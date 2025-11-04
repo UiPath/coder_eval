@@ -53,21 +53,21 @@ jobs:
 
       # PHASE 1: Fast checks (fail early)
       - name: Check code formatting (ruff format)
-        run: uv run ruff format --check coder_eval/ tests/
+        run: ruff format --check coder_eval/ tests/
 
       - name: Lint code (ruff check)
-        run: uv run ruff check coder_eval/ tests/
+        run: ruff check coder_eval/ tests/
 
       # PHASE 2: Type checking
       - name: Type check with pyright
-        run: uv run pyright
+        run: pyright
 
       # PHASE 3: Security scanning
       - name: Security - Dependency vulnerabilities (pip-audit)
-        run: uv run pip-audit --desc --skip-editable
+        run: pip-audit --desc --skip-editable
 
       - name: Security - Code analysis (bandit)
-        run: uv run bandit -r coder_eval/ -ll --format json -o bandit-report.json
+        run: bandit -r coder_eval/ -ll --format json -o bandit-report.json
 
       - name: Upload security reports
         if: always()
@@ -81,7 +81,7 @@ jobs:
       # PHASE 4: Test suite with coverage
       - name: Run test suite with coverage
         run: |
-          uv run pytest tests/ -v \
+          pytest tests/ -v \
             --cov=coder_eval \
             --cov-report=term-missing \
             --cov-report=xml \
