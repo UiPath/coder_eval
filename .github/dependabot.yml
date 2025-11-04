@@ -1,4 +1,13 @@
 version: 2
+
+# Registry authentication for private package indices
+registries:
+  uipath-registry:
+    type: python-index
+    url: https://uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/
+    username: ${{ secrets.UIPATH_PACKAGE_INDEX_USERNAME }}
+    password: ${{ secrets.UIPATH_PACKAGE_INDEX_PASSWORD }}
+
 updates:
   # Python dependencies
   - package-ecosystem: "pip"
@@ -14,6 +23,9 @@ updates:
     commit-message:
       prefix: "deps"
       include: "scope"
+    # Use the UiPath registry for package resolution
+    registries:
+      - uipath-registry
     # Group patch updates to reduce PR noise
     groups:
       patch-updates:
