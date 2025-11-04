@@ -45,6 +45,8 @@ jobs:
           pip install uv
 
       - name: Install project dependencies
+        env:
+          UV_EXTRA_INDEX_URL: "https://${{ secrets.UIPATH_PACKAGE_INDEX_USERNAME }}:${{ secrets.UIPATH_PACKAGE_INDEX_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
         run: uv pip install --system -e ".[dev]"
 
       # PHASE 1: Fast checks (fail early)
