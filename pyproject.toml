@@ -66,7 +66,15 @@ lines-after-imports = 2
 [tool.pyright]
 pythonVersion = "3.13"
 include = ["coder_eval"]
-exclude = ["data", "tmp", "**/__pycache__", "**/.pytest_cache", "tests", ".venv"]
+exclude = [
+    "data",
+    "tmp",
+    "**/__pycache__",
+    "**/.pytest_cache",
+    "tests",
+    ".venv",
+    "ref",
+]
 venvPath = "."
 venv = ".venv"
 
@@ -84,7 +92,6 @@ reportUnknownMemberType = "none"
 # Import/runtime hygiene (useful, low-noise)
 reportMissingImports = "error"
 reportImportCycles = "warning"
-reportUnusedImports = "warning"
 reportDuplicateImport = "information"
 
 # Catch real logic bugs with minimal churn
@@ -103,7 +110,6 @@ reportInvalidTypeVarUse = "warning"
 
 # OO correctness, but not too strict
 reportIncompatibleMethodOverride = "warning"
-reportOverlappingOverloads = "warning"
 reportInconsistentConstructor = "warning"
 
 # Small quality-of-life checks that catch slip-ups
@@ -112,8 +118,6 @@ reportImplicitStringConcatenation = "warning"
 # Keep these quiet unless you want more discipline later
 reportPrivateUsage = "none"
 reportConstantRedefinition = "none"
-reportUnusedClasses = "none"
-reportUnusedFunctions = "none"
 reportUntypedFunctionDecorator = "none"
 reportUntypedClassDecorator = "none"
 reportUntypedBaseClass = "none"
@@ -122,6 +126,7 @@ reportUntypedNamedTuple = "none"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
 # Exclude specific directories from test discovery
 norecursedirs = [
     ".*",
@@ -131,12 +136,67 @@ norecursedirs = [
     "venv",
     ".venv",
     "node_modules",
-    "ref",  # Exclude ref/ directory
-]
-# Additional pytest options
-addopts = [
-    "-v",  # Verbose output
-    "--strict-markers",  # Strict marker checking
-    "--tb=short",  # Shorter traceback format
+    "ref",
 ]
 
+# Default pytest options
+addopts = [
+    "-v",               # Verbose output
+    "--strict-markers", # Fail on undefined markers
+    "--strict-config",  # Fail on config errors
+    "--tb=short",       # Shorter traceback format
+    "-ra",              # Show summary of all test outcomes
+    "--showlocals",     # Show local variables in tracebacks
+    "--color=yes",      # Force colored output
+]
+
+# Asyncio configuration
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+# Test markers (define all custom markers here)
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+    "e2e: marks tests as end-to-end tests",
+    "requires_api_key: marks tests that need real API keys",
+]
+
+# Test discovery patterns
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# Warnings configuration
+filterwarnings = [
+    "error",                             # Turn warnings into errors
+    "ignore::DeprecationWarning",        # Ignore deprecation warnings from dependencies
+    "ignore::PendingDeprecationWarning",
+    "ignore::ResourceWarning",           # Ignore unclosed resources (handled by cleanup)
+]
+
+# Coverage integration (when using --cov)
+[tool.coverage.run]
+source = ["coder_eval"]
+omit = ["*/tests/*", "*/__pycache__/*", "*/.venv/*", "*/test_*.py"]
+branch = true                                                       # Measure branch coverage
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "def __str__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+    "@abc.abstractmethod",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"

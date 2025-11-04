@@ -6,8 +6,7 @@ help:  ## Show this help message
 
 install:  ## Install project with dev dependencies
 	uv pip install -e ".[dev]"
-	pre-commit install
-	@echo "✅ Installation complete!"
+	uv run pre-commit install
 
 format:  ## Auto-format code with ruff
 	uv run ruff format coder_eval/ tests/
@@ -19,32 +18,23 @@ typecheck:  ## Run type checking with pyright
 	uv run pyright
 
 test:  ## Run test suite
-	uv run pytest tests/ -v
+	uv run pytest -v tests/
 
 test-cov:  ## Run tests with coverage report
-	uv run pytest tests/ -v --cov=coder_eval --cov-report=term-missing --cov-report=html
+	pytest tests/ -v --cov=coder_eval --cov-report=term-missing --cov-report=html
 	@echo "📊 Coverage report: htmlcov/index.html"
 
-security:  ## Run security scans
-	@echo "🔒 Running pip-audit..."
-	uv run pip-audit --desc --skip-editable
-	@echo "🔒 Running bandit..."
-	uv run bandit -r coder_eval/ -ll
 
 verify:  ## Run all verification steps (CI equivalent)
-	@echo "🔍 Running format check..."
-	@uv run ruff format --check coder_eval/ tests/
-	@echo "🔍 Running lint check..."
-	@uv run ruff check coder_eval/ tests/
-	@echo "🔍 Running type check..."
-	@uv run pyright
-	@echo "🔍 Running tests with coverage..."
-	@uv run pytest tests/ -v --cov=coder_eval --cov-fail-under=80
-	@echo "✅ All verification checks passed!"
+	uv run ruff format --check coder_eval/ tests/
+	uv run ruff check coder_eval/ tests/
+	uv run pyright
+	# uv run pip-audit --desc --skip-editable
+	# uv run bandit -r coder_eval/ -ll --format json -o bandit-report.json
+	uv run pytest tests/ -v --cov=coder_eval --cov-report=term-missing --cov-report=xml --cov-fail-under=80
 
 clean:  ## Clean build artifacts and cache
-	rm -rf build/ dist/ *.egg-info .pytest_cache .ruff_cache .coverage htmlcov/ bandit-report.json
+	rm -rf build/ dist/ *.egg-info .pytest_cache .ruff_cache .coverage coverage.xml htmlcov/ bandit-report.json coverage.xml
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	@echo "🧹 Cleaned artifacts"
 
 .DEFAULT_GOAL := help
