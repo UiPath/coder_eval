@@ -5,8 +5,8 @@ registries:
   uipath-registry:
     type: python-index
     url: https://uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/
-    username: ${{ secrets.UIPATH_PACKAGE_INDEX_USERNAME }}
-    password: ${{ secrets.UIPATH_PACKAGE_INDEX_PASSWORD }}
+    username: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
+    password: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
 
 updates:
   # Python dependencies
