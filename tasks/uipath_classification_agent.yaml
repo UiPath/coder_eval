@@ -1,0 +1,191 @@
+task_id: uipath-classification-agent
+description: "Create a text classification agent using UiPath LangChain"
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+
+sandbox:
+  driver: tempdir
+  python_version: "3.13"
+  template_sources:
+    - type: template_dir
+      path: "../templates/uipath-starter"
+  env_packages:
+    - uipath-langchain>=0.0.140
+    - pydantic>=2.0
+    - python-dotenv>=1.0
+
+initial_prompt: |
+  Create a text classification agent that categorizes customer feedback into categories.
+
+  The script should:
+  - Use Pydantic BaseModel for input (text, categories) and output (category, confidence)
+  - Use UiPathChat to classify text using an LLM
+  - Accept a list of possible categories as input
+  - Return the most appropriate category and confidence level
+  - Create a clear classification prompt
+  - Have a main() function with proper type signatures
+  - Load environment variables properly
+
+  Example categories: "positive", "negative", "neutral", "question", "complaint"
+
+success_criteria:
+  - type: file_exists
+    description: "main.py file exists"
+    path: "main.py"
+    weight: 0.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Uses modern UiPath LangChain interface"
+    path: "main.py"
+    includes:
+      - "from uipath_langchain.chat import UiPathChat"
+    excludes:
+      - "from uipath import UiPath"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Uses Pydantic BaseModel for type safety"
+    path: "main.py"
+    includes:
+      - "from pydantic import BaseModel"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Defines proper input model with text and categories"
+    path: "main.py"
+    includes:
+      - "Input"
+      - "text"
+      - "categories"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Defines proper output model with category"
+    path: "main.py"
+    includes:
+      - "Output"
+      - "category"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Loads environment variables properly"
+    path: "main.py"
+    includes:
+      - "from dotenv import load_dotenv"
+      - "load_dotenv()"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Has main() function with proper signature"
+    path: "main.py"
+    includes:
+      - "def main"
+      - "-> "
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Successfully classifies sample text"
+    command: 'uv run uipath run main.py ''{"text": "Your product is amazing! I love it and would definitely recommend it to others.", "categories": ["positive", "negative", "neutral", "question"]}'''
+    timeout: 45
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: reference_comparison
+    description: "Code structure matches reference (AST similarity)"
+    agent_file: "main.py"
+    comparison_method: "ast"
+    similarity_threshold: 0.7
+    weight: 2.5
+    pass_threshold: 0.7
+
+max_iterations: 5
+
+reference:
+  code: |
+    from pydantic import BaseModel
+    from typing import List
+    from uipath_langchain.chat import UiPathChat
+    from dotenv import load_dotenv
+
+    # Load environment variables
+    load_dotenv()
+
+
+    class ClassificationInput(BaseModel):
+        """Input for the classifier."""
+        text: str
+        categories: List[str]
+
+
+    class ClassificationOutput(BaseModel):
+        """Output from the classifier."""
+        category: str
+        confidence: str
+        reasoning: str
+
+
+    def main(input: ClassificationInput) -> ClassificationOutput:
+        chat = UiPathChat(model="gpt-4o-mini-2024-07-18")
+
+        categories_str = ", ".join(input.categories)
+
+        prompt = f"""You are a text classification expert. Classify the provided text into one of these categories: {categories_str}
+
+    Instructions:
+    - Choose the MOST appropriate category from the list
+    - Provide your confidence level (high/medium/low)
+    - Explain your reasoning briefly
+
+    Format your response EXACTLY as:
+    Category: [category]
+    Confidence: [high/medium/low]
+    Reasoning: [brief explanation]
+
+    Text to classify:
+    {input.text}
+    """
+
+        response = chat.invoke(prompt)
+        content = response.content.strip()
+
+        # Parse response
+        category = "unknown"
+        confidence = "low"
+        reasoning = "Unable to classify"
+
+        for line in content.split("\n"):
+            if line.startswith("Category:"):
+                category = line.split(":", 1)[1].strip()
+            elif line.startswith("Confidence:"):
+                confidence = line.split(":", 1)[1].strip()
+            elif line.startswith("Reasoning:"):
+                reasoning = line.split(":", 1)[1].strip()
+
+        return ClassificationOutput(
+            category=category,
+            confidence=confidence,
+            reasoning=reasoning
+        )
+
+llm_reviewer:
+  enabled: true
+  prompt: |
+    Evaluate if the classification agent is complete and follows modern UiPath patterns:
+
+    1. Does it use UiPath LangChain (uipath_langchain.chat) instead of legacy SDK?
+    2. Are input/output models properly defined with Pydantic BaseModel?
+    3. Does it accept dynamic categories as input?
+    4. Does it load environment variables with dotenv?
+    5. Can it successfully classify text and return valid JSON?
+    6. Is the classification prompt clear and effective?
+    7. Is the code simple, clean, and production-ready?

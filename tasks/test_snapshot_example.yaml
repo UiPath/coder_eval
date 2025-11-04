@@ -1,0 +1,48 @@
+task_id: "test_snapshot_example"
+description: "Example task demonstrating snapshot configuration"
+
+agent:
+  type: "claude-code"
+  max_turns: 3
+
+sandbox:
+  driver: "tempdir"
+  python_version: "3.13"
+  env_packages: []
+
+  # Snapshot configuration
+  snapshots:
+    mode: "hybrid"  # Options: disabled, full, incremental, hybrid
+    checkpoint_frequency: 2  # Full snapshot every 2 iterations (hybrid mode only)
+    ignore_patterns:
+      - "*.log"
+      - "temp_*"
+
+initial_prompt: |
+  Create a simple Python script called hello.py that prints "Hello, World!".
+
+max_iterations: 3
+
+success_criteria:
+  - type: "file_exists"
+    path: "hello.py"
+    description: "hello.py file should exist"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: "run_command"
+    command: "python hello.py"
+    expected_exit_code: 0
+    description: "Script should run successfully"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: "program_stdout_equals"
+    command: "python hello.py"
+    expected_output: "Hello, World!"
+    description: "Script should output 'Hello, World!'"
+    weight: 2.0
+    pass_threshold: 1.0
+
+llm_reviewer:
+  enabled: false

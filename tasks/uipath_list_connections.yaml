@@ -1,0 +1,101 @@
+task_id: uipath-list-connections
+description: "Create a minimal Python script that lists all UiPath connections"
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+
+sandbox:
+  driver: tempdir
+  python_version: "3.13"
+  template_sources:
+    - type: template_dir
+      path: "../templates/uipath-starter"
+  env_packages:
+    - uipath>=2.1.75
+    - python-dotenv>=1.0
+
+initial_prompt: |
+  Create a minimal Python script (list_connections.py) that lists all UiPath connections.
+
+  The script should:
+  - Use the uipath SDK to list connections
+  - Load environment variables from .env file
+  - Print the connections to stdout
+
+  Keep it as simple and minimal as possible. 
+  The script should work assuming UIPATH_URL and UIPATH_ACCESS_TOKEN
+  are already set in .env file.
+
+success_criteria:
+  - type: file_exists
+    description: "list_connections.py file exists"
+    path: "list_connections.py"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script imports load_dotenv"
+    path: "list_connections.py"
+    includes:
+      - "from dotenv import load_dotenv"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script calls load_dotenv()"
+    path: "list_connections.py"
+    includes:
+      - "load_dotenv()"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script imports UiPath SDK"
+    path: "list_connections.py"
+    includes:
+      - "from uipath import UiPath"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script initializes SDK and lists connections"
+    path: "list_connections.py"
+    includes:
+      - "UiPath()"
+      - "connections.list()"
+      - "print("
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Python syntax is valid"
+    command: "python -m py_compile list_connections.py"
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: reference_comparison
+    description: "Code structure matches reference implementation"
+    agent_file: "list_connections.py"
+    comparison_method: "ast"
+    similarity_threshold: 0.8
+    weight: 2.0
+    pass_threshold: 0.8
+
+max_iterations: 5
+
+reference:
+  code: |
+    #!/usr/bin/env python3
+    from dotenv import load_dotenv
+    from uipath import UiPath
+
+    load_dotenv()
+    sdk = UiPath()
+    connections = sdk.connections.list()
+    print(connections)
+
+llm_reviewer:
+  enabled: true

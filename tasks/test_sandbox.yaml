@@ -1,0 +1,21 @@
+task_id: "test_sandbox_only"
+description: "Test task to verify sandbox and success criteria work (no agent execution)"
+initial_prompt: "This task tests the sandbox without running the agent"
+max_iterations: 1
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Read", "Write", "Bash"]
+
+sandbox:
+  driver: "tempdir"
+  python_version: "3.13"
+  env_packages: []
+  network_enabled: false
+
+success_criteria:
+  - type: "run_command"
+    command: "python --version"
+    timeout: 5
+    description: "Python should be available in the sandbox."

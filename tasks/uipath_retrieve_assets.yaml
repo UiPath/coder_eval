@@ -1,0 +1,122 @@
+task_id: uipath-retrieve-assets
+description: "Create a script that retrieves and displays UiPath assets"
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+
+sandbox:
+  driver: tempdir
+  python_version: "3.13"
+  template_sources:
+    - type: template_dir
+      path: "../templates/uipath-starter"
+  env_packages:
+    - uipath>=2.1.75
+    - python-dotenv>=1.0
+
+initial_prompt: |
+  Create a Python script (retrieve_assets.py) that retrieves and displays UiPath assets.
+
+  The script should:
+  - Load environment variables from .env file
+  - Initialize the UiPath SDK
+  - Retrieve a list of predefined asset names (you can use: ["TestAsset1", "TestAsset2", "Config_Setting"])
+  - For each asset, try to retrieve it and display its value
+  - Handle errors gracefully if an asset doesn't exist
+  - Print results in a clear format showing which assets exist and their values
+
+  Keep the code simple and well-structured.
+
+success_criteria:
+  - type: file_exists
+    description: "retrieve_assets.py file exists"
+    path: "retrieve_assets.py"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script imports required modules"
+    path: "retrieve_assets.py"
+    includes:
+      - "from dotenv import load_dotenv"
+      - "from uipath import UiPath"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script loads environment and initializes SDK"
+    path: "retrieve_assets.py"
+    includes:
+      - "load_dotenv()"
+      - "UiPath()"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script uses assets.retrieve() method"
+    path: "retrieve_assets.py"
+    includes:
+      - "assets.retrieve"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script has error handling"
+    path: "retrieve_assets.py"
+    includes:
+      - "try:"
+      - "except"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Python syntax is valid"
+    command: "python -m py_compile retrieve_assets.py"
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: reference_comparison
+    description: "Code structure matches reference implementation"
+    agent_file: "retrieve_assets.py"
+    comparison_method: "ast"
+    similarity_threshold: 0.7
+    weight: 2.0
+    pass_threshold: 0.7
+
+max_iterations: 5
+
+reference:
+  code: |
+    #!/usr/bin/env python3
+    from dotenv import load_dotenv
+    from uipath import UiPath
+
+    load_dotenv()
+    sdk = UiPath()
+
+    # List of assets to check
+    asset_names = ["TestAsset1", "TestAsset2", "Config_Setting"]
+
+    print("Retrieving UiPath Assets:")
+    print("=" * 60)
+
+    for name in asset_names:
+        try:
+            asset = sdk.assets.retrieve(name=name)
+            print(f"✓ {name}: {asset.value}")
+        except Exception as e:
+            print(f"✗ {name}: Not found or error - {e}")
+
+llm_reviewer:
+  enabled: true
+  prompt: |
+    Evaluate if the asset retrieval script is complete and correct:
+
+    1. Does it properly load environment variables?
+    2. Does it initialize the UiPath SDK correctly?
+    3. Does it use sdk.assets.retrieve() to get asset values?
+    4. Does it handle errors for missing assets?
+    5. Is the output clear and informative?

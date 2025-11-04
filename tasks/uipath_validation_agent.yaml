@@ -1,0 +1,188 @@
+task_id: uipath-validation-agent
+description: "Create a data validation agent using pure Python with Pydantic"
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+
+sandbox:
+  driver: tempdir
+  python_version: "3.13"
+  template_sources:
+    - type: template_dir
+      path: "../templates/uipath-starter"
+  env_packages:
+    - pydantic>=2.0
+    - python-dotenv>=1.0
+
+initial_prompt: |
+  Create a data validation agent that validates email addresses and phone numbers.
+
+  The script should:
+  - Use Pydantic BaseModel for input (email, phone) and output (valid, errors)
+  - Implement a validation function that checks:
+    * Email: Contains @ symbol and has domain
+    * Phone: Contains only digits, +, -, (), spaces and has 10+ characters
+  - Return validation results with specific error messages
+  - Have a main() function that takes input and returns output
+  - Include test examples showing valid and invalid data
+
+  Use pure Python - no LangChain or external APIs needed.
+
+success_criteria:
+  - type: file_exists
+    description: "main.py file exists"
+    path: "main.py"
+    weight: 0.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Uses Pydantic BaseModel for type safety"
+    path: "main.py"
+    includes:
+      - "from pydantic import BaseModel"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Defines proper input model"
+    path: "main.py"
+    includes:
+      - "Input"
+      - "email"
+      - "phone"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Defines proper output model"
+    path: "main.py"
+    includes:
+      - "Output"
+      - "valid"
+      - "errors"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Implements validation logic"
+    path: "main.py"
+    includes:
+      - "if"
+      - "@"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Has main() function with proper signature"
+    path: "main.py"
+    includes:
+      - "def main"
+      - "-> "
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Python syntax is valid"
+    command: "python -m py_compile main.py"
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: reference_comparison
+    description: "Code structure matches reference (AST similarity)"
+    agent_file: "main.py"
+    comparison_method: "ast"
+    similarity_threshold: 0.7
+    weight: 2.5
+    pass_threshold: 0.7
+
+max_iterations: 5
+
+reference:
+  code: |
+    from pydantic import BaseModel
+    from typing import List
+    from dotenv import load_dotenv
+
+    # Load environment variables
+    load_dotenv()
+
+
+    class ValidationInput(BaseModel):
+        """Input for validation."""
+        email: str
+        phone: str
+
+
+    class ValidationOutput(BaseModel):
+        """Output from validation."""
+        valid: bool
+        errors: List[str]
+
+
+    def validate_email(email: str) -> str | None:
+        """Validate email format."""
+        if not email or "@" not in email:
+            return "Email must contain @ symbol"
+
+        parts = email.split("@")
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            return "Email must have valid format (user@domain)"
+
+        if "." not in parts[1]:
+            return "Email domain must contain a dot"
+
+        return None
+
+
+    def validate_phone(phone: str) -> str | None:
+        """Validate phone number format."""
+        if not phone:
+            return "Phone number cannot be empty"
+
+        # Remove common separators
+        cleaned = phone.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+
+        # Check for + prefix (international)
+        if cleaned.startswith("+"):
+            cleaned = cleaned[1:]
+
+        if not cleaned.isdigit():
+            return "Phone number must contain only digits and separators"
+
+        if len(cleaned) < 10:
+            return "Phone number must have at least 10 digits"
+
+        return None
+
+
+    def main(input: ValidationInput) -> ValidationOutput:
+        errors = []
+
+        # Validate email
+        email_error = validate_email(input.email)
+        if email_error:
+            errors.append(f"Email: {email_error}")
+
+        # Validate phone
+        phone_error = validate_phone(input.phone)
+        if phone_error:
+            errors.append(f"Phone: {phone_error}")
+
+        return ValidationOutput(
+            valid=len(errors) == 0,
+            errors=errors
+        )
+
+llm_reviewer:
+  enabled: true
+  prompt: |
+    Evaluate if the validation agent is complete and correct:
+
+    1. Are input/output models properly defined with Pydantic BaseModel?
+    2. Does it validate email addresses (@ symbol, domain)?
+    3. Does it validate phone numbers (format, length)?
+    4. Does it return clear error messages for validation failures?
+    5. Is the code simple, clean, and production-ready?

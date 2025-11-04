@@ -1,0 +1,29 @@
+task_id: fibonacci-starter
+description: "Implement fibonacci function with starter code template"
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+
+sandbox:
+  driver: tempdir
+  python_version: "3.13"
+  template_sources:
+    - type: template_dir
+      path: "../templates/fibonacci-starter"
+  env_packages:
+    - pytest
+
+initial_prompt: |
+  Implement the fibonacci function in src/main.py.
+  The file has a stub function already defined with a docstring.
+  The tests in tests/test_main.py define the expected behavior.
+  Make all tests pass.
+
+success_criteria:
+  - type: pytest
+    description: "All tests pass"
+    path: "tests/"
+    timeout: 60
+
+max_iterations: 3

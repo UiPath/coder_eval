@@ -1,0 +1,145 @@
+task_id: uipath-summarization-agent
+description: "Create a simple text summarization agent using UiPath LangChain"
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+
+sandbox:
+  driver: tempdir
+  python_version: "3.13"
+  template_sources:
+    - type: template_dir
+      path: "../templates/uipath-starter"
+  env_packages:
+    - uipath-langchain>=0.0.140
+    - pydantic>=2.0
+    - python-dotenv>=1.0
+
+initial_prompt: |
+  Can you create a simple UiPath agent that summarizes text using a simple LangChain interface?
+
+  Given text input, it should output a summary. Make it as simple as possible.
+
+reference:
+  code: |
+    from pydantic import BaseModel, Field
+    from uipath_langchain.chat import UiPathChat
+    from dotenv import load_dotenv
+
+    # Load environment variables
+    load_dotenv()
+
+
+    class SummarizerInput(BaseModel):
+        """Input for the summarizer."""
+        text: str
+
+
+    class SummarizerOutput(BaseModel):
+        """Output from the summarizer."""
+        summary: str
+
+
+    def main(input: SummarizerInput) -> SummarizerOutput:
+        chat = UiPathChat(model="gpt-4o-mini-2024-07-18")
+
+        prompt = f"""You are a professional text summarizer. Create a concise, accurate summary of the provided text. Capture the key points and main ideas clearly.
+
+    Text to summarize:
+    {input.text}
+    """
+
+        response = chat.invoke(prompt)
+
+        return SummarizerOutput(summary=response.content)
+
+success_criteria:
+  - type: file_exists
+    description: "main.py file exists"
+    path: "main.py"
+    weight: 0.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Uses modern UiPath LangChain interface"
+    path: "main.py"
+    includes:
+      - "from uipath_langchain.chat import UiPathChat"
+    excludes:
+      - "from uipath import UiPath"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Uses Pydantic BaseModel for type safety"
+    path: "main.py"
+    includes:
+      - "from pydantic import BaseModel"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Defines proper input model with text field"
+    path: "main.py"
+    includes:
+      - "Input"
+      - "text"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Defines proper output model with summary field"
+    path: "main.py"
+    includes:
+      - "Output"
+      - "summary"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Loads environment variables properly"
+    path: "main.py"
+    includes:
+      - "from dotenv import load_dotenv"
+      - "load_dotenv()"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Has main() function with proper signature"
+    path: "main.py"
+    includes:
+      - "def main"
+      - "-> "
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Successfully summarizes sample text"
+    command: 'uv run uipath run main.py ''{"text": "Artificial intelligence (AI) has revolutionized numerous industries by enabling machines to perform tasks that typically require human intelligence. Machine learning, a subset of AI, allows computers to learn from data without explicit programming. Deep learning, which uses neural networks, has achieved remarkable results in image recognition, natural language processing, and game playing. These technologies continue to evolve rapidly, promising even more transformative applications in healthcare, finance, transportation, and beyond."}'''
+    timeout: 45
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: reference_comparison
+    description: "Code structure matches reference (AST similarity)"
+    agent_file: "main.py"
+    comparison_method: "ast"
+    similarity_threshold: 0.7
+    weight: 2.5
+    pass_threshold: 0.7
+
+max_iterations: 5
+
+llm_reviewer:
+  enabled: true
+  prompt: |
+    Evaluate if the text summarization agent is complete and follows modern UiPath patterns:
+
+    1. Does it use UiPath LangChain (uipath_langchain.chat) instead of legacy SDK?
+    2. Are input/output models properly defined with Pydantic BaseModel?
+    3. Does it load environment variables with dotenv?
+    4. Can it successfully summarize text and return valid JSON?
+    5. Is the code simple, clean, and production-ready?

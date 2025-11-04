@@ -1,0 +1,31 @@
+# Test task to verify LLM Gateway integration - intentionally fails first iteration
+task_id: test_llmgw_fail
+name: Test LLM Gateway Integration with Failure
+description: Create a specific file to test LLM Gateway reviewer when criteria fail
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+
+sandbox:
+  driver: tempdir
+  python_version: "3.13"
+
+success_criteria:
+  - type: file_exists
+    path: "greetings.py"
+    description: "A greetings.py file should exist"
+
+  - type: file_contains
+    path: "greetings.py"
+    includes:
+      - "print"
+      - "Hello, World!"
+      - "def greet()"
+    description: "greetings.py should have print, Hello World, and a greet function"
+
+llm_reviewer:
+  enabled: true
+
+max_iterations: 3
+initial_prompt: "Create a file called hello.py that prints 'Hi there!'"

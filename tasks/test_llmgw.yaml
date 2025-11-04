@@ -1,0 +1,35 @@
+# Test task to verify LLM Gateway integration
+task_id: test_llmgw
+name: Test LLM Gateway Integration
+description: Create a simple hello world file to test LLM Gateway reviewer
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+
+sandbox:
+  driver: tempdir
+  python_version: "3.13"
+  template_sources:
+    - type: starter_files
+      files:
+        - path: "README.md"
+          content: "# Test Project\nThis is a test."
+
+success_criteria:
+  - type: file_exists
+    path: "hello.py"
+    description: "A hello.py file should exist"
+
+  - type: file_contains
+    path: "hello.py"
+    includes:
+      - "print"
+      - "Hello"
+    description: "hello.py should contain a print statement with Hello"
+
+llm_reviewer:
+  enabled: true
+
+max_iterations: 2
+initial_prompt: "Create a file called hello.py that prints 'Hello, World!'"

@@ -1,0 +1,153 @@
+task_id: uipath-process-invocation
+description: "Create a script that starts a UiPath process and monitors its execution"
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+
+sandbox:
+  driver: tempdir
+  python_version: "3.13"
+  template_sources:
+    - type: template_dir
+      path: "../templates/uipath-starter"
+  env_packages:
+    - uipath>=2.1.75
+    - python-dotenv>=1.0
+
+initial_prompt: |
+  Create a Python script (process_invocation.py) that starts a UiPath process and monitors its execution.
+
+  The script should:
+  - Load environment variables and initialize UiPath SDK
+  - Import ProcessStartInfo from uipath.models.processes
+  - Start a process using sdk.processes.invoke_process()
+  - Use ProcessStartInfo with 'release_key' (required) and optional 'input_arguments'
+  - Monitor the job execution using sdk.jobs.retrieve(job_id)
+  - Print job status and results
+  - Handle cases where the process/job doesn't exist gracefully
+
+  Important: ProcessStartInfo requires 'release_key' (the process release identifier).
+  The invoke_process() method returns a response with job information.
+
+success_criteria:
+  - type: file_exists
+    description: "process_invocation.py file exists"
+    path: "process_invocation.py"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script imports required modules"
+    path: "process_invocation.py"
+    includes:
+      - "from uipath import UiPath"
+      - "from uipath.models.processes import ProcessStartInfo"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script creates ProcessStartInfo"
+    path: "process_invocation.py"
+    includes:
+      - "ProcessStartInfo"
+      - "release_key="
+    weight: 2.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script invokes process"
+    path: "process_invocation.py"
+    includes:
+      - "processes.invoke_process"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script retrieves job status"
+    path: "process_invocation.py"
+    includes:
+      - "jobs.retrieve"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Python syntax is valid"
+    command: "python -m py_compile process_invocation.py"
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: reference_comparison
+    description: "Code structure matches reference implementation"
+    agent_file: "process_invocation.py"
+    comparison_method: "ast"
+    similarity_threshold: 0.65
+    weight: 2.0
+    pass_threshold: 0.65
+
+max_iterations: 5
+
+reference:
+  code: |
+    #!/usr/bin/env python3
+    from dotenv import load_dotenv
+    from uipath import UiPath
+    from uipath.models.processes import ProcessStartInfo
+
+    load_dotenv()
+    sdk = UiPath()
+
+    # Example release key (user would replace with actual value)
+    release_key = "your-release-key-here"
+
+    print("UiPath Process Invocation & Monitoring")
+    print("=" * 60)
+
+    # Start process
+    print(f"\nStarting process (release_key: {release_key[:20]}...)...")
+    try:
+        start_info = ProcessStartInfo(
+            release_key=release_key,
+            input_arguments={"param1": "value1", "param2": 100}
+        )
+
+        response = sdk.processes.invoke_process(start_info=start_info)
+        data = response.json()
+
+        job_id = data.get('JobId') or data.get('Id')
+        print(f"✓ Process started, Job ID: {job_id}")
+
+        # Monitor job
+        if job_id:
+            print(f"\nMonitoring job {job_id}...")
+            job_response = sdk.jobs.retrieve(job_id=job_id)
+            job_data = job_response.json()
+
+            print(f"  Status: {job_data.get('State', 'Unknown')}")
+            print(f"  Started: {job_data.get('StartTime', 'N/A')}")
+            print(f"  Robot: {job_data.get('Robot', {}).get('Name', 'N/A')}")
+
+            if job_data.get('OutputArguments'):
+                print(f"  Output: {job_data['OutputArguments']}")
+
+            print("\n✓ Job monitoring complete")
+        else:
+            print("✗ No job ID returned")
+
+    except Exception as e:
+        print(f"✗ Error: {e}")
+        print("Note: This requires a valid release_key and configured robot")
+
+llm_reviewer:
+  enabled: true
+  prompt: |
+    Evaluate if the process invocation script is complete and correct:
+
+    1. Does it import ProcessStartInfo from uipath.models.processes?
+    2. Does it create ProcessStartInfo with 'release_key' and optional 'input_arguments'?
+    3. Does it use sdk.processes.invoke_process() to start the process?
+    4. Does it retrieve job status using sdk.jobs.retrieve()?
+    5. Does it handle errors gracefully?
+    6. Is the code structure clear and well-organized?

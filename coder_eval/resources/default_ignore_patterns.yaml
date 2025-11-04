@@ -1,0 +1,61 @@
+# Default file/directory patterns to ignore during file operations
+# These patterns apply to:
+# - Template directory copying (sandbox setup)
+# - File change detection (agent tracking)
+# - Snapshot creation (incremental mode)
+
+# Virtual environments
+virtual_environments:
+  - ".venv"
+  - "venv"
+  - "ENV"
+  - "env"
+  - "virtualenv"
+
+# Version control
+version_control:
+  - ".git"
+  - ".svn"
+  - ".hg"
+
+# Python artifacts
+python_artifacts:
+  - "__pycache__"
+  - "*.pyc"
+  - "*.pyo"
+  - "*.pyd"
+  - ".pytest_cache"
+  - ".ruff_cache"
+  - "*.egg-info"
+  - ".eggs"
+  - "dist"
+  - "build"
+
+# IDE and editor files
+ide_files:
+  - ".vscode"
+  - ".idea"
+  - "*.swp"
+  - "*.swo"
+  - "*~"
+  - ".DS_Store"
+  - "Thumbs.db"
+
+# Package managers
+package_managers:
+  - "node_modules"
+  - ".npm"
+  - "bower_components"
+
+# Test and coverage
+test_coverage:
+  - ".coverage"
+  - "htmlcov"
+  - ".tox"
+  - ".nox"
+
+# Compiled files
+compiled:
+  - "*.so"
+  - "*.dylib"
+  - "*.dll"

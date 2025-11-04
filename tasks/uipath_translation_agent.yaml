@@ -1,0 +1,170 @@
+task_id: uipath-translation-agent
+description: "Create a simple translation agent using UiPath LangChain"
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+
+sandbox:
+  driver: tempdir
+  python_version: "3.13"
+  template_sources:
+    - type: template_dir
+      path: "../templates/uipath-starter"
+  env_packages:
+    - uipath-langchain>=0.0.140
+    - pydantic>=2.0
+    - python-dotenv>=1.0
+
+initial_prompt: |
+  Create a simple translation agent using UiPath LangChain that translates text between languages.
+
+  The script should:
+  - Use Pydantic BaseModel for input (text, target_language) and output (translated_text, source_language)
+  - Use UiPathChat to perform translation using an LLM
+  - Create a clear prompt that instructs the LLM to translate
+  - Support common languages (English, Spanish, French, German, etc.)
+  - Have a main() function with proper type signatures
+  - Load environment variables properly
+
+  Keep it simple and production-ready.
+
+success_criteria:
+  - type: file_exists
+    description: "main.py file exists"
+    path: "main.py"
+    weight: 0.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Uses modern UiPath LangChain interface"
+    path: "main.py"
+    includes:
+      - "from uipath_langchain.chat import UiPathChat"
+    excludes:
+      - "from uipath import UiPath"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Uses Pydantic BaseModel for type safety"
+    path: "main.py"
+    includes:
+      - "from pydantic import BaseModel"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Defines proper input model"
+    path: "main.py"
+    includes:
+      - "Input"
+      - "text"
+      - "target_language"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Defines proper output model"
+    path: "main.py"
+    includes:
+      - "Output"
+      - "translated_text"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Loads environment variables properly"
+    path: "main.py"
+    includes:
+      - "from dotenv import load_dotenv"
+      - "load_dotenv()"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Has main() function with proper signature"
+    path: "main.py"
+    includes:
+      - "def main"
+      - "-> "
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Successfully translates sample text"
+    command: 'uv run uipath run main.py ''{"text": "Hello, how are you?", "target_language": "Spanish"}'''
+    timeout: 45
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: reference_comparison
+    description: "Code structure matches reference (AST similarity)"
+    agent_file: "main.py"
+    comparison_method: "ast"
+    similarity_threshold: 0.7
+    weight: 2.5
+    pass_threshold: 0.7
+
+max_iterations: 5
+
+reference:
+  code: |
+    from pydantic import BaseModel
+    from uipath_langchain.chat import UiPathChat
+    from dotenv import load_dotenv
+
+    # Load environment variables
+    load_dotenv()
+
+
+    class TranslationInput(BaseModel):
+        """Input for the translator."""
+        text: str
+        target_language: str
+
+
+    class TranslationOutput(BaseModel):
+        """Output from the translator."""
+        translated_text: str
+        source_language: str
+
+
+    def main(input: TranslationInput) -> TranslationOutput:
+        chat = UiPathChat(model="gpt-4o-mini-2024-07-18")
+
+        prompt = f"""You are a professional translator. Translate the provided text to {input.target_language}.
+
+    Important:
+    - Provide ONLY the translated text, nothing else
+    - Maintain the original tone and style
+    - Preserve formatting if present
+    - Detect the source language automatically
+
+    Text to translate:
+    {input.text}
+    """
+
+        response = chat.invoke(prompt)
+        translated = response.content.strip()
+
+        # Simple source language detection from context
+        source_language = "auto-detected"
+
+        return TranslationOutput(
+            translated_text=translated,
+            source_language=source_language
+        )
+
+llm_reviewer:
+  enabled: true
+  prompt: |
+    Evaluate if the translation agent is complete and follows modern UiPath patterns:
+
+    1. Does it use UiPath LangChain (uipath_langchain.chat) instead of legacy SDK?
+    2. Are input/output models properly defined with Pydantic BaseModel?
+    3. Does it load environment variables with dotenv?
+    4. Can it successfully translate text and return valid JSON?
+    5. Is the translation prompt clear and effective?
+    6. Is the code simple, clean, and production-ready?

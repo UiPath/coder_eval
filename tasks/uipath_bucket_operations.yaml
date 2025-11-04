@@ -1,0 +1,139 @@
+task_id: uipath-bucket-operations
+description: "Create a script that uploads and downloads files from UiPath buckets"
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+
+sandbox:
+  driver: tempdir
+  python_version: "3.13"
+  template_sources:
+    - type: template_dir
+      path: "../templates/uipath-starter"
+  env_packages:
+    - uipath>=2.1.75
+    - python-dotenv>=1.0
+
+initial_prompt: |
+  Create a Python script (bucket_operations.py) that demonstrates file upload and download with UiPath buckets.
+
+  The script should:
+  - Load environment variables from .env file
+  - Initialize the UiPath SDK
+  - Create a test file with some content (e.g., "Hello from UiPath SDK!")
+  - Upload the file to a bucket (you can use bucket name "default" and path "test/sample.txt")
+  - Download the same file back
+  - Verify the downloaded content matches the original
+  - Print status messages for each step
+
+  Handle errors appropriately and provide clear output.
+
+success_criteria:
+  - type: file_exists
+    description: "bucket_operations.py file exists"
+    path: "bucket_operations.py"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script imports required modules"
+    path: "bucket_operations.py"
+    includes:
+      - "from dotenv import load_dotenv"
+      - "from uipath import UiPath"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script uses buckets.upload() method"
+    path: "bucket_operations.py"
+    includes:
+      - "buckets.upload"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script uses buckets.download() method"
+    path: "bucket_operations.py"
+    includes:
+      - "buckets.download"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script verifies content matches"
+    path: "bucket_operations.py"
+    includes:
+      - "if"
+      - "=="
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Python syntax is valid"
+    command: "python -m py_compile bucket_operations.py"
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: reference_comparison
+    description: "Code structure matches reference implementation"
+    agent_file: "bucket_operations.py"
+    comparison_method: "ast"
+    similarity_threshold: 0.65
+    weight: 2.0
+    pass_threshold: 0.65
+
+max_iterations: 5
+
+reference:
+  code: |
+    #!/usr/bin/env python3
+    from dotenv import load_dotenv
+    from uipath import UiPath
+
+    load_dotenv()
+    sdk = UiPath()
+
+    bucket_name = "default"
+    remote_path = "test/sample.txt"
+    test_content = b"Hello from UiPath SDK test!"
+
+    print("UiPath Bucket Operations")
+    print("=" * 60)
+
+    # Upload
+    print(f"\nUploading to {bucket_name}/{remote_path}...")
+    sdk.buckets.upload(
+        bucket=bucket_name,
+        path=remote_path,
+        content=test_content
+    )
+    print("✓ Upload successful")
+
+    # Download
+    print(f"\nDownloading from {bucket_name}/{remote_path}...")
+    downloaded = sdk.buckets.download(
+        bucket=bucket_name,
+        path=remote_path
+    )
+    print(f"✓ Downloaded {len(downloaded)} bytes")
+
+    # Verify
+    if downloaded == test_content:
+        print("\n✓ Content matches! Test passed.")
+    else:
+        print("\n✗ Content mismatch! Test failed.")
+
+llm_reviewer:
+  enabled: true
+  prompt: |
+    Evaluate if the bucket operations script is complete and correct:
+
+    1. Does it upload a file using sdk.buckets.upload()?
+    2. Does it download the file using sdk.buckets.download()?
+    3. Does it verify the content matches?
+    4. Does it handle byte content correctly?
+    5. Is the output clear and shows success/failure?

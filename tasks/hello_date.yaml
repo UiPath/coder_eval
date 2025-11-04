@@ -1,0 +1,28 @@
+task_id: "hello_date_smoke_test"
+description: "Create a Python script that prints 'Hello, Claude!' then the current date."
+initial_prompt: "Create a Python file named app.py that prints 'Hello, Claude!' on one line, and today's date in YYYY-MM-DD format on the next line. Then, run the script using python."
+max_iterations: 2
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"  # Safer default
+  allowed_tools: ["Read", "Write", "Bash"]
+
+sandbox:
+  driver: "tempdir"
+  python_version: "3.13"
+  env_packages: []
+  network_enabled: false
+
+success_criteria:
+  - type: "file_exists"
+    path: "app.py"
+    description: "The file app.py must be created."
+  - type: "file_contains"
+    path: "app.py"
+    includes: ["Hello, Claude!", "datetime"]
+    description: "The script must contain the required string and import."
+  - type: "run_command"
+    command: "python app.py"
+    timeout: 10
+    description: "The script must execute successfully."

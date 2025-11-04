@@ -1,0 +1,150 @@
+task_id: uipath-queue-items
+description: "Create a script that adds items to a UiPath queue and lists them"
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+
+sandbox:
+  driver: tempdir
+  python_version: "3.13"
+  template_sources:
+    - type: template_dir
+      path: "../templates/uipath-starter"
+  env_packages:
+    - uipath>=2.1.75
+    - python-dotenv>=1.0
+
+initial_prompt: |
+  Create a Python script (queue_items.py) that demonstrates queue item management in UiPath.
+
+  The script should:
+  - Load environment variables and initialize UiPath SDK
+  - Import QueueItem from uipath.models.queues
+  - Add 3 items to a queue named "TestQueue"
+  - Each item should have specific_content with some data (e.g., {"id": 1, "value": 100})
+  - List all queue items using sdk.queues.list_items()
+  - Filter the results to show only items from "TestQueue"
+  - Print the item details (ID, Status, Data)
+
+  Important: QueueItem model requires 'name' (the queue name) and 'specific_content' (the item data).
+
+success_criteria:
+  - type: file_exists
+    description: "queue_items.py file exists"
+    path: "queue_items.py"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script imports required modules"
+    path: "queue_items.py"
+    includes:
+      - "from uipath import UiPath"
+      - "from uipath.models.queues import QueueItem"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script creates QueueItem instances"
+    path: "queue_items.py"
+    includes:
+      - "QueueItem"
+      - "name="
+      - "specific_content="
+    weight: 2.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script uses create_item() method"
+    path: "queue_items.py"
+    includes:
+      - "queues.create_item"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Script uses list_items() method"
+    path: "queue_items.py"
+    includes:
+      - "queues.list_items"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Python syntax is valid"
+    command: "python -m py_compile queue_items.py"
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: reference_comparison
+    description: "Code structure matches reference implementation"
+    agent_file: "queue_items.py"
+    comparison_method: "ast"
+    similarity_threshold: 0.65
+    weight: 2.0
+    pass_threshold: 0.65
+
+max_iterations: 5
+
+reference:
+  code: |
+    #!/usr/bin/env python3
+    from dotenv import load_dotenv
+    from uipath import UiPath
+    from uipath.models.queues import QueueItem
+
+    load_dotenv()
+    sdk = UiPath()
+
+    queue_name = "TestQueue"
+
+    print(f"Queue Item Management - Queue: {queue_name}")
+    print("=" * 60)
+
+    # Add items
+    print("\nAdding items to queue...")
+    items_to_add = [
+        {"id": 1, "name": "Item A", "value": 100},
+        {"id": 2, "name": "Item B", "value": 200},
+        {"id": 3, "name": "Item C", "value": 300}
+    ]
+
+    for item_data in items_to_add:
+        queue_item = QueueItem(
+            name=queue_name,
+            specific_content=item_data
+        )
+        sdk.queues.create_item(item=queue_item)
+        print(f"  ✓ Added item: {item_data['name']}")
+
+    # List items
+    print(f"\nListing items from {queue_name}...")
+    response = sdk.queues.list_items()
+    items = response.json().get('value', [])
+
+    # Filter by queue name
+    queue_items = [
+        item for item in items
+        if item.get('QueueName') == queue_name
+    ]
+
+    print(f"✓ Found {len(queue_items)} items:")
+    for item in queue_items[:5]:
+        print(f"  - ID: {item.get('Id')}")
+        print(f"    Status: {item.get('Status')}")
+        print(f"    Data: {item.get('SpecificContent')}")
+
+llm_reviewer:
+  enabled: true
+  prompt: |
+    Evaluate if the queue items script is complete and correct:
+
+    1. Does it import QueueItem from uipath.models.queues?
+    2. Does it create QueueItem with 'name' (queue name) and 'specific_content' (data)?
+    3. Does it use sdk.queues.create_item() to add items?
+    4. Does it use sdk.queues.list_items() to retrieve items?
+    5. Does it filter the results by queue name?
+    6. Is the code structure clear and well-organized?

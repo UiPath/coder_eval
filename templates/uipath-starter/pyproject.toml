@@ -1,0 +1,9 @@
+[project]
+name = "agent1"
+version = "0.0.1"
+description = "agent1"
+authors = [{ name = "John Doe", email = "john.doe@myemail.com" }]
+dependencies = [
+    "uipath>=2.1.75"
+]
+requires-python = ">=3.10"
