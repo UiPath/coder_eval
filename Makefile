@@ -43,7 +43,7 @@ verify:  ## Run all verification steps (CI equivalent)
 	@echo "✅ All verification checks passed!"
 
 clean:  ## Clean build artifacts and cache
-	rm -rf build/ dist/ *.egg-info .pytest_cache .ruff_cache .coverage htmlcov/
+	rm -rf build/ dist/ *.egg-info .pytest_cache .ruff_cache .coverage htmlcov/ bandit-report.json
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	@echo "🧹 Cleaned artifacts"
 

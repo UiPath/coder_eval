@@ -303,8 +303,15 @@ class Sandbox:
             env["PATH"] = f"{self.venv_dir / 'bin'}:{env['PATH']}"
 
         try:
+            # Shell execution is intentional for sandbox - allows pipes, redirects, and complex commands
             result = subprocess.run(
-                command, shell=True, cwd=self.sandbox_dir, env=env, capture_output=True, text=True, timeout=timeout
+                command,
+                shell=True,  # nosec B602 - Required for sandbox command execution
+                cwd=self.sandbox_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
             )
 
             # Log command completion
