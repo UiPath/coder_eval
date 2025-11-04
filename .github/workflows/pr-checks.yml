@@ -18,6 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
+    # Set UiPath package index authentication for all steps
+    env:
+      UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -45,8 +49,6 @@ jobs:
           pip install uv
 
       - name: Install project dependencies
-        env:
-          UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
         run: uv pip install --system -e ".[dev]"
 
       # PHASE 1: Fast checks (fail early)

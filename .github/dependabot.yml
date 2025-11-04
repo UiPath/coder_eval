@@ -13,10 +13,8 @@ updates:
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
-    open-pull-requests-limit: 3
+      interval: "monthly"  # Changed from weekly to monthly (longest interval)
+    open-pull-requests-limit: 1  # Only 1 PR at a time
     labels:
       - "dependencies"
       - "python"
@@ -26,17 +24,21 @@ updates:
     # Use the UiPath registry for package resolution
     registries:
       - uipath-registry
-    # Group patch updates to reduce PR noise
-    groups:
-      patch-updates:
-        update-types:
-          - "patch"
+    # Only get security updates and major version updates
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "monthly"
+      interval: "monthly"  # Longest interval
+    open-pull-requests-limit: 1  # Only 1 PR at a time
     labels:
       - "dependencies"
       - "github-actions"
+    # Only get major version updates
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
