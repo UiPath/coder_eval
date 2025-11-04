@@ -21,6 +21,7 @@ jobs:
     # Set UiPath package index authentication for all steps
     env:
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+      ANTHROPIC_API_KEY: "sk-ant-test-dummy-key-for-ci-tests-only"
 
     steps:
       - name: Checkout code
