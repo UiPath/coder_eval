@@ -14,7 +14,7 @@ dependencies = [
     "anthropic>=0.25",
     "claude-agent-sdk>=0.1.1",
     "anyio>=4.11.0",
-    "uipath>=2.1.78",
+    "uipath>=2.1.134",
     "uipath-llmgw-client>=0.1.33",
     "pylint>=3.3.9",
     "radon>=6.0",
@@ -119,4 +119,24 @@ reportUntypedClassDecorator = "none"
 reportUntypedBaseClass = "none"
 reportUntypedNamedTuple = "none"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# Exclude specific directories from test discovery
+norecursedirs = [
+    ".*",
+    "build",
+    "dist",
+    "*.egg",
+    "venv",
+    ".venv",
+    "node_modules",
+    "ref",  # Exclude ref/ directory
+]
+# Additional pytest options
+addopts = [
+    "-v",  # Verbose output
+    "--strict-markers",  # Strict marker checking
+    "--tb=short",  # Shorter traceback format
+]
 

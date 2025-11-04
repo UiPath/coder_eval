@@ -338,7 +338,7 @@ pre-commit>=3.0            # Pre-commit hooks
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...
-LLMGW_REQUESTING_PRODUCT=coder-eval
+LLMGW_REQUESTING_PRODUCT=agent-gym
 LLMGW_REQUESTING_FEATURE=evaluation
 LOG_LEVEL=INFO
 ```
