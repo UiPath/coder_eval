@@ -91,12 +91,14 @@ Defines all Pydantic models for type safety and validation.
 7. **Task Definition**: `TaskDefinition`, `AgentConfig`, `LLMReviewerConfig`, `ReferenceSource`
 
 **Continuous Scoring**:
+
 - All criteria have `weight` (default: 1.0) and `pass_threshold` (default: 0.9)
 - Results include `score: float` (0.0-1.0) instead of binary pass/fail
 - `EvaluationResult.weighted_score` = Σ(score × weight) / Σ(weight)
 - Task succeeds when ALL criteria meet their pass thresholds
 
 **Snapshot System**:
+
 - `SnapshotMode`: DISABLED, FULL, INCREMENTAL, HYBRID
 - `SnapshotConfig`: mode, checkpoint_frequency, ignore_patterns
 - `SnapshotManifest`: Metadata for each snapshot (iteration, size, file_count, changed_files)
@@ -108,12 +110,14 @@ Defines all Pydantic models for type safety and validation.
 Manages isolated execution environments with templates and snapshots.
 
 **Key Methods**:
+
 - `setup() -> Path` - Creates sandbox, applies templates, sets up venv
 - `cleanup(preserve: bool)` - Removes or preserves sandbox
 - `run_command(command, timeout) -> (exit_code, stdout, stderr)`
 - `get_file_content()`, `file_exists()`, `list_files()`
 
 **Template System**:
+
 - Sequential application of multiple template sources
 - `_apply_repo_source()` - Git clone with optional commit
 - `_apply_template_dir_source()` - Recursive copy with ignore patterns
@@ -121,12 +125,14 @@ Manages isolated execution environments with templates and snapshots.
 - Auto-ignores: `.venv`, `.git`, `__pycache__`, `node_modules`, etc.
 
 **Snapshot System** (async):
+
 - `async create_snapshot() -> SnapshotManifest`
 - `async _snapshot_full()` - Full copy with `shutil.copytree`
 - `async _snapshot_incremental()` - Changed files only
 - Uses `asyncio.to_thread()` for non-blocking file I/O
 
 **Virtual Environment**:
+
 - Uses `uv venv` (fallback to stdlib venv)
 - Uses `uv pip install` (fallback to pip)
 
@@ -151,11 +157,13 @@ class Agent(ABC):
 Implements Agent interface using Claude Agent SDK.
 
 **Two-Phase Command Telemetry**:
+
 1. **Phase 1**: Capture `ToolUseBlock` from `AssistantMessage` → create pending command with start time
 2. **Phase 2**: Receive `ResultMessage` → update status (success/error), duration, error message
 3. **Phase 3**: Finalize commands → handle missing results as "unknown" status
 
 **File Change Detection**:
+
 - Captures file tree (path → mtime) before/after turn
 - Detects created, modified, deleted files
 - Ignores `.venv`, `__pycache__`, `.git` directories
@@ -165,12 +173,14 @@ Implements Agent interface using Claude Agent SDK.
 ### 5. evaluator.py - Evaluation System (824 lines)
 
 **SuccessChecker**:
+
 - `check_all(criteria, reference_code) -> list[CriterionResult]`
 - Dispatch table maps criterion types to checker methods
 - All checkers decorated with `@handle_criterion_errors` for consistent error handling
 - Implements 9 criterion types with continuous scoring (0.0-1.0)
 
 **Key Checkers**:
+
 - `_check_file_exists()` - Binary: 1.0 if exists, 0.0 if not
 - `_check_file_contains()` - Fractional: average of (includes matched / total) and (excludes absent / total)
 - `_check_pytest()` - Fractional: tests_passed / tests_total
@@ -178,6 +188,7 @@ Implements Agent interface using Claude Agent SDK.
 - `_check_reference_comparison()` - Uses similarity scorers (AST, token, complexity)
 
 **LLMReviewer**:
+
 - Uses UiPath LLM Gateway with LangChain (`LLMGatewayNormalizedChatModel`)
 - `review() -> LLMDecision | None`
 - Returns: issues, score, next_steps, should_continue
@@ -201,15 +212,18 @@ Coordinates the complete evaluation lifecycle.
 3. **Cleanup**: Stop agent, preserve/cleanup sandbox, save results
 
 **Snapshot Integration**:
+
 - Creates `snapshot_base_dir` during setup if mode != DISABLED
 - `_create_iteration_snapshot()` called after each agent turn
 - Hybrid mode: full snapshots at checkpoints (iteration % checkpoint_frequency == 0), incremental otherwise
 
 **Feedback Generation**:
+
 - **LLM Mode**: Uses LLM reviewer for qualitative feedback with suggestions
 - **Deterministic Mode**: Lists criteria that failed thresholds with scores, errors, and remediation steps
 
 **Batch Execution**:
+
 - `run_batch()` runs multiple tasks in parallel with `asyncio.gather()`
 - Configurable concurrency limit via `max_parallel`
 
@@ -220,11 +234,13 @@ Coordinates the complete evaluation lifecycle.
 Typer-based CLI with Rich terminal output.
 
 **Commands**:
+
 - `run` - Execute evaluation tasks (supports parallel execution)
 - `plan` - Validate task files without executing (dry-run)
 - `report` - Display or export pre-generated run reports
 
 **Features**:
+
 - Rich terminal output with colors and tables
 - Progress spinners during execution
 - Markdown report generation
@@ -235,29 +251,36 @@ Typer-based CLI with Rich terminal output.
 ### 8. Supporting Modules
 
 **config.py**: Centralized configuration using pydantic-settings
+
 - API keys, paths, defaults
 - Environment variable loading from `.env`
 - Global `settings` singleton
 
 **utils.py**: Version info utilities
+
 - `get_version_info()` - Captures versions of key dependencies
 
 **logging_config.py**: Structured logging setup
+
 - Task-specific log handlers
 - Color-coded output
 - Per-task log files
 
 **path_utils.py**: Path and run ID utilities
+
 - `generate_run_id()`, `get_task_run_dir()`, `create_latest_symlink()`
 
 **reports.py**: Report generation
+
 - Markdown report generation
 - Load reports from run directories
 
 **analysis.py**: Command statistics calculation
+
 - `calculate_command_statistics()` - Aggregates telemetry from all turns
 
 **scorers.py**: Code similarity scorers
+
 - `SimilarityScorer` - AST and token-based comparison
 - `ComplexityScorer` - Cyclomatic complexity comparison
 - `QualityScorer` - Type annotations, docstrings, error handling metrics
@@ -328,6 +351,7 @@ pre-commit>=3.0            # Pre-commit hooks
 ### pyproject.toml
 
 **Key sections**:
+
 - `[project]` - Metadata, dependencies, scripts
 - `[project.optional-dependencies]` - Dev dependencies (Dependabot compatible)
 - `[tool.ruff]` - Line length 120, Python 3.13 target
@@ -387,7 +411,7 @@ uv run ruff check coder_eval/ tests/
 uv run pyright
 
 # 4. Test
-uv run pytest tests/ -v
+uv run pytest -v tests/
 
 # All must pass before proceeding
 ```
@@ -409,6 +433,7 @@ make clean      # Clean build artifacts
 ### GitHub Actions CI/CD
 
 **PR Quality Checks** (`.github/workflows/pr-checks.yml`):
+
 - Phase 1: Format + lint (fail early)
 - Phase 2: Type checking
 - Phase 3: Security scanning (pip-audit, bandit)
@@ -416,10 +441,12 @@ make clean      # Clean build artifacts
 - Single-job strategy, <2 min runtime
 
 **CodeQL Security** (`.github/workflows/codeql.yml`):
+
 - Weekly security analysis
 - Also runs on PRs to main/develop
 
 **Pre-commit Hooks** (`.pre-commit-config.yaml`):
+
 - Ruff v0.8.4 (format + lint with auto-fixes)
 - Standard checks (whitespace, EOF, YAML, large files, merge conflicts)
 - Pyright (manual stage only)
@@ -454,6 +481,7 @@ make clean      # Clean build artifacts
 **252 tests, 86% coverage**
 
 **Test Categories**:
+
 - Models: Pydantic validation, discriminated unions
 - Sandbox: Lifecycle, commands, templates, snapshots
 - Agent: SDK integration, telemetry, file tracking
@@ -463,8 +491,9 @@ make clean      # Clean build artifacts
 - Utilities: Logging, path utils, reports, analysis, scorers
 
 **Run tests**:
+
 ```bash
-pytest tests/ -v                  # All tests
+pytest -v tests/                  # All tests
 pytest tests/test_sandbox.py      # Specific module
 pytest --cov=coder_eval tests/    # With coverage
 ```
@@ -530,7 +559,9 @@ reference:
 4. **Agent timeout errors** - Increase `timeout` in sandbox limits or task `max_iterations`
 
 ---
+
 ## Final notes
+
 - When doing code review, reach out to gemini 2.5 pro, codex and anthropic/claude-sonnet-4.5 through Zen MCP server
 - When reaching consensus between model, reach out to gemini 2.5 pro, codex and anthropic/claude-sonnet-4.5 through Zen MCP server
 - Any temporary files should be created in `tmp/` folder, NOT `/tmp` folder

@@ -1,0 +1,110 @@
+"""Sandbox configuration and snapshot models."""
+
+from __future__ import annotations
+
+import warnings
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
+
+from coder_eval.models.enums import SnapshotMode
+from coder_eval.models.templates import TemplateSource
+
+
+class ResourceLimits(BaseModel):
+    """Resource limits for sandbox execution."""
+
+    timeout: int = Field(default=300, description="Maximum execution time in seconds")
+    max_memory_mb: int | None = Field(default=None, description="Maximum memory in MB (currently not enforced)")
+    max_disk_mb: int | None = Field(default=None, description="Maximum disk usage in MB (currently not enforced)")
+
+
+class SnapshotConfig(BaseModel):
+    """Configuration for iteration snapshots.
+
+    Note: No 'enabled' flag - use mode=DISABLED to disable snapshots.
+    This avoids redundant state (e.g., enabled=False, mode=FULL).
+    """
+
+    mode: SnapshotMode = Field(
+        default=SnapshotMode.DISABLED, description="Snapshot mode (default: disabled for backward compatibility)"
+    )
+    checkpoint_frequency: int = Field(
+        default=5, ge=1, description="Full snapshot every N iterations (hybrid mode only)"
+    )
+    ignore_patterns: list[str] = Field(
+        default_factory=list, description="Additional file patterns to exclude (beyond sandbox defaults like .venv)"
+    )
+
+
+class SnapshotManifest(BaseModel):
+    """Metadata for a single snapshot.
+
+    Stored as manifest.json in each snapshot directory.
+    """
+
+    created_at: datetime = Field(description="When this snapshot was created")
+    iteration: int = Field(description="Iteration number (0-indexed)")
+    mode: SnapshotMode = Field(description="Snapshot mode used (full/incremental)")
+    size_bytes: int = Field(description="Total size of snapshot in bytes")
+    file_count: int = Field(description="Number of files in snapshot")
+    changed_files: list[str] = Field(
+        default_factory=list,
+        description="List of changed file paths (for incremental snapshots, includes DELETED: markers)",
+    )
+    base_iteration: int | None = Field(
+        default=None, description="For incremental: which iteration to apply changes to (typically iteration - 1)"
+    )
+
+
+class SandboxConfig(BaseModel):
+    """Configuration for the sandboxed execution environment."""
+
+    driver: Literal["tempdir"] = Field(default="tempdir", description="Sandbox driver type (only tempdir supported)")
+    python_version: str = Field(default="3.13", description="Python version to use in the sandbox")
+    env_packages: list[str] = Field(default_factory=list, description="Python packages to install in the environment")
+    network_enabled: bool = Field(default=False, description="Whether network access is enabled")
+    limits: ResourceLimits = Field(default_factory=ResourceLimits, description="Resource limits for execution")
+
+    # Multi-source template support
+    template_sources: list[TemplateSource] | None = Field(
+        default=None, description="Sequential list of template sources to apply"
+    )
+
+    # Snapshot configuration
+    snapshots: SnapshotConfig = Field(default_factory=SnapshotConfig, description="Iteration snapshot configuration")
+
+    # Customizable ignore patterns
+    additional_ignore_patterns: list[str] = Field(
+        default_factory=list,
+        description="Additional patterns to ignore during template setup and snapshots (beyond defaults)",
+    )
+
+    @model_validator(mode="after")
+    def validate_template_sources(self) -> SandboxConfig:
+        """Validate template sources configuration."""
+        # Import RepoSource locally to avoid circular import
+        from coder_eval.models.templates import RepoSource
+
+        if self.template_sources:
+            # Check for multiple RepoSource entries
+            repo_sources = [src for src in self.template_sources if isinstance(src, RepoSource)]
+            if len(repo_sources) > 1:
+                raise ValueError("Only one RepoSource is allowed in template_sources.")
+
+            # Check that RepoSource (if present) is first
+            if len(repo_sources) == 1 and not isinstance(self.template_sources[0], RepoSource):
+                raise ValueError(
+                    "RepoSource must be the first element in template_sources (git clone requires an empty directory)."
+                )
+
+            # Warn if too many sources
+            if len(self.template_sources) > 10:
+                warnings.warn(
+                    f"Many template sources ({len(self.template_sources)}) - this may be a misconfiguration",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+        return self

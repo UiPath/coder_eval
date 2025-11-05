@@ -3,8 +3,6 @@
 import json
 from unittest.mock import Mock
 
-import pytest
-
 from coder_eval.evaluator import LLMReviewer, SuccessChecker
 from coder_eval.models import (
     CodeLintsCriterion,
@@ -269,9 +267,13 @@ def test_success_checker_unsupported_type():
     # Create mock criterion with invalid type
     bad_criterion = Mock()
     bad_criterion.type = "invalid_type_that_does_not_exist"
+    bad_criterion.description = "Test criterion with unsupported type"
 
-    with pytest.raises(TypeError, match="Unsupported criterion type"):
-        checker.check(bad_criterion)
+    # Should return failed result instead of raising
+    result = checker.check(bad_criterion)
+    assert result.score == 0.0
+    assert "Unsupported criterion type" in result.error
+    assert result.criterion_type == "invalid_type_that_does_not_exist"
 
 
 def test_success_checker_with_mocked_sandbox():

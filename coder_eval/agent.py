@@ -1,19 +1,8 @@
 """Abstract base class for coding agents."""
 
 from abc import ABC, abstractmethod
-from enum import Enum
 
-from .models import TurnRecord
-
-
-class AgentState(str, Enum):
-    """Possible states of the agent during execution."""
-
-    WORKING = "working"
-    WAITING_FOR_USER = "waiting_for_user"
-    CODE_PROPOSAL = "code_proposal"
-    FINISHED = "finished"
-    ERROR = "error"
+from .models import AgentState, TurnRecord
 
 
 class Agent(ABC):
