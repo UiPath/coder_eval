@@ -6,7 +6,10 @@ from pathlib import Path
 import pytest
 
 from coder_eval.models import SnapshotMode
-from coder_eval.orchestrator import BatchRunConfig, Orchestrator
+from coder_eval.orchestration.config import BatchRunConfig
+from coder_eval.orchestration.evaluation import create_iteration_snapshot
+from coder_eval.orchestration.task_loader import load_task
+from coder_eval.orchestrator import Orchestrator
 
 
 @pytest.mark.asyncio
@@ -26,7 +29,7 @@ async def test_snapshot_e2e_full_mode(tmp_path):
 
     # Note: This test requires ANTHROPIC_API_KEY to actually run the agent
     # For now, we'll just verify the configuration is applied correctly
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
 
     # Apply overrides (same logic as run_batch)
     if config.snapshot_mode:
@@ -53,7 +56,7 @@ async def test_snapshot_e2e_hybrid_mode_checkpoint_logic(tmp_path):
 
     # Create a simple task with hybrid mode
     task_file = Path("tasks/hello_date.yaml")
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
 
     # Configure hybrid snapshots
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.HYBRID, checkpoint_frequency=3)
@@ -80,7 +83,14 @@ async def test_snapshot_e2e_hybrid_mode_checkpoint_logic(tmp_path):
         agent_output="Output 1",
         files_changed=[FileChange(path="file1.txt", operation="created")],
     )
-    await orchestrator._create_iteration_snapshot(1, turn_record_1)
+    await create_iteration_snapshot(
+        sandbox=orchestrator.sandbox,
+        snapshot_base_dir=orchestrator.snapshot_base_dir,
+        task=task,
+        iteration=1,
+        turn_record=turn_record_1,
+        logger=orchestrator.logger,
+    )
 
     # Iteration 2 (not checkpoint) - should be incremental
     turn_record_2 = TurnRecord(
@@ -89,7 +99,14 @@ async def test_snapshot_e2e_hybrid_mode_checkpoint_logic(tmp_path):
         agent_output="Output 2",
         files_changed=[FileChange(path="file2.txt", operation="modified")],
     )
-    await orchestrator._create_iteration_snapshot(2, turn_record_2)
+    await create_iteration_snapshot(
+        sandbox=orchestrator.sandbox,
+        snapshot_base_dir=orchestrator.snapshot_base_dir,
+        task=task,
+        iteration=2,
+        turn_record=turn_record_2,
+        logger=orchestrator.logger,
+    )
 
     # Iteration 3 (checkpoint!) - should be full
     turn_record_3 = TurnRecord(
@@ -98,7 +115,14 @@ async def test_snapshot_e2e_hybrid_mode_checkpoint_logic(tmp_path):
         agent_output="Output 3",
         files_changed=[FileChange(path="file3.txt", operation="modified")],
     )
-    await orchestrator._create_iteration_snapshot(3, turn_record_3)
+    await create_iteration_snapshot(
+        sandbox=orchestrator.sandbox,
+        snapshot_base_dir=orchestrator.snapshot_base_dir,
+        task=task,
+        iteration=3,
+        turn_record=turn_record_3,
+        logger=orchestrator.logger,
+    )
 
     # Verify all snapshots were created
     snapshot_1 = Path(turn_record_1.snapshot_path)
@@ -143,7 +167,7 @@ async def test_snapshot_directory_structure(tmp_path):
     from coder_eval.sandbox import Sandbox
 
     task_file = Path("tasks/hello_date.yaml")
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.FULL)
 
     run_dir = tmp_path / "test_run" / "structure_test"
@@ -163,7 +187,14 @@ async def test_snapshot_directory_structure(tmp_path):
 
     # Create snapshot
     turn_record = TurnRecord(iteration=1, user_input="Test", agent_output="Output", files_changed=[])
-    await orchestrator._create_iteration_snapshot(1, turn_record)
+    await create_iteration_snapshot(
+        sandbox=orchestrator.sandbox,
+        snapshot_base_dir=orchestrator.snapshot_base_dir,
+        task=task,
+        iteration=1,
+        turn_record=turn_record,
+        logger=orchestrator.logger,
+    )
 
     snapshot_path = Path(turn_record.snapshot_path)
 
@@ -195,7 +226,7 @@ async def test_snapshot_ignore_patterns_applied(tmp_path):
     from coder_eval.sandbox import Sandbox
 
     task_file = Path("tasks/test_snapshot_example.yaml")
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
 
     # Task YAML has ignore patterns: ["*.log", "temp_*"]
     assert "*.log" in task.sandbox.snapshots.ignore_patterns
@@ -224,7 +255,14 @@ async def test_snapshot_ignore_patterns_applied(tmp_path):
 
     # Create snapshot
     turn_record = TurnRecord(iteration=1, user_input="Test", agent_output="Output", files_changed=[])
-    await orchestrator._create_iteration_snapshot(1, turn_record)
+    await create_iteration_snapshot(
+        sandbox=orchestrator.sandbox,
+        snapshot_base_dir=orchestrator.snapshot_base_dir,
+        task=task,
+        iteration=1,
+        turn_record=turn_record,
+        logger=orchestrator.logger,
+    )
 
     snapshot_path = Path(turn_record.snapshot_path)
 
@@ -243,7 +281,7 @@ async def test_snapshot_ignore_patterns_applied(tmp_path):
 def test_snapshot_yaml_configuration():
     """Verify snapshot configuration can be loaded from YAML."""
     task_file = Path("tasks/test_snapshot_example.yaml")
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
 
     # Verify YAML configuration was loaded correctly
     assert task.sandbox.snapshots.mode == SnapshotMode.HYBRID
@@ -256,7 +294,7 @@ def test_snapshot_cli_override_validation():
     from coder_eval.models import SnapshotConfig
 
     task_file = Path("tasks/hello_date.yaml")
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
 
     # Test each mode can be set via CLI override
     for mode_str in ["disabled", "full", "incremental", "hybrid"]:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from ..orchestrator import Orchestrator
+from ..orchestration.task_loader import load_task
 from .console import console
 from .utils import check_api_keys, check_tools
 
@@ -40,7 +40,7 @@ def plan_command(
     all_valid = True
     for task_file in task_files:
         try:
-            task = Orchestrator.load_task(task_file)
+            task = load_task(task_file)
 
             console.print(f"[green]✓[/green] {task_file.name}")
             console.print(f"  [dim]Task ID: {task.task_id}[/dim]")

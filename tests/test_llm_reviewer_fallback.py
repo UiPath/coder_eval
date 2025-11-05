@@ -18,6 +18,7 @@ from coder_eval.models import (
     SandboxConfig,
     TaskDefinition,
 )
+from coder_eval.orchestration.evaluation import generate_next_prompt
 from coder_eval.orchestrator import Orchestrator
 
 
@@ -95,10 +96,14 @@ async def test_llm_reviewer_fallback_on_failure(tmp_path):
     ]
 
     # Generate feedback
-    feedback = await orchestrator._generate_next_prompt(
+    feedback = await generate_next_prompt(
+        task=task,
         agent_output="I tried to create the files",
         criteria_results=criteria_results,
         iteration=1,
+        llm_reviewer=orchestrator.llm_reviewer,
+        reference_code=None,
+        logger=orchestrator.logger,
     )
 
     # Verify deterministic feedback is used
@@ -168,10 +173,14 @@ async def test_llm_reviewer_succeeds_when_available(tmp_path):
     ]
 
     # Generate feedback
-    feedback = await orchestrator._generate_next_prompt(
+    feedback = await generate_next_prompt(
+        task=task,
         agent_output="Created output",
         criteria_results=criteria_results,
         iteration=1,
+        llm_reviewer=orchestrator.llm_reviewer,
+        reference_code=None,
+        logger=orchestrator.logger,
     )
 
     # Verify LLM feedback is used
@@ -236,10 +245,14 @@ async def test_fallback_includes_criterion_details(tmp_path):
         ),
     ]
 
-    feedback = await orchestrator._generate_next_prompt(
+    feedback = await generate_next_prompt(
+        task=task,
         agent_output="Output",
         criteria_results=criteria_results,
         iteration=1,
+        llm_reviewer=orchestrator.llm_reviewer,
+        reference_code=None,
+        logger=orchestrator.logger,
     )
 
     # Verify error details included
@@ -311,10 +324,14 @@ async def test_fallback_with_partial_pass(tmp_path):
         ),
     ]
 
-    feedback = await orchestrator._generate_next_prompt(
+    feedback = await generate_next_prompt(
+        task=task,
         agent_output="Output",
         criteria_results=criteria_results,
         iteration=1,
+        llm_reviewer=orchestrator.llm_reviewer,
+        reference_code=None,
+        logger=orchestrator.logger,
     )
 
     # Verify only failed criterion in feedback

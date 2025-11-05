@@ -1,5 +1,7 @@
 """Tests for orchestrator reference loading."""
 
+import logging
+
 import pytest
 
 from coder_eval.models import (
@@ -9,7 +11,7 @@ from coder_eval.models import (
     SandboxConfig,
     TaskDefinition,
 )
-from coder_eval.orchestrator import Orchestrator
+from coder_eval.orchestration.evaluation import load_reference_code
 
 
 class TestOrchestratorReference:
@@ -30,8 +32,9 @@ class TestOrchestratorReference:
         run_dir = tmp_path / "run"
         run_dir.mkdir()
 
-        orch = Orchestrator(task, run_dir, preserve_sandbox=False, task_file=None)
-        reference = orch._load_reference_code()
+        reference, _ = load_reference_code(
+            task, task_file=None, cached_reference=None, logger=logging.getLogger(__name__)
+        )
 
         assert reference == "print('hello')"
 
@@ -56,8 +59,9 @@ class TestOrchestratorReference:
         run_dir = tmp_path / "run"
         run_dir.mkdir()
 
-        orch = Orchestrator(task, run_dir, preserve_sandbox=False, task_file=task_file)
-        reference = orch._load_reference_code()
+        reference, _ = load_reference_code(
+            task, task_file=task_file, cached_reference=None, logger=logging.getLogger(__name__)
+        )
 
         assert reference == "print('from file')"
 
@@ -76,10 +80,10 @@ class TestOrchestratorReference:
         run_dir = tmp_path / "run"
         run_dir.mkdir()
 
-        orch = Orchestrator(task, run_dir, preserve_sandbox=False, task_file=None)
-
-        ref1 = orch._load_reference_code()
-        ref2 = orch._load_reference_code()
+        ref1, cached = load_reference_code(
+            task, task_file=None, cached_reference=None, logger=logging.getLogger(__name__)
+        )
+        ref2, _ = load_reference_code(task, task_file=None, cached_reference=cached, logger=logging.getLogger(__name__))
 
         # Same object (cached)
         assert ref1 is ref2
@@ -98,8 +102,9 @@ class TestOrchestratorReference:
         run_dir = tmp_path / "run"
         run_dir.mkdir()
 
-        orch = Orchestrator(task, run_dir, preserve_sandbox=False, task_file=None)
-        reference = orch._load_reference_code()
+        reference, _ = load_reference_code(
+            task, task_file=None, cached_reference=None, logger=logging.getLogger(__name__)
+        )
 
         assert reference is None
 
@@ -119,10 +124,8 @@ class TestOrchestratorReference:
         run_dir = tmp_path / "run"
         run_dir.mkdir()
 
-        orch = Orchestrator(task, run_dir, preserve_sandbox=False, task_file=task_file)
-
         with pytest.raises(FileNotFoundError, match="Reference file not found"):
-            orch._load_reference_code()
+            load_reference_code(task, task_file=task_file, cached_reference=None, logger=logging.getLogger(__name__))
 
     def test_file_reference_without_task_file(self, tmp_path):
         """Error when file reference but no task_file provided."""
@@ -139,7 +142,5 @@ class TestOrchestratorReference:
         run_dir = tmp_path / "run"
         run_dir.mkdir()
 
-        orch = Orchestrator(task, run_dir, preserve_sandbox=False, task_file=None)
-
         with pytest.raises(ValueError, match="task_file not set"):
-            orch._load_reference_code()
+            load_reference_code(task, task_file=None, cached_reference=None, logger=logging.getLogger(__name__))

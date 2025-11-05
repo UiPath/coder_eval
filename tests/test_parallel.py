@@ -5,7 +5,8 @@ import time
 
 import pytest
 
-from coder_eval.orchestrator import BatchRunConfig, Orchestrator
+from coder_eval.orchestration.config import BatchRunConfig
+from coder_eval.orchestrator import Orchestrator
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,7 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from coder_eval.evaluator import SuccessChecker
+from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.models import (
     AgentKind,
     CriterionResult,

@@ -134,7 +134,7 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
 
 
 # Decorator for registration (defined here to avoid circular imports)
-def register_criterion(cls: type[BaseCriterion]) -> type[BaseCriterion]:
+def register_criterion(cls: type[BaseCriterion]) -> type[BaseCriterion]:  # type: ignore[reportMissingTypeArgument]
     """Decorator to register a criterion checker.
 
     Moved here from __init__.py to prevent circular import issues.

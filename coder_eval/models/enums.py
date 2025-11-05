@@ -8,6 +8,7 @@ class AgentKind(str, Enum):
 
     CLAUDE_CODE = "claude-code"
     AIDER = "aider"
+    UNKNOWN = "unknown"  # Used when agent type cannot be determined (e.g., task loading failure)
 
 
 class AgentState(str, Enum):

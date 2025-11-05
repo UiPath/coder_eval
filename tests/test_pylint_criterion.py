@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from coder_eval.evaluator import SuccessChecker
+from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.models import PylintScoreCriterion
 
 

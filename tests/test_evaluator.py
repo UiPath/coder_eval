@@ -3,7 +3,8 @@
 import json
 from unittest.mock import Mock
 
-from coder_eval.evaluator import LLMReviewer, SuccessChecker
+from coder_eval.evaluation.checker import SuccessChecker
+from coder_eval.evaluation.reviewer import LLMReviewer
 from coder_eval.models import (
     CodeLintsCriterion,
     FileContainsCriterion,

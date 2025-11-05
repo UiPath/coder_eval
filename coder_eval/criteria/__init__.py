@@ -1,5 +1,7 @@
 """Criterion checker registry and plugin system with dynamic discovery."""
 
+# pyright: reportImportCycles=false
+
 import importlib
 import logging
 import pkgutil
@@ -14,11 +16,11 @@ logger = logging.getLogger(__name__)
 class CriterionRegistry:
     """Registry for criterion checker plugins with dynamic discovery."""
 
-    _checkers: ClassVar[dict[str, type[BaseCriterion]]] = {}
+    _checkers: ClassVar[dict[str, type[BaseCriterion]]] = {}  # type: ignore[reportMissingTypeArgument]
     _discovered: ClassVar[bool] = False
 
     @classmethod
-    def register(cls, checker_class: type[BaseCriterion]) -> type[BaseCriterion]:
+    def register(cls, checker_class: type[BaseCriterion]) -> type[BaseCriterion]:  # type: ignore[reportMissingTypeArgument]
         """Register a criterion checker.
 
         Args:
@@ -42,14 +44,14 @@ class CriterionRegistry:
         if criterion_type in cls._checkers:
             logger.warning(
                 f"Overwriting existing checker for '{criterion_type}': "
-                f"{cls._checkers[criterion_type].__name__} -> {checker_class.__name__}"
+                + f"{cls._checkers[criterion_type].__name__} -> {checker_class.__name__}"
             )
         cls._checkers[criterion_type] = checker_class
         logger.debug(f"Registered criterion checker: {criterion_type} -> {checker_class.__name__}")
         return checker_class
 
     @classmethod
-    def get_checker(cls, criterion_type: str) -> type[BaseCriterion]:
+    def get_checker(cls, criterion_type: str) -> type[BaseCriterion]:  # type: ignore[reportMissingTypeArgument]
         """Get checker class for a criterion type.
 
         Args:
@@ -64,7 +66,7 @@ class CriterionRegistry:
         if criterion_type not in cls._checkers:
             raise KeyError(
                 f"No checker registered for criterion type '{criterion_type}'. "
-                f"Available types: {list(cls._checkers.keys())}"
+                + f"Available types: {list(cls._checkers.keys())}"
             )
         return cls._checkers[criterion_type]
 

@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from coder_eval.evaluator import LLMReviewer
+from coder_eval.evaluation.reviewer import LLMReviewer
 from coder_eval.models import LLMReviewerConfig
 
 

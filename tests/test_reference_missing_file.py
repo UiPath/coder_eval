@@ -3,10 +3,12 @@
 Tests ensure clear FileNotFoundError for missing reference files.
 """
 
+import logging
+
 import pytest
 
 from coder_eval.models import AgentConfig, FileExistsCriterion, ReferenceSource, SandboxConfig, TaskDefinition
-from coder_eval.orchestrator import Orchestrator
+from coder_eval.orchestration.evaluation import load_reference_code
 
 
 def test_load_reference_missing_file_raises(tmp_path):
@@ -32,12 +34,9 @@ def test_load_reference_missing_file_raises(tmp_path):
         reference=ReferenceSource(file="missing_reference.py"),  # File doesn't exist
     )
 
-    # Create orchestrator
-    orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", preserve_sandbox=False, task_file=task_file)
-
     # Attempt to load reference - should raise FileNotFoundError
     with pytest.raises(FileNotFoundError) as exc_info:
-        orchestrator._load_reference_code()
+        load_reference_code(task, task_file, cached_reference=None, logger=logging.getLogger(__name__))
 
     # Verify error message contains both file path and task file
     error_msg = str(exc_info.value)
@@ -65,10 +64,8 @@ def test_load_reference_inline_code_works(tmp_path):
         reference=ReferenceSource(code="def solution():\n    return 42"),
     )
 
-    orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", preserve_sandbox=False, task_file=task_file)
-
     # Load reference - should succeed
-    ref_code = orchestrator._load_reference_code()
+    ref_code, _ = load_reference_code(task, task_file, cached_reference=None, logger=logging.getLogger(__name__))
 
     assert ref_code == "def solution():\n    return 42"
 
@@ -98,10 +95,8 @@ def test_load_reference_existing_file_works(tmp_path):
         reference=ReferenceSource(file="reference_solution.py"),
     )
 
-    orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", preserve_sandbox=False, task_file=task_file)
-
     # Load reference - should succeed
-    ref_code = orchestrator._load_reference_code()
+    ref_code, _ = load_reference_code(task, task_file, cached_reference=None, logger=logging.getLogger(__name__))
 
     assert ref_code == "def solution():\n    return 'success'"
 
@@ -127,17 +122,15 @@ def test_load_reference_caches_result(tmp_path):
         reference=ReferenceSource(file="reference.py"),
     )
 
-    orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", preserve_sandbox=False, task_file=task_file)
-
     # First load
-    ref_code_1 = orchestrator._load_reference_code()
+    ref_code_1, cached = load_reference_code(task, task_file, cached_reference=None, logger=logging.getLogger(__name__))
     assert ref_code_1 == "original content"
 
     # Modify file on disk
     ref_file.write_text("modified content")
 
     # Second load - should return cached value
-    ref_code_2 = orchestrator._load_reference_code()
+    ref_code_2, _ = load_reference_code(task, task_file, cached_reference=cached, logger=logging.getLogger(__name__))
     assert ref_code_2 == "original content"  # Still returns cached value
 
 
@@ -161,10 +154,8 @@ def test_load_reference_no_reference_returns_none(tmp_path):
         reference=None,
     )
 
-    orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", preserve_sandbox=False, task_file=task_file)
-
     # Load reference - should return None
-    ref_code = orchestrator._load_reference_code()
+    ref_code, _ = load_reference_code(task, task_file, cached_reference=None, logger=logging.getLogger(__name__))
 
     assert ref_code is None
 
@@ -189,9 +180,6 @@ def test_load_reference_without_task_file_raises(tmp_path):
         reference=ReferenceSource(file="reference.py"),
     )
 
-    # Create orchestrator WITHOUT task_file
-    orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", preserve_sandbox=False, task_file=None)
-
     # Attempt to load reference - should raise ValueError
     with pytest.raises(ValueError, match="task_file not set"):
-        orchestrator._load_reference_code()
+        load_reference_code(task, task_file=None, cached_reference=None, logger=logging.getLogger(__name__))

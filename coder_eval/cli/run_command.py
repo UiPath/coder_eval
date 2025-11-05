@@ -7,7 +7,8 @@ import typer
 
 from ..config import settings
 from ..logging_config import setup_logging
-from ..orchestrator import BatchRunConfig, Orchestrator
+from ..orchestration.config import BatchRunConfig
+from ..orchestrator import Orchestrator
 from ..path_utils import create_latest_symlink
 from .run_helpers import (
     expand_task_files,

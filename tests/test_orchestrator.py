@@ -4,13 +4,15 @@ from pathlib import Path
 
 import pytest
 
+from coder_eval.orchestration.evaluation import create_iteration_snapshot, generate_next_prompt
+from coder_eval.orchestration.task_loader import load_task
 from coder_eval.orchestrator import Orchestrator
 
 
 def test_orchestrator_load_task():
     """Test loading a task from YAML."""
     task_file = Path("tasks/hello_date.yaml")
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
 
     assert task.task_id == "hello_date_smoke_test"
     assert task.max_iterations == 2
@@ -20,13 +22,13 @@ def test_orchestrator_load_task():
 def test_orchestrator_load_task_missing_file():
     """Test loading a non-existent task file."""
     with pytest.raises(FileNotFoundError):
-        Orchestrator.load_task(Path("tasks/nonexistent.yaml"))
+        load_task(Path("tasks/nonexistent.yaml"))
 
 
 def test_orchestrator_initialization(tmp_path):
     """Test orchestrator initialization."""
     task_file = Path("tasks/hello_date.yaml")
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
 
     run_dir = tmp_path / "test_run" / "hello_date"
 
@@ -43,7 +45,7 @@ def test_orchestrator_initialization(tmp_path):
 async def test_orchestrator_create_agent(tmp_path):
     """Test agent creation."""
     task_file = Path("tasks/hello_date.yaml")
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
 
     run_dir = tmp_path / "test_run" / "hello_date"
 
@@ -61,7 +63,7 @@ def test_orchestrator_generate_feedback(tmp_path):
     from coder_eval.models import CriterionResult
 
     task_file = Path("tasks/hello_date.yaml")
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
 
     run_dir = tmp_path / "test_run" / "hello_date"
     Orchestrator(task=task, run_dir=run_dir)
@@ -164,10 +166,14 @@ async def test_orchestrator_deterministic_feedback_with_failures(tmp_path):
     ]
 
     # Generate feedback
-    feedback = await orchestrator._generate_next_prompt(
+    feedback = await generate_next_prompt(
+        task=task,
         agent_output="I tried to create the file",
         criteria_results=criteria_results,
         iteration=1,
+        llm_reviewer=None,
+        reference_code=None,
+        logger=orchestrator.logger,
     )
 
     # Assertions
@@ -239,10 +245,14 @@ async def test_orchestrator_deterministic_feedback_with_partial_scores(tmp_path)
         ),
     ]
 
-    feedback = await orchestrator._generate_next_prompt(
+    feedback = await generate_next_prompt(
+        task=task,
         agent_output="I wrote some tests",
         criteria_results=criteria_results,
         iteration=1,
+        llm_reviewer=None,
+        reference_code=None,
+        logger=orchestrator.logger,
     )
 
     # Verify feedback shows both score and threshold
@@ -337,10 +347,14 @@ async def test_orchestrator_deterministic_feedback_mixed_results(tmp_path):
         ),
     ]
 
-    feedback = await orchestrator._generate_next_prompt(
+    feedback = await generate_next_prompt(
+        task=task,
         agent_output="Created and ran script",
         criteria_results=criteria_results,
         iteration=1,
+        llm_reviewer=None,
+        reference_code=None,
+        logger=orchestrator.logger,
     )
 
     # Only the failed criterion should appear
@@ -383,7 +397,7 @@ success_criteria:
 @pytest.mark.asyncio
 async def test_run_batch_empty_list(tmp_path):
     """Test batch execution with empty task list (edge case from review)."""
-    from coder_eval.orchestrator import BatchRunConfig
+    from coder_eval.orchestration.config import BatchRunConfig
 
     config = BatchRunConfig(run_dir=tmp_path / "run", max_parallel=1)
 
@@ -404,7 +418,7 @@ async def test_run_batch_empty_list(tmp_path):
 
 def test_batch_run_config_validation():
     """Test BatchRunConfig validation."""
-    from coder_eval.orchestrator import BatchRunConfig
+    from coder_eval.orchestration.config import BatchRunConfig
 
     # Valid config
     config = BatchRunConfig(run_dir=Path("/tmp/run"), max_parallel=3)
@@ -423,6 +437,7 @@ def test_generate_run_summary(tmp_path):
     from datetime import datetime
 
     from coder_eval.models import AgentKind, EvaluationResult
+    from coder_eval.orchestration.batch import _generate_run_summary
 
     # Create mock results
     results = [
@@ -454,7 +469,7 @@ def test_generate_run_summary(tmp_path):
         },
     ]
 
-    summary = Orchestrator._generate_run_summary(
+    summary = _generate_run_summary(
         run_dir=tmp_path,
         task_results=results,
         start_time=datetime.now(),
@@ -474,10 +489,12 @@ def test_generate_run_summary(tmp_path):
 
 def test_create_error_result(tmp_path):
     """Test error result creation for failed tasks."""
+    from coder_eval.orchestration.batch import _create_error_result
+
     task_file = tmp_path / "failed_task.yaml"
     error = ValueError("Task loading failed")
 
-    result = Orchestrator._create_error_result(task_file, error)
+    result = _create_error_result(task_file, error)
 
     # Verify structure
     assert "task_id" in result
@@ -501,7 +518,7 @@ async def test_orchestrator_snapshot_setup_disabled(tmp_path):
     from coder_eval.models import SnapshotConfig, SnapshotMode
 
     task_file = Path("tasks/hello_date.yaml")
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
 
     # Explicitly disable snapshots
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.DISABLED)
@@ -541,7 +558,7 @@ async def test_orchestrator_snapshot_setup_enabled(tmp_path):
     from coder_eval.models import SnapshotConfig, SnapshotMode
 
     task_file = Path("tasks/hello_date.yaml")
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
 
     # Enable full snapshots
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.FULL)
@@ -582,7 +599,7 @@ async def test_orchestrator_create_iteration_snapshot_disabled(tmp_path):
     from coder_eval.models import SnapshotConfig, SnapshotMode, TurnRecord
 
     task_file = Path("tasks/hello_date.yaml")
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
 
     # Disable snapshots
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.DISABLED)
@@ -599,7 +616,14 @@ async def test_orchestrator_create_iteration_snapshot_disabled(tmp_path):
     )
 
     # Call snapshot creation (should do nothing)
-    await orchestrator._create_iteration_snapshot(1, turn_record)
+    await create_iteration_snapshot(
+        sandbox=orchestrator.sandbox,
+        snapshot_base_dir=orchestrator.snapshot_base_dir,
+        task=task,
+        iteration=1,
+        turn_record=turn_record,
+        logger=orchestrator.logger,
+    )
 
     # Verify no snapshot created
     assert turn_record.snapshot_path is None
@@ -613,7 +637,7 @@ async def test_orchestrator_create_iteration_snapshot_full(tmp_path):
     from coder_eval.sandbox import Sandbox
 
     task_file = Path("tasks/hello_date.yaml")
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
 
     # Enable full snapshots
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.FULL)
@@ -641,7 +665,14 @@ async def test_orchestrator_create_iteration_snapshot_full(tmp_path):
     )
 
     # Create snapshot
-    await orchestrator._create_iteration_snapshot(1, turn_record)
+    await create_iteration_snapshot(
+        sandbox=orchestrator.sandbox,
+        snapshot_base_dir=orchestrator.snapshot_base_dir,
+        task=task,
+        iteration=1,
+        turn_record=turn_record,
+        logger=orchestrator.logger,
+    )
 
     # Verify snapshot was created
     assert turn_record.snapshot_path is not None
@@ -664,7 +695,7 @@ async def test_orchestrator_create_iteration_snapshot_hybrid(tmp_path):
     from coder_eval.sandbox import Sandbox
 
     task_file = Path("tasks/hello_date.yaml")
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
 
     # Enable hybrid snapshots with checkpoint every 2 iterations
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.HYBRID, checkpoint_frequency=2)
@@ -691,7 +722,14 @@ async def test_orchestrator_create_iteration_snapshot_hybrid(tmp_path):
         agent_output="Output 1",
         files_changed=[FileChange(path="file1.txt", operation="created")],
     )
-    await orchestrator._create_iteration_snapshot(1, turn_record_1)
+    await create_iteration_snapshot(
+        sandbox=orchestrator.sandbox,
+        snapshot_base_dir=orchestrator.snapshot_base_dir,
+        task=task,
+        iteration=1,
+        turn_record=turn_record_1,
+        logger=orchestrator.logger,
+    )
 
     # Iteration 2 (checkpoint) - should create full
     turn_record_2 = TurnRecord(
@@ -700,7 +738,14 @@ async def test_orchestrator_create_iteration_snapshot_hybrid(tmp_path):
         agent_output="Output 2",
         files_changed=[FileChange(path="file2.txt", operation="created")],
     )
-    await orchestrator._create_iteration_snapshot(2, turn_record_2)
+    await create_iteration_snapshot(
+        sandbox=orchestrator.sandbox,
+        snapshot_base_dir=orchestrator.snapshot_base_dir,
+        task=task,
+        iteration=2,
+        turn_record=turn_record_2,
+        logger=orchestrator.logger,
+    )
 
     # Verify both snapshots exist
     assert turn_record_1.snapshot_path is not None
@@ -733,7 +778,7 @@ async def test_orchestrator_snapshot_error_handling(tmp_path):
     from coder_eval.models import SnapshotConfig, SnapshotMode, TurnRecord
 
     task_file = Path("tasks/hello_date.yaml")
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
 
     # Enable snapshots
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.FULL)
@@ -756,7 +801,14 @@ async def test_orchestrator_snapshot_error_handling(tmp_path):
     )
 
     # Call snapshot creation - should handle error gracefully
-    await orchestrator._create_iteration_snapshot(1, turn_record)
+    await create_iteration_snapshot(
+        sandbox=orchestrator.sandbox,
+        snapshot_base_dir=orchestrator.snapshot_base_dir,
+        task=task,
+        iteration=1,
+        turn_record=turn_record,
+        logger=orchestrator.logger,
+    )
 
     # Verify snapshot fields remain None (error was handled)
     assert turn_record.snapshot_path is None
@@ -768,7 +820,7 @@ async def test_orchestrator_snapshot_error_handling(tmp_path):
 
 def test_batch_run_config_with_snapshot_overrides():
     """Test that BatchRunConfig accepts snapshot override parameters."""
-    from coder_eval.orchestrator import BatchRunConfig
+    from coder_eval.orchestration.config import BatchRunConfig
 
     config = BatchRunConfig(
         run_dir=Path("/tmp/test_run"),
@@ -786,7 +838,7 @@ def test_batch_run_config_with_snapshot_overrides():
 
 def test_batch_run_config_snapshot_defaults():
     """Test that BatchRunConfig has correct defaults for snapshot fields."""
-    from coder_eval.orchestrator import BatchRunConfig
+    from coder_eval.orchestration.config import BatchRunConfig
 
     config = BatchRunConfig(
         run_dir=Path("/tmp/test_run"),
@@ -801,7 +853,7 @@ def test_batch_run_config_snapshot_defaults():
 async def test_run_batch_applies_snapshot_mode_override(tmp_path):
     """Test that run_batch applies snapshot mode override from config."""
     from coder_eval.models import SnapshotMode
-    from coder_eval.orchestrator import BatchRunConfig, Orchestrator
+    from coder_eval.orchestration.config import BatchRunConfig
 
     task_file = Path("tasks/hello_date.yaml")
     run_dir = tmp_path / "test_run"
@@ -813,7 +865,7 @@ async def test_run_batch_applies_snapshot_mode_override(tmp_path):
     )
 
     # Load task (which has disabled snapshots by default)
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
     original_mode = task.sandbox.snapshots.mode
 
     # Simulate what run_batch does with overrides
@@ -836,7 +888,7 @@ async def test_run_batch_applies_snapshot_mode_override(tmp_path):
 async def test_run_batch_applies_checkpoint_freq_override(tmp_path):
     """Test that run_batch applies checkpoint frequency override."""
     from coder_eval.models import SnapshotMode
-    from coder_eval.orchestrator import BatchRunConfig, Orchestrator
+    from coder_eval.orchestration.config import BatchRunConfig
 
     task_file = Path("tasks/hello_date.yaml")
     run_dir = tmp_path / "test_run"
@@ -849,7 +901,7 @@ async def test_run_batch_applies_checkpoint_freq_override(tmp_path):
     )
 
     # Load task
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
 
     # Apply overrides (simulating run_batch logic)
     if config.snapshot_mode:
@@ -871,7 +923,7 @@ async def test_run_batch_applies_checkpoint_freq_override(tmp_path):
 async def test_run_batch_preserves_ignore_patterns(tmp_path):
     """Test that run_batch preserves task-specific ignore patterns when overriding."""
     from coder_eval.models import SnapshotMode
-    from coder_eval.orchestrator import BatchRunConfig, Orchestrator
+    from coder_eval.orchestration.config import BatchRunConfig
 
     task_file = Path("tasks/test_snapshot_example.yaml")
     run_dir = tmp_path / "test_run"
@@ -883,7 +935,7 @@ async def test_run_batch_preserves_ignore_patterns(tmp_path):
     )
 
     # Load task (has custom ignore patterns in YAML)
-    task = Orchestrator.load_task(task_file)
+    task = load_task(task_file)
     original_patterns = task.sandbox.snapshots.ignore_patterns.copy()
 
     # Apply overrides

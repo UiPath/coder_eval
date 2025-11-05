@@ -1,6 +1,7 @@
 """Tests for evaluator reference code support."""
 
-from coder_eval.evaluator import LLMReviewer, SuccessChecker
+from coder_eval.evaluation.checker import SuccessChecker
+from coder_eval.evaluation.reviewer import LLMReviewer
 from coder_eval.models import (
     LLMReviewerConfig,
     ReferenceComparisonCriterion,

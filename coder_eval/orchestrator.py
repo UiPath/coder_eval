@@ -5,49 +5,30 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
-
-import yaml
-from pydantic import BaseModel, Field
 
 from .agent import Agent
 from .analysis import calculate_command_statistics
 from .config import settings
 from .errors.executor import execute_with_retry
 from .errors.retry import create_error_context
-from .evaluator import LLMReviewer, SuccessChecker
+from .evaluation.checker import SuccessChecker
+from .evaluation.reviewer import LLMReviewer
 from .models import (
     AgentKind,
-    CriteriaResults,
     EvaluationResult,
     RunSummary,
     SnapshotMode,
     TaskDefinition,
-    TemplateDirSource,
 )
+from .orchestration.batch import run_batch as run_batch_impl
+from .orchestration.config import BatchRunConfig
+from .orchestration.evaluation import create_iteration_snapshot, generate_next_prompt, load_reference_code
 from .sandbox import Sandbox
 from .utils import get_version_info
 
 
 # Get module logger
 logger = logging.getLogger(__name__)
-
-
-class BatchRunConfig(BaseModel):
-    """Configuration for batch task execution.
-
-    This configuration object encapsulates all parameters needed to run
-    multiple tasks in batch mode with optional parallelism.
-    """
-
-    run_dir: Path = Field(description="Directory for this batch run")
-    max_parallel: int = Field(default=1, ge=1, description="Max concurrent tasks")
-    preserve_sandbox: bool = Field(default=False, description="Preserve sandbox after execution")
-    max_iterations: int | None = Field(default=None, description="Override max iterations for all tasks")
-    snapshot_mode: str | None = Field(default=None, description="Override snapshot mode for all tasks")
-    snapshot_checkpoint_freq: int | None = Field(
-        default=None, description="Override checkpoint frequency for hybrid mode"
-    )
 
 
 class Orchestrator:
@@ -285,10 +266,12 @@ class Orchestrator:
             # Communicate with agent (with retry logic)
             self.logger.debug(f"Sending prompt: {current_prompt[:100]}...")
 
-            # Use lambda with default argument to safely bind loop variable
-            # (without `prompt=current_prompt`, closure would capture stale reference)
+            # Use lambda with default arguments to safely bind variables
+            # (without defaults, closure would capture stale references)
+            # Local variable for type narrowing in lambda
+            agent = self.agent
             turn_record = await execute_with_retry(
-                operation=lambda prompt=current_prompt: self.agent.communicate(prompt),
+                operation=lambda prompt=current_prompt, a=agent: a.communicate(prompt),
                 operation_name=f"Agent communication (iteration {iteration})",
                 context={
                     "task_id": self.task.task_id,
@@ -301,11 +284,24 @@ class Orchestrator:
             self.logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
 
             # Create snapshot after this turn (if enabled)
-            await self._create_iteration_snapshot(iteration, turn_record)
+            if self.snapshot_base_dir and self.sandbox:
+                await create_iteration_snapshot(
+                    sandbox=self.sandbox,
+                    snapshot_base_dir=self.snapshot_base_dir,
+                    task=self.task,
+                    iteration=iteration,
+                    turn_record=turn_record,
+                    logger=self.logger,
+                )
 
             # Check success criteria (pass reference code for reference_comparison criterion)
             self.logger.debug("Checking success criteria")
-            reference_code = self._load_reference_code()
+            reference_code, self._reference_code = load_reference_code(
+                task=self.task,
+                task_file=self.task_file,
+                cached_reference=self._reference_code,
+                logger=self.logger,
+            )
             criteria_results = await asyncio.to_thread(
                 self.success_checker.check_all, self.task.success_criteria, reference_code=reference_code
             )
@@ -343,160 +339,17 @@ class Orchestrator:
 
             # If not successful and not at max iterations, get feedback
             if iteration < self.task.max_iterations:
-                current_prompt = await self._generate_next_prompt(turn_record.agent_output, criteria_results, iteration)
-
-        return success
-
-    async def _generate_next_prompt(
-        self,
-        agent_output: str,
-        criteria_results: CriteriaResults,
-        iteration: int,
-    ) -> str:
-        """Generate the next prompt based on results and feedback.
-
-        Tries LLM review first if configured. Falls back to deterministic
-        feedback listing failed criteria (those with score < pass_threshold).
-
-        Args:
-            agent_output: The agent's output from this turn
-            criteria_results: Results of success criteria checks
-            iteration: Current iteration number
-
-        Returns:
-            Next prompt to send to the agent with actionable feedback
-        """
-        # Assert result is initialized
-        assert self.result is not None, "Result not initialized"
-
-        # Try LLM review first if enabled
-        if self.llm_reviewer:
-            self.logger.info("Requesting LLM review")
-            reference_code = self._load_reference_code()
-
-            # Wrap LLM reviewer call with retry logic for network resilience
-            async def _review_operation():
-                assert self.llm_reviewer is not None
-                return await asyncio.to_thread(
-                    self.llm_reviewer.review,
-                    task_description=self.task.description,
-                    agent_output=agent_output,
-                    current_iteration=iteration,
-                    max_iterations=self.task.max_iterations,
-                    reference_solution=reference_code,
+                current_prompt = await generate_next_prompt(
+                    task=self.task,
+                    agent_output=turn_record.agent_output,
+                    criteria_results=criteria_results,
+                    iteration=iteration,
+                    llm_reviewer=self.llm_reviewer,
+                    reference_code=reference_code,
+                    logger=self.logger,
                 )
 
-            decision = await execute_with_retry(
-                operation=_review_operation,
-                operation_name="LLM reviewer",
-                context={
-                    "task_id": self.task.task_id,
-                    "component": "evaluator",
-                },
-            )
-
-            if decision:
-                self.result.llm_review = decision
-                self.logger.info(f"Issues:\n{decision.issues[:100]}...")
-                self.logger.info(f"LLM Score: {decision.score}")
-
-                if decision.next_steps:
-                    steps_text = "\n".join(f"- {s}" for s in decision.next_steps)
-                    return f"""The task is not yet complete. Here's the feedback:
-
-Issues:
-{decision.issues}
-
-Next steps:
-{steps_text}
-
-Please address these issues and continue working on the task."""
-
-        # Fallback to deterministic feedback from criteria
-        self.logger.info("Using deterministic feedback from failed criteria")
-
-        # Check which criteria failed their pass_threshold
-        failed_criteria = [
-            (result, criterion)
-            for result, criterion in zip(criteria_results, self.task.success_criteria, strict=True)
-            if result.score < criterion.pass_threshold
-        ]
-
-        if failed_criteria:
-            feedback_parts = ["The following checks failed:\n"]
-            for result, criterion in failed_criteria:
-                feedback_parts.append(f"- {criterion.description}")
-                feedback_parts.append(f"  Score: {result.score:.2f} (threshold: {criterion.pass_threshold})")
-                if result.error:
-                    feedback_parts.append(f"  Error: {result.error}")
-                elif result.details:
-                    feedback_parts.append(f"  Details: {result.details}")
-
-            feedback_parts.append("\nPlease fix these issues and complete the task.")
-
-            return "\n".join(feedback_parts)
-
-        # Fallback message if no specific feedback
-        return "The task is not yet complete. Please continue working on it."
-
-    async def _create_iteration_snapshot(self, iteration: int, turn_record) -> None:
-        """Create a snapshot of the sandbox after this iteration.
-
-        Implements hybrid mode: full snapshots at checkpoints, incremental otherwise.
-        Gracefully handles errors to prevent snapshot failures from breaking evaluation.
-
-        Args:
-            iteration: Current iteration number (1-indexed)
-            turn_record: TurnRecord to update with snapshot info
-        """
-        # Skip if snapshots disabled
-        if not self.snapshot_base_dir or not self.sandbox:
-            return
-
-        snapshot_config = self.task.sandbox.snapshots
-        if snapshot_config.mode == SnapshotMode.DISABLED:
-            return
-
-        try:
-            # Determine snapshot mode for this iteration
-            snapshot_dir = self.snapshot_base_dir / f"iteration_{iteration}"
-
-            # Hybrid mode: full at checkpoints, incremental otherwise
-            if snapshot_config.mode == SnapshotMode.HYBRID:
-                is_checkpoint = iteration % snapshot_config.checkpoint_frequency == 0
-                mode = SnapshotMode.FULL if is_checkpoint else SnapshotMode.INCREMENTAL
-            else:
-                # Use configured mode directly (FULL or INCREMENTAL)
-                mode = snapshot_config.mode
-
-            # Create snapshot
-            self.logger.debug(f"Creating {mode.value} snapshot for iteration {iteration}")
-
-            manifest = await self.sandbox.create_snapshot(
-                snapshot_dir=snapshot_dir,
-                mode=mode,
-                changed_files=turn_record.files_changed if mode == SnapshotMode.INCREMENTAL else None,
-                ignore_patterns=snapshot_config.ignore_patterns,
-            )
-
-            # Update manifest with correct iteration number
-            manifest.iteration = iteration
-
-            # Update turn record with snapshot info
-            turn_record.snapshot_path = str(snapshot_dir)
-            turn_record.snapshot_size_bytes = manifest.size_bytes
-
-            self.logger.info(
-                f"Snapshot created: {manifest.file_count} files, {manifest.size_bytes / 1024:.1f} KB, mode={mode.value}"
-            )
-
-        except asyncio.CancelledError:
-            # Re-raise to allow proper task cancellation
-            raise
-        except Exception as e:
-            # Log error but don't fail the evaluation
-            self.logger.warning(f"Failed to create snapshot for iteration {iteration}: {e}")
-            # Don't set snapshot_path on turn_record if snapshot failed
+        return success
 
     async def _cleanup(self) -> None:
         """Clean up all resources."""
@@ -523,96 +376,6 @@ Please address these issues and continue working on the task."""
             except Exception as e:
                 self.logger.warning(f"Failed to cleanup sandbox: {e}")
 
-    def _load_reference_code(self) -> str | None:
-        """Load reference code from task definition.
-
-        Returns:
-            Reference code content, or None if not defined.
-
-        Raises:
-            FileNotFoundError: If reference file path doesn't exist.
-
-        Security: Reference code is NEVER shown to the agent.
-        It is only used by LLM reviewer and reference comparison criterion.
-        """
-        # Return cached if already loaded
-        if self._reference_code is not None:
-            return self._reference_code
-
-        if not self.task.reference:
-            return None
-
-        if self.task.reference.code:
-            # Inline code
-            self._reference_code = self.task.reference.code
-        elif self.task.reference.file:
-            # Load from file (resolve relative to task YAML location)
-            if not self.task_file:
-                raise ValueError("task_file not set, cannot resolve reference file path")
-            ref_path = self.task_file.parent / self.task.reference.file
-            if not ref_path.exists():
-                raise FileNotFoundError(f"Reference file not found: {ref_path} (specified in {self.task_file})")
-            self._reference_code = ref_path.read_text()
-
-        # Log that reference was loaded (but NOT the content for security)
-        self.logger.info("Reference solution loaded (content hidden for security)")
-        return self._reference_code
-
-    @classmethod
-    def load_task(cls, task_file: Path) -> TaskDefinition:
-        """Load a task definition from a YAML file.
-
-        Args:
-            task_file: Path to the task YAML file
-
-        Returns:
-            Parsed TaskDefinition
-
-        Raises:
-            FileNotFoundError: If task file doesn't exist
-            ValueError: If task file is invalid
-        """
-        if not task_file.exists():
-            raise FileNotFoundError(f"Task file not found: {task_file}")
-
-        with open(task_file) as f:
-            task_data = yaml.safe_load(f)
-
-        try:
-            task = TaskDefinition(**task_data)
-            # Resolve relative template paths
-            task = cls._resolve_template_paths(task, task_file.parent)
-            return task
-        except Exception as e:
-            raise ValueError(f"Invalid task definition: {e}") from e
-
-    @classmethod
-    def _resolve_template_paths(cls, task: TaskDefinition, base_dir: Path) -> TaskDefinition:
-        """Resolve relative template paths to absolute paths.
-
-        Mutates TemplateDirSource.path in place for both new API (template_sources)
-        and legacy API (template_dir). Other source types don't need path resolution.
-
-        Args:
-            task: Task definition with possibly relative paths
-            base_dir: Directory containing the task YAML file
-
-        Returns:
-            Task with resolved absolute paths (modified in place)
-        """
-        sandbox_config = task.sandbox
-
-        # Handle new API: iterate template_sources and resolve TemplateDirSource paths
-        if sandbox_config.template_sources:
-            for source in sandbox_config.template_sources:
-                if isinstance(source, TemplateDirSource):
-                    template_path = Path(source.path)
-                    if not template_path.is_absolute():
-                        source.path = str((base_dir / template_path).resolve())
-                # Other source types (RepoSource, StarterFilesSource) don't need resolution
-
-        return task
-
     @classmethod
     async def run_batch(
         cls,
@@ -621,9 +384,8 @@ Please address these issues and continue working on the task."""
     ) -> RunSummary:
         """Run multiple tasks in batch with optional parallelism.
 
-        This method orchestrates the execution of multiple evaluation tasks,
-        managing concurrency, exception handling, and result aggregation.
-        Returns a complete RunSummary with all results and statistics.
+        Delegates to orchestration.batch.run_batch() for the actual implementation.
+        This method is kept as a class method for backward compatibility.
 
         Args:
             task_files: List of paths to task YAML files
@@ -648,198 +410,4 @@ Please address these issues and continue working on the task."""
             ... )
             >>> print(f"Success: {summary.tasks_succeeded}/{summary.tasks_run}")
         """
-        start_time = datetime.now()
-
-        # Load all tasks first (fail fast if any are invalid)
-        tasks: list[tuple[Path, TaskDefinition]] = []
-        for task_file in task_files:
-            task = cls.load_task(task_file)
-
-            # Apply CLI overrides
-            if config.max_iterations:
-                task.max_iterations = config.max_iterations
-
-            # Apply snapshot overrides
-            if config.snapshot_mode:
-                from .models import SnapshotConfig
-
-                # Parse mode string to enum
-                mode = SnapshotMode(config.snapshot_mode.lower())
-
-                # Create new snapshot config with overridden values
-                task.sandbox.snapshots = SnapshotConfig(
-                    mode=mode,
-                    checkpoint_frequency=config.snapshot_checkpoint_freq or task.sandbox.snapshots.checkpoint_frequency,
-                    ignore_patterns=task.sandbox.snapshots.ignore_patterns,  # Preserve task-specific patterns
-                )
-            elif config.snapshot_checkpoint_freq:
-                # If only checkpoint frequency is overridden, preserve mode
-                from .models import SnapshotConfig
-
-                task.sandbox.snapshots = SnapshotConfig(
-                    mode=task.sandbox.snapshots.mode,
-                    checkpoint_frequency=config.snapshot_checkpoint_freq,
-                    ignore_patterns=task.sandbox.snapshots.ignore_patterns,
-                )
-
-            tasks.append((task_file, task))
-
-        # Create semaphore for concurrency control
-        semaphore = asyncio.Semaphore(config.max_parallel)
-
-        # Create coroutines for all tasks
-        async def run_task_with_semaphore(task_file: Path, task: TaskDefinition) -> dict[str, Any]:
-            """Run single task with semaphore for concurrency control."""
-            async with semaphore:
-                return await cls._run_single_task_batch(
-                    task_file=task_file,
-                    task=task,
-                    run_dir=config.run_dir,
-                    preserve=config.preserve_sandbox,
-                )
-
-        coroutines = [run_task_with_semaphore(task_file, task) for task_file, task in tasks]
-
-        # Execute all tasks (with exception handling)
-        results: list[dict[str, Any] | BaseException] = await asyncio.gather(*coroutines, return_exceptions=True)
-
-        # Process results and handle exceptions
-        processed_results: list[dict[str, Any]] = []
-        for i, result in enumerate(results):
-            if isinstance(result, BaseException):
-                task_file = task_files[i]
-                error_result = cls._create_error_result(task_file, result)
-                processed_results.append(error_result)
-            else:
-                processed_results.append(result)
-
-        end_time = datetime.now()
-
-        # Generate and return summary (all-in-one)
-        return cls._generate_run_summary(config.run_dir, processed_results, start_time, end_time)
-
-    @classmethod
-    async def _run_single_task_batch(
-        cls,
-        task_file: Path,
-        task: TaskDefinition,
-        run_dir: Path,
-        preserve: bool,
-    ) -> dict[str, Any]:
-        """Run a single task as part of a batch (internal helper).
-
-        Args:
-            task_file: Path to task file (for logging/error reporting)
-            task: Loaded task definition
-            run_dir: Run-level directory
-            preserve: Whether to preserve sandbox
-
-        Returns:
-            Dictionary with {task_id, result, duration}
-        """
-        # Create per-task subdirectory
-        task_run_dir = run_dir / task.task_id
-        task_run_dir.mkdir(parents=True, exist_ok=True)
-
-        # Create orchestrator for single task
-        orchestrator = cls(
-            task=task,
-            run_dir=task_run_dir,
-            preserve_sandbox=preserve,
-            task_file=task_file,
-        )
-
-        # Run evaluation
-        result = await orchestrator.run()
-
-        return {
-            "task_id": task.task_id,
-            "result": result,
-            "duration": result.duration_seconds,
-        }
-
-    @classmethod
-    def _create_error_result(cls, task_file: Path, error: BaseException) -> dict[str, Any]:
-        """Create an error result for a failed task.
-
-        Args:
-            task_file: Path to task file that failed
-            error: Exception that was raised
-
-        Returns:
-            Dictionary with error result in same format as successful results
-        """
-        error_result = EvaluationResult(
-            task_id=task_file.stem,  # Use filename as fallback
-            task_description=f"Failed to load task from {task_file}",
-            agent_type=AgentKind.CLAUDE_CODE,
-            started_at=datetime.now(),
-            final_status="ERROR",
-            error_message=str(error),
-            iteration_count=0,
-            environment_info={},
-        )
-        return {
-            "task_id": error_result.task_id,
-            "result": error_result,
-            "duration": 0.0,
-        }
-
-    @classmethod
-    def _generate_run_summary(
-        cls,
-        run_dir: Path,
-        task_results: list[dict[str, Any]],
-        start_time: datetime,
-        end_time: datetime,
-    ) -> RunSummary:
-        """Generate run-level summary from batch results.
-
-        Args:
-            run_dir: Run directory path
-            task_results: List of task result dictionaries
-            start_time: Batch start time
-            end_time: Batch end time
-
-        Returns:
-            RunSummary with aggregated statistics
-        """
-        from .reports import ReportGenerator
-
-        statuses = [r["result"].final_status for r in task_results]
-
-        summary = RunSummary(
-            run_id=run_dir.name,
-            start_time=start_time,
-            end_time=end_time,
-            total_duration_seconds=(end_time - start_time).total_seconds(),
-            tasks_run=len(task_results),
-            tasks_succeeded=statuses.count("SUCCESS"),
-            tasks_failed=statuses.count("FAILURE"),
-            tasks_error=statuses.count("ERROR"),
-            task_results=[
-                {
-                    "task_id": r["task_id"],
-                    "status": r["result"].final_status,
-                    "weighted_score": r["result"].weighted_score,
-                    "duration": r["duration"],
-                }
-                for r in task_results
-            ],
-            framework_version=get_version_info().get("coder_eval", "unknown"),
-            environment_info=get_version_info(),
-        )
-
-        # Create run directory if it doesn't exist
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        # Save run-summary.json
-        summary_path = run_dir / "run-summary.json"
-        summary_path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
-
-        # Generate run-report.md with command statistics
-        report_md = ReportGenerator.generate_markdown(summary, run_dir=run_dir)
-        report_path = run_dir / "run-report.md"
-        report_path.write_text(report_md, encoding="utf-8")
-
-        return summary
+        return await run_batch_impl(task_files, config)

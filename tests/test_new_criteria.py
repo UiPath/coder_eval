@@ -2,7 +2,7 @@
 
 import re
 
-from coder_eval.evaluator import SuccessChecker
+from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.models import CodeLintsCriterion, FileMatchesRegexCriterion, SandboxConfig
 from coder_eval.sandbox import Sandbox
 

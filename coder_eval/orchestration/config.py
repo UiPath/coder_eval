@@ -1,0 +1,22 @@
+"""Configuration models for orchestration."""
+
+from pathlib import Path
+
+from pydantic import BaseModel, Field
+
+
+class BatchRunConfig(BaseModel):
+    """Configuration for batch task execution.
+
+    This configuration object encapsulates all parameters needed to run
+    multiple tasks in batch mode with optional parallelism.
+    """
+
+    run_dir: Path = Field(description="Directory for this batch run")
+    max_parallel: int = Field(default=1, ge=1, description="Max concurrent tasks")
+    preserve_sandbox: bool = Field(default=False, description="Preserve sandbox after execution")
+    max_iterations: int | None = Field(default=None, description="Override max iterations for all tasks")
+    snapshot_mode: str | None = Field(default=None, description="Override snapshot mode for all tasks")
+    snapshot_checkpoint_freq: int | None = Field(
+        default=None, description="Override checkpoint frequency for hybrid mode"
+    )

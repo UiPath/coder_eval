@@ -514,7 +514,7 @@ class TestMultiSourcePathResolution:
 
     def test_template_sources_path_resolution(self, tmp_path):
         """Test that TemplateDirSource paths are resolved."""
-        from coder_eval.orchestrator import Orchestrator
+        from coder_eval.orchestration.task_loader import resolve_template_paths
 
         # Create template directory structure
         tasks_dir = tmp_path / "tasks"
@@ -543,14 +543,14 @@ class TestMultiSourcePathResolution:
         )
 
         # Resolve paths relative to tasks_dir
-        resolved_task = Orchestrator._resolve_template_paths(task, tasks_dir)
+        resolved_task = resolve_template_paths(task, tasks_dir)
 
         # TemplateDirSource path should be resolved
         assert resolved_task.sandbox.template_sources[0].path == str((tasks_dir / "../templates/base").resolve())
 
     def test_mixed_relative_and_absolute_paths(self, tmp_path):
         """Test resolution with mix of relative and absolute paths."""
-        from coder_eval.orchestrator import Orchestrator
+        from coder_eval.orchestration.task_loader import resolve_template_paths
 
         tasks_dir = tmp_path / "tasks"
         tasks_dir.mkdir()
@@ -580,7 +580,7 @@ class TestMultiSourcePathResolution:
             success_criteria=[FileExistsCriterion(description="test", path="test.txt")],
         )
 
-        resolved_task = Orchestrator._resolve_template_paths(task, tasks_dir)
+        resolved_task = resolve_template_paths(task, tasks_dir)
 
         # First should be resolved, second unchanged
         assert resolved_task.sandbox.template_sources[0].path == str((tasks_dir / "../templates/base").resolve())
