@@ -726,6 +726,9 @@ class EvaluationResult(BaseModel):
 
     # Error information
     error_message: str | None = Field(default=None, description="Error message if evaluation failed")
+    error_details: dict[str, Any] | None = Field(
+        default=None, description="Detailed error context from error_handling module"
+    )
 
     # Environment information
     environment_info: dict[str, Any] = Field(

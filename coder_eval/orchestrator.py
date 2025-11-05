@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from .agent import Agent
 from .analysis import calculate_command_statistics
 from .config import settings
+from .error_handling import create_error_context, execute_with_retry
 from .evaluator import LLMReviewer, SuccessChecker
 from .models import (
     AgentKind,
@@ -141,10 +142,29 @@ class Orchestrator:
                 else:
                     self.result.final_status = "FAILURE"
 
+            except asyncio.CancelledError:
+                # Re-raise cancellation to allow proper task cancellation
+                raise
             except Exception as e:
                 # Handle catastrophic errors
                 self.result.final_status = "ERROR"
                 self.result.error_message = str(e)
+
+                # Determine which component failed (setup vs. iteration N)
+                if self.result.iteration_count == 0:
+                    failed_component = "orchestrator.setup"
+                else:
+                    failed_component = f"orchestrator.iteration_{self.result.iteration_count}"
+
+                # Capture detailed error context
+                self.result.error_details = create_error_context(
+                    error=e,
+                    task_id=self.task.task_id,
+                    attempt=max(self.result.iteration_count, 1),  # Actual iteration attempt (1-indexed)
+                    component=failed_component,
+                    agent_name=self.task.agent.type.value,
+                )
+
                 self.logger.error(f"Evaluation failed: {e}", exc_info=True)
 
             finally:
@@ -181,9 +201,18 @@ class Orchestrator:
         # Validate API keys
         settings.validate_api_keys(self.task.agent.type.value)
 
-        # Create sandbox
+        # Create sandbox with retry logic
         self.sandbox = Sandbox(self.task.sandbox, task_id=self.task.task_id)
-        sandbox_dir = await asyncio.to_thread(self.sandbox.setup)
+
+        async def _setup_sandbox():
+            assert self.sandbox is not None
+            return await asyncio.to_thread(self.sandbox.setup)
+
+        sandbox_dir = await execute_with_retry(
+            operation=_setup_sandbox,
+            operation_name="Sandbox setup",
+            context={"task_id": self.task.task_id, "component": "sandbox"},
+        )
 
         # Assert result is initialized (set in run())
         assert self.result is not None, "Result not initialized"
@@ -202,9 +231,18 @@ class Orchestrator:
         if self.task.llm_reviewer.enabled:
             self.llm_reviewer = LLMReviewer(self.task.llm_reviewer)
 
-        # Create and start agent
+        # Create and start agent with retry logic
         self.agent = await self._create_agent()
-        await self.agent.start(str(sandbox_dir))
+
+        async def _start_agent():
+            assert self.agent is not None
+            await self.agent.start(str(sandbox_dir))
+
+        await execute_with_retry(
+            operation=_start_agent,
+            operation_name="Agent start",
+            context={"task_id": self.task.task_id, "component": "agent", "agent_name": self.task.agent.type.value},
+        )
 
     async def _create_agent(self) -> Agent:
         """Create the appropriate agent based on task configuration.
@@ -243,9 +281,20 @@ class Orchestrator:
 
             self.logger.info(f"Starting iteration {iteration}/{self.task.max_iterations}")
 
-            # Communicate with agent
+            # Communicate with agent (with retry logic)
             self.logger.debug(f"Sending prompt: {current_prompt[:100]}...")
-            turn_record = await self.agent.communicate(current_prompt)
+
+            # Use lambda with default argument to safely bind loop variable
+            # (without `prompt=current_prompt`, closure would capture stale reference)
+            turn_record = await execute_with_retry(
+                operation=lambda prompt=current_prompt: self.agent.communicate(prompt),
+                operation_name=f"Agent communication (iteration {iteration})",
+                context={
+                    "task_id": self.task.task_id,
+                    "component": "agent",
+                    "agent_name": self.task.agent.type.value,
+                },
+            )
             self.result.turns.append(turn_record)
 
             self.logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
@@ -323,13 +372,26 @@ class Orchestrator:
         if self.llm_reviewer:
             self.logger.info("Requesting LLM review")
             reference_code = self._load_reference_code()
-            decision = await asyncio.to_thread(
-                self.llm_reviewer.review,
-                task_description=self.task.description,
-                agent_output=agent_output,
-                current_iteration=iteration,
-                max_iterations=self.task.max_iterations,
-                reference_solution=reference_code,
+
+            # Wrap LLM reviewer call with retry logic for network resilience
+            async def _review_operation():
+                assert self.llm_reviewer is not None
+                return await asyncio.to_thread(
+                    self.llm_reviewer.review,
+                    task_description=self.task.description,
+                    agent_output=agent_output,
+                    current_iteration=iteration,
+                    max_iterations=self.task.max_iterations,
+                    reference_solution=reference_code,
+                )
+
+            decision = await execute_with_retry(
+                operation=_review_operation,
+                operation_name="LLM reviewer",
+                context={
+                    "task_id": self.task.task_id,
+                    "component": "evaluator",
+                },
             )
 
             if decision:
@@ -427,6 +489,9 @@ Please address these issues and continue working on the task."""
                 f"Snapshot created: {manifest.file_count} files, {manifest.size_bytes / 1024:.1f} KB, mode={mode.value}"
             )
 
+        except asyncio.CancelledError:
+            # Re-raise to allow proper task cancellation
+            raise
         except Exception as e:
             # Log error but don't fail the evaluation
             self.logger.warning(f"Failed to create snapshot for iteration {iteration}: {e}")
@@ -447,11 +512,13 @@ Please address these issues and continue working on the task."""
                 if self.preserve_sandbox and self.result:
                     # Compute artifacts directory on-demand
                     artifacts_dir = self.run_dir / "artifacts"
-                    preserved_path = self.sandbox.preserve_to(artifacts_dir)
+                    # Use asyncio.to_thread to prevent blocking event loop
+                    preserved_path = await asyncio.to_thread(self.sandbox.preserve_to, artifacts_dir)
                     self.result.sandbox_path = str(preserved_path)
                     self.logger.info(f"Sandbox preserved to: {preserved_path}")
 
-                self.sandbox.cleanup(preserve=False)  # Already preserved above if needed
+                # Use asyncio.to_thread to prevent blocking event loop
+                await asyncio.to_thread(self.sandbox.cleanup, preserve=False)
             except Exception as e:
                 self.logger.warning(f"Failed to cleanup sandbox: {e}")
 

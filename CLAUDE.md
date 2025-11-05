@@ -530,6 +530,10 @@ reference:
 4. **Agent timeout errors** - Increase `timeout` in sandbox limits or task `max_iterations`
 
 ---
+## Final notes
+- When doing code review, reach out to gemini 2.5 pro, codex and anthropic/claude-sonnet-4.5 through Zen MCP server
+- When reaching consensus between model, reach out to gemini 2.5 pro, codex and anthropic/claude-sonnet-4.5 through Zen MCP server
+- Any temporary files should be created in `tmp/` folder, NOT `/tmp` folder
 
 ## Contact and Support
 

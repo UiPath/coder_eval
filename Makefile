@@ -37,4 +37,7 @@ clean:  ## Clean build artifacts and cache
 	rm -rf build/ dist/ *.egg-info .pytest_cache .ruff_cache .coverage coverage.xml htmlcov/ bandit-report.json coverage.xml
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
+run:	## Run coder-eval on all tasks with 4 parallel jobs
+	uv run coder-eval run tasks/*.yaml -j 4
+
 .DEFAULT_GOAL := help
