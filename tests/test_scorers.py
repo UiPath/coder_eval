@@ -8,7 +8,9 @@ Tests cover:
 
 import pytest
 
-from coder_eval.scorers import ComplexityScorer, QualityScorer, SimilarityScorer
+from coder_eval.scoring.complexity import ComplexityScorer
+from coder_eval.scoring.quality import QualityScorer
+from coder_eval.scoring.similarity import SimilarityScorer
 
 
 class TestSimilarityScorer:

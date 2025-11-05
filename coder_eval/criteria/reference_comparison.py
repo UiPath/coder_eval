@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING
 
 from coder_eval.criteria.base import BaseCriterion, register_criterion
 from coder_eval.models import CriterionResult, ReferenceComparisonCriterion
-from coder_eval.scorers import ComplexityScorer, SimilarityScorer
+from coder_eval.scoring.complexity import ComplexityScorer
+from coder_eval.scoring.similarity import SimilarityScorer
 
 
 if TYPE_CHECKING:

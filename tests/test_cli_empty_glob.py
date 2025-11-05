@@ -30,7 +30,7 @@ def test_cli_handles_empty_glob_results(tmp_path):
     # Simulate CLI call with glob pattern that matches nothing
     glob_pattern = tasks_dir / "*.yaml"
 
-    with patch("coder_eval.cli.console.print") as mock_print:
+    with patch("coder_eval.cli.console.console.print") as mock_print:
         with pytest.raises(typer.Exit) as exc_info:
             # Call the synchronous run function, which will try to process the glob
             # We need to use asyncio.run internally since the actual function is async
@@ -38,7 +38,7 @@ def test_cli_handles_empty_glob_results(tmp_path):
 
             # The run() function calls asyncio.run internally, but we need to
             # trigger the empty glob check. Let's call _run_all_tasks directly.
-            from coder_eval.cli import _run_all_tasks
+            from coder_eval.cli.run_command import _run_all_tasks
 
             asyncio.run(
                 _run_all_tasks(
@@ -73,11 +73,11 @@ def test_cli_handles_invalid_glob_pattern(tmp_path):
     # Try with pattern that won't match anything
     pattern = tasks_dir / "[invalid-brackets-*.yaml"
 
-    with patch("coder_eval.cli.console.print"):
+    with patch("coder_eval.cli.console.console.print"):
         with pytest.raises(typer.Exit) as exc_info:
             import asyncio
 
-            from coder_eval.cli import _run_all_tasks
+            from coder_eval.cli.run_command import _run_all_tasks
 
             asyncio.run(
                 _run_all_tasks(
@@ -121,7 +121,7 @@ success_criteria:
     # Test that explicit path is recognized (we'll mock the actual execution)
     import asyncio
 
-    from coder_eval.cli import _run_all_tasks
+    from coder_eval.cli.run_command import _run_all_tasks
 
     # Mock Orchestrator.run_batch to avoid actual execution
     with patch("coder_eval.orchestrator.Orchestrator.run_batch") as mock_run_batch:
@@ -139,7 +139,7 @@ success_criteria:
             framework_version="test",
         )
 
-        with patch("coder_eval.cli.console.print"), patch("coder_eval.logging_config.aggregate_task_logs"):
+        with patch("coder_eval.cli.console.console.print"), patch("coder_eval.logging_config.aggregate_task_logs"):
             # Should not raise error - file exists
             asyncio.run(
                 _run_all_tasks(
@@ -191,7 +191,7 @@ success_criteria:
 
     import asyncio
 
-    from coder_eval.cli import _run_all_tasks
+    from coder_eval.cli.run_command import _run_all_tasks
 
     with patch("coder_eval.orchestrator.Orchestrator.run_batch") as mock_run_batch:
         mock_run_batch.return_value = RunSummary(
@@ -207,7 +207,7 @@ success_criteria:
             framework_version="test",
         )
 
-        with patch("coder_eval.cli.console.print"), patch("coder_eval.logging_config.aggregate_task_logs"):
+        with patch("coder_eval.cli.console.console.print"), patch("coder_eval.logging_config.aggregate_task_logs"):
             asyncio.run(
                 _run_all_tasks(
                     task_files=[glob_pattern],

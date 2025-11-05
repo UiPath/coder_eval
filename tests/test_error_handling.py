@@ -8,14 +8,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from coder_eval.error_handling import (
-    ErrorCategory,
-    RetryConfig,
-    categorize_error,
-    create_error_context,
-    execute_with_retry,
-    truncate_log,
-)
+from coder_eval.errors.categories import RETRY_CONFIG, ErrorCategory, RetryConfig
+from coder_eval.errors.categorization import categorize_error
+from coder_eval.errors.executor import execute_with_retry
+from coder_eval.errors.retry import create_error_context, truncate_log
 
 
 class TestErrorCategory:
@@ -23,8 +19,6 @@ class TestErrorCategory:
 
     def test_retryable_categories_have_retry_config(self):
         """Retryable error categories must be in RETRY_CONFIG."""
-        from coder_eval.error_handling import RETRY_CONFIG
-
         # Retryable categories (those expected in RETRY_CONFIG)
         retryable = [
             ErrorCategory.AGENT_API_ERROR,
@@ -43,8 +37,6 @@ class TestErrorCategory:
 
     def test_retry_config_types(self):
         """Verify retry config has correct types and values."""
-        from coder_eval.error_handling import RETRY_CONFIG
-
         for _category, config in RETRY_CONFIG.items():
             assert isinstance(config, RetryConfig)
             assert config.max_retries >= 0
@@ -53,8 +45,6 @@ class TestErrorCategory:
 
     def test_retryable_categories(self):
         """Verify which categories are retryable."""
-        from coder_eval.error_handling import RETRY_CONFIG
-
         # All categories in RETRY_CONFIG should have max_retries > 0
         for category, config in RETRY_CONFIG.items():
             assert config.max_retries > 0, f"{category} in RETRY_CONFIG should be retryable"
@@ -73,8 +63,6 @@ class TestErrorCategory:
             ErrorCategory.DISK_FULL,  # Added valid non-retryable
             ErrorCategory.OUT_OF_MEMORY,  # Added valid non-retryable
         ]
-
-        from coder_eval.error_handling import RETRY_CONFIG
 
         for category in non_retryable:
             assert category not in RETRY_CONFIG, f"{category} should not be retryable (not in RETRY_CONFIG)"

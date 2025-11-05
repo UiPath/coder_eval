@@ -13,7 +13,8 @@ from pydantic import BaseModel, Field
 from .agent import Agent
 from .analysis import calculate_command_statistics
 from .config import settings
-from .error_handling import create_error_context, execute_with_retry
+from .errors.executor import execute_with_retry
+from .errors.retry import create_error_context
 from .evaluator import LLMReviewer, SuccessChecker
 from .models import (
     AgentKind,

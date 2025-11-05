@@ -9,13 +9,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from coder_eval.error_handling import (
-    ErrorCategory,
-    categorize_error,
-    execute_with_retry,
-    get_retry_delay,
-    should_retry,
-)
+from coder_eval.errors.categories import ErrorCategory
+from coder_eval.errors.categorization import categorize_error
+from coder_eval.errors.executor import execute_with_retry
+from coder_eval.errors.retry import get_retry_delay, should_retry
 
 
 @pytest.mark.asyncio
