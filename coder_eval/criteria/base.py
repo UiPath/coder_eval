@@ -5,7 +5,7 @@ import os
 import traceback
 from abc import ABC, abstractmethod
 from functools import wraps
-from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
+from typing import TYPE_CHECKING, ClassVar
 
 from coder_eval.models import BaseSuccessCriterion, CriterionResult
 
@@ -14,9 +14,6 @@ if TYPE_CHECKING:
     from coder_eval.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
-
-# TypeVar for generic checker type safety
-C = TypeVar("C", bound=BaseSuccessCriterion)
 
 
 def handle_criterion_errors(func):
@@ -59,7 +56,7 @@ def handle_criterion_errors(func):
     return wrapper
 
 
-class BaseCriterion(ABC, Generic[C]):
+class BaseCriterion[C: BaseSuccessCriterion](ABC):
     """Abstract base class for all criterion checkers.
 
     Each criterion checker must:
