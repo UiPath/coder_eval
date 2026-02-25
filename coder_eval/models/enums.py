@@ -1,9 +1,9 @@
 """Enumeration types for coder_eval."""
 
-from enum import Enum
+from enum import StrEnum
 
 
-class AgentKind(str, Enum):
+class AgentKind(StrEnum):
     """Supported agent types."""
 
     CLAUDE_CODE = "claude-code"
@@ -11,7 +11,7 @@ class AgentKind(str, Enum):
     UNKNOWN = "unknown"  # Used when agent type cannot be determined (e.g., task loading failure)
 
 
-class AgentState(str, Enum):
+class AgentState(StrEnum):
     """Possible states of the agent during execution."""
 
     WORKING = "working"
@@ -21,7 +21,7 @@ class AgentState(str, Enum):
     ERROR = "error"
 
 
-class SnapshotMode(str, Enum):
+class SnapshotMode(StrEnum):
     """Snapshot mode for iteration snapshots.
 
     Note: No separate 'enabled' flag needed - use DISABLED to disable snapshots.
