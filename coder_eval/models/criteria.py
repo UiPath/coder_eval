@@ -236,6 +236,33 @@ class ReferenceComparisonCriterion(BaseSuccessCriterion):
         return self
 
 
+class CommandExecutedCriterion(BaseSuccessCriterion):
+    """Check whether the agent executed specific commands/tools.
+
+    Inspects CommandTelemetry records from TurnRecord.commands to verify
+    that the agent used specific tools or commands during evaluation.
+
+    Pure data model - checking logic in CommandExecutedChecker._check_impl()
+
+    Example YAML:
+        success_criteria:
+          - type: "command_executed"
+            description: "Agent used curl to fetch weather"
+            tool_name: "Bash"
+            command_pattern: "curl.*wttr\\.in"
+            min_count: 1
+            require_success: true
+    """
+
+    type: Literal["command_executed"] = "command_executed"
+    tool_name: str | None = Field(default=None, description="Tool name filter (e.g., 'Bash'). None = any tool.")
+    command_pattern: str | None = Field(
+        default=None, description="Regex to match command parameters. None = any command."
+    )
+    min_count: int = Field(default=1, ge=1, description="Minimum matching commands required.")
+    require_success: bool = Field(default=False, description="If True, only count successful commands.")
+
+
 # Discriminated union of all success criteria
 SuccessCriterion = (
     FileExistsCriterion
@@ -247,4 +274,5 @@ SuccessCriterion = (
     | CodeLintsCriterion
     | PylintScoreCriterion
     | ReferenceComparisonCriterion
+    | CommandExecutedCriterion
 )

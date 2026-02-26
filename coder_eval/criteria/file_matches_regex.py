@@ -9,6 +9,7 @@ from coder_eval.models import CriterionResult, FileMatchesRegexCriterion
 
 
 if TYPE_CHECKING:
+    from coder_eval.models.results import TurnRecord
     from coder_eval.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ class FileMatchesRegexChecker(BaseCriterion[FileMatchesRegexCriterion]):
         criterion: FileMatchesRegexCriterion,
         sandbox: "Sandbox",
         reference_code: str | None = None,
+        turn_records: list["TurnRecord"] | None = None,
     ) -> CriterionResult:
         """Check if file content matches the regex pattern.
 

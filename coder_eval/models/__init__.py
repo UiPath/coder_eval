@@ -9,6 +9,7 @@ which submodule they're defined in.
 from coder_eval.models.criteria import (
     BaseSuccessCriterion,
     CodeLintsCriterion,
+    CommandExecutedCriterion,
     FileContainsCriterion,
     FileExistsCriterion,
     FileMatchesRegexCriterion,
@@ -86,6 +87,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "CodeLintsCriterion",
     "PylintScoreCriterion",
     "ReferenceComparisonCriterion",
+    "CommandExecutedCriterion",
     "SuccessCriterion",
     # Templates
     "BaseTemplateSource",

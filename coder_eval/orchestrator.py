@@ -318,7 +318,10 @@ class Orchestrator:
                 logger=self.logger,
             )
             criteria_results = await asyncio.to_thread(
-                self.success_checker.check_all, self.task.success_criteria, reference_code=reference_code
+                self.success_checker.check_all,
+                self.task.success_criteria,
+                reference_code=reference_code,
+                turn_records=self.result.turns,
             )
             self.result.success_criteria_results = criteria_results
 

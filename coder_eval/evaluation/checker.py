@@ -8,7 +8,7 @@ the criteria registry.
 import logging
 
 from ..criteria import BaseCriterion, CriterionRegistry, init_criteria
-from ..models import CriteriaResults, CriterionResult, SuccessCriteria, SuccessCriterion
+from ..models import CriteriaResults, CriterionResult, SuccessCriteria, SuccessCriterion, TurnRecords
 from ..sandbox import Sandbox
 
 
@@ -37,6 +37,8 @@ class SuccessChecker:
         # Cached reference code - automatically set by check()/check_all() when provided
         # Used by subsequent check() calls that don't explicitly pass reference_code
         self._reference_code: str | None = None
+        # Cached turn records - set by check()/check_all() when provided
+        self._turn_records: TurnRecords | None = None
 
         # V3: Lazy initialization - registry loaded here, not at import
         if init_registry:
@@ -46,12 +48,14 @@ class SuccessChecker:
         self,
         criterion: SuccessCriterion,
         reference_code: str | None = None,
+        turn_records: TurnRecords | None = None,
     ) -> CriterionResult:
         """Check a single criterion (backward compatibility wrapper).
 
         Args:
             criterion: Criterion definition
             reference_code: Optional reference code for comparison
+            turn_records: Optional turn records for command inspection
 
         Returns:
             CriterionResult with score
@@ -59,20 +63,25 @@ class SuccessChecker:
         # Persist reference_code for subsequent calls (backward compat)
         if reference_code is not None:
             self._reference_code = reference_code
+        if turn_records is not None:
+            self._turn_records = turn_records
         # Use instance variable if no reference_code provided
         ref_code = reference_code if reference_code is not None else self._reference_code
-        return self._check_single(criterion, ref_code)
+        records = turn_records if turn_records is not None else self._turn_records
+        return self._check_single(criterion, ref_code, records)
 
     def check_all(
         self,
         criteria: SuccessCriteria,
         reference_code: str | None = None,
+        turn_records: TurnRecords | None = None,
     ) -> CriteriaResults:
         """Check all success criteria.
 
         Args:
             criteria: List of criterion definitions
             reference_code: Optional reference code for comparison
+            turn_records: Optional turn records for command inspection
 
         Returns:
             List of criterion results with scores
@@ -80,9 +89,13 @@ class SuccessChecker:
         # Persist reference_code for subsequent check() calls
         if reference_code is not None:
             self._reference_code = reference_code
+        if turn_records is not None:
+            self._turn_records = turn_records
+        ref_code = reference_code if reference_code is not None else self._reference_code
+        records = turn_records if turn_records is not None else self._turn_records
         results = []
         for criterion in criteria:
-            result = self._check_single(criterion, reference_code)
+            result = self._check_single(criterion, ref_code, records)
             results.append(result)
         return results
 
@@ -104,12 +117,14 @@ class SuccessChecker:
         self,
         criterion: SuccessCriterion,
         reference_code: str | None,
+        turn_records: TurnRecords | None = None,
     ) -> CriterionResult:
         """Check a single criterion using registered checker.
 
         Args:
             criterion: Criterion definition (discriminated union)
             reference_code: Optional reference code
+            turn_records: Optional turn records for command inspection
 
         Returns:
             CriterionResult with score
@@ -120,7 +135,7 @@ class SuccessChecker:
         try:
             # Get cached instance
             checker = self._get_checker_instance(criterion_type)
-            result = checker.check(criterion, self.sandbox, reference_code)
+            result = checker.check(criterion, self.sandbox, reference_code, turn_records=turn_records)
 
             logger.info(f"Criterion '{criterion_type}' score: {result.score:.2f}")
             return result

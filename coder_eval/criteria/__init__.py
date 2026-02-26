@@ -137,6 +137,7 @@ def validate_registry() -> None:
             "code_lints",
             "pylint_score",
             "reference_comparison",
+            "command_executed",
         }
 
     registered_types = set(CriterionRegistry.list_types())
