@@ -7,8 +7,8 @@ from dotenv import dotenv_values, load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-# Load .env file without overriding (allows shell environment for API keys)
-load_dotenv(override=False)
+# Load .env file with override so .env values always win over shell environment
+load_dotenv(override=True)
 
 # For certain keys, we want .env values to take precedence over shell environment
 # because the shell may have outdated/different credentials
