@@ -196,6 +196,14 @@ def _create_error_result(task_file: Path, error: BaseException) -> dict[str, Any
     }
 
 
+def _extract_reference_similarity(result: EvaluationResult) -> float | None:
+    """Extract reference_comparison score from criteria results, if present."""
+    for cr in result.success_criteria_results:
+        if cr.criterion_type == "reference_comparison":
+            return cr.score
+    return None
+
+
 def _generate_run_summary(
     run_dir: Path,
     task_results: list[dict[str, Any]],
@@ -235,6 +243,16 @@ def _generate_run_summary(
                 "status": r["result"].final_status,
                 "weighted_score": r["result"].weighted_score,
                 "duration": r["duration"],
+                "iteration_count": r["result"].iteration_count,
+                "turns": [
+                    {
+                        "iteration": t.iteration,
+                        "duration_seconds": t.duration_seconds,
+                        "command_count": len(t.commands),
+                    }
+                    for t in r["result"].turns
+                ],
+                "reference_similarity": _extract_reference_similarity(r["result"]),
             }
             for r in task_results
         ],

@@ -549,6 +549,16 @@ reference:
 
 ---
 
+## Design Principles
+
+- **DRY (Don't Repeat Yourself)**: Field descriptions, validation rules, and documentation defined once in Pydantic models
+- **Single Source of Truth**: Schema models are the authoritative source for parameter definitions
+- **Type Safety**: Full type checking with Pydantic and Pyright
+- **YAGNI**: Don't add complexity until actually needed
+- **KISS**: Keep it simple, stupid!
+- **Clean Code**: No dead code, all imports used, all tests passing
+- **Greenfield project**: No worries about backward compatibility
+
 ## Troubleshooting
 
 **Common Issues**:

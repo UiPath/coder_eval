@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 
 if TYPE_CHECKING:
@@ -68,6 +68,41 @@ class ReportGenerator:
         return lines
 
     @staticmethod
+    def _generate_generation_metrics_section(task_results: list[dict[str, Any]]) -> list[str]:
+        """Generate Generation Metrics section showing per-task latency and iteration breakdown.
+
+        Args:
+            task_results: List of task result dictionaries from RunSummary
+
+        Returns:
+            List of markdown lines
+        """
+        lines = [
+            "## Generation Metrics",
+            "",
+            "| Task ID | Total Latency | Turns | Avg Turn Latency | Self-Corrections |",
+            "|---------|---------------|-------|------------------|------------------|",
+        ]
+
+        for task in task_results:
+            task_id = task["task_id"]
+            total_latency = f"{task['duration']:.1f}s"
+            turns = task.get("turns", [])
+            num_turns = len(turns)
+            iteration_count = task.get("iteration_count") or 0
+            self_corrections = max(0, iteration_count - 1)
+
+            if turns:
+                avg_turn = sum(t["duration_seconds"] for t in turns) / len(turns)
+                avg_turn_str = f"{avg_turn:.1f}s"
+            else:
+                avg_turn_str = "N/A"
+
+            lines.append(f"| {task_id} | {total_latency} | {num_turns} | {avg_turn_str} | {self_corrections} |")
+
+        return lines
+
+    @staticmethod
     def generate_markdown(summary: RunSummary, run_dir: Path | None = None) -> str:
         """Generate markdown report from run summary.
 
@@ -94,26 +129,59 @@ class ReportGenerator:
             f"- **Failed**: {summary.tasks_failed}",
             f"- **Errors**: {summary.tasks_error}",
             f"- **Success Rate**: {success_rate:.1f}%",
-            "",
-            "## Task Details",
-            "",
-            "| Task ID | Status | Weighted Score | Duration |",
-            "|---------|--------|----------------|----------|",
         ]
 
+        # Aggregate P0 metrics
+        scores = [t["weighted_score"] for t in summary.task_results if t.get("weighted_score") is not None]
+        durations = [t["duration"] for t in summary.task_results if t["duration"] > 0]
+        iterations = [t["iteration_count"] for t in summary.task_results if t.get("iteration_count") is not None]
+        similarities = [
+            t["reference_similarity"] for t in summary.task_results if t.get("reference_similarity") is not None
+        ]
+
+        if scores:
+            lines.append(f"- **Avg Reliability Score**: {sum(scores) / len(scores):.3f}")
+        if durations:
+            lines.append(f"- **Avg Generation Latency**: {sum(durations) / len(durations):.1f}s")
+        if iterations:
+            lines.append(f"- **Avg Self-Correction Iterations**: {sum(iterations) / len(iterations):.1f}")
+        if similarities:
+            lines.append(f"- **Avg Ground Truth Similarity**: {sum(similarities) / len(similarities):.3f}")
+
+        # Task Details table
+        has_similarity = any(t.get("reference_similarity") is not None for t in summary.task_results)
+
+        header = "| Task ID | Status | Reliability Score | Iterations | Latency |"
+        separator = "|---------|--------|-------------------|------------|---------|"
+        if has_similarity:
+            header += " Similarity |"
+            separator += "------------|"
+
+        lines.extend(["", "## Task Details", "", header, separator])
+
         for task_result in summary.task_results:
-            status_display = task_result["status"]
             weighted_score = task_result.get("weighted_score")
             score_str = f"{weighted_score:.3f}" if weighted_score is not None else "N/A"
-            lines.append(
-                f"| {task_result['task_id']} | {status_display} | {score_str} | {task_result['duration']:.2f}s |"
-            )
+            iters = task_result.get("iteration_count", "N/A")
+            duration = f"{task_result['duration']:.1f}s"
+
+            row = f"| {task_result['task_id']} | {task_result['status']} | {score_str} | {iters} | {duration} |"
+            if has_similarity:
+                sim = task_result.get("reference_similarity")
+                sim_str = f"{sim:.3f}" if sim is not None else "N/A"
+                row += f" {sim_str} |"
+            lines.append(row)
+
+        # Generation Metrics section
+        if any(t.get("turns") for t in summary.task_results):
+            lines.extend(["", ""])
+            lines.extend(ReportGenerator._generate_generation_metrics_section(summary.task_results))
 
         # Add aggregated command statistics if run_dir is provided
         if run_dir:
             aggregated_stats = ReportGenerator._aggregate_command_statistics(run_dir)
             if aggregated_stats and aggregated_stats.total_commands > 0:
-                lines.extend(["", ""])  # Spacing
+                lines.extend(["", ""])
                 lines.extend(ReportGenerator._generate_command_statistics_section(aggregated_stats))
 
         lines.extend(
