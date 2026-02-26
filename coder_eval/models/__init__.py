@@ -56,6 +56,7 @@ from coder_eval.models.telemetry import (
     CommandStatistics,
     CommandTelemetry,
     SlowestCommandInfo,
+    TokenUsage,
 )
 
 # Templates
@@ -102,6 +103,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "CommandTelemetry",
     "CommandStatistics",
     "SlowestCommandInfo",
+    "TokenUsage",
     # Results
     "CriterionResult",
     "LLMDecision",

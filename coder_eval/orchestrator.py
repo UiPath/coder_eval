@@ -165,6 +165,21 @@ class Orchestrator:
                     if self.result.turns:
                         self.result.command_stats = calculate_command_statistics(self.result.turns)
 
+                    # Aggregate token usage across all turns
+                    if self.result.turns:
+                        from .models.telemetry import TokenUsage
+
+                        usages = [t.token_usage for t in self.result.turns if t.token_usage is not None]
+                        if usages:
+                            costs = [u.total_cost_usd for u in usages if u.total_cost_usd is not None]
+                            self.result.total_token_usage = TokenUsage(
+                                input_tokens=sum(u.input_tokens for u in usages),
+                                output_tokens=sum(u.output_tokens for u in usages),
+                                cache_creation_input_tokens=sum(u.cache_creation_input_tokens for u in usages),
+                                cache_read_input_tokens=sum(u.cache_read_input_tokens for u in usages),
+                                total_cost_usd=sum(costs) if costs else None,
+                            )
+
                     # Save report to per-task directory
                     self.report_path.parent.mkdir(parents=True, exist_ok=True)
                     self.report_path.write_text(

@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind
-from coder_eval.models.telemetry import CommandStatistics, CommandTelemetry
+from coder_eval.models.telemetry import CommandStatistics, CommandTelemetry, TokenUsage
 
 
 class CriterionResult(BaseModel):
@@ -73,6 +73,9 @@ class TurnRecord(BaseModel):
         default=None, description="Path to snapshot for this iteration (if snapshots enabled)"
     )
     snapshot_size_bytes: int | None = Field(default=None, description="Size of snapshot in bytes (if created)")
+    token_usage: TokenUsage | None = Field(
+        default=None, description="Token usage for this turn (if available from agent SDK)"
+    )
 
 
 class EvaluationResult(BaseModel):
@@ -119,6 +122,9 @@ class EvaluationResult(BaseModel):
 
     # Command telemetry
     command_stats: CommandStatistics | None = Field(default=None, description="Aggregated command telemetry statistics")
+
+    # Token usage
+    total_token_usage: TokenUsage | None = Field(default=None, description="Aggregated token usage across all turns")
 
     def calculate_weighted_score(self, criteria: list[SuccessCriterion]) -> None:
         """Calculate weighted average score from criterion results.

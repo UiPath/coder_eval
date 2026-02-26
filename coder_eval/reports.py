@@ -177,6 +177,12 @@ class ReportGenerator:
             lines.extend(["", ""])
             lines.extend(ReportGenerator._generate_generation_metrics_section(summary.task_results))
 
+        # Token Usage section
+        token_lines = ReportGenerator._generate_token_usage_section(summary.task_results)
+        if token_lines:
+            lines.extend(["", ""])
+            lines.extend(token_lines)
+
         # Add aggregated command statistics if run_dir is provided
         if run_dir:
             aggregated_stats = ReportGenerator._aggregate_command_statistics(run_dir)
@@ -197,6 +203,47 @@ class ReportGenerator:
             lines.append(f"- **{key}**: {value}")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _generate_token_usage_section(task_results: list[dict[str, Any]]) -> list[str]:
+        """Generate Token Usage section for the report.
+
+        Args:
+            task_results: List of task result dictionaries from RunSummary
+
+        Returns:
+            List of markdown lines (empty if no token data available)
+        """
+        tasks_with_tokens = [t for t in task_results if t.get("total_tokens") is not None]
+        if not tasks_with_tokens:
+            return []
+
+        lines = ["## Token Usage", ""]
+
+        total_tokens = sum(t["total_tokens"] for t in tasks_with_tokens)
+        costs = [t["total_cost_usd"] for t in tasks_with_tokens if t.get("total_cost_usd") is not None]
+        total_cost = sum(costs) if costs else None
+
+        lines.append(f"**Total Tokens**: {total_tokens:,}")
+        if total_cost is not None:
+            lines.append(f"**Total Cost**: ${total_cost:.4f}")
+        lines.append(f"**Avg Tokens/Task**: {total_tokens // len(tasks_with_tokens):,}")
+        lines.append("")
+
+        lines.extend(
+            [
+                "| Task ID | Total Tokens | Cost |",
+                "|---------|-------------|------|",
+            ]
+        )
+
+        for t in tasks_with_tokens:
+            tokens = t.get("total_tokens", 0)
+            cost = t.get("total_cost_usd")
+            cost_str = f"${cost:.4f}" if cost is not None else "N/A"
+            lines.append(f"| {t['task_id']} | {tokens:,} | {cost_str} |")
+
+        return lines
 
     @staticmethod
     def _aggregate_command_statistics(run_dir: Path) -> CommandStatistics | None:

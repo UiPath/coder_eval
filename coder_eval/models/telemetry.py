@@ -8,6 +8,21 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+class TokenUsage(BaseModel):
+    """Token usage from a single agent turn or aggregated across turns."""
+
+    input_tokens: int = Field(default=0, description="Input prompt tokens")
+    output_tokens: int = Field(default=0, description="Output completion tokens")
+    cache_creation_input_tokens: int = Field(default=0, description="Tokens used to create prompt cache")
+    cache_read_input_tokens: int = Field(default=0, description="Tokens read from prompt cache")
+    total_cost_usd: float | None = Field(default=None, description="Total cost in USD (from SDK)")
+
+    @property
+    def total_tokens(self) -> int:
+        """Total tokens consumed (input + output)."""
+        return self.input_tokens + self.output_tokens
+
+
 class CommandTelemetry(BaseModel):
     """Telemetry for a single command execution.
 

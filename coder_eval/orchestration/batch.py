@@ -253,6 +253,10 @@ def _generate_run_summary(
                     for t in r["result"].turns
                 ],
                 "reference_similarity": _extract_reference_similarity(r["result"]),
+                "total_tokens": (r["result"].total_token_usage.total_tokens if r["result"].total_token_usage else None),
+                "total_cost_usd": (
+                    r["result"].total_token_usage.total_cost_usd if r["result"].total_token_usage else None
+                ),
             }
             for r in task_results
         ],

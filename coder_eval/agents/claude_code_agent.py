@@ -9,7 +9,7 @@ from typing import Any
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, Message, query
 
 from coder_eval.agent import Agent, AgentState
-from coder_eval.models import AgentConfig, CommandTelemetry, FileChange, FileChanges, FileTree, TurnRecord
+from coder_eval.models import AgentConfig, CommandTelemetry, FileChange, FileChanges, FileTree, TokenUsage, TurnRecord
 from coder_eval.resources import get_ignore_patterns, should_ignore_path
 
 
@@ -28,8 +28,16 @@ def _is_tool_use_block(block: Any) -> bool:
 
 
 def _is_result_message(message: Any) -> bool:
-    """Check if message is a ResultMessage using duck typing."""
+    """Check if message is a ToolResultBlock using duck typing."""
     return hasattr(message, "tool_use_id") and hasattr(message, "is_error")
+
+
+def _is_sdk_result_message(message: Any) -> bool:
+    """Check if message is the SDK's final ResultMessage (with usage/cost data).
+
+    Distinct from ToolResultBlock which has tool_use_id.
+    """
+    return hasattr(message, "session_id") and hasattr(message, "usage")
 
 
 class ClaudeCodeAgent(Agent):
@@ -88,6 +96,10 @@ class ClaudeCodeAgent(Agent):
         processed_results: set[str] = set()  # Track duplicate ResultMessages
         sequence_number = 0
 
+        # SDK ResultMessage token usage (captured from final message)
+        sdk_result_usage: dict[str, Any] | None = None
+        sdk_result_cost: float | None = None
+
         # Capture stderr for debugging
         stderr_lines = []
 
@@ -136,7 +148,13 @@ class ClaudeCodeAgent(Agent):
                                 }
                                 sequence_number += 1
 
-                # PHASE 2: Process ResultMessage and update command status/duration
+                # Capture SDK ResultMessage with token usage (check BEFORE tool results
+                # to avoid misclassification if SDK message also has tool_use_id/is_error)
+                elif _is_sdk_result_message(message):
+                    sdk_result_usage = getattr(message, "usage", None)
+                    sdk_result_cost = getattr(message, "total_cost_usd", None)
+
+                # PHASE 2: Process tool ResultMessage and update command status/duration
                 elif _is_result_message(message):
                     tool_use_id = getattr(message, "tool_use_id", None)
                     is_error = getattr(message, "is_error", False)
@@ -211,6 +229,17 @@ class ClaudeCodeAgent(Agent):
 
         # Commands are in sequence order as they were captured
 
+        # Build TokenUsage from SDK ResultMessage data
+        token_usage: TokenUsage | None = None
+        if sdk_result_usage:
+            token_usage = TokenUsage(
+                input_tokens=sdk_result_usage.get("input_tokens", 0),
+                output_tokens=sdk_result_usage.get("output_tokens", 0),
+                cache_creation_input_tokens=sdk_result_usage.get("cache_creation_input_tokens", 0) or 0,
+                cache_read_input_tokens=sdk_result_usage.get("cache_read_input_tokens", 0) or 0,
+                total_cost_usd=sdk_result_cost,
+            )
+
         # Capture file state after the turn
         files_after = self._capture_file_tree()
 
@@ -233,6 +262,7 @@ class ClaudeCodeAgent(Agent):
             files_changed=file_changes,
             timestamp=datetime.now(),
             duration_seconds=duration,
+            token_usage=token_usage,
         )
 
     async def stop(self) -> None:
