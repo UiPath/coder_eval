@@ -52,7 +52,7 @@ jobs:
 
       - name: Install project dependencies
         run: |
-          uv venv .venv
+          uv venv .venv --clear
           uv pip install --python .venv/bin/python -e ".[dev]"
 
       # PHASE 1: Fast checks (fail early)

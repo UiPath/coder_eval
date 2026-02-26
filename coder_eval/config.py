@@ -10,10 +10,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Load .env file without overriding (allows shell environment for API keys)
 load_dotenv(override=False)
 
-# For LLM Gateway specifically, we want .env values to take precedence over shell environment
-# because the shell may have outdated/different Gateway credentials
+# For certain keys, we want .env values to take precedence over shell environment
+# because the shell may have outdated/different credentials
 env_values = dotenv_values(".env")
 for key in [
+    "ANTHROPIC_API_KEY",
     "LLMGW_URL",
     "LLMGW_CLIENT_ID",
     "LLMGW_CLIENT_SECRET",

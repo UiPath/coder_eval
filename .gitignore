@@ -52,11 +52,10 @@ uipath.json
 # Project-specific
 .claude/settings.local.json
 .uipath/
+c/
 runs/
 reports/
 artifacts/
 .DS_Store
 tmp/
-docs/
 refs/
-
