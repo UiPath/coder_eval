@@ -25,8 +25,8 @@ def reviewer_config():
 def reviewer(reviewer_config):
     """Initialized LLM reviewer with mocked LLM Gateway client."""
     reviewer = LLMReviewer(reviewer_config)
-    # Mock the LLM client
-    reviewer.llm = MagicMock()
+    # Mock the LLM client (set private attr to bypass lazy property)
+    reviewer._llm = MagicMock()
     return reviewer
 
 
@@ -219,7 +219,7 @@ def test_evaluator_returns_none_when_disabled(reviewer_config):
     # Create reviewer with disabled config
     disabled_config = LLMReviewerConfig(enabled=False, model="test-model")
     reviewer = LLMReviewer(disabled_config)
-    reviewer.llm = MagicMock()
+    reviewer._llm = MagicMock()
 
     result = reviewer.review(
         task_description="Test task",

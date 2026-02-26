@@ -26,7 +26,11 @@ class LLMReviewer:
     """
 
     def __init__(self, config: LLMReviewerConfig):
-        """Initialize the LLM reviewer with Gateway client.
+        """Initialize the LLM reviewer configuration.
+
+        The LLM client is created lazily on first review() call to avoid
+        eager authentication during construction (which breaks unit tests
+        that only test parse/prompt methods).
 
         Args:
             config: LLM reviewer configuration
@@ -35,27 +39,32 @@ class LLMReviewer:
             RuntimeError: If uipath_llmgw_client package is not installed
         """
         self.config = config
+        self._llm = None
 
         if not config.enabled:
             return
 
+        # Verify import is available (fail fast if package missing)
         try:
-            from uipath_llmgw_client.llmgw_langchain_client import LLMGatewayNormalizedChatModel
+            from uipath_llmgw_client import get_langchain_chat_model  # noqa: F401
         except ImportError as e:
             raise RuntimeError(
-                "uipath_llmgw_client is required for LLM reviewer. Install with: pip install uipath_llmgw_client"
+                "uipath_llmgw_client is required for LLM reviewer. Install with: pip install uipath-llmgw-client"
             ) from e
 
-        from ..config import settings
+    @property
+    def llm(self):
+        """Lazy-initialize the LLM client on first access."""
+        if self._llm is None:
+            from uipath_llmgw_client import get_langchain_chat_model
 
-        # Initialize LangChain-based Gateway client for all models
-        self.llm = LLMGatewayNormalizedChatModel(
-            model=config.model,
-            temperature=config.temperature,
-            max_tokens=config.max_tokens,
-            requesting_product=settings.llmgw_requesting_product,
-            requesting_feature=settings.llmgw_requesting_feature,
-        )
+            self._llm = get_langchain_chat_model(
+                model=self.config.model,
+                llmgw_client_type="normalized",
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+            )
+        return self._llm
 
     def review(
         self,

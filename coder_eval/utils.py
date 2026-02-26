@@ -34,7 +34,7 @@ def get_version_info() -> dict[str, str]:
         version_info["anthropic"] = "Not Installed"
 
     try:
-        import openai
+        import openai  # pyright: ignore[reportMissingImports]
 
         version_info["openai"] = openai.__version__
     except (ImportError, AttributeError):

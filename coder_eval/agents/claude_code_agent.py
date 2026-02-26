@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, Message, query
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, Message, ProcessError, query
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.models import AgentConfig, CommandTelemetry, FileChange, FileChanges, FileTree, TokenUsage, TurnRecord
@@ -190,6 +190,10 @@ class ClaudeCodeAgent(Agent):
                             + "No matching ToolUseBlock found. This may indicate an SDK issue."
                         )
 
+        except ProcessError as e:
+            self._state = AgentState.ERROR
+            stderr = e.stderr or "\n".join(stderr_lines[-20:]) or "No stderr captured"
+            raise RuntimeError(f"CLI process failed (exit code {e.exit_code}): {stderr}") from e
         except Exception as e:
             self._state = AgentState.ERROR
             # Include stderr in error message for debugging

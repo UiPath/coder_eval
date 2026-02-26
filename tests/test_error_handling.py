@@ -129,6 +129,19 @@ class TestCategorizeError:
         result = categorize_error(error, {"component": "agent"})
         assert result == ErrorCategory.AGENT_CRASH
 
+    def test_categorize_agent_cli_process_failure(self):
+        """CLI process failure with exit code → AGENT_CRASH (not retryable)."""
+        error = RuntimeError("CLI process failed (exit code 1): some error output")
+        result = categorize_error(error, {"component": "agent"})
+        assert result == ErrorCategory.AGENT_CRASH
+
+    def test_categorize_agent_generic_exit_code_not_crash(self):
+        """Generic mention of 'exit code' should NOT match AGENT_CRASH."""
+        error = RuntimeError("Command returned exit code 1")
+        result = categorize_error(error, {"component": "agent"})
+        # Falls through to default AGENT_API_ERROR, not AGENT_CRASH
+        assert result == ErrorCategory.AGENT_API_ERROR
+
     def test_categorize_agent_invalid_output(self):
         """Invalid/malformed output → AGENT_INVALID_OUTPUT."""
         error = Exception("Malformed JSON response")

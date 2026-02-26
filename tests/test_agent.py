@@ -1,8 +1,10 @@
 """Tests for the agent implementations."""
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+from claude_agent_sdk import ProcessError
 
 from coder_eval.agent import AgentState
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
@@ -265,3 +267,56 @@ def test_claude_agent_message_formatting_edge_cases():
     assert "[ASSISTANT] First response" in formatted
     assert "[ASSISTANT] Second response" in formatted
     assert formatted.count("[ASSISTANT]") == 2
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_process_error_includes_stderr():
+    """Test that ProcessError is caught and its stderr is included in RuntimeError."""
+    config = AgentConfig(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+    )
+    agent = ClaudeCodeAgent(config)
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        # query() returns an async generator, so mock must be one too
+        async def mock_query(*args, **kwargs):
+            raise ProcessError("process failed", exit_code=1, stderr="Error: invalid config")
+            yield  # makes this an async generator
+
+        with (
+            patch("coder_eval.agents.claude_code_agent.query", mock_query),
+            pytest.raises(RuntimeError, match=r"CLI process failed \(exit code 1\): Error: invalid config"),
+        ):
+            await agent.communicate("do something")
+
+        assert agent.get_state() == AgentState.ERROR
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_process_error_no_stderr_at_all():
+    """Test that ProcessError with no stderr and no stderr_lines shows sentinel message."""
+    config = AgentConfig(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+    )
+    agent = ClaudeCodeAgent(config)
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        async def mock_query(*args, **kwargs):
+            raise ProcessError("process failed", exit_code=None, stderr=None)
+            yield  # makes this an async generator
+
+        with (
+            patch("coder_eval.agents.claude_code_agent.query", mock_query),
+            pytest.raises(RuntimeError, match=r"CLI process failed \(exit code None\): No stderr captured"),
+        ):
+            await agent.communicate("do something")

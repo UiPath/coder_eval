@@ -126,7 +126,7 @@ def categorize_error(
         return ErrorCategory.SANDBOX_SETUP_ERROR
 
     if component == "agent":
-        if "crash" in error_str or "killed" in error_str:
+        if "crash" in error_str or "killed" in error_str or "cli process failed (exit code" in error_str:
             return ErrorCategory.AGENT_CRASH
         if "invalid" in error_str or "malformed" in error_str:
             return ErrorCategory.AGENT_INVALID_OUTPUT

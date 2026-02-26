@@ -15,7 +15,7 @@ dependencies = [
     "claude-agent-sdk>=0.1.43",
     "anyio>=4.12.1",
     "uipath>=2.9.9",
-    "uipath-llmgw-client>=0.1.33",
+    "uipath-llmgw-client>=1.0.0",
     "pylint>=4.0.5",
     "radon>=6.0.1",
 ]
