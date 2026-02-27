@@ -1,5 +1,6 @@
 task_id: uipath-validation-agent
 description: "Create a data validation agent using pure Python with Pydantic"
+tags: [uipath-python, network]
 
 agent:
   type: claude-code

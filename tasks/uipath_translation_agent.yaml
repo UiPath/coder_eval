@@ -1,5 +1,6 @@
 task_id: uipath-translation-agent
 description: "Create a simple translation agent using UiPath LangChain"
+tags: [uipath-langchain, network]
 
 agent:
   type: claude-code

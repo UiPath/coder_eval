@@ -1,5 +1,6 @@
 task_id: "test_snapshot_example"
 description: "Example task demonstrating snapshot configuration"
+tags: [example, basic]
 
 agent:
   type: "claude-code"

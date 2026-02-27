@@ -20,3 +20,5 @@ class BatchRunConfig(BaseModel):
     snapshot_checkpoint_freq: int | None = Field(
         default=None, description="Override checkpoint frequency for hybrid mode"
     )
+    include_tags: set[str] | None = Field(default=None, description="Only run tasks matching any of these tags")
+    exclude_tags: set[str] | None = Field(default=None, description="Skip tasks matching any of these tags")

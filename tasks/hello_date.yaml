@@ -2,6 +2,7 @@ task_id: "hello_date_smoke_test"
 description: "Create a Python script that prints 'Hello, Claude!' then the current date."
 initial_prompt: "Create a Python file named app.py that prints 'Hello, Claude!' on one line, and today's date in YYYY-MM-DD format on the next line. Then, run the script using python."
 max_iterations: 2
+tags: [smoke, golden, basic, pure-python]
 
 agent:
   type: "claude-code"

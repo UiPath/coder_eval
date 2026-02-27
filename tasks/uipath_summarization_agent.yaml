@@ -1,5 +1,6 @@
 task_id: uipath-summarization-agent
 description: "Create a simple text summarization agent using UiPath LangChain"
+tags: [golden, uipath-langchain, network]
 
 agent:
   type: claude-code

@@ -2,6 +2,7 @@
 task_id: test_llmgw_fail
 name: Test LLM Gateway Integration with Failure
 description: Create a specific file to test LLM Gateway reviewer when criteria fail
+tags: [integration, llm-review, network]
 
 agent:
   type: claude-code

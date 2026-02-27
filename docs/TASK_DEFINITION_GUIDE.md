@@ -35,6 +35,7 @@ task_id: "my_task"                    # Unique identifier (required)
 description: "What this task tests"   # Human-readable description (required)
 initial_prompt: "Instructions..."     # Prompt sent to the agent (required)
 max_iterations: 3                     # Max agent iterations (required)
+tags: [smoke, golden, pure-python]    # Optional tags for filtering (kebab-case)
 
 agent: { ... }                        # Agent configuration (required)
 sandbox: { ... }                      # Sandbox configuration (required)
@@ -42,6 +43,38 @@ success_criteria: [ ... ]             # List of criteria (required, at least 1)
 
 llm_reviewer: { ... }                 # Optional LLM reviewer
 reference: { ... }                    # Optional reference solution
+```
+
+## Tags
+
+Tags categorize tasks for selective execution. Tags must be lowercase kebab-case strings.
+
+```yaml
+tags: [smoke, golden, uipath-python]
+```
+
+**Well-known tags:**
+
+| Tag | Purpose |
+|-----|---------|
+| `smoke` | Quick sanity check, should always pass |
+| `golden` | High-confidence reference tasks for framework validation |
+| `basic` | Simple tasks testing core functionality |
+| `integration` | Requires external services or network |
+| `example` | Demonstration/tutorial tasks, not for CI |
+| `uipath-python` | Uses UiPath Python SDK |
+| `uipath-langchain` | Uses UiPath + LangChain integration |
+| `pure-python` | No external SDK dependencies |
+| `llm-review` | Includes LLM reviewer step |
+| `template` | Uses template sources |
+| `network` | Requires network access |
+
+**CLI filtering:**
+
+```bash
+coder-eval run tasks/*.yaml --tags smoke          # Only run smoke tasks
+coder-eval run tasks/*.yaml --tags golden,basic   # Run golden OR basic tasks
+coder-eval run tasks/*.yaml --exclude-tags example # Skip example tasks
 ```
 
 ## Agent Configuration

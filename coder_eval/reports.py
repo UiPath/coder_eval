@@ -164,12 +164,16 @@ class ReportGenerator:
         # Task Details table
         has_similarity = any(t.get("reference_similarity") is not None for t in summary.task_results)
         has_model = any(t.get("model_used") for t in summary.task_results)
+        has_tags = any(t.get("tags") for t in summary.task_results)
 
         header = "| Task ID | Status | Reliability Score | Iterations | Latency |"
         separator = "|---------|--------|-------------------|------------|---------|"
         if has_model:
             header += " Model |"
             separator += "-------|"
+        if has_tags:
+            header += " Tags |"
+            separator += "------|"
         if has_similarity:
             header += " Similarity |"
             separator += "------------|"
@@ -186,6 +190,10 @@ class ReportGenerator:
             if has_model:
                 model = task_result.get("model_used") or "N/A"
                 row += f" {model} |"
+            if has_tags:
+                tags = task_result.get("tags", [])
+                tags_str = ", ".join(tags) if tags else ""
+                row += f" {tags_str} |"
             if has_similarity:
                 sim = task_result.get("reference_similarity")
                 sim_str = f"{sim:.3f}" if sim is not None else "N/A"

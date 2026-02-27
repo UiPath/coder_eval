@@ -1,5 +1,6 @@
 task_id: uipath-classification-agent
 description: "Create a text classification agent using UiPath LangChain"
+tags: [uipath-langchain, network]
 
 agent:
   type: claude-code

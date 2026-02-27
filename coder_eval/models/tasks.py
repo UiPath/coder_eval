@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -77,6 +78,7 @@ class TaskDefinition(BaseModel):
     description: str = Field(description="Human-readable description of what the task is testing")
     initial_prompt: str = Field(description="The initial prompt to send to the agent")
     max_iterations: int = Field(default=3, description="Maximum number of agent turns")
+    tags: list[str] = Field(default_factory=list, description="Tags for categorizing and filtering tasks (kebab-case)")
     agent: AgentConfig = Field(description="Agent configuration")
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
     success_criteria: list[SuccessCriterion] = Field(description="List of criteria that must all pass for task success")
@@ -89,6 +91,16 @@ class TaskDefinition(BaseModel):
             "Reference solution for LLM review and code comparison. HIDDEN from the agent - never included in prompts."
         ),
     )
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, v: list[str]) -> list[str]:
+        """Validate tags are non-empty lowercase kebab-case strings."""
+        tag_pattern = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+        for tag in v:
+            if not tag_pattern.match(tag):
+                raise ValueError(f"Tag '{tag}' must be lowercase kebab-case (e.g., 'smoke', 'uipath-python')")
+        return v
 
     @field_validator("success_criteria")
     @classmethod

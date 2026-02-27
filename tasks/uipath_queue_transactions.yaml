@@ -1,5 +1,6 @@
 task_id: uipath-queue-transactions
 description: "Create a script that processes queue transactions with proper completion handling"
+tags: [integration, uipath-python, network]
 
 agent:
   type: claude-code

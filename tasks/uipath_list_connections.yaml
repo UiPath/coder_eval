@@ -1,5 +1,6 @@
 task_id: uipath-list-connections
 description: "Create a minimal Python script that lists all UiPath connections"
+tags: [integration, uipath-python, network]
 
 agent:
   type: claude-code
@@ -23,7 +24,7 @@ initial_prompt: |
   - Load environment variables from .env file
   - Print the connections to stdout
 
-  Keep it as simple and minimal as possible. 
+  Keep it as simple and minimal as possible.
   The script should work assuming UIPATH_URL and UIPATH_ACCESS_TOKEN
   are already set in .env file.
 

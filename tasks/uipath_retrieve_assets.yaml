@@ -1,5 +1,6 @@
 task_id: uipath-retrieve-assets
 description: "Create a script that retrieves and displays UiPath assets"
+tags: [integration, uipath-python, network]
 
 agent:
   type: claude-code

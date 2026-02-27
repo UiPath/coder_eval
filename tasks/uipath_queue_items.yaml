@@ -1,5 +1,6 @@
 task_id: uipath-queue-items
 description: "Create a script that adds items to a UiPath queue and lists them"
+tags: [integration, uipath-python, network]
 
 agent:
   type: claude-code

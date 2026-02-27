@@ -70,6 +70,17 @@ def run_command(
         help="Checkpoint frequency for hybrid mode (default: 5)",
         min=1,
     ),
+    tags: str | None = typer.Option(
+        None,
+        "--tags",
+        "-t",
+        help="Only run tasks matching any of these tags (comma-separated, e.g., 'smoke,golden')",
+    ),
+    exclude_tags: str | None = typer.Option(
+        None,
+        "--exclude-tags",
+        help="Skip tasks matching any of these tags (comma-separated, e.g., 'example,integration')",
+    ),
 ) -> None:
     """Run evaluation tasks (optionally in parallel).
 
@@ -88,7 +99,15 @@ def run_command(
         coder-eval run tasks/*.yaml --max-parallel 3
 
         coder-eval run tasks/*.yaml --verbose --log-file debug.log
+
+        coder-eval run tasks/*.yaml --tags smoke
+
+        coder-eval run tasks/*.yaml --tags golden,basic --exclude-tags example
     """
+    # Parse tag filters
+    include_tags = {t.strip() for t in tags.split(",") if t.strip()} if tags else None
+    exclude_tags_set = {t.strip() for t in exclude_tags.split(",") if t.strip()} if exclude_tags else None
+
     # Setup logging before running tasks
     log_level = settings.log_level
     setup_logging(level=log_level, log_file=log_file, verbose=verbose)
@@ -96,7 +115,15 @@ def run_command(
     # Run the async entry point
     asyncio.run(
         _run_all_tasks(
-            task_files, max_iterations, preserve, run_dir, max_parallel, snapshot_mode, snapshot_checkpoint_freq
+            task_files,
+            max_iterations,
+            preserve,
+            run_dir,
+            max_parallel,
+            snapshot_mode,
+            snapshot_checkpoint_freq,
+            include_tags,
+            exclude_tags_set,
         )
     )
 
@@ -109,6 +136,8 @@ async def _run_all_tasks(
     max_parallel: int,
     snapshot_mode: str | None,
     snapshot_checkpoint_freq: int | None,
+    include_tags: set[str] | None = None,
+    exclude_tags: set[str] | None = None,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -124,6 +153,8 @@ async def _run_all_tasks(
         max_parallel: Maximum number of concurrent tasks
         snapshot_mode: Optional override for snapshot mode
         snapshot_checkpoint_freq: Optional override for checkpoint frequency
+        include_tags: Only run tasks matching any of these tags
+        exclude_tags: Skip tasks matching any of these tags
     """
     # Prepare run directory
     run_dir = prepare_run_directory(run_dir)
@@ -142,6 +173,8 @@ async def _run_all_tasks(
         max_iterations=max_iterations,
         snapshot_mode=snapshot_mode,
         snapshot_checkpoint_freq=snapshot_checkpoint_freq,
+        include_tags=include_tags,
+        exclude_tags=exclude_tags,
     )
 
     # Run batch (business logic delegated to orchestrator)

@@ -1,5 +1,6 @@
 task_id: uipath-process-invocation
 description: "Create a script that starts a UiPath process and monitors its execution"
+tags: [integration, uipath-python, network]
 
 agent:
   type: claude-code

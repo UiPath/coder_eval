@@ -10,6 +10,7 @@ the batch execution flow logic.
 # pyright: reportImportCycles=false
 
 import asyncio
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,9 @@ from ..models import AgentKind, EvaluationResult, RunSummary, SnapshotMode, Task
 from ..utils import get_version_info
 from .config import BatchRunConfig
 from .task_loader import load_task
+
+
+logger = logging.getLogger(__name__)
 
 
 async def run_batch(
@@ -90,8 +94,14 @@ async def run_batch(
 
         tasks.append((task_file, task))
 
+    # Filter tasks by tags
+    tasks = filter_tasks_by_tags(tasks, include_tags=config.include_tags, exclude_tags=config.exclude_tags)
+
     # Create semaphore for concurrency control
     semaphore = asyncio.Semaphore(config.max_parallel)
+
+    # Build a mapping of task_id -> tags for the summary
+    task_tags: dict[str, list[str]] = {task.task_id: task.tags for _, task in tasks}
 
     # Create coroutines for all tasks
     async def run_task_with_semaphore(task_file: Path, task: TaskDefinition) -> dict[str, Any]:
@@ -123,7 +133,7 @@ async def run_batch(
     end_time = datetime.now()
 
     # Generate and return summary (all-in-one)
-    return _generate_run_summary(config.run_dir, processed_results, start_time, end_time)
+    return _generate_run_summary(config.run_dir, processed_results, start_time, end_time, task_tags)
 
 
 async def _run_single_task(
@@ -209,6 +219,7 @@ def _generate_run_summary(
     task_results: list[dict[str, Any]],
     start_time: datetime,
     end_time: datetime,
+    task_tags: dict[str, list[str]] | None = None,
 ) -> RunSummary:
     """Generate run-level summary from batch results.
 
@@ -217,6 +228,7 @@ def _generate_run_summary(
         task_results: List of task result dictionaries
         start_time: Batch start time
         end_time: Batch end time
+        task_tags: Optional mapping of task_id -> tags
 
     Returns:
         RunSummary with aggregated statistics
@@ -244,6 +256,7 @@ def _generate_run_summary(
                 "weighted_score": r["result"].weighted_score,
                 "duration": r["duration"],
                 "iteration_count": r["result"].iteration_count,
+                "tags": (task_tags or {}).get(r["task_id"], []),
                 "turns": [
                     {
                         "iteration": t.iteration,
@@ -275,3 +288,33 @@ def _generate_run_summary(
     report_path.write_text(report_md, encoding="utf-8")
 
     return summary
+
+
+def filter_tasks_by_tags(
+    tasks: list[tuple[Path, TaskDefinition]],
+    include_tags: set[str] | None = None,
+    exclude_tags: set[str] | None = None,
+) -> list[tuple[Path, TaskDefinition]]:
+    """Filter tasks by tag inclusion/exclusion (OR logic).
+
+    Args:
+        tasks: List of (task_file, task_definition) tuples
+        include_tags: If set, only keep tasks matching ANY of these tags
+        exclude_tags: If set, remove tasks matching ANY of these tags
+
+    Returns:
+        Filtered list of (task_file, task_definition) tuples
+    """
+    result = tasks
+    if include_tags:
+        result = [(p, t) for p, t in result if include_tags & set(t.tags)]
+        skipped = len(tasks) - len(result)
+        if skipped:
+            logger.info("Tag filter: included %d/%d tasks (tags: %s)", len(result), len(tasks), ", ".join(include_tags))
+    if exclude_tags:
+        before = len(result)
+        result = [(p, t) for p, t in result if not (exclude_tags & set(t.tags))]
+        skipped = before - len(result)
+        if skipped:
+            logger.info("Tag filter: excluded %d tasks (tags: %s)", skipped, ", ".join(exclude_tags))
+    return result

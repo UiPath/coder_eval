@@ -1,5 +1,6 @@
 task_id: date-formatter-inline
 description: "Create a date formatter script with inline starter files"
+tags: [basic, pure-python, template]
 
 agent:
   type: claude-code

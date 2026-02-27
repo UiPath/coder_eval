@@ -1,5 +1,6 @@
 task_id: uipath-calculator-agent
 description: "Create a calculator agent using UiPath LangGraph StateGraph"
+tags: [golden, uipath-langchain, network]
 
 agent:
   type: claude-code

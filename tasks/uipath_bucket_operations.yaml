@@ -1,5 +1,6 @@
 task_id: uipath-bucket-operations
 description: "Create a script that uploads and downloads files from UiPath buckets"
+tags: [integration, uipath-python, network]
 
 agent:
   type: claude-code

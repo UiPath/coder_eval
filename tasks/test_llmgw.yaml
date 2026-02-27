@@ -2,6 +2,7 @@
 task_id: test_llmgw
 name: Test LLM Gateway Integration
 description: Create a simple hello world file to test LLM Gateway reviewer
+tags: [integration, llm-review, network]
 
 agent:
   type: claude-code
