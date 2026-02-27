@@ -204,11 +204,12 @@ async def test_snapshot_while_files_being_modified(tmp_path):
     assert snapshot_dir.exists()
 
     # Files in snapshot may have original or modified content (timing-dependent)
-    # Just verify no corruption (files exist and contain valid text)
+    # An empty string is also valid: write_text() truncates before writing,
+    # so the snapshot may capture the file between truncation and write.
     for i in range(20):
         assert (snapshot_dir / f"file{i}.txt").exists()
         content = (snapshot_dir / f"file{i}.txt").read_text()
-        assert content in [f"original{i}", f"modified{i}"]
+        assert content in [f"original{i}", f"modified{i}", ""]
 
 
 @pytest.mark.asyncio

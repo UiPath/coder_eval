@@ -187,8 +187,7 @@ Tasks are YAML files. See [docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_G
 
 ## Notes for AI Assistants
 
-- When doing code review, reach out to gemini 2.5 pro, codex and anthropic/claude-sonnet-4.5 through Zen MCP server
-- When reaching consensus between models, reach out to gemini 2.5 pro, codex and anthropic/claude-sonnet-4.5 through Zen MCP server
+- When doing code review, reach out to gemini-3 and codex through multi mcp server
 - Any temporary files should be created in `tmp/` folder, NOT `/tmp` folder
 - All models are importable from `coder_eval.models` — don't import from submodules directly
 - The `criteria/` package uses auto-discovery; new checkers just need the `@register_criterion` decorator
