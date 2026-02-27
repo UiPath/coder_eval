@@ -9,12 +9,13 @@ from coder_eval.models import AgentConfig
 
 
 def create_mock_sdk_messages():
-    """Create mock SDK message classes with correct names for agent processing.
+    """Create mock SDK message classes matching real SDK structure.
 
-    IMPORTANT: Class names must exactly match what ClaudeCodeAgent expects:
-    - ToolUseBlock (checked via type(block).__name__)
-    - AssistantMessage (checked via type(message).__name__)
-    - ResultMessage (checked via type(message).__name__)
+    The SDK delivers tool results inside UserMessage.content as ToolResultBlock objects.
+    - AssistantMessage: contains ToolUseBlock in content (duck-typed via 'content' + 'model')
+    - UserMessage: contains ToolResultBlock in content (duck-typed via 'content' + 'tool_use_result')
+    - ToolUseBlock: has 'id', 'name', 'input'
+    - ToolResultBlock: has 'tool_use_id', 'is_error', 'content'
     """
 
     class ToolUseBlock:
@@ -23,18 +24,26 @@ def create_mock_sdk_messages():
             self.name = name
             self.input = input_params
 
-    class AssistantMessage:
-        def __init__(self, content):
-            self.content = content
-            self.model = "mock-model"  # Required for duck-type guard
-
-    class ResultMessage:
+    class ToolResultBlock:
         def __init__(self, tool_use_id, is_error, content):
             self.tool_use_id = tool_use_id
             self.is_error = is_error
             self.content = content
 
-    return ToolUseBlock, AssistantMessage, ResultMessage
+    class AssistantMessage:
+        def __init__(self, content):
+            self.content = content
+            self.model = "mock-model"
+
+    class UserMessage:
+        """Wraps ToolResultBlock(s) as the SDK does."""
+
+        def __init__(self, tool_use_id, is_error, content):
+            block = ToolResultBlock(tool_use_id, is_error, content)
+            self.content = [block]
+            self.tool_use_result = {"tool_use_id": tool_use_id, "is_error": is_error, "content": content}
+
+    return ToolUseBlock, AssistantMessage, UserMessage
 
 
 class TestCommandTelemetryStatus:
@@ -273,7 +282,9 @@ class TestCommandTelemetryStatus:
                 turn = await agent.communicate("Orphaned result")
 
                 assert len(turn.commands) == 0
-                assert any("unknown tool_use_id" in record.message for record in caplog.records)
+                assert any("unknown tool_use_id" in record.message for record in caplog.records), (
+                    f"Expected 'unknown tool_use_id' warning. Records: {[r.message for r in caplog.records]}"
+                )
 
         finally:
             agent_module.query = original_query
@@ -317,7 +328,7 @@ class TestCommandTelemetryStatus:
                 assert cmd.error_message == "second result (error)"
 
                 # Should log debug message
-                assert any("Multiple ResultMessages" in record.message for record in caplog.records)
+                assert any("Multiple results" in record.message for record in caplog.records)
 
         finally:
             agent_module.query = original_query
@@ -357,11 +368,10 @@ class TestCommandTelemetryStatus:
 
                 # Should have warning about missing result
                 warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-                assert any("completed without ResultMessage" in r.message for r in warnings)
+                assert any("completed without tool result" in r.message for r in warnings)
 
-                # Should have info summary about unknown statuses
-                infos = [r for r in caplog.records if r.levelname == "INFO"]
-                assert any("'unknown' status" in r.message for r in infos)
+                # Should have warning summary about unknown statuses with message types
+                assert any("'unknown' status" in r.message for r in warnings)
 
         finally:
             agent_module.query = original_query

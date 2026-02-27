@@ -12,7 +12,10 @@ from coder_eval.models import AgentConfig
 
 
 def create_mock_sdk_messages():
-    """Create mock SDK message classes for agent processing."""
+    """Create mock SDK message classes matching real SDK structure.
+
+    The SDK delivers tool results inside UserMessage.content as ToolResultBlock objects.
+    """
 
     class ToolUseBlock:
         def __init__(self, tool_id, name, input_params):
@@ -20,18 +23,26 @@ def create_mock_sdk_messages():
             self.name = name
             self.input = input_params
 
-    class AssistantMessage:
-        def __init__(self, content):
-            self.content = content
-            self.model = "mock-model"
-
-    class ResultMessage:
+    class ToolResultBlock:
         def __init__(self, tool_use_id, is_error, content):
             self.tool_use_id = tool_use_id
             self.is_error = is_error
             self.content = content
 
-    return ToolUseBlock, AssistantMessage, ResultMessage
+    class AssistantMessage:
+        def __init__(self, content):
+            self.content = content
+            self.model = "mock-model"
+
+    class UserMessage:
+        """Wraps ToolResultBlock(s) as the SDK does."""
+
+        def __init__(self, tool_use_id, is_error, content):
+            block = ToolResultBlock(tool_use_id, is_error, content)
+            self.content = [block]
+            self.tool_use_result = {"tool_use_id": tool_use_id, "is_error": is_error, "content": content}
+
+    return ToolUseBlock, AssistantMessage, UserMessage
 
 
 @pytest.mark.asyncio
@@ -121,7 +132,7 @@ async def test_duplicate_result_message_last_wins(tmp_path, caplog):
         assert cmd.error_message == "File not found"
 
         # Verify debug log for duplicate
-        assert any("Multiple ResultMessages" in record.message for record in caplog.records)
+        assert any("Multiple results" in record.message for record in caplog.records)
 
     finally:
         agent_module.query = original_query
@@ -182,7 +193,7 @@ async def test_pending_command_without_result_finalizes_unknown(tmp_path, caplog
 
         # Verify warning logged for unknown status
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-        assert any("completed without ResultMessage" in r.message for r in warnings)
+        assert any("completed without tool result" in r.message for r in warnings)
         assert any("Status set to 'unknown'" in r.message for r in warnings)
 
     finally:
@@ -225,7 +236,7 @@ async def test_orphaned_result_without_tool_use_logs_warning(tmp_path, caplog):
 
         # Verify warning logged
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-        assert any("ResultMessage received for unknown tool_use_id" in r.message for r in warnings)
+        assert any("unknown tool_use_id" in r.message for r in warnings)
         assert any("No matching ToolUseBlock found" in r.message for r in warnings)
 
     finally:

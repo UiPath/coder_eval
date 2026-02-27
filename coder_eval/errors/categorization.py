@@ -85,6 +85,13 @@ def categorize_error(
     if any(pat in error_str for pat in ["authentication", "unauthorized", "invalid api key", "401"]):
         return ErrorCategory.AGENT_AUTH_ERROR
 
+    # Billing/credit errors (NOT retryable - retrying wastes time)
+    if any(
+        pat in error_str
+        for pat in ["credit", "billing", "payment", "insufficient", "402", "quota exceeded", "spending limit"]
+    ):
+        return ErrorCategory.AGENT_BILLING_ERROR
+
     # Rate limiting
     if any(pat in error_str for pat in ["rate limit", "429", "ratelimit", "too many requests"]):
         return ErrorCategory.AGENT_RATE_LIMIT
@@ -126,7 +133,12 @@ def categorize_error(
         return ErrorCategory.SANDBOX_SETUP_ERROR
 
     if component == "agent":
-        if "crash" in error_str or "killed" in error_str or "cli process failed (exit code" in error_str:
+        if (
+            "crash" in error_str
+            or "killed" in error_str
+            or "cli process failed (exit code" in error_str
+            or "command failed with exit code" in error_str
+        ):
             return ErrorCategory.AGENT_CRASH
         if "invalid" in error_str or "malformed" in error_str:
             return ErrorCategory.AGENT_INVALID_OUTPUT

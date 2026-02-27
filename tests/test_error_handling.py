@@ -56,6 +56,7 @@ class TestErrorCategory:
             ErrorCategory.AGENT_CRASH,
             ErrorCategory.AGENT_INVALID_OUTPUT,
             ErrorCategory.AGENT_AUTH_ERROR,
+            ErrorCategory.AGENT_BILLING_ERROR,
             ErrorCategory.TASK_NOT_FOUND,
             ErrorCategory.TASK_INVALID,
             ErrorCategory.UNKNOWN,

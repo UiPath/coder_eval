@@ -27,6 +27,7 @@ class ErrorCategory(Enum):
     AGENT_API_ERROR = "agent_api_error"  # API connection/network error (retryable)
     AGENT_RATE_LIMIT = "agent_rate_limit"  # API rate limit (retryable with long delay)
     AGENT_AUTH_ERROR = "agent_auth_error"  # Invalid API key (NOT retryable)
+    AGENT_BILLING_ERROR = "agent_billing_error"  # Insufficient credits/billing issue (NOT retryable)
     AGENT_CRASH = "agent_crash"  # Agent process crashed (NOT retryable)
     AGENT_INVALID_OUTPUT = "agent_invalid_output"  # Malformed response (NOT retryable)
 
@@ -168,5 +169,14 @@ ERROR_TIPS = {
     ),
     ErrorCategory.AGENT_API_ERROR: (
         "API connection error. Check your network connection and verify the API endpoint is accessible."
+    ),
+    ErrorCategory.AGENT_BILLING_ERROR: (
+        "Insufficient API credits or billing issue. Check your account balance and billing settings "
+        "at your provider's dashboard."
+    ),
+    ErrorCategory.AGENT_CRASH: (
+        "Claude CLI process exited unexpectedly. Common causes: insufficient API credits, "
+        "invalid API key, or network issues. Run 'claude --version' to verify the CLI works, "
+        "then try running your prompt directly with 'claude' to see the actual error."
     ),
 }

@@ -27,9 +27,14 @@ def _is_tool_use_block(block: Any) -> bool:
     return hasattr(block, "name") and hasattr(block, "id") and hasattr(block, "input")
 
 
-def _is_result_message(message: Any) -> bool:
-    """Check if message is a ToolResultBlock using duck typing."""
-    return hasattr(message, "tool_use_id") and hasattr(message, "is_error")
+def _is_user_message(message: Any) -> bool:
+    """Check if message is a UserMessage (which may contain tool results) using duck typing."""
+    return hasattr(message, "content") and hasattr(message, "tool_use_result")
+
+
+def _is_tool_result_block(block: Any) -> bool:
+    """Check if block is a ToolResultBlock using duck typing."""
+    return hasattr(block, "tool_use_id") and hasattr(block, "is_error")
 
 
 def _is_sdk_result_message(message: Any) -> bool:
@@ -160,52 +165,40 @@ class ClaudeCodeAgent(Agent):
                     sdk_result_usage = getattr(message, "usage", None)
                     sdk_result_cost = getattr(message, "total_cost_usd", None)
 
-                # PHASE 2: Process tool ResultMessage and update command status/duration
-                elif _is_result_message(message):
-                    tool_use_id = getattr(message, "tool_use_id", None)
-                    is_error = getattr(message, "is_error", False)
-                    content = getattr(message, "content", "")
-
-                    if tool_use_id and tool_use_id in pending_commands:
-                        cmd_data = pending_commands[tool_use_id]
-                        cmd = cmd_data["telemetry"]
-                        command_start_time = cmd_data["command_start_time"]
-
-                        # Calculate precise duration
-                        command_end_time = time.monotonic()
-                        duration_ms = (command_end_time - command_start_time) * 1000
-
-                        # Update command with actual results
-                        cmd.result_status = "error" if is_error else "success"
-                        cmd.duration_ms = duration_ms
-                        cmd.result_summary = content[:200] if content else None  # Truncate long results
-
-                        if is_error:
-                            cmd.error_message = content
-
-                        # Log duplicate results for debugging
-                        if tool_use_id in processed_results:
-                            logger.debug(
-                                f"Multiple ResultMessages for tool_id={tool_use_id}. Last result wins strategy applied."
-                            )
-                        processed_results.add(tool_use_id)
-                    else:
-                        # Orphaned result - log warning
-                        logger.warning(
-                            f"ResultMessage received for unknown tool_use_id={tool_use_id}. "
-                            + "No matching ToolUseBlock found. This may indicate an SDK issue."
-                        )
+                # PHASE 2: Process tool results from UserMessage content blocks.
+                # The SDK delivers tool results as UserMessage objects containing
+                # ToolResultBlock in their content list (not as standalone messages).
+                elif _is_user_message(message):
+                    content = getattr(message, "content", None)
+                    if content and isinstance(content, list):
+                        for block in content:
+                            if _is_tool_result_block(block):
+                                self._resolve_pending_command(
+                                    block.tool_use_id,
+                                    getattr(block, "is_error", False) or False,
+                                    block.content,
+                                    pending_commands,
+                                    processed_results,
+                                )
 
         except ProcessError as e:
             self._state = AgentState.ERROR
-            stderr = e.stderr or "\n".join(stderr_lines[-20:]) or "No stderr captured"
-            raise RuntimeError(f"CLI process failed (exit code {e.exit_code}): {stderr}") from e
+            stderr = self._build_stderr_message(e.stderr, stderr_lines)
+            error_info = self._extract_error_from_messages(messages)
+            detail = error_info or stderr
+            raise RuntimeError(f"CLI process failed (exit code {e.exit_code}): {detail}") from e
         except Exception as e:
             self._state = AgentState.ERROR
-            # Include stderr in error message for debugging
-            error_details = str(e)
-            if stderr_lines:
-                error_details += "\nStderr output:\n" + "\n".join(stderr_lines[-20:])  # Last 20 lines
+            # The SDK wraps ProcessError as a generic Exception via the message stream.
+            # Extract useful info from collected messages and stderr.
+            error_info = self._extract_error_from_messages(messages)
+            cause_stderr = self._extract_cause_stderr(e)
+            stderr = self._build_stderr_message(cause_stderr, stderr_lines)
+            error_details = self._clean_error_message(str(e))
+            if error_info:
+                error_details += f"\nDetails: {error_info}"
+            elif stderr:
+                error_details += f"\nStderr output:\n{stderr}"
             raise RuntimeError(f"Communication with agent failed: {error_details}") from e
 
         # PHASE 3: Finalize commands - convert pending to list and handle missing results
@@ -220,7 +213,7 @@ class ClaudeCodeAgent(Agent):
                 cmd.result_status = "unknown"
                 unknown_status_count += 1
                 logger.warning(
-                    f"Command {cmd.tool_name}:{tool_id} completed without ResultMessage. "
+                    f"Command {cmd.tool_name}:{tool_id} completed without tool result. "
                     + "Status set to 'unknown'. This may indicate agent interruption or SDK issue."
                 )
 
@@ -230,11 +223,17 @@ class ClaudeCodeAgent(Agent):
 
             commands.append(cmd)
 
-        # Log summary of unknown statuses
+        # Log summary of unknown statuses with message type breakdown for debugging
         if unknown_status_count > 0:
-            logger.info(
+            msg_type_counts: dict[str, int] = {}
+            for msg in messages:
+                type_name = type(msg).__name__
+                msg_type_counts[type_name] = msg_type_counts.get(type_name, 0) + 1
+            type_summary = ", ".join(f"{k}={v}" for k, v in sorted(msg_type_counts.items()))
+            logger.warning(
                 f"Turn completed with {unknown_status_count} command(s) in 'unknown' status. "
-                + "This may indicate agent/SDK communication issues."
+                + f"Messages received: [{type_summary}]. "
+                + "This may indicate an SDK message type mismatch or agent interruption."
             )
 
         # Commands are in sequence order as they were captured
@@ -290,6 +289,156 @@ class ClaudeCodeAgent(Agent):
             Current agent state
         """
         return self._state
+
+    @staticmethod
+    def _resolve_pending_command(
+        tool_use_id: str,
+        is_error: bool,
+        content: Any,
+        pending_commands: dict[str, dict[str, Any]],
+        processed_results: set[str],
+    ) -> None:
+        """Match a tool result back to its pending command and update status/duration.
+
+        Args:
+            tool_use_id: The tool use ID from the result
+            is_error: Whether the tool execution resulted in an error
+            content: The result content (string or structured)
+            pending_commands: Map of tool_id -> {telemetry, command_start_time}
+            processed_results: Set of already-processed tool IDs (for duplicate detection)
+        """
+        # Normalize content to string for storage
+        content_str = str(content) if content is not None else ""
+
+        if tool_use_id in pending_commands:
+            cmd_data = pending_commands[tool_use_id]
+            cmd = cmd_data["telemetry"]
+            command_start_time = cmd_data["command_start_time"]
+
+            # Calculate precise duration
+            command_end_time = time.monotonic()
+            duration_ms = (command_end_time - command_start_time) * 1000
+
+            # Update command with actual results
+            cmd.result_status = "error" if is_error else "success"
+            cmd.duration_ms = duration_ms
+            cmd.result_summary = content_str[:200] if content_str else None
+
+            if is_error:
+                cmd.error_message = content_str
+
+                # Detect permission-blocked tool use and log at INFO level
+                content_lower = content_str.lower()
+                if any(
+                    phrase in content_lower
+                    for phrase in ("permission", "not allowed", "requires approval", "denied", "blocked")
+                ):
+                    logger.info(
+                        f"Tool use blocked: {cmd.tool_name} (id={tool_use_id}) "
+                        + f"- permission denied. Error: {content_str[:200]}"
+                    )
+
+            if tool_use_id in processed_results:
+                logger.debug(f"Multiple results for tool_id={tool_use_id}. Last result wins.")
+            processed_results.add(tool_use_id)
+        else:
+            logger.warning(
+                f"Tool result received for unknown tool_use_id={tool_use_id}. No matching ToolUseBlock found."
+            )
+
+    @staticmethod
+    def _build_stderr_message(sdk_stderr: str | None, stderr_lines: list[str]) -> str:
+        """Combine SDK stderr with captured stderr lines, filtering out placeholder text.
+
+        The SDK often returns a hardcoded placeholder like "Check stderr output for details"
+        instead of actual error content. The real error details are in stderr_lines captured
+        via the stderr callback.
+
+        Args:
+            sdk_stderr: The stderr string from ProcessError (may be a placeholder)
+            stderr_lines: Lines captured via the stderr callback during execution
+
+        Returns:
+            Combined stderr message with real content, or "No stderr captured"
+        """
+        parts = []
+
+        # Include SDK stderr only if it's not the hardcoded placeholder
+        if sdk_stderr and "check stderr output" not in sdk_stderr.lower():
+            parts.append(sdk_stderr)
+
+        # Always include captured stderr lines (these contain the real error details)
+        if stderr_lines:
+            parts.append("\n".join(stderr_lines[-20:]))
+
+        return "\n".join(parts) if parts else "No stderr captured"
+
+    @staticmethod
+    def _extract_cause_stderr(error: Exception) -> str | None:
+        """Walk the exception __cause__ chain looking for a ProcessError with stderr.
+
+        The SDK re-raises ProcessError as a generic Exception via the Query message stream.
+        This method recovers the original stderr from the cause chain.
+
+        Args:
+            error: The caught exception
+
+        Returns:
+            stderr string from the original ProcessError, or None
+        """
+        cause = error.__cause__
+        depth = 0
+        while cause and depth < 5:
+            if isinstance(cause, ProcessError):
+                return cause.stderr
+            cause = cause.__cause__
+            depth += 1
+        return None
+
+    @staticmethod
+    def _clean_error_message(message: str) -> str:
+        """Remove unhelpful SDK placeholder text from error messages.
+
+        Args:
+            message: Raw error message string
+
+        Returns:
+            Cleaned error message
+        """
+        # Remove the hardcoded placeholder that the SDK injects
+        cleaned = message.replace("\nError output: Check stderr output for details", "")
+        cleaned = cleaned.replace("Error output: Check stderr output for details", "")
+        return cleaned.strip()
+
+    @staticmethod
+    def _extract_error_from_messages(messages: list[Message]) -> str | None:
+        """Extract error details from messages received before a crash.
+
+        When the CLI process crashes, it may have sent a ResultMessage with
+        is_error=True and error details in the 'result' field before exiting.
+        This method scans collected messages for such error information.
+
+        Args:
+            messages: Messages collected during the turn before the error
+
+        Returns:
+            Error description if found, None otherwise
+        """
+        for msg in reversed(messages):
+            # Check for ResultMessage with error info
+            if _is_sdk_result_message(msg) and getattr(msg, "is_error", False):
+                result = getattr(msg, "result", None)
+                if result:
+                    return str(result)[:500]
+
+            # Check for SystemMessage with error subtype
+            if type(msg).__name__ == "SystemMessage":
+                subtype = getattr(msg, "subtype", None)
+                data = getattr(msg, "data", None)
+                if subtype == "error" and data:
+                    return str(data)[:500]
+
+        return None
 
     def _capture_file_tree(self) -> FileTree:
         """Capture the current state of files in the working directory.

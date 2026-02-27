@@ -239,13 +239,21 @@ Installed automatically by `make install`. Includes ruff format/lint, trailing w
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `ANTHROPIC_API_KEY` | Yes (for Claude Code) | Anthropic API key |
+| `UV_INDEX_UIPATH_USERNAME` | Yes (for install) | UiPath package index username |
+| `UV_INDEX_UIPATH_PASSWORD` | Yes (for install) | UiPath package index password (for installing LLMGW client from private index) |
 | `LLMGW_URL` | For LLM reviewer | UiPath LLM Gateway URL |
 | `LLMGW_CLIENT_ID` | For LLM reviewer | Gateway client ID |
 | `LLMGW_CLIENT_SECRET` | For LLM reviewer | Gateway client secret |
+| `LLMGW_SEMANTIC_ORG_ID` | For LLM reviewer | Gateway semantic org ID |
+| `LLMGW_SEMANTIC_TENANT_ID` | For LLM reviewer | Gateway semantic tenant ID |
+| `LLMGW_SEMANTIC_USER_ID` | For LLM reviewer | Gateway semantic user ID |
+| `LLMGW_REQUESTING_PRODUCT` | No | Requesting product name (default: `coder-eval`) |
+| `LLMGW_REQUESTING_FEATURE` | No | Requesting feature name (default: `llm-reviewer`) |
+| `LLMGW_TIMEOUT_SECONDS` | No | Gateway request timeout (default: 290) |
 | `LOG_LEVEL` | No | Logging level (default: INFO) |
 | `LOG_TO_FILE` | No | Enable file logging (default: false) |
 
-See `.env.example` for the full list.
+See `.env.example` for the full list with default values.
 
 ## Extending
 
@@ -271,7 +279,7 @@ See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.
 | `ANTHROPIC_API_KEY is required` | Create `.env` from `.env.example` and add your key |
 | `claude command not found` | `brew install claude` |
 | `uv command not found` | `brew install uv` or `pip install uv` |
-| `uv pip install` 401 error | Ensure UiPath Engineering.Cloud Azure group membership |
+| `uv pip install` 401 error | Set `UV_INDEX_UIPATH_USERNAME` and `UV_INDEX_UIPATH_PASSWORD` in `.env`; ensure UiPath Engineering.Cloud Azure group membership |
 | Tests failing | `source .venv/bin/activate && uv pip install -e ".[dev]"` |
 | Pre-commit hooks failing | `pre-commit autoupdate && pre-commit run --all-files` |
 

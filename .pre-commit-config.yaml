@@ -1,7 +1,7 @@
 repos:
   # Ruff for formatting and linting
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.4
+    rev: v0.15.2
     hooks:
       # Run formatter first (auto-fixes)
       - id: ruff-format
