@@ -115,21 +115,34 @@ class ReportGenerator:
         """
         success_rate = (summary.tasks_succeeded / summary.tasks_run * 100) if summary.tasks_run > 0 else 0
 
+        # Collect unique models across all tasks
+        models = sorted({t["model_used"] for t in summary.task_results if t.get("model_used")})
+
         lines = [
             "# Evaluation Run Report",
             "",
             f"**Run ID**: `{summary.run_id}`",
             f"**Date**: {summary.start_time.strftime('%Y-%m-%d %H:%M:%S')}",
             f"**Duration**: {summary.total_duration_seconds:.2f}s",
-            "",
-            "## Summary",
-            "",
-            f"- **Total Tasks**: {summary.tasks_run}",
-            f"- **Succeeded**: {summary.tasks_succeeded}",
-            f"- **Failed**: {summary.tasks_failed}",
-            f"- **Errors**: {summary.tasks_error}",
-            f"- **Success Rate**: {success_rate:.1f}%",
         ]
+
+        if len(models) == 1:
+            lines.append(f"**Model**: `{models[0]}`")
+        elif len(models) > 1:
+            lines.append(f"**Models**: {', '.join(f'`{m}`' for m in models)}")
+
+        lines.extend(
+            [
+                "",
+                "## Summary",
+                "",
+                f"- **Total Tasks**: {summary.tasks_run}",
+                f"- **Succeeded**: {summary.tasks_succeeded}",
+                f"- **Failed**: {summary.tasks_failed}",
+                f"- **Errors**: {summary.tasks_error}",
+                f"- **Success Rate**: {success_rate:.1f}%",
+            ]
+        )
 
         # Aggregate P0 metrics
         scores = [t["weighted_score"] for t in summary.task_results if t.get("weighted_score") is not None]
@@ -150,9 +163,13 @@ class ReportGenerator:
 
         # Task Details table
         has_similarity = any(t.get("reference_similarity") is not None for t in summary.task_results)
+        has_model = any(t.get("model_used") for t in summary.task_results)
 
         header = "| Task ID | Status | Reliability Score | Iterations | Latency |"
         separator = "|---------|--------|-------------------|------------|---------|"
+        if has_model:
+            header += " Model |"
+            separator += "-------|"
         if has_similarity:
             header += " Similarity |"
             separator += "------------|"
@@ -166,6 +183,9 @@ class ReportGenerator:
             duration = f"{task_result['duration']:.1f}s"
 
             row = f"| {task_result['task_id']} | {task_result['status']} | {score_str} | {iters} | {duration} |"
+            if has_model:
+                model = task_result.get("model_used") or "N/A"
+                row += f" {model} |"
             if has_similarity:
                 sim = task_result.get("reference_similarity")
                 sim_str = f"{sim:.3f}" if sim is not None else "N/A"

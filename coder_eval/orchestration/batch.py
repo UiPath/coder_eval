@@ -252,6 +252,7 @@ def _generate_run_summary(
                     }
                     for t in r["result"].turns
                 ],
+                "model_used": r["result"].model_used,
                 "reference_similarity": _extract_reference_similarity(r["result"]),
                 "total_tokens": (r["result"].total_token_usage.total_tokens if r["result"].total_token_usage else None),
                 "total_cost_usd": (

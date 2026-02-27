@@ -199,7 +199,7 @@ class TestAgentTokenCapture:
         sdk_result.total_cost_usd = 0.0234
         # Ensure it doesn't match other guards
         del sdk_result.content
-        del sdk_result.role
+        del sdk_result.model
         del sdk_result.tool_use_id
         del sdk_result.is_error
         del sdk_result.name
@@ -236,7 +236,7 @@ class TestAgentTokenCapture:
         # Create a mock assistant message (no usage data)
         assistant_msg = MagicMock()
         assistant_msg.content = "Hello"
-        assistant_msg.role = "assistant"
+        assistant_msg.model = "mock-model"
         # Remove attributes so it doesn't match SDK result guard
         del assistant_msg.session_id
         del assistant_msg.usage
@@ -271,7 +271,7 @@ class TestAgentTokenCapture:
         }
         sdk_result.total_cost_usd = None
         del sdk_result.content
-        del sdk_result.role
+        del sdk_result.model
         del sdk_result.tool_use_id
         del sdk_result.is_error
         del sdk_result.name

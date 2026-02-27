@@ -165,6 +165,15 @@ class Orchestrator:
                     if self.result.turns:
                         self.result.command_stats = calculate_command_statistics(self.result.turns)
 
+                    # Resolve model_used from turns (last turn with model wins) or agent config
+                    if self.result.turns:
+                        for turn in reversed(self.result.turns):
+                            if turn.model_used:
+                                self.result.model_used = turn.model_used
+                                break
+                    if not self.result.model_used and self.task.agent.model:
+                        self.result.model_used = self.task.agent.model
+
                     # Aggregate token usage across all turns
                     if self.result.turns:
                         from .models.telemetry import TokenUsage

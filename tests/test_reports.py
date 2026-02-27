@@ -16,6 +16,7 @@ def _make_task_result(
     iteration_count: int | None = None,
     turns: list[dict] | None = None,
     reference_similarity: float | None = None,
+    model_used: str | None = None,
 ) -> dict:
     """Helper to create a task_result dict with all expected fields."""
     return {
@@ -26,6 +27,7 @@ def _make_task_result(
         "iteration_count": iteration_count,
         "turns": turns or [],
         "reference_similarity": reference_similarity,
+        "model_used": model_used,
     }
 
 
@@ -452,3 +454,107 @@ def test_load_from_run_dir_resolves_symlink(tmp_path):
     assert loaded_report == report_content
     # Source path should be from resolved directory, not symlink
     assert "2025-10-11_12-00-00" in str(source_path)
+
+
+def test_generate_markdown_with_model_info():
+    """Test that model info appears in header and task details table."""
+    summary = RunSummary(
+        run_id="test-run",
+        start_time=datetime(2025, 10, 11, 12, 0, 0),
+        end_time=datetime(2025, 10, 11, 12, 1, 0),
+        total_duration_seconds=60.0,
+        tasks_run=2,
+        tasks_succeeded=2,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[
+            _make_task_result(
+                "task1", "SUCCESS", 1.0, 30.0, iteration_count=1, model_used="claude-sonnet-4-5-20250514"
+            ),
+            _make_task_result(
+                "task2", "SUCCESS", 0.9, 30.0, iteration_count=1, model_used="claude-sonnet-4-5-20250514"
+            ),
+        ],
+        framework_version="0.1.0",
+        environment_info={},
+    )
+
+    report_md = ReportGenerator.generate_markdown(summary)
+
+    # Header should show single model
+    assert "**Model**: `claude-sonnet-4-5-20250514`" in report_md
+
+    # Task details table should have Model column
+    lines = report_md.split("\n")
+    header_lines = [line for line in lines if line.startswith("| Task ID")]
+    assert len(header_lines) == 1
+    assert "Model" in header_lines[0]
+
+    # Task rows should include model
+    assert "claude-sonnet-4-5-20250514" in report_md
+
+
+def test_generate_markdown_no_model_info():
+    """Test that Model column is omitted when no tasks have model_used."""
+    summary = RunSummary(
+        run_id="test-run",
+        start_time=datetime(2025, 10, 11, 12, 0, 0),
+        end_time=datetime(2025, 10, 11, 12, 1, 0),
+        total_duration_seconds=60.0,
+        tasks_run=1,
+        tasks_succeeded=1,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[
+            _make_task_result("task1", "SUCCESS", 0.9, 30.0, iteration_count=1),
+        ],
+        framework_version="0.1.0",
+        environment_info={},
+    )
+
+    report_md = ReportGenerator.generate_markdown(summary)
+
+    # Header should NOT show model line
+    assert "**Model**:" not in report_md
+    assert "**Models**:" not in report_md
+
+    # Task details table should NOT have Model column
+    lines = report_md.split("\n")
+    header_lines = [line for line in lines if line.startswith("| Task ID")]
+    assert len(header_lines) == 1
+    assert "Model" not in header_lines[0]
+
+
+def test_generate_markdown_multiple_models():
+    """Test that header shows multiple models when tasks use different models."""
+    summary = RunSummary(
+        run_id="test-run",
+        start_time=datetime(2025, 10, 11, 12, 0, 0),
+        end_time=datetime(2025, 10, 11, 12, 2, 0),
+        total_duration_seconds=120.0,
+        tasks_run=2,
+        tasks_succeeded=2,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[
+            _make_task_result(
+                "task1", "SUCCESS", 1.0, 60.0, iteration_count=1, model_used="claude-sonnet-4-5-20250514"
+            ),
+            _make_task_result("task2", "SUCCESS", 0.9, 60.0, iteration_count=1, model_used="claude-opus-4-20250514"),
+        ],
+        framework_version="0.1.0",
+        environment_info={},
+    )
+
+    report_md = ReportGenerator.generate_markdown(summary)
+
+    # Header should show multiple models
+    assert "**Models**:" in report_md
+    assert "`claude-opus-4-20250514`" in report_md
+    assert "`claude-sonnet-4-5-20250514`" in report_md
+
+    # Task details table should have Model column with per-task values
+    lines = report_md.split("\n")
+    header_lines = [line for line in lines if line.startswith("| Task ID")]
+    assert len(header_lines) == 1
+    assert "Model" in header_lines[0]

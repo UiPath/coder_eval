@@ -76,6 +76,9 @@ class TurnRecord(BaseModel):
     token_usage: TokenUsage | None = Field(
         default=None, description="Token usage for this turn (if available from agent SDK)"
     )
+    model_used: str | None = Field(
+        default=None, description="Model identifier used for this turn (e.g., 'claude-sonnet-4-5-20250514')"
+    )
 
 
 class EvaluationResult(BaseModel):
@@ -84,6 +87,9 @@ class EvaluationResult(BaseModel):
     task_id: str = Field(description="ID of the evaluated task")
     task_description: str = Field(description="Description of the task")
     agent_type: AgentKind = Field(description="Type of agent used")
+    model_used: str | None = Field(
+        default=None, description="Model identifier used for the evaluation (resolved from turns or agent config)"
+    )
 
     # Execution metadata
     started_at: datetime = Field(description="When evaluation started")

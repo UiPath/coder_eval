@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Type guards for SDK message types (using duck typing for robustness)
 def _is_assistant_message(message: Any) -> bool:
     """Check if message is an AssistantMessage using duck typing."""
-    return hasattr(message, "content") and hasattr(message, "role")
+    return hasattr(message, "content") and hasattr(message, "model")
 
 
 def _is_tool_use_block(block: Any) -> bool:
@@ -100,6 +100,9 @@ class ClaudeCodeAgent(Agent):
         sdk_result_usage: dict[str, Any] | None = None
         sdk_result_cost: float | None = None
 
+        # Model identifier from AssistantMessage (last one wins)
+        sdk_model_used: str | None = None
+
         # Capture stderr for debugging
         stderr_lines = []
 
@@ -124,6 +127,9 @@ class ClaudeCodeAgent(Agent):
 
                 # PHASE 1: Capture ToolUseBlock and create pending command
                 if _is_assistant_message(message):
+                    model_attr = getattr(message, "model", None)
+                    if isinstance(model_attr, str):
+                        sdk_model_used = model_attr
                     content = getattr(message, "content", None)
                     # Content can be a list of blocks (text, tool_use, etc.)
                     if content and isinstance(content, list):
@@ -267,6 +273,7 @@ class ClaudeCodeAgent(Agent):
             timestamp=datetime.now(),
             duration_seconds=duration,
             token_usage=token_usage,
+            model_used=sdk_model_used,
         )
 
     async def stop(self) -> None:

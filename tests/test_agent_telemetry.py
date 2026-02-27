@@ -26,7 +26,7 @@ def create_mock_sdk_messages():
     class AssistantMessage:
         def __init__(self, content):
             self.content = content
-            self.role = "assistant"  # Required for duck-type guard
+            self.model = "mock-model"  # Required for duck-type guard
 
     class ResultMessage:
         def __init__(self, tool_use_id, is_error, content):
