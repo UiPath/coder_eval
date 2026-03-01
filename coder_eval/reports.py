@@ -80,8 +80,8 @@ class ReportGenerator:
         lines = [
             "## Generation Metrics",
             "",
-            "| Task ID | Total Latency | Turns | Avg Turn Latency | Self-Corrections |",
-            "|---------|---------------|-------|------------------|------------------|",
+            "| Task ID | Total Latency | Turns | Asst Turns | Avg Turn Latency | Self-Corrections |",
+            "|---------|---------------|-------|------------|------------------|------------------|",
         ]
 
         for task in task_results:
@@ -92,13 +92,18 @@ class ReportGenerator:
             iteration_count = task.get("iteration_count") or 0
             self_corrections = max(0, iteration_count - 1)
 
+            # Sum assistant_turn_count across all turns for this task
+            asst_turns = sum(t.get("assistant_turn_count", 0) for t in turns)
+
             if turns:
                 avg_turn = sum(t["duration_seconds"] for t in turns) / len(turns)
                 avg_turn_str = f"{avg_turn:.1f}s"
             else:
                 avg_turn_str = "N/A"
 
-            lines.append(f"| {task_id} | {total_latency} | {num_turns} | {avg_turn_str} | {self_corrections} |")
+            lines.append(
+                f"| {task_id} | {total_latency} | {num_turns} | {asst_turns} | {avg_turn_str} | {self_corrections} |"
+            )
 
         return lines
 
@@ -158,6 +163,14 @@ class ReportGenerator:
             lines.append(f"- **Avg Generation Latency**: {sum(durations) / len(durations):.1f}s")
         if iterations:
             lines.append(f"- **Avg Self-Correction Iterations**: {sum(iterations) / len(iterations):.1f}")
+
+        # Total assistant turns across all tasks
+        total_asst_turns = sum(
+            sum(t.get("assistant_turn_count", 0) for t in task.get("turns", [])) for task in summary.task_results
+        )
+        if total_asst_turns > 0:
+            lines.append(f"- **Total Assistant Turns**: {total_asst_turns}")
+
         if similarities:
             lines.append(f"- **Avg Ground Truth Similarity**: {sum(similarities) / len(similarities):.3f}")
 

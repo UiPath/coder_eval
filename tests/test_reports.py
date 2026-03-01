@@ -280,10 +280,10 @@ def test_generate_markdown_generation_metrics_section():
     report_md = ReportGenerator.generate_markdown(summary)
 
     assert "## Generation Metrics" in report_md
-    # task1: 1 iteration = 0 self-corrections
-    assert "| task1 | 50.0s | 1 | 50.0s | 0 |" in report_md
+    # task1: 1 iteration = 0 self-corrections, 0 asst turns (no assistant_turn_count in test data)
+    assert "| task1 | 50.0s | 1 | 0 | 50.0s | 0 |" in report_md
     # task2: 3 iterations = 2 self-corrections, avg turn = (25+22+23)/3 = 23.3s
-    assert "| task2 | 70.0s | 3 | 23.3s | 2 |" in report_md
+    assert "| task2 | 70.0s | 3 | 0 | 23.3s | 2 |" in report_md
 
 
 def test_generate_markdown_no_generation_metrics_without_turns():

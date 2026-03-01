@@ -262,6 +262,7 @@ def _generate_run_summary(
                         "iteration": t.iteration,
                         "duration_seconds": t.duration_seconds,
                         "command_count": len(t.commands),
+                        "assistant_turn_count": t.assistant_turn_count,
                     }
                     for t in r["result"].turns
                 ],

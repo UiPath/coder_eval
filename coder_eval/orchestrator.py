@@ -189,6 +189,10 @@ class Orchestrator:
                                 total_cost_usd=sum(costs) if costs else None,
                             )
 
+                    # Aggregate assistant turns across all turns
+                    if self.result.turns:
+                        self.result.total_assistant_turns = sum(t.assistant_turn_count for t in self.result.turns)
+
                     # Save report to per-task directory
                     self.report_path.parent.mkdir(parents=True, exist_ok=True)
                     self.report_path.write_text(

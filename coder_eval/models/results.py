@@ -79,6 +79,10 @@ class TurnRecord(BaseModel):
     model_used: str | None = Field(
         default=None, description="Model identifier used for this turn (e.g., 'claude-sonnet-4-5-20250514')"
     )
+    assistant_turn_count: int = Field(
+        default=0,
+        description="Number of AssistantMessage objects received from the SDK in this turn",
+    )
 
 
 class EvaluationResult(BaseModel):
@@ -131,6 +135,12 @@ class EvaluationResult(BaseModel):
 
     # Token usage
     total_token_usage: TokenUsage | None = Field(default=None, description="Aggregated token usage across all turns")
+
+    # Assistant turns
+    total_assistant_turns: int | None = Field(
+        default=None,
+        description="Total assistant turns across all orchestrator iterations",
+    )
 
     def calculate_weighted_score(self, criteria: list[SuccessCriterion]) -> None:
         """Calculate weighted average score from criterion results.

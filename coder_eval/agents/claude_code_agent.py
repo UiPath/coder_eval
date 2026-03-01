@@ -108,6 +108,9 @@ class ClaudeCodeAgent(Agent):
         # Model identifier from AssistantMessage (last one wins)
         sdk_model_used: str | None = None
 
+        # Count of AssistantMessage objects in this turn
+        assistant_turn_count = 0
+
         # Capture stderr for debugging
         stderr_lines = []
 
@@ -132,6 +135,7 @@ class ClaudeCodeAgent(Agent):
 
                 # PHASE 1: Capture ToolUseBlock and create pending command
                 if _is_assistant_message(message):
+                    assistant_turn_count += 1
                     model_attr = getattr(message, "model", None)
                     if isinstance(model_attr, str):
                         sdk_model_used = model_attr
@@ -273,6 +277,7 @@ class ClaudeCodeAgent(Agent):
             duration_seconds=duration,
             token_usage=token_usage,
             model_used=sdk_model_used,
+            assistant_turn_count=assistant_turn_count,
         )
 
     async def stop(self) -> None:
