@@ -5,7 +5,7 @@ tags: [integration, uipath-python, network]
 agent:
   type: claude-code
   permission_mode: acceptEdits
-  allowed_tools: ["Bash"]
+  allowed_tools: ["Bash", "Read", "Write"]
 
 sandbox:
   driver: tempdir

@@ -128,10 +128,15 @@ class ClaudeCodeAgent(Agent):
             )
 
             # Use the query function for one-shot interaction
+            logger.debug("Starting agent query stream...")
             async for message in query(prompt=user_input, options=options):
                 messages.append(message)
+                msg_type = type(message).__name__
 
-                # NEW: Two-phase command telemetry capture using type guards
+                # Stream debug logging for real-time visibility
+                self._log_message_debug(message, msg_type)
+
+                # Two-phase command telemetry capture using type guards
 
                 # PHASE 1: Capture ToolUseBlock and create pending command
                 if _is_assistant_message(message):
@@ -184,6 +189,8 @@ class ClaudeCodeAgent(Agent):
                                     pending_commands,
                                     processed_results,
                                 )
+
+            logger.debug("Agent query stream ended")
 
         except ProcessError as e:
             self._state = AgentState.ERROR
@@ -294,6 +301,63 @@ class ClaudeCodeAgent(Agent):
             Current agent state
         """
         return self._state
+
+    @staticmethod
+    def _log_message_debug(message: Any, msg_type: str) -> None:
+        """Log agent message details at DEBUG level for real-time streaming visibility.
+
+        Args:
+            message: SDK message object
+            msg_type: Type name of the message
+        """
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+
+        if msg_type == "AssistantMessage":
+            content = getattr(message, "content", None)
+            if content and isinstance(content, list):
+                for block in content:
+                    if _is_tool_use_block(block):
+                        params_str = str(block.input)[:300]
+                        logger.debug(f">>> TOOL CALL: {block.name} | id={block.id} | params={params_str}")
+                    elif hasattr(block, "text"):
+                        text = str(block.text)[:500]
+                        logger.debug(f">>> ASSISTANT: {text}")
+                    else:
+                        block_type = type(block).__name__
+                        logger.debug(f">>> ASSISTANT BLOCK ({block_type}): {str(block)[:200]}")
+            elif content and isinstance(content, str):
+                logger.debug(f">>> ASSISTANT: {content[:500]}")
+
+        elif msg_type == "UserMessage":
+            content = getattr(message, "content", None)
+            if content and isinstance(content, list):
+                for block in content:
+                    if _is_tool_result_block(block):
+                        is_error = getattr(block, "is_error", False) or False
+                        status = "ERROR" if is_error else "OK"
+                        result_preview = str(block.content)[:300] if block.content is not None else "(empty)"
+                        logger.debug(f"<<< TOOL RESULT [{status}]: id={block.tool_use_id} | {result_preview}")
+
+        elif msg_type == "ResultMessage":
+            usage = getattr(message, "usage", None)
+            cost = getattr(message, "total_cost_usd", None)
+            is_error = getattr(message, "is_error", False)
+            result = getattr(message, "result", None)
+            if is_error:
+                logger.debug(f"<<< RESULT [ERROR]: {str(result)[:300]}")
+            else:
+                usage_str = str(usage)[:200] if usage else "n/a"
+                cost_str = f"${cost}" if cost is not None else "n/a"
+                logger.debug(f"<<< RESULT: cost={cost_str}, usage={usage_str}")
+
+        elif msg_type == "SystemMessage":
+            subtype = getattr(message, "subtype", None)
+            data = getattr(message, "data", None)
+            logger.debug(f"--- SYSTEM ({subtype}): {str(data)[:200]}")
+
+        else:
+            logger.debug(f"--- {msg_type}: {str(message)[:200]}")
 
     @staticmethod
     def _resolve_pending_command(
@@ -532,9 +596,14 @@ class ClaudeCodeAgent(Agent):
                 continue
 
             elif msg_type_name == "AssistantMessage":
-                # Assistant text responses
+                # Assistant text responses — content may be a string or list of blocks
                 content = getattr(msg, "content", "")
-                if content:
+                if isinstance(content, list):
+                    for block in content:
+                        text = getattr(block, "text", None)
+                        if text:
+                            formatted_parts.append(f"[ASSISTANT] {text}")
+                elif content:
                     formatted_parts.append(f"[ASSISTANT] {content}")
 
             elif msg_type_name == "ResultMessage":

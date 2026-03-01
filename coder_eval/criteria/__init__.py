@@ -47,7 +47,6 @@ class CriterionRegistry:
                 + f"{cls._checkers[criterion_type].__name__} -> {checker_class.__name__}"
             )
         cls._checkers[criterion_type] = checker_class
-        logger.debug(f"Registered criterion checker: {criterion_type} -> {checker_class.__name__}")
         return checker_class
 
     @classmethod
@@ -94,7 +93,6 @@ class CriterionRegistry:
         for _, module_name, _ in pkgutil.iter_modules(package.__path__, f"{package.__name__}."):
             try:
                 importlib.import_module(module_name)
-                logger.debug(f"Successfully imported criteria module: {module_name}")
             except Exception as e:
                 logger.error(f"Failed to import criteria module '{module_name}': {e}", exc_info=True)
 
