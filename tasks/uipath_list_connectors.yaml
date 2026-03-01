@@ -1,0 +1,45 @@
+task_id: uipath-list-connectors
+description: "List available UiPath Integration Service connectors using the uipath CLI and save output to connectors.json"
+tags: [integration, uipath-python, network]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash"]
+
+sandbox:
+  driver: tempdir
+  python_version: "3.13"
+  env_packages: []
+
+initial_prompt: |
+  Use the `uipcli` CLI tool to list all available UiPath Integration Service connectors
+  and save the output to connectors.json in the current directory. The output should be in JSON format.
+  The CLI should already be installed in the virtual environment.
+
+success_criteria:
+  - type: file_exists
+    description: "connectors.json file exists"
+    path: "connectors.json"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "connectors.json contains Microsoft"
+    path: "connectors.json"
+    includes: ["Microsoft"]
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Agent ran the uipath CLI to list connectors"
+    tool_name: "Bash"
+    command_pattern: 'uipcli\s+is\s+connectors\s+list'
+    min_count: 1
+    weight: 1.0
+    pass_threshold: 1.0
+
+max_iterations: 2
+
+llm_reviewer:
+  enabled: true
