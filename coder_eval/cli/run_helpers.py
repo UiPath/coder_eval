@@ -78,7 +78,8 @@ def print_execution_summary(run_dir: Path, summary: RunSummary) -> None:
     """
     console.print(f"\n[bold green]Run complete:[/bold green] {run_dir}")
     console.print(f"[bold]Results:[/bold] {summary.tasks_succeeded}/{summary.tasks_run} succeeded")
-    console.print(f"[dim]View report: {run_dir / 'run-report.md'}[/dim]")
+    console.print(f"[dim]View report: open {run_dir / 'run-report.md'}[/dim]")
+    console.print(f"[dim]View report: uv run coder-eval report {run_dir}[/dim]")
 
     # Print log file locations
     console.print("\n[bold]Log Files:[/bold]")
