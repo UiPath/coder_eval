@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind
+from coder_eval.models.tasks import AgentConfig
 from coder_eval.models.telemetry import CommandStatistics, CommandTelemetry, TokenUsage
 
 
@@ -125,6 +126,18 @@ class EvaluationResult(BaseModel):
     # Environment information
     environment_info: dict[str, Any] = Field(
         default_factory=dict, description="Version information and environment details"
+    )
+
+    # Agent configuration
+    agent_config: AgentConfig | None = Field(
+        default=None,
+        description="Agent configuration used for the evaluation (from task YAML)",
+    )
+
+    # SDK options (raw dump of all ClaudeAgentOptions fields including defaults)
+    sdk_options: dict[str, Any] | None = Field(
+        default=None,
+        description="Raw SDK options dump from ClaudeAgentOptions (all fields including defaults)",
     )
 
     # Artifacts

@@ -1,10 +1,15 @@
 """Utility functions for version tracking and reproducibility."""
 
 import subprocess
+from pathlib import Path
 
 
-def get_version_info() -> dict[str, str]:
+def get_version_info(sandbox_path: Path | None = None) -> dict[str, str]:
     """Captures versions of key dependencies for reproducibility.
+
+    Args:
+        sandbox_path: Optional path to sandbox directory. When provided,
+            CLAUDE.md in the sandbox will be hashed for reproducibility tracking.
 
     Returns:
         Dictionary containing version information for critical dependencies.
@@ -46,5 +51,15 @@ def get_version_info() -> dict[str, str]:
         version_info["pydantic"] = pydantic.__version__
     except (ImportError, AttributeError):
         version_info["pydantic"] = "Not Installed"
+
+    # Hash CLAUDE.md if sandbox path provided
+    if sandbox_path:
+        claude_md = sandbox_path / "CLAUDE.md"
+        if claude_md.is_file():
+            import hashlib
+
+            content = claude_md.read_bytes()
+            version_info["claude_md_sha256"] = hashlib.sha256(content).hexdigest()
+            version_info["claude_md_size_bytes"] = str(len(content))
 
     return version_info

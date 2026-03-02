@@ -193,6 +193,10 @@ class Orchestrator:
                     if self.result.turns:
                         self.result.total_assistant_turns = sum(t.assistant_turn_count for t in self.result.turns)
 
+                    # Capture SDK options from agent (if supported)
+                    if self.agent:
+                        self.result.sdk_options = self.agent.get_sdk_options()
+
                     # Save report to per-task directory
                     self.report_path.parent.mkdir(parents=True, exist_ok=True)
                     self.report_path.write_text(
@@ -252,6 +256,14 @@ class Orchestrator:
             operation=_start_agent,
             operation_name="Agent start",
             context={"task_id": self.task.task_id, "component": "agent", "agent_name": self.task.agent.type.value},
+        )
+
+        # Save agent config on result (copy to prevent mutation of shared reference)
+        self.result.agent_config = self.task.agent.model_copy(deep=True)
+
+        # Re-capture environment_info with sandbox path (for CLAUDE.md hash)
+        self.result.environment_info = get_version_info(
+            sandbox_path=Path(self.result.sandbox_path) if self.result.sandbox_path else None,
         )
 
     async def _create_agent(self) -> Agent:

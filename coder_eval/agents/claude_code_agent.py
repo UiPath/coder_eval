@@ -1,5 +1,6 @@
 """Claude Code agent implementation using the Claude Agent SDK."""
 
+import dataclasses
 import logging
 import time
 from datetime import datetime
@@ -45,6 +46,67 @@ def _is_sdk_result_message(message: Any) -> bool:
     return hasattr(message, "session_id") and hasattr(message, "usage")
 
 
+_SKIP = object()  # Sentinel for values that should be excluded from the dump
+
+
+def _serialize_value(value: Any) -> Any:
+    """Recursively serialize a value to JSON-safe types.
+
+    Returns _SKIP sentinel for non-serializable values (callables, file-like objects).
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if callable(value):
+        return _SKIP
+    if hasattr(value, "write") and hasattr(value, "read"):
+        return _SKIP
+    if isinstance(value, Path):
+        return str(value)
+    if dataclasses.is_dataclass(value):
+        serialized: dict[str, Any] = {}
+        for field in dataclasses.fields(value):
+            field_value = _serialize_value(getattr(value, field.name))
+            if field_value is not _SKIP:
+                serialized[field.name] = field_value
+        return serialized
+    if isinstance(value, dict):
+        serialized_dict: dict[str, Any] = {}
+        for k, v in value.items():
+            v_serialized = _serialize_value(v)
+            if v_serialized is not _SKIP:
+                serialized_dict[str(k)] = v_serialized
+        return serialized_dict
+    if isinstance(value, (list, tuple)):
+        serialized_list: list[Any] = []
+        for item in value:
+            item_serialized = _serialize_value(item)
+            if item_serialized is not _SKIP:
+                serialized_list.append(item_serialized)
+        return serialized_list
+    # Fallback: convert unknown types to string representation
+    return str(value)
+
+
+def _dump_sdk_options(opts: ClaudeAgentOptions) -> dict[str, Any]:
+    """Dump ClaudeAgentOptions to a plain dict, skipping non-serializable values.
+
+    Recursively traverses dataclass fields and nested structures (dicts, lists,
+    dataclasses). Skips callables and file-like objects. Converts Path to str.
+
+    Args:
+        opts: ClaudeAgentOptions dataclass instance
+
+    Returns:
+        Dictionary of field names to JSON-serializable values
+    """
+    result: dict[str, Any] = {}
+    for field in dataclasses.fields(opts):
+        value = _serialize_value(getattr(opts, field.name))
+        if value is not _SKIP:
+            result[field.name] = value
+    return result
+
+
 class ClaudeCodeAgent(Agent):
     """Implementation of the Agent interface for Claude Code using the SDK."""
 
@@ -59,6 +121,7 @@ class ClaudeCodeAgent(Agent):
         self.working_directory: Path | None = None
         self._state = AgentState.WORKING
         self._iteration = 0
+        self._sdk_options_dump: dict[str, Any] | None = None
 
     async def start(self, working_directory: str) -> None:
         """Initialize and start the Claude Code agent.
@@ -126,6 +189,9 @@ class ClaudeCodeAgent(Agent):
                 model=self.config.model,
                 stderr=capture_stderr,  # Capture stderr for better error messages
             )
+
+            # Dump SDK options for later inspection (captures all 37+ fields including defaults)
+            self._sdk_options_dump = _dump_sdk_options(options)
 
             # Use the query function for one-shot interaction
             logger.debug("Starting agent query stream...")
@@ -301,6 +367,14 @@ class ClaudeCodeAgent(Agent):
             Current agent state
         """
         return self._state
+
+    def get_sdk_options(self) -> dict[str, Any] | None:
+        """Get the raw SDK options used for the last agent query.
+
+        Returns:
+            Dictionary of SDK option field names to values, or None if communicate() hasn't been called.
+        """
+        return self._sdk_options_dump
 
     @staticmethod
     def _log_message_debug(message: Any, msg_type: str) -> None:

@@ -121,10 +121,11 @@ async def run_batch(
     results: list[dict[str, Any] | BaseException] = await asyncio.gather(*coroutines, return_exceptions=True)
 
     # Process results and handle exceptions
+    # Note: `results` aligns with `tasks` (post-filter), not the original `task_files`
     processed_results: list[dict[str, Any]] = []
     for i, result in enumerate(results):
         if isinstance(result, BaseException):
-            task_file = task_files[i]
+            task_file = tasks[i][0]
             error_result = _create_error_result(task_file, result)
             processed_results.append(error_result)
         else:
@@ -272,6 +273,8 @@ def _generate_run_summary(
                 "total_cost_usd": (
                     r["result"].total_token_usage.total_cost_usd if r["result"].total_token_usage else None
                 ),
+                "agent_config": (r["result"].agent_config.model_dump() if r["result"].agent_config else None),
+                "sdk_options": r["result"].sdk_options,
             }
             for r in task_results
         ],

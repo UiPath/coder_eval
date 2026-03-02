@@ -17,6 +17,8 @@ def _make_task_result(
     turns: list[dict] | None = None,
     reference_similarity: float | None = None,
     model_used: str | None = None,
+    agent_config: dict | None = None,
+    sdk_options: dict | None = None,
 ) -> dict:
     """Helper to create a task_result dict with all expected fields."""
     return {
@@ -28,6 +30,8 @@ def _make_task_result(
         "turns": turns or [],
         "reference_similarity": reference_similarity,
         "model_used": model_used,
+        "agent_config": agent_config,
+        "sdk_options": sdk_options,
     }
 
 
@@ -558,3 +562,255 @@ def test_generate_markdown_multiple_models():
     header_lines = [line for line in lines if line.startswith("| Task ID")]
     assert len(header_lines) == 1
     assert "Model" in header_lines[0]
+
+
+def test_generate_markdown_with_agent_settings():
+    """Test that Agent Settings section appears when agent_config is present."""
+    summary = RunSummary(
+        run_id="test-run",
+        start_time=datetime(2025, 10, 11, 12, 0, 0),
+        end_time=datetime(2025, 10, 11, 12, 1, 0),
+        total_duration_seconds=60.0,
+        tasks_run=1,
+        tasks_succeeded=1,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[
+            _make_task_result(
+                "task1",
+                "SUCCESS",
+                1.0,
+                30.0,
+                iteration_count=1,
+                agent_config={
+                    "type": "claude-code",
+                    "permission_mode": "acceptEdits",
+                    "allowed_tools": ["Read", "Write", "Bash"],
+                    "model": "claude-sonnet-4-5-20250514",
+                },
+            ),
+        ],
+        framework_version="0.1.0",
+        environment_info={},
+    )
+
+    report_md = ReportGenerator.generate_markdown(summary)
+
+    assert "## Agent Settings" in report_md
+    assert "**Permission Mode**: acceptEdits" in report_md
+    assert "**Allowed Tools**: Read, Write, Bash" in report_md
+    assert "**Model**: claude-sonnet-4-5-20250514" in report_md
+    # Agent Settings should appear before Environment
+    agent_idx = report_md.index("## Agent Settings")
+    env_idx = report_md.index("## Environment")
+    assert agent_idx < env_idx
+
+
+def test_generate_markdown_agent_settings_all_tools():
+    """Test that Agent Settings shows (all) when allowed_tools is None."""
+    summary = RunSummary(
+        run_id="test-run",
+        start_time=datetime(2025, 10, 11, 12, 0, 0),
+        end_time=datetime(2025, 10, 11, 12, 1, 0),
+        total_duration_seconds=60.0,
+        tasks_run=1,
+        tasks_succeeded=1,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[
+            _make_task_result(
+                "task1",
+                "SUCCESS",
+                1.0,
+                30.0,
+                iteration_count=1,
+                agent_config={
+                    "type": "claude-code",
+                    "permission_mode": "bypassPermissions",
+                    "allowed_tools": None,
+                    "model": None,
+                },
+            ),
+        ],
+        framework_version="0.1.0",
+        environment_info={},
+    )
+
+    report_md = ReportGenerator.generate_markdown(summary)
+
+    assert "## Agent Settings" in report_md
+    assert "**Permission Mode**: bypassPermissions" in report_md
+    assert "**Allowed Tools**: (all)" in report_md
+    # Model line should not appear when model is None
+    agent_section_start = report_md.index("## Agent Settings")
+    env_section_start = report_md.index("## Environment")
+    agent_section = report_md[agent_section_start:env_section_start]
+    assert "**Model**:" not in agent_section
+
+
+def test_generate_markdown_with_sdk_options():
+    """Test that Agent Settings section renders from sdk_options when available."""
+    summary = RunSummary(
+        run_id="test-run",
+        start_time=datetime(2025, 10, 11, 12, 0, 0),
+        end_time=datetime(2025, 10, 11, 12, 1, 0),
+        total_duration_seconds=60.0,
+        tasks_run=1,
+        tasks_succeeded=1,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[
+            _make_task_result(
+                "task1",
+                "SUCCESS",
+                1.0,
+                30.0,
+                iteration_count=1,
+                sdk_options={
+                    "permission_mode": "bypassPermissions",
+                    "allowed_tools": ["Read", "Write"],
+                    "model": "claude-sonnet-4-5-20250514",
+                    "max_turns": 50,
+                    "thinking": {"type": "enabled", "budget_tokens": 10000},
+                    "effort": "high",
+                    "mcp_servers": {"my-server": {"command": "node", "args": ["server.js"]}},
+                    "betas": ["context-1m-2025-08-07"],
+                    "max_budget_usd": 5.0,
+                },
+            ),
+        ],
+        framework_version="0.1.0",
+        environment_info={},
+    )
+
+    report_md = ReportGenerator.generate_markdown(summary)
+
+    assert "## Agent Settings" in report_md
+    assert "**Permission Mode**: bypassPermissions" in report_md
+    assert "**Allowed Tools**: Read, Write" in report_md
+    assert "**Model**: claude-sonnet-4-5-20250514" in report_md
+    assert "**Max Turns**: 50" in report_md
+    assert "**Max Budget (USD)**: 5.0" in report_md
+    assert "**Thinking**:" in report_md
+    assert "**Effort**: high" in report_md
+    assert "**MCP Servers**: my-server" in report_md
+    assert "**Betas**: context-1m-2025-08-07" in report_md
+
+
+def test_generate_markdown_sdk_options_preferred_over_agent_config():
+    """Test that sdk_options is preferred over agent_config when both are present."""
+    summary = RunSummary(
+        run_id="test-run",
+        start_time=datetime(2025, 10, 11, 12, 0, 0),
+        end_time=datetime(2025, 10, 11, 12, 1, 0),
+        total_duration_seconds=60.0,
+        tasks_run=1,
+        tasks_succeeded=1,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[
+            _make_task_result(
+                "task1",
+                "SUCCESS",
+                1.0,
+                30.0,
+                iteration_count=1,
+                agent_config={
+                    "type": "claude-code",
+                    "permission_mode": "acceptEdits",
+                    "allowed_tools": None,
+                    "model": None,
+                },
+                sdk_options={
+                    "permission_mode": "bypassPermissions",
+                    "allowed_tools": ["Read"],
+                    "model": "claude-opus-4-20250514",
+                    "max_turns": 100,
+                },
+            ),
+        ],
+        framework_version="0.1.0",
+        environment_info={},
+    )
+
+    report_md = ReportGenerator.generate_markdown(summary)
+
+    # Should use sdk_options values, not agent_config
+    assert "**Permission Mode**: bypassPermissions" in report_md
+    assert "**Allowed Tools**: Read" in report_md
+    assert "**Model**: claude-opus-4-20250514" in report_md
+    assert "**Max Turns**: 100" in report_md
+
+
+def test_generate_markdown_sdk_options_defaults_hidden():
+    """Test that Agent Settings hides SDK fields that are None/empty (defaults)."""
+    summary = RunSummary(
+        run_id="test-run",
+        start_time=datetime(2025, 10, 11, 12, 0, 0),
+        end_time=datetime(2025, 10, 11, 12, 1, 0),
+        total_duration_seconds=60.0,
+        tasks_run=1,
+        tasks_succeeded=1,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[
+            _make_task_result(
+                "task1",
+                "SUCCESS",
+                1.0,
+                30.0,
+                iteration_count=1,
+                sdk_options={
+                    "permission_mode": "bypassPermissions",
+                    "allowed_tools": [],
+                    "model": None,
+                    "max_turns": None,
+                    "thinking": None,
+                    "effort": None,
+                    "mcp_servers": {},
+                    "betas": [],
+                    "max_budget_usd": None,
+                    "system_prompt": None,
+                },
+            ),
+        ],
+        framework_version="0.1.0",
+        environment_info={},
+    )
+
+    report_md = ReportGenerator.generate_markdown(summary)
+
+    assert "## Agent Settings" in report_md
+    assert "**Permission Mode**: bypassPermissions" in report_md
+    assert "**Allowed Tools**: (all)" in report_md
+    # None/empty defaults should not appear
+    assert "**Max Turns**" not in report_md
+    assert "**Max Budget" not in report_md
+    assert "**Thinking**" not in report_md
+    assert "**Effort**" not in report_md
+    assert "**MCP Servers**" not in report_md
+    assert "**Betas**" not in report_md
+    assert "**System Prompt**" not in report_md
+
+
+def test_generate_markdown_no_agent_settings():
+    """Test that Agent Settings section is omitted when no task has agent_config."""
+    summary = RunSummary(
+        run_id="test-run",
+        start_time=datetime(2025, 10, 11, 12, 0, 0),
+        end_time=datetime(2025, 10, 11, 12, 1, 0),
+        total_duration_seconds=60.0,
+        tasks_run=1,
+        tasks_succeeded=1,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[
+            _make_task_result("task1", "SUCCESS", 1.0, 30.0, iteration_count=1),
+        ],
+        framework_version="0.1.0",
+        environment_info={},
+    )
+
+    report_md = ReportGenerator.generate_markdown(summary)
+
+    assert "## Agent Settings" not in report_md

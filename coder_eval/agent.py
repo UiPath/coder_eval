@@ -1,6 +1,7 @@
 """Abstract base class for coding agents."""
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 from .models import AgentState, TurnRecord
 
@@ -49,3 +50,11 @@ class Agent(ABC):
             Current agent state
         """
         pass
+
+    def get_sdk_options(self) -> dict[str, Any] | None:
+        """Get the raw SDK options used for the last agent query.
+
+        Returns:
+            Dictionary of SDK option field names to values, or None if not available.
+        """
+        return None

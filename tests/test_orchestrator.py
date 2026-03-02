@@ -1,5 +1,6 @@
 """Tests for the orchestrator."""
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from coder_eval.orchestration.evaluation import create_iteration_snapshot, generate_next_prompt
 from coder_eval.orchestration.task_loader import load_task
 from coder_eval.orchestrator import Orchestrator
+from coder_eval.utils import get_version_info
 
 
 def test_orchestrator_load_task():
@@ -954,3 +956,515 @@ async def test_run_batch_preserves_ignore_patterns(tmp_path):
     assert task.sandbox.snapshots.ignore_patterns == original_patterns
     assert "*.log" in task.sandbox.snapshots.ignore_patterns
     assert "temp_*" in task.sandbox.snapshots.ignore_patterns
+
+
+# ==================== get_version_info Tests ====================
+
+
+def test_get_version_info_without_sandbox_path():
+    """Test get_version_info() backward compatibility without sandbox_path."""
+    info = get_version_info()
+
+    # Should return standard keys
+    assert "claude_code_cli" in info
+    assert "uv" in info
+    assert "anthropic" in info
+    assert "pydantic" in info
+
+    # Should NOT have CLAUDE.md keys
+    assert "claude_md_sha256" not in info
+    assert "claude_md_size_bytes" not in info
+
+
+def test_get_version_info_with_sandbox_path_and_claude_md(tmp_path):
+    """Test get_version_info() includes CLAUDE.md hash when present."""
+    # Create a CLAUDE.md in the sandbox
+    claude_md = tmp_path / "CLAUDE.md"
+    content = b"# Test CLAUDE.md\nSome instructions here."
+    claude_md.write_bytes(content)
+
+    info = get_version_info(sandbox_path=tmp_path)
+
+    # Should have CLAUDE.md hash
+    expected_hash = hashlib.sha256(content).hexdigest()
+    assert info["claude_md_sha256"] == expected_hash
+    assert info["claude_md_size_bytes"] == str(len(content))
+
+
+def test_get_version_info_with_sandbox_path_no_claude_md(tmp_path):
+    """Test get_version_info() omits CLAUDE.md keys when file doesn't exist."""
+    info = get_version_info(sandbox_path=tmp_path)
+
+    assert "claude_md_sha256" not in info
+    assert "claude_md_size_bytes" not in info
+
+
+# ==================== Agent Config on EvaluationResult Tests ====================
+
+
+def test_evaluation_result_agent_config_default():
+    """Test that EvaluationResult.agent_config defaults to None."""
+    from datetime import datetime
+
+    from coder_eval.models import AgentKind, EvaluationResult
+
+    result = EvaluationResult(
+        task_id="test",
+        task_description="test",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="SUCCESS",
+        iteration_count=1,
+    )
+
+    assert result.agent_config is None
+
+
+def test_evaluation_result_agent_config_set():
+    """Test that EvaluationResult.agent_config can be set from AgentConfig."""
+    from datetime import datetime
+
+    from coder_eval.models import AgentConfig, AgentKind, EvaluationResult
+
+    config = AgentConfig(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="bypassPermissions",
+        allowed_tools=["Read", "Write"],
+        model="claude-sonnet-4-5-20250514",
+    )
+
+    result = EvaluationResult(
+        task_id="test",
+        task_description="test",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="SUCCESS",
+        iteration_count=1,
+        agent_config=config,
+    )
+
+    assert result.agent_config is not None
+    assert result.agent_config.permission_mode == "bypassPermissions"
+    assert result.agent_config.allowed_tools == ["Read", "Write"]
+    assert result.agent_config.model == "claude-sonnet-4-5-20250514"
+
+
+def test_evaluation_result_serialization_roundtrip_with_agent_config():
+    """Test that EvaluationResult with agent_config survives JSON roundtrip."""
+    from datetime import datetime
+
+    from coder_eval.models import AgentConfig, AgentKind, EvaluationResult
+
+    config = AgentConfig(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+        allowed_tools=["Read"],
+        model="claude-sonnet-4-5-20250514",
+    )
+
+    original = EvaluationResult(
+        task_id="roundtrip_test",
+        task_description="test",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime(2025, 1, 1, 12, 0, 0),
+        final_status="SUCCESS",
+        iteration_count=1,
+        agent_config=config,
+    )
+
+    # Serialize and deserialize
+    json_str = original.model_dump_json()
+    restored = EvaluationResult.model_validate_json(json_str)
+
+    assert restored.agent_config is not None
+    assert restored.agent_config.type == AgentKind.CLAUDE_CODE
+    assert restored.agent_config.permission_mode == "acceptEdits"
+    assert restored.agent_config.allowed_tools == ["Read"]
+    assert restored.agent_config.model == "claude-sonnet-4-5-20250514"
+
+
+def test_evaluation_result_backward_compat_without_agent_config():
+    """Test that old JSON without agent_config still deserializes."""
+    from coder_eval.models import EvaluationResult
+
+    # JSON from before agent_config existed (no agent_config field)
+    old_json = """{
+        "task_id": "old_task",
+        "task_description": "old test",
+        "agent_type": "claude-code",
+        "started_at": "2025-01-01T12:00:00",
+        "final_status": "SUCCESS",
+        "iteration_count": 1
+    }"""
+
+    result = EvaluationResult.model_validate_json(old_json)
+
+    assert result.agent_config is None
+    assert result.task_id == "old_task"
+
+
+# ==================== Batch Error Mapping After Tag Filter Tests ====================
+
+
+def test_batch_error_mapping_after_tag_filter(tmp_path):
+    """Test that batch error results map to correct task file after tag filtering."""
+    from datetime import datetime
+
+    from coder_eval.models import AgentKind, EvaluationResult
+    from coder_eval.orchestration.batch import _create_error_result
+
+    # Simulate: 3 original tasks, filter removes task 0, leaving tasks 1 and 2
+    # If task 1 (index 0 in filtered list) errors, it should map to task_b, not task_a
+
+    task_a_result = {
+        "task_id": "task_b",
+        "result": EvaluationResult(
+            task_id="task_b",
+            task_description="Task B",
+            agent_type=AgentKind.CLAUDE_CODE,
+            started_at=datetime.now(),
+            final_status="SUCCESS",
+            iteration_count=1,
+        ),
+        "duration": 10.0,
+    }
+
+    task_b_error = _create_error_result(Path("task_c.yaml"), ValueError("Task C failed"))
+
+    # Both should have correct task IDs regardless of original ordering
+    assert task_a_result["task_id"] == "task_b"
+    assert task_b_error["task_id"] == "task_c"  # stem of the yaml file
+
+
+def test_generate_run_summary_includes_agent_config(tmp_path):
+    """Test that _generate_run_summary includes agent_config in task results."""
+    from datetime import datetime
+
+    from coder_eval.models import AgentConfig, AgentKind, EvaluationResult
+    from coder_eval.orchestration.batch import _generate_run_summary
+
+    config = AgentConfig(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+        model="claude-sonnet-4-5-20250514",
+    )
+
+    results = [
+        {
+            "task_id": "task1",
+            "result": EvaluationResult(
+                task_id="task1",
+                task_description="Test",
+                agent_type=AgentKind.CLAUDE_CODE,
+                started_at=datetime.now(),
+                final_status="SUCCESS",
+                iteration_count=1,
+                agent_config=config,
+            ),
+            "duration": 10.0,
+        },
+    ]
+
+    summary = _generate_run_summary(
+        run_dir=tmp_path,
+        task_results=results,
+        start_time=datetime.now(),
+        end_time=datetime.now(),
+    )
+
+    # Verify agent_config is included in task results
+    assert len(summary.task_results) == 1
+    task_result = summary.task_results[0]
+    assert task_result["agent_config"] is not None
+    assert task_result["agent_config"]["permission_mode"] == "acceptEdits"
+    assert task_result["agent_config"]["model"] == "claude-sonnet-4-5-20250514"
+
+
+def test_generate_run_summary_agent_config_none(tmp_path):
+    """Test that _generate_run_summary handles None agent_config."""
+    from datetime import datetime
+
+    from coder_eval.models import AgentKind, EvaluationResult
+    from coder_eval.orchestration.batch import _generate_run_summary
+
+    results = [
+        {
+            "task_id": "task1",
+            "result": EvaluationResult(
+                task_id="task1",
+                task_description="Test",
+                agent_type=AgentKind.CLAUDE_CODE,
+                started_at=datetime.now(),
+                final_status="ERROR",
+                iteration_count=0,
+            ),
+            "duration": 0.0,
+        },
+    ]
+
+    summary = _generate_run_summary(
+        run_dir=tmp_path,
+        task_results=results,
+        start_time=datetime.now(),
+        end_time=datetime.now(),
+    )
+
+    assert summary.task_results[0]["agent_config"] is None
+
+
+# ==================== SDK Options Dump Tests ====================
+
+
+def test_dump_sdk_options_basic():
+    """Test _dump_sdk_options with a real ClaudeAgentOptions instance."""
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    from coder_eval.agents.claude_code_agent import _dump_sdk_options
+
+    options = ClaudeAgentOptions(
+        cwd="/tmp/test",
+        permission_mode="bypassPermissions",
+        allowed_tools=["Read", "Write"],
+        model="claude-sonnet-4-5-20250514",
+    )
+
+    dump = _dump_sdk_options(options)
+
+    assert isinstance(dump, dict)
+    assert dump["cwd"] == "/tmp/test"
+    assert dump["permission_mode"] == "bypassPermissions"
+    assert dump["allowed_tools"] == ["Read", "Write"]
+    assert dump["model"] == "claude-sonnet-4-5-20250514"
+
+
+def test_dump_sdk_options_excludes_callables():
+    """Test that _dump_sdk_options skips callable fields like stderr."""
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    from coder_eval.agents.claude_code_agent import _dump_sdk_options
+
+    def my_stderr(line: str) -> None:
+        pass
+
+    options = ClaudeAgentOptions(
+        cwd="/tmp/test",
+        stderr=my_stderr,
+    )
+
+    dump = _dump_sdk_options(options)
+
+    # stderr is a callable and should be excluded
+    assert "stderr" not in dump
+
+
+def test_dump_sdk_options_includes_defaults():
+    """Test that _dump_sdk_options includes fields with default values."""
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    from coder_eval.agents.claude_code_agent import _dump_sdk_options
+
+    options = ClaudeAgentOptions(cwd="/tmp/test")
+
+    dump = _dump_sdk_options(options)
+
+    # Should include fields with default values
+    assert "max_turns" in dump
+    assert "model" in dump
+    assert "thinking" in dump
+    assert "effort" in dump
+    assert "mcp_servers" in dump
+
+
+def test_dump_sdk_options_converts_path():
+    """Test that _dump_sdk_options converts Path objects to strings."""
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    from coder_eval.agents.claude_code_agent import _dump_sdk_options
+
+    options = ClaudeAgentOptions(cwd=Path("/tmp/test"))
+
+    dump = _dump_sdk_options(options)
+
+    assert isinstance(dump["cwd"], str)
+    assert dump["cwd"] == "/tmp/test"
+
+
+def test_dump_sdk_options_handles_nested_dataclasses():
+    """Test that _dump_sdk_options recursively serializes nested dataclasses.
+
+    This test verifies that HookMatcher (a dataclass with callable fields)
+    and AgentDefinition (a dataclass with string fields) are properly
+    handled without crashing Pydantic serialization.
+    """
+    import json
+
+    from claude_agent_sdk import ClaudeAgentOptions
+    from claude_agent_sdk.types import AgentDefinition, HookMatcher
+
+    from coder_eval.agents.claude_code_agent import _dump_sdk_options
+
+    async def my_hook(input, output, ctx):
+        return {"action": "allow"}
+
+    options = ClaudeAgentOptions(
+        cwd="/tmp/test",
+        hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[my_hook], timeout=30.0)]},
+        agents={"helper": AgentDefinition(description="test agent", prompt="do stuff")},
+    )
+
+    dump = _dump_sdk_options(options)
+
+    # Hooks should be recursively serialized, with callables stripped
+    assert "hooks" in dump
+    hook_list = dump["hooks"]["PreToolUse"]
+    assert len(hook_list) == 1
+    assert hook_list[0]["matcher"] == "Bash"
+    assert hook_list[0]["timeout"] == 30.0
+    # Callable hooks inside HookMatcher should be stripped (empty list)
+    assert hook_list[0]["hooks"] == []
+
+    # AgentDefinition should be recursively converted to dict
+    assert "agents" in dump
+    assert dump["agents"]["helper"]["description"] == "test agent"
+    assert dump["agents"]["helper"]["prompt"] == "do stuff"
+
+    # The entire dump must be JSON-serializable
+    json.dumps(dump)
+
+    # And Pydantic-serializable (the actual serialization path)
+    from typing import Any
+
+    from pydantic import BaseModel
+
+    class TestModel(BaseModel):
+        sdk_options: dict[str, Any] | None = None
+
+    m = TestModel(sdk_options=dump)
+    m.model_dump_json()  # Must not raise
+
+
+def test_evaluation_result_sdk_options_default():
+    """Test that EvaluationResult.sdk_options defaults to None."""
+    from datetime import datetime
+
+    from coder_eval.models import AgentKind, EvaluationResult
+
+    result = EvaluationResult(
+        task_id="test",
+        task_description="test",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="SUCCESS",
+        iteration_count=1,
+    )
+
+    assert result.sdk_options is None
+
+
+def test_evaluation_result_serialization_roundtrip_with_sdk_options():
+    """Test that EvaluationResult with sdk_options survives JSON roundtrip."""
+    from datetime import datetime
+
+    from coder_eval.models import EvaluationResult
+
+    original = EvaluationResult(
+        task_id="roundtrip_sdk",
+        task_description="test",
+        agent_type="claude-code",
+        started_at=datetime(2025, 1, 1, 12, 0, 0),
+        final_status="SUCCESS",
+        iteration_count=1,
+        sdk_options={
+            "cwd": "/tmp/test",
+            "permission_mode": "bypassPermissions",
+            "allowed_tools": ["Read"],
+            "model": "claude-sonnet-4-5-20250514",
+            "max_turns": None,
+            "thinking": None,
+            "effort": None,
+            "mcp_servers": {},
+        },
+    )
+
+    json_str = original.model_dump_json()
+    restored = EvaluationResult.model_validate_json(json_str)
+
+    assert restored.sdk_options is not None
+    assert restored.sdk_options["cwd"] == "/tmp/test"
+    assert restored.sdk_options["permission_mode"] == "bypassPermissions"
+    assert restored.sdk_options["allowed_tools"] == ["Read"]
+    assert restored.sdk_options["model"] == "claude-sonnet-4-5-20250514"
+    assert restored.sdk_options["max_turns"] is None
+
+
+def test_evaluation_result_backward_compat_without_sdk_options():
+    """Test that old JSON without sdk_options still deserializes."""
+    from coder_eval.models import EvaluationResult
+
+    old_json = """{
+        "task_id": "old_task",
+        "task_description": "old test",
+        "agent_type": "claude-code",
+        "started_at": "2025-01-01T12:00:00",
+        "final_status": "SUCCESS",
+        "iteration_count": 1
+    }"""
+
+    result = EvaluationResult.model_validate_json(old_json)
+
+    assert result.sdk_options is None
+    assert result.task_id == "old_task"
+
+
+def test_generate_run_summary_includes_sdk_options(tmp_path):
+    """Test that _generate_run_summary includes sdk_options in task results."""
+    from datetime import datetime
+
+    from coder_eval.models import AgentKind, EvaluationResult
+    from coder_eval.orchestration.batch import _generate_run_summary
+
+    sdk_opts = {
+        "cwd": "/tmp/sandbox",
+        "permission_mode": "bypassPermissions",
+        "allowed_tools": [],
+        "model": "claude-sonnet-4-5-20250514",
+        "max_turns": 50,
+        "thinking": None,
+    }
+
+    results = [
+        {
+            "task_id": "task1",
+            "result": EvaluationResult(
+                task_id="task1",
+                task_description="Test",
+                agent_type=AgentKind.CLAUDE_CODE,
+                started_at=datetime.now(),
+                final_status="SUCCESS",
+                iteration_count=1,
+                sdk_options=sdk_opts,
+            ),
+            "duration": 10.0,
+        },
+    ]
+
+    summary = _generate_run_summary(
+        run_dir=tmp_path,
+        task_results=results,
+        start_time=datetime.now(),
+        end_time=datetime.now(),
+    )
+
+    assert summary.task_results[0]["sdk_options"] is not None
+    assert summary.task_results[0]["sdk_options"]["permission_mode"] == "bypassPermissions"
+    assert summary.task_results[0]["sdk_options"]["max_turns"] == 50
+
+
+def test_claude_code_agent_get_sdk_options_before_communicate():
+    """Test that get_sdk_options returns None before communicate() is called."""
+    from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
+    from coder_eval.models import AgentConfig, AgentKind
+
+    agent = ClaudeCodeAgent(AgentConfig(type=AgentKind.CLAUDE_CODE))
+
+    assert agent.get_sdk_options() is None

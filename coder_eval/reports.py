@@ -231,6 +231,51 @@ class ReportGenerator:
                 lines.extend(["", ""])
                 lines.extend(ReportGenerator._generate_command_statistics_section(aggregated_stats))
 
+        # Agent Settings section — prefer sdk_options (full SDK dump), fall back to agent_config
+        sdk_opts_list = [t["sdk_options"] for t in summary.task_results if t.get("sdk_options")]
+        agent_configs = [t["agent_config"] for t in summary.task_results if t.get("agent_config")]
+        settings_source: dict[str, Any] | None = None
+        is_sdk = False
+        if sdk_opts_list:
+            settings_source = sdk_opts_list[0]
+            is_sdk = True
+        elif agent_configs:
+            settings_source = agent_configs[0]
+
+        if settings_source:
+            lines.extend(["", "## Agent Settings", ""])
+            # Common fields (shared between sdk_options and agent_config)
+            lines.append(f"- **Permission Mode**: {settings_source.get('permission_mode', 'N/A')}")
+            tools = settings_source.get("allowed_tools")
+            lines.append(f"- **Allowed Tools**: {', '.join(tools) if tools else '(all)'}")
+            model = settings_source.get("model")
+            if model:
+                lines.append(f"- **Model**: {model}")
+
+            # Additional SDK-specific fields (only when using sdk_options and non-default)
+            if is_sdk:
+                if settings_source.get("max_turns") is not None:
+                    lines.append(f"- **Max Turns**: {settings_source['max_turns']}")
+                if settings_source.get("max_budget_usd") is not None:
+                    lines.append(f"- **Max Budget (USD)**: {settings_source['max_budget_usd']}")
+                if settings_source.get("thinking") is not None:
+                    lines.append(f"- **Thinking**: {settings_source['thinking']}")
+                if settings_source.get("effort") is not None:
+                    lines.append(f"- **Effort**: {settings_source['effort']}")
+                if settings_source.get("mcp_servers"):
+                    mcp = settings_source["mcp_servers"]
+                    if isinstance(mcp, dict):
+                        lines.append(f"- **MCP Servers**: {', '.join(mcp.keys())}")
+                    else:
+                        lines.append(f"- **MCP Servers**: {mcp}")
+                if settings_source.get("betas"):
+                    lines.append(f"- **Betas**: {', '.join(settings_source['betas'])}")
+                if settings_source.get("system_prompt") is not None:
+                    prompt_str = str(settings_source["system_prompt"]).replace("\n", " ")
+                    if len(prompt_str) > 200:
+                        prompt_str = prompt_str[:200] + "..."
+                    lines.append(f"- **System Prompt**: {prompt_str}")
+
         lines.extend(
             [
                 "",
