@@ -8,14 +8,14 @@ agent:
 
 sandbox:
   driver: tempdir
-  python_version: "3.13"
+  python:
+    env_packages:
+      - uipath-langchain>=0.0.140
+      - pydantic>=2.0
+      - python-dotenv>=1.0
   template_sources:
     - type: template_dir
       path: "../templates/uipath-starter"
-  env_packages:
-    - uipath-langchain>=0.0.140
-    - pydantic>=2.0
-    - python-dotenv>=1.0
 
 initial_prompt: |
   Can you create a simple UiPath agent that summarizes text using a simple LangChain interface?

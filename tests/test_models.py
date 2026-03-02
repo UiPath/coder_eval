@@ -58,7 +58,6 @@ class TestSandboxConfigValidation:
         with pytest.raises(ValueError, match="Only one RepoSource is allowed"):
             SandboxConfig(
                 driver="tempdir",
-                python_version="3.13",
                 template_sources=[
                     RepoSource(url="https://github.com/user/repo1.git"),
                     RepoSource(url="https://github.com/user/repo2.git"),
@@ -70,7 +69,6 @@ class TestSandboxConfigValidation:
         with tempfile.TemporaryDirectory() as tmpdir, pytest.raises(ValueError, match="Only one RepoSource is allowed"):
             SandboxConfig(
                 driver="tempdir",
-                python_version="3.13",
                 template_sources=[
                     RepoSource(url="https://github.com/user/repo1.git"),
                     TemplateDirSource(path=str(Path(tmpdir) / "template")),
@@ -83,7 +81,6 @@ class TestSandboxConfigValidation:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = SandboxConfig(
                 driver="tempdir",
-                python_version="3.13",
                 template_sources=[
                     RepoSource(url="https://github.com/user/repo.git"),
                     TemplateDirSource(path=str(Path(tmpdir) / "template")),
@@ -101,7 +98,6 @@ class TestSandboxConfigValidation:
         ):
             SandboxConfig(
                 driver="tempdir",
-                python_version="3.13",
                 template_sources=[
                     TemplateDirSource(path=str(Path(tmpdir) / "template")),
                     RepoSource(url="https://github.com/user/repo.git"),

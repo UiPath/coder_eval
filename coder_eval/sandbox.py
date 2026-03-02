@@ -72,12 +72,13 @@ class Sandbox:
         # Setup template content (repo, directory, or inline files)
         self._setup_template()
 
-        # Set up Python virtual environment
-        self._setup_virtualenv()
+        # Set up Python virtual environment (only if python config is provided)
+        if self.config.python:
+            self._setup_virtualenv()
 
-        # Install required packages
-        if self.config.env_packages:
-            self._install_packages()
+            # Install required packages
+            if self.config.python.env_packages:
+                self._install_packages()
 
         return self.sandbox_dir
 
@@ -251,7 +252,7 @@ class Sandbox:
 
     def _install_packages(self) -> None:
         """Install required Python packages in the virtual environment."""
-        if not self.config.env_packages or not self.venv_dir:
+        if not self.config.python or not self.config.python.env_packages or not self.venv_dir:
             return
 
         # Get path to pip in the virtual environment
@@ -261,13 +262,13 @@ class Sandbox:
         try:
             subprocess.run(["uv", "--version"], check=True, capture_output=True, timeout=5)
             # Use uv pip for faster installation
-            cmd = ["uv", "pip", "install", *self.config.env_packages]
+            cmd = ["uv", "pip", "install", *self.config.python.env_packages]
             env = os.environ.copy()
             env["VIRTUAL_ENV"] = str(self.venv_dir)
             env["PATH"] = f"{self.venv_dir / 'bin'}:{env['PATH']}"
         except (subprocess.CalledProcessError, FileNotFoundError):
             # Fallback to regular pip
-            cmd = [str(pip_path), "install", *self.config.env_packages]
+            cmd = [str(pip_path), "install", *self.config.python.env_packages]
             env = None
 
         try:

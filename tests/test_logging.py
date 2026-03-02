@@ -349,7 +349,7 @@ class TestLogPersistence:
         setup_logging(level="INFO")  # Console at INFO
 
         task_log = tmp_path / "task.log"
-        config = SandboxConfig(driver="tempdir", python_version="3.13", env_packages=[], network_enabled=False)
+        config = SandboxConfig(driver="tempdir", network_enabled=False)
         sandbox = Sandbox(config, task_id="integration_test")
 
         try:

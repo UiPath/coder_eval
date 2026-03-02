@@ -385,7 +385,7 @@ agent:
   type: claude-code
 sandbox:
   driver: tempdir
-  python_version: "3.13"
+  python: {{}}
 success_criteria:
   - type: file_exists
     path: test.txt

@@ -101,10 +101,10 @@ agent:
 ```yaml
 sandbox:
   driver: "tempdir"                   # Sandbox type ("tempdir" or "docker")
-  python_version: "3.13"             # Python version for venv
-  env_packages:                       # Packages to install in sandbox venv
-    - pytest
-    - pylint>=3.0
+  python:                              # Python env config (null to skip venv)
+    env_packages:                      # Packages to install in sandbox venv
+      - pytest
+      - pylint>=3.0
   network_enabled: false              # Network access (default: false)
   template_sources: [ ... ]           # Optional: preset files (see below)
   snapshots: { ... }                  # Optional: snapshot config (see below)
@@ -307,7 +307,7 @@ Runs pylint and evaluates code quality. **Continuous scoring:** pylint score (0â
 
 **Notes:**
 - `min_score` (0â€“10 scale) overrides `pass_threshold` when both are set
-- Install pylint in sandbox: `env_packages: [pylint>=3.0]`
+- Install pylint in sandbox: `python: { env_packages: [pylint>=3.0] }`
 
 ### `reference_comparison`
 
@@ -460,13 +460,13 @@ agent:
 
 sandbox:
   driver: "tempdir"
-  python_version: "3.13"
+  python:
+    env_packages:
+      - pytest
+      - pylint>=3.0
   template_sources:
     - type: "template_dir"
       path: "../templates/python-starter"
-  env_packages:
-    - pytest
-    - pylint>=3.0
   snapshots:
     mode: "hybrid"
     checkpoint_frequency: 3

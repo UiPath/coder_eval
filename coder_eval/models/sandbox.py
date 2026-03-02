@@ -58,12 +58,20 @@ class SnapshotManifest(BaseModel):
     )
 
 
+class PythonEnvConfig(BaseModel):
+    """Configuration for the Python virtual environment in the sandbox."""
+
+    env_packages: list[str] = Field(default_factory=list, description="Packages to install")
+
+
 class SandboxConfig(BaseModel):
     """Configuration for the sandboxed execution environment."""
 
     driver: Literal["tempdir"] = Field(default="tempdir", description="Sandbox driver type (only tempdir supported)")
-    python_version: str = Field(default="3.13", description="Python version to use in the sandbox")
-    env_packages: list[str] = Field(default_factory=list, description="Python packages to install in the environment")
+    python: PythonEnvConfig | None = Field(
+        default_factory=PythonEnvConfig,
+        description="Python environment config; set to null in YAML (or None in Python) to skip venv creation",
+    )
     network_enabled: bool = Field(default=False, description="Whether network access is enabled")
     limits: ResourceLimits = Field(default_factory=ResourceLimits, description="Resource limits for execution")
 

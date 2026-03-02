@@ -23,7 +23,6 @@ class TestTemplateDir:
             template_sources=[
                 TemplateDirSource(path=str(template_dir)),
             ],
-            python_version="3.13",
         )
         sandbox = Sandbox(config, task_id="test-template")
 
@@ -55,7 +54,6 @@ class TestTemplateDir:
             template_sources=[
                 TemplateDirSource(path=str(template_dir)),
             ],
-            python_version="3.13",
         )
         sandbox = Sandbox(config, task_id="test-nested")
 
@@ -76,7 +74,6 @@ class TestTemplateDir:
             template_sources=[
                 TemplateDirSource(path=str(tmp_path / "nonexistent")),
             ],
-            python_version="3.13",
         )
         sandbox = Sandbox(config, task_id="test-notfound")
 
@@ -101,7 +98,6 @@ class TestTemplateIgnorePatterns:
             template_sources=[
                 TemplateDirSource(path=str(template_dir)),
             ],
-            python_version="3.13",
         )
         sandbox = Sandbox(config, task_id="test-ignore-venv")
 
@@ -133,7 +129,6 @@ class TestTemplateIgnorePatterns:
             template_sources=[
                 TemplateDirSource(path=str(template_dir)),
             ],
-            python_version="3.13",
         )
         sandbox = Sandbox(config, task_id="test-ignore-git")
 
@@ -161,7 +156,6 @@ class TestTemplateIgnorePatterns:
             template_sources=[
                 TemplateDirSource(path=str(template_dir)),
             ],
-            python_version="3.13",
         )
         sandbox = Sandbox(config, task_id="test-ignore-pycache")
 
@@ -184,7 +178,6 @@ class TestStarterFiles:
         """Test creating single inline file."""
         config = SandboxConfig(
             driver="tempdir",
-            python_version="3.13",
             template_sources=[
                 StarterFilesSource(
                     files=[
@@ -208,7 +201,6 @@ class TestStarterFiles:
         """Test creating multiple files with subdirectories."""
         config = SandboxConfig(
             driver="tempdir",
-            python_version="3.13",
             template_sources=[
                 StarterFilesSource(
                     files=[
@@ -236,7 +228,6 @@ class TestStarterFiles:
         """Test that path traversal is rejected."""
         config = SandboxConfig(
             driver="tempdir",
-            python_version="3.13",
             template_sources=[
                 StarterFilesSource(
                     files=[
@@ -264,7 +255,6 @@ class TestIntegration:
         # Create sandbox and verify agent can work with template files
         config = SandboxConfig(
             driver="tempdir",
-            python_version="3.13",
             template_sources=[
                 TemplateDirSource(path=str(template_dir)),
             ],
@@ -293,7 +283,6 @@ class TestIntegration:
         """Test that agent can write to files from template."""
         config = SandboxConfig(
             driver="tempdir",
-            python_version="3.13",
             template_sources=[
                 StarterFilesSource(
                     files=[
@@ -345,7 +334,6 @@ class TestMultiSourceTemplates:
         # Create sandbox with multiple sources (last wins)
         config = SandboxConfig(
             driver="tempdir",
-            python_version="3.13",
             template_sources=[
                 TemplateDirSource(path=str(base_template)),
                 TemplateDirSource(path=str(override_template)),
@@ -379,7 +367,6 @@ class TestMultiSourceTemplates:
         # Create sandbox with template + starter files
         config = SandboxConfig(
             driver="tempdir",
-            python_version="3.13",
             template_sources=[
                 TemplateDirSource(path=str(template_dir)),
                 StarterFilesSource(
@@ -420,7 +407,6 @@ class TestMultiSourceTemplates:
 
         config = SandboxConfig(
             driver="tempdir",
-            python_version="3.13",
             template_sources=[
                 TemplateDirSource(path=str(template1)),
                 TemplateDirSource(path=str(template2)),
@@ -455,7 +441,6 @@ class TestMultiSourceValidation:
         with pytest.raises(ValueError, match="RepoSource must be the first element"):
             SandboxConfig(
                 driver="tempdir",
-                python_version="3.13",
                 template_sources=[
                     TemplateDirSource(path=str(template_dir)),
                     RepoSource(url="https://github.com/test/repo.git"),
@@ -470,7 +455,6 @@ class TestMultiSourceValidation:
         # RepoSource first - should be valid
         config = SandboxConfig(
             driver="tempdir",
-            python_version="3.13",
             template_sources=[
                 RepoSource(url="https://github.com/test/repo.git"),
                 TemplateDirSource(path=str(template_dir)),
@@ -496,7 +480,6 @@ class TestMultiSourceValidation:
 
             config = SandboxConfig(
                 driver="tempdir",
-                python_version="3.13",
                 template_sources=sources,
             )
 
@@ -525,7 +508,6 @@ class TestMultiSourcePathResolution:
         # Use relative paths in config
         config = SandboxConfig(
             driver="tempdir",
-            python_version="3.13",
             template_sources=[
                 TemplateDirSource(path="../templates/base"),  # Relative
             ],
@@ -562,7 +544,6 @@ class TestMultiSourcePathResolution:
         # Mix of relative and absolute
         config = SandboxConfig(
             driver="tempdir",
-            python_version="3.13",
             template_sources=[
                 TemplateDirSource(path="../templates/base"),  # Relative
                 TemplateDirSource(path=str(template2.resolve())),  # Absolute

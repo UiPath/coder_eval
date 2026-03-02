@@ -11,8 +11,7 @@ agent:
 
 sandbox:
   driver: "tempdir"
-  python_version: "3.13"
-  env_packages: []
+  python: {}
   network_enabled: false
 
 success_criteria:

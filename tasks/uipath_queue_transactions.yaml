@@ -8,13 +8,13 @@ agent:
 
 sandbox:
   driver: tempdir
-  python_version: "3.13"
+  python:
+    env_packages:
+      - uipath>=2.1.75
+      - python-dotenv>=1.0
   template_sources:
     - type: template_dir
       path: "../templates/uipath-starter"
-  env_packages:
-    - uipath>=2.1.75
-    - python-dotenv>=1.0
 
 initial_prompt: |
   Create a Python script (queue_transactions.py) that demonstrates transaction-based queue processing.

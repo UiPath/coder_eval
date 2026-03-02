@@ -8,7 +8,10 @@ agent:
 
 sandbox:
   driver: tempdir
-  python_version: "3.13"
+  python:
+    env_packages:
+      - python-dateutil>=2.8.0
+      - pytest>=8.0
   template_sources:
     - type: starter_files
       files:
@@ -28,10 +31,6 @@ sandbox:
           content: |
             python-dateutil>=2.8.0
             pytest>=8.0
-
-  env_packages:
-    - python-dateutil>=2.8.0
-    - pytest>=8.0
 
 initial_prompt: |
   Create a date_formatter.py module with a format_date() function.

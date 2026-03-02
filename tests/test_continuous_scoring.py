@@ -394,7 +394,9 @@ def test_fail():
     assert False
 """)
 
-        config = SandboxConfig(driver="tempdir", env_packages=["pytest"])
+        from coder_eval.models import PythonEnvConfig
+
+        config = SandboxConfig(driver="tempdir", python=PythonEnvConfig(env_packages=["pytest"]))
         sandbox = Sandbox(config=config, task_id="test")
         sandbox.sandbox_dir = sandbox_dir
         sandbox._setup_virtualenv()

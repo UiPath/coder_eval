@@ -8,12 +8,12 @@ agent:
 
 sandbox:
   driver: tempdir
-  python_version: "3.13"
+  python:
+    env_packages:
+      - pytest
   template_sources:
     - type: template_dir
       path: "../templates/fibonacci-starter"
-  env_packages:
-    - pytest
 
 initial_prompt: |
   Implement the fibonacci function in src/main.py.

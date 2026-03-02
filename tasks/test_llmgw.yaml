@@ -10,7 +10,7 @@ agent:
 
 sandbox:
   driver: tempdir
-  python_version: "3.13"
+  python: {}
   template_sources:
     - type: starter_files
       files:

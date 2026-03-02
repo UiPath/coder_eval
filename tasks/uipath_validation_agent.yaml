@@ -8,13 +8,13 @@ agent:
 
 sandbox:
   driver: tempdir
-  python_version: "3.13"
+  python:
+    env_packages:
+      - pydantic>=2.0
+      - python-dotenv>=1.0
   template_sources:
     - type: template_dir
       path: "../templates/uipath-starter"
-  env_packages:
-    - pydantic>=2.0
-    - python-dotenv>=1.0
 
 initial_prompt: |
   Create a data validation agent that validates email addresses and phone numbers.

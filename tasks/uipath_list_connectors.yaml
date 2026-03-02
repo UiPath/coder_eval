@@ -9,8 +9,7 @@ agent:
 
 sandbox:
   driver: tempdir
-  python_version: "3.13"
-  env_packages: []
+  python: {}
 
 initial_prompt: |
   Use the `uipcli` CLI tool to list all available UiPath Integration Service connectors
