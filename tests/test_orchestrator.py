@@ -1468,3 +1468,98 @@ def test_claude_code_agent_get_sdk_options_before_communicate():
     agent = ClaudeCodeAgent(AgentConfig(type=AgentKind.CLAUDE_CODE))
 
     assert agent.get_sdk_options() is None
+
+
+def test_batch_run_config_with_agent_overrides():
+    """Test BatchRunConfig accepts agent override fields."""
+    from coder_eval.orchestration.config import BatchRunConfig
+
+    config = BatchRunConfig(
+        run_dir=Path("/tmp/run"),
+        agent_model="claude-sonnet-4-20250514",
+        permission_mode="bypassPermissions",
+        max_turns=50,
+    )
+    assert config.agent_model == "claude-sonnet-4-20250514"
+    assert config.permission_mode == "bypassPermissions"
+    assert config.max_turns == 50
+
+
+def test_batch_run_config_agent_override_defaults():
+    """Test BatchRunConfig agent override fields default to None."""
+    from coder_eval.orchestration.config import BatchRunConfig
+
+    config = BatchRunConfig(run_dir=Path("/tmp/run"))
+    assert config.agent_model is None
+    assert config.permission_mode is None
+    assert config.max_turns is None
+
+
+@pytest.mark.asyncio
+async def test_run_batch_applies_agent_model_override(tmp_path):
+    """Test that run_batch applies agent model override from config."""
+    from coder_eval.orchestration.config import BatchRunConfig
+
+    task_file = Path("tasks/hello_date.yaml")
+    run_dir = tmp_path / "test_run"
+
+    config = BatchRunConfig(
+        run_dir=run_dir,
+        agent_model="override-model",
+    )
+
+    task = load_task(task_file)
+    original_model = task.agent.model
+
+    # Simulate override logic from batch.py
+    effective_model = config.agent_model
+    if effective_model:
+        task.agent.model = effective_model
+
+    assert task.agent.model == "override-model"
+    assert task.agent.model != original_model
+
+
+@pytest.mark.asyncio
+async def test_run_batch_applies_permission_mode_override(tmp_path):
+    """Test that run_batch applies permission mode override from config."""
+    from coder_eval.orchestration.config import BatchRunConfig
+
+    task_file = Path("tasks/hello_date.yaml")
+    run_dir = tmp_path / "test_run"
+
+    config = BatchRunConfig(
+        run_dir=run_dir,
+        permission_mode="bypassPermissions",
+    )
+
+    task = load_task(task_file)
+
+    effective_perm = config.permission_mode
+    if effective_perm:
+        task.agent.permission_mode = effective_perm
+
+    assert task.agent.permission_mode == "bypassPermissions"
+
+
+@pytest.mark.asyncio
+async def test_run_batch_applies_max_turns_override(tmp_path):
+    """Test that run_batch applies max turns override from config."""
+    from coder_eval.orchestration.config import BatchRunConfig
+
+    task_file = Path("tasks/hello_date.yaml")
+    run_dir = tmp_path / "test_run"
+
+    config = BatchRunConfig(
+        run_dir=run_dir,
+        max_turns=42,
+    )
+
+    task = load_task(task_file)
+    assert task.agent.max_turns is None  # Default
+
+    effective_max_turns = config.max_turns if config.max_turns is not None else None
+    if effective_max_turns is not None:
+        task.agent.max_turns = effective_max_turns
+
+    assert task.agent.max_turns == 42

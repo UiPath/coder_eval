@@ -57,7 +57,8 @@ async def run_batch(
         ... )
         >>> print(f"Success: {summary.tasks_succeeded}/{summary.tasks_run}")
     """
-    # Import Orchestrator here to avoid circular import
+    # Import here to avoid circular imports
+    from ..config import settings as app_settings
     from ..orchestrator import Orchestrator
 
     start_time = datetime.now()
@@ -68,7 +69,7 @@ async def run_batch(
         task = load_task(task_file)
 
         # Apply CLI overrides
-        if config.max_iterations:
+        if config.max_iterations is not None:
             task.max_iterations = config.max_iterations
 
         # Apply snapshot overrides (consolidated logic)
@@ -91,6 +92,21 @@ async def run_batch(
                 checkpoint_frequency=checkpoint_freq,
                 ignore_patterns=task.sandbox.snapshots.ignore_patterns,  # Preserve task-specific patterns
             )
+
+        # Apply agent overrides (CLI > .env > task YAML)
+        effective_model = config.agent_model if config.agent_model is not None else app_settings.default_agent_model
+        if effective_model is not None:
+            task.agent.model = effective_model
+
+        effective_perm = (
+            config.permission_mode if config.permission_mode is not None else app_settings.default_permission_mode
+        )
+        if effective_perm is not None:
+            task.agent.permission_mode = effective_perm  # type: ignore[assignment]  # validated by Pydantic via validate_assignment
+
+        effective_max_turns = config.max_turns if config.max_turns is not None else app_settings.default_max_turns
+        if effective_max_turns is not None:
+            task.agent.max_turns = effective_max_turns
 
         tasks.append((task_file, task))
 

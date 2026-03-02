@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind
@@ -15,6 +15,8 @@ from coder_eval.models.sandbox import SandboxConfig
 class AgentConfig(BaseModel):
     """Configuration for the coding agent."""
 
+    model_config = ConfigDict(validate_assignment=True)
+
     type: AgentKind = Field(description="The type of agent to use (claude-code, aider, etc.)")
     permission_mode: Literal["default", "acceptEdits", "plan", "bypassPermissions"] = Field(
         default="acceptEdits", description="Permission mode for agent actions"
@@ -23,6 +25,7 @@ class AgentConfig(BaseModel):
         default=None, description="List of allowed tools (e.g., ['Read', 'Write', 'Bash'])"
     )
     model: str | None = Field(default=None, description="Specific model to use (if applicable)")
+    max_turns: int | None = Field(default=None, description="Maximum agent inner-loop turns per iteration")
 
     # Customizable ignore patterns for file tracking
     additional_ignore_patterns: list[str] = Field(

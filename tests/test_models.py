@@ -50,6 +50,42 @@ def test_success_criterion_discriminated_union():
     assert criterion.type == "run_command"
 
 
+class TestAgentConfig:
+    """Tests for AgentConfig fields."""
+
+    def test_max_turns_default_none(self):
+        """Test that max_turns defaults to None."""
+        from coder_eval.models import AgentConfig, AgentKind
+
+        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        assert config.max_turns is None
+
+    def test_max_turns_set_from_yaml(self):
+        """Test that max_turns can be set (e.g., from task YAML)."""
+        from coder_eval.models import AgentConfig, AgentKind
+
+        config = AgentConfig(type=AgentKind.CLAUDE_CODE, max_turns=3)
+        assert config.max_turns == 3
+
+    def test_invalid_permission_mode_assignment_rejected(self):
+        """Test that assigning invalid permission_mode via attribute raises ValidationError."""
+        from pydantic import ValidationError
+
+        from coder_eval.models import AgentConfig, AgentKind
+
+        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        with pytest.raises(ValidationError):
+            config.permission_mode = "foobar"
+
+    def test_valid_permission_mode_assignment_accepted(self):
+        """Test that assigning valid permission_mode via attribute works."""
+        from coder_eval.models import AgentConfig, AgentKind
+
+        config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="default")
+        config.permission_mode = "bypassPermissions"
+        assert config.permission_mode == "bypassPermissions"
+
+
 class TestSandboxConfigValidation:
     """Tests for SandboxConfig validation logic."""
 

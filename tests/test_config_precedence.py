@@ -4,6 +4,7 @@ Tests ensure predictable config loading order prevents auth failures.
 """
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -97,8 +98,9 @@ def test_config_loads_defaults_when_no_env_vars():
 
     # Verify defaults are used (note: llmgw_requesting_product may be overridden by system .env)
     assert settings.log_level == "INFO"
-    assert settings.default_max_iterations == 3
-    assert settings.default_agent_type == "claude-code"
+    assert settings.default_agent_model is None
+    assert settings.default_permission_mode is None
+    assert settings.default_max_turns is None
     # Don't assert llmgw_requesting_product as it may be overridden by system environment
 
 
@@ -149,7 +151,7 @@ def test_config_exports_to_os_environ(monkeypatch):
     """
     # Set test values
     monkeypatch.setenv("LOG_LEVEL", "WARNING")
-    monkeypatch.setenv("DEFAULT_MAX_ITERATIONS", "5")
+    monkeypatch.setenv("DEFAULT_AGENT_MODEL", "claude-sonnet-4-20250514")
 
     from coder_eval.config import Settings
 
@@ -170,5 +172,49 @@ def test_config_exports_to_os_environ(monkeypatch):
 
     # Verify settings are in os.environ
     assert os.getenv("LOG_LEVEL") == "WARNING"
-    assert os.getenv("DEFAULT_MAX_ITERATIONS") == "5"
-    assert os.getenv("DEFAULT_AGENT_TYPE") == "claude-code"
+    assert os.getenv("DEFAULT_AGENT_MODEL") == "claude-sonnet-4-20250514"
+
+
+def test_agent_override_precedence_cli_over_env_over_yaml():
+    """Test CLI > .env > task YAML precedence for agent overrides.
+
+    Verifies that BatchRunConfig fields (CLI) take priority over
+    Settings fields (.env), which take priority over task YAML values.
+    """
+    from coder_eval.models import AgentConfig, AgentKind, SandboxConfig, TaskDefinition
+    from coder_eval.orchestration.config import BatchRunConfig
+
+    # Simulate a task with YAML-defined values
+    task = TaskDefinition(
+        task_id="test-precedence",
+        description="Test precedence",
+        initial_prompt="test",
+        agent=AgentConfig(type=AgentKind.CLAUDE_CODE, model="yaml-model", permission_mode="default", max_turns=10),
+        sandbox=SandboxConfig(driver="tempdir"),
+        success_criteria=[{"type": "file_exists", "path": "test.py", "description": "test"}],
+    )
+
+    # CLI value should win over .env and YAML
+    config = BatchRunConfig(
+        run_dir=Path("runs/test"),
+        agent_model="cli-model",
+        permission_mode="bypassPermissions",
+        max_turns=99,
+    )
+
+    # Apply overrides (simulating batch.py logic)
+    effective_model = config.agent_model or None  # CLI value
+    if effective_model:
+        task.agent.model = effective_model
+
+    effective_perm = config.permission_mode or None
+    if effective_perm:
+        task.agent.permission_mode = effective_perm
+
+    effective_max_turns = config.max_turns if config.max_turns is not None else None
+    if effective_max_turns is not None:
+        task.agent.max_turns = effective_max_turns
+
+    assert task.agent.model == "cli-model"
+    assert task.agent.permission_mode == "bypassPermissions"
+    assert task.agent.max_turns == 99

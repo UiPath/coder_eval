@@ -81,6 +81,23 @@ def run_command(
         "--exclude-tags",
         help="Skip tasks matching any of these tags (comma-separated, e.g., 'example,integration')",
     ),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        "-m",
+        help="Override agent model for all tasks (e.g., claude-sonnet-4-20250514)",
+    ),
+    permission_mode: str | None = typer.Option(
+        None,
+        "--permission-mode",
+        help="Override permission mode for all tasks (default/acceptEdits/plan/bypassPermissions)",
+    ),
+    max_turns: int | None = typer.Option(
+        None,
+        "--max-turns",
+        help="Override max agent inner-loop turns per iteration for all tasks",
+        min=1,
+    ),
 ) -> None:
     """Run evaluation tasks (optionally in parallel).
 
@@ -104,6 +121,14 @@ def run_command(
 
         coder-eval run tasks/*.yaml --tags golden,basic --exclude-tags example
     """
+    # Validate permission mode early for clear error message
+    if permission_mode is not None:
+        allowed_modes = {"default", "acceptEdits", "plan", "bypassPermissions"}
+        if permission_mode not in allowed_modes:
+            raise typer.BadParameter(
+                f"Invalid --permission-mode '{permission_mode}'. Choose from: {', '.join(sorted(allowed_modes))}."
+            )
+
     # Parse tag filters
     include_tags = {t.strip() for t in tags.split(",") if t.strip()} if tags else None
     exclude_tags_set = {t.strip() for t in exclude_tags.split(",") if t.strip()} if exclude_tags else None
@@ -124,6 +149,9 @@ def run_command(
             snapshot_checkpoint_freq,
             include_tags,
             exclude_tags_set,
+            model,
+            permission_mode,
+            max_turns,
         )
     )
 
@@ -138,6 +166,9 @@ async def _run_all_tasks(
     snapshot_checkpoint_freq: int | None,
     include_tags: set[str] | None = None,
     exclude_tags: set[str] | None = None,
+    agent_model: str | None = None,
+    permission_mode: str | None = None,
+    max_turns: int | None = None,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -155,6 +186,9 @@ async def _run_all_tasks(
         snapshot_checkpoint_freq: Optional override for checkpoint frequency
         include_tags: Only run tasks matching any of these tags
         exclude_tags: Skip tasks matching any of these tags
+        agent_model: Optional override for agent model
+        permission_mode: Optional override for permission mode
+        max_turns: Optional override for max agent turns
     """
     # Prepare run directory
     run_dir = prepare_run_directory(run_dir)
@@ -175,6 +209,9 @@ async def _run_all_tasks(
         snapshot_checkpoint_freq=snapshot_checkpoint_freq,
         include_tags=include_tags,
         exclude_tags=exclude_tags,
+        agent_model=agent_model,
+        permission_mode=permission_mode,
+        max_turns=max_turns,
     )
 
     # Run batch (business logic delegated to orchestrator)

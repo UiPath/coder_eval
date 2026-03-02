@@ -50,9 +50,10 @@ class Settings(BaseSettings):
     # Paths
     runs_dir: Path = Path("runs")  # Base directory for timestamped runs
 
-    # Defaults
-    default_agent_type: str = "claude-code"
-    default_max_iterations: int = 3
+    # Agent defaults (CLI > .env > task YAML)
+    default_agent_model: str | None = None
+    default_permission_mode: str | None = None
+    default_max_turns: int | None = None
 
     # Logging
     log_level: str = "INFO"  # Default log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)

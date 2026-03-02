@@ -187,6 +187,7 @@ class ClaudeCodeAgent(Agent):
                 permission_mode=self.config.permission_mode,
                 allowed_tools=self.config.allowed_tools or [],
                 model=self.config.model,
+                max_turns=self.config.max_turns,
                 stderr=capture_stderr,  # Capture stderr for better error messages
             )
 
