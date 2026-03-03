@@ -566,3 +566,41 @@ class TestMultiSourcePathResolution:
         # First should be resolved, second unchanged
         assert resolved_task.sandbox.template_sources[0].path == str((tasks_dir / "../templates/base").resolve())
         assert resolved_task.sandbox.template_sources[1].path == str(template2.resolve())
+
+
+class TestUiPathStarterTemplate:
+    """Regression tests for uipath-starter template integrity."""
+
+    def test_uipath_json_copied_to_sandbox(self):
+        """Test that uipath.json from uipath-starter template is copied into the sandbox.
+
+        Regression test: without uipath.json, `uv run uipath run main.py` fails with
+        'Config file not found: uipath.json'. This test ensures the template includes
+        a valid uipath.json and that the sandbox copy mechanism does not skip it.
+        """
+        import json
+        from pathlib import Path
+
+        template_dir = Path(__file__).parent.parent / "templates" / "uipath-starter"
+        config = SandboxConfig(
+            driver="tempdir",
+            template_sources=[
+                TemplateDirSource(path=str(template_dir)),
+            ],
+        )
+        sandbox = Sandbox(config, task_id="test-uipath-json")
+
+        try:
+            sandbox_path = sandbox.setup()
+
+            # uipath.json must exist in the sandbox
+            uipath_json_path = sandbox_path / "uipath.json"
+            assert uipath_json_path.exists(), "uipath.json missing from sandbox — uipath run will fail"
+
+            # Must be valid JSON with a 'functions' mapping
+            content = json.loads(uipath_json_path.read_text())
+            assert "functions" in content, "uipath.json missing 'functions' key"
+            assert "main.py" in content["functions"], "uipath.json missing 'main.py' entrypoint"
+            assert content["functions"]["main.py"] == "main.py:main"
+        finally:
+            sandbox.cleanup(preserve=False)

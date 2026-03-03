@@ -48,6 +48,7 @@ bandit-report.json
 # UiPath specific
 .uipath/
 uipath.json
+!templates/uipath-starter/uipath.json
 
 # Project-specific
 .claude/settings.local.json

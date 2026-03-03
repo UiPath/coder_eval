@@ -413,3 +413,47 @@ def test_llm_reviewer_parse_old_format_with_aliases():
     assert decision.score == 0.8
     assert decision.next_steps == ["Consider adding tests"]  # Read via 'suggestions' alias
     assert decision.should_continue is True
+
+
+def test_success_checker_logs_include_task_id(caplog):
+    """Test that SuccessChecker logs include task_id context when provided.
+
+    Regression test: checker logs previously lacked the [task-name] prefix,
+    making it hard to trace which task a criterion result belonged to in
+    concurrent runs.
+    """
+    import logging
+
+    mock_sandbox = Mock()
+    mock_sandbox.file_exists.return_value = True
+
+    checker = SuccessChecker(mock_sandbox, task_id="my-test-task")
+
+    # Verify logger is a LoggerAdapter with task_id
+    assert isinstance(checker.logger, logging.LoggerAdapter)
+    assert checker.logger.extra["task_id"] == "my-test-task"
+
+    # Run a check and verify the task_id appears in log records
+    criterion = FileExistsCriterion(path="test.txt", description="Test file")
+    with caplog.at_level(logging.INFO, logger="coder_eval.evaluation.checker"):
+        checker.check(criterion)
+
+    assert any("my-test-task" in r.message or getattr(r, "task_id", None) == "my-test-task" for r in caplog.records)
+
+
+def test_success_checker_logs_without_task_id():
+    """Test that SuccessChecker works correctly when task_id is omitted."""
+    import logging
+
+    mock_sandbox = Mock()
+    mock_sandbox.file_exists.return_value = True
+
+    checker = SuccessChecker(mock_sandbox)
+
+    # Without task_id, logger should be the plain module logger (not an adapter)
+    assert not isinstance(checker.logger, logging.LoggerAdapter)
+
+    # Should still function normally
+    criterion = FileExistsCriterion(path="test.txt", description="Test file")
+    result = checker.check(criterion)
+    assert result.score == 1.0

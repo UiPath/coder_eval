@@ -241,7 +241,7 @@ class Orchestrator:
             self.logger.info(f"Snapshots enabled: mode={self.task.sandbox.snapshots.mode.value}")
 
         # Create success checker
-        self.success_checker = SuccessChecker(self.sandbox)
+        self.success_checker = SuccessChecker(self.sandbox, task_id=self.task.task_id)
 
         # Create LLM reviewer if enabled
         if self.task.llm_reviewer.enabled:

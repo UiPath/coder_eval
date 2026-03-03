@@ -1,4 +1,4 @@
-task_id: flow-add-node
+task_id: uipath-flow-add-node
 description: "Add a Terminate node to a UiPath automation workflow for HTTP Request error handling"
 tags: [integration, uipath-flow, template]
 
