@@ -308,8 +308,8 @@ class TestFractionalScoring:
         )
 
         result = checker.check(criterion)
-        # includes: 1/2 = 0.5, excludes: 1.0 (none), avg = 0.75
-        assert result.score == 0.75
+        # includes: 1/2 = 0.5, no excludes so score = includes_score only
+        assert result.score == 0.5
 
     def test_file_contains_all_includes_no_excludes(self, tmp_path):
         """Test file_contains with all includes found."""

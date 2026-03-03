@@ -41,11 +41,13 @@ def calculate_command_statistics(turns: list[TurnRecord]) -> CommandStatistics:
         commands_by_tool[cmd.tool_name] = commands_by_tool.get(cmd.tool_name, 0) + 1
 
     # Timing statistics (only for commands with duration data)
-    total_time = sum(cmd.duration_ms for cmd in all_commands if cmd.duration_ms)
-    avg_time = total_time / len(all_commands) if all_commands else 0
+    # Use `is not None` to include valid 0.0ms durations
+    total_time = sum(cmd.duration_ms for cmd in all_commands if cmd.duration_ms is not None)
+    timed_count = sum(1 for cmd in all_commands if cmd.duration_ms is not None)
+    avg_time = total_time / timed_count if timed_count > 0 else 0
 
     # Find slowest commands (type-safe using SlowestCommandInfo model)
-    commands_with_timing = [c for c in all_commands if c.duration_ms]
+    commands_with_timing = [c for c in all_commands if c.duration_ms is not None]
     slowest = sorted(commands_with_timing, key=lambda x: x.duration_ms or 0, reverse=True)[:5]
 
     slowest_info = [

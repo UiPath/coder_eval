@@ -112,7 +112,7 @@ class Orchestrator:
         task_log_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Use context manager for automatic log handler management
-        with task_log_handler(task_log_path):
+        with task_log_handler(task_log_path, task_id=self.task.task_id):
             try:
                 # Setup components
                 await self._setup()

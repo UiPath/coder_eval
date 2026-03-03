@@ -43,7 +43,7 @@ def _extract_signatures(code: str) -> set[str]:
     signatures = set()
 
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             # Get argument names
             args = [arg.arg for arg in node.args.args]
 

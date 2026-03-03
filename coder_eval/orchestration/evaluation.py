@@ -85,6 +85,13 @@ Next steps:
 {steps_text}
 
 Please address these issues and continue working on the task."""
+            elif decision.issues:
+                return f"""The task is not yet complete. Here's the feedback:
+
+Issues:
+{decision.issues}
+
+Please address these issues and continue working on the task."""
 
     # Fallback to deterministic feedback from criteria
     logger.info("Using deterministic feedback from failed criteria")

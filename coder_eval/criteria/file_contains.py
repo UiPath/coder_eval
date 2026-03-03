@@ -55,8 +55,17 @@ class FileContainsChecker(BaseCriterion[FileContainsCriterion]):
         else:
             excludes_score = 1.0
 
-        # Combined score: average of includes and excludes
-        score = (includes_score + excludes_score) / 2.0
+        # Combined score: only average when both categories are active
+        has_includes = includes_total > 0
+        has_excludes = bool(criterion.excludes)
+        if has_includes and has_excludes:
+            score = (includes_score + excludes_score) / 2.0
+        elif has_includes:
+            score = includes_score
+        elif has_excludes:
+            score = excludes_score
+        else:
+            score = 1.0
 
         # Build details
         details_parts = []

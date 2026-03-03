@@ -35,7 +35,7 @@ class QualityScorer:
             SyntaxError: If code cannot be parsed
         """
         tree = ast.parse(code)
-        functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+        functions = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
 
         if not functions:
             return 1.0  # No functions to annotate
@@ -45,10 +45,11 @@ class QualityScorer:
             # Return type (50% weight)
             has_return = func.returns is not None
 
-            # Parameter types (50% weight)
-            total_params = len(func.args.args)
+            # Parameter types (50% weight) - exclude self/cls which don't need annotations
+            params = [arg for arg in func.args.args if arg.arg not in ("self", "cls")]
+            total_params = len(params)
             if total_params > 0:
-                params_annotated = sum(1 for arg in func.args.args if arg.annotation)
+                params_annotated = sum(1 for arg in params if arg.annotation)
                 param_coverage = params_annotated / total_params
             else:
                 param_coverage = 1.0  # No params to annotate
@@ -80,7 +81,7 @@ class QualityScorer:
         module_doc = ast.get_docstring(tree) is not None
 
         # Function docstrings
-        functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+        functions = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
         if not functions:
             return 1.0 if module_doc else 0.5
 
@@ -106,7 +107,7 @@ class QualityScorer:
         """
         tree = ast.parse(code)
 
-        functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+        functions = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
         try_blocks = [n for n in ast.walk(tree) if isinstance(n, ast.Try)]
 
         if not functions:

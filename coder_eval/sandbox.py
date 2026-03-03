@@ -335,6 +335,11 @@ class Sandbox:
             logger.warning(error_msg)
             return -1, "", error_msg
 
+    # NOTE: get_file_content, file_exists, and list_files intentionally do NOT validate
+    # path traversal. The sandbox is a trusted execution environment where the agent
+    # needs filesystem access beyond the sandbox root (e.g., reading installed packages,
+    # system headers). Path traversal protection is handled at the agent permission level.
+
     def get_file_content(self, path: str) -> str:
         """Read the content of a file in the sandbox.
 

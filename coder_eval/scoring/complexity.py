@@ -93,12 +93,12 @@ class ComplexityScorer:
         scores = {}
 
         # Cyclomatic complexity score
-        ref_cc = reference_baseline.get("cyclomatic", 10)
+        ref_cc = max(reference_baseline.get("cyclomatic", 10), 1)
         agent_cc = agent_metrics["cyclomatic_complexity"]
         scores["cyclomatic_score"] = max(0.0, 1.0 - min(1.0, agent_cc / (ref_cc * 1.5)))
 
         # LOC score
-        ref_loc = reference_baseline.get("lines_of_code", 50)
+        ref_loc = max(reference_baseline.get("lines_of_code", 50), 1)
         agent_loc = agent_metrics["lines_of_code"]
         scores["loc_score"] = max(0.0, 1.0 - min(1.0, agent_loc / (ref_loc * 1.5)))
 

@@ -90,7 +90,13 @@ class ReferenceComparisonChecker(BaseCriterion[ReferenceComparisonCriterion]):
                 score = similarity_scorer.score_token_similarity(agent_code, reference_code)
             elif criterion.comparison_method == "complexity":
                 complexity_scorer = ComplexityScorer()
-                metrics = complexity_scorer.score_complexity(agent_code, reference_code, {})
+                ref_metrics = complexity_scorer.calculate_metrics(reference_code)
+                reference_baseline = {
+                    "cyclomatic": ref_metrics["cyclomatic_complexity"],
+                    "lines_of_code": ref_metrics["lines_of_code"],
+                    "function_count": ref_metrics["function_count"],
+                }
+                metrics = complexity_scorer.score_complexity(agent_code, reference_code, reference_baseline)
                 score = metrics["scores"]["overall_complexity"]
             else:
                 return CriterionResult(

@@ -10,6 +10,7 @@ This module provides centralized logging setup with:
 
 import logging
 import sys
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -107,22 +108,51 @@ def setup_logging(level: str = "INFO", log_file: Path | None = None, verbose: bo
     app_logger.debug(f"Logging configured: level={logging.getLevelName(log_level)}, file={log_file}")
 
 
+class _TaskIdFilter(logging.Filter):
+    """Filter that only accepts records matching a specific task_id.
+
+    Accepts records that either:
+    - Have a matching task_id in their extra context
+    - Have no task_id set (general/shared log messages)
+    """
+
+    def __init__(self, task_id: str):
+        super().__init__()
+        self.task_id = task_id
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record_task_id = getattr(record, "task_id", None)
+        return record_task_id is None or record_task_id == self.task_id
+
+
+# Lock for thread-safe handler add/remove and level restoration in parallel batch runs
+_task_handler_lock = threading.Lock()
+
+
 @contextmanager
-def task_log_handler(task_log_path: Path, level: int = logging.DEBUG):
+def task_log_handler(task_log_path: Path, level: int = logging.DEBUG, task_id: str | None = None):
     """Context manager for task-specific logging.
 
     Automatically adds a FileHandler at the start and removes it at the end,
     guaranteeing cleanup even if exceptions occur.
 
+    When task_id is provided, a filter is applied so that in parallel batch runs
+    each task's log file only contains its own messages (plus shared messages
+    without a task_id).
+
+    Thread-safe: uses a lock and reference counting so that concurrent handlers
+    correctly restore the original log level when the last handler exits.
+
     Args:
         task_log_path: Path to task log file
         level: Logging level for file output (default: DEBUG)
+        task_id: Optional task ID for filtering in parallel runs
 
     Yields:
         None (handler is managed internally)
 
     Example:
-        >>> with task_log_handler(Path("task.log")):
+        >>> with task_log_handler(Path("task.log"), task_id="my_task"):
         ...     logger.info("This goes to both console and task.log")
     """
     # Create handler
@@ -133,24 +163,41 @@ def task_log_handler(task_log_path: Path, level: int = logging.DEBUG):
     formatter = logging.Formatter(fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     handler.setFormatter(formatter)
 
-    # Add to coder_eval logger (which is the parent for all our loggers)
-    # This ensures we capture all coder_eval.* logs
-    app_logger = logging.getLogger("coder_eval")
-    app_logger.addHandler(handler)
+    # Add task_id filter to prevent cross-contamination in parallel runs
+    task_filter: _TaskIdFilter | None = None
+    if task_id:
+        task_filter = _TaskIdFilter(task_id)
+        handler.addFilter(task_filter)
 
-    # Also ensure app logger level allows DEBUG messages
-    original_level = app_logger.level
-    if app_logger.level > level:
-        app_logger.setLevel(level)
+    # Thread-safe handler registration with reference-counted level management
+    app_logger = logging.getLogger("coder_eval")
+    with _task_handler_lock:
+        handler_count: int = getattr(app_logger, "_task_handler_count", 0)
+        if handler_count == 0:
+            # First handler: save the true original level
+            app_logger._task_handler_original_level = app_logger.level  # type: ignore[attr-defined]
+        app_logger._task_handler_count = handler_count + 1  # type: ignore[attr-defined]
+        app_logger.addHandler(handler)
+        if app_logger.level > level:
+            app_logger.setLevel(level)
 
     try:
         yield
     finally:
-        # Guaranteed cleanup
-        app_logger.removeHandler(handler)
+        # Guaranteed cleanup with thread-safe level restoration
+        with _task_handler_lock:
+            app_logger.removeHandler(handler)
+            remaining: int = getattr(app_logger, "_task_handler_count", 1) - 1
+            app_logger._task_handler_count = max(remaining, 0)  # type: ignore[attr-defined]
+            if remaining <= 0:
+                # Last handler: restore the true original level
+                original = getattr(app_logger, "_task_handler_original_level", app_logger.level)
+                app_logger.setLevel(original)
+                if hasattr(app_logger, "_task_handler_original_level"):
+                    del app_logger._task_handler_original_level  # type: ignore[attr-defined]
+        if task_filter:
+            handler.removeFilter(task_filter)
         handler.close()
-        # Restore original level
-        app_logger.setLevel(original_level)
 
 
 def aggregate_task_logs(run_dir: Path) -> None:

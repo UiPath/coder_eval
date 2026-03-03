@@ -86,6 +86,9 @@ def categorize_error(
         return ErrorCategory.AGENT_AUTH_ERROR
 
     # Billing/credit errors (NOT retryable - retrying wastes time)
+    # NOTE: Broad patterns like "insufficient" and "credit" are intentional. We prefer
+    # false positives (skipping retry on a non-billing error) over false negatives
+    # (wasting retries on a billing error that will never succeed).
     if any(
         pat in error_str
         for pat in ["credit", "billing", "payment", "insufficient", "402", "quota exceeded", "spending limit"]

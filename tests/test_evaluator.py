@@ -71,8 +71,8 @@ def test_success_checker_file_contains():
             path="app.py", includes=["missing_string"], description="File should contain missing string"
         )
         result = checker.check(criterion)
-        # includes: 0/1=0.0, excludes: 1.0 (no excludes), avg=(0.0+1.0)/2=0.5
-        assert result.score == 0.5
+        # includes: 0/1=0.0, no excludes so score = includes_score only
+        assert result.score == 0.0
 
         # Check file contains excluded strings
         criterion = FileContainsCriterion(
@@ -311,8 +311,8 @@ def test_success_checker_mocked_file_contains():
     # Test missing include
     criterion = FileContainsCriterion(path="test.txt", includes=["Hello", "Missing"], description="Should fail")
     result = checker.check(criterion)
-    # includes: 1/2=0.5, excludes: 1.0 (no excludes), avg=(0.5+1.0)/2=0.75
-    assert result.score == 0.75
+    # includes: 1/2=0.5, no excludes so score = includes_score only
+    assert result.score == 0.5
     assert "Missing" in result.details or "1/2" in result.details
 
 
