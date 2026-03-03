@@ -1,4 +1,4 @@
-task_id: uipath-flow-add-node
+task_id: uipath-flow-add-terminate-node
 description: "Add a Terminate node to a UiPath automation workflow for HTTP Request error handling"
 tags: [integration, uipath-flow, template]
 
@@ -12,24 +12,24 @@ sandbox:
   python_version: "3.13"
   template_sources:
     - type: template_dir
-      path: "../templates/uipath-flow-add-node"
+      path: "../../../templates/uipath-flow-starter"
+    - type: template_dir
+      path: "./artifacts"
 
 initial_prompt: |
-  sandbox_starter.flow is the file defining an automation workflow. Add a new Terminate node
-  to the workflow to control what to do when the error happens for the HTTP Request step.
-  Use uipcli flow command to explore the nodes and metadata needed for the Terminate node.
-  Save the result as sandbox_result.flow
+  Modify add_terminate_node_baseline.flow: add a Terminate node connected to the httpRequest1 error port.
+  Save the result as add_terminate_node_result.flow.
 
 success_criteria:
   - type: file_exists
     description: "Result flow file exists"
-    path: "sandbox_result.flow"
+    path: "add_terminate_node_result.flow"
     weight: 1.0
     pass_threshold: 1.0
 
   - type: file_contains
     description: "Result flow file contains a Terminate node"
-    path: "sandbox_result.flow"
+    path: "add_terminate_node_result.flow"
     includes:
       - "Terminate"
       - "core.logic.terminate"
@@ -38,7 +38,7 @@ success_criteria:
 
   - type: file_contains
     description: "Result flow file preserves the existing HTTP Request step"
-    path: "sandbox_result.flow"
+    path: "add_terminate_node_result.flow"
     includes:
       - "httpRequest1"
       - "core.action.http"
@@ -47,7 +47,7 @@ success_criteria:
 
   - type: run_command
     description: "Result flow file is valid JSON"
-    command: "python -c \"import json; json.load(open('sandbox_result.flow'))\""
+    command: "python -c \"import json; json.load(open('add_terminate_node_result.flow'))\""
     timeout: 10
     expected_exit_code: 0
     weight: 1.5
@@ -55,7 +55,7 @@ success_criteria:
 
   - type: run_command
     description: "Terminate node is structurally correct and connected to HTTP Request error"
-    command: "python -c \"import json; r=json.load(open('sandbox_result.flow')); tn=[n for n in r['nodes'] if n['type']=='core.logic.terminate']; assert len(tn)>=1,'No Terminate node'; tids={n['id'] for n in tn}; ee=[e for e in r['edges'] if e['sourceNodeId']=='httpRequest1' and e['sourcePort']=='error' and e['targetNodeId'] in tids]; assert len(ee)>=1,'No error edge from HTTP Request to Terminate'; td=[d for d in r.get('definitions',[]) if d.get('nodeType')=='core.logic.terminate']; assert len(td)>=1,'No Terminate definition'\""
+    command: "python -c \"import json; r=json.load(open('add_terminate_node_result.flow')); tn=[n for n in r['nodes'] if n['type']=='core.logic.terminate']; assert len(tn)>=1,'No Terminate node'; tids={n['id'] for n in tn}; ee=[e for e in r['edges'] if e['sourceNodeId']=='httpRequest1' and e['sourcePort']=='error' and e['targetNodeId'] in tids]; assert len(ee)>=1,'No error edge from HTTP Request to Terminate'; td=[d for d in r.get('definitions',[]) if d.get('nodeType')=='core.logic.terminate']; assert len(td)>=1,'No Terminate definition'\""
     timeout: 10
     expected_exit_code: 0
     weight: 3.0
@@ -63,7 +63,7 @@ success_criteria:
 
   - type: run_command
     description: "Result matches expected output"
-    command: "python -c \"import json; r=json.load(open('sandbox_result.flow')); e=json.load(open('sandbox_expected.flow')); rn=sorted([n['type'] for n in r['nodes']]); en=sorted([n['type'] for n in e['nodes']]); assert rn==en, f'Node types differ: {rn} vs {en}'; re=sorted([(x['sourceNodeId'],x['sourcePort'],x['targetNodeId']) for x in r['edges']]); ee=sorted([(x['sourceNodeId'],x['sourcePort'],x['targetNodeId']) for x in e['edges']]); assert re==ee, f'Edge connections differ: {re} vs {ee}'; rd=sorted([d.get('nodeType','') for d in r.get('definitions',[])]); ed=sorted([d.get('nodeType','') for d in e.get('definitions',[])]); assert rd==ed, f'Definitions differ: {rd} vs {ed}'\""
+    command: "python -c \"import json, os; r=json.load(open('add_terminate_node_result.flow')); e=json.load(open(os.path.join(os.environ['TASK_DIR'], 'fixture', 'add_terminate_node_expected.flow'))); rn=sorted([n['type'] for n in r['nodes']]); en=sorted([n['type'] for n in e['nodes']]); assert rn==en, f'Node types differ: {rn} vs {en}'; re=sorted([(x['sourceNodeId'],x['sourcePort'],x['targetNodeId']) for x in r['edges']]); ee=sorted([(x['sourceNodeId'],x['sourcePort'],x['targetNodeId']) for x in e['edges']]); assert re==ee, f'Edge connections differ: {re} vs {ee}'; rd=sorted([d.get('nodeType','') for d in r.get('definitions',[])]); ed=sorted([d.get('nodeType','') for d in e.get('definitions',[])]); assert rd==ed, f'Definitions differ: {rd} vs {ed}'\""
     timeout: 10
     expected_exit_code: 0
     weight: 3.0

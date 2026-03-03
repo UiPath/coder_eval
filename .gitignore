@@ -56,7 +56,7 @@ uipath.json
 c/
 runs/
 reports/
-artifacts/
+/runs/**/artifacts/
 .DS_Store
 tmp/
 refs/

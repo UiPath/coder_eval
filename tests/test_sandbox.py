@@ -78,6 +78,43 @@ def test_sandbox_run_command():
         sandbox.cleanup()
 
 
+def test_sandbox_run_command_task_dir_set():
+    """Test that TASK_DIR env var is set when task_dir is provided."""
+    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    task_dir = Path("/some/task/dir")
+
+    sandbox = Sandbox(config, task_id="test_task_dir", task_dir=task_dir)
+
+    try:
+        sandbox.setup()
+
+        exit_code, stdout, _stderr = sandbox.run_command("python -c \"import os; print(os.environ['TASK_DIR'])\"")
+        assert exit_code == 0
+        assert stdout.strip() == str(task_dir)
+
+    finally:
+        sandbox.cleanup()
+
+
+def test_sandbox_run_command_task_dir_absent():
+    """Test that TASK_DIR env var is absent when task_dir is not provided."""
+    config = SandboxConfig(driver="tempdir", network_enabled=False)
+
+    sandbox = Sandbox(config, task_id="test_no_task_dir")
+
+    try:
+        sandbox.setup()
+
+        exit_code, stdout, _stderr = sandbox.run_command(
+            "python -c \"import os; print(os.environ.get('TASK_DIR', 'NOT_SET'))\""
+        )
+        assert exit_code == 0
+        assert stdout.strip() == "NOT_SET"
+
+    finally:
+        sandbox.cleanup()
+
+
 def test_sandbox_with_packages():
     """Test sandbox with package installation."""
     from coder_eval.models import PythonEnvConfig

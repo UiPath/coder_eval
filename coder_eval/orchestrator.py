@@ -230,7 +230,8 @@ class Orchestrator:
         settings.validate_api_keys(self.task.agent.type.value)
 
         # Create sandbox with retry logic
-        self.sandbox = Sandbox(self.task.sandbox, task_id=self.task.task_id)
+        task_dir = self.task_file.parent if self.task_file else None
+        self.sandbox = Sandbox(self.task.sandbox, task_id=self.task.task_id, task_dir=task_dir)
 
         async def _setup_sandbox():
             assert self.sandbox is not None

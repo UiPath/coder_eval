@@ -32,15 +32,17 @@ class Sandbox:
     environments with virtual environments and resource limits.
     """
 
-    def __init__(self, config: SandboxConfig, task_id: str):
+    def __init__(self, config: SandboxConfig, task_id: str, task_dir: Path | None = None):
         """Initialize the sandbox.
 
         Args:
             config: Sandbox configuration
             task_id: Unique identifier for this task (used in paths)
+            task_dir: Directory containing the task YAML file (exposed as TASK_DIR env var in run_command)
         """
         self.config = config
         self.task_id = task_id
+        self.task_dir = task_dir
         self.sandbox_dir: Path | None = None
         self.venv_dir: Path | None = None
         self._cleanup_on_exit = True
@@ -302,6 +304,8 @@ class Sandbox:
         if self.venv_dir:
             env["VIRTUAL_ENV"] = str(self.venv_dir)
             env["PATH"] = f"{self.venv_dir / 'bin'}:{env['PATH']}"
+        if self.task_dir:
+            env["TASK_DIR"] = str(self.task_dir)
 
         try:
             # Shell execution is intentional for sandbox - allows pipes, redirects, and complex commands
