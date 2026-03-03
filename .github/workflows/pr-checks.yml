@@ -105,3 +105,79 @@ jobs:
         run: |
           echo "✅ Quality gate complete!"
           echo "📊 All checks passed: formatting, linting, types, security, tests"
+
+  e2e-smoke:
+    name: E2E Smoke Tests (Real API)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Skip on fork PRs where secrets aren't available
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Cache dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.cache/pip
+            .venv
+          key: ${{ runner.os }}-py3.13-e2e-${{ hashFiles('**/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-py3.13-e2e-
+            ${{ runner.os }}-py3.13-
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+
+      - name: Install project dependencies
+        run: |
+          uv venv .venv --clear
+          uv pip install --python .venv/bin/python -e ".[dev]"
+
+      - name: Run e2e smoke tests
+        run: .venv/bin/coder-eval run tasks/*.yaml --tags smoke --model claude-haiku-4-5-20251001 --max-iter 2
+
+      - name: Verify results
+        run: |
+          test -f runs/latest/run-summary.json || {
+            echo "run-summary.json not found - coder-eval may have crashed before producing results"
+            ls -la runs/ 2>/dev/null || echo "runs/ directory does not exist"
+            exit 1
+          }
+          SUCCEEDED=$(jq '.tasks_succeeded' runs/latest/run-summary.json)
+          FAILED=$(jq '.tasks_failed' runs/latest/run-summary.json)
+          ERRORS=$(jq '.tasks_error' runs/latest/run-summary.json)
+          echo "Results: $SUCCEEDED succeeded, $FAILED failed, $ERRORS errors"
+          test "$SUCCEEDED" -gt 0 || { echo "No tasks succeeded"; exit 1; }
+          test "$FAILED" -eq 0 || { echo "Some tasks failed"; exit 1; }
+          test "$ERRORS" -eq 0 || { echo "Some tasks errored"; exit 1; }
+
+      - name: Upload run artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-smoke-runs
+          path: runs/
+          retention-days: 7

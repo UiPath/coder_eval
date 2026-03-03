@@ -1,4 +1,4 @@
-.PHONY: help install format check typecheck test verify clean
+.PHONY: help install format check typecheck test verify clean e2e run
 
 help:  ## Show this help message
 	@echo "Available commands:"
@@ -40,5 +40,8 @@ clean:  ## Clean build artifacts and cache
 
 run:	## Run coder-eval on all tasks with 8 parallel jobs
 	uv run coder-eval run tasks/*.yaml -j 8
+
+e2e:  ## Run e2e smoke tests with real API
+	uv run coder-eval run tasks/*.yaml --tags smoke --model claude-haiku-4-5-20251001 --max-iter 2
 
 .DEFAULT_GOAL := help
