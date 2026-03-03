@@ -115,6 +115,13 @@ async def run_batch(
         if effective_max_turns is not None:
             task.agent.max_turns = effective_max_turns
 
+        # Apply timeout overrides (CLI > task YAML)
+        if config.task_timeout_seconds is not None:
+            task.task_timeout_seconds = config.task_timeout_seconds
+
+        if config.turn_timeout_seconds is not None:
+            task.agent.turn_timeout_seconds = config.turn_timeout_seconds
+
         tasks.append((task_file, task))
 
     # Filter tasks by tags

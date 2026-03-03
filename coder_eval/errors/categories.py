@@ -147,6 +147,10 @@ RETRY_CONFIG: dict[ErrorCategory, RetryConfig] = {
 
 # Error tip system for better UX
 ERROR_TIPS = {
+    ErrorCategory.AGENT_TIMEOUT: (
+        "Agent or task timed out. Consider increasing --turn-timeout or --task-timeout, "
+        "or simplifying the task to require fewer iterations."
+    ),
     ErrorCategory.AGENT_RATE_LIMIT: (
         "Rate limit hit. Consider using --max-parallel=1 to reduce concurrent API calls, "
         "or check your API key quota at your provider's dashboard."

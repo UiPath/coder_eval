@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from .categories import ErrorCategory
+from .timeout import EvaluationTimeoutError
 
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,11 @@ def categorize_error(
 
     component = context.get("component", "")
 
-    # 1. Check specific exception types first (most reliable)
+    # 1. Check custom timeout exceptions first (before generic TimeoutError)
+    if isinstance(error, EvaluationTimeoutError):
+        return ErrorCategory.AGENT_TIMEOUT
+
+    # 2. Check specific exception types (most reliable)
     if isinstance(error, TimeoutError):
         if component == "agent":
             return ErrorCategory.AGENT_TIMEOUT
@@ -67,7 +72,7 @@ def categorize_error(
     if isinstance(error, MemoryError):
         return ErrorCategory.OUT_OF_MEMORY
 
-    # 2. Check for known SDK exceptions (if available)
+    # 3. Check for known SDK exceptions (if available)
     # Note: Uncomment when anthropic SDK exceptions are available
     # try:
     #     from anthropic import RateLimitError, AuthenticationError
@@ -78,7 +83,7 @@ def categorize_error(
     # except ImportError:
     #     pass
 
-    # 3. Fallback to string matching
+    # 4. Fallback to string matching
     error_str = str(error).lower()
 
     # Authentication errors

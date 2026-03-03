@@ -27,3 +27,7 @@ class BatchRunConfig(BaseModel):
     agent_model: str | None = Field(default=None, description="Override agent model for all tasks")
     permission_mode: str | None = Field(default=None, description="Override permission mode for all tasks")
     max_turns: int | None = Field(default=None, description="Override max turns for all tasks")
+
+    # Timeout overrides (CLI > task YAML)
+    task_timeout_seconds: int | None = Field(default=None, ge=30, description="Override task timeout for all tasks")
+    turn_timeout_seconds: int | None = Field(default=None, ge=10, description="Override turn timeout for all tasks")

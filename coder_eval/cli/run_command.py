@@ -101,6 +101,18 @@ def run_command(
         help="Override max agent inner-loop turns per iteration for all tasks",
         min=1,
     ),
+    task_timeout: int | None = typer.Option(
+        None,
+        "--task-timeout",
+        help="Override task timeout (seconds) for all tasks. Covers the evaluation loop.",
+        min=30,
+    ),
+    turn_timeout: int | None = typer.Option(
+        None,
+        "--turn-timeout",
+        help="Override turn timeout (seconds) for all tasks. Per agent.communicate() call.",
+        min=10,
+    ),
 ) -> None:
     """Run evaluation tasks (optionally in parallel).
 
@@ -155,6 +167,8 @@ def run_command(
             model,
             permission_mode,
             max_turns,
+            task_timeout,
+            turn_timeout,
         )
     )
 
@@ -172,6 +186,8 @@ async def _run_all_tasks(
     agent_model: str | None = None,
     permission_mode: str | None = None,
     max_turns: int | None = None,
+    task_timeout_seconds: int | None = None,
+    turn_timeout_seconds: int | None = None,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -192,6 +208,8 @@ async def _run_all_tasks(
         agent_model: Optional override for agent model
         permission_mode: Optional override for permission mode
         max_turns: Optional override for max agent turns
+        task_timeout_seconds: Optional override for task timeout (seconds)
+        turn_timeout_seconds: Optional override for turn timeout (seconds)
     """
     # Prepare run directory
     run_dir = prepare_run_directory(run_dir)
@@ -215,6 +233,8 @@ async def _run_all_tasks(
         agent_model=agent_model,
         permission_mode=permission_mode,
         max_turns=max_turns,
+        task_timeout_seconds=task_timeout_seconds,
+        turn_timeout_seconds=turn_timeout_seconds,
     )
 
     # Run batch with tqdm progress bar

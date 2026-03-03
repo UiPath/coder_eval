@@ -13,6 +13,7 @@ from .analysis import calculate_command_statistics
 from .config import settings
 from .errors.executor import execute_with_retry
 from .errors.retry import create_error_context
+from .errors.timeout import TaskTimeoutError, TurnTimeoutError
 from .evaluation.checker import SuccessChecker
 from .evaluation.reviewer import LLMReviewer
 from .models import (
@@ -117,8 +118,19 @@ class Orchestrator:
                 # Setup components
                 await self._setup()
 
-                # Run the main evaluation loop
-                success = await self._evaluation_loop()
+                # Wrap evaluation loop with task-level timeout (if configured)
+                task_timeout = self.task.task_timeout_seconds
+                if task_timeout is not None:
+                    try:
+                        success = await asyncio.wait_for(self._evaluation_loop(), timeout=task_timeout)
+                    except TimeoutError:
+                        raise TaskTimeoutError(
+                            task_timeout,
+                            task_id=self.task.task_id,
+                            elapsed_seconds=time.time() - start_time,
+                        ) from None
+                else:
+                    success = await self._evaluation_loop()
 
                 # Update final status
                 if success:
@@ -317,7 +329,9 @@ class Orchestrator:
             # (without defaults, closure would capture stale references)
             # Local variable for type narrowing in lambda
             agent = self.agent
-            turn_record = await execute_with_retry(
+            turn_timeout = self.task.agent.turn_timeout_seconds
+
+            communicate_coro = execute_with_retry(
                 operation=lambda prompt=prompt_with_cwd, a=agent: a.communicate(prompt),
                 operation_name=f"Agent communication (iteration {iteration})",
                 context={
@@ -326,6 +340,18 @@ class Orchestrator:
                     "agent_name": self.task.agent.type.value,
                 },
             )
+
+            if turn_timeout is not None:
+                try:
+                    turn_record = await asyncio.wait_for(communicate_coro, timeout=turn_timeout)
+                except TimeoutError:
+                    raise TurnTimeoutError(
+                        turn_timeout,
+                        task_id=self.task.task_id,
+                        iteration=iteration,
+                    ) from None
+            else:
+                turn_record = await communicate_coro
             self.result.turns.append(turn_record)
 
             self.logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")

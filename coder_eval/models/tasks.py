@@ -27,6 +27,12 @@ class AgentConfig(BaseModel):
     model: str | None = Field(default=None, description="Specific model to use (if applicable)")
     max_turns: int | None = Field(default=None, description="Maximum agent inner-loop turns per iteration")
 
+    turn_timeout_seconds: int | None = Field(
+        default=None,
+        ge=10,
+        description="Maximum seconds per agent turn (communicate call). None = no limit.",
+    )
+
     # Customizable ignore patterns for file tracking
     additional_ignore_patterns: list[str] = Field(
         default_factory=list,
@@ -85,6 +91,11 @@ class TaskDefinition(BaseModel):
     agent: AgentConfig = Field(description="Agent configuration")
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
     success_criteria: list[SuccessCriterion] = Field(description="List of criteria that must all pass for task success")
+    task_timeout_seconds: int | None = Field(
+        default=None,
+        ge=30,
+        description="Maximum seconds for the entire evaluation loop (all iterations). None = no limit.",
+    )
     llm_reviewer: LLMReviewerConfig = Field(
         default_factory=LLMReviewerConfig, description="Optional LLM reviewer configuration"
     )
