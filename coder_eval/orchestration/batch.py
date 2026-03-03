@@ -50,7 +50,7 @@ async def run_batch(
 
     Raises:
         FileNotFoundError: If task files don't exist
-        ValueError: If task files are invalid
+        ValueError: If task files are invalid or contain duplicate task IDs
 
     Example:
         >>> config = BatchRunConfig(
@@ -126,6 +126,9 @@ async def run_batch(
 
     # Filter tasks by tags
     tasks = filter_tasks_by_tags(tasks, include_tags=config.include_tags, exclude_tags=config.exclude_tags)
+
+    # Validate no duplicate task IDs (would cause result clobbering)
+    _validate_unique_task_ids(tasks)
 
     # Create semaphore for concurrency control
     semaphore = asyncio.Semaphore(config.max_parallel)
@@ -344,6 +347,17 @@ def _generate_run_summary(
     report_path.write_text(report_md, encoding="utf-8")
 
     return summary
+
+
+def _validate_unique_task_ids(tasks: list[tuple[Path, TaskDefinition]]) -> None:
+    """Raise ValueError if any tasks share the same task_id."""
+    seen: dict[str, list[Path]] = {}
+    for task_file, task in tasks:
+        seen.setdefault(task.task_id, []).append(task_file)
+    duplicates = {tid: files for tid, files in seen.items() if len(files) > 1}
+    if duplicates:
+        lines = [f"  - '{tid}': {', '.join(str(f) for f in files)}" for tid, files in duplicates.items()]
+        raise ValueError("Duplicate task IDs found:\n" + "\n".join(lines))
 
 
 def filter_tasks_by_tags(

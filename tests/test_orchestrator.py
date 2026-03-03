@@ -1563,3 +1563,37 @@ async def test_run_batch_applies_max_turns_override(tmp_path):
         task.agent.max_turns = effective_max_turns
 
     assert task.agent.max_turns == 42
+
+
+# ==================== Duplicate Task ID Validation Tests ====================
+
+
+@pytest.mark.asyncio
+async def test_run_batch_rejects_duplicate_task_ids(tmp_path):
+    """Test that run_batch raises ValueError when tasks share the same task_id."""
+    from coder_eval.orchestration.batch import run_batch
+    from coder_eval.orchestration.config import BatchRunConfig
+
+    # Create two task YAML files with the same task_id
+    task_yaml = """\
+task_id: duplicate_id
+description: A test task
+initial_prompt: Do something
+agent:
+  type: claude-code
+sandbox:
+  driver: tempdir
+success_criteria:
+  - type: file_exists
+    path: output.txt
+    description: Output file must exist
+"""
+    task_file_a = tmp_path / "task_a.yaml"
+    task_file_b = tmp_path / "task_b.yaml"
+    task_file_a.write_text(task_yaml)
+    task_file_b.write_text(task_yaml)
+
+    config = BatchRunConfig(run_dir=tmp_path / "run")
+
+    with pytest.raises(ValueError, match="Duplicate task IDs found"):
+        await run_batch(task_files=[task_file_a, task_file_b], config=config)
