@@ -5,6 +5,7 @@ tags: [golden, basic, pure-python, template]
 agent:
   type: claude-code
   permission_mode: acceptEdits
+  allowed_tools: ["Bash"]
 
 sandbox:
   driver: tempdir

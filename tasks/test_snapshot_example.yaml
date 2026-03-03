@@ -4,6 +4,8 @@ tags: [example, basic]
 
 agent:
   type: "claude-code"
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash"]
   max_turns: 3
 
 sandbox:

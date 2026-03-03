@@ -294,6 +294,10 @@ class Orchestrator:
         assert self.result is not None, "Result not initialized"
 
         current_prompt = self.task.initial_prompt
+        # Working directory context prepended to every prompt (including feedback) since
+        # each communicate() call is stateless and the agent loses context between iterations
+        assert self.sandbox is not None and self.sandbox.sandbox_dir is not None
+        sandbox_dir = self.sandbox.sandbox_dir
         iteration = 0
         success = False
 
@@ -304,6 +308,7 @@ class Orchestrator:
             self.logger.info(f"Starting iteration {iteration}/{self.task.max_iterations}")
 
             # Communicate with agent (with retry logic)
+            prompt_with_cwd = f"Your working directory is: {sandbox_dir}\n\n{current_prompt}"
             self.logger.debug(f"Sending prompt: {current_prompt[:100]}...")
 
             # Use lambda with default arguments to safely bind variables
@@ -311,7 +316,7 @@ class Orchestrator:
             # Local variable for type narrowing in lambda
             agent = self.agent
             turn_record = await execute_with_retry(
-                operation=lambda prompt=current_prompt, a=agent: a.communicate(prompt),
+                operation=lambda prompt=prompt_with_cwd, a=agent: a.communicate(prompt),
                 operation_name=f"Agent communication (iteration {iteration})",
                 context={
                     "task_id": self.task.task_id,

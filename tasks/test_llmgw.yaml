@@ -7,6 +7,7 @@ tags: [integration, llm-review, network]
 agent:
   type: claude-code
   permission_mode: acceptEdits
+  allowed_tools: ["Bash"]
 
 sandbox:
   driver: tempdir

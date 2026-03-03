@@ -1,0 +1,1319 @@
+{
+  "id": "workflow-1",
+  "version": "1.0.0",
+  "name": "Untitled Workflow",
+  "nodes": [
+    {
+      "id": "start",
+      "type": "core.trigger.manual",
+      "typeVersion": "1.0.0",
+      "ui": {
+        "position": {
+          "x": 250,
+          "y": 150
+        },
+        "size": {
+          "width": 96,
+          "height": 96
+        },
+        "collapsed": false
+      },
+      "display": {
+        "label": "Manual trigger"
+      },
+      "inputs": {},
+      "model": {
+        "type": "bpmn:StartEvent",
+        "entryPointId": "a96a46e7-2c74-4fdc-9f6e-1f861ae2ca12",
+        "isDefaultEntryPoint": true
+      }
+    },
+    {
+      "id": "httpRequest1",
+      "type": "core.action.http",
+      "typeVersion": "1.0.0",
+      "ui": {
+        "position": {
+          "x": 426,
+          "y": 150
+        },
+        "size": {
+          "width": 96,
+          "height": 96
+        },
+        "collapsed": false
+      },
+      "display": {
+        "label": "HTTP Request 1",
+        "iconBackground": "linear-gradient(225deg, #FAFAFB 0%, #ECEDEF 100%)",
+        "iconBackgroundDark": "linear-gradient(225deg, #526069 0%, rgba(50, 60, 66, 0.6) 100%)",
+        "icon": "app-window"
+      },
+      "inputs": {
+        "implementation": {
+          "mode": "manual",
+          "method": "GET",
+          "url": "",
+          "swaggerDefinition": null
+        },
+        "authenticationType": "manual",
+        "application": "",
+        "connection": "",
+        "headers": {},
+        "queryParams": {},
+        "body": "",
+        "contentType": "application/json",
+        "timeout": "PT15M",
+        "retryCount": 0,
+        "branches": []
+      },
+      "model": {
+        "type": "bpmn:ServiceTask",
+        "expansion": {
+          "nodes": [
+            {
+              "id": "{nodeId}",
+              "type": "bpmn:SubProcess",
+              "replaceOriginal": true,
+              "data": {
+                "label": "{node.data.label}",
+                "isExpanded": true
+              },
+              "nodes": [
+                {
+                  "id": "_Implicit_StartEvent_{nodeId}",
+                  "type": "bpmn:StartEvent",
+                  "parentId": "{nodeId}",
+                  "position": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "data": {
+                    "label": "HTTP Request Start"
+                  }
+                },
+                {
+                  "id": "_Implicit_HttpTask_{nodeId}",
+                  "type": "bpmn:SendTask",
+                  "parentId": "{nodeId}",
+                  "position": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "propagate": {
+                    "retry": {
+                      "condition": "node.data.inputs.retryCount > 0",
+                      "maxRetryCount": "node.data.inputs.retryCount",
+                      "retryBackoff": "node.data.inputs.timeout",
+                      "retryBackoffDefault": "PT1S",
+                      "retryAllErrors": "true",
+                      "retryBackoffType": "Static"
+                    }
+                  },
+                  "data": {
+                    "label": "{node.data.label}",
+                    "model": {
+                      "data": {
+                        "serviceType": "Intsvc.HttpExecution",
+                        "version": "v1",
+                        "context": [
+                          {
+                            "name": "mode",
+                            "type": "string",
+                            "source": "node.data.inputs.implementation.mode"
+                          },
+                          {
+                            "name": "method",
+                            "type": "string",
+                            "source": "node.data.inputs.implementation.method"
+                          },
+                          {
+                            "name": "url",
+                            "type": "string",
+                            "source": "node.data.inputs.implementation.url"
+                          },
+                          {
+                            "name": "headers",
+                            "type": "json",
+                            "source": "node.data.inputs.headers",
+                            "format": "json"
+                          },
+                          {
+                            "name": "parameters",
+                            "type": "json",
+                            "source": "node.data.inputs.queryParams",
+                            "format": "json"
+                          },
+                          {
+                            "name": "body",
+                            "type": "json",
+                            "source": "node.data.inputs.body",
+                            "format": "json"
+                          }
+                        ],
+                        "outputs": [
+                          {
+                            "name": "response",
+                            "type": "json",
+                            "source": "=response",
+                            "var": "{nodeId}.output",
+                            "internal": true
+                          }
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "id": "_Implicit_Gateway_{nodeId}",
+                  "type": "bpmn:ExclusiveGateway",
+                  "parentId": "{nodeId}",
+                  "position": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "condition": "node.data.inputs.branches.length > 0",
+                  "data": {
+                    "label": "Response Branch",
+                    "defaultFlowId": "_Implicit_Edge__Implicit_Gateway_{nodeId}__Implicit_EndEvent_Default_{nodeId}"
+                  }
+                },
+                {
+                  "forEach": "node.data.inputs.branches",
+                  "id": "_Implicit_EndEvent_{branchName}_{nodeId}",
+                  "type": "bpmn:EndEvent",
+                  "parentId": "{nodeId}",
+                  "position": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "data": {
+                    "label": "{branch.name}"
+                  }
+                },
+                {
+                  "id": "_Implicit_EndEvent_Default_{nodeId}",
+                  "type": "bpmn:EndEvent",
+                  "parentId": "{nodeId}",
+                  "position": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "data": {
+                    "label": "Default"
+                  }
+                },
+                {
+                  "condition": "hasEdgeFromHandle('error')",
+                  "id": "_Implicit_EndEvent_Failure_{nodeId}",
+                  "type": "bpmn:EndEvent",
+                  "parentId": "{nodeId}",
+                  "position": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "data": {
+                    "label": "Failure"
+                  }
+                },
+                {
+                  "condition": "hasEdgeFromHandle('error')",
+                  "id": "_Implicit_BoundaryError_{nodeId}",
+                  "type": "bpmn:BoundaryEvent",
+                  "parentId": "{nodeId}",
+                  "position": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "data": {
+                    "label": "Error",
+                    "cancelActivity": false,
+                    "attachedToId": "_Implicit_HttpTask_{nodeId}",
+                    "eventDefinition": {
+                      "type": "bpmn:ErrorEventDefinition",
+                      "id": "_Implicit_BoundaryError_{nodeId}_Error"
+                    }
+                  }
+                }
+              ],
+              "edges": [
+                {
+                  "id": "_Implicit_Edge__Implicit_StartEvent_{nodeId}__Implicit_HttpTask_{nodeId}",
+                  "source": "_Implicit_StartEvent_{nodeId}",
+                  "target": "_Implicit_HttpTask_{nodeId}",
+                  "type": "bpmn:SequenceFlow",
+                  "data": {}
+                },
+                {
+                  "condition": "node.data.inputs.branches.length === 0",
+                  "id": "_Implicit_Edge__Implicit_HttpTask_{nodeId}__Implicit_EndEvent_Default_{nodeId}",
+                  "source": "_Implicit_HttpTask_{nodeId}",
+                  "target": "_Implicit_EndEvent_Default_{nodeId}",
+                  "type": "bpmn:SequenceFlow",
+                  "data": {}
+                },
+                {
+                  "condition": "node.data.inputs.branches.length > 0",
+                  "id": "_Implicit_Edge__Implicit_HttpTask_{nodeId}__Implicit_Gateway_{nodeId}",
+                  "source": "_Implicit_HttpTask_{nodeId}",
+                  "target": "_Implicit_Gateway_{nodeId}",
+                  "type": "bpmn:SequenceFlow",
+                  "data": {}
+                },
+                {
+                  "forEach": "node.data.inputs.branches",
+                  "condition": "node.data.inputs.branches.length > 0",
+                  "id": "_Implicit_Edge__Implicit_Gateway_{nodeId}__Implicit_EndEvent_{branchName}_{nodeId}",
+                  "source": "_Implicit_Gateway_{nodeId}",
+                  "target": "_Implicit_EndEvent_{branchName}_{nodeId}",
+                  "type": "bpmn:SequenceFlow",
+                  "data": {
+                    "conditionExpression": "{branch.conditionExpression}",
+                    "label": "{branch.name}"
+                  }
+                },
+                {
+                  "condition": "node.data.inputs.branches.length > 0",
+                  "id": "_Implicit_Edge__Implicit_Gateway_{nodeId}__Implicit_EndEvent_Default_{nodeId}",
+                  "source": "_Implicit_Gateway_{nodeId}",
+                  "target": "_Implicit_EndEvent_Default_{nodeId}",
+                  "type": "bpmn:SequenceFlow",
+                  "data": {
+                    "label": "Default"
+                  }
+                },
+                {
+                  "condition": "hasEdgeFromHandle('error')",
+                  "id": "_Implicit_Edge__Implicit_BoundaryError_{nodeId}__Implicit_EndEvent_Failure_{nodeId}",
+                  "source": "_Implicit_BoundaryError_{nodeId}",
+                  "target": "_Implicit_EndEvent_Failure_{nodeId}",
+                  "type": "bpmn:SequenceFlow",
+                  "data": {}
+                }
+              ]
+            },
+            {
+              "id": "_Implicit_PostSubprocessGateway_{nodeId}",
+              "type": "bpmn:ExclusiveGateway",
+              "condition": "(node.data.inputs.branches.length > 0 || hasEdgeFromHandle('error')) && originalEdges.length > 0",
+              "parentId": null,
+              "position": {
+                "x": 0,
+                "y": 0
+              },
+              "data": {
+                "label": "Post-Subprocess Branch"
+              }
+            }
+          ],
+          "edges": [
+            {
+              "condition": "(node.data.inputs.branches.length > 0 || hasEdgeFromHandle('error')) && originalEdges.length > 0",
+              "id": "_Implicit_Edge_{nodeId}__Implicit_PostSubprocessGateway_{nodeId}",
+              "source": "{nodeId}",
+              "target": "_Implicit_PostSubprocessGateway_{nodeId}",
+              "type": "bpmn:SequenceFlow",
+              "data": {}
+            },
+            {
+              "forEach": "node.data.inputs.branches",
+              "condition": "node.data.inputs.branches.length > 0",
+              "matchOriginalEdgeByHandle": "branch-{branch.id}",
+              "preserveEdgeId": true,
+              "source": "_Implicit_PostSubprocessGateway_{nodeId}",
+              "type": "bpmn:SequenceFlow",
+              "data": {
+                "conditionExpression": "{branch.conditionExpression}",
+                "label": "{branch.name}"
+              }
+            },
+            {
+              "condition": "node.data.inputs.branches.length > 0 || hasEdgeFromHandle('error')",
+              "matchOriginalEdgeByHandle": "default",
+              "preserveEdgeId": true,
+              "source": "_Implicit_PostSubprocessGateway_{nodeId}",
+              "type": "bpmn:SequenceFlow",
+              "data": {
+                "label": "Default"
+              }
+            },
+            {
+              "condition": "hasEdgeFromHandle('error')",
+              "matchOriginalEdgeByHandle": "error",
+              "preserveEdgeId": true,
+              "source": "_Implicit_PostSubprocessGateway_{nodeId}",
+              "type": "bpmn:SequenceFlow",
+              "data": {
+                "conditionExpression": "=js:vars.{nodeId}.output.statusCode >= 400",
+                "label": "Error"
+              }
+            },
+            {
+              "condition": "node.data.inputs.branches.length === 0 && !hasEdgeFromHandle('error')",
+              "matchOriginalEdgeByHandle": "default",
+              "preserveEdgeId": true,
+              "source": "{nodeId}",
+              "type": "bpmn:SequenceFlow"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "extract1",
+      "type": "core.action.transform.extract",
+      "typeVersion": "1.0.0",
+      "ui": {
+        "position": {
+          "x": 602,
+          "y": 150
+        },
+        "size": {
+          "width": 96,
+          "height": 96
+        },
+        "collapsed": false
+      },
+      "display": {
+        "label": "Extract 1",
+        "iconBackground": "linear-gradient(225deg, #FAFAFB 0%, #ECEDEF 100%)",
+        "iconBackgroundDark": "linear-gradient(225deg, #526069 0%, rgba(50, 60, 66, 0.6) 100%)",
+        "icon": "upload"
+      },
+      "inputs": {
+        "operations": []
+      },
+      "model": {
+        "type": "bpmn:ScriptTask"
+      }
+    },
+    {
+      "id": "end1",
+      "type": "core.control.end",
+      "typeVersion": "1.0.0",
+      "ui": {
+        "position": {
+          "x": 778,
+          "y": 150
+        },
+        "size": {
+          "width": 96,
+          "height": 96
+        },
+        "collapsed": false
+      },
+      "display": {
+        "label": "End 1",
+        "shape": "circle",
+        "icon": "circle-check"
+      },
+      "inputs": {},
+      "model": {
+        "type": "bpmn:EndEvent"
+      }
+    },
+    {
+      "id": "terminate1",
+      "type": "core.logic.terminate",
+      "typeVersion": "1.0.0",
+      "ui": {
+        "position": {
+          "x": 602,
+          "y": 310
+        },
+        "size": {
+          "width": 96,
+          "height": 96
+        },
+        "collapsed": false
+      },
+      "display": {
+        "label": "Terminate 1",
+        "shape": "rectangle",
+        "icon": "circle-x"
+      },
+      "inputs": {},
+      "model": {
+        "type": "bpmn:EndEvent",
+        "eventDefinition": "bpmn:TerminateEventDefinition"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge_start-output-core.action.http-1772244076892-input",
+      "sourceNodeId": "start",
+      "sourcePort": "output",
+      "targetNodeId": "httpRequest1",
+      "targetPort": "input"
+    },
+    {
+      "id": "edge_httpRequest1-default-core.action.transform.extract-1772244085761-input",
+      "sourceNodeId": "httpRequest1",
+      "sourcePort": "default",
+      "targetNodeId": "extract1",
+      "targetPort": "input"
+    },
+    {
+      "id": "edge_extract1-output-core.control.end-1772244093495-input",
+      "sourceNodeId": "extract1",
+      "sourcePort": "output",
+      "targetNodeId": "end1",
+      "targetPort": "input"
+    },
+    {
+      "id": "edge_httpRequest1-error-core.logic.terminate-1772481100706-input",
+      "sourceNodeId": "httpRequest1",
+      "sourcePort": "error",
+      "targetNodeId": "terminate1",
+      "targetPort": "input"
+    }
+  ],
+  "definitions": [
+    {
+      "nodeType": "core.trigger.manual",
+      "version": "1.0.0",
+      "category": "trigger",
+      "tags": [
+        "trigger",
+        "manual"
+      ],
+      "sortOrder": 40,
+      "display": {
+        "label": "Manual trigger",
+        "icon": "play",
+        "shape": "circle",
+        "iconBackground": "linear-gradient(225deg, #FAFAFB 0%, #ECEDEF 100%)",
+        "iconBackgroundDark": "linear-gradient(225deg, #526069 0%, rgba(50, 60, 66, 0.6) 100%)"
+      },
+      "handleConfiguration": [
+        {
+          "position": "right",
+          "handles": [
+            {
+              "id": "output",
+              "type": "source",
+              "handleType": "output",
+              "showButton": true,
+              "constraints": {
+                "minConnections": 1,
+                "validationMessage": "Trigger must connect to at least one workflow node (not configuration nodes)"
+              }
+            }
+          ],
+          "visible": true
+        }
+      ],
+      "model": {
+        "type": "bpmn:StartEvent",
+        "entryPointId": true
+      }
+    },
+    {
+      "nodeType": "core.action.http",
+      "version": "1.0.0",
+      "category": "data-operations",
+      "tags": [
+        "connector",
+        "http",
+        "api",
+        "rest",
+        "request"
+      ],
+      "sortOrder": 35,
+      "display": {
+        "label": "HTTP Request",
+        "icon": "app-window",
+        "iconBackground": "linear-gradient(225deg, #FAFAFB 0%, #ECEDEF 100%)",
+        "iconBackgroundDark": "linear-gradient(225deg, #526069 0%, rgba(50, 60, 66, 0.6) 100%)"
+      },
+      "handleConfiguration": [
+        {
+          "position": "left",
+          "handles": [
+            {
+              "id": "input",
+              "type": "target",
+              "handleType": "input"
+            }
+          ],
+          "visible": true
+        },
+        {
+          "position": "right",
+          "handles": [
+            {
+              "id": "branch-{item.id}",
+              "type": "source",
+              "handleType": "output",
+              "label": "{item.name}",
+              "repeat": "inputs.branches"
+            },
+            {
+              "id": "default",
+              "type": "source",
+              "handleType": "output",
+              "label": "Default"
+            },
+            {
+              "id": "error",
+              "type": "source",
+              "handleType": "output",
+              "label": "Error"
+            }
+          ],
+          "visible": true
+        }
+      ],
+      "debug": {
+        "runtime": "bpmnEngine"
+      },
+      "model": {
+        "type": "bpmn:ServiceTask",
+        "expansion": {
+          "nodes": [
+            {
+              "id": "{nodeId}",
+              "type": "bpmn:SubProcess",
+              "replaceOriginal": true,
+              "data": {
+                "label": "{node.data.label}",
+                "isExpanded": true
+              },
+              "nodes": [
+                {
+                  "id": "_Implicit_StartEvent_{nodeId}",
+                  "type": "bpmn:StartEvent",
+                  "parentId": "{nodeId}",
+                  "position": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "data": {
+                    "label": "HTTP Request Start"
+                  }
+                },
+                {
+                  "id": "_Implicit_HttpTask_{nodeId}",
+                  "type": "bpmn:SendTask",
+                  "parentId": "{nodeId}",
+                  "position": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "propagate": {
+                    "retry": {
+                      "condition": "node.data.inputs.retryCount > 0",
+                      "maxRetryCount": "node.data.inputs.retryCount",
+                      "retryBackoff": "node.data.inputs.timeout",
+                      "retryBackoffDefault": "PT1S",
+                      "retryAllErrors": "true",
+                      "retryBackoffType": "Static"
+                    }
+                  },
+                  "data": {
+                    "label": "{node.data.label}",
+                    "model": {
+                      "data": {
+                        "serviceType": "Intsvc.HttpExecution",
+                        "version": "v1",
+                        "context": [
+                          {
+                            "name": "mode",
+                            "type": "string",
+                            "source": "node.data.inputs.implementation.mode"
+                          },
+                          {
+                            "name": "method",
+                            "type": "string",
+                            "source": "node.data.inputs.implementation.method"
+                          },
+                          {
+                            "name": "url",
+                            "type": "string",
+                            "source": "node.data.inputs.implementation.url"
+                          },
+                          {
+                            "name": "headers",
+                            "type": "json",
+                            "source": "node.data.inputs.headers",
+                            "format": "json"
+                          },
+                          {
+                            "name": "parameters",
+                            "type": "json",
+                            "source": "node.data.inputs.queryParams",
+                            "format": "json"
+                          },
+                          {
+                            "name": "body",
+                            "type": "json",
+                            "source": "node.data.inputs.body",
+                            "format": "json"
+                          }
+                        ],
+                        "outputs": [
+                          {
+                            "name": "response",
+                            "type": "json",
+                            "source": "=response",
+                            "var": "{nodeId}.output",
+                            "internal": true
+                          }
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "id": "_Implicit_Gateway_{nodeId}",
+                  "type": "bpmn:ExclusiveGateway",
+                  "parentId": "{nodeId}",
+                  "position": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "condition": "node.data.inputs.branches.length > 0",
+                  "data": {
+                    "label": "Response Branch",
+                    "defaultFlowId": "_Implicit_Edge__Implicit_Gateway_{nodeId}__Implicit_EndEvent_Default_{nodeId}"
+                  }
+                },
+                {
+                  "forEach": "node.data.inputs.branches",
+                  "id": "_Implicit_EndEvent_{branchName}_{nodeId}",
+                  "type": "bpmn:EndEvent",
+                  "parentId": "{nodeId}",
+                  "position": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "data": {
+                    "label": "{branch.name}"
+                  }
+                },
+                {
+                  "id": "_Implicit_EndEvent_Default_{nodeId}",
+                  "type": "bpmn:EndEvent",
+                  "parentId": "{nodeId}",
+                  "position": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "data": {
+                    "label": "Default"
+                  }
+                },
+                {
+                  "condition": "hasEdgeFromHandle('error')",
+                  "id": "_Implicit_EndEvent_Failure_{nodeId}",
+                  "type": "bpmn:EndEvent",
+                  "parentId": "{nodeId}",
+                  "position": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "data": {
+                    "label": "Failure"
+                  }
+                },
+                {
+                  "condition": "hasEdgeFromHandle('error')",
+                  "id": "_Implicit_BoundaryError_{nodeId}",
+                  "type": "bpmn:BoundaryEvent",
+                  "parentId": "{nodeId}",
+                  "position": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "data": {
+                    "label": "Error",
+                    "cancelActivity": false,
+                    "attachedToId": "_Implicit_HttpTask_{nodeId}",
+                    "eventDefinition": {
+                      "type": "bpmn:ErrorEventDefinition",
+                      "id": "_Implicit_BoundaryError_{nodeId}_Error"
+                    }
+                  }
+                }
+              ],
+              "edges": [
+                {
+                  "id": "_Implicit_Edge__Implicit_StartEvent_{nodeId}__Implicit_HttpTask_{nodeId}",
+                  "source": "_Implicit_StartEvent_{nodeId}",
+                  "target": "_Implicit_HttpTask_{nodeId}",
+                  "type": "bpmn:SequenceFlow",
+                  "data": {}
+                },
+                {
+                  "condition": "node.data.inputs.branches.length === 0",
+                  "id": "_Implicit_Edge__Implicit_HttpTask_{nodeId}__Implicit_EndEvent_Default_{nodeId}",
+                  "source": "_Implicit_HttpTask_{nodeId}",
+                  "target": "_Implicit_EndEvent_Default_{nodeId}",
+                  "type": "bpmn:SequenceFlow",
+                  "data": {}
+                },
+                {
+                  "condition": "node.data.inputs.branches.length > 0",
+                  "id": "_Implicit_Edge__Implicit_HttpTask_{nodeId}__Implicit_Gateway_{nodeId}",
+                  "source": "_Implicit_HttpTask_{nodeId}",
+                  "target": "_Implicit_Gateway_{nodeId}",
+                  "type": "bpmn:SequenceFlow",
+                  "data": {}
+                },
+                {
+                  "forEach": "node.data.inputs.branches",
+                  "condition": "node.data.inputs.branches.length > 0",
+                  "id": "_Implicit_Edge__Implicit_Gateway_{nodeId}__Implicit_EndEvent_{branchName}_{nodeId}",
+                  "source": "_Implicit_Gateway_{nodeId}",
+                  "target": "_Implicit_EndEvent_{branchName}_{nodeId}",
+                  "type": "bpmn:SequenceFlow",
+                  "data": {
+                    "conditionExpression": "{branch.conditionExpression}",
+                    "label": "{branch.name}"
+                  }
+                },
+                {
+                  "condition": "node.data.inputs.branches.length > 0",
+                  "id": "_Implicit_Edge__Implicit_Gateway_{nodeId}__Implicit_EndEvent_Default_{nodeId}",
+                  "source": "_Implicit_Gateway_{nodeId}",
+                  "target": "_Implicit_EndEvent_Default_{nodeId}",
+                  "type": "bpmn:SequenceFlow",
+                  "data": {
+                    "label": "Default"
+                  }
+                },
+                {
+                  "condition": "hasEdgeFromHandle('error')",
+                  "id": "_Implicit_Edge__Implicit_BoundaryError_{nodeId}__Implicit_EndEvent_Failure_{nodeId}",
+                  "source": "_Implicit_BoundaryError_{nodeId}",
+                  "target": "_Implicit_EndEvent_Failure_{nodeId}",
+                  "type": "bpmn:SequenceFlow",
+                  "data": {}
+                }
+              ]
+            },
+            {
+              "id": "_Implicit_PostSubprocessGateway_{nodeId}",
+              "type": "bpmn:ExclusiveGateway",
+              "condition": "(node.data.inputs.branches.length > 0 || hasEdgeFromHandle('error')) && originalEdges.length > 0",
+              "parentId": null,
+              "position": {
+                "x": 0,
+                "y": 0
+              },
+              "data": {
+                "label": "Post-Subprocess Branch"
+              }
+            }
+          ],
+          "edges": [
+            {
+              "condition": "(node.data.inputs.branches.length > 0 || hasEdgeFromHandle('error')) && originalEdges.length > 0",
+              "id": "_Implicit_Edge_{nodeId}__Implicit_PostSubprocessGateway_{nodeId}",
+              "source": "{nodeId}",
+              "target": "_Implicit_PostSubprocessGateway_{nodeId}",
+              "type": "bpmn:SequenceFlow",
+              "data": {}
+            },
+            {
+              "forEach": "node.data.inputs.branches",
+              "condition": "node.data.inputs.branches.length > 0",
+              "matchOriginalEdgeByHandle": "branch-{branch.id}",
+              "preserveEdgeId": true,
+              "source": "_Implicit_PostSubprocessGateway_{nodeId}",
+              "type": "bpmn:SequenceFlow",
+              "data": {
+                "conditionExpression": "{branch.conditionExpression}",
+                "label": "{branch.name}"
+              }
+            },
+            {
+              "condition": "node.data.inputs.branches.length > 0 || hasEdgeFromHandle('error')",
+              "matchOriginalEdgeByHandle": "default",
+              "preserveEdgeId": true,
+              "source": "_Implicit_PostSubprocessGateway_{nodeId}",
+              "type": "bpmn:SequenceFlow",
+              "data": {
+                "label": "Default"
+              }
+            },
+            {
+              "condition": "hasEdgeFromHandle('error')",
+              "matchOriginalEdgeByHandle": "error",
+              "preserveEdgeId": true,
+              "source": "_Implicit_PostSubprocessGateway_{nodeId}",
+              "type": "bpmn:SequenceFlow",
+              "data": {
+                "conditionExpression": "=js:vars.{nodeId}.output.statusCode >= 400",
+                "label": "Error"
+              }
+            },
+            {
+              "condition": "node.data.inputs.branches.length === 0 && !hasEdgeFromHandle('error')",
+              "matchOriginalEdgeByHandle": "default",
+              "preserveEdgeId": true,
+              "source": "{nodeId}",
+              "type": "bpmn:SequenceFlow"
+            }
+          ]
+        }
+      },
+      "inputDefinition": {
+        "implementation": {
+          "mode": "manual",
+          "method": "GET",
+          "url": "",
+          "swaggerDefinition": null
+        },
+        "authenticationType": "manual",
+        "application": "",
+        "connection": "",
+        "headers": {},
+        "queryParams": {},
+        "body": "",
+        "contentType": "application/json",
+        "timeout": "PT15M",
+        "retryCount": 0,
+        "branches": []
+      },
+      "outputDefinition": {
+        "output": {
+          "type": "object",
+          "description": "HTTP response object",
+          "source": "=response",
+          "var": "output",
+          "properties": {
+            "body": {
+              "type": "string",
+              "description": "Response body content"
+            },
+            "statusCode": {
+              "type": "number",
+              "description": "HTTP status code"
+            },
+            "headers": {
+              "type": "object",
+              "description": "Response headers",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "error": {
+          "type": "object",
+          "description": "Error message if request failed",
+          "source": "=Error",
+          "var": "error",
+          "schema": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "required": [
+              "code",
+              "message",
+              "detail",
+              "category",
+              "status"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Error code as a string"
+              },
+              "message": {
+                "type": "string",
+                "description": "High-level error message"
+              },
+              "detail": {
+                "type": "string",
+                "description": "Detailed error description"
+              },
+              "category": {
+                "type": "string",
+                "description": "Error category"
+              },
+              "status": {
+                "type": "integer",
+                "description": "HTTP status code"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "form": {
+        "id": "http-properties-v2",
+        "title": "HTTP Request",
+        "sections": [
+          {
+            "id": "implementation",
+            "title": "Implementation",
+            "collapsible": true,
+            "defaultExpanded": true,
+            "fields": [
+              {
+                "name": "inputs",
+                "type": "custom",
+                "component": "http-implementation-section",
+                "label": "",
+                "validation": {
+                  "required": true,
+                  "messages": {
+                    "required": "Implementation details are required"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "id": "headers",
+            "title": "Headers",
+            "collapsible": true,
+            "defaultExpanded": false,
+            "fields": [
+              {
+                "name": "inputs.headers",
+                "type": "custom",
+                "component": "key-value-editor",
+                "label": "HTTP Headers",
+                "componentProps": {
+                  "keyLabel": "Header Name",
+                  "valueLabel": "Header Value",
+                  "keyDefault": "Content-Type",
+                  "keyOptions": [
+                    "Accept",
+                    "Accept-Encoding",
+                    "Accept-Language",
+                    "Authorization",
+                    "Cache-Control",
+                    "Connection",
+                    "Content-Encoding",
+                    "Content-Length",
+                    "Content-Type",
+                    "Cookie",
+                    "Host",
+                    "If-Modified-Since",
+                    "If-None-Match",
+                    "Origin",
+                    "Referer",
+                    "User-Agent",
+                    "X-Requested-With",
+                    "X-Forwarded-For",
+                    "X-Api-Key"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "id": "parameters",
+            "title": "Query Parameters",
+            "collapsible": true,
+            "defaultExpanded": false,
+            "fields": [
+              {
+                "name": "inputs.queryParams",
+                "type": "custom",
+                "component": "key-value-editor",
+                "label": "Query Parameters",
+                "componentProps": {
+                  "keyLabel": "Parameter Name",
+                  "valueLabel": "Parameter Value"
+                }
+              }
+            ]
+          },
+          {
+            "id": "body",
+            "title": "Body",
+            "collapsible": true,
+            "defaultExpanded": false,
+            "fields": [
+              {
+                "name": "inputs.contentType",
+                "type": "select",
+                "label": "Content Type",
+                "options": [
+                  {
+                    "label": "application/json",
+                    "value": "application/json"
+                  },
+                  {
+                    "label": "application/xml",
+                    "value": "application/xml"
+                  },
+                  {
+                    "label": "text/plain",
+                    "value": "text/plain"
+                  },
+                  {
+                    "label": "application/x-www-form-urlencoded",
+                    "value": "application/x-www-form-urlencoded"
+                  }
+                ]
+              },
+              {
+                "name": "inputs.body",
+                "type": "custom",
+                "component": "code-editor",
+                "label": "Body",
+                "componentProps": {
+                  "language": "json",
+                  "minHeight": 150,
+                  "placeholder": "{\n  \"key\": \"value\"\n}"
+                }
+              }
+            ]
+          },
+          {
+            "id": "branches",
+            "title": "Branches",
+            "collapsible": true,
+            "defaultExpanded": false,
+            "fields": [
+              {
+                "name": "inputs.branches",
+                "type": "custom",
+                "component": "http-branch-editor",
+                "label": "Response Branches",
+                "description": "Define conditional branches based on response status or properties"
+              }
+            ]
+          },
+          {
+            "id": "advanced",
+            "title": "Advanced",
+            "collapsible": true,
+            "defaultExpanded": false,
+            "fields": [
+              {
+                "name": "inputs.timeout",
+                "type": "text",
+                "label": "Timeout",
+                "description": "ISO 8601 duration format (e.g., PT15M for 15 minutes, PT1H for 1 hour)"
+              },
+              {
+                "name": "inputs.retryCount",
+                "type": "number",
+                "label": "Retry Count",
+                "description": "Number of times to retry on failure"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "nodeType": "core.action.transform.extract",
+      "version": "1.0.0",
+      "category": "data-operations",
+      "tags": [
+        "data",
+        "transformation",
+        "extract"
+      ],
+      "sortOrder": 35,
+      "display": {
+        "label": "Extract",
+        "icon": "upload",
+        "iconBackground": "linear-gradient(225deg, #FAFAFB 0%, #ECEDEF 100%)",
+        "iconBackgroundDark": "linear-gradient(225deg, #526069 0%, rgba(50, 60, 66, 0.6) 100%)"
+      },
+      "handleConfiguration": [
+        {
+          "position": "left",
+          "handles": [
+            {
+              "id": "input",
+              "type": "target",
+              "handleType": "input"
+            }
+          ]
+        },
+        {
+          "position": "right",
+          "handles": [
+            {
+              "id": "output",
+              "type": "source",
+              "handleType": "output"
+            }
+          ]
+        }
+      ],
+      "debug": {
+        "runtime": "clientScript"
+      },
+      "model": {
+        "type": "bpmn:ScriptTask"
+      },
+      "inputDefinition": {
+        "operations": []
+      },
+      "outputDefinition": {
+        "output": {
+          "type": "object",
+          "description": "The transformed data result",
+          "source": "=result.response",
+          "var": "output"
+        }
+      },
+      "form": {
+        "id": "data-transform-extract-form",
+        "title": "Extract",
+        "sections": [
+          {
+            "defaultExpanded": true,
+            "id": "extract-section",
+            "title": "Extract Configuration",
+            "fields": [
+              {
+                "name": "inputs.operations",
+                "type": "custom",
+                "component": "extract-operation-editor",
+                "componentProps": {},
+                "label": "Extract Configuration"
+              }
+            ],
+            "collapsible": true
+          }
+        ]
+      }
+    },
+    {
+      "nodeType": "core.control.end",
+      "version": "1.0.0",
+      "category": "control-flow",
+      "tags": [
+        "control-flow",
+        "end",
+        "finish",
+        "complete"
+      ],
+      "sortOrder": 20,
+      "display": {
+        "label": "End",
+        "icon": "circle-check",
+        "shape": "circle"
+      },
+      "handleConfiguration": [
+        {
+          "position": "left",
+          "handles": [
+            {
+              "id": "input",
+              "type": "target",
+              "handleType": "input"
+            }
+          ]
+        }
+      ],
+      "model": {
+        "type": "bpmn:EndEvent"
+      }
+    },
+    {
+      "nodeType": "core.logic.terminate",
+      "version": "1.0.0",
+      "category": "control-flow",
+      "tags": [
+        "control-flow",
+        "end",
+        "stop",
+        "terminate"
+      ],
+      "sortOrder": 20,
+      "display": {
+        "label": "Terminate",
+        "icon": "circle-x",
+        "shape": "square"
+      },
+      "handleConfiguration": [
+        {
+          "position": "left",
+          "handles": [
+            {
+              "id": "input",
+              "type": "target",
+              "handleType": "input"
+            }
+          ]
+        }
+      ],
+      "model": {
+        "type": "bpmn:EndEvent",
+        "eventDefinition": "bpmn:TerminateEventDefinition"
+      }
+    }
+  ],
+  "variables": {
+    "nodes": [
+      {
+        "id": "httpRequest1.output",
+        "type": "object",
+        "description": "HTTP response object",
+        "binding": {
+          "nodeId": "httpRequest1",
+          "outputId": "output"
+        }
+      },
+      {
+        "id": "httpRequest1.error",
+        "type": "object",
+        "schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "required": [
+            "code",
+            "message",
+            "detail",
+            "category",
+            "status"
+          ],
+          "properties": {
+            "code": {
+              "type": "string",
+              "description": "Error code as a string"
+            },
+            "message": {
+              "type": "string",
+              "description": "High-level error message"
+            },
+            "detail": {
+              "type": "string",
+              "description": "Detailed error description"
+            },
+            "category": {
+              "type": "string",
+              "description": "Error category"
+            },
+            "status": {
+              "type": "integer",
+              "description": "HTTP status code"
+            }
+          },
+          "additionalProperties": false
+        },
+        "description": "Error message if request failed",
+        "binding": {
+          "nodeId": "httpRequest1",
+          "outputId": "error"
+        }
+      },
+      {
+        "id": "extract1.output",
+        "type": "object",
+        "description": "The transformed data result",
+        "binding": {
+          "nodeId": "extract1",
+          "outputId": "output"
+        }
+      }
+    ]
+  },
+  "metadata": {
+    "createdAt": "2026-02-28T02:00:15.037Z",
+    "updatedAt": "2026-03-02T20:16:06.962Z"
+  }
+}
