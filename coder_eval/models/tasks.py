@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
+from claude_agent_sdk import SdkPluginConfig
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from coder_eval.models.criteria import SuccessCriterion
@@ -26,6 +27,7 @@ class AgentConfig(BaseModel):
     )
     model: str | None = Field(default=None, description="Specific model to use (if applicable)")
     max_turns: int | None = Field(default=None, description="Maximum agent inner-loop turns per iteration")
+    plugins: list[SdkPluginConfig] | None = Field(default=None, description="List of Claude Code plugins")
 
     turn_timeout_seconds: int | None = Field(
         default=None,

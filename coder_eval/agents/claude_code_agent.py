@@ -2,6 +2,8 @@
 
 import dataclasses
 import logging
+import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -181,13 +183,15 @@ class ClaudeCodeAgent(Agent):
             stderr_lines.append(line)
 
         try:
-            # Create options for this query
+            # Process plugins: copy from config and replace env vars in paths
+            plugins = self._process_plugins(self.config.plugins or [])  # type: ignore[arg-type]
             options = ClaudeAgentOptions(
                 cwd=str(self.working_directory),
                 permission_mode=self.config.permission_mode,
                 allowed_tools=self.config.allowed_tools or [],
                 model=self.config.model,
                 max_turns=self.config.max_turns,
+                plugins=plugins,  # type: ignore[arg-type]
                 stderr=capture_stderr,  # Capture stderr for better error messages
             )
 
@@ -376,6 +380,47 @@ class ClaudeCodeAgent(Agent):
             Dictionary of SDK option field names to values, or None if communicate() hasn't been called.
         """
         return self._sdk_options_dump
+
+    @staticmethod
+    def _process_plugins(plugins: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Process plugins by expanding environment variable placeholders in paths.
+
+        Expands any $VAR or ${VAR} patterns in plugin paths using environment variables.
+        Logs a warning if a path contains an env var reference that is not set.
+
+        Args:
+            plugins: List of plugin configuration dictionaries (with optional 'path' keys)
+
+        Returns:
+            List of processed plugin configurations with env vars expanded
+        """
+        if not plugins:
+            return []
+
+        processed = []
+
+        for plugin in plugins:
+            # Create a copy to avoid modifying the original
+            processed_plugin = dict(plugin)
+
+            # Expand env vars in path if present
+            if "path" in processed_plugin:
+                path = processed_plugin["path"]
+                # Check for unset env vars before expansion (for better error messages)
+                # Matches $VAR or ${VAR}
+                var_pattern = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+                for match in var_pattern.finditer(path):
+                    # group(1) is ${VAR}, group(2) is $VAR
+                    var_name = match.group(1) or match.group(2)
+                    if var_name not in os.environ:
+                        logger.warning(f"Plugin path contains undefined environment variable ${var_name}: {path}")
+
+                # Expand all env vars in the path
+                processed_plugin["path"] = os.path.expandvars(path)
+
+            processed.append(processed_plugin)
+
+        return processed
 
     @staticmethod
     def _log_message_debug(message: Any, msg_type: str) -> None:

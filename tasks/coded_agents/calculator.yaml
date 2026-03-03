@@ -1,0 +1,34 @@
+task_id: "uipath_calculator_agent"
+description: "Create a UiPath calculator agent that takes 2 numbers and one operator as input and produces a number as output."
+initial_prompt: |
+  Create a UiPath calculator agent in the current directory that takes 2 numbers and one operator as input and produces a number as output.
+  The agent should be called calculator and it should be defined in main.py.
+  It should not contain any evaluations.
+max_iterations: 3
+tags: [uipath, coded-agents]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Glob", "Grep"]
+  plugins:
+    - type: "local"
+      path: $UIPATH_PLUGIN_MARKETPLACE_DIR/plugins/uipath-coded-agents/
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+  network_enabled: false
+
+success_criteria:
+  - type: "file_exists"
+    path: "main.py"
+    description: "The calculator agent file must be created."
+  - type: "file_contains"
+    path: "main.py"
+    includes: ["def", "calculator"]
+    description: "The agent must contain function definition and handle operators and numbers."
+  - type: "run_command"
+    command: "uv run uipath --help"
+    timeout: 10
+    description: "The uipath library should be initiated correctly."

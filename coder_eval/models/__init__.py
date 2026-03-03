@@ -4,6 +4,9 @@ All models can be imported from coder_eval.models regardless of
 which submodule they're defined in.
 """
 
+# SDK Types
+from claude_agent_sdk import SdkPluginConfig
+
 # Enums
 # Criteria (all 9 + union + base)
 from coder_eval.models.criteria import (
@@ -73,6 +76,8 @@ from coder_eval.models.templates import (
 
 
 __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
+    # SDK Types
+    "SdkPluginConfig",
     # Enums
     "AgentKind",
     "AgentState",

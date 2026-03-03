@@ -14,6 +14,7 @@ A robust, extensible framework for evaluating AI coding agents with comprehensiv
 - **Command Telemetry** — Full traceability of every tool invocation with timing and status
 - **Token Usage Tracking** — Input/output token counts for cost analysis
 - **Reference Comparison** — Code similarity scoring using AST, token, and complexity analysis
+- **Claude Code Plugins** — Configurable plugin support for Claude Code with marketplace directory substitution
 - **Parallel Execution** — Run multiple evaluations concurrently with configurable parallelism
 - **Rich CLI** — User-friendly command-line interface with validation, execution, and reporting
 
@@ -131,6 +132,9 @@ agent:
   type: "claude-code"
   permission_mode: "acceptEdits"
   allowed_tools: ["Read", "Write", "Bash"]
+  plugins:
+    - type: "local"
+      path: "$UIPATH_PLUGIN_MARKETPLACE_DIR/plugins/my-plugin"
 
 sandbox:
   driver: "tempdir"
@@ -151,6 +155,29 @@ For the full task definition reference — all 10 criterion types, scoring, temp
 
 > **Tip:** When creating new tasks with Claude Code, point it at the guide:
 > _"Read `docs/TASK_DEFINITION_GUIDE.md` and use it as a reference to create a new task definition for ..."_
+
+### Claude Code Agent Configuration
+
+The `agent` section configures the Claude Code behavior. Common options:
+
+```yaml
+agent:
+  type: "claude-code"                           # Agent type
+  permission_mode: "acceptEdits"                # Permission level: default, acceptEdits, plan, bypassPermissions
+  allowed_tools: ["Read", "Write", "Bash"]      # Tools Claude Code can use
+  model: "claude-opus-4-6"                      # Optional: override model
+  max_turns: 5                                  # Optional: max internal loop turns per iteration
+  plugins:                                      # Optional: Claude Code plugins
+    - type: "local"
+      path: "$UIPATH_PLUGIN_MARKETPLACE_DIR/plugins/mcp"  # Plugin path (supports env var substitution)
+    - type: "local"
+      path: "/absolute/path/to/plugin"            # Or absolute path
+```
+
+**Plugin Configuration:**
+- Set `UIPATH_PLUGIN_MARKETPLACE_DIR` environment variable to enable `$UIPATH_PLUGIN_MARKETPLACE_DIR` substitution in plugin paths
+- Each plugin requires `type: "local"` and a `path` to the plugin directory
+- Plugin paths support environment variable substitution (e.g., `$UIPATH_PLUGIN_MARKETPLACE_DIR/plugin-name`)
 
 ## Output Structure
 
@@ -254,6 +281,7 @@ Installed automatically by `make install`. Includes ruff format/lint, trailing w
 | `LLMGW_REQUESTING_PRODUCT` | No                    | Requesting product name (default: `coder-eval`)                                |
 | `LLMGW_REQUESTING_FEATURE` | No                    | Requesting feature name (default: `llm-reviewer`)                              |
 | `LLMGW_TIMEOUT_SECONDS`    | No                    | Gateway request timeout (default: 290)                                         |
+| `UIPATH_PLUGIN_MARKETPLACE_DIR` | No              | Base directory for Claude Code plugins (used to substitute `$UIPATH_PLUGIN_MARKETPLACE_DIR` in plugin paths) |
 | `LOG_LEVEL`                | No                    | Logging level (default: INFO)                                                  |
 | `LOG_TO_FILE`              | No                    | Enable file logging (default: false)                                           |
 
