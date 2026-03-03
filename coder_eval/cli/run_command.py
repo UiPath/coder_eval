@@ -1,9 +1,12 @@
 """Run command - execute evaluation tasks."""
 
 import asyncio
+import sys
 from pathlib import Path
+from typing import Any
 
 import typer
+from tqdm import tqdm
 
 from ..config import settings
 from ..logging_config import setup_logging
@@ -214,8 +217,34 @@ async def _run_all_tasks(
         max_turns=max_turns,
     )
 
-    # Run batch (business logic delegated to orchestrator)
-    summary = await Orchestrator.run_batch(task_files=all_task_files, config=config)
+    # Run batch with tqdm progress bar
+    progress_bar: tqdm[Any] | None = None
+
+    def _on_batch_start(task_count: int) -> None:
+        nonlocal progress_bar
+        progress_bar = tqdm(
+            total=task_count, desc="Tasks", unit="task", dynamic_ncols=True, disable=not sys.stderr.isatty()
+        )
+
+    def _on_task_complete(result: dict[str, Any]) -> None:
+        if progress_bar is None:
+            return
+        status = result["result"].final_status
+        task_id = result["task_id"]
+        status_icon = {"SUCCESS": "\u2713", "FAILURE": "\u2717", "ERROR": "!"}.get(status, "?")
+        progress_bar.set_postfix_str(f"{status_icon} {task_id}")
+        progress_bar.update(1)
+
+    try:
+        summary = await Orchestrator.run_batch(
+            task_files=all_task_files,
+            config=config,
+            on_task_complete=_on_task_complete,
+            on_batch_start=_on_batch_start,
+        )
+    finally:
+        if progress_bar is not None:
+            progress_bar.close()
 
     # Create 'latest' symlink
     if run_dir.parent == settings.runs_dir:  # Only if using default runs/ directory

@@ -3,8 +3,10 @@
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from .agent import Agent
 from .analysis import calculate_command_statistics
@@ -429,6 +431,8 @@ class Orchestrator:
         cls,
         task_files: list[Path],
         config: BatchRunConfig,
+        on_task_complete: Callable[[dict[str, Any]], None] | None = None,
+        on_batch_start: Callable[[int], None] | None = None,
     ) -> RunSummary:
         """Run multiple tasks in batch with optional parallelism.
 
@@ -438,6 +442,8 @@ class Orchestrator:
         Args:
             task_files: List of paths to task YAML files
             config: Batch execution configuration
+            on_task_complete: Optional callback invoked after each task finishes
+            on_batch_start: Optional callback invoked with the final task count after filtering
 
         Returns:
             RunSummary with aggregated results and statistics
@@ -458,4 +464,6 @@ class Orchestrator:
             ... )
             >>> print(f"Success: {summary.tasks_succeeded}/{summary.tasks_run}")
         """
-        return await run_batch_impl(task_files, config)
+        return await run_batch_impl(
+            task_files, config, on_task_complete=on_task_complete, on_batch_start=on_batch_start
+        )

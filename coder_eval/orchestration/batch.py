@@ -11,6 +11,7 @@ the batch execution flow logic.
 
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 async def run_batch(
     task_files: list[Path],
     config: BatchRunConfig,
+    on_task_complete: Callable[[dict[str, Any]], None] | None = None,
+    on_batch_start: Callable[[int], None] | None = None,
 ) -> RunSummary:
     """Run multiple tasks in batch with optional parallelism.
 
@@ -37,6 +40,10 @@ async def run_batch(
     Args:
         task_files: List of paths to task YAML files
         config: Batch execution configuration
+        on_task_complete: Optional callback invoked after each task finishes,
+            receives the task result dict with keys {task_id, result, duration}
+        on_batch_start: Optional callback invoked after task loading and filtering,
+            receives the final count of tasks that will be executed
 
     Returns:
         RunSummary with aggregated results and statistics
@@ -119,17 +126,27 @@ async def run_batch(
     # Build a mapping of task_id -> tags for the summary
     task_tags: dict[str, list[str]] = {task.task_id: task.tags for _, task in tasks}
 
+    # Notify caller of final task count (after filtering)
+    if on_batch_start is not None:
+        on_batch_start(len(tasks))
+
     # Create coroutines for all tasks
     async def run_task_with_semaphore(task_file: Path, task: TaskDefinition) -> dict[str, Any]:
         """Run single task with semaphore for concurrency control."""
         async with semaphore:
-            return await _run_single_task(
-                orchestrator_class=Orchestrator,
-                task_file=task_file,
-                task=task,
-                run_dir=config.run_dir,
-                preserve=config.preserve_sandbox,
-            )
+            try:
+                task_result = await _run_single_task(
+                    orchestrator_class=Orchestrator,
+                    task_file=task_file,
+                    task=task,
+                    run_dir=config.run_dir,
+                    preserve=config.preserve_sandbox,
+                )
+            except BaseException as exc:
+                _safe_notify(on_task_complete, _create_error_result(task_file, exc, task_id=task.task_id))
+                raise
+            _safe_notify(on_task_complete, task_result)
+            return task_result
 
     coroutines = [run_task_with_semaphore(task_file, task) for task_file, task in tasks]
 
@@ -141,8 +158,8 @@ async def run_batch(
     processed_results: list[dict[str, Any]] = []
     for i, result in enumerate(results):
         if isinstance(result, BaseException):
-            task_file = tasks[i][0]
-            error_result = _create_error_result(task_file, result)
+            task_file, task = tasks[i]
+            error_result = _create_error_result(task_file, result, task_id=task.task_id)
             processed_results.append(error_result)
         else:
             processed_results.append(result)
@@ -194,20 +211,32 @@ async def _run_single_task(
     }
 
 
-def _create_error_result(task_file: Path, error: BaseException) -> dict[str, Any]:
+def _safe_notify(callback: Callable[[dict[str, Any]], None] | None, result: dict[str, Any]) -> None:
+    """Invoke a progress callback, swallowing any exceptions so UI failures never affect task outcomes."""
+    if callback is None:
+        return
+    try:
+        callback(result)
+    except Exception:
+        logger.warning("Progress callback failed (ignored)", exc_info=True)
+
+
+def _create_error_result(task_file: Path, error: BaseException, *, task_id: str | None = None) -> dict[str, Any]:
     """Create an error result for a failed task.
 
     Args:
         task_file: Path to task file that failed
         error: Exception that was raised
+        task_id: Explicit task ID; falls back to task_file.stem when unavailable
 
     Returns:
         Dictionary with error result in same format as successful results
     """
     # Include exception type for better triage
     error_type = type(error).__name__
+    resolved_task_id = task_id if task_id is not None else task_file.stem
     error_result = EvaluationResult(
-        task_id=task_file.stem,  # Use filename as fallback
+        task_id=resolved_task_id,
         task_description=f"Failed to load task from {task_file}: {error_type}",
         agent_type=AgentKind.UNKNOWN,  # Agent type unknown when task loading fails
         started_at=datetime.now(),
