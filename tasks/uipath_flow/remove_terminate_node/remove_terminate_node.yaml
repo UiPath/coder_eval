@@ -1,0 +1,87 @@
+task_id: uipath-flow-remove-terminate-node
+description: "Remove a Terminate node from a UiPath automation workflow and its error-handling edge"
+tags: [integration, uipath-flow, template]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash"]
+
+sandbox:
+  driver: tempdir
+  python_version: "3.13"
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/uipath-flow-starter"
+    - type: template_dir
+      path: "./artifacts"
+
+initial_prompt: |
+  Modify remove_terminate_node_baseline.flow: remove the Terminate node and its connecting edge from the httpRequest1 error port.
+  Also remove the Terminate definition entry if no other node uses it.
+  Save the result as remove_terminate_node_result.flow.
+
+success_criteria:
+  - type: file_exists
+    description: "Result flow file exists"
+    path: "remove_terminate_node_result.flow"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Result preserves HTTP Request and does not contain Terminate"
+    path: "remove_terminate_node_result.flow"
+    includes:
+      - "httpRequest1"
+      - "core.action.http"
+    excludes:
+      - "core.logic.terminate"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Result flow file is valid JSON"
+    command: "python -c \"import json; json.load(open('remove_terminate_node_result.flow'))\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "No Terminate node, no error edge from HTTP Request to Terminate, no Terminate definition"
+    command: "python -c \"import json; r=json.load(open('remove_terminate_node_result.flow')); tn=[n for n in r['nodes'] if n['type']=='core.logic.terminate']; assert len(tn)==0,'Terminate node still present'; ee=[e for e in r['edges'] if e['sourceNodeId']=='httpRequest1' and e['sourcePort']=='error']; assert len(ee)==0,'Error edge from HTTP Request still present'; td=[d for d in r.get('definitions',[]) if d.get('nodeType')=='core.logic.terminate']; assert len(td)==0,'Terminate definition still present'\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Result matches expected output"
+    command: "python -c \"import json, os; r=json.load(open('remove_terminate_node_result.flow')); e=json.load(open(os.path.join(os.environ['TASK_DIR'], 'fixture', 'remove_terminate_node_expected.flow'))); rn=sorted([n['type'] for n in r['nodes']]); en=sorted([n['type'] for n in e['nodes']]); assert rn==en, f'Node types differ: {rn} vs {en}'; re=sorted([(x['sourceNodeId'],x['sourcePort'],x['targetNodeId']) for x in r['edges']]); ee=sorted([(x['sourceNodeId'],x['sourcePort'],x['targetNodeId']) for x in e['edges']]); assert re==ee, f'Edge connections differ: {re} vs {ee}'; rd=sorted([d.get('nodeType','') for d in r.get('definitions',[])]); ed=sorted([d.get('nodeType','') for d in e.get('definitions',[])]); assert rd==ed, f'Definitions differ: {rd} vs {ed}'\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Agent used uipcli flow command to explore nodes"
+    tool_name: "Bash"
+    command_pattern: "uipcli.*flow"
+    min_count: 1
+    require_success: false
+    weight: 1.5
+    pass_threshold: 1.0
+
+max_iterations: 5
+
+llm_reviewer:
+  enabled: true
+  prompt: |
+    Evaluate if the flow modification is complete and correct:
+
+    1. Was the Terminate node successfully removed from the workflow?
+    2. Was the error-handling edge from httpRequest1 to the Terminate node removed?
+    3. Was the Terminate definition entry removed?
+    4. Did the agent use uipcli flow commands to explore available nodes and metadata?
+    5. Is the resulting flow file valid and well-structured JSON?
+    6. Does the modification preserve the remaining workflow structure?
