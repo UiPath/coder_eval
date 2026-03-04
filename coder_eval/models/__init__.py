@@ -41,6 +41,7 @@ from coder_eval.models.results import (
 
 # Sandbox
 from coder_eval.models.sandbox import (
+    NodeEnvConfig,
     PythonEnvConfig,
     ResourceLimits,
     SandboxConfig,
@@ -103,6 +104,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "StarterFile",
     "TemplateSource",
     # Sandbox
+    "NodeEnvConfig",
     "PythonEnvConfig",
     "SandboxConfig",
     "SnapshotConfig",

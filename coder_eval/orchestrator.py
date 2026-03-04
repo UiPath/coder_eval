@@ -286,6 +286,10 @@ class Orchestrator:
             sandbox_path=Path(self.result.sandbox_path) if self.result.sandbox_path else None,
         )
 
+        # Add installed tool versions (from npm packages etc.)
+        if self.sandbox and self.sandbox.installed_tool_versions:
+            self.result.environment_info["installed_tools"] = self.sandbox.installed_tool_versions
+
     async def _create_agent(self) -> Agent:
         """Create the appropriate agent based on task configuration.
 

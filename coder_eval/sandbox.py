@@ -1,6 +1,7 @@
 """Sandbox manager for isolated execution environments."""
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -46,6 +47,7 @@ class Sandbox:
         self.sandbox_dir: Path | None = None
         self.venv_dir: Path | None = None
         self._cleanup_on_exit = True
+        self.installed_tool_versions: dict[str, str] = {}
 
     def setup(self) -> Path:
         """Set up the sandbox environment.
@@ -81,6 +83,10 @@ class Sandbox:
             # Install required packages
             if self.config.python.env_packages:
                 self._install_packages()
+
+        # Install Node.js packages
+        if self.config.node and self.config.node.env_packages:
+            self._install_node_packages()
 
         return self.sandbox_dir
 
@@ -278,6 +284,70 @@ class Sandbox:
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to install packages: {e.stderr}") from e
 
+    def _install_node_packages(self) -> None:
+        """Install npm packages locally in the sandbox directory."""
+        if not self.config.node or not self.config.node.env_packages or not self.sandbox_dir:
+            return
+
+        packages = self.config.node.env_packages
+
+        # Try bun first, fall back to npm
+        try:
+            subprocess.run(["bun", "--version"], check=True, capture_output=True, timeout=5)
+            cmd = ["bun", "add", *packages]
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            cmd = ["npm", "install", *packages]
+
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300, cwd=self.sandbox_dir)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to install node packages: {e.stderr}") from e
+
+        # Capture installed versions
+        self._capture_node_tool_versions()
+
+    def _capture_node_tool_versions(self) -> None:
+        """Capture installed versions for explicitly requested npm packages only."""
+        if not self.sandbox_dir or not self.config.node:
+            return
+
+        node_modules = self.sandbox_dir / "node_modules"
+        if not node_modules.exists():
+            return
+
+        # Extract package names from specifiers (strip version: "@uipath/uipcli@0.1.5" -> "@uipath/uipcli")
+        requested_names: set[str] = set()
+        for spec in self.config.node.env_packages:
+            if spec.startswith("@"):
+                # Scoped: "@scope/pkg@version" -> "@scope/pkg"
+                requested_names.add("@" + spec[1:].split("@", 1)[0])
+            else:
+                # Unscoped: "pkg@version" -> "pkg"
+                requested_names.add(spec.split("@", 1)[0])
+
+        # Read package.json for each requested package
+        for name in requested_names:
+            if name.startswith("@") and "/" in name:
+                # Scoped: @scope/pkg -> node_modules/@scope/pkg
+                scope, pkg = name.split("/", 1)
+                pkg_dir = node_modules / scope / pkg
+            else:
+                pkg_dir = node_modules / name
+
+            pkg_json = pkg_dir / "package.json"
+            if pkg_json.exists():
+                try:
+                    data = json.loads(pkg_json.read_text())
+                    version = data.get("version", "unknown")
+                    self.installed_tool_versions[name] = version
+                except (json.JSONDecodeError, OSError) as exc:
+                    logger.debug(
+                        "Failed to read or parse package.json for %s at %s: %s",
+                        name,
+                        pkg_json,
+                        exc,
+                    )
+
     def run_command(self, command: str, timeout: int | None = None) -> tuple[int, str, str]:
         """Run a command in the sandbox environment.
 
@@ -304,6 +374,11 @@ class Sandbox:
         if self.venv_dir:
             env["VIRTUAL_ENV"] = str(self.venv_dir)
             env["PATH"] = f"{self.venv_dir / 'bin'}:{env['PATH']}"
+        # Add node_modules/.bin to PATH if it exists
+        node_bin = self.sandbox_dir / "node_modules" / ".bin"
+        if node_bin.exists():
+            env["PATH"] = f"{node_bin}:{env['PATH']}"
+
         if self.task_dir:
             env["TASK_DIR"] = str(self.task_dir)
 

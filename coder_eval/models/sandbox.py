@@ -64,6 +64,14 @@ class PythonEnvConfig(BaseModel):
     env_packages: list[str] = Field(default_factory=list, description="Packages to install")
 
 
+class NodeEnvConfig(BaseModel):
+    """Configuration for Node.js environment in the sandbox."""
+
+    env_packages: list[str] = Field(
+        default_factory=list, description="npm packages to install (e.g., '@uipath/uipcli@0.1.5')"
+    )
+
+
 class SandboxConfig(BaseModel):
     """Configuration for the sandboxed execution environment."""
 
@@ -71,6 +79,10 @@ class SandboxConfig(BaseModel):
     python: PythonEnvConfig | None = Field(
         default_factory=PythonEnvConfig,
         description="Python environment config; set to null in YAML (or None in Python) to skip venv creation",
+    )
+    node: NodeEnvConfig | None = Field(
+        default=None,
+        description="Node.js environment config; set to enable npm package installation in the sandbox",
     )
     network_enabled: bool = Field(default=False, description="Whether network access is enabled")
     limits: ResourceLimits = Field(default_factory=ResourceLimits, description="Resource limits for execution")
