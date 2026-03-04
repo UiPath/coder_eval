@@ -58,7 +58,7 @@ class MockAgent(Agent):
         """
         return self.state
 
-    async def communicate(self, user_input: str) -> TurnRecord:
+    async def communicate(self, user_input: str, **kwargs) -> TurnRecord:
         """Simulate agent turn based on configured scenario.
 
         Args:

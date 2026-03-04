@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..models import AgentKind, EvaluationResult, RunSummary, SnapshotMode, TaskDefinition
+from ..streaming.callbacks import StreamCallback
 from ..utils import get_version_info
 from .config import BatchRunConfig
 from .task_loader import load_task
@@ -30,6 +31,7 @@ async def run_batch(
     config: BatchRunConfig,
     on_task_complete: Callable[[dict[str, Any]], None] | None = None,
     on_batch_start: Callable[[int], None] | None = None,
+    stream_callback_factory: Callable[[str], StreamCallback] | None = None,
 ) -> RunSummary:
     """Run multiple tasks in batch with optional parallelism.
 
@@ -143,6 +145,7 @@ async def run_batch(
     # Create coroutines for all tasks
     async def run_task_with_semaphore(task_file: Path, task: TaskDefinition) -> dict[str, Any]:
         """Run single task with semaphore for concurrency control."""
+        task_callback = stream_callback_factory(task.task_id) if stream_callback_factory else None
         async with semaphore:
             try:
                 task_result = await _run_single_task(
@@ -151,6 +154,7 @@ async def run_batch(
                     task=task,
                     run_dir=config.run_dir,
                     preserve=config.preserve_sandbox,
+                    stream_callback=task_callback,
                 )
             except BaseException as exc:
                 _safe_notify(on_task_complete, _create_error_result(task_file, exc, task_id=task.task_id))
@@ -186,6 +190,7 @@ async def _run_single_task(
     task: TaskDefinition,
     run_dir: Path,
     preserve: bool,
+    stream_callback: StreamCallback | None = None,
 ) -> dict[str, Any]:
     """Run a single task as part of a batch (internal helper).
 
@@ -195,6 +200,7 @@ async def _run_single_task(
         task: Loaded task definition
         run_dir: Run-level directory
         preserve: Whether to preserve sandbox
+        stream_callback: Optional streaming callback for this task
 
     Returns:
         Dictionary with {task_id, result, duration}
@@ -209,6 +215,7 @@ async def _run_single_task(
         run_dir=task_run_dir,
         preserve_sandbox=preserve,
         task_file=task_file,
+        stream_callback=stream_callback,
     )
 
     # Run evaluation

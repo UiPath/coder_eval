@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import click
 import typer
 from tqdm import tqdm
 
@@ -13,6 +14,7 @@ from ..logging_config import setup_logging
 from ..orchestration.config import BatchRunConfig
 from ..orchestrator import Orchestrator
 from ..path_utils import create_latest_symlink
+from ..streaming.renderers import RichStreamRenderer
 from .run_helpers import (
     expand_task_files,
     prepare_run_directory,
@@ -113,6 +115,13 @@ def run_command(
         help="Override turn timeout (seconds) for all tasks. Per agent.communicate() call.",
         min=10,
     ),
+    stream: str | None = typer.Option(
+        None,
+        "--stream",
+        "-s",
+        click_type=click.Choice(["full", "minimal"], case_sensitive=False),
+        help="Stream LLM events to terminal: 'full' or 'minimal' (turn-level only). Disables progress bar.",
+    ),
 ) -> None:
     """Run evaluation tasks (optionally in parallel).
 
@@ -169,6 +178,7 @@ def run_command(
             max_turns,
             task_timeout,
             turn_timeout,
+            stream,
         )
     )
 
@@ -188,6 +198,7 @@ async def _run_all_tasks(
     max_turns: int | None = None,
     task_timeout_seconds: int | None = None,
     turn_timeout_seconds: int | None = None,
+    stream_mode: str | None = None,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -210,6 +221,7 @@ async def _run_all_tasks(
         max_turns: Optional override for max agent turns
         task_timeout_seconds: Optional override for task timeout (seconds)
         turn_timeout_seconds: Optional override for turn timeout (seconds)
+        stream_mode: Optional stream mode ('full' or 'minimal') for real-time output
     """
     # Prepare run directory
     run_dir = prepare_run_directory(run_dir)
@@ -237,34 +249,51 @@ async def _run_all_tasks(
         turn_timeout_seconds=turn_timeout_seconds,
     )
 
-    # Run batch with tqdm progress bar
-    progress_bar: tqdm[Any] | None = None
+    # Create streaming callback factory if --stream is enabled
+    stream_callback_factory = None
+    if stream_mode:
+        batch_mode = len(all_task_files) > 1
+        renderer = RichStreamRenderer(verbosity=stream_mode, batch_mode=batch_mode)
+        # Factory returns the shared renderer for all tasks; task_id is used by batch.py
+        # for per-task isolation, but here we share one renderer that prefixes output with task_id
+        stream_callback_factory = lambda task_id, r=renderer: r  # noqa: E731
 
-    def _on_batch_start(task_count: int) -> None:
-        nonlocal progress_bar
-        progress_bar = tqdm(
-            total=task_count, desc="Tasks", unit="task", dynamic_ncols=True, disable=not sys.stderr.isatty()
-        )
-
-    def _on_task_complete(result: dict[str, Any]) -> None:
-        if progress_bar is None:
-            return
-        status = result["result"].final_status
-        task_id = result["task_id"]
-        status_icon = {"SUCCESS": "\u2713", "FAILURE": "\u2717", "ERROR": "!"}.get(status, "?")
-        progress_bar.set_postfix_str(f"{status_icon} {task_id}")
-        progress_bar.update(1)
-
-    try:
+    if stream_mode:
+        # Streaming mode: no progress bar
         summary = await Orchestrator.run_batch(
             task_files=all_task_files,
             config=config,
-            on_task_complete=_on_task_complete,
-            on_batch_start=_on_batch_start,
+            stream_callback_factory=stream_callback_factory,
         )
-    finally:
-        if progress_bar is not None:
-            progress_bar.close()
+    else:
+        # Default: tqdm progress bar
+        progress_bar: tqdm[Any] | None = None
+
+        def _on_batch_start(task_count: int) -> None:
+            nonlocal progress_bar
+            progress_bar = tqdm(
+                total=task_count, desc="Tasks", unit="task", dynamic_ncols=True, disable=not sys.stderr.isatty()
+            )
+
+        def _on_task_complete(result: dict[str, Any]) -> None:
+            if progress_bar is None:
+                return
+            status = result["result"].final_status
+            task_id = result["task_id"]
+            status_icon = {"SUCCESS": "\u2713", "FAILURE": "\u2717", "ERROR": "!"}.get(status, "?")
+            progress_bar.set_postfix_str(f"{status_icon} {task_id}")
+            progress_bar.update(1)
+
+        try:
+            summary = await Orchestrator.run_batch(
+                task_files=all_task_files,
+                config=config,
+                on_task_complete=_on_task_complete,
+                on_batch_start=_on_batch_start,
+            )
+        finally:
+            if progress_bar is not None:
+                progress_bar.close()
 
     # Create 'latest' symlink
     if run_dir.parent == settings.runs_dir:  # Only if using default runs/ directory

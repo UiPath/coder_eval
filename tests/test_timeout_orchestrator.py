@@ -84,7 +84,7 @@ async def test_turn_timeout_fires(tmp_path):
     # Mock agent that sleeps longer than the turn timeout
     mock_agent = AsyncMock()
 
-    async def slow_communicate(_prompt):
+    async def slow_communicate(_prompt, **kwargs):
         await asyncio.sleep(10)
         return _make_turn_record()
 
@@ -242,7 +242,7 @@ async def test_turn_timeout_fires_before_task_timeout(tmp_path):
     # Mock agent that sleeps longer than turn timeout but within task timeout
     mock_agent = AsyncMock()
 
-    async def slow_communicate(_prompt):
+    async def slow_communicate(_prompt, **kwargs):
         await asyncio.sleep(10)
         return _make_turn_record()
 

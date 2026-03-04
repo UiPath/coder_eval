@@ -27,6 +27,8 @@ from .orchestration.batch import run_batch as run_batch_impl
 from .orchestration.config import BatchRunConfig
 from .orchestration.evaluation import create_iteration_snapshot, generate_next_prompt, load_reference_code
 from .sandbox import Sandbox
+from .streaming.callbacks import StreamCallback, TaskScopedCallback, safe_emit
+from .streaming.events import CriteriaCheckEvent, TurnCompleteEvent, TurnStartEvent
 from .utils import get_version_info
 
 
@@ -47,6 +49,7 @@ class Orchestrator:
         run_dir: Path,
         preserve_sandbox: bool = False,
         task_file: Path | None = None,
+        stream_callback: StreamCallback | None = None,
     ):
         """Initialize the orchestrator.
 
@@ -55,11 +58,13 @@ class Orchestrator:
             run_dir: Per-task directory within a run (e.g., runs/2025-10-09_15-30-45/hello_date/)
             preserve_sandbox: Whether to preserve sandbox after completion
             task_file: Path to task YAML file (for resolving reference file paths)
+            stream_callback: Optional callback for real-time event streaming
         """
         self.task = task
         self.run_dir = run_dir
         self.preserve_sandbox = preserve_sandbox
         self.task_file = task_file
+        self.stream_callback = stream_callback
 
         # Derived paths
         self.report_path = self.run_dir / "report.json"
@@ -326,14 +331,31 @@ class Orchestrator:
             prompt_with_cwd = f"Your working directory is: {sandbox_dir}\n\n{current_prompt}"
             self.logger.debug(f"Sending prompt: {current_prompt[:100]}...")
 
+            safe_emit(
+                self.stream_callback,
+                TurnStartEvent(
+                    task_id=self.task.task_id,
+                    iteration=iteration,
+                    max_iterations=self.task.max_iterations,
+                    prompt_preview=current_prompt[:100],
+                ),
+            )
+
             # Use lambda with default arguments to safely bind variables
             # (without defaults, closure would capture stale references)
             # Local variable for type narrowing in lambda
             agent = self.agent
             turn_timeout = self.task.agent.turn_timeout_seconds
 
+            # Wrap callback to stamp correct task_id on agent-emitted events
+            agent_callback: StreamCallback | None = None
+            if self.stream_callback is not None:
+                agent_callback = TaskScopedCallback(self.stream_callback, self.task.task_id)
+
             communicate_coro = execute_with_retry(
-                operation=lambda prompt=prompt_with_cwd, a=agent: a.communicate(prompt),
+                operation=lambda prompt=prompt_with_cwd, a=agent, cb=agent_callback: a.communicate(
+                    prompt, stream_callback=cb
+                ),
                 operation_name=f"Agent communication (iteration {iteration})",
                 context={
                     "task_id": self.task.task_id,
@@ -354,6 +376,17 @@ class Orchestrator:
             else:
                 turn_record = await communicate_coro
             self.result.turns.append(turn_record)
+
+            safe_emit(
+                self.stream_callback,
+                TurnCompleteEvent(
+                    task_id=self.task.task_id,
+                    iteration=iteration,
+                    duration_s=turn_record.duration_seconds or 0.0,
+                    command_count=len(turn_record.commands),
+                    token_usage_str=str(turn_record.token_usage) if turn_record.token_usage else "",
+                ),
+            )
 
             self.logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
 
@@ -409,6 +442,22 @@ class Orchestrator:
                 f"Success criteria: {passed_count}/{total_count} passed, weighted score: {current_score:.3f}"
             )
 
+            criteria_details = [
+                f"{criterion.type}: {'PASS' if result.score >= criterion.pass_threshold else 'FAIL'}"
+                + f" ({result.score:.2f})"
+                for result, criterion in zip(criteria_results, self.task.success_criteria, strict=True)
+            ]
+            safe_emit(
+                self.stream_callback,
+                CriteriaCheckEvent(
+                    task_id=self.task.task_id,
+                    passed=passed_count,
+                    total=total_count,
+                    weighted_score=current_score,
+                    details=criteria_details,
+                ),
+            )
+
             if all_passed:
                 self.logger.info("All success criteria passed!")
                 success = True
@@ -460,6 +509,7 @@ class Orchestrator:
         config: BatchRunConfig,
         on_task_complete: Callable[[dict[str, Any]], None] | None = None,
         on_batch_start: Callable[[int], None] | None = None,
+        stream_callback_factory: Callable[[str], StreamCallback] | None = None,
     ) -> RunSummary:
         """Run multiple tasks in batch with optional parallelism.
 
@@ -492,5 +542,9 @@ class Orchestrator:
             >>> print(f"Success: {summary.tasks_succeeded}/{summary.tasks_run}")
         """
         return await run_batch_impl(
-            task_files, config, on_task_complete=on_task_complete, on_batch_start=on_batch_start
+            task_files,
+            config,
+            on_task_complete=on_task_complete,
+            on_batch_start=on_batch_start,
+            stream_callback_factory=stream_callback_factory,
         )

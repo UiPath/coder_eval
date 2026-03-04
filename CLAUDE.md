@@ -60,7 +60,8 @@ coder_eval/
 │   ├── categories.py              # Error categorization
 │   ├── categorization.py          # Error classification logic
 │   ├── executor.py                # Execution with error context
-│   └── retry.py                   # Retry logic with exponential backoff
+│   ├── retry.py                   # Retry logic with exponential backoff
+│   └── timeout.py                 # Timeout handling
 │
 ├── orchestration/                 # Batch execution utilities
 │   ├── batch.py                   # Parallel task execution
@@ -85,10 +86,16 @@ coder_eval/
 │   ├── quality.py                 # Quality metrics (annotations, docstrings)
 │   └── similarity.py              # Unified similarity interface
 │
+├── streaming/                     # Real-time LLM event streaming
+│   ├── __init__.py                # Unified exports
+│   ├── callbacks.py               # StreamCallback protocol, TaskScopedCallback, safe_emit
+│   ├── events.py                  # StreamEvent types (TurnStart, ToolCall, ToolResult, etc.)
+│   └── renderers.py               # RichStreamRenderer (full/minimal verbosity, batch mode)
+│
 └── resources/                     # Package resources
 
 tasks/                             # Task definition YAML files
-tests/                             # Test suite (39 files)
+tests/                             # Test suite
 docs/                              # Documentation
 templates/                         # Sandbox template directories
 ```
@@ -99,6 +106,7 @@ templates/                         # Sandbox template directories
 - **Plugin Registry**: `criteria/` uses auto-discovery via `pkgutil` + `@register_criterion` decorator
 - **Strategy Pattern**: `Agent` ABC with implementations in `agents/`
 - **Separation of Concerns**: Data models (`models/`) are pure Pydantic; logic lives in `criteria/`, `evaluation/`, etc.
+- **Callback Streaming**: `StreamCallback` protocol with `TaskScopedCallback` wrapper for real-time LLM event output
 - **All models importable from `coder_eval.models`** regardless of submodule
 
 ## Success Criteria (10 types)

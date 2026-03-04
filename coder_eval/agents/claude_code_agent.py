@@ -14,6 +14,8 @@ from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, Message, Proce
 from coder_eval.agent import Agent, AgentState
 from coder_eval.models import AgentConfig, CommandTelemetry, FileChange, FileChanges, FileTree, TokenUsage, TurnRecord
 from coder_eval.resources import get_ignore_patterns, should_ignore_path
+from coder_eval.streaming.callbacks import StreamCallback, safe_emit
+from coder_eval.streaming.events import TextChunkEvent, ToolCallEvent, ToolResultEvent
 
 
 logger = logging.getLogger(__name__)
@@ -135,7 +137,7 @@ class ClaudeCodeAgent(Agent):
         self._state = AgentState.WORKING
         # Note: Client is created per-communication to avoid transport issues
 
-    async def communicate(self, user_input: str) -> TurnRecord:
+    async def communicate(self, user_input: str, *, stream_callback: StreamCallback | None = None) -> TurnRecord:
         """Send a message to Claude and receive its response.
 
         Args:
@@ -239,6 +241,25 @@ class ClaudeCodeAgent(Agent):
                                 }
                                 sequence_number += 1
 
+                                safe_emit(
+                                    stream_callback,
+                                    ToolCallEvent(
+                                        task_id=self.config.type.value,
+                                        tool_name=block.name,
+                                        tool_id=block.id,
+                                        parameters=block.input if isinstance(block.input, dict) else {},
+                                        sequence_number=sequence_number - 1,
+                                    ),
+                                )
+                            elif hasattr(block, "text"):
+                                safe_emit(
+                                    stream_callback,
+                                    TextChunkEvent(
+                                        task_id=self.config.type.value,
+                                        text=str(block.text),
+                                    ),
+                                )
+
                 # Capture SDK ResultMessage with token usage (check BEFORE tool results
                 # to avoid misclassification if SDK message also has tool_use_id/is_error)
                 elif _is_sdk_result_message(message):
@@ -253,12 +274,28 @@ class ClaudeCodeAgent(Agent):
                     if content and isinstance(content, list):
                         for block in content:
                             if _is_tool_result_block(block):
+                                # Extract tool_name before resolve (defensive: resolve could remove entries)
+                                tool_name = ""
+                                if block.tool_use_id in pending_commands:
+                                    tool_name = pending_commands[block.tool_use_id]["telemetry"].tool_name
                                 self._resolve_pending_command(
                                     block.tool_use_id,
                                     getattr(block, "is_error", False) or False,
                                     block.content,
                                     pending_commands,
                                     processed_results,
+                                )
+                                is_error_flag = getattr(block, "is_error", False) or False
+                                result_content = str(block.content) if block.content is not None else ""
+                                safe_emit(
+                                    stream_callback,
+                                    ToolResultEvent(
+                                        task_id=self.config.type.value,
+                                        tool_id=block.tool_use_id,
+                                        tool_name=tool_name,
+                                        success=not is_error_flag,
+                                        result_preview=result_content[:200],
+                                    ),
                                 )
 
             logger.debug("Agent query stream ended")

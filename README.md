@@ -16,6 +16,7 @@ A robust, extensible framework for evaluating AI coding agents with comprehensiv
 - **Reference Comparison** — Code similarity scoring using AST, token, and complexity analysis
 - **Claude Code Plugins** — Configurable plugin support for Claude Code with marketplace directory substitution
 - **Parallel Execution** — Run multiple evaluations concurrently with configurable parallelism
+- **Real-Time Streaming** — `--stream` flag for live LLM event output (tool calls, results, text) with full/minimal verbosity modes
 - **Rich CLI** — User-friendly command-line interface with validation, execution, and reporting
 
 ## Quick Start
@@ -85,6 +86,9 @@ coder-eval run tasks/*.yaml
 
 # Parallel execution (up to 3 concurrent)
 coder-eval run tasks/*.yaml --max-parallel 3
+
+# Stream real-time LLM output
+coder-eval run tasks/hello_date.yaml --stream full
 ```
 
 **Options:**
@@ -95,6 +99,14 @@ coder-eval run tasks/*.yaml --max-parallel 3
 | `--preserve / --no-preserve` | Preserve sandbox after execution (default: preserve)                 |
 | `--run-dir`                  | Custom run directory (default: timestamped in `runs/`)               |
 | `--max-parallel, -j`         | Concurrent tasks (default: 1)                                        |
+| `--model, -m`                | Override agent model for all tasks (e.g., `claude-sonnet-4-20250514`)|
+| `--permission-mode`          | Override permission mode (`default`, `acceptEdits`, `plan`, `bypassPermissions`) |
+| `--max-turns`                | Override max agent inner-loop turns per iteration                    |
+| `--task-timeout`             | Override task timeout in seconds (covers the evaluation loop)        |
+| `--turn-timeout`             | Override turn timeout in seconds (per agent communicate call)        |
+| `--stream, -s`               | Stream LLM events to terminal: `full` or `minimal` (disables progress bar) |
+| `--tags, -t`                 | Only run tasks matching any of these tags (comma-separated)          |
+| `--exclude-tags`             | Skip tasks matching any of these tags (comma-separated)              |
 | `--snapshot-mode`            | Override snapshot mode (`disabled`, `full`, `incremental`, `hybrid`) |
 | `--snapshot-checkpoint-freq` | Checkpoint frequency for hybrid mode                                 |
 | `--verbose, -v`              | DEBUG-level logging                                                  |
@@ -206,6 +218,7 @@ coder_eval/
 ├── orchestration/   # Batch execution + task loading
 ├── cli/             # Typer CLI commands
 ├── scoring/         # Code similarity scorers (AST, token, complexity)
+├── streaming/       # Real-time event streaming (callbacks, renderers)
 ├── agents/          # Agent implementations (Claude Code)
 ├── agent.py         # Agent ABC
 ├── sandbox.py       # Sandbox manager
@@ -323,6 +336,7 @@ See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.
 - [x] Reference comparison
 - [x] Parallel execution
 - [x] Token usage tracking
+- [x] Real-time LLM streaming output
 - [ ] Docker sandbox driver
 - [ ] Support for more agents (Aider, Cursor, etc.)
 - [ ] Web UI for results visualization

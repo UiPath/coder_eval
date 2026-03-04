@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from .models import AgentState, TurnRecord
+from .streaming.callbacks import StreamCallback
 
 
 class Agent(ABC):
@@ -23,7 +24,7 @@ class Agent(ABC):
         pass
 
     @abstractmethod
-    async def communicate(self, user_input: str) -> TurnRecord:
+    async def communicate(self, user_input: str, *, stream_callback: StreamCallback | None = None) -> TurnRecord:
         """Send a message to the agent and receive its response.
 
         Args:
