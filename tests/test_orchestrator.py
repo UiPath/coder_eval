@@ -27,6 +27,12 @@ def test_orchestrator_load_task_missing_file():
         load_task(Path("tasks/nonexistent.yaml"))
 
 
+def test_orchestrator_load_task_directory():
+    """Test that loading a directory instead of a YAML file gives a clear error."""
+    with pytest.raises(ValueError, match="Expected a YAML task file but got a directory"):
+        load_task(Path("tasks"))
+
+
 def test_orchestrator_initialization(tmp_path):
     """Test orchestrator initialization."""
     task_file = Path("tasks/hello_date.yaml")

@@ -23,6 +23,13 @@ def load_task(task_file: Path) -> TaskDefinition:
     if not task_file.exists():
         raise FileNotFoundError(f"Task file not found: {task_file}")
 
+    if task_file.is_dir():
+        msg = (
+            f"Expected a YAML task file but got a directory: {task_file}\n"
+            f"Hint: use a glob pattern like '{task_file}/*.yaml' to select task files."
+        )
+        raise ValueError(msg)
+
     with open(task_file) as f:
         task_data = yaml.safe_load(f)
 
