@@ -1,0 +1,13 @@
+task_id: test_task
+description: Test task
+initial_prompt: Test
+max_iterations: 1
+# agent block required by TaskDefinition schema but unused in evaluate-only mode
+agent:
+  type: claude-code
+sandbox:
+  driver: tempdir
+success_criteria:
+  - type: file_exists
+    path: app.py
+    description: app.py must exist

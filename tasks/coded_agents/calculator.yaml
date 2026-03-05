@@ -2,7 +2,7 @@ task_id: "uipath_calculator_agent"
 description: "Create a UiPath calculator agent that takes 2 numbers and one operator as input and produces a number as output."
 initial_prompt: |
   Create a UiPath calculator agent in the current directory that takes 2 numbers and one operator as input and produces a number as output.
-  The agent should be called calculator and it should be defined in main.py.
+  The agent should be called calculator and it should be defined in main.py. The entrypoint function should be called "calculator".
   It should not contain any evaluations.
 max_iterations: 3
 tags: [uipath, coded-agents]
@@ -28,7 +28,9 @@ success_criteria:
     path: "main.py"
     includes: ["def", "calculator"]
     description: "The agent must contain function definition and handle operators and numbers."
-  - type: "run_command"
-    command: "uv run uipath --help"
-    timeout: 10
-    description: "The uipath library should be initiated correctly."
+  - type: "uipath_eval"
+    description: "Verify calculator agent evaluation metrics"
+    agent_name: calculator
+    eval_set: evaluations/eval-sets/default.json
+    thresholds:
+      ExactMatchEvaluator: 1.0

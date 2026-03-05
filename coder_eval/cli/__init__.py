@@ -3,6 +3,7 @@
 import typer
 
 from .console import console
+from .evaluate_command import evaluate_command
 from .plan_command import plan_command
 from .report_command import report_command
 from .run_command import run_command
@@ -25,6 +26,7 @@ def main(ctx: typer.Context) -> None:
     Available commands:
     - run: Execute evaluation tasks
     - plan: Validate task files (dry-run)
+    - evaluate: Run criteria against a directory without an agent
     - report: Display or export evaluation reports
     """
     # If no subcommand was invoked, show help and exit
@@ -36,6 +38,7 @@ def main(ctx: typer.Context) -> None:
 # Register commands
 app.command(name="run")(run_command)
 app.command(name="plan")(plan_command)
+app.command(name="evaluate")(evaluate_command)
 app.command(name="report")(report_command)
 
 

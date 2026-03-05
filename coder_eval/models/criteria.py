@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -29,6 +29,9 @@ class BaseSuccessCriterion(BaseModel, ABC):
     pass_threshold: float = Field(
         default=0.9, ge=0.0, le=1.0, description="Minimum score required to pass (default: 0.9 = 90%)"
     )
+
+    requires_agent: ClassVar[bool] = False
+    """True if this criterion requires agent turn records to evaluate correctly."""
 
     # Business logic (check operations) moved to SuccessChecker in evaluator.py
 
@@ -212,6 +215,8 @@ class ReferenceComparisonCriterion(BaseSuccessCriterion):
             pass_threshold: 0.8
     """
 
+    requires_agent: ClassVar[bool] = True
+
     type: Literal["reference_comparison"] = "reference_comparison"
 
     # Required fields
@@ -254,6 +259,8 @@ class CommandExecutedCriterion(BaseSuccessCriterion):
             require_success: true
     """
 
+    requires_agent: ClassVar[bool] = True
+
     type: Literal["command_executed"] = "command_executed"
     tool_name: str | None = Field(default=None, description="Tool name filter (e.g., 'Bash'). None = any tool.")
     command_pattern: str | None = Field(
@@ -261,6 +268,28 @@ class CommandExecutedCriterion(BaseSuccessCriterion):
     )
     min_count: int = Field(default=1, ge=1, description="Minimum matching commands required.")
     require_success: bool = Field(default=False, description="If True, only count successful commands.")
+
+
+class UiPathEvalCriterion(BaseSuccessCriterion):
+    """Check evaluation results against UiPath agent performance.
+
+    Pure data model - checking logic in UiPathEvalChecker._check_impl()
+
+    Threshold semantics: all thresholds are *minimum acceptable values* — a metric
+    passes if ``metric_value >= threshold``. For metrics where lower is better
+    (e.g. latency), negate or invert the metric on the evaluation side rather than
+    here (e.g. use ``throughput = 1 / avg_time`` and threshold on that instead).
+    """
+
+    type: Literal["uipath_eval"] = "uipath_eval"
+    agent_name: str = Field(description="Name of the UiPath agent to evaluate")
+    eval_set: str = Field(description="Evaluation set identifier")
+    thresholds: dict[str, float] = Field(
+        description=(
+            "Minimum acceptable value per metric (e.g., {'accuracy': 0.8, 'f1': 0.75}). "
+            "A metric passes if its value >= the threshold."
+        )
+    )
 
 
 # Discriminated union of all success criteria
@@ -275,4 +304,5 @@ SuccessCriterion = (
     | PylintScoreCriterion
     | ReferenceComparisonCriterion
     | CommandExecutedCriterion
+    | UiPathEvalCriterion
 )

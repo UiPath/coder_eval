@@ -71,6 +71,9 @@ coder-eval run tasks/hello_date.yaml
 
 # 3. View results
 coder-eval report runs/latest
+
+# Alternatively: evaluate criteria against a directory without an agent
+coder-eval evaluate tasks/hello_date.yaml ./my_solution
 ```
 
 ## CLI Commands
@@ -119,6 +122,32 @@ coder-eval plan tasks/*.yaml
 ```
 
 Checks task syntax, required CLI tools, API keys, and schema validity without executing.
+
+### `coder-eval evaluate` — Test Criteria Without an Agent
+
+```bash
+# Evaluate criteria against a directory
+coder-eval evaluate tasks/hello_date.yaml ./my_solution
+
+# Preserve sandbox for debugging
+coder-eval evaluate tasks/hello_date.yaml ./my_solution --preserve
+
+# Verbose output
+coder-eval evaluate tasks/test.yaml /path/to/code -v
+```
+
+Runs all success criteria defined in a task against a directory without requiring an agent. Useful for:
+- Testing criterion definitions
+- Validating task configurations
+- Evaluating code that was already written
+- Debugging criteria issues
+
+**Options:**
+
+| Flag                         | Description                                        |
+| ---------------------------- | -------------------------------------------------- |
+| `--preserve / --no-preserve` | Preserve sandbox after evaluation (default: preserve) |
+| `--verbose, -v`              | DEBUG-level logging                                |
 
 ### `coder-eval report` — View Results
 

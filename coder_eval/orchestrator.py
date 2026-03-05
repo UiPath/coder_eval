@@ -50,6 +50,7 @@ class Orchestrator:
         preserve_sandbox: bool = False,
         task_file: Path | None = None,
         stream_callback: StreamCallback | None = None,
+        sandbox: Sandbox | None = None,
     ):
         """Initialize the orchestrator.
 
@@ -59,12 +60,14 @@ class Orchestrator:
             preserve_sandbox: Whether to preserve sandbox after completion
             task_file: Path to task YAML file (for resolving reference file paths)
             stream_callback: Optional callback for real-time event streaming
+            sandbox: Pre-built Sandbox to use directly; if None, creates one from task config and runs the agent
         """
         self.task = task
         self.run_dir = run_dir
         self.preserve_sandbox = preserve_sandbox
         self.task_file = task_file
         self.stream_callback = stream_callback
+        self.sandbox = sandbox
 
         # Derived paths
         self.report_path = self.run_dir / "report.json"
@@ -74,7 +77,6 @@ class Orchestrator:
         self.snapshot_base_dir: Path | None = None
 
         # Components (initialized in run())
-        self.sandbox: Sandbox | None = None
         self.agent: Agent | None = None
         self.success_checker: SuccessChecker | None = None
         self.llm_reviewer: LLMReviewer | None = None
@@ -231,6 +233,13 @@ class Orchestrator:
         Raises:
             RuntimeError: If setup fails
         """
+        if self.sandbox is not None:
+            # evaluate-only mode: sandbox already set up, skip agent
+            assert self.result is not None
+            self.result.sandbox_path = str(self.sandbox.sandbox_dir)
+            self.success_checker = SuccessChecker(self.sandbox, task_id=self.task.task_id)
+            return
+
         # Validate API keys
         settings.validate_api_keys(self.task.agent.type.value)
 
@@ -312,10 +321,26 @@ class Orchestrator:
         Returns:
             True if task succeeded, False otherwise
         """
-        # Assert that setup has been called
-        assert self.agent is not None, "Agent not initialized"
         assert self.success_checker is not None, "Success checker not initialized"
         assert self.result is not None, "Result not initialized"
+
+        if self.agent is None:
+            # evaluate-only mode: no agent, single check
+            assert self.success_checker is not None
+            assert self.result is not None
+            unsupported = [c.type for c in self.task.success_criteria if c.requires_agent]
+            if unsupported:
+                self.logger.warning(
+                    "Criteria %s require agent execution; results may be incomplete in evaluate-only mode",
+                    unsupported,
+                )
+            self.result.iteration_count = 1
+            criteria_results = await asyncio.to_thread(self.success_checker.check_all, self.task.success_criteria)
+            self.result.success_criteria_results = criteria_results
+            all_passed = all(
+                r.score >= c.pass_threshold for r, c in zip(criteria_results, self.task.success_criteria, strict=True)
+            )
+            return all_passed
 
         current_prompt = self.task.initial_prompt
         # Working directory context prepended to every prompt (including feedback) since
