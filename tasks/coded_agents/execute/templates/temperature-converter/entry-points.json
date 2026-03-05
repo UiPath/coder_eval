@@ -1,0 +1,25 @@
+{
+  "entryPoints": [
+    {
+      "filePath": "main.py",
+      "uniqueId": "convert_temperature",
+      "type": "function",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "celsius": {"type": "number", "description": "Temperature in Celsius to convert"}
+        },
+        "required": ["celsius"]
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "fahrenheit": {"type": "number"},
+          "kelvin": {"type": "number"}
+        }
+      }
+    }
+  ]
+}

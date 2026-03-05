@@ -46,7 +46,8 @@ class UiPathEvalChecker(BaseCriterion[UiPathEvalCriterion]):
         task_dir = sandbox.task_dir
         if task_dir:
             resolved_path = (task_dir / criterion.eval_set).resolve()
-            eval_set_path = str(resolved_path)
+            if resolved_path.exists():
+                eval_set_path = str(resolved_path)
 
         # Use a unique output filename to avoid conflicts
         output_filename = f"uipath_eval_output_{uuid.uuid4().hex[:8]}.json"
