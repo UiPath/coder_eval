@@ -51,6 +51,7 @@ class TestTemplateDir:
 
         config = SandboxConfig(
             driver="tempdir",
+            python=None,
             template_sources=[
                 TemplateDirSource(path=str(template_dir)),
             ],
@@ -126,6 +127,7 @@ class TestTemplateIgnorePatterns:
 
         config = SandboxConfig(
             driver="tempdir",
+            python=None,
             template_sources=[
                 TemplateDirSource(path=str(template_dir)),
             ],
@@ -153,6 +155,7 @@ class TestTemplateIgnorePatterns:
 
         config = SandboxConfig(
             driver="tempdir",
+            python=None,
             template_sources=[
                 TemplateDirSource(path=str(template_dir)),
             ],
@@ -178,6 +181,7 @@ class TestStarterFiles:
         """Test creating single inline file."""
         config = SandboxConfig(
             driver="tempdir",
+            python=None,
             template_sources=[
                 StarterFilesSource(
                     files=[
@@ -201,6 +205,7 @@ class TestStarterFiles:
         """Test creating multiple files with subdirectories."""
         config = SandboxConfig(
             driver="tempdir",
+            python=None,
             template_sources=[
                 StarterFilesSource(
                     files=[
@@ -255,6 +260,7 @@ class TestIntegration:
         # Create sandbox and verify agent can work with template files
         config = SandboxConfig(
             driver="tempdir",
+            python=None,
             template_sources=[
                 TemplateDirSource(path=str(template_dir)),
             ],
@@ -283,6 +289,7 @@ class TestIntegration:
         """Test that agent can write to files from template."""
         config = SandboxConfig(
             driver="tempdir",
+            python=None,
             template_sources=[
                 StarterFilesSource(
                     files=[
@@ -334,6 +341,7 @@ class TestMultiSourceTemplates:
         # Create sandbox with multiple sources (last wins)
         config = SandboxConfig(
             driver="tempdir",
+            python=None,
             template_sources=[
                 TemplateDirSource(path=str(base_template)),
                 TemplateDirSource(path=str(override_template)),
@@ -367,6 +375,7 @@ class TestMultiSourceTemplates:
         # Create sandbox with template + starter files
         config = SandboxConfig(
             driver="tempdir",
+            python=None,
             template_sources=[
                 TemplateDirSource(path=str(template_dir)),
                 StarterFilesSource(
@@ -407,6 +416,7 @@ class TestMultiSourceTemplates:
 
         config = SandboxConfig(
             driver="tempdir",
+            python=None,
             template_sources=[
                 TemplateDirSource(path=str(template1)),
                 TemplateDirSource(path=str(template2)),
@@ -584,6 +594,7 @@ class TestUiPathStarterTemplate:
         template_dir = Path(__file__).parent.parent / "templates" / "uipath-starter"
         config = SandboxConfig(
             driver="tempdir",
+            python=None,
             template_sources=[
                 TemplateDirSource(path=str(template_dir)),
             ],

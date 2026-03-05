@@ -13,7 +13,7 @@ class TestFileMatchesRegexCriterion:
     def test_regex_match_found(self, tmp_path):
         """Test that pattern is found in file."""
         # Setup
-        config = SandboxConfig(driver="tempdir")
+        config = SandboxConfig(driver="tempdir", python=None)
         sandbox = Sandbox(config, task_id="test_regex_match")
         sandbox_dir = sandbox.setup()
 
@@ -43,7 +43,7 @@ class TestFileMatchesRegexCriterion:
     def test_regex_match_not_found(self, tmp_path):
         """Test that pattern is not found in file."""
         # Setup
-        config = SandboxConfig(driver="tempdir")
+        config = SandboxConfig(driver="tempdir", python=None)
         sandbox = Sandbox(config, task_id="test_regex_no_match")
         sandbox_dir = sandbox.setup()
 
@@ -73,7 +73,7 @@ class TestFileMatchesRegexCriterion:
     def test_regex_must_not_match(self, tmp_path):
         """Test must_match=False - pattern should NOT be present."""
         # Setup
-        config = SandboxConfig(driver="tempdir")
+        config = SandboxConfig(driver="tempdir", python=None)
         sandbox = Sandbox(config, task_id="test_regex_must_not_match")
         sandbox_dir = sandbox.setup()
 
@@ -103,7 +103,7 @@ class TestFileMatchesRegexCriterion:
     def test_regex_must_not_match_fails(self, tmp_path):
         """Test must_match=False fails when pattern is found."""
         # Setup
-        config = SandboxConfig(driver="tempdir")
+        config = SandboxConfig(driver="tempdir", python=None)
         sandbox = Sandbox(config, task_id="test_regex_must_not_match_fail")
         sandbox_dir = sandbox.setup()
 
@@ -134,7 +134,7 @@ class TestFileMatchesRegexCriterion:
     def test_regex_with_flags(self, tmp_path):
         """Test regex with flags (case insensitive)."""
         # Setup
-        config = SandboxConfig(driver="tempdir")
+        config = SandboxConfig(driver="tempdir", python=None)
         sandbox = Sandbox(config, task_id="test_regex_flags")
         sandbox_dir = sandbox.setup()
 
@@ -164,7 +164,7 @@ class TestFileMatchesRegexCriterion:
     def test_regex_file_not_found(self, tmp_path):
         """Test that check fails if file doesn't exist."""
         # Setup
-        config = SandboxConfig(driver="tempdir")
+        config = SandboxConfig(driver="tempdir", python=None)
         sandbox = Sandbox(config, task_id="test_regex_no_file")
         sandbox.setup()
 
@@ -189,7 +189,7 @@ class TestFileMatchesRegexCriterion:
     def test_regex_invalid_pattern(self, tmp_path):
         """Test that invalid regex pattern is handled."""
         # Setup
-        config = SandboxConfig(driver="tempdir")
+        config = SandboxConfig(driver="tempdir", python=None)
         sandbox = Sandbox(config, task_id="test_regex_invalid")
         sandbox_dir = sandbox.setup()
 
@@ -340,7 +340,7 @@ class TestCodeLintsCriterion:
     def test_lints_command_not_found(self, tmp_path):
         """Test handling of non-existent linter command."""
         # Setup
-        config = SandboxConfig(driver="tempdir")
+        config = SandboxConfig(driver="tempdir", python=None)
         sandbox = Sandbox(config, task_id="test_lint_not_found")
         sandbox_dir = sandbox.setup()
 

@@ -2,15 +2,17 @@
 
 import asyncio
 import time
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from coder_eval.models import AgentState
 from coder_eval.orchestration.config import BatchRunConfig
 from coder_eval.orchestrator import Orchestrator
 
 
 @pytest.mark.asyncio
-async def test_sequential_mode(tmp_path):
+async def test_sequential_mode(tmp_path, mocker):
     """Test that max_parallel=1 maintains sequential execution."""
     # Create a valid task file
     task_content = """
@@ -21,6 +23,7 @@ agent:
   type: claude-code
 sandbox:
   driver: tempdir
+  python: null
 max_iterations: 1
 success_criteria:
   - type: file_exists
@@ -29,6 +32,13 @@ success_criteria:
 """
     task_file = tmp_path / "test_task.yaml"
     task_file.write_text(task_content)
+
+    # Mock agent so we don't spawn the real claude CLI
+    mock_agent = MagicMock()
+    mock_agent.start = AsyncMock(side_effect=RuntimeError("mock agent crash"))
+    mock_agent.stop = AsyncMock()
+    mock_agent.get_state.return_value = AgentState.ERROR
+    mocker.patch.object(Orchestrator, "_create_agent", new=AsyncMock(return_value=mock_agent))
 
     # Configure batch execution with sequential mode
     run_dir = tmp_path / "run"

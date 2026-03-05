@@ -348,7 +348,7 @@ class Sandbox:
                         exc,
                     )
 
-    def run_command(self, command: str, timeout: int | None = None) -> tuple[int, str, str]:
+    def run_command(self, command: str, timeout: float | int | None = None) -> tuple[int, str, str]:
         """Run a command in the sandbox environment.
 
         Args:

@@ -7,6 +7,7 @@ agent:
   type: claude-code
 sandbox:
   driver: tempdir
+  python: null
 success_criteria:
   - type: file_exists
     path: app.py

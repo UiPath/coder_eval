@@ -528,8 +528,9 @@ async def test_orchestrator_snapshot_setup_disabled(tmp_path):
     task_file = Path("tasks/hello_date.yaml")
     task = load_task(task_file)
 
-    # Explicitly disable snapshots
+    # Explicitly disable snapshots; no venv needed for snapshot setup test
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.DISABLED)
+    task.sandbox.python = None
 
     run_dir = tmp_path / "test_run" / "hello_date"
     orchestrator = Orchestrator(task=task, run_dir=run_dir)
@@ -568,8 +569,9 @@ async def test_orchestrator_snapshot_setup_enabled(tmp_path):
     task_file = Path("tasks/hello_date.yaml")
     task = load_task(task_file)
 
-    # Enable full snapshots
+    # Enable full snapshots; no venv needed for snapshot setup test
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.FULL)
+    task.sandbox.python = None
 
     run_dir = tmp_path / "test_run" / "hello_date"
     orchestrator = Orchestrator(task=task, run_dir=run_dir)
@@ -649,6 +651,7 @@ async def test_orchestrator_create_iteration_snapshot_full(tmp_path):
 
     # Enable full snapshots
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.FULL)
+    task.sandbox.python = None
 
     run_dir = tmp_path / "test_run" / "hello_date"
     orchestrator = Orchestrator(task=task, run_dir=run_dir)
@@ -707,6 +710,7 @@ async def test_orchestrator_create_iteration_snapshot_hybrid(tmp_path):
 
     # Enable hybrid snapshots with checkpoint every 2 iterations
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.HYBRID, checkpoint_frequency=2)
+    task.sandbox.python = None
 
     run_dir = tmp_path / "test_run" / "hello_date"
     orchestrator = Orchestrator(task=task, run_dir=run_dir)

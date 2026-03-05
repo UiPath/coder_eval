@@ -20,7 +20,7 @@ from coder_eval.models import (
 from coder_eval.orchestrator import Orchestrator
 
 
-def _make_task(*, turn_timeout: int | None = None, task_timeout: int | None = None, max_iterations: int = 3):
+def _make_task(*, turn_timeout: float | None = None, task_timeout: float | None = None, max_iterations: int = 3):
     """Create a minimal TaskDefinition for testing.
 
     Uses model_construct() to bypass Pydantic's ge= validators when setting
@@ -64,7 +64,7 @@ def _make_turn_record(iteration: int = 1) -> TurnRecord:
 @pytest.mark.asyncio
 async def test_turn_timeout_fires(tmp_path):
     """Turn timeout fires when agent.communicate() is slow."""
-    task = _make_task(turn_timeout=1)  # 1 second timeout (bypasses ge=10 via model_construct)
+    task = _make_task(turn_timeout=0.1)  # 100ms timeout (bypasses ge=10 via model_construct)
     run_dir = tmp_path / "run" / "timeout_test"
     run_dir.mkdir(parents=True)
 
@@ -106,14 +106,14 @@ async def test_turn_timeout_fires(tmp_path):
         await orchestrator._evaluation_loop()
 
     assert exc_info.value.layer == "turn"
-    assert exc_info.value.timeout_seconds == 1
+    assert exc_info.value.timeout_seconds == 0.1
     assert exc_info.value.iteration == 1
 
 
 @pytest.mark.asyncio
 async def test_task_timeout_fires(tmp_path):
     """Task timeout fires when the overall evaluation loop takes too long."""
-    task = _make_task(task_timeout=1, max_iterations=10)  # 1 second task timeout
+    task = _make_task(task_timeout=0.1, max_iterations=10)  # 100ms task timeout
     run_dir = tmp_path / "run" / "timeout_test"
     run_dir.mkdir(parents=True)
 
@@ -140,7 +140,7 @@ async def test_task_timeout_fires(tmp_path):
 @pytest.mark.asyncio
 async def test_task_timeout_populates_elapsed_seconds(tmp_path):
     """TaskTimeoutError includes elapsed_seconds when raised by the orchestrator."""
-    task = _make_task(task_timeout=1, max_iterations=10)  # 1 second task timeout
+    task = _make_task(task_timeout=0.1, max_iterations=10)  # 100ms task timeout
     run_dir = tmp_path / "run" / "timeout_test"
     run_dir.mkdir(parents=True)
 
@@ -222,7 +222,7 @@ async def test_no_timeout_when_none(tmp_path):
 @pytest.mark.asyncio
 async def test_turn_timeout_fires_before_task_timeout(tmp_path):
     """Turn timeout (inner) fires before task timeout (outer) when a single turn is slow."""
-    task = _make_task(turn_timeout=1, task_timeout=60)  # Turn: 1s, Task: 60s
+    task = _make_task(turn_timeout=0.1, task_timeout=60)  # Turn: 100ms, Task: 60s
     run_dir = tmp_path / "run" / "timeout_test"
     run_dir.mkdir(parents=True)
 

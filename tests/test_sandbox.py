@@ -140,7 +140,7 @@ def test_sandbox_with_packages():
 
 def test_sandbox_file_operations():
     """Test file operations in the sandbox."""
-    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    config = SandboxConfig(driver="tempdir", python=None, network_enabled=False)
 
     sandbox = Sandbox(config, task_id="test_files")
 
@@ -170,7 +170,7 @@ def test_sandbox_file_operations():
 
 def test_sandbox_timeout():
     """Test command timeout enforcement."""
-    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    config = SandboxConfig(driver="tempdir", python=None, network_enabled=False)
 
     sandbox = Sandbox(config, task_id="test_timeout")
 
@@ -178,7 +178,7 @@ def test_sandbox_timeout():
         sandbox.setup()
 
         # Run a command that sleeps longer than timeout
-        exit_code, _stdout, stderr = sandbox.run_command("sleep 10", timeout=1)
+        exit_code, _stdout, stderr = sandbox.run_command("sleep 10", timeout=0.1)
         assert exit_code == -1
         assert "timed out" in stderr.lower()
 
@@ -188,7 +188,7 @@ def test_sandbox_timeout():
 
 def test_sandbox_preserve():
     """Test preserving sandbox to artifact directory."""
-    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    config = SandboxConfig(driver="tempdir", python=None, network_enabled=False)
 
     sandbox = Sandbox(config, task_id="test_preserve")
     artifact_dir = Path("artifacts/test")
@@ -523,7 +523,7 @@ def test_sandbox_run_command_logging(caplog, clean_logging):
     """Test that run_command logs output at DEBUG level."""
     import logging
 
-    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    config = SandboxConfig(driver="tempdir", python=None, network_enabled=False)
     sandbox = Sandbox(config, task_id="test_logging")
 
     try:
@@ -552,19 +552,19 @@ def test_sandbox_run_command_timeout_logging(caplog, clean_logging):
     """Test that timeouts are logged at WARNING level."""
     import logging
 
-    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    config = SandboxConfig(driver="tempdir", python=None, network_enabled=False)
     sandbox = Sandbox(config, task_id="test_timeout")
 
     try:
         sandbox.setup()
 
         with caplog.at_level(logging.WARNING):
-            exit_code, _stdout, _stderr = sandbox.run_command("sleep 10", timeout=1)
+            exit_code, _stdout, _stderr = sandbox.run_command("sleep 10", timeout=0.1)
 
         # Verify timeout logged at WARNING
         assert exit_code == -1
         log_messages = [record.message for record in caplog.records if record.name == "coder_eval.sandbox"]
-        assert any("timed out after 1 seconds" in msg for msg in log_messages)
+        assert any("timed out after 0.1 seconds" in msg for msg in log_messages)
         assert logging.WARNING in [rec.levelno for rec in caplog.records]
 
     finally:
@@ -575,7 +575,7 @@ def test_sandbox_run_command_empty_output_not_logged(caplog, clean_logging):
     """Test that empty stdout/stderr is not logged."""
     import logging
 
-    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    config = SandboxConfig(driver="tempdir", python=None, network_enabled=False)
     sandbox = Sandbox(config, task_id="test_empty")
 
     try:

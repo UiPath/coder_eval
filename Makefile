@@ -18,10 +18,10 @@ typecheck:  ## Run type checking with pyright
 	uv run pyright
 
 test:  ## Run test suite
-	uv run pytest -v tests/
+	uv run pytest -n auto tests/
 
 test-cov:  ## Run tests with coverage report
-	pytest tests/ -v --cov=coder_eval --cov-report=term-missing --cov-report=html
+	uv run pytest tests/ -n auto --cov=coder_eval --cov-report=term-missing --cov-report=html
 	@echo "📊 Coverage report: htmlcov/index.html"
 
 
@@ -31,7 +31,7 @@ verify:  ## Run all verification steps (CI equivalent)
 	uv run pyright
 	# uv run pip-audit --desc --skip-editable
 	# uv run bandit -r coder_eval/ -ll --format json -o bandit-report.json
-	uv run pytest tests/ -v --cov=coder_eval --cov-report=term-missing --cov-report=xml --cov-fail-under=80
+	uv run pytest tests/ -n auto --cov=coder_eval --cov-report=term-missing --cov-report=xml --cov-fail-under=80
 
 clean:  ## Clean build artifacts and cache
 	rm -rf build/ dist/ *.egg-info .pytest_cache .ruff_cache .coverage coverage.xml htmlcov/ bandit-report.json coverage.xml

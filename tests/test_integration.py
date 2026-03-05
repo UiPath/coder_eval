@@ -54,7 +54,7 @@ agent:
 
 sandbox:
   driver: "tempdir"
-  python: {}
+  python: null
 
 success_criteria:
   - type: "file_exists"
@@ -91,7 +91,7 @@ agent:
 
 sandbox:
   driver: "tempdir"
-  python: {}
+  python: null
 
 success_criteria:
   - type: "file_exists"

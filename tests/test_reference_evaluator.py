@@ -15,7 +15,7 @@ class TestSuccessCheckerReference:
 
     def test_check_all_accepts_reference_code(self, tmp_path):
         """check_all accepts reference_code parameter."""
-        config = SandboxConfig(driver="tempdir")
+        config = SandboxConfig(driver="tempdir", python=None)
         sandbox = Sandbox(config, "test")
         sandbox.setup()
 
@@ -30,7 +30,7 @@ class TestSuccessCheckerReference:
 
     def test_reference_comparison_without_reference(self, tmp_path):
         """reference_comparison fails without reference code."""
-        config = SandboxConfig(driver="tempdir")
+        config = SandboxConfig(driver="tempdir", python=None)
         sandbox = Sandbox(config, "test")
         sandbox.setup()
 
@@ -53,7 +53,7 @@ class TestSuccessCheckerReference:
 
     def test_reference_comparison_with_reference(self, tmp_path):
         """reference_comparison succeeds with reference code."""
-        config = SandboxConfig(driver="tempdir")
+        config = SandboxConfig(driver="tempdir", python=None)
         sandbox = Sandbox(config, "test")
         sandbox.setup()
 
@@ -81,7 +81,7 @@ class TestSuccessCheckerReference:
 
     def test_reference_comparison_agent_file_missing(self, tmp_path):
         """reference_comparison fails when agent file doesn't exist."""
-        config = SandboxConfig(driver="tempdir")
+        config = SandboxConfig(driver="tempdir", python=None)
         sandbox = Sandbox(config, "test")
         sandbox.setup()
 
@@ -103,7 +103,7 @@ class TestSuccessCheckerReference:
 
     def test_reference_comparison_ast_method(self, tmp_path):
         """reference_comparison with ast method."""
-        config = SandboxConfig(driver="tempdir")
+        config = SandboxConfig(driver="tempdir", python=None)
         sandbox = Sandbox(config, "test")
         sandbox.setup()
 

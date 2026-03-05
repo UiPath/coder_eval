@@ -21,7 +21,7 @@ from coder_eval.sandbox import Sandbox
 
 def test_success_checker_file_exists():
     """Test file existence checking."""
-    config = SandboxConfig(driver="tempdir")
+    config = SandboxConfig(driver="tempdir", python=None)
     sandbox = Sandbox(config, task_id="test_eval")
 
     try:
@@ -48,7 +48,7 @@ def test_success_checker_file_exists():
 
 def test_success_checker_file_contains():
     """Test file content checking."""
-    config = SandboxConfig(driver="tempdir")
+    config = SandboxConfig(driver="tempdir", python=None)
     sandbox = Sandbox(config, task_id="test_eval_contains")
 
     try:
@@ -91,7 +91,7 @@ def test_success_checker_file_contains():
 
 def test_success_checker_run_command():
     """Test command execution checking."""
-    config = SandboxConfig(driver="tempdir")
+    config = SandboxConfig(driver="tempdir", python=None)
     sandbox = Sandbox(config, task_id="test_eval_cmd")
 
     try:
@@ -119,7 +119,7 @@ def test_success_checker_run_command():
 
 def test_success_checker_check_all():
     """Test checking multiple criteria."""
-    config = SandboxConfig(driver="tempdir")
+    config = SandboxConfig(driver="tempdir", python=None)
     sandbox = Sandbox(config, task_id="test_eval_all")
 
     try:
