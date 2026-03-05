@@ -19,6 +19,7 @@ def _make_task_result(
     model_used: str | None = None,
     agent_config: dict | None = None,
     sdk_options: dict | None = None,
+    installed_tools: dict[str, str] | None = None,
 ) -> dict:
     """Helper to create a task_result dict with all expected fields."""
     return {
@@ -32,6 +33,7 @@ def _make_task_result(
         "model_used": model_used,
         "agent_config": agent_config,
         "sdk_options": sdk_options,
+        "installed_tools": installed_tools,
     }
 
 
@@ -83,6 +85,7 @@ def test_generate_markdown_basic():
         ],
         framework_version="0.1.0",
         environment_info={
+            "coder_eval": "0.1.0",
             "python": "3.13.3",
             "uv": "0.8.17",
         },
@@ -126,7 +129,7 @@ def test_generate_markdown_basic():
     assert "Self-Corrections" in report_md
 
     # Check environment section
-    assert "Framework**: 0.1.0" in report_md
+    assert "coder_eval**: 0.1.0" in report_md
     assert "python**: 3.13.3" in report_md
     assert "uv**: 0.8.17" in report_md
 
@@ -814,3 +817,103 @@ def test_generate_markdown_no_agent_settings():
     report_md = ReportGenerator.generate_markdown(summary)
 
     assert "## Agent Settings" not in report_md
+
+
+def test_generate_markdown_with_installed_tools():
+    """Test that Installed Tools section appears when tasks have installed tools."""
+    summary = RunSummary(
+        run_id="test-run",
+        start_time=datetime(2025, 10, 11, 12, 0, 0),
+        end_time=datetime(2025, 10, 11, 12, 2, 0),
+        total_duration_seconds=120.0,
+        tasks_run=2,
+        tasks_succeeded=2,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[
+            _make_task_result(
+                "task1",
+                "SUCCESS",
+                1.0,
+                60.0,
+                iteration_count=1,
+                installed_tools={"@uipath/uipcli": "0.1.5"},
+            ),
+            _make_task_result(
+                "task2",
+                "SUCCESS",
+                0.9,
+                60.0,
+                iteration_count=1,
+                installed_tools={"@uipath/uipcli": "0.1.5"},
+            ),
+        ],
+        framework_version="0.1.0",
+        environment_info={},
+    )
+
+    report_md = ReportGenerator.generate_markdown(summary)
+
+    assert "## Installed Tools" in report_md
+    assert "| Task ID | Tool | Version |" in report_md
+    assert "| task1 | @uipath/uipcli | 0.1.5 |" in report_md
+    assert "| task2 | @uipath/uipcli | 0.1.5 |" in report_md
+    # Should appear before Environment
+    tools_idx = report_md.index("## Installed Tools")
+    env_idx = report_md.index("## Environment")
+    assert tools_idx < env_idx
+
+
+def test_generate_markdown_installed_tools_multiple_per_task():
+    """Test that multiple tools per task each get their own row."""
+    summary = RunSummary(
+        run_id="test-run",
+        start_time=datetime(2025, 10, 11, 12, 0, 0),
+        end_time=datetime(2025, 10, 11, 12, 1, 0),
+        total_duration_seconds=60.0,
+        tasks_run=1,
+        tasks_succeeded=1,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[
+            _make_task_result(
+                "task1",
+                "SUCCESS",
+                1.0,
+                60.0,
+                iteration_count=1,
+                installed_tools={"@uipath/uipcli": "0.1.5", "@uipath/sdk": "2.0.0"},
+            ),
+        ],
+        framework_version="0.1.0",
+        environment_info={},
+    )
+
+    report_md = ReportGenerator.generate_markdown(summary)
+
+    assert "## Installed Tools" in report_md
+    assert "| task1 | @uipath/sdk | 2.0.0 |" in report_md
+    assert "| task1 | @uipath/uipcli | 0.1.5 |" in report_md
+
+
+def test_generate_markdown_no_installed_tools():
+    """Test that Installed Tools section is omitted when no tasks have installed tools."""
+    summary = RunSummary(
+        run_id="test-run",
+        start_time=datetime(2025, 10, 11, 12, 0, 0),
+        end_time=datetime(2025, 10, 11, 12, 1, 0),
+        total_duration_seconds=60.0,
+        tasks_run=1,
+        tasks_succeeded=1,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[
+            _make_task_result("task1", "SUCCESS", 1.0, 30.0, iteration_count=1),
+        ],
+        framework_version="0.1.0",
+        environment_info={},
+    )
+
+    report_md = ReportGenerator.generate_markdown(summary)
+
+    assert "## Installed Tools" not in report_md

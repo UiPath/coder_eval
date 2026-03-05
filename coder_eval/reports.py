@@ -276,12 +276,17 @@ class ReportGenerator:
                         prompt_str = prompt_str[:200] + "..."
                     lines.append(f"- **System Prompt**: {prompt_str}")
 
+        # Installed Tools section (per-task tool versions from sandbox npm packages etc.)
+        installed_tools_lines = ReportGenerator._generate_installed_tools_section(summary.task_results)
+        if installed_tools_lines:
+            lines.extend([""])
+            lines.extend(installed_tools_lines)
+
         lines.extend(
             [
                 "",
                 "## Environment",
                 "",
-                f"- **Framework**: {summary.framework_version}",
             ]
         )
 
@@ -328,6 +333,34 @@ class ReportGenerator:
             cost = t.get("total_cost_usd")
             cost_str = f"${cost:.4f}" if cost is not None else "N/A"
             lines.append(f"| {t['task_id']} | {tokens:,} | {cost_str} |")
+
+        return lines
+
+    @staticmethod
+    def _generate_installed_tools_section(task_results: list[dict[str, Any]]) -> list[str]:
+        """Generate Installed Tools section showing per-task tool versions.
+
+        Args:
+            task_results: List of task result dictionaries from RunSummary
+
+        Returns:
+            List of markdown lines (empty if no tasks have installed tools)
+        """
+        tasks_with_tools = [t for t in task_results if t.get("installed_tools")]
+        if not tasks_with_tools:
+            return []
+
+        lines = [
+            "## Installed Tools",
+            "",
+            "| Task ID | Tool | Version |",
+            "|---------|------|---------|",
+        ]
+
+        for task in tasks_with_tools:
+            task_id = task["task_id"]
+            for tool_name, version in sorted(task["installed_tools"].items()):
+                lines.append(f"| {task_id} | {tool_name} | {version} |")
 
         return lines
 

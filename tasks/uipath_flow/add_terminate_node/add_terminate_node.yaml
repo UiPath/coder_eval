@@ -1,6 +1,6 @@
 task_id: uipath-flow-add-terminate-node
 description: "Add a Terminate node to a UiPath automation workflow for HTTP Request error handling"
-tags: [integration, uipath-flow, template]
+tags: [integration, uipath-flow]
 
 agent:
   type: claude-code

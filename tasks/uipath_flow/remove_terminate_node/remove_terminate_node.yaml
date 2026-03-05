@@ -1,6 +1,6 @@
 task_id: uipath-flow-remove-terminate-node
 description: "Remove a Terminate node from a UiPath automation workflow and its error-handling edge"
-tags: [integration, uipath-flow, template]
+tags: [integration, uipath-flow]
 
 agent:
   type: claude-code

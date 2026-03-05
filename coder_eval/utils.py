@@ -16,6 +16,14 @@ def get_version_info(sandbox_path: Path | None = None) -> dict[str, str]:
     """
     version_info = {}
 
+    # Get coder_eval version
+    try:
+        from importlib.metadata import version
+
+        version_info["coder_eval"] = version("coder_eval")
+    except Exception:
+        version_info["coder_eval"] = "unknown"
+
     # Try to get Claude CLI version
     try:
         result = subprocess.run(["claude", "-v"], capture_output=True, text=True, timeout=5)

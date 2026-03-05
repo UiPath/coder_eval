@@ -303,6 +303,7 @@ def _generate_run_summary(
 
     statuses = [r["result"].final_status for r in task_results]
 
+    version_info = get_version_info()
     summary = RunSummary(
         run_id=run_dir.name,
         start_time=start_time,
@@ -337,11 +338,12 @@ def _generate_run_summary(
                 ),
                 "agent_config": (r["result"].agent_config.model_dump() if r["result"].agent_config else None),
                 "sdk_options": r["result"].sdk_options,
+                "installed_tools": r["result"].environment_info.get("installed_tools"),
             }
             for r in task_results
         ],
-        framework_version=get_version_info().get("coder_eval", "unknown"),
-        environment_info=get_version_info(),
+        framework_version=version_info.get("coder_eval", "unknown"),
+        environment_info=version_info,
     )
 
     # Save run-summary.json
