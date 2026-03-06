@@ -345,6 +345,7 @@ name = "coder-eval"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "anthropic" },
     { name = "anyio" },
     { name = "claude-agent-sdk" },
@@ -378,6 +379,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.10.0" },
     { name = "anthropic", specifier = ">=0.84.0" },
     { name = "anyio", specifier = ">=4.12.1" },
     { name = "bandit", extras = ["toml"], marker = "extra == 'dev'", specifier = ">=1.9.4" },

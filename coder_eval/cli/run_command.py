@@ -122,6 +122,11 @@ def run_command(
         click_type=click.Choice(["full", "minimal"], case_sensitive=False),
         help="Stream LLM events to terminal: 'full' or 'minimal' (turn-level only). Disables progress bar.",
     ),
+    proxy: bool | None = typer.Option(
+        None,
+        "--proxy/--no-proxy",
+        help="Override LLM Gateway proxy setting from .env (LLMGW_PROXY_ENABLED)",
+    ),
 ) -> None:
     """Run evaluation tasks (optionally in parallel).
 
@@ -156,6 +161,10 @@ def run_command(
     # Parse tag filters
     include_tags = {t.strip() for t in tags.split(",") if t.strip()} if tags else None
     exclude_tags_set = {t.strip() for t in exclude_tags.split(",") if t.strip()} if exclude_tags else None
+
+    # Override proxy setting if --proxy or --no-proxy was passed
+    if proxy is not None:
+        settings.llmgw_proxy_enabled = proxy
 
     # Setup logging before running tasks
     log_level = settings.log_level

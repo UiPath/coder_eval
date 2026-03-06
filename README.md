@@ -113,6 +113,7 @@ coder-eval run tasks/hello_date.yaml --stream full
 | `--exclude-tags`             | Skip tasks matching any of these tags (comma-separated)              |
 | `--snapshot-mode`            | Override snapshot mode (`disabled`, `full`, `incremental`, `hybrid`) |
 | `--snapshot-checkpoint-freq` | Checkpoint frequency for hybrid mode                                 |
+| `--proxy / --no-proxy`       | Route API calls through the LLM Gateway proxy (default: no proxy)    |
 | `--verbose, -v`              | DEBUG-level logging                                                  |
 | `--log-file`                 | Write logs to file                                                   |
 
@@ -255,6 +256,23 @@ Each agent gets its own isolated sandbox and produces an independent `Evaluation
 - Set `UIPATH_PLUGIN_MARKETPLACE_DIR` environment variable to enable `$UIPATH_PLUGIN_MARKETPLACE_DIR` substitution in plugin paths
 - Each plugin requires `type: "local"` and a `path` to the plugin directory
 - Plugin paths support environment variable substitution (e.g., `$UIPATH_PLUGIN_MARKETPLACE_DIR/plugin-name`)
+
+## API Routing & Benchmarking
+
+`coder-eval` supports two API routing modes:
+
+- **Direct API** (default, `--no-proxy`): Calls the Anthropic API directly using your `ANTHROPIC_API_KEY`. This is the standard path with accurate token/cost reporting from the SDK.
+- **LLM Gateway Proxy** (`--proxy`): Routes all API traffic through a local proxy that forwards requests to the UiPath LLM Gateway. Useful for testing gateway integration and using organization-managed model access.
+
+```bash
+# Direct API (default) — use for official benchmarks
+coder-eval run tasks/hello_date.yaml
+
+# Via LLM Gateway proxy
+coder-eval run tasks/hello_date.yaml --proxy
+```
+
+> **For official benchmarking, always use `--no-proxy` (direct API).** The proxy adds measurable latency overhead (~2x on simple tasks) due to S2S authentication, extra network hops, and per-turn gateway routing. It also breaks SDK-level token and cost reporting — the SDK reports zero usage through the proxy, and token counts are instead estimated by the proxy server using a different methodology. Task outcomes and correctness are not affected, but latency and cost metrics will not be comparable across modes. See [docs/features/api-direct-vs-proxy-comparison.md](docs/features/api-direct-vs-proxy-comparison.md) for a detailed analysis.
 
 ## Output Structure
 

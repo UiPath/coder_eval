@@ -6,7 +6,11 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+
+if TYPE_CHECKING:
+    from .proxy.server import LLMGatewayProxy
 
 from .agent import Agent
 from .analysis import calculate_command_statistics
@@ -80,6 +84,10 @@ class Orchestrator:
         self.agent: Agent | None = None
         self.success_checker: SuccessChecker | None = None
         self.llm_reviewer: LLMReviewer | None = None
+
+        # Proxy (initialized in _setup if enabled)
+        self.proxy: LLMGatewayProxy | None = None
+        self.proxy_port: int | None = None
 
         # Result tracking
         self.result: EvaluationResult | None = None
@@ -213,6 +221,25 @@ class Orchestrator:
                                 total_cost_usd=sum(costs) if costs else None,
                             )
 
+                    # Override with proxy usage when SDK reports zeros (proxy intercepts all traffic)
+                    if self.proxy is not None:
+                        from .models.telemetry import TokenUsage
+
+                        pu = self.proxy.usage
+                        sdk_usage = self.result.total_token_usage
+                        sdk_is_zero = sdk_usage is None or (
+                            sdk_usage.input_tokens == 0 and sdk_usage.output_tokens == 0
+                        )
+                        if sdk_is_zero and (pu.input_tokens > 0 or pu.output_tokens > 0):
+                            proxy_cost = self.proxy.get_total_cost()
+                            self.result.total_token_usage = TokenUsage(
+                                input_tokens=pu.input_tokens,
+                                output_tokens=pu.output_tokens,
+                                cache_creation_input_tokens=pu.cache_creation_input_tokens,
+                                cache_read_input_tokens=pu.cache_read_input_tokens,
+                                total_cost_usd=proxy_cost,
+                            )
+
                     # Aggregate assistant turns across all turns
                     if self.result.turns:
                         self.result.total_assistant_turns = sum(t.assistant_turn_count for t in self.result.turns)
@@ -279,6 +306,13 @@ class Orchestrator:
         if self.task.llm_reviewer.enabled:
             self.llm_reviewer = LLMReviewer(self.task.llm_reviewer)
 
+        # Start LLM Gateway proxy if enabled
+        if settings.llmgw_proxy_enabled:
+            self.logger.info("API routing: LLM Gateway proxy (via %s)", settings.llmgw_url)
+            await self._start_proxy()
+        else:
+            self.logger.info("API routing: direct Anthropic API")
+
         # Create and start agent with retry logic
         self.agent = await self._create_agent()
 
@@ -300,9 +334,45 @@ class Orchestrator:
             sandbox_path=Path(self.result.sandbox_path) if self.result.sandbox_path else None,
         )
 
+        # Record API routing mode
+        if settings.llmgw_proxy_enabled:
+            self.result.environment_info["api_routing"] = "llmgw_proxy"
+            self.result.environment_info["llmgw_url"] = settings.llmgw_url or ""
+        else:
+            self.result.environment_info["api_routing"] = "anthropic_direct"
+
         # Add installed tool versions (from npm packages etc.)
         if self.sandbox and self.sandbox.installed_tool_versions:
             self.result.environment_info["installed_tools"] = self.sandbox.installed_tool_versions
+
+    async def _start_proxy(self) -> None:
+        """Start the LLM Gateway proxy server."""
+        from .proxy import LLMGatewayProxy
+        from .proxy.config import ProxyConfig
+
+        assert settings.llmgw_url is not None
+        assert settings.llmgw_client_id is not None
+        assert settings.llmgw_client_secret is not None
+        assert settings.llmgw_semantic_org_id is not None
+        assert settings.llmgw_semantic_tenant_id is not None
+
+        proxy_config = ProxyConfig(
+            llmgw_url=settings.llmgw_url,
+            client_id=settings.llmgw_client_id,
+            client_secret=settings.llmgw_client_secret,
+            org_id=settings.llmgw_semantic_org_id,
+            tenant_id=settings.llmgw_semantic_tenant_id,
+            requesting_product=settings.llmgw_requesting_product,
+            requesting_feature=settings.llmgw_requesting_feature,
+            user_id=settings.llmgw_semantic_user_id or "",
+            timeout_seconds=settings.llmgw_timeout_seconds,
+            vendor=settings.llmgw_proxy_vendor,
+            api_flavor=settings.llmgw_proxy_api_flavor,
+        )
+
+        self.proxy = LLMGatewayProxy(proxy_config)
+        self.proxy_port = await self.proxy.start()
+        self.logger.info("LLM Gateway proxy started on port %d", self.proxy_port)
 
     async def _create_agent(self) -> Agent:
         """Create the appropriate agent based on task configuration.
@@ -317,7 +387,7 @@ class Orchestrator:
         if self.task.agent.type == AgentKind.CLAUDE_CODE:
             from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 
-            return ClaudeCodeAgent(self.task.agent)
+            return ClaudeCodeAgent(self.task.agent, proxy_port=self.proxy_port)
         else:
             raise ValueError(f"Unsupported agent type: {self.task.agent.type}")
 
@@ -523,6 +593,13 @@ class Orchestrator:
                 await self.agent.stop()
             except Exception as e:
                 self.logger.warning(f"Failed to stop agent: {e}")
+
+        # Stop proxy
+        if self.proxy:
+            try:
+                await self.proxy.stop()
+            except Exception as e:
+                self.logger.warning(f"Failed to stop proxy: {e}")
 
         # Cleanup sandbox
         if self.sandbox:

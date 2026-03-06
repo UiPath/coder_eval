@@ -133,8 +133,8 @@ def test_config_validates_required_api_keys():
     """
     from coder_eval.config import Settings
 
-    # Create settings with no API key
-    settings = Settings(anthropic_api_key=None)
+    # Create settings with no API key and proxy disabled
+    settings = Settings(anthropic_api_key=None, llmgw_proxy_enabled=False)
 
     # Verify validation raises error for claude-code agent
     with pytest.raises(ValueError, match="ANTHROPIC_API_KEY is required"):

@@ -31,11 +31,32 @@ def should_retry(category: ErrorCategory, attempt: int) -> bool:
     return attempt < config.max_retries
 
 
-def get_retry_delay(category: ErrorCategory, attempt: int) -> float:
-    """Calculate delay before retry with exponential backoff and jitter.
+def compute_backoff(config: RetryConfig, attempt: int) -> float:
+    """Calculate delay with exponential backoff and jitter.
 
     Formula: (initial_delay * backoff_multiplier^attempt) + jitter
     Jitter: Random value between 0 and 25% of base delay
+
+    Args:
+        config: Retry configuration (initial delay, multiplier)
+        attempt: Current attempt number (0-indexed)
+
+    Returns:
+        Delay in seconds
+    """
+    base_delay = config.initial_delay * (config.backoff_multiplier**attempt)
+
+    # Add jitter: up to 25% of base delay to prevent thundering herd
+    jitter = random.uniform(0, base_delay * 0.25)
+
+    return base_delay + jitter
+
+
+def get_retry_delay(category: ErrorCategory, attempt: int) -> float:
+    """Calculate delay before retry with exponential backoff and jitter.
+
+    Convenience wrapper around ``compute_backoff`` that looks up the
+    ``RetryConfig`` for the given error category.
 
     Args:
         category: Error category
@@ -51,12 +72,7 @@ def get_retry_delay(category: ErrorCategory, attempt: int) -> float:
         10.8  # 10.0 base + 0.8 jitter
     """
     config = RETRY_CONFIG.get(category, RetryConfig())
-    base_delay = config.initial_delay * (config.backoff_multiplier**attempt)
-
-    # Add jitter: up to 25% of base delay to prevent thundering herd
-    jitter = random.uniform(0, base_delay * 0.25)
-
-    return base_delay + jitter
+    return compute_backoff(config, attempt)
 
 
 def get_error_tip(category: ErrorCategory) -> str:

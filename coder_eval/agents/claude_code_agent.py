@@ -114,13 +114,15 @@ def _dump_sdk_options(opts: ClaudeAgentOptions) -> dict[str, Any]:
 class ClaudeCodeAgent(Agent):
     """Implementation of the Agent interface for Claude Code using the SDK."""
 
-    def __init__(self, config: AgentConfig):
+    def __init__(self, config: AgentConfig, proxy_port: int | None = None):
         """Initialize the Claude Code agent.
 
         Args:
             config: Agent configuration
+            proxy_port: If set, route API traffic through the local LLM Gateway proxy on this port
         """
         self.config = config
+        self.proxy_port = proxy_port
         self.client: ClaudeSDKClient | None = None
         self.working_directory: Path | None = None
         self._state = AgentState.WORKING
@@ -187,6 +189,15 @@ class ClaudeCodeAgent(Agent):
         try:
             # Process plugins: copy from config and replace env vars in paths
             plugins = self._process_plugins(self.config.plugins or [])  # type: ignore[arg-type]
+
+            # Build env overrides for proxy routing
+            env: dict[str, str] = {}
+            if self.proxy_port is not None:
+                env = {
+                    "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{self.proxy_port}",
+                    "ANTHROPIC_API_KEY": "llmgw-proxy",  # Dummy key, required by CLI
+                }
+
             options = ClaudeAgentOptions(
                 cwd=str(self.working_directory),
                 permission_mode=self.config.permission_mode,
@@ -195,6 +206,7 @@ class ClaudeCodeAgent(Agent):
                 max_turns=self.config.max_turns,
                 plugins=plugins,  # type: ignore[arg-type]
                 stderr=capture_stderr,  # Capture stderr for better error messages
+                env=env,
             )
 
             # Dump SDK options for later inspection (captures all 37+ fields including defaults)

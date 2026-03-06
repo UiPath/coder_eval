@@ -19,6 +19,7 @@ dependencies = [
     "pylint>=4.0.5",
     "radon>=6.0.1",
     "tqdm>=4.67.0",
+    "aiohttp>=3.10.0",
 ]
 
 [project.optional-dependencies]
@@ -169,6 +170,7 @@ markers = [
     "unit: marks tests as unit tests",
     "e2e: marks tests as end-to-end tests",
     "requires_api_key: marks tests that need real API keys",
+    "live: marks tests that hit real external services (LLM Gateway, etc.)",
 ]
 
 # Test discovery patterns

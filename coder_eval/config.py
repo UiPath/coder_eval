@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     default_permission_mode: str | None = None
     default_max_turns: int | None = None
 
+    # LLM Gateway Proxy settings
+    llmgw_proxy_enabled: bool = False
+    llmgw_proxy_vendor: str = "awsbedrock"
+    llmgw_proxy_api_flavor: str = "invoke"
+
     # Logging
     log_level: str = "INFO"  # Default log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     log_to_file: bool = False  # Whether to enable file logging
@@ -70,8 +75,26 @@ class Settings(BaseSettings):
         Raises:
             ValueError: If required API key is missing
         """
-        if agent_type == "claude-code" and not self.anthropic_api_key:
+        if agent_type == "claude-code" and not self.anthropic_api_key and not self.llmgw_proxy_enabled:
             raise ValueError("ANTHROPIC_API_KEY is required for Claude Code agent. Please set it in your .env file.")
+
+        if self.llmgw_proxy_enabled:
+            missing = []
+            if not self.llmgw_url:
+                missing.append("LLMGW_URL")
+            if not self.llmgw_client_id:
+                missing.append("LLMGW_CLIENT_ID")
+            if not self.llmgw_client_secret:
+                missing.append("LLMGW_CLIENT_SECRET")
+            if not self.llmgw_semantic_org_id:
+                missing.append("LLMGW_SEMANTIC_ORG_ID")
+            if not self.llmgw_semantic_tenant_id:
+                missing.append("LLMGW_SEMANTIC_TENANT_ID")
+            if missing:
+                raise ValueError(
+                    f"LLM Gateway proxy is enabled but missing required settings: {', '.join(missing)}."
+                    + " Please set them in your .env file."
+                )
 
 
 # Global settings instance
