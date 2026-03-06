@@ -75,11 +75,11 @@ On the v1 task (identical turn count), latency went from 29.9s to 62.3s -- a **+
 - **No proxy**: The Claude Code SDK reports real token usage including prompt cache stats (`cache_creation_input_tokens`, `cache_read_input_tokens`). Example: task 1 shows 14,740 cache creation + 176,243 cache read + 1,316 output tokens.
 - **With proxy**: The SDK reports `cost=$0` and all token fields as `0` because the proxy intercepts the response and the SDK can't extract usage metadata. Instead, the **proxy server** tracks tokens independently: "34 requests, 6,382 input + 3,338 output tokens" for task 1.
 
-The "Total Tokens" in the report come from different sources:
-- No proxy: 3,177 tokens (SDK-reported, likely output tokens only)
-- With proxy: 20,442 tokens (proxy-counted, sum of all request/response body tokens across 56 total proxy requests)
+The "Total Tokens" in the report (`TokenUsage.total_tokens`) is defined as `input_tokens + output_tokens`, **excluding** cache tokens. This explains the discrepancy:
+- No proxy: 3,177 tokens = SDK-reported `input_tokens` (21) + `output_tokens` (3,156). The much larger cache counts (176K+ cache reads) are tracked separately and not included.
+- With proxy: 20,442 tokens = proxy-counted input + output across all 56 requests (including internal Haiku calls invisible in direct mode). The SDK itself reports all zeros since usage metadata is lost through the proxy.
 
-These numbers are **not directly comparable** -- they measure different things.
+These numbers are **not directly comparable** -- they measure different scopes of API traffic.
 
 #### 3. Visible Internal SDK Traffic
 The proxy logs reveal Claude Code SDK internals invisible in direct mode:
@@ -117,7 +117,7 @@ With only 1 run per configuration, we **cannot distinguish** proxy-induced behav
 
 ## Cost Comparison Caveat
 
-The cost numbers are not apples-to-apples:
+The cost numbers are not directly comparable:
 
 | Source | No Proxy | With Proxy |
 |--------|----------|------------|

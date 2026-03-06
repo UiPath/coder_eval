@@ -33,6 +33,7 @@ A robust, extensible framework for evaluating AI coding agents with comprehensiv
   ```bash
   brew install uv  # macOS, or: pip install uv
   ```
+- **UiPath package index credentials** — `UV_INDEX_UIPATH_USERNAME` / `UV_INDEX_UIPATH_PASSWORD` must be set and exported (required for LLMGW package). See [Agents Gym installation guide](https://github.com/UiPath/agents_gym?tab=readme-ov-file#installation) for setup instructions.
 
 ### Installation
 
@@ -45,8 +46,6 @@ cd coder_eval
 uv venv .venv
 source .venv/bin/activate
 
-# Ensure that you have UV_INDEX_UIPATH_USERNAME / UV_INDEX_UIPATH_PASSWORD setup
-# (otherwise installation of LLMGW package will fail)
 # Install with dev dependencies (recommended)
 make install
 
@@ -97,25 +96,25 @@ coder-eval run tasks/hello_date.yaml --stream full
 
 **Options:**
 
-| Flag                         | Description                                                          |
-| ---------------------------- | -------------------------------------------------------------------- |
-| `--max-iter, -i`             | Override max iterations for all tasks                                |
-| `--preserve / --no-preserve` | Preserve sandbox after execution (default: preserve)                 |
-| `--run-dir`                  | Custom run directory (default: timestamped in `runs/`)               |
-| `--max-parallel, -j`         | Concurrent tasks (default: 1)                                        |
-| `--model, -m`                | Override agent model for all tasks (e.g., `claude-sonnet-4-20250514`)|
+| Flag                         | Description                                                                      |
+| ---------------------------- | -------------------------------------------------------------------------------- |
+| `--max-iter, -i`             | Override max iterations for all tasks                                            |
+| `--preserve / --no-preserve` | Preserve sandbox after execution (default: preserve)                             |
+| `--run-dir`                  | Custom run directory (default: timestamped in `runs/`)                           |
+| `--max-parallel, -j`         | Concurrent tasks (default: 1)                                                    |
+| `--model, -m`                | Override agent model for all tasks (e.g., `claude-sonnet-4-20250514`)            |
 | `--permission-mode`          | Override permission mode (`default`, `acceptEdits`, `plan`, `bypassPermissions`) |
-| `--max-turns`                | Override max agent inner-loop turns per iteration                    |
-| `--task-timeout`             | Override task timeout in seconds (covers the evaluation loop)        |
-| `--turn-timeout`             | Override turn timeout in seconds (per agent communicate call)        |
-| `--stream, -s`               | Stream LLM events to terminal: `full` or `minimal` (disables progress bar) |
-| `--tags, -t`                 | Only run tasks matching any of these tags (comma-separated)          |
-| `--exclude-tags`             | Skip tasks matching any of these tags (comma-separated)              |
-| `--snapshot-mode`            | Override snapshot mode (`disabled`, `full`, `incremental`, `hybrid`) |
-| `--snapshot-checkpoint-freq` | Checkpoint frequency for hybrid mode                                 |
-| `--proxy / --no-proxy`       | Route API calls through the LLM Gateway proxy (default: no proxy)    |
-| `--verbose, -v`              | DEBUG-level logging                                                  |
-| `--log-file`                 | Write logs to file                                                   |
+| `--max-turns`                | Override max agent inner-loop turns per iteration                                |
+| `--task-timeout`             | Override task timeout in seconds (covers the evaluation loop)                    |
+| `--turn-timeout`             | Override turn timeout in seconds (per agent communicate call)                    |
+| `--stream, -s`               | Stream LLM events to terminal: `full` or `minimal` (disables progress bar)       |
+| `--tags, -t`                 | Only run tasks matching any of these tags (comma-separated)                      |
+| `--exclude-tags`             | Skip tasks matching any of these tags (comma-separated)                          |
+| `--snapshot-mode`            | Override snapshot mode (`disabled`, `full`, `incremental`, `hybrid`)             |
+| `--snapshot-checkpoint-freq` | Checkpoint frequency for hybrid mode                                             |
+| `--proxy / --no-proxy`       | Route API calls through the LLM Gateway proxy (default: no proxy)                |
+| `--verbose, -v`              | DEBUG-level logging                                                              |
+| `--log-file`                 | Write logs to file                                                               |
 
 ### `coder-eval plan` — Validate Tasks
 
@@ -139,6 +138,7 @@ coder-eval evaluate tasks/test.yaml /path/to/code -v
 ```
 
 Runs all success criteria defined in a task against a directory without requiring an agent. Useful for:
+
 - Testing criterion definitions
 - Validating task configurations
 - Evaluating code that was already written
@@ -146,10 +146,10 @@ Runs all success criteria defined in a task against a directory without requirin
 
 **Options:**
 
-| Flag                         | Description                                        |
-| ---------------------------- | -------------------------------------------------- |
+| Flag                         | Description                                           |
+| ---------------------------- | ----------------------------------------------------- |
 | `--preserve / --no-preserve` | Preserve sandbox after evaluation (default: preserve) |
-| `--verbose, -v`              | DEBUG-level logging                                |
+| `--verbose, -v`              | DEBUG-level logging                                   |
 
 ### `coder-eval report` — View Results
 
@@ -207,16 +207,16 @@ The `agent` section configures a single Claude Code agent:
 
 ```yaml
 agent:
-  type: "claude-code"                           # Agent type
-  permission_mode: "acceptEdits"                # Permission level: default, acceptEdits, plan, bypassPermissions
-  allowed_tools: ["Read", "Write", "Bash"]      # Tools Claude Code can use
-  model: "claude-opus-4-6"                      # Optional: override model
-  max_turns: 5                                  # Optional: max internal loop turns per iteration
-  plugins:                                      # Optional: Claude Code plugins
+  type: "claude-code" # Agent type
+  permission_mode: "acceptEdits" # Permission level: default, acceptEdits, plan, bypassPermissions
+  allowed_tools: ["Read", "Write", "Bash"] # Tools Claude Code can use
+  model: "claude-opus-4-6" # Optional: override model
+  max_turns: 5 # Optional: max internal loop turns per iteration
+  plugins: # Optional: Claude Code plugins
     - type: "local"
-      path: "$UIPATH_PLUGIN_MARKETPLACE_DIR/plugins/mcp"  # Plugin path (supports env var substitution)
+      path: "$UIPATH_PLUGIN_MARKETPLACE_DIR/plugins/mcp" # Plugin path (supports env var substitution)
     - type: "local"
-      path: "/absolute/path/to/plugin"            # Or absolute path
+      path: "/absolute/path/to/plugin" # Or absolute path
 ```
 
 #### Multi-agent comparison
@@ -253,6 +253,7 @@ Each agent gets its own isolated sandbox and produces an independent `Evaluation
 > **Note:** CLI flags like `--model` and `--permission-mode` are ignored for multi-agent tasks — configure each agent explicitly in the YAML. Task-level flags (`--max-iter`, `--task-timeout`, etc.) still apply to all agents.
 
 **Plugin Configuration:**
+
 - Set `UIPATH_PLUGIN_MARKETPLACE_DIR` environment variable to enable `$UIPATH_PLUGIN_MARKETPLACE_DIR` substitution in plugin paths
 - Each plugin requires `type: "local"` and a `path` to the plugin directory
 - Plugin paths support environment variable substitution (e.g., `$UIPATH_PLUGIN_MARKETPLACE_DIR/plugin-name`)
@@ -272,7 +273,13 @@ coder-eval run tasks/hello_date.yaml
 coder-eval run tasks/hello_date.yaml --proxy
 ```
 
-> **For official benchmarking, always use `--no-proxy` (direct API).** The proxy adds measurable latency overhead (~2x on simple tasks) due to S2S authentication, extra network hops, and per-turn gateway routing. It also breaks SDK-level token and cost reporting — the SDK reports zero usage through the proxy, and token counts are instead estimated by the proxy server using a different methodology. Task outcomes and correctness are not affected, but latency and cost metrics will not be comparable across modes. See [docs/features/api-direct-vs-proxy-comparison.md](docs/features/api-direct-vs-proxy-comparison.md) for a detailed analysis.
+> **For official benchmarking, always use `--no-proxy` (direct API).**
+>
+> - Proxy adds ~2x latency on simple tasks (S2S auth, extra network hops, per-turn routing)
+> - SDK reports zero token/cost usage through the proxy; tokens are estimated by the proxy server instead
+> - Task outcomes are not affected, but latency and cost metrics are not comparable across modes
+>
+> See [docs/features/api-direct-vs-proxy-comparison.md](docs/features/api-direct-vs-proxy-comparison.md) for a detailed analysis.
 
 ## Output Structure
 
@@ -374,23 +381,24 @@ Installed automatically by `make install`. Includes ruff format/lint, trailing w
 
 ### Environment Variables (`.env`)
 
-| Variable                   | Required              | Description                                                                    |
-| -------------------------- | --------------------- | ------------------------------------------------------------------------------ |
-| `ANTHROPIC_API_KEY`        | Yes (for Claude Code) | Anthropic API key                                                              |
-| `UV_INDEX_UIPATH_USERNAME` | Yes (for install)     | UiPath package index username                                                  |
-| `UV_INDEX_UIPATH_PASSWORD` | Yes (for install)     | UiPath package index password (for installing LLMGW client from private index) |
-| `LLMGW_URL`                | For LLM reviewer      | UiPath LLM Gateway URL                                                         |
-| `LLMGW_CLIENT_ID`          | For LLM reviewer      | Gateway client ID                                                              |
-| `LLMGW_CLIENT_SECRET`      | For LLM reviewer      | Gateway client secret                                                          |
-| `LLMGW_SEMANTIC_ORG_ID`    | For LLM reviewer      | Gateway semantic org ID                                                        |
-| `LLMGW_SEMANTIC_TENANT_ID` | For LLM reviewer      | Gateway semantic tenant ID                                                     |
-| `LLMGW_SEMANTIC_USER_ID`   | For LLM reviewer      | Gateway semantic user ID                                                       |
-| `LLMGW_REQUESTING_PRODUCT` | No                    | Requesting product name (default: `coder-eval`)                                |
-| `LLMGW_REQUESTING_FEATURE` | No                    | Requesting feature name (default: `llm-reviewer`)                              |
-| `LLMGW_TIMEOUT_SECONDS`    | No                    | Gateway request timeout (default: 290)                                         |
-| `UIPATH_PLUGIN_MARKETPLACE_DIR` | No              | Base directory for Claude Code plugins (used to substitute `$UIPATH_PLUGIN_MARKETPLACE_DIR` in plugin paths) |
-| `LOG_LEVEL`                | No                    | Logging level (default: INFO)                                                  |
-| `LOG_TO_FILE`              | No                    | Enable file logging (default: false)                                           |
+| Variable                        | Required              | Description                                                                                                  |
+| ------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `ANTHROPIC_API_KEY`             | Yes (for Claude Code) | Anthropic API key                                                                                            |
+| `UV_INDEX_UIPATH_USERNAME`      | Yes (for install)     | UiPath package index username                                                                                |
+| `UV_INDEX_UIPATH_PASSWORD`      | Yes (for install)     | UiPath package index password (for installing LLMGW client from private index)                               |
+| `LLMGW_URL`                     | For LLM reviewer      | UiPath LLM Gateway URL                                                                                       |
+| `LLMGW_CLIENT_ID`               | For LLM reviewer      | Gateway client ID                                                                                            |
+| `LLMGW_CLIENT_SECRET`           | For LLM reviewer      | Gateway client secret                                                                                        |
+| `LLMGW_SEMANTIC_ORG_ID`         | For LLM reviewer      | Gateway semantic org ID                                                                                      |
+| `LLMGW_SEMANTIC_TENANT_ID`      | For LLM reviewer      | Gateway semantic tenant ID                                                                                   |
+| `LLMGW_SEMANTIC_USER_ID`        | For LLM reviewer      | Gateway semantic user ID                                                                                     |
+| `LLMGW_REQUESTING_PRODUCT`      | No                    | Requesting product name (default: `coder-eval`)                                                              |
+| `LLMGW_REQUESTING_FEATURE`      | No                    | Requesting feature name (default: `llm-reviewer`)                                                            |
+| `LLMGW_TIMEOUT_SECONDS`         | No                    | Gateway request timeout (default: 290)                                                                       |
+| `LLMGW_PROXY_ENABLED`          | No                    | Enable LLM Gateway proxy for API routing (default: `false`). Overridden by `--proxy / --no-proxy` CLI flag   |
+| `UIPATH_PLUGIN_MARKETPLACE_DIR` | No                    | Base directory for Claude Code plugins (used to substitute `$UIPATH_PLUGIN_MARKETPLACE_DIR` in plugin paths) |
+| `LOG_LEVEL`                     | No                    | Logging level (default: INFO)                                                                                |
+| `LOG_TO_FILE`                   | No                    | Enable file logging (default: false)                                                                         |
 
 See `.env.example` for the full list with default values.
 
