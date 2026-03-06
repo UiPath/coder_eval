@@ -104,6 +104,9 @@ class Orchestrator:
         start_time = time.time()
         started_at = datetime.now()
 
+        # Orchestrator always receives a fully-expanded single-agent task.
+        assert self.task.agent is not None, "task.agent must be set; multi-agent tasks must be expanded before running"
+
         # Initialize result
         self.result = EvaluationResult(
             task_id=self.task.task_id,
@@ -233,6 +236,8 @@ class Orchestrator:
         Raises:
             RuntimeError: If setup fails
         """
+        agent_cfg = self.task.agent
+        assert agent_cfg is not None  # guaranteed by run() assertion above
         if self.sandbox is not None:
             # evaluate-only mode: sandbox already set up, skip agent
             assert self.result is not None
@@ -241,7 +246,7 @@ class Orchestrator:
             return
 
         # Validate API keys
-        settings.validate_api_keys(self.task.agent.type.value)
+        settings.validate_api_keys(agent_cfg.type.value)
 
         # Create sandbox with retry logic
         task_dir = self.task_file.parent.resolve() if self.task_file else None
@@ -284,11 +289,11 @@ class Orchestrator:
         await execute_with_retry(
             operation=_start_agent,
             operation_name="Agent start",
-            context={"task_id": self.task.task_id, "component": "agent", "agent_name": self.task.agent.type.value},
+            context={"task_id": self.task.task_id, "component": "agent", "agent_name": agent_cfg.type.value},
         )
 
         # Save agent config on result (copy to prevent mutation of shared reference)
-        self.result.agent_config = self.task.agent.model_copy(deep=True)
+        self.result.agent_config = agent_cfg.model_copy(deep=True)
 
         # Re-capture environment_info with sandbox path (for CLAUDE.md hash)
         self.result.environment_info = get_version_info(
@@ -308,6 +313,7 @@ class Orchestrator:
         Raises:
             ValueError: If agent type is not supported
         """
+        assert self.task.agent is not None  # guaranteed by run() assertion
         if self.task.agent.type == AgentKind.CLAUDE_CODE:
             from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 
@@ -347,6 +353,9 @@ class Orchestrator:
         # each communicate() call is stateless and the agent loses context between iterations
         assert self.sandbox is not None and self.sandbox.sandbox_dir is not None
         sandbox_dir = self.sandbox.sandbox_dir
+        # Bind agent config locally for Pyright narrowing (self.task.agent is guaranteed non-None by run())
+        agent_cfg = self.task.agent
+        assert agent_cfg is not None
         iteration = 0
         success = False
 
@@ -374,7 +383,7 @@ class Orchestrator:
             # (without defaults, closure would capture stale references)
             # Local variable for type narrowing in lambda
             agent = self.agent
-            turn_timeout = self.task.agent.turn_timeout_seconds
+            turn_timeout = agent_cfg.turn_timeout_seconds
 
             # Wrap callback to stamp correct task_id on agent-emitted events
             agent_callback: StreamCallback | None = None
@@ -389,7 +398,7 @@ class Orchestrator:
                 context={
                     "task_id": self.task.task_id,
                     "component": "agent",
-                    "agent_name": self.task.agent.type.value,
+                    "agent_name": agent_cfg.type.value,
                 },
             )
 

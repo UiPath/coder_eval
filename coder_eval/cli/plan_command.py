@@ -44,7 +44,11 @@ def plan_command(
 
             console.print(f"[green]✓[/green] {task_file.name}")
             console.print(f"  [dim]Task ID: {task.task_id}[/dim]")
-            console.print(f"  [dim]Agent: {task.agent.type.value}[/dim]")
+            if task.agent is not None:
+                console.print(f"  [dim]Agent: {task.agent.type.value}[/dim]")
+            elif task.agents is not None:
+                agent_names = ", ".join(f"{a.name} ({a.type.value})" for a in task.agents)
+                console.print(f"  [dim]Agents: {agent_names}[/dim]")
             console.print(f"  [dim]Max iterations: {task.max_iterations}[/dim]")
             console.print(f"  [dim]Success criteria: {len(task.success_criteria)}[/dim]")
 

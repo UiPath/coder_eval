@@ -1,5 +1,5 @@
 # coder_eval ("Coding Agents Gym")
- 
+
 A robust, extensible framework for evaluating AI coding agents with comprehensive sandboxing, reproducibility, and data-driven analysis.
 
 ## Features
@@ -15,6 +15,7 @@ A robust, extensible framework for evaluating AI coding agents with comprehensiv
 - **Token Usage Tracking** — Input/output token counts for cost analysis
 - **Reference Comparison** — Code similarity scoring using AST, token, and complexity analysis
 - **Claude Code Plugins** — Configurable plugin support for Claude Code with marketplace directory substitution
+- **Multi-Agent Comparison** — Run the same task with multiple agent configurations side-by-side and compare results in one report
 - **Parallel Execution** — Run multiple evaluations concurrently with configurable parallelism
 - **Real-Time Streaming** — `--stream` flag for live LLM event output (tool calls, results, text) with full/minimal verbosity modes
 - **Rich CLI** — User-friendly command-line interface with validation, execution, and reporting
@@ -197,9 +198,11 @@ For the full task definition reference — all 10 criterion types, scoring, temp
 > **Tip:** When creating new tasks with Claude Code, point it at the guide:
 > _"Read `docs/TASK_DEFINITION_GUIDE.md` and use it as a reference to create a new task definition for ..."_
 
-### Claude Code Agent Configuration
+### Agent Configuration
 
-The `agent` section configures the Claude Code behavior. Common options:
+#### Single agent
+
+The `agent` section configures a single Claude Code agent:
 
 ```yaml
 agent:
@@ -215,6 +218,39 @@ agent:
       path: "/absolute/path/to/plugin"            # Or absolute path
 ```
 
+#### Multi-agent comparison
+
+Replace `agent` with `agents` (a list) to run the same task with multiple agent configurations and compare results side-by-side. Each entry must have a unique `name`:
+
+```yaml
+agents:
+  - name: "bypass"                              # Label used in reports and run directory
+    type: "claude-code"
+    permission_mode: "bypassPermissions"
+    model: "claude-haiku-4-5-20251001"
+
+  - name: "careful"
+    type: "claude-code"
+    permission_mode: "acceptEdits"
+    allowed_tools: ["Read", "Write", "Bash"]
+    model: "claude-sonnet-4-6"
+```
+
+Each agent gets its own isolated sandbox and produces an independent `EvaluationResult`. Results are written to `runs/{run-id}/{task_id}/{agent_name}/` and the report includes an **Agent Comparison** section:
+
+```
+## Agent Comparison
+
+### hello_date_smoke_test
+
+| Agent   | Status  | Score | Iterations | Latency |
+|---------|---------|-------|------------|---------|
+| bypass  | SUCCESS | 1.000 | 1          | 4.8s    |
+| careful | SUCCESS | 1.000 | 1          | 9.2s    |
+```
+
+> **Note:** CLI flags like `--model` and `--permission-mode` are ignored for multi-agent tasks — configure each agent explicitly in the YAML. Task-level flags (`--max-iter`, `--task-timeout`, etc.) still apply to all agents.
+
 **Plugin Configuration:**
 - Set `UIPATH_PLUGIN_MARKETPLACE_DIR` environment variable to enable `$UIPATH_PLUGIN_MARKETPLACE_DIR` substitution in plugin paths
 - Each plugin requires `type: "local"` and a `path` to the plugin directory
@@ -227,11 +263,22 @@ runs/
 ├── 2026-02-26_14-30-00/           # Timestamped run directory
 │   ├── run-report.md              # Human-readable markdown report
 │   ├── run-summary.json           # Aggregated statistics
-│   ├── task_id/
-│   │   ├── report.json            # Task evaluation result
-│   │   ├── task.log               # Task execution log
+│   │
+│   ├── task_id/                   # Single-agent task
+│   │   ├── report.json
+│   │   ├── task.log
 │   │   ├── snapshots/             # Iteration snapshots (if enabled)
 │   │   └── artifacts/             # Preserved sandbox (if --preserve)
+│   │
+│   ├── multi_agent_task/          # Multi-agent task (one subdir per agent)
+│   │   ├── bypass/
+│   │   │   ├── report.json
+│   │   │   ├── task.log
+│   │   │   └── artifacts/
+│   │   └── careful/
+│   │       ├── report.json
+│   │       ├── task.log
+│   │       └── artifacts/
 │   └── ...
 └── latest -> 2026-02-26_14-30-00/ # Symlink to most recent run
 ```
@@ -369,7 +416,7 @@ See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.
 - [ ] Docker sandbox driver
 - [ ] Support for more agents (Aider, Cursor, etc.)
 - [ ] Web UI for results visualization
-- [ ] Comparative analysis reports
+- [x] Multi-agent comparison reports
 
 ## License
 

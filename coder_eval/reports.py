@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 
 if TYPE_CHECKING:
     from .models import CommandStatistics, RunSummary
+
+logger = logging.getLogger(__name__)
 
 
 class ReportGenerator:
@@ -77,12 +80,17 @@ class ReportGenerator:
         Returns:
             List of markdown lines
         """
-        lines = [
-            "## Generation Metrics",
-            "",
-            "| Task ID | Total Latency | Turns | Asst Turns | Avg Turn Latency | Self-Corrections |",
-            "|---------|---------------|-------|------------|------------------|------------------|",
-        ]
+        has_agent = any(t.get("agent_name") for t in task_results)
+
+        header = "| Task ID |"
+        separator = "|---------|"
+        if has_agent:
+            header += " Agent |"
+            separator += "-------|"
+        header += " Total Latency | Turns | Asst Turns | Avg Turn Latency | Self-Corrections |"
+        separator += "---------------|-------|------------|------------------|------------------|"
+
+        lines = ["## Generation Metrics", "", header, separator]
 
         for task in task_results:
             task_id = task["task_id"]
@@ -101,9 +109,58 @@ class ReportGenerator:
             else:
                 avg_turn_str = "N/A"
 
-            lines.append(
-                f"| {task_id} | {total_latency} | {num_turns} | {asst_turns} | {avg_turn_str} | {self_corrections} |"
+            row = f"| {task_id} |"
+            if has_agent:
+                row += f" {task.get('agent_name') or 'N/A'} |"
+            row += f" {total_latency} | {num_turns} | {asst_turns} | {avg_turn_str} | {self_corrections} |"
+            lines.append(row)
+
+        return lines
+
+    @staticmethod
+    def _generate_agent_comparison_section(task_results: list[dict[str, Any]]) -> list[str]:
+        """Generate an Agent Comparison section for runs with multi-agent tasks.
+
+        Groups task results by task_id when multiple agents ran the same task,
+        then renders a side-by-side comparison table per task.
+
+        Args:
+            task_results: List of task result dicts from RunSummary
+
+        Returns:
+            List of markdown lines (empty if no multi-agent results present)
+        """
+        from collections import defaultdict
+
+        groups: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+        for tr in task_results:
+            if tr.get("agent_name"):
+                groups[tr["task_id"]].append(tr)
+
+        if not groups:
+            return []
+
+        lines = ["## Agent Comparison", ""]
+
+        for task_id in sorted(groups):
+            agent_results = groups[task_id]
+            lines.append(f"### {task_id}")
+            lines.append("")
+            lines.extend(
+                [
+                    "| Agent | Status | Score | Iterations | Latency |",
+                    "|-------|--------|-------|------------|---------|",
+                ]
             )
+            for ar in agent_results:
+                agent_name = ar.get("agent_name", "N/A")
+                status = ar["status"]
+                score_val = ar.get("weighted_score")
+                score = f"{score_val:.3f}" if score_val is not None else "N/A"
+                iters = ar.get("iteration_count", "N/A")
+                latency = f"{ar['duration']:.1f}s"
+                lines.append(f"| {agent_name} | {status} | {score} | {iters} | {latency} |")
+            lines.append("")
 
         return lines
 
@@ -174,13 +231,23 @@ class ReportGenerator:
         if similarities:
             lines.append(f"- **Avg Ground Truth Similarity**: {sum(similarities) / len(similarities):.3f}")
 
+        # Agent Comparison section (for multi-agent runs)
+        comparison_lines = ReportGenerator._generate_agent_comparison_section(summary.task_results)
+        if comparison_lines:
+            lines.extend(["", ""])
+            lines.extend(comparison_lines)
+
         # Task Details table
         has_similarity = any(t.get("reference_similarity") is not None for t in summary.task_results)
         has_model = any(t.get("model_used") for t in summary.task_results)
         has_tags = any(t.get("tags") for t in summary.task_results)
+        has_agent = any(t.get("agent_name") for t in summary.task_results)
 
         header = "| Task ID | Status | Reliability Score | Iterations | Latency |"
         separator = "|---------|--------|-------------------|------------|---------|"
+        if has_agent:
+            header += " Agent |"
+            separator += "-------|"
         if has_model:
             header += " Model |"
             separator += "-------|"
@@ -200,6 +267,9 @@ class ReportGenerator:
             duration = f"{task_result['duration']:.1f}s"
 
             row = f"| {task_result['task_id']} | {task_result['status']} | {score_str} | {iters} | {duration} |"
+            if has_agent:
+                agent_name = task_result.get("agent_name") or "N/A"
+                row += f" {agent_name} |"
             if has_model:
                 model = task_result.get("model_used") or "N/A"
                 row += f" {model} |"
@@ -231,50 +301,62 @@ class ReportGenerator:
                 lines.extend(["", ""])
                 lines.extend(ReportGenerator._generate_command_statistics_section(aggregated_stats))
 
-        # Agent Settings section — prefer sdk_options (full SDK dump), fall back to agent_config
-        sdk_opts_list = [t["sdk_options"] for t in summary.task_results if t.get("sdk_options")]
-        agent_configs = [t["agent_config"] for t in summary.task_results if t.get("agent_config")]
-        settings_source: dict[str, Any] | None = None
-        is_sdk = False
-        if sdk_opts_list:
-            settings_source = sdk_opts_list[0]
-            is_sdk = True
-        elif agent_configs:
-            settings_source = agent_configs[0]
+        # Agent Settings section — prefer sdk_options (full SDK dump), fall back to agent_config.
+        # For multi-agent runs, render one subsection per agent.
+        # Deduplicate: same agent_name appears across multiple tasks; only emit settings once per agent.
+        agent_entries: list[tuple[str | None, dict[str, Any], bool]] = []  # (agent_name, settings, is_sdk)
+        seen_agent_names: set[str | None] = set()
+        for tr in summary.task_results:
+            agent_name = tr.get("agent_name")
+            if agent_name in seen_agent_names:
+                continue
+            if tr.get("sdk_options"):
+                agent_entries.append((agent_name, tr["sdk_options"], True))
+                seen_agent_names.add(agent_name)
+            elif tr.get("agent_config"):
+                agent_entries.append((agent_name, tr["agent_config"], False))
+                seen_agent_names.add(agent_name)
 
-        if settings_source:
+        if agent_entries:
+            is_multi_agent = any(name for name, _, _ in agent_entries)
             lines.extend(["", "## Agent Settings", ""])
-            # Common fields (shared between sdk_options and agent_config)
-            lines.append(f"- **Permission Mode**: {settings_source.get('permission_mode', 'N/A')}")
-            tools = settings_source.get("allowed_tools")
-            lines.append(f"- **Allowed Tools**: {', '.join(tools) if tools else '(all)'}")
-            model = settings_source.get("model")
-            if model:
-                lines.append(f"- **Model**: {model}")
+            for agent_name, settings_source, is_sdk in agent_entries:
+                if is_multi_agent and agent_name:
+                    lines.append(f"### {agent_name}")
+                    lines.append("")
+                # Common fields (shared between sdk_options and agent_config)
+                lines.append(f"- **Permission Mode**: {settings_source.get('permission_mode', 'N/A')}")
+                tools = settings_source.get("allowed_tools")
+                lines.append(f"- **Allowed Tools**: {', '.join(tools) if tools else '(all)'}")
+                model = settings_source.get("model")
+                if model:
+                    lines.append(f"- **Model**: {model}")
 
-            # Additional SDK-specific fields (only when using sdk_options and non-default)
-            if is_sdk:
-                if settings_source.get("max_turns") is not None:
-                    lines.append(f"- **Max Turns**: {settings_source['max_turns']}")
-                if settings_source.get("max_budget_usd") is not None:
-                    lines.append(f"- **Max Budget (USD)**: {settings_source['max_budget_usd']}")
-                if settings_source.get("thinking") is not None:
-                    lines.append(f"- **Thinking**: {settings_source['thinking']}")
-                if settings_source.get("effort") is not None:
-                    lines.append(f"- **Effort**: {settings_source['effort']}")
-                if settings_source.get("mcp_servers"):
-                    mcp = settings_source["mcp_servers"]
-                    if isinstance(mcp, dict):
-                        lines.append(f"- **MCP Servers**: {', '.join(mcp.keys())}")
-                    else:
-                        lines.append(f"- **MCP Servers**: {mcp}")
-                if settings_source.get("betas"):
-                    lines.append(f"- **Betas**: {', '.join(settings_source['betas'])}")
-                if settings_source.get("system_prompt") is not None:
-                    prompt_str = str(settings_source["system_prompt"]).replace("\n", " ")
-                    if len(prompt_str) > 200:
-                        prompt_str = prompt_str[:200] + "..."
-                    lines.append(f"- **System Prompt**: {prompt_str}")
+                # Additional SDK-specific fields (only when using sdk_options and non-default)
+                if is_sdk:
+                    if settings_source.get("max_turns") is not None:
+                        lines.append(f"- **Max Turns**: {settings_source['max_turns']}")
+                    if settings_source.get("max_budget_usd") is not None:
+                        lines.append(f"- **Max Budget (USD)**: {settings_source['max_budget_usd']}")
+                    if settings_source.get("thinking") is not None:
+                        lines.append(f"- **Thinking**: {settings_source['thinking']}")
+                    if settings_source.get("effort") is not None:
+                        lines.append(f"- **Effort**: {settings_source['effort']}")
+                    if settings_source.get("mcp_servers"):
+                        mcp = settings_source["mcp_servers"]
+                        if isinstance(mcp, dict):
+                            lines.append(f"- **MCP Servers**: {', '.join(mcp.keys())}")
+                        else:
+                            lines.append(f"- **MCP Servers**: {mcp}")
+                    if settings_source.get("betas"):
+                        lines.append(f"- **Betas**: {', '.join(settings_source['betas'])}")
+                    if settings_source.get("system_prompt") is not None:
+                        prompt_str = str(settings_source["system_prompt"]).replace("\n", " ")
+                        if len(prompt_str) > 200:
+                            prompt_str = prompt_str[:200] + "..."
+                        lines.append(f"- **System Prompt**: {prompt_str}")
+                if is_multi_agent:
+                    lines.append("")
 
         # Installed Tools section (per-task tool versions from sandbox npm packages etc.)
         installed_tools_lines = ReportGenerator._generate_installed_tools_section(summary.task_results)
@@ -309,6 +391,8 @@ class ReportGenerator:
         if not tasks_with_tokens:
             return []
 
+        has_agent = any(t.get("agent_name") for t in tasks_with_tokens)
+
         lines = ["## Token Usage", ""]
 
         total_tokens = sum(t["total_tokens"] for t in tasks_with_tokens)
@@ -321,18 +405,24 @@ class ReportGenerator:
         lines.append(f"**Avg Tokens/Task**: {total_tokens // len(tasks_with_tokens):,}")
         lines.append("")
 
-        lines.extend(
-            [
-                "| Task ID | Total Tokens | Cost |",
-                "|---------|-------------|------|",
-            ]
-        )
+        header = "| Task ID |"
+        separator = "|---------|"
+        if has_agent:
+            header += " Agent |"
+            separator += "-------|"
+        header += " Total Tokens | Cost |"
+        separator += "-------------|------|"
+        lines.extend([header, separator])
 
         for t in tasks_with_tokens:
             tokens = t.get("total_tokens", 0)
             cost = t.get("total_cost_usd")
             cost_str = f"${cost:.4f}" if cost is not None else "N/A"
-            lines.append(f"| {t['task_id']} | {tokens:,} | {cost_str} |")
+            row = f"| {t['task_id']} |"
+            if has_agent:
+                row += f" {t.get('agent_name') or 'N/A'} |"
+            row += f" {tokens:,} | {cost_str} |"
+            lines.append(row)
 
         return lines
 
@@ -379,21 +469,36 @@ class ReportGenerator:
 
         all_turns: list[TurnRecord] = []
 
-        # Iterate through task subdirectories and load their reports
+        skip_dirs = {"artifacts", ".git"}
+
+        # Iterate through task subdirectories and load their reports.
+        # Handles both single-agent layout (run_dir/task_id/report.json) and
+        # multi-agent layout (run_dir/task_id/agent_name/report.json).
         for task_dir in run_dir.iterdir():
-            if not task_dir.is_dir() or task_dir.name in {"artifacts", ".git"}:
+            if not task_dir.is_dir() or task_dir.name in skip_dirs:
                 continue
 
             report_path = task_dir / "report.json"
-            if not report_path.exists():
-                continue
-
-            try:
-                result = EvaluationResult.model_validate_json(report_path.read_text())
-                all_turns.extend(result.turns)
-            except Exception:
-                # Skip tasks that can't be loaded
-                continue
+            if report_path.exists():
+                # Single-agent task directory
+                try:
+                    result = EvaluationResult.model_validate_json(report_path.read_text())
+                    all_turns.extend(result.turns)
+                except Exception:
+                    logger.warning("Failed to load report %s for command statistics", report_path, exc_info=True)
+            else:
+                # Maybe a multi-agent task directory — recurse one level into agent subdirs
+                for agent_dir in task_dir.iterdir():
+                    if not agent_dir.is_dir() or agent_dir.name in skip_dirs:
+                        continue
+                    agent_report = agent_dir / "report.json"
+                    if not agent_report.exists():
+                        continue
+                    try:
+                        result = EvaluationResult.model_validate_json(agent_report.read_text())
+                        all_turns.extend(result.turns)
+                    except Exception:
+                        logger.warning("Failed to load report %s for command statistics", agent_report, exc_info=True)
 
         if not all_turns:
             return None

@@ -18,6 +18,10 @@ class AgentConfig(BaseModel):
 
     model_config = ConfigDict(validate_assignment=True)
 
+    name: str | None = Field(
+        default=None,
+        description="Display name for this agent (required when using 'agents' for multi-agent comparison)",
+    )
     type: AgentKind = Field(description="The type of agent to use (claude-code, aider, etc.)")
     permission_mode: Literal["default", "acceptEdits", "plan", "bypassPermissions"] = Field(
         default="acceptEdits", description="Permission mode for agent actions"
@@ -90,7 +94,17 @@ class TaskDefinition(BaseModel):
     initial_prompt: str = Field(description="The initial prompt to send to the agent")
     max_iterations: int = Field(default=3, description="Maximum number of agent turns")
     tags: list[str] = Field(default_factory=list, description="Tags for categorizing and filtering tasks (kebab-case)")
-    agent: AgentConfig = Field(description="Agent configuration")
+    agent: AgentConfig | None = Field(
+        default=None,
+        description="Single agent configuration. Mutually exclusive with 'agents'.",
+    )
+    agents: list[AgentConfig] | None = Field(
+        default=None,
+        description=(
+            "Multiple agent configurations for side-by-side comparison. "
+            "Each entry must have a unique 'name'. Cannot be combined with 'agent'."
+        ),
+    )
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
     success_criteria: list[SuccessCriterion] = Field(description="List of criteria that must all pass for task success")
     task_timeout_seconds: int | None = Field(
@@ -107,6 +121,31 @@ class TaskDefinition(BaseModel):
             "Reference solution for LLM review and code comparison. HIDDEN from the agent - never included in prompts."
         ),
     )
+
+    @model_validator(mode="after")
+    def validate_agent_config(self) -> TaskDefinition:
+        """Enforce exactly one of 'agent'/'agents' and validate multi-agent specifics."""
+        if self.agent is not None and self.agents is not None:
+            raise ValueError("Only one of 'agent' or 'agents' can be provided, not both")
+        if self.agent is None and self.agents is None:
+            raise ValueError("Either 'agent' or 'agents' must be provided")
+        if self.agents is not None:
+            if len(self.agents) < 2:
+                raise ValueError("'agents' must contain at least 2 entries; use 'agent' for a single agent")
+            names = [a.name for a in self.agents]
+            if any(n is None for n in names):
+                raise ValueError("Each entry in 'agents' must have a 'name' field set")
+            name_pattern = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+            for name in names:
+                if name and not name_pattern.match(name):
+                    raise ValueError(
+                        f"Agent name {name!r} is invalid; use letters, digits, hyphens, and underscores only"
+                    )
+            if len(set(names)) != len(names):
+                raise ValueError("Agent names in 'agents' must be unique within a task")
+        if "__" in self.task_id:
+            raise ValueError("task_id must not contain '__' (reserved as multi-agent separator)")
+        return self
 
     @field_validator("tags")
     @classmethod

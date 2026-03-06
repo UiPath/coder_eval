@@ -20,7 +20,7 @@ from ..models import AgentKind, EvaluationResult, RunSummary, SnapshotMode, Task
 from ..streaming.callbacks import StreamCallback
 from ..utils import get_version_info
 from .config import BatchRunConfig
-from .task_loader import load_task
+from .task_loader import expand_task_for_agents, load_task
 
 
 logger = logging.getLogger(__name__)
@@ -73,11 +73,11 @@ async def run_batch(
     start_time = datetime.now()
 
     # Load all tasks first (fail fast if any are invalid)
-    tasks: list[tuple[Path, TaskDefinition]] = []
+    loaded_tasks: list[tuple[Path, TaskDefinition]] = []
     for task_file in task_files:
         task = load_task(task_file)
 
-        # Apply CLI overrides
+        # Apply task-level CLI overrides (apply to all tasks regardless of single/multi-agent)
         if config.max_iterations is not None:
             task.max_iterations = config.max_iterations
 
@@ -102,50 +102,83 @@ async def run_batch(
                 ignore_patterns=task.sandbox.snapshots.ignore_patterns,  # Preserve task-specific patterns
             )
 
-        # Apply agent overrides (CLI > .env > task YAML)
-        effective_model = config.agent_model if config.agent_model is not None else app_settings.default_agent_model
-        if effective_model is not None:
-            task.agent.model = effective_model
-
-        effective_perm = (
-            config.permission_mode if config.permission_mode is not None else app_settings.default_permission_mode
-        )
-        if effective_perm is not None:
-            task.agent.permission_mode = effective_perm  # type: ignore[assignment]  # validated by Pydantic via validate_assignment
-
-        effective_max_turns = config.max_turns if config.max_turns is not None else app_settings.default_max_turns
-        if effective_max_turns is not None:
-            task.agent.max_turns = effective_max_turns
-
         # Apply timeout overrides (CLI > task YAML)
         if config.task_timeout_seconds is not None:
             task.task_timeout_seconds = config.task_timeout_seconds
 
-        if config.turn_timeout_seconds is not None:
-            task.agent.turn_timeout_seconds = config.turn_timeout_seconds
+        # Apply agent-level overrides only for single-agent tasks.
+        # Multi-agent tasks define per-agent config explicitly in the YAML.
+        if task.agents is None:
+            assert task.agent is not None  # guaranteed by task validation (either agent or agents must be set)
+            effective_model = config.agent_model if config.agent_model is not None else app_settings.default_agent_model
+            if effective_model is not None:
+                task.agent.model = effective_model
 
-        tasks.append((task_file, task))
+            effective_perm = (
+                config.permission_mode if config.permission_mode is not None else app_settings.default_permission_mode
+            )
+            if effective_perm is not None:
+                task.agent.permission_mode = effective_perm  # type: ignore[assignment]  # validated by Pydantic via validate_assignment
 
-    # Filter tasks by tags
-    tasks = filter_tasks_by_tags(tasks, include_tags=config.include_tags, exclude_tags=config.exclude_tags)
+            effective_max_turns = config.max_turns if config.max_turns is not None else app_settings.default_max_turns
+            if effective_max_turns is not None:
+                task.agent.max_turns = effective_max_turns
 
-    # Validate no duplicate task IDs (would cause result clobbering)
+            if config.turn_timeout_seconds is not None:
+                task.agent.turn_timeout_seconds = config.turn_timeout_seconds
+        else:
+            # Warn if agent-level CLI overrides are set but will be ignored for multi-agent tasks
+            ignored: list[str] = []
+            if config.agent_model is not None:
+                ignored.append(f"--model={config.agent_model!r}")
+            if config.permission_mode is not None:
+                ignored.append(f"--permission-mode={config.permission_mode!r}")
+            if config.max_turns is not None:
+                ignored.append(f"--max-turns={config.max_turns}")
+            if config.turn_timeout_seconds is not None:
+                ignored.append(f"--turn-timeout={config.turn_timeout_seconds}")
+            if ignored:
+                msg = "Task %r is multi-agent; CLI flags %s are ignored (configure each agent in the YAML instead)"
+                logger.warning(msg, task.task_id, ", ".join(ignored))
+
+        loaded_tasks.append((task_file, task))
+
+    # Filter tasks by tags (before expansion so tags apply to the whole task, not per-agent)
+    loaded_tasks = filter_tasks_by_tags(
+        loaded_tasks, include_tags=config.include_tags, exclude_tags=config.exclude_tags
+    )
+
+    # Expand multi-agent tasks into one entry per agent.
+    # Each entry is (task_file, single-agent TaskDefinition, agent_name | None).
+    # agent_name is None for single-agent tasks; it drives the nested run subdirectory.
+    tasks: list[tuple[Path, TaskDefinition, str | None]] = []
+    for task_file, task in loaded_tasks:
+        if task.agents is not None:
+            for expanded in expand_task_for_agents(task):
+                expanded_agent = expanded.agent
+                assert expanded_agent is not None  # guaranteed by expand_task_for_agents
+                tasks.append((task_file, expanded, expanded_agent.name))
+        else:
+            tasks.append((task_file, task, None))
+
+    # Validate no duplicate (task_id, agent_name) pairs (would cause result clobbering)
     _validate_unique_task_ids(tasks)
 
     # Create semaphore for concurrency control
     semaphore = asyncio.Semaphore(config.max_parallel)
 
     # Build a mapping of task_id -> tags for the summary
-    task_tags: dict[str, list[str]] = {task.task_id: task.tags for _, task in tasks}
+    task_tags: dict[str, list[str]] = {task.task_id: task.tags for _, task, _ in tasks}
 
-    # Notify caller of final task count (after filtering)
+    # Notify caller of final task count (after filtering and expansion)
     if on_batch_start is not None:
         on_batch_start(len(tasks))
 
     # Create coroutines for all tasks
-    async def run_task_with_semaphore(task_file: Path, task: TaskDefinition) -> dict[str, Any]:
+    async def run_task_with_semaphore(task_file: Path, task: TaskDefinition, agent_name: str | None) -> dict[str, Any]:
         """Run single task with semaphore for concurrency control."""
-        task_callback = stream_callback_factory(task.task_id) if stream_callback_factory else None
+        callback_key = f"{task.task_id}/{agent_name}" if agent_name else task.task_id
+        task_callback = stream_callback_factory(callback_key) if stream_callback_factory else None
         async with semaphore:
             try:
                 task_result = await _run_single_task(
@@ -154,26 +187,29 @@ async def run_batch(
                     task=task,
                     run_dir=config.run_dir,
                     preserve=config.preserve_sandbox,
+                    agent_name=agent_name,
                     stream_callback=task_callback,
                 )
             except BaseException as exc:
-                _safe_notify(on_task_complete, _create_error_result(task_file, exc, task_id=task.task_id))
+                _safe_notify(
+                    on_task_complete, _create_error_result(task_file, exc, task_id=task.task_id, agent_name=agent_name)
+                )
                 raise
             _safe_notify(on_task_complete, task_result)
             return task_result
 
-    coroutines = [run_task_with_semaphore(task_file, task) for task_file, task in tasks]
+    coroutines = [run_task_with_semaphore(task_file, task, agent_name) for task_file, task, agent_name in tasks]
 
     # Execute all tasks (with exception handling)
     results: list[dict[str, Any] | BaseException] = await asyncio.gather(*coroutines, return_exceptions=True)
 
     # Process results and handle exceptions
-    # Note: `results` aligns with `tasks` (post-filter), not the original `task_files`
+    # Note: `results` aligns with `tasks` (post-filter, post-expansion), not the original `task_files`
     processed_results: list[dict[str, Any]] = []
     for i, result in enumerate(results):
         if isinstance(result, BaseException):
-            task_file, task = tasks[i]
-            error_result = _create_error_result(task_file, result, task_id=task.task_id)
+            task_file, task, agent_name = tasks[i]
+            error_result = _create_error_result(task_file, result, task_id=task.task_id, agent_name=agent_name)
             processed_results.append(error_result)
         else:
             processed_results.append(result)
@@ -190,6 +226,7 @@ async def _run_single_task(
     task: TaskDefinition,
     run_dir: Path,
     preserve: bool,
+    agent_name: str | None = None,
     stream_callback: StreamCallback | None = None,
 ) -> dict[str, Any]:
     """Run a single task as part of a batch (internal helper).
@@ -197,16 +234,19 @@ async def _run_single_task(
     Args:
         orchestrator_class: Orchestrator class to instantiate
         task_file: Path to task file (for logging/error reporting)
-        task: Loaded task definition
+        task: Loaded task definition (always single-agent after expansion)
         run_dir: Run-level directory
         preserve: Whether to preserve sandbox
+        agent_name: Agent name for multi-agent tasks; drives nested subdirectory.
+            None for single-agent tasks → run_dir/task_id/
+            Set for multi-agent tasks  → run_dir/task_id/agent_name/
         stream_callback: Optional streaming callback for this task
 
     Returns:
-        Dictionary with {task_id, result, duration}
+        Dictionary with {task_id, agent_name, result, duration}
     """
-    # Create per-task subdirectory
-    task_run_dir = run_dir / task.task_id
+    # For multi-agent tasks nest under task_id/agent_name/; single-agent stays flat.
+    task_run_dir = run_dir / task.task_id / agent_name if agent_name else run_dir / task.task_id
     task_run_dir.mkdir(parents=True, exist_ok=True)
 
     # Create orchestrator for single task
@@ -223,6 +263,7 @@ async def _run_single_task(
 
     return {
         "task_id": task.task_id,
+        "agent_name": agent_name,
         "result": result,
         "duration": result.duration_seconds,
     }
@@ -238,13 +279,20 @@ def _safe_notify(callback: Callable[[dict[str, Any]], None] | None, result: dict
         logger.warning("Progress callback failed (ignored)", exc_info=True)
 
 
-def _create_error_result(task_file: Path, error: BaseException, *, task_id: str | None = None) -> dict[str, Any]:
+def _create_error_result(
+    task_file: Path,
+    error: BaseException,
+    *,
+    task_id: str | None = None,
+    agent_name: str | None = None,
+) -> dict[str, Any]:
     """Create an error result for a failed task.
 
     Args:
         task_file: Path to task file that failed
         error: Exception that was raised
         task_id: Explicit task ID; falls back to task_file.stem when unavailable
+        agent_name: Agent name for multi-agent tasks; None for single-agent
 
     Returns:
         Dictionary with error result in same format as successful results
@@ -264,6 +312,7 @@ def _create_error_result(task_file: Path, error: BaseException, *, task_id: str 
     )
     return {
         "task_id": error_result.task_id,
+        "agent_name": agent_name,
         "result": error_result,
         "duration": 0.0,
     }
@@ -316,6 +365,7 @@ def _generate_run_summary(
         task_results=[
             {
                 "task_id": r["task_id"],
+                "agent_name": r.get("agent_name"),
                 "status": r["result"].final_status,
                 "weighted_score": r["result"].weighted_score,
                 "duration": r["duration"],
@@ -358,14 +408,22 @@ def _generate_run_summary(
     return summary
 
 
-def _validate_unique_task_ids(tasks: list[tuple[Path, TaskDefinition]]) -> None:
-    """Raise ValueError if any tasks share the same task_id."""
-    seen: dict[str, list[Path]] = {}
-    for task_file, task in tasks:
-        seen.setdefault(task.task_id, []).append(task_file)
-    duplicates = {tid: files for tid, files in seen.items() if len(files) > 1}
+def _validate_unique_task_ids(tasks: list[tuple[Path, TaskDefinition, str | None]]) -> None:
+    """Raise ValueError if any (task_id, agent_name) pairs are duplicated.
+
+    For single-agent tasks agent_name is None; uniqueness is checked on task_id alone.
+    For multi-agent tasks the pair (task_id, agent_name) must be unique across all files.
+    """
+    seen: dict[tuple[str, str | None], list[Path]] = {}
+    for task_file, task, agent_name in tasks:
+        key = (task.task_id, agent_name)
+        seen.setdefault(key, []).append(task_file)
+    duplicates = {k: files for k, files in seen.items() if len(files) > 1}
     if duplicates:
-        lines = [f"  - '{tid}': {', '.join(str(f) for f in files)}" for tid, files in duplicates.items()]
+        lines = [
+            f"  - task_id={tid!r}, agent={aname!r}: {', '.join(str(f) for f in files)}"
+            for (tid, aname), files in duplicates.items()
+        ]
         raise ValueError("Duplicate task IDs found:\n" + "\n".join(lines))
 
 

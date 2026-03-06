@@ -42,6 +42,32 @@ def load_task(task_file: Path) -> TaskDefinition:
         raise ValueError(f"Invalid task definition: {e}") from e
 
 
+def expand_task_for_agents(task: TaskDefinition) -> list[TaskDefinition]:
+    """Expand a multi-agent task into one TaskDefinition per agent.
+
+    For single-agent tasks (task.agents is None) returns [task] unchanged.
+    For multi-agent tasks returns N tasks, each with:
+    - task.agent set to the specific AgentConfig for that agent
+    - task.agents set to None (normalized to single-agent form)
+    - task.task_id and all other fields identical to the original
+
+    Args:
+        task: Task definition (possibly with agents list)
+
+    Returns:
+        List of single-agent TaskDefinitions ready for independent evaluation
+    """
+    if task.agents is None:
+        return [task]
+
+    expanded: list[TaskDefinition] = []
+    base = task.model_dump(exclude={"agent", "agents"})
+    for agent_config in task.agents:
+        new_task = TaskDefinition(**{**base, "agent": agent_config.model_dump()})
+        expanded.append(new_task)
+    return expanded
+
+
 def resolve_template_paths(task: TaskDefinition, base_dir: Path) -> TaskDefinition:
     """Resolve relative template paths to absolute paths.
 
