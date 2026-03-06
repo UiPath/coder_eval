@@ -1,5 +1,5 @@
-# coder_eval
-
+# coder_eval ("Coding Agents Gym")
+ 
 A robust, extensible framework for evaluating AI coding agents with comprehensive sandboxing, reproducibility, and data-driven analysis.
 
 ## Features
