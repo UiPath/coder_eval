@@ -8,36 +8,36 @@ from coder_eval.orchestration.config import BatchRunConfig
 
 
 class TestAgentConfigTurnTimeout:
-    """Test turn_timeout_seconds on AgentConfig."""
+    """Test turn_timeout on AgentConfig."""
 
     def test_default_is_none(self):
-        """turn_timeout_seconds defaults to None (disabled)."""
+        """turn_timeout defaults to None (disabled)."""
         config = AgentConfig(type="claude-code")
-        assert config.turn_timeout_seconds is None
+        assert config.turn_timeout is None
 
     def test_valid_value(self):
-        """Accepts valid turn_timeout_seconds >= 10."""
-        config = AgentConfig(type="claude-code", turn_timeout_seconds=60)
-        assert config.turn_timeout_seconds == 60
+        """Accepts valid turn_timeout >= 10."""
+        config = AgentConfig(type="claude-code", turn_timeout=60)
+        assert config.turn_timeout == 60
 
     def test_minimum_value(self):
         """Accepts minimum valid value of 10."""
-        config = AgentConfig(type="claude-code", turn_timeout_seconds=10)
-        assert config.turn_timeout_seconds == 10
+        config = AgentConfig(type="claude-code", turn_timeout=10)
+        assert config.turn_timeout == 10
 
     def test_below_minimum_rejected(self):
-        """Rejects turn_timeout_seconds < 10."""
+        """Rejects turn_timeout < 10."""
         with pytest.raises(ValidationError, match="greater than or equal to 10"):
-            AgentConfig(type="claude-code", turn_timeout_seconds=5)
+            AgentConfig(type="claude-code", turn_timeout=5)
 
     def test_none_accepted(self):
         """Explicitly passing None is accepted."""
-        config = AgentConfig(type="claude-code", turn_timeout_seconds=None)
-        assert config.turn_timeout_seconds is None
+        config = AgentConfig(type="claude-code", turn_timeout=None)
+        assert config.turn_timeout is None
 
 
 class TestTaskDefinitionTaskTimeout:
-    """Test task_timeout_seconds on TaskDefinition."""
+    """Test task_timeout on TaskDefinition."""
 
     def _minimal_task(self, **overrides):
         """Create a minimal valid TaskDefinition."""
@@ -53,29 +53,29 @@ class TestTaskDefinitionTaskTimeout:
         return TaskDefinition(**defaults)
 
     def test_default_is_none(self):
-        """task_timeout_seconds defaults to None (disabled)."""
+        """task_timeout defaults to None (disabled)."""
         task = self._minimal_task()
-        assert task.task_timeout_seconds is None
+        assert task.task_timeout is None
 
     def test_valid_value(self):
-        """Accepts valid task_timeout_seconds >= 30."""
-        task = self._minimal_task(task_timeout_seconds=300)
-        assert task.task_timeout_seconds == 300
+        """Accepts valid task_timeout >= 30."""
+        task = self._minimal_task(task_timeout=300)
+        assert task.task_timeout == 300
 
     def test_minimum_value(self):
         """Accepts minimum valid value of 30."""
-        task = self._minimal_task(task_timeout_seconds=30)
-        assert task.task_timeout_seconds == 30
+        task = self._minimal_task(task_timeout=30)
+        assert task.task_timeout == 30
 
     def test_below_minimum_rejected(self):
-        """Rejects task_timeout_seconds < 30."""
+        """Rejects task_timeout < 30."""
         with pytest.raises(ValidationError, match="greater than or equal to 30"):
-            self._minimal_task(task_timeout_seconds=10)
+            self._minimal_task(task_timeout=10)
 
     def test_none_accepted(self):
         """Explicitly passing None is accepted."""
-        task = self._minimal_task(task_timeout_seconds=None)
-        assert task.task_timeout_seconds is None
+        task = self._minimal_task(task_timeout=None)
+        assert task.task_timeout is None
 
 
 class TestBatchRunConfigTimeouts:
@@ -86,8 +86,8 @@ class TestBatchRunConfigTimeouts:
         from pathlib import Path
 
         config = BatchRunConfig(run_dir=Path("/tmp/test"))
-        assert config.task_timeout_seconds is None
-        assert config.turn_timeout_seconds is None
+        assert config.task_timeout is None
+        assert config.turn_timeout is None
 
     def test_valid_values(self):
         """Accepts valid timeout overrides."""
@@ -95,22 +95,22 @@ class TestBatchRunConfigTimeouts:
 
         config = BatchRunConfig(
             run_dir=Path("/tmp/test"),
-            task_timeout_seconds=300,
-            turn_timeout_seconds=60,
+            task_timeout=300,
+            turn_timeout=60,
         )
-        assert config.task_timeout_seconds == 300
-        assert config.turn_timeout_seconds == 60
+        assert config.task_timeout == 300
+        assert config.turn_timeout == 60
 
     def test_task_timeout_below_minimum_rejected(self):
-        """Rejects task_timeout_seconds < 30."""
+        """Rejects task_timeout < 30."""
         from pathlib import Path
 
         with pytest.raises(ValidationError, match="greater than or equal to 30"):
-            BatchRunConfig(run_dir=Path("/tmp/test"), task_timeout_seconds=10)
+            BatchRunConfig(run_dir=Path("/tmp/test"), task_timeout=10)
 
     def test_turn_timeout_below_minimum_rejected(self):
-        """Rejects turn_timeout_seconds < 10."""
+        """Rejects turn_timeout < 10."""
         from pathlib import Path
 
         with pytest.raises(ValidationError, match="greater than or equal to 10"):
-            BatchRunConfig(run_dir=Path("/tmp/test"), turn_timeout_seconds=3)
+            BatchRunConfig(run_dir=Path("/tmp/test"), turn_timeout=3)

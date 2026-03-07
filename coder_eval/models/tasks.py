@@ -33,7 +33,7 @@ class AgentConfig(BaseModel):
     max_turns: int | None = Field(default=None, description="Maximum agent inner-loop turns per iteration")
     plugins: list[SdkPluginConfig] | None = Field(default=None, description="List of Claude Code plugins")
 
-    turn_timeout_seconds: int | None = Field(
+    turn_timeout: int | None = Field(
         default=None,
         ge=10,
         description="Maximum seconds per agent turn (communicate call). None = no limit.",
@@ -107,7 +107,7 @@ class TaskDefinition(BaseModel):
     )
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
     success_criteria: list[SuccessCriterion] = Field(description="List of criteria that must all pass for task success")
-    task_timeout_seconds: int | None = Field(
+    task_timeout: int | None = Field(
         default=None,
         ge=30,
         description="Maximum seconds for the entire evaluation loop (all iterations). None = no limit.",

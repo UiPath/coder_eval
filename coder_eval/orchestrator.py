@@ -137,7 +137,7 @@ class Orchestrator:
                 await self._setup()
 
                 # Wrap evaluation loop with task-level timeout (if configured)
-                task_timeout = self.task.task_timeout_seconds
+                task_timeout = self.task.task_timeout
                 if task_timeout is not None:
                     try:
                         success = await asyncio.wait_for(self._evaluation_loop(), timeout=task_timeout)
@@ -453,7 +453,7 @@ class Orchestrator:
             # (without defaults, closure would capture stale references)
             # Local variable for type narrowing in lambda
             agent = self.agent
-            turn_timeout = agent_cfg.turn_timeout_seconds
+            turn_timeout = agent_cfg.turn_timeout
 
             # Wrap callback to stamp correct task_id on agent-emitted events
             agent_callback: StreamCallback | None = None

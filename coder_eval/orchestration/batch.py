@@ -103,8 +103,8 @@ async def run_batch(
             )
 
         # Apply timeout overrides (CLI > task YAML)
-        if config.task_timeout_seconds is not None:
-            task.task_timeout_seconds = config.task_timeout_seconds
+        if config.task_timeout is not None:
+            task.task_timeout = config.task_timeout
 
         # Apply agent-level overrides only for single-agent tasks.
         # Multi-agent tasks define per-agent config explicitly in the YAML.
@@ -124,8 +124,8 @@ async def run_batch(
             if effective_max_turns is not None:
                 task.agent.max_turns = effective_max_turns
 
-            if config.turn_timeout_seconds is not None:
-                task.agent.turn_timeout_seconds = config.turn_timeout_seconds
+            if config.turn_timeout is not None:
+                task.agent.turn_timeout = config.turn_timeout
         else:
             # Warn if agent-level CLI overrides are set but will be ignored for multi-agent tasks
             ignored: list[str] = []
@@ -135,8 +135,8 @@ async def run_batch(
                 ignored.append(f"--permission-mode={config.permission_mode!r}")
             if config.max_turns is not None:
                 ignored.append(f"--max-turns={config.max_turns}")
-            if config.turn_timeout_seconds is not None:
-                ignored.append(f"--turn-timeout={config.turn_timeout_seconds}")
+            if config.turn_timeout is not None:
+                ignored.append(f"--turn-timeout={config.turn_timeout}")
             if ignored:
                 msg = "Task %r is multi-agent; CLI flags %s are ignored (configure each agent in the YAML instead)"
                 logger.warning(msg, task.task_id, ", ".join(ignored))

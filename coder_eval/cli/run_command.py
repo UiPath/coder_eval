@@ -205,8 +205,8 @@ async def _run_all_tasks(
     agent_model: str | None = None,
     permission_mode: str | None = None,
     max_turns: int | None = None,
-    task_timeout_seconds: int | None = None,
-    turn_timeout_seconds: int | None = None,
+    task_timeout: int | None = None,
+    turn_timeout: int | None = None,
     stream_mode: str | None = None,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
@@ -228,8 +228,8 @@ async def _run_all_tasks(
         agent_model: Optional override for agent model
         permission_mode: Optional override for permission mode
         max_turns: Optional override for max agent turns
-        task_timeout_seconds: Optional override for task timeout (seconds)
-        turn_timeout_seconds: Optional override for turn timeout (seconds)
+        task_timeout: Optional override for task timeout (seconds)
+        turn_timeout: Optional override for turn timeout (seconds)
         stream_mode: Optional stream mode ('full' or 'minimal') for real-time output
     """
     # Prepare run directory
@@ -254,8 +254,8 @@ async def _run_all_tasks(
         agent_model=agent_model,
         permission_mode=permission_mode,
         max_turns=max_turns,
-        task_timeout_seconds=task_timeout_seconds,
-        turn_timeout_seconds=turn_timeout_seconds,
+        task_timeout=task_timeout,
+        turn_timeout=turn_timeout,
     )
 
     # Create streaming callback factory if --stream is enabled

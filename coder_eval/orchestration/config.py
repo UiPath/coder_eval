@@ -29,5 +29,5 @@ class BatchRunConfig(BaseModel):
     max_turns: int | None = Field(default=None, description="Override max turns for all tasks")
 
     # Timeout overrides (CLI > task YAML)
-    task_timeout_seconds: int | None = Field(default=None, ge=30, description="Override task timeout for all tasks")
-    turn_timeout_seconds: int | None = Field(default=None, ge=10, description="Override turn timeout for all tasks")
+    task_timeout: int | None = Field(default=None, ge=30, description="Override task timeout for all tasks")
+    turn_timeout: int | None = Field(default=None, ge=10, description="Override turn timeout for all tasks")

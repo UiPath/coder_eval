@@ -29,8 +29,8 @@ All async code already propagates `asyncio.CancelledError` correctly, so wrappin
 CLI (--task-timeout, --turn-timeout)
   |
   v
-BatchRunConfig --- override --> TaskDefinition.task_timeout_seconds
-                                AgentConfig.turn_timeout_seconds
+BatchRunConfig --- override --> TaskDefinition.task_timeout
+                                AgentConfig.turn_timeout
   |
   v
 orchestrator.run():
@@ -117,12 +117,12 @@ class TaskTimeoutError(EvaluationTimeoutError):
 
 ## Step 2: Model Changes
 
-### 2a. `coder_eval/models/tasks.py` — Add `turn_timeout_seconds` to `AgentConfig`
+### 2a. `coder_eval/models/tasks.py` — Add `turn_timeout` to `AgentConfig`
 
 ```python
 class AgentConfig(BaseModel):
     # ... existing fields ...
-    turn_timeout_seconds: int | None = Field(
+    turn_timeout: int | None = Field(
         default=None,
         ge=10,
         description="Maximum seconds per agent turn (communicate call). None = no limit.",
@@ -131,12 +131,12 @@ class AgentConfig(BaseModel):
 
 **Why on `AgentConfig`?** Turn timeout is an agent-level concern — how long we wait for the agent to respond per iteration.
 
-### 2b. `coder_eval/models/tasks.py` — Add `task_timeout_seconds` to `TaskDefinition`
+### 2b. `coder_eval/models/tasks.py` — Add `task_timeout` to `TaskDefinition`
 
 ```python
 class TaskDefinition(BaseModel):
     # ... existing fields ...
-    task_timeout_seconds: int | None = Field(
+    task_timeout: int | None = Field(
         default=None,
         ge=30,
         description="Maximum seconds for the entire evaluation loop (all iterations). None = no limit.",
@@ -152,10 +152,10 @@ class BatchRunConfig(BaseModel):
     # ... existing fields ...
 
     # Timeout overrides (CLI > task YAML)
-    task_timeout_seconds: int | None = Field(
+    task_timeout: int | None = Field(
         default=None, description="Override task timeout for all tasks"
     )
-    turn_timeout_seconds: int | None = Field(
+    turn_timeout: int | None = Field(
         default=None, description="Override turn timeout for all tasks"
     )
 ```
@@ -179,7 +179,7 @@ turn_record = await execute_with_retry(
 **New code**:
 ```python
 agent = self.agent
-turn_timeout = self.task.agent.turn_timeout_seconds
+turn_timeout = self.task.agent.turn_timeout
 
 async def _communicate_with_timeout(prompt: str = prompt_with_cwd, a: Agent = agent) -> TurnRecord:
     if turn_timeout is not None:
@@ -244,7 +244,7 @@ try:
     await self._setup()
 
     # Wrap evaluation loop with task-level timeout
-    task_timeout = self.task.task_timeout_seconds
+    task_timeout = self.task.task_timeout
     if task_timeout is not None:
         try:
             success = await asyncio.wait_for(
@@ -336,14 +336,14 @@ Pass through to `_run_all_tasks()` and into `BatchRunConfig`:
 
 ```python
 # In _run_all_tasks() signature, add:
-task_timeout_seconds: int | None = None,
-turn_timeout_seconds: int | None = None,
+task_timeout: int | None = None,
+turn_timeout: int | None = None,
 
 # In BatchRunConfig construction, add:
 config = BatchRunConfig(
     # ... existing fields ...
-    task_timeout_seconds=task_timeout_seconds,
-    turn_timeout_seconds=turn_timeout_seconds,
+    task_timeout=task_timeout,
+    turn_timeout=turn_timeout,
 )
 ```
 
@@ -353,11 +353,11 @@ In `run_batch()`, where CLI overrides are applied to each task (after the existi
 
 ```python
 # Apply timeout overrides (CLI > task YAML)
-if config.task_timeout_seconds is not None:
-    task.task_timeout_seconds = config.task_timeout_seconds
+if config.task_timeout is not None:
+    task.task_timeout = config.task_timeout
 
-if config.turn_timeout_seconds is not None:
-    task.agent.turn_timeout_seconds = config.turn_timeout_seconds
+if config.turn_timeout is not None:
+    task.agent.turn_timeout = config.turn_timeout
 ```
 
 ---
@@ -378,20 +378,20 @@ Test the custom exceptions:
 
 Test model field validation:
 
-- `AgentConfig(type="claude-code", turn_timeout_seconds=60)` — accepted
-- `AgentConfig(type="claude-code", turn_timeout_seconds=5)` — rejected (ge=10)
-- `AgentConfig(type="claude-code", turn_timeout_seconds=None)` — accepted (default)
-- `TaskDefinition(..., task_timeout_seconds=120)` — accepted
-- `TaskDefinition(..., task_timeout_seconds=10)` — rejected (ge=30)
-- `TaskDefinition(..., task_timeout_seconds=None)` — accepted (default)
-- `BatchRunConfig(..., task_timeout_seconds=300, turn_timeout_seconds=60)` — accepted
+- `AgentConfig(type="claude-code", turn_timeout=60)` — accepted
+- `AgentConfig(type="claude-code", turn_timeout=5)` — rejected (ge=10)
+- `AgentConfig(type="claude-code", turn_timeout=None)` — accepted (default)
+- `TaskDefinition(..., task_timeout=120)` — accepted
+- `TaskDefinition(..., task_timeout=10)` — rejected (ge=30)
+- `TaskDefinition(..., task_timeout=None)` — accepted (default)
+- `BatchRunConfig(..., task_timeout=300, turn_timeout=60)` — accepted
 
 ### 7c. `tests/test_timeout_orchestrator.py` (new)
 
 Test timeout behavior in the orchestrator:
 
 - **Turn timeout fires**: Mock `agent.communicate()` to sleep longer than turn timeout. Verify `TurnTimeoutError` is raised, `final_status="ERROR"`, `error_message` contains "turn timed out".
-- **Task timeout fires**: Mock `agent.communicate()` to be slow (but within turn timeout). Set `max_iterations=10`, `task_timeout_seconds=1`. Verify `final_status="ERROR"`, `error_message` contains "Task timed out".
+- **Task timeout fires**: Mock `agent.communicate()` to be slow (but within turn timeout). Set `max_iterations=10`, `task_timeout=1`. Verify `final_status="ERROR"`, `error_message` contains "Task timed out".
 - **No timeout (None)**: Verify normal execution when both timeouts are `None`.
 - **Turn timeout < task timeout**: Verify turn timeout fires first when a single turn is slow.
 
@@ -408,8 +408,8 @@ Test error categorization:
 
 Test batch override wiring:
 
-- Verify `BatchRunConfig.task_timeout_seconds` overrides `task.task_timeout_seconds` in `run_batch()`
-- Verify `BatchRunConfig.turn_timeout_seconds` overrides `task.agent.turn_timeout_seconds` in `run_batch()`
+- Verify `BatchRunConfig.task_timeout` overrides `task.task_timeout` in `run_batch()`
+- Verify `BatchRunConfig.turn_timeout` overrides `task.agent.turn_timeout` in `run_batch()`
 - Verify `None` overrides don't clobber task YAML values
 
 ---
@@ -434,8 +434,8 @@ Check that:
 | File | Change |
 |------|--------|
 | `coder_eval/errors/timeout.py` | **New** — `EvaluationTimeoutError`, `TurnTimeoutError`, `TaskTimeoutError` |
-| `coder_eval/models/tasks.py` | Add `turn_timeout_seconds` to `AgentConfig`, `task_timeout_seconds` to `TaskDefinition` |
-| `coder_eval/orchestration/config.py` | Add `task_timeout_seconds`, `turn_timeout_seconds` to `BatchRunConfig` |
+| `coder_eval/models/tasks.py` | Add `turn_timeout` to `AgentConfig`, `task_timeout` to `TaskDefinition` |
+| `coder_eval/orchestration/config.py` | Add `task_timeout`, `turn_timeout` to `BatchRunConfig` |
 | `coder_eval/orchestrator.py` | Wrap `agent.communicate()` with turn timeout, wrap `_evaluation_loop()` with task timeout |
 | `coder_eval/errors/categorization.py` | Add `EvaluationTimeoutError` → `AGENT_TIMEOUT` check |
 | `coder_eval/errors/categories.py` | Add `AGENT_TIMEOUT` error tip |
@@ -456,10 +456,10 @@ task_id: slow-task
 description: "Task with timeout protection"
 initial_prompt: "Build a web server..."
 max_iterations: 5
-task_timeout_seconds: 600   # 10 minutes for all iterations
+task_timeout: 600   # 10 minutes for all iterations
 agent:
   type: claude-code
-  turn_timeout_seconds: 120  # 2 minutes per turn
+  turn_timeout: 120  # 2 minutes per turn
 sandbox:
   driver: tempdir
 success_criteria:
