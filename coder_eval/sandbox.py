@@ -231,7 +231,7 @@ class Sandbox:
 
     def _should_ignore_template_file(self, path: Path) -> bool:
         """Check if template file/directory should be ignored."""
-        patterns = get_ignore_patterns(self.config.additional_ignore_patterns)
+        patterns = get_ignore_patterns(self.config.ignore_patterns)
         return should_ignore_path(path, patterns)
 
     def _setup_virtualenv(self) -> None:

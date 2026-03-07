@@ -6,7 +6,7 @@ import warnings
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from coder_eval.models.enums import SnapshotMode
 from coder_eval.models.templates import TemplateSource
@@ -75,6 +75,8 @@ class NodeEnvConfig(BaseModel):
 class SandboxConfig(BaseModel):
     """Configuration for the sandboxed execution environment."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     driver: Literal["tempdir"] = Field(default="tempdir", description="Sandbox driver type (only tempdir supported)")
     python: PythonEnvConfig | None = Field(
         default_factory=PythonEnvConfig,
@@ -96,9 +98,10 @@ class SandboxConfig(BaseModel):
     snapshots: SnapshotConfig = Field(default_factory=SnapshotConfig, description="Iteration snapshot configuration")
 
     # Customizable ignore patterns
-    additional_ignore_patterns: list[str] = Field(
+    ignore_patterns: list[str] = Field(
         default_factory=list,
         description="Additional patterns to ignore during template setup and snapshots (beyond defaults)",
+        validation_alias=AliasChoices("ignore_patterns", "additional_ignore_patterns"),
     )
 
     @model_validator(mode="after")

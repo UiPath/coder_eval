@@ -708,7 +708,7 @@ class ClaudeCodeAgent(Agent):
         Returns:
             True if path should be ignored
         """
-        patterns = get_ignore_patterns(self.config.additional_ignore_patterns)
+        patterns = get_ignore_patterns(self.config.ignore_patterns)
         return should_ignore_path(path, patterns)
 
     def _detect_file_changes(

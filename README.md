@@ -96,25 +96,55 @@ coder-eval run tasks/hello_date.yaml --stream full
 
 **Options:**
 
+*Execution:*
+
 | Flag                         | Description                                                                      |
 | ---------------------------- | -------------------------------------------------------------------------------- |
 | `--max-iter, -i`             | Override max iterations for all tasks                                            |
+| `--max-parallel, -j`         | Concurrent tasks (default: 1)                                                    |
 | `--preserve / --no-preserve` | Preserve sandbox after execution (default: preserve)                             |
 | `--run-dir`                  | Custom run directory (default: timestamped in `runs/`)                           |
-| `--max-parallel, -j`         | Concurrent tasks (default: 1)                                                    |
+
+*Agent overrides:*
+
+| Flag                         | Description                                                                      |
+| ---------------------------- | -------------------------------------------------------------------------------- |
+| `--allowed-tools`            | Override allowed tools (comma-separated, e.g., `Read,Write,Bash`)               |
+| `--ignore-patterns`          | Override ignore patterns (comma-separated, e.g., `*.log,__pycache__`)           |
+| `--max-turns`                | Override max agent inner-loop turns per iteration                                |
 | `--model, -m`                | Override agent model for all tasks (e.g., `claude-sonnet-4-20250514`)            |
 | `--permission-mode`          | Override permission mode (`default`, `acceptEdits`, `plan`, `bypassPermissions`) |
-| `--max-turns`                | Override max agent inner-loop turns per iteration                                |
+| `--plugins`                  | Override plugins (JSON array, e.g., `'[{"name":"x","path":"/y"}]'`)             |
+
+*Timeouts:*
+
+| Flag                         | Description                                                                      |
+| ---------------------------- | -------------------------------------------------------------------------------- |
 | `--task-timeout`             | Override task timeout in seconds (covers the evaluation loop)                    |
 | `--turn-timeout`             | Override turn timeout in seconds (per agent communicate call)                    |
-| `--stream, -s`               | Stream LLM events to terminal: `full` or `minimal` (disables progress bar)       |
-| `--tags, -t`                 | Only run tasks matching any of these tags (comma-separated)                      |
+
+*Filtering:*
+
+| Flag                         | Description                                                                      |
+| ---------------------------- | -------------------------------------------------------------------------------- |
 | `--exclude-tags`             | Skip tasks matching any of these tags (comma-separated)                          |
-| `--snapshot-mode`            | Override snapshot mode (`disabled`, `full`, `incremental`, `hybrid`)             |
+| `--tags, -t`                 | Only run tasks matching any of these tags (comma-separated)                      |
+
+*Snapshots:*
+
+| Flag                         | Description                                                                      |
+| ---------------------------- | -------------------------------------------------------------------------------- |
 | `--snapshot-checkpoint-freq` | Checkpoint frequency for hybrid mode                                             |
-| `--proxy / --no-proxy`       | Route API calls through the LLM Gateway proxy (default: no proxy)                |
-| `--verbose, -v`              | DEBUG-level logging                                                              |
+| `--snapshot-mode`            | Override snapshot mode (`disabled`, `full`, `incremental`, `hybrid`)             |
+
+*Output & networking:*
+
+| Flag                         | Description                                                                      |
+| ---------------------------- | -------------------------------------------------------------------------------- |
 | `--log-file`                 | Write logs to file                                                               |
+| `--proxy / --no-proxy`       | Route API calls through the LLM Gateway proxy (default: no proxy)                |
+| `--stream, -s`               | Stream LLM events to terminal: `full` or `minimal` (disables progress bar)       |
+| `--verbose, -v`              | DEBUG-level logging                                                              |
 
 ### `coder-eval plan` — Validate Tasks
 
@@ -250,7 +280,7 @@ Each agent gets its own isolated sandbox and produces an independent `Evaluation
 | careful | SUCCESS | 1.000 | 1          | 9.2s    |
 ```
 
-> **Note:** CLI flags like `--model` and `--permission-mode` are ignored for multi-agent tasks — configure each agent explicitly in the YAML. Task-level flags (`--max-iter`, `--task-timeout`, etc.) still apply to all agents.
+> **Note:** Agent-level CLI flags (`--model`, `--permission-mode`, `--max-turns`, `--allowed-tools`, `--plugins`, `--ignore-patterns`) are ignored for multi-agent tasks — configure each agent explicitly in the YAML. Task-level flags (`--max-iter`, `--task-timeout`, etc.) still apply to all agents.
 
 **Plugin Configuration:**
 

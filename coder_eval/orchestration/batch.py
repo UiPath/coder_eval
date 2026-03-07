@@ -126,6 +126,15 @@ async def run_batch(
 
             if config.turn_timeout is not None:
                 task.agent.turn_timeout = config.turn_timeout
+
+            if config.allowed_tools is not None:
+                task.agent.allowed_tools = config.allowed_tools
+
+            if config.plugins is not None:
+                task.agent.plugins = config.plugins
+
+            if config.ignore_patterns is not None:
+                task.agent.ignore_patterns = config.ignore_patterns
         else:
             # Warn if agent-level CLI overrides are set but will be ignored for multi-agent tasks
             ignored: list[str] = []
@@ -137,6 +146,12 @@ async def run_batch(
                 ignored.append(f"--max-turns={config.max_turns}")
             if config.turn_timeout is not None:
                 ignored.append(f"--turn-timeout={config.turn_timeout}")
+            if config.allowed_tools is not None:
+                ignored.append(f"--allowed-tools={','.join(config.allowed_tools)}")
+            if config.plugins is not None:
+                ignored.append("--plugins=...")
+            if config.ignore_patterns is not None:
+                ignored.append(f"--ignore-patterns={','.join(config.ignore_patterns)}")
             if ignored:
                 msg = "Task %r is multi-agent; CLI flags %s are ignored (configure each agent in the YAML instead)"
                 logger.warning(msg, task.task_id, ", ".join(ignored))

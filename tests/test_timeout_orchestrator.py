@@ -33,7 +33,7 @@ def _make_task(*, turn_timeout: float | None = None, task_timeout: float | None 
         model=None,
         max_turns=None,
         turn_timeout=turn_timeout,
-        additional_ignore_patterns=[],
+        ignore_patterns=[],
     )
     task = TaskDefinition.model_construct(
         task_id="timeout_test",

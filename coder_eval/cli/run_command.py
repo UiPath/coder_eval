@@ -122,6 +122,24 @@ def run_command(
         click_type=click.Choice(["full", "minimal"], case_sensitive=False),
         help="Stream LLM events to terminal: 'full' or 'minimal' (turn-level only). Disables progress bar.",
     ),
+    allowed_tools: str | None = typer.Option(
+        None,
+        "--allowed-tools",
+        help="Override allowed tools for all tasks (comma-separated, e.g., 'Read,Write,Bash')",
+    ),
+    plugins: str | None = typer.Option(
+        None,
+        "--plugins",
+        help='Override plugins for all tasks (JSON array, e.g., \'[{"name": "my-plugin", "path": "/path"}]\')',
+    ),
+    ignore_patterns: str | None = typer.Option(
+        None,
+        "--ignore-patterns",
+        help=(
+            "Override agent file-change detection ignore patterns (comma-separated, e.g., '*.log,__pycache__')."
+            " Does not affect sandbox/snapshot ignore patterns."
+        ),
+    ),
     proxy: bool | None = typer.Option(
         None,
         "--proxy/--no-proxy",
@@ -162,6 +180,28 @@ def run_command(
     include_tags = {t.strip() for t in tags.split(",") if t.strip()} if tags else None
     exclude_tags_set = {t.strip() for t in exclude_tags.split(",") if t.strip()} if exclude_tags else None
 
+    # Parse comma-separated list options
+    allowed_tools_list = [t.strip() for t in allowed_tools.split(",") if t.strip()] if allowed_tools else None
+    ignore_patterns_list = [p.strip() for p in ignore_patterns.split(",") if p.strip()] if ignore_patterns else None
+
+    # Parse plugins JSON and validate against SdkPluginConfig schema
+    plugins_list: list[Any] | None = None
+    if plugins is not None:
+        import json
+
+        from claude_agent_sdk import SdkPluginConfig
+        from pydantic import TypeAdapter, ValidationError
+
+        try:
+            raw = json.loads(plugins)
+        except json.JSONDecodeError as e:
+            raise typer.BadParameter(f"--plugins must be valid JSON: {e}") from e
+
+        try:
+            plugins_list = TypeAdapter(list[SdkPluginConfig]).validate_python(raw)
+        except ValidationError as e:
+            raise typer.BadParameter(f"--plugins validation failed: {e}") from e
+
     # Override proxy setting if --proxy or --no-proxy was passed
     if proxy is not None:
         settings.llmgw_proxy_enabled = proxy
@@ -188,6 +228,9 @@ def run_command(
             task_timeout,
             turn_timeout,
             stream,
+            allowed_tools_list,
+            plugins_list,
+            ignore_patterns_list,
         )
     )
 
@@ -208,6 +251,9 @@ async def _run_all_tasks(
     task_timeout: int | None = None,
     turn_timeout: int | None = None,
     stream_mode: str | None = None,
+    allowed_tools: list[str] | None = None,
+    plugins: list[dict[str, str]] | None = None,
+    ignore_patterns: list[str] | None = None,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -231,6 +277,9 @@ async def _run_all_tasks(
         task_timeout: Optional override for task timeout (seconds)
         turn_timeout: Optional override for turn timeout (seconds)
         stream_mode: Optional stream mode ('full' or 'minimal') for real-time output
+        allowed_tools: Optional override for allowed tools
+        plugins: Optional override for plugins (SdkPluginConfig objects)
+        ignore_patterns: Optional override for agent file change detection ignore patterns
     """
     # Prepare run directory
     run_dir = prepare_run_directory(run_dir)
@@ -254,6 +303,9 @@ async def _run_all_tasks(
         agent_model=agent_model,
         permission_mode=permission_mode,
         max_turns=max_turns,
+        allowed_tools=allowed_tools,
+        plugins=plugins,
+        ignore_patterns=ignore_patterns,
         task_timeout=task_timeout,
         turn_timeout=turn_timeout,
     )

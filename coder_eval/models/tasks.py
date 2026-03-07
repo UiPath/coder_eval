@@ -6,7 +6,7 @@ import re
 from typing import Literal
 
 from claude_agent_sdk import SdkPluginConfig
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind
@@ -16,7 +16,7 @@ from coder_eval.models.sandbox import SandboxConfig
 class AgentConfig(BaseModel):
     """Configuration for the coding agent."""
 
-    model_config = ConfigDict(validate_assignment=True)
+    model_config = ConfigDict(validate_assignment=True, populate_by_name=True)
 
     name: str | None = Field(
         default=None,
@@ -40,9 +40,10 @@ class AgentConfig(BaseModel):
     )
 
     # Customizable ignore patterns for file tracking
-    additional_ignore_patterns: list[str] = Field(
+    ignore_patterns: list[str] = Field(
         default_factory=list,
         description="Additional patterns to ignore during file change detection (beyond defaults)",
+        validation_alias=AliasChoices("ignore_patterns", "additional_ignore_patterns"),
     )
 
 

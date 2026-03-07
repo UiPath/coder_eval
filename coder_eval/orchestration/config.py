@@ -1,6 +1,7 @@
 """Configuration models for orchestration."""
 
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -27,6 +28,12 @@ class BatchRunConfig(BaseModel):
     agent_model: str | None = Field(default=None, description="Override agent model for all tasks")
     permission_mode: str | None = Field(default=None, description="Override permission mode for all tasks")
     max_turns: int | None = Field(default=None, description="Override max turns for all tasks")
+
+    allowed_tools: list[str] | None = Field(default=None, description="Override allowed tools for all tasks")
+    plugins: list[Any] | None = Field(
+        default=None, description="Override plugins (SdkPluginConfig objects) for all tasks"
+    )
+    ignore_patterns: list[str] | None = Field(default=None, description="Override ignore patterns for all tasks")
 
     # Timeout overrides (CLI > task YAML)
     task_timeout: int | None = Field(default=None, ge=30, description="Override task timeout for all tasks")
