@@ -248,7 +248,7 @@ def calc(x, y):
         # Use exact agent metrics as baseline
         baseline = agent_metrics.copy()
 
-        result = scorer.score_complexity(agent_code, ref_code, baseline)
+        scorer.score_complexity(agent_code, ref_code, baseline)
 
         # When agent matches baseline exactly, scores should be perfect
         # Note: cyclomatic uses 1.5x buffer, so exact match gets score based on formula

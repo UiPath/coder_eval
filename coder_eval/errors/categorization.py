@@ -73,15 +73,15 @@ def categorize_error(
         return ErrorCategory.OUT_OF_MEMORY
 
     # 3. Check for known SDK exceptions (if available)
-    # Note: Uncomment when anthropic SDK exceptions are available
-    # try:
-    #     from anthropic import RateLimitError, AuthenticationError
-    #     if isinstance(error, RateLimitError):
-    #         return ErrorCategory.AGENT_RATE_LIMIT
-    #     if isinstance(error, AuthenticationError):
-    #         return ErrorCategory.AGENT_AUTH_ERROR
-    # except ImportError:
-    #     pass
+    try:
+        from anthropic import AuthenticationError, RateLimitError
+
+        if isinstance(error, RateLimitError):
+            return ErrorCategory.AGENT_RATE_LIMIT
+        if isinstance(error, AuthenticationError):
+            return ErrorCategory.AGENT_AUTH_ERROR
+    except ImportError:
+        pass  # anthropic package not installed; fall through to string matching
 
     # 4. Fallback to string matching
     error_str = str(error).lower()

@@ -149,8 +149,6 @@ class Sandbox:
         Raises:
             RuntimeError: If template directory doesn't exist or is not a directory
         """
-        import logging
-
         assert self.sandbox_dir is not None, "Sandbox directory not initialized"
 
         template_path = Path(source.path)
@@ -200,8 +198,6 @@ class Sandbox:
         Raises:
             RuntimeError: If file path escapes sandbox (path traversal)
         """
-        import logging
-
         assert self.sandbox_dir is not None, "Sandbox directory not initialized"
 
         logger = logging.getLogger(__name__)
