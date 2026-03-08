@@ -151,10 +151,20 @@ Compare agent's approach to reference. Focus on correctness and completeness dif
 
 """
 
+        # Build task-specific criteria section if provided
+        task_criteria_section = ""
+        if self.config.prompt:
+            task_criteria_section = f"""
+TASK-SPECIFIC REVIEW CRITERIA:
+{self.config.prompt}
+Evaluate the agent's work against these criteria in addition to general code quality.
+
+"""
+
         return f"""You are a code reviewer evaluating an agent's implementation.
 
 TASK: {task_description}
-{reference_section}
+{reference_section}{task_criteria_section}
 AGENT OUTPUT (Iteration {current_iteration}/{max_iterations}):
 {agent_output}
 

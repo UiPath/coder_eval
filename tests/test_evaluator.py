@@ -415,6 +415,60 @@ def test_llm_reviewer_parse_old_format_with_aliases():
     assert decision.should_continue is True
 
 
+def test_llm_reviewer_build_prompt_with_task_prompt():
+    """Test that task-specific prompt is included in the review prompt."""
+    custom_prompt = (
+        "Evaluate if the calculator agent is complete:\n"
+        "1. Does it use LangGraph StateGraph?\n"
+        "2. Are input/output models defined with Pydantic?\n"
+    )
+    config = LLMReviewerConfig(enabled=True, model="gpt-5-2025-08-07", prompt=custom_prompt)
+
+    reviewer = LLMReviewer(config)
+
+    prompt = reviewer._build_review_prompt(
+        task_description="Build a calculator agent",
+        agent_output="Agent created calculator.py",
+        current_iteration=1,
+        max_iterations=3,
+    )
+
+    assert "TASK-SPECIFIC REVIEW CRITERIA" in prompt
+    assert "LangGraph StateGraph" in prompt
+    assert "Pydantic" in prompt
+    # Generic instructions should still be present
+    assert "No praise, no fluff" in prompt
+
+
+def test_llm_reviewer_build_prompt_without_task_prompt():
+    """Test that prompt works normally when no task-specific prompt is configured."""
+    config = LLMReviewerConfig(enabled=True, model="gpt-5-2025-08-07")
+
+    reviewer = LLMReviewer(config)
+
+    prompt = reviewer._build_review_prompt(
+        task_description="Build something",
+        agent_output="Agent output",
+        current_iteration=1,
+        max_iterations=3,
+    )
+
+    assert "TASK-SPECIFIC REVIEW CRITERIA" not in prompt
+    assert "No praise, no fluff" in prompt
+
+
+def test_llm_reviewer_config_accepts_prompt_field():
+    """Test that LLMReviewerConfig correctly stores the prompt field."""
+    config = LLMReviewerConfig(enabled=True, prompt="Check for edge cases")
+    assert config.prompt == "Check for edge cases"
+
+
+def test_llm_reviewer_config_prompt_defaults_to_none():
+    """Test that prompt defaults to None when not provided."""
+    config = LLMReviewerConfig(enabled=True)
+    assert config.prompt is None
+
+
 def test_success_checker_logs_include_task_id(caplog):
     """Test that SuccessChecker logs include task_id context when provided.
 

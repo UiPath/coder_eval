@@ -61,6 +61,10 @@ class LLMReviewerConfig(BaseModel):
     )
     temperature: float = Field(default=0.0, ge=0.0, le=2.0, description="Temperature for LLM sampling")
     max_tokens: int = Field(default=1000, gt=0, description="Maximum tokens in response")
+    prompt: str | None = Field(
+        default=None,
+        description="Task-specific review instructions appended to the review prompt",
+    )
 
 
 class ReferenceSource(BaseModel):
