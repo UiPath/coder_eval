@@ -1,0 +1,55 @@
+task_id: uipath-flow-process-list-simple
+description: >
+  Minimal-prompt evaluation: agent must figure out how to list UiPath flow
+  processes using uipcli CLI with no step-by-step guidance.
+tags: [flow, uipcli, simple]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash", "Read", "Write"]
+  max_turns: 10
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+initial_prompt: |
+  List all UiPath flow processes and save the results to processes.json in the
+  current directory. The `uipcli` CLI is already available.
+
+success_criteria:
+  - type: file_exists
+    description: "processes.json file exists"
+    path: "processes.json"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "processes.json is valid JSON"
+    command: "python -c \"import json; json.load(open('processes.json'))\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "processes.json contains process data"
+    path: "processes.json"
+    includes:
+      - "Name"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Agent ran uipcli flow process list"
+    tool_name: "Bash"
+    command_pattern: 'uipcli\s+flow\s+process\s+list'
+    min_count: 1
+    weight: 1.0
+    pass_threshold: 1.0
+
+max_iterations: 2
+
+llm_reviewer:
+  enabled: true

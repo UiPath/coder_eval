@@ -1,0 +1,72 @@
+task_id: uipath-flow-node-simple
+description: >
+  Minimal-prompt evaluation: agent must figure out how to explore Flow nodes
+  using uipcli CLI with no step-by-step guidance.
+tags: [flow, uipcli, simple]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash", "Read", "Write"]
+  max_turns: 12
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+initial_prompt: |
+  Use the `uipcli` CLI to explore available Flow nodes. Pull the latest node
+  data, list them, search for HTTP-related nodes, and get details of one node.
+  Save a summary to nodes_report.json. The `uipcli` CLI is already available.
+
+success_criteria:
+  - type: command_executed
+    description: "Agent pulled node data"
+    tool_name: "Bash"
+    command_pattern: 'uipcli\s+flow\s+node\s+pull'
+    min_count: 1
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Agent listed nodes"
+    tool_name: "Bash"
+    command_pattern: 'uipcli\s+flow\s+node\s+list'
+    min_count: 1
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Agent searched for nodes"
+    tool_name: "Bash"
+    command_pattern: 'uipcli\s+flow\s+node\s+search'
+    min_count: 1
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Agent got details of a specific node"
+    tool_name: "Bash"
+    command_pattern: 'uipcli\s+flow\s+node\s+get'
+    min_count: 1
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_exists
+    description: "nodes_report.json summary exists"
+    path: "nodes_report.json"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "nodes_report.json is valid JSON"
+    command: "python -c \"import json; json.load(open('nodes_report.json'))\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+max_iterations: 2
+
+llm_reviewer:
+  enabled: true

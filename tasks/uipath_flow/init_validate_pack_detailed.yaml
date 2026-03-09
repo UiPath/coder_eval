@@ -1,0 +1,180 @@
+task_id: uipath-flow-init-validate-pack-detailed
+description: >
+  Detailed-prompt evaluation: agent follows step-by-step instructions to
+  initialize, validate, and pack a Flow project using uipcli CLI.
+tags: [flow, uipcli, detailed]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash", "Read", "Write"]
+  max_turns: 14
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+initial_prompt: |
+  Use the `uipcli` CLI tool to go through the full Flow project lifecycle:
+  init, validate, and pack.
+
+  Be efficient: redirect output directly to files. Do not run unnecessary
+  verification commands.
+
+  ## Step 1: Initialize a new Flow project
+  Run `uipcli flow init TestFlow --format json > init_result.json`
+  This creates a new Flow project directory with boilerplate files.
+
+  ## Step 2: Explore the generated project
+  List the files in the TestFlow directory to understand the project structure:
+    ls -la TestFlow/ > project_files.txt
+
+  ## Step 3: Validate the generated .flow file
+  Find the .flow file in the TestFlow directory and validate it:
+    uipcli flow validate TestFlow/TestFlow.flow --format json > validate_result.json
+  Also try with --verbose:
+    uipcli flow validate TestFlow/TestFlow.flow --verbose --format json > validate_verbose.json
+
+  ## Step 4: Pack the project
+  Pack the project into a .nupkg file:
+    uipcli flow pack TestFlow ./output --format json > pack_result.json
+  Also try with custom version:
+    uipcli flow pack TestFlow ./output --version 2.0.0 --format json > pack_versioned.json
+
+  ## Step 5: Write summary report
+  Create project_report.json:
+    {
+      "project_name": "TestFlow",
+      "commands_used": ["flow init", "flow validate", "flow pack"],
+      "project_files": ["<list files from step 2>"],
+      "validation_passed": <true|false>,
+      "package_created": <true|false>,
+      "options_exercised": ["--format json", "--verbose", "--version"],
+      "steps_completed": ["init", "explore", "validate", "validate_verbose", "pack", "pack_versioned", "report"]
+    }
+
+  Important notes:
+  - The `uipcli` CLI is already available in the environment.
+  - `flow init` creates a project directory with boilerplate files.
+  - `flow validate` checks a .flow file against the Flow schema.
+  - `flow pack` requires a project path and output directory.
+  - The .flow file is typically named after the project (e.g., TestFlow.flow).
+
+success_criteria:
+  - type: command_executed
+    description: "Agent initialized a Flow project"
+    tool_name: "Bash"
+    command_pattern: 'uipcli\s+flow\s+init'
+    min_count: 1
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_exists
+    description: "init_result.json exists"
+    path: "init_result.json"
+    weight: 0.5
+    pass_threshold: 1.0
+
+  - type: file_exists
+    description: "project_files.txt exists"
+    path: "project_files.txt"
+    weight: 0.5
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Agent validated a .flow file"
+    tool_name: "Bash"
+    command_pattern: 'uipcli\s+flow\s+validate'
+    min_count: 1
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_exists
+    description: "validate_result.json exists"
+    path: "validate_result.json"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Agent used --verbose on validate"
+    tool_name: "Bash"
+    command_pattern: 'uipcli\s+flow\s+validate.*--verbose'
+    min_count: 1
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_exists
+    description: "validate_verbose.json exists"
+    path: "validate_verbose.json"
+    weight: 0.5
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Agent packed the project"
+    tool_name: "Bash"
+    command_pattern: 'uipcli\s+flow\s+pack'
+    min_count: 1
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_exists
+    description: "pack_result.json exists"
+    path: "pack_result.json"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Agent used --version on pack"
+    tool_name: "Bash"
+    command_pattern: 'uipcli\s+flow\s+pack.*--version'
+    min_count: 1
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_exists
+    description: "pack_versioned.json exists"
+    path: "pack_versioned.json"
+    weight: 0.5
+    pass_threshold: 1.0
+
+  - type: file_exists
+    description: "project_report.json summary exists"
+    path: "project_report.json"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "project_report.json is valid JSON"
+    command: "python -c \"import json; json.load(open('project_report.json'))\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Report contains expected summary fields"
+    path: "project_report.json"
+    includes:
+      - "project_name"
+      - "commands_used"
+      - "validation_passed"
+      - "package_created"
+      - "options_exercised"
+      - "steps_completed"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Report confirms options were exercised"
+    path: "project_report.json"
+    includes:
+      - "--format json"
+      - "--verbose"
+      - "--version"
+    weight: 1.0
+    pass_threshold: 1.0
+
+max_iterations: 2
+
+llm_reviewer:
+  enabled: true
