@@ -15,7 +15,6 @@ A robust, extensible framework for evaluating AI coding agents with comprehensiv
 - **Token Usage Tracking** — Input/output token counts for cost analysis
 - **Reference Comparison** — Code similarity scoring using AST, token, and complexity analysis
 - **Claude Code Plugins** — Configurable plugin support for Claude Code with marketplace directory substitution
-- **Multi-Agent Comparison** — Run the same task with multiple agent configurations side-by-side and compare results in one report
 - **Parallel Execution** — Run multiple evaluations concurrently with configurable parallelism
 - **Real-Time Streaming** — `--stream` flag for live LLM event output (tool calls, results, text) with full/minimal verbosity modes
 - **Rich CLI** — User-friendly command-line interface with validation, execution, and reporting
@@ -96,51 +95,30 @@ coder-eval run tasks/hello_date.yaml --stream full
 
 **Options:**
 
-*Execution:*
-
 | Flag                         | Description                                                                      |
 | ---------------------------- | -------------------------------------------------------------------------------- |
+| **Execution**                |                                                                                  |
 | `--max-iter, -i`             | Override max iterations for all tasks                                            |
 | `--max-parallel, -j`         | Concurrent tasks (default: 1)                                                    |
 | `--preserve / --no-preserve` | Preserve sandbox after execution (default: preserve)                             |
 | `--run-dir`                  | Custom run directory (default: timestamped in `runs/`)                           |
-
-*Agent overrides:*
-
-| Flag                         | Description                                                                      |
-| ---------------------------- | -------------------------------------------------------------------------------- |
+| **Agent overrides**          |                                                                                  |
 | `--allowed-tools`            | Override allowed tools (comma-separated, e.g., `Read,Write,Bash`)               |
 | `--ignore-patterns`          | Override ignore patterns (comma-separated, e.g., `*.log,__pycache__`)           |
 | `--max-turns`                | Override max agent inner-loop turns per iteration                                |
 | `--model, -m`                | Override agent model for all tasks (e.g., `claude-sonnet-4-20250514`)            |
 | `--permission-mode`          | Override permission mode (`default`, `acceptEdits`, `plan`, `bypassPermissions`) |
 | `--plugins`                  | Override plugins (JSON array, e.g., `'[{"name":"x","path":"/y"}]'`)             |
-
-*Timeouts:*
-
-| Flag                         | Description                                                                      |
-| ---------------------------- | -------------------------------------------------------------------------------- |
+| **Timeouts**                 |                                                                                  |
 | `--task-timeout`             | Override task timeout in seconds (covers the evaluation loop)                    |
 | `--turn-timeout`             | Override turn timeout in seconds (per agent communicate call)                    |
-
-*Filtering:*
-
-| Flag                         | Description                                                                      |
-| ---------------------------- | -------------------------------------------------------------------------------- |
+| **Filtering**                |                                                                                  |
 | `--exclude-tags`             | Skip tasks matching any of these tags (comma-separated)                          |
 | `--tags, -t`                 | Only run tasks matching any of these tags (comma-separated)                      |
-
-*Snapshots:*
-
-| Flag                         | Description                                                                      |
-| ---------------------------- | -------------------------------------------------------------------------------- |
+| **Snapshots**                |                                                                                  |
 | `--snapshot-checkpoint-freq` | Checkpoint frequency for hybrid mode                                             |
 | `--snapshot-mode`            | Override snapshot mode (`disabled`, `full`, `incremental`, `hybrid`)             |
-
-*Output & networking:*
-
-| Flag                         | Description                                                                      |
-| ---------------------------- | -------------------------------------------------------------------------------- |
+| **Output & networking**      |                                                                                  |
 | `--log-file`                 | Write logs to file                                                               |
 | `--proxy / --no-proxy`       | Route API calls through the LLM Gateway proxy (default: no proxy)                |
 | `--stream, -s`               | Stream LLM events to terminal: `full` or `minimal` (disables progress bar)       |
@@ -229,11 +207,9 @@ For the full task definition reference — all 10 criterion types, scoring, temp
 > **Tip:** When creating new tasks with Claude Code, point it at the guide:
 > _"Read `docs/TASK_DEFINITION_GUIDE.md` and use it as a reference to create a new task definition for ..."_
 
-### Agent Configuration
+### Claude Code Agent Configuration
 
-#### Single agent
-
-The `agent` section configures a single Claude Code agent:
+The `agent` section configures the Claude Code behavior. Common options:
 
 ```yaml
 agent:
@@ -248,39 +224,6 @@ agent:
     - type: "local"
       path: "/absolute/path/to/plugin" # Or absolute path
 ```
-
-#### Multi-agent comparison
-
-Replace `agent` with `agents` (a list) to run the same task with multiple agent configurations and compare results side-by-side. Each entry must have a unique `name`:
-
-```yaml
-agents:
-  - name: "bypass"                              # Label used in reports and run directory
-    type: "claude-code"
-    permission_mode: "bypassPermissions"
-    model: "claude-haiku-4-5-20251001"
-
-  - name: "careful"
-    type: "claude-code"
-    permission_mode: "acceptEdits"
-    allowed_tools: ["Read", "Write", "Bash"]
-    model: "claude-sonnet-4-6"
-```
-
-Each agent gets its own isolated sandbox and produces an independent `EvaluationResult`. Results are written to `runs/{run-id}/{task_id}/{agent_name}/` and the report includes an **Agent Comparison** section:
-
-```
-## Agent Comparison
-
-### hello_date_smoke_test
-
-| Agent   | Status  | Score | Iterations | Latency |
-|---------|---------|-------|------------|---------|
-| bypass  | SUCCESS | 1.000 | 1          | 4.8s    |
-| careful | SUCCESS | 1.000 | 1          | 9.2s    |
-```
-
-> **Note:** Agent-level CLI flags (`--model`, `--permission-mode`, `--max-turns`, `--allowed-tools`, `--plugins`, `--ignore-patterns`) are ignored for multi-agent tasks — configure each agent explicitly in the YAML. Task-level flags (`--max-iter`, `--task-timeout`, etc.) still apply to all agents.
 
 **Plugin Configuration:**
 
@@ -318,22 +261,11 @@ runs/
 ├── 2026-02-26_14-30-00/           # Timestamped run directory
 │   ├── run-report.md              # Human-readable markdown report
 │   ├── run-summary.json           # Aggregated statistics
-│   │
-│   ├── task_id/                   # Single-agent task
-│   │   ├── report.json
-│   │   ├── task.log
+│   ├── task_id/
+│   │   ├── report.json            # Task evaluation result
+│   │   ├── task.log               # Task execution log
 │   │   ├── snapshots/             # Iteration snapshots (if enabled)
 │   │   └── artifacts/             # Preserved sandbox (if --preserve)
-│   │
-│   ├── multi_agent_task/          # Multi-agent task (one subdir per agent)
-│   │   ├── bypass/
-│   │   │   ├── report.json
-│   │   │   ├── task.log
-│   │   │   └── artifacts/
-│   │   └── careful/
-│   │       ├── report.json
-│   │       ├── task.log
-│   │       └── artifacts/
 │   └── ...
 └── latest -> 2026-02-26_14-30-00/ # Symlink to most recent run
 ```
@@ -472,7 +404,7 @@ See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.
 - [ ] Docker sandbox driver
 - [ ] Support for more agents (Aider, Cursor, etc.)
 - [ ] Web UI for results visualization
-- [x] Multi-agent comparison reports
+- [ ] Comparative analysis reports
 
 ## License
 

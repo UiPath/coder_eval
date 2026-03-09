@@ -20,18 +20,15 @@ def _make_task_result(
     agent_config: dict | None = None,
     sdk_options: dict | None = None,
     installed_tools: dict[str, str] | None = None,
-    agent_name: str | None = None,
 ) -> dict:
     """Helper to create a task_result dict with all expected fields."""
     return {
         "task_id": task_id,
-        "agent_name": agent_name,
         "status": status,
         "weighted_score": weighted_score,
         "duration": duration,
         "iteration_count": iteration_count,
         "turns": turns or [],
-        "tags": [],
         "reference_similarity": reference_similarity,
         "model_used": model_used,
         "agent_config": agent_config,
@@ -294,8 +291,6 @@ def test_generate_markdown_generation_metrics_section():
     assert "| task1 | 50.0s | 1 | 0 | 50.0s | 0 |" in report_md
     # task2: 3 iterations = 2 self-corrections, avg turn = (25+22+23)/3 = 23.3s
     assert "| task2 | 70.0s | 3 | 0 | 23.3s | 2 |" in report_md
-    # No Agent column for single-agent runs
-    assert "Agent" not in report_md.split("## Generation Metrics")[1].split("\n")[2]
 
 
 def test_generate_markdown_no_generation_metrics_without_turns():
@@ -899,233 +894,6 @@ def test_generate_markdown_installed_tools_multiple_per_task():
     assert "## Installed Tools" in report_md
     assert "| task1 | @uipath/sdk | 2.0.0 |" in report_md
     assert "| task1 | @uipath/uipcli | 0.1.5 |" in report_md
-
-
-def test_generate_markdown_agent_comparison_section():
-    """Test that Agent Comparison section appears for multi-agent runs."""
-    summary = RunSummary(
-        run_id="test-run",
-        start_time=datetime(2025, 10, 11, 12, 0, 0),
-        end_time=datetime(2025, 10, 11, 12, 2, 0),
-        total_duration_seconds=120.0,
-        tasks_run=2,
-        tasks_succeeded=1,
-        tasks_failed=1,
-        tasks_error=0,
-        task_results=[
-            _make_task_result("my_task", "SUCCESS", 1.0, 5.0, iteration_count=1, agent_name="fast"),
-            _make_task_result("my_task", "FAILURE", 0.5, 12.0, iteration_count=2, agent_name="careful"),
-        ],
-        framework_version="0.1.0",
-        environment_info={},
-    )
-
-    report_md = ReportGenerator.generate_markdown(summary)
-
-    assert "## Agent Comparison" in report_md
-    assert "### my_task" in report_md
-    assert "| fast | SUCCESS | 1.000 | 1 | 5.0s |" in report_md
-    assert "| careful | FAILURE | 0.500 | 2 | 12.0s |" in report_md
-
-    # Task Details table should have Agent column
-    lines = report_md.split("\n")
-    header_lines = [line for line in lines if line.startswith("| Task ID")]
-    assert len(header_lines) == 1
-    assert "Agent" in header_lines[0]
-
-    # Comparison section appears before Task Details
-    assert report_md.index("## Agent Comparison") < report_md.index("## Task Details")
-
-
-def test_generation_metrics_has_agent_column_for_multi_agent():
-    """Test that Generation Metrics table includes Agent column for multi-agent runs."""
-    summary = RunSummary(
-        run_id="test-run",
-        start_time=datetime(2025, 10, 11, 12, 0, 0),
-        end_time=datetime(2025, 10, 11, 12, 2, 0),
-        total_duration_seconds=120.0,
-        tasks_run=2,
-        tasks_succeeded=2,
-        tasks_failed=0,
-        tasks_error=0,
-        task_results=[
-            _make_task_result(
-                "my_task",
-                "SUCCESS",
-                1.0,
-                5.0,
-                iteration_count=1,
-                turns=[{"iteration": 1, "duration_seconds": 5.0, "command_count": 2, "assistant_turn_count": 3}],
-                agent_name="fast",
-            ),
-            _make_task_result(
-                "my_task",
-                "SUCCESS",
-                0.9,
-                12.0,
-                iteration_count=2,
-                turns=[
-                    {"iteration": 1, "duration_seconds": 6.0, "command_count": 2, "assistant_turn_count": 2},
-                    {"iteration": 2, "duration_seconds": 6.0, "command_count": 2, "assistant_turn_count": 2},
-                ],
-                agent_name="careful",
-            ),
-        ],
-        framework_version="0.1.0",
-        environment_info={},
-    )
-
-    report_md = ReportGenerator.generate_markdown(summary)
-
-    gen_section = report_md.split("## Generation Metrics")[1].split("##")[0]
-    assert "| Agent |" in gen_section
-    assert "| my_task | fast |" in gen_section
-    assert "| my_task | careful |" in gen_section
-
-
-def test_token_usage_has_agent_column_for_multi_agent():
-    """Test that Token Usage table includes Agent column for multi-agent runs."""
-    base = _make_task_result("my_task", "SUCCESS", 1.0, 5.0)
-    result_fast = {**base, "agent_name": "fast", "total_tokens": 500, "total_cost_usd": 0.01}
-    result_careful = {
-        **base,
-        "agent_name": "careful",
-        "total_tokens": 800,
-        "total_cost_usd": 0.02,
-        "weighted_score": 0.9,
-        "duration": 10.0,
-    }
-
-    summary = RunSummary(
-        run_id="test-run",
-        start_time=datetime(2025, 10, 11, 12, 0, 0),
-        end_time=datetime(2025, 10, 11, 12, 1, 0),
-        total_duration_seconds=60.0,
-        tasks_run=2,
-        tasks_succeeded=2,
-        tasks_failed=0,
-        tasks_error=0,
-        task_results=[result_fast, result_careful],
-        framework_version="0.1.0",
-        environment_info={},
-    )
-
-    report_md = ReportGenerator.generate_markdown(summary)
-
-    token_section = report_md.split("## Token Usage")[1].split("##")[0]
-    assert "| Agent |" in token_section
-    assert "| my_task | fast |" in token_section
-    assert "| my_task | careful |" in token_section
-
-
-def test_agent_settings_shows_all_agents_for_multi_agent():
-    """Test that Agent Settings shows one subsection per agent in multi-agent runs."""
-    summary = RunSummary(
-        run_id="test-run",
-        start_time=datetime(2025, 10, 11, 12, 0, 0),
-        end_time=datetime(2025, 10, 11, 12, 1, 0),
-        total_duration_seconds=60.0,
-        tasks_run=2,
-        tasks_succeeded=2,
-        tasks_failed=0,
-        tasks_error=0,
-        task_results=[
-            _make_task_result(
-                "my_task",
-                "SUCCESS",
-                1.0,
-                5.0,
-                agent_name="fast",
-                agent_config={
-                    "type": "claude-code",
-                    "permission_mode": "bypassPermissions",
-                    "allowed_tools": None,
-                    "model": "haiku",
-                },
-            ),
-            _make_task_result(
-                "my_task",
-                "SUCCESS",
-                0.9,
-                10.0,
-                agent_name="careful",
-                agent_config={
-                    "type": "claude-code",
-                    "permission_mode": "acceptEdits",
-                    "allowed_tools": ["Read", "Write"],
-                    "model": "sonnet",
-                },
-            ),
-        ],
-        framework_version="0.1.0",
-        environment_info={},
-    )
-
-    report_md = ReportGenerator.generate_markdown(summary)
-
-    settings_section = report_md.split("## Agent Settings")[1].split("## Environment")[0]
-    assert "### fast" in settings_section
-    assert "### careful" in settings_section
-    assert "bypassPermissions" in settings_section
-    assert "acceptEdits" in settings_section
-    assert "**Model**: haiku" in settings_section
-    assert "**Model**: sonnet" in settings_section
-
-
-def test_generate_markdown_no_comparison_section_for_single_agent():
-    """Test that Agent Comparison section is absent when all tasks are single-agent."""
-    summary = RunSummary(
-        run_id="test-run",
-        start_time=datetime(2025, 10, 11, 12, 0, 0),
-        end_time=datetime(2025, 10, 11, 12, 1, 0),
-        total_duration_seconds=60.0,
-        tasks_run=2,
-        tasks_succeeded=2,
-        tasks_failed=0,
-        tasks_error=0,
-        task_results=[
-            _make_task_result("task1", "SUCCESS", 1.0, 10.0, iteration_count=1),
-            _make_task_result("task2", "SUCCESS", 0.9, 15.0, iteration_count=1),
-        ],
-        framework_version="0.1.0",
-        environment_info={},
-    )
-
-    report_md = ReportGenerator.generate_markdown(summary)
-
-    assert "## Agent Comparison" not in report_md
-    lines = report_md.split("\n")
-    header_lines = [line for line in lines if line.startswith("| Task ID")]
-    assert "Agent" not in header_lines[0]
-
-
-def test_generate_markdown_mixed_single_and_multi_agent():
-    """Test that comparison section groups only multi-agent results."""
-    summary = RunSummary(
-        run_id="test-run",
-        start_time=datetime(2025, 10, 11, 12, 0, 0),
-        end_time=datetime(2025, 10, 11, 12, 3, 0),
-        total_duration_seconds=180.0,
-        tasks_run=3,
-        tasks_succeeded=3,
-        tasks_failed=0,
-        tasks_error=0,
-        task_results=[
-            _make_task_result("single_task", "SUCCESS", 1.0, 8.0, iteration_count=1),
-            _make_task_result("compare_task", "SUCCESS", 1.0, 5.0, iteration_count=1, agent_name="alpha"),
-            _make_task_result("compare_task", "SUCCESS", 0.8, 10.0, iteration_count=2, agent_name="beta"),
-        ],
-        framework_version="0.1.0",
-        environment_info={},
-    )
-
-    report_md = ReportGenerator.generate_markdown(summary)
-
-    assert "## Agent Comparison" in report_md
-    assert "### compare_task" in report_md
-    assert "### single_task" not in report_md
-    assert "| alpha | SUCCESS" in report_md
-    assert "| beta | SUCCESS" in report_md
 
 
 def test_generate_markdown_no_installed_tools():
