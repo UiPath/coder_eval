@@ -1,6 +1,6 @@
 task_id: uipath-queue-transactions
 description: "Create a script that processes queue transactions with proper completion handling"
-tags: [integration, uipath-python, network]
+tags: [golden, integration, uipath-python, network]
 
 agent:
   type: claude-code
@@ -18,22 +18,19 @@ sandbox:
       path: "../templates/uipath-starter"
 
 initial_prompt: |
-  Create a Python script (queue_transactions.py) that demonstrates transaction-based queue processing.
+  Create a Python script called queue_transactions.py that shows how to work with
+  UiPath Orchestrator queues in a transactional pattern.
 
-  The script should:
-  - Load environment variables and initialize UiPath SDK
-  - Import TransactionItem and TransactionItemResult from uipath.models.queues
-  - Create 3 transaction items with specific_content containing data
-  - List transaction items and filter by queue name and status
-  - Process each transaction (simulate some work)
-  - Complete each transaction with TransactionItemResult (is_successful + output)
-  - Handle failures by marking transactions as failed
-  - Print clear status messages
+  The script should create a few transaction items on a queue, then loop through them
+  and mark each one as completed. If something goes wrong processing a transaction,
+  mark it as failed instead. Print clear status messages throughout.
 
-  Important:
-  - TransactionItem uses 'name' for queue name and 'specific_content' for data
-  - Use sdk.queues.create_transaction_item() with no_robot=True
-  - Complete with sdk.queues.complete_transaction_item(transaction_key, result)
+  Use the UiPath Python SDK's queue methods and the proper transaction item models.
+  Put everything in a def main() function — don't call the SDK at module level since
+  credentials aren't available at import time. Add if __name__ == "__main__": main()
+  at the bottom. Load env vars with dotenv.
+
+  Keep it to one file.
 
 success_criteria:
   - type: file_exists
@@ -46,8 +43,8 @@ success_criteria:
     description: "Script imports required modules"
     path: "queue_transactions.py"
     includes:
-      - "from uipath import UiPath"
-      - "from uipath.models.queues import TransactionItem"
+      - "UiPath"
+      - "TransactionItem"
       - "TransactionItemResult"
     weight: 2.0
     pass_threshold: 1.0
@@ -56,28 +53,34 @@ success_criteria:
     description: "Script creates TransactionItem instances"
     path: "queue_transactions.py"
     includes:
-      - "TransactionItem"
-      - "name="
+      - "TransactionItem("
       - "specific_content="
     weight: 2.5
     pass_threshold: 1.0
 
   - type: file_contains
-    description: "Script creates transactions"
+    description: "Script creates and completes transactions"
     path: "queue_transactions.py"
     includes:
-      - "queues.create_transaction_item"
-      - "no_robot="
-    weight: 2.0
+      - "create_transaction_item"
+      - "complete_transaction_item"
+    weight: 2.5
     pass_threshold: 1.0
 
   - type: file_contains
-    description: "Script completes transactions"
+    description: "Script handles success and failure"
     path: "queue_transactions.py"
     includes:
-      - "queues.complete_transaction_item"
-      - "TransactionItemResult"
-    weight: 2.5
+      - "is_successful"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Has main() function entrypoint"
+    path: "queue_transactions.py"
+    includes:
+      - "def main"
+    weight: 1.5
     pass_threshold: 1.0
 
   - type: run_command
@@ -88,108 +91,76 @@ success_criteria:
     weight: 1.0
     pass_threshold: 1.0
 
-  - type: reference_comparison
-    description: "Code structure matches reference implementation"
-    agent_file: "queue_transactions.py"
-    comparison_method: "ast"
-    similarity_threshold: 0.65
-    weight: 2.0
-    pass_threshold: 0.65
+  - type: run_command
+    description: "Module imports resolve correctly"
+    command: "python -c 'import queue_transactions'"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.5
+    pass_threshold: 1.0
 
-max_iterations: 5
+max_iterations: 1
 
 reference:
   code: |
-    #!/usr/bin/env python3
     from dotenv import load_dotenv
-    from uipath import UiPath
-    from uipath.models.queues import TransactionItem, TransactionItemResult
+    from uipath.platform import UiPath
+    from uipath.platform.orchestrator.queues import TransactionItem, TransactionItemResult
 
-    load_dotenv()
-    sdk = UiPath()
 
-    queue_name = "TransactionQueue"
+    def main():
+        load_dotenv()
+        sdk = UiPath()
 
-    print(f"Queue Transaction Processing - Queue: {queue_name}")
-    print("=" * 60)
+        queue_name = "TransactionQueue"
+        transaction_keys = []
 
-    # Create transactions
-    print("\nCreating transaction items...")
-    transaction_keys = []
-
-    for i in range(3):
-        transaction = TransactionItem(
-            name=queue_name,
-            specific_content={
-                "id": i + 1,
-                "value": (i + 1) * 100,
-                "description": f"Transaction {i + 1}"
-            }
-        )
-
-        try:
-            response = sdk.queues.create_transaction_item(
-                item=transaction,
-                no_robot=True
+        for i in range(3):
+            transaction = TransactionItem(
+                name=queue_name,
+                specific_content={"id": i + 1, "value": (i + 1) * 100},
             )
-            data = response.json()
-            key = data.get('Key')
-            transaction_keys.append(key)
-            print(f"  ✓ Created transaction {i + 1}: Key={key}")
-        except Exception as e:
-            print(f"  ✗ Error creating transaction {i + 1}: {e}")
-
-    # Process transactions
-    print(f"\nProcessing {len(transaction_keys)} transactions...")
-    for i, key in enumerate(transaction_keys, 1):
-        try:
-            # Simulate processing
-            result_data = {
-                "processed_id": i,
-                "status": "completed",
-                "processed_at": "2024-01-01T00:00:00Z"
-            }
-
-            result = TransactionItemResult(
-                is_successful=True,
-                output=result_data
-            )
-
-            sdk.queues.complete_transaction_item(
-                transaction_key=key,
-                result=result
-            )
-            print(f"  ✓ Completed transaction {i}")
-
-        except Exception as e:
-            print(f"  ✗ Error processing transaction {i}: {e}")
-
-            # Mark as failed
-            result = TransactionItemResult(
-                is_successful=False,
-                processing_exception={"message": str(e)}
-            )
-
             try:
-                sdk.queues.complete_transaction_item(
-                    transaction_key=key,
-                    result=result
-                )
-                print(f"  ✓ Marked transaction {i} as failed")
-            except Exception as e2:
-                print(f"  ✗ Could not mark transaction {i} as failed: {e2}")
+                response = sdk.queues.create_transaction_item(transaction, no_robot=True)
+                key = response.json().get("Key")
+                transaction_keys.append(key)
+                print(f"Created transaction {i + 1}: Key={key}")
+            except Exception as e:
+                print(f"Error creating transaction {i + 1}: {e}")
 
-    print("\n" + "=" * 60)
-    print("✓ Transaction processing complete!")
+        for i, key in enumerate(transaction_keys, 1):
+            try:
+                result = TransactionItemResult(
+                    is_successful=True,
+                    output={"processed_id": i, "status": "completed"},
+                )
+                sdk.queues.complete_transaction_item(key, result)
+                print(f"Completed transaction {i}")
+            except Exception as e:
+                print(f"Error processing transaction {i}: {e}")
+                fail_result = TransactionItemResult(
+                    is_successful=False,
+                    processing_exception={"message": str(e)},
+                )
+                try:
+                    sdk.queues.complete_transaction_item(key, fail_result)
+                except Exception:
+                    pass
+
+
+    if __name__ == "__main__":
+        main()
+
+    print("\nTransaction processing complete!")
 
 llm_reviewer:
   enabled: true
   prompt: |
     Evaluate if the queue transactions script is complete and correct:
 
-    1. Does it import TransactionItem and TransactionItemResult?
-    2. Does it create TransactionItem with 'name' and 'specific_content'?
-    3. Does it use sdk.queues.create_transaction_item() with no_robot=True?
-    4. Does it complete transactions using sdk.queues.complete_transaction_item()?
-    5. Does it handle both success and failure cases?
+    1. Does it import TransactionItem and TransactionItemResult from uipath.platform.orchestrator.queues?
+    2. Does it create TransactionItem with name= and specific_content=?
+    3. Does it use sdk.queues.create_transaction_item(item, no_robot=True) with positional args?
+    4. Does it complete with sdk.queues.complete_transaction_item(transaction_key, result)?
+    5. Does it handle both success (is_successful=True) and failure (is_successful=False)?
     6. Is the code structure clear and well-organized?

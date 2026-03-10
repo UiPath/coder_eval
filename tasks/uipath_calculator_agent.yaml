@@ -19,18 +19,20 @@ sandbox:
       path: "../templates/uipath-starter"
 
 initial_prompt: |
-  Create a calculator agent using UiPath LangGraph StateGraph that performs basic arithmetic operations.
+  Write your solution in main.py (overwrite the existing file).
 
-  The script should:
-  - Use Pydantic BaseModel for input (a, b, operator) and output (result, operation)
-  - Use LangGraph's StateGraph with state_schema, input, and output parameters
-  - Implement a calculate node function that performs +, -, *, / operations
-  - Build the graph with START -> calculate -> END
-  - Compile and test the graph with sample input
-  - Handle division by zero gracefully
-  - Print results showing the operation and result
+  I need a simple calculator built as a LangGraph StateGraph agent. It should take two
+  numbers and an operator (+, -, *, /) and return the result along with a human-readable
+  description of what it computed (like "10 + 5 = 15").
 
-  Keep it simple and well-structured.
+  Use Pydantic BaseModel for the input and output schemas, and wire up a single
+  "calculate" node in the graph (START -> calculate -> END). Make sure division by zero
+  doesn't crash it.
+
+  The entrypoint should be a main() function with typed input/output, following the
+  standard UiPath coded agents pattern.
+
+  Keep it to one file, no extras.
 
 success_criteria:
   - type: file_exists
@@ -43,7 +45,8 @@ success_criteria:
     description: "Uses LangGraph StateGraph"
     path: "main.py"
     includes:
-      - "from langgraph.graph import StateGraph"
+      - "langgraph.graph"
+      - "StateGraph"
       - "START"
       - "END"
     weight: 2.0
@@ -53,28 +56,24 @@ success_criteria:
     description: "Uses Pydantic BaseModel for types"
     path: "main.py"
     includes:
-      - "from pydantic import BaseModel"
+      - "BaseModel"
     weight: 1.5
     pass_threshold: 1.0
 
   - type: file_contains
-    description: "Defines input model with required fields"
+    description: "Defines input model with operator field"
     path: "main.py"
     includes:
-      - "Input"
-      - "a:"
-      - "b:"
-      - "operator:"
-    weight: 1.5
+      - "operator"
+    weight: 1.0
     pass_threshold: 1.0
 
   - type: file_contains
-    description: "Defines output model with result field"
+    description: "Defines output model with operation description"
     path: "main.py"
     includes:
-      - "Output"
-      - "result:"
-    weight: 1.5
+      - "operation"
+    weight: 1.0
     pass_threshold: 1.0
 
   - type: file_contains
@@ -82,7 +81,9 @@ success_criteria:
     path: "main.py"
     includes:
       - "StateGraph("
-      - "state_schema="
+      - "add_node"
+      - "add_edge"
+      - "compile"
     weight: 2.0
     pass_threshold: 1.0
 
@@ -102,41 +103,34 @@ success_criteria:
     weight: 1.0
     pass_threshold: 1.0
 
-  - type: reference_comparison
-    description: "Code structure matches reference (AST similarity)"
-    agent_file: "main.py"
-    comparison_method: "ast"
-    similarity_threshold: 0.7
+  - type: run_command
+    description: "Module imports resolve correctly"
+    command: "python -c 'import main'"
+    timeout: 30
+    expected_exit_code: 0
     weight: 2.5
-    pass_threshold: 0.7
+    pass_threshold: 1.0
 
-max_iterations: 5
+max_iterations: 1
 
 reference:
   code: |
     from pydantic import BaseModel
     from langgraph.graph import StateGraph, START, END
-    from dotenv import load_dotenv
-
-    # Load environment variables
-    load_dotenv()
 
 
     class CalculatorInput(BaseModel):
-        """Input for the calculator."""
         a: float
         b: float
         operator: str
 
 
     class CalculatorOutput(BaseModel):
-        """Output from the calculator."""
         result: float
         operation: str
 
 
     def calculate(state: CalculatorInput) -> CalculatorOutput:
-        """Perform arithmetic operation."""
         if state.operator == "+":
             result = state.a + state.b
         elif state.operator == "-":
@@ -150,25 +144,21 @@ reference:
 
         return CalculatorOutput(
             result=result,
-            operation=f"{state.a} {state.operator} {state.b} = {result}"
+            operation=f"{state.a} {state.operator} {state.b} = {result}",
         )
 
 
     def main(input: CalculatorInput) -> CalculatorOutput:
-        # Build graph
         builder = StateGraph(
             state_schema=CalculatorInput,
             input=CalculatorInput,
-            output=CalculatorOutput
+            output=CalculatorOutput,
         )
-
         builder.add_node("calculate", calculate)
         builder.add_edge(START, "calculate")
         builder.add_edge("calculate", END)
 
         graph = builder.compile()
-
-        # Execute
         result = graph.invoke(input)
         return CalculatorOutput(**result)
 
@@ -181,5 +171,5 @@ llm_reviewer:
     2. Are input/output models properly defined with Pydantic BaseModel?
     3. Does it implement a calculate node function?
     4. Does the graph flow from START -> calculate -> END?
-    5. Can it successfully perform arithmetic operations?
-    6. Is the code simple, clean, and production-ready?
+    5. Can it handle +, -, *, / operations?
+    6. Does it handle division by zero?

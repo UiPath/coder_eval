@@ -1,15 +1,16 @@
-from dataclasses import dataclass
+from dotenv import load_dotenv
+from pydantic import BaseModel
+
+load_dotenv()
 
 
-@dataclass
-class EchoIn:
+class EchoIn(BaseModel):
     message: str
-    repeat: int | None = 1
+    repeat: int = 1
     prefix: str | None = None
 
 
-@dataclass
-class EchoOut:
+class EchoOut(BaseModel):
     message: str
 
 

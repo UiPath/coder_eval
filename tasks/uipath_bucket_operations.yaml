@@ -1,6 +1,6 @@
 task_id: uipath-bucket-operations
 description: "Create a script that uploads and downloads files from UiPath buckets"
-tags: [integration, uipath-python, network]
+tags: [golden, integration, uipath-python, network]
 
 agent:
   type: claude-code
@@ -18,18 +18,18 @@ sandbox:
       path: "../templates/uipath-starter"
 
 initial_prompt: |
-  Create a Python script (bucket_operations.py) that demonstrates file upload and download with UiPath buckets.
+  Create a Python script called bucket_operations.py that does a round-trip test with
+  UiPath storage buckets: write a local file, upload it to a bucket, download it back
+  to a different local path, and verify the content matches.
 
-  The script should:
-  - Load environment variables from .env file
-  - Initialize the UiPath SDK
-  - Create a test file with some content (e.g., "Hello from UiPath SDK!")
-  - Upload the file to a bucket (you can use bucket name "default" and path "test/sample.txt")
-  - Download the same file back
-  - Verify the downloaded content matches the original
-  - Print status messages for each step
+  Use the UiPath Python SDK for the bucket operations. Print status messages so it's
+  clear what's happening at each step.
 
-  Handle errors appropriately and provide clear output.
+  Put everything in a def main() function (don't make SDK calls at module level — it
+  needs credentials that aren't available at import time). Add the standard
+  if __name__ == "__main__": main() guard at the bottom. Load env vars with dotenv.
+
+  Keep it to one file.
 
 success_criteria:
   - type: file_exists
@@ -42,24 +42,26 @@ success_criteria:
     description: "Script imports required modules"
     path: "bucket_operations.py"
     includes:
-      - "from dotenv import load_dotenv"
-      - "from uipath import UiPath"
+      - "load_dotenv"
+      - "UiPath"
     weight: 1.5
     pass_threshold: 1.0
 
   - type: file_contains
-    description: "Script uses buckets.upload() method"
+    description: "Script uses correct upload parameters"
     path: "bucket_operations.py"
     includes:
       - "buckets.upload"
+      - "blob_file_path="
     weight: 2.0
     pass_threshold: 1.0
 
   - type: file_contains
-    description: "Script uses buckets.download() method"
+    description: "Script uses correct download parameters"
     path: "bucket_operations.py"
     includes:
       - "buckets.download"
+      - "destination_path="
     weight: 2.0
     pass_threshold: 1.0
 
@@ -67,8 +69,16 @@ success_criteria:
     description: "Script verifies content matches"
     path: "bucket_operations.py"
     includes:
-      - "if"
-      - "=="
+      - "open("
+      - ".read()"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Has main() function entrypoint"
+    path: "bucket_operations.py"
+    includes:
+      - "def main"
     weight: 1.5
     pass_threshold: 1.0
 
@@ -80,62 +90,69 @@ success_criteria:
     weight: 1.0
     pass_threshold: 1.0
 
-  - type: reference_comparison
-    description: "Code structure matches reference implementation"
-    agent_file: "bucket_operations.py"
-    comparison_method: "ast"
-    similarity_threshold: 0.65
-    weight: 2.0
-    pass_threshold: 0.65
+  - type: run_command
+    description: "Module imports resolve correctly"
+    command: "python -c 'import bucket_operations'"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.5
+    pass_threshold: 1.0
 
-max_iterations: 5
+
+max_iterations: 1
 
 reference:
   code: |
-    #!/usr/bin/env python3
     from dotenv import load_dotenv
-    from uipath import UiPath
+    from uipath.platform import UiPath
 
-    load_dotenv()
-    sdk = UiPath()
 
-    bucket_name = "default"
-    remote_path = "test/sample.txt"
-    test_content = b"Hello from UiPath SDK test!"
+    def main():
+        load_dotenv()
+        sdk = UiPath()
 
-    print("UiPath Bucket Operations")
-    print("=" * 60)
+        bucket_name = "default"
+        remote_path = "test/sample.txt"
+        local_upload = "upload_sample.txt"
+        local_download = "download_sample.txt"
+        test_content = "Hello from UiPath SDK test!"
 
-    # Upload
-    print(f"\nUploading to {bucket_name}/{remote_path}...")
-    sdk.buckets.upload(
-        bucket=bucket_name,
-        path=remote_path,
-        content=test_content
-    )
-    print("✓ Upload successful")
+        with open(local_upload, "w") as f:
+            f.write(test_content)
 
-    # Download
-    print(f"\nDownloading from {bucket_name}/{remote_path}...")
-    downloaded = sdk.buckets.download(
-        bucket=bucket_name,
-        path=remote_path
-    )
-    print(f"✓ Downloaded {len(downloaded)} bytes")
+        sdk.buckets.upload(
+            name=bucket_name,
+            blob_file_path=remote_path,
+            source_path=local_upload,
+        )
+        print("Upload successful")
 
-    # Verify
-    if downloaded == test_content:
-        print("\n✓ Content matches! Test passed.")
-    else:
-        print("\n✗ Content mismatch! Test failed.")
+        sdk.buckets.download(
+            name=bucket_name,
+            blob_file_path=remote_path,
+            destination_path=local_download,
+        )
+        print("Download successful")
+
+        with open(local_download) as f:
+            downloaded_content = f.read()
+
+        if downloaded_content == test_content:
+            print("Content matches!")
+        else:
+            print("Content mismatch!")
+
+
+    if __name__ == "__main__":
+        main()
 
 llm_reviewer:
   enabled: true
   prompt: |
     Evaluate if the bucket operations script is complete and correct:
 
-    1. Does it upload a file using sdk.buckets.upload()?
-    2. Does it download the file using sdk.buckets.download()?
-    3. Does it verify the content matches?
-    4. Does it handle byte content correctly?
+    1. Does it use sdk.buckets.upload() with keyword args name=, blob_file_path=, and source_path= or content=?
+    2. Does it use sdk.buckets.download() with keyword args name=, blob_file_path=, destination_path=?
+    3. Does it read the downloaded file from disk (download returns None, writes to file)?
+    4. Does it verify the content matches?
     5. Is the output clear and shows success/failure?
