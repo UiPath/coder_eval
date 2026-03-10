@@ -1,0 +1,77 @@
+task_id: uipath-is-resources-simple
+description: >
+  Minimal-prompt evaluation: agent must figure out how to use Integration Service
+  resources commands to create a Zoho Desk ticket using uipcli CLI with no
+  step-by-step guidance.
+tags: [is, uipcli, simple]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash", "Read", "Write"]
+  max_turns: 25
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+initial_prompt: |
+  Use the `uipcli` CLI tool to work with Integration Service resources for the
+  Zoho Desk connector (uipath-zoho-desk). List available resources, describe the
+  create_ticket fields, resolve any required references (like departments and contacts),
+  create a real ticket, and save a summary report to resources_report.json.
+  Note: dot-notation fields from describe (e.g. `contact.email`) must be sent as
+  nested JSON in --body: `{"contact": {"email": "..."}}` not `{"contact.email": "..."}`.
+
+success_criteria:
+  - type: command_executed
+    description: "Agent listed resources for zoho-desk"
+    tool_name: "Bash"
+    command_pattern: 'uipcli\s+is\s+resources\s+list\s+uipath-zoho-desk'
+    min_count: 1
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Agent described create_ticket resource"
+    tool_name: "Bash"
+    command_pattern: 'uipcli\s+is\s+resources\s+describe\s+uipath-zoho-desk\s+create_ticket'
+    min_count: 1
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Agent executed create to make a ticket"
+    tool_name: "Bash"
+    command_pattern: 'uipcli\s+is\s+resources\s+execute\s+create\s+uipath-zoho-desk\s+create_ticket.*--body'
+    min_count: 1
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_exists
+    description: "resources_report.json summary exists"
+    path: "resources_report.json"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "resources_report.json is valid JSON"
+    command: "python -c \"import json; json.load(open('resources_report.json'))\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Report contains key data"
+    path: "resources_report.json"
+    includes:
+      - "uipath-zoho-desk"
+      - "create_ticket"
+    weight: 1.0
+    pass_threshold: 1.0
+
+max_iterations: 2
+
+llm_reviewer:
+  enabled: true
