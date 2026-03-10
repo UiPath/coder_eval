@@ -314,11 +314,17 @@ class ReportGenerator:
 
         lines = ["## Token Usage", ""]
 
+        total_input = sum(t.get("input_tokens") or 0 for t in tasks_with_tokens)
+        total_output = sum(t.get("output_tokens") or 0 for t in tasks_with_tokens)
+        total_cache_write = sum(t.get("cache_creation_input_tokens") or 0 for t in tasks_with_tokens)
+        total_cache_read = sum(t.get("cache_read_input_tokens") or 0 for t in tasks_with_tokens)
         total_tokens = sum(t["total_tokens"] for t in tasks_with_tokens)
         costs = [t["total_cost_usd"] for t in tasks_with_tokens if t.get("total_cost_usd") is not None]
         total_cost = sum(costs) if costs else None
 
-        lines.append(f"**Total Tokens**: {total_tokens:,}")
+        lines.append(f"**Total Tokens**: {total_tokens:,} (input: {total_input:,}, output: {total_output:,})")
+        if total_cache_write > 0 or total_cache_read > 0:
+            lines.append(f"**Cache Tokens**: write: {total_cache_write:,}, read: {total_cache_read:,}")
         if total_cost is not None:
             lines.append(f"**Total Cost**: ${total_cost:.4f}")
         lines.append(f"**Avg Tokens/Task**: {total_tokens // len(tasks_with_tokens):,}")
@@ -326,16 +332,24 @@ class ReportGenerator:
 
         lines.extend(
             [
-                "| Task ID | Total Tokens | Cost |",
-                "|---------|-------------|------|",
+                "| Task ID | Input | Output | Cache Write | Cache Read | Total | Cost |",
+                "|---------|-------|--------|-------------|------------|-------|------|",
             ]
         )
 
         for t in tasks_with_tokens:
+            input_tok = t.get("input_tokens") or 0
+            output_tok = t.get("output_tokens") or 0
+            cache_write = t.get("cache_creation_input_tokens") or 0
+            cache_read = t.get("cache_read_input_tokens") or 0
             tokens = t.get("total_tokens", 0)
             cost = t.get("total_cost_usd")
             cost_str = f"${cost:.4f}" if cost is not None else "N/A"
-            lines.append(f"| {t['task_id']} | {tokens:,} | {cost_str} |")
+            row = (
+                f"| {t['task_id']} | {input_tok:,} | {output_tok:,} "
+                f"| {cache_write:,} | {cache_read:,} | {tokens:,} | {cost_str} |"
+            )
+            lines.append(row)
 
         return lines
 

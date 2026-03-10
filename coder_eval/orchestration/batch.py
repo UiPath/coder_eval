@@ -341,6 +341,16 @@ def _generate_run_summary(
                 ],
                 "model_used": r["result"].model_used,
                 "reference_similarity": _extract_reference_similarity(r["result"]),
+                "input_tokens": (r["result"].total_token_usage.input_tokens if r["result"].total_token_usage else None),
+                "output_tokens": (
+                    r["result"].total_token_usage.output_tokens if r["result"].total_token_usage else None
+                ),
+                "cache_creation_input_tokens": (
+                    r["result"].total_token_usage.cache_creation_input_tokens if r["result"].total_token_usage else None
+                ),
+                "cache_read_input_tokens": (
+                    r["result"].total_token_usage.cache_read_input_tokens if r["result"].total_token_usage else None
+                ),
                 "total_tokens": (r["result"].total_token_usage.total_tokens if r["result"].total_token_usage else None),
                 "total_cost_usd": (
                     r["result"].total_token_usage.total_cost_usd if r["result"].total_token_usage else None

@@ -383,18 +383,36 @@ class TestReportTokenUsageSection:
 
     def test_token_section_renders_with_data(self):
         task_results = [
-            {"task_id": "task1", "total_tokens": 5000, "total_cost_usd": 0.05},
-            {"task_id": "task2", "total_tokens": 3000, "total_cost_usd": 0.03},
+            {
+                "task_id": "task1",
+                "input_tokens": 3000,
+                "output_tokens": 2000,
+                "cache_creation_input_tokens": 500,
+                "cache_read_input_tokens": 10000,
+                "total_tokens": 5000,
+                "total_cost_usd": 0.05,
+            },
+            {
+                "task_id": "task2",
+                "input_tokens": 2000,
+                "output_tokens": 1000,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 8000,
+                "total_tokens": 3000,
+                "total_cost_usd": 0.03,
+            },
         ]
         lines = ReportGenerator._generate_token_usage_section(task_results)
+        joined = "\n".join(lines)
 
         assert len(lines) > 0
         assert "## Token Usage" in lines
-        assert "**Total Tokens**: 8,000" in "\n".join(lines)
-        assert "**Total Cost**: $0.0800" in "\n".join(lines)
-        assert "**Avg Tokens/Task**: 4,000" in "\n".join(lines)
-        assert "| task1 | 5,000 | $0.0500 |" in "\n".join(lines)
-        assert "| task2 | 3,000 | $0.0300 |" in "\n".join(lines)
+        assert "**Total Tokens**: 8,000 (input: 5,000, output: 3,000)" in joined
+        assert "**Cache Tokens**: write: 500, read: 18,000" in joined
+        assert "**Total Cost**: $0.0800" in joined
+        assert "**Avg Tokens/Task**: 4,000" in joined
+        assert "| task1 | 3,000 | 2,000 | 500 | 10,000 | 5,000 | $0.0500 |" in joined
+        assert "| task2 | 2,000 | 1,000 | 0 | 8,000 | 3,000 | $0.0300 |" in joined
 
     def test_token_section_omitted_when_no_data(self):
         task_results = [
@@ -405,15 +423,21 @@ class TestReportTokenUsageSection:
 
     def test_token_section_handles_missing_cost(self):
         task_results = [
-            {"task_id": "task1", "total_tokens": 5000, "total_cost_usd": None},
+            {
+                "task_id": "task1",
+                "input_tokens": 3000,
+                "output_tokens": 2000,
+                "total_tokens": 5000,
+                "total_cost_usd": None,
+            },
         ]
         lines = ReportGenerator._generate_token_usage_section(task_results)
         joined = "\n".join(lines)
 
         assert "## Token Usage" in joined
-        assert "**Total Tokens**: 5,000" in joined
+        assert "**Total Tokens**: 5,000 (input: 3,000, output: 2,000)" in joined
         assert "**Total Cost**" not in joined  # No cost line when all costs are None
-        assert "| task1 | 5,000 | N/A |" in joined
+        assert "| task1 | 3,000 | 2,000 | 0 | 0 | 5,000 | N/A |" in joined
 
     def test_token_section_in_full_report(self):
         """Test that token section appears in generate_markdown when data is available."""
@@ -435,6 +459,8 @@ class TestReportTokenUsageSection:
                     "iteration_count": 1,
                     "turns": [],
                     "reference_similarity": None,
+                    "input_tokens": 7000,
+                    "output_tokens": 3000,
                     "total_tokens": 10000,
                     "total_cost_usd": 0.1234,
                 }
@@ -446,18 +472,26 @@ class TestReportTokenUsageSection:
         report_md = ReportGenerator.generate_markdown(summary)
         assert "## Token Usage" in report_md
         assert "10,000" in report_md
+        assert "input: 7,000" in report_md
+        assert "output: 3,000" in report_md
         assert "$0.1234" in report_md
 
     def test_token_section_handles_zero_cost(self):
         """Test that $0.0000 cost is displayed correctly (not treated as missing)."""
         task_results = [
-            {"task_id": "task1", "total_tokens": 5000, "total_cost_usd": 0.0},
+            {
+                "task_id": "task1",
+                "input_tokens": 3000,
+                "output_tokens": 2000,
+                "total_tokens": 5000,
+                "total_cost_usd": 0.0,
+            },
         ]
         lines = ReportGenerator._generate_token_usage_section(task_results)
         joined = "\n".join(lines)
 
         assert "**Total Cost**: $0.0000" in joined
-        assert "| task1 | 5,000 | $0.0000 |" in joined
+        assert "| task1 | 3,000 | 2,000 | 0 | 0 | 5,000 | $0.0000 |" in joined
 
     def test_token_section_not_in_full_report_without_data(self):
         """Test that token section is absent when no token data."""
