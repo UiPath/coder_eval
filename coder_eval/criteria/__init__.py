@@ -128,14 +128,14 @@ def validate_registry() -> None:
         expected_types = {
             "file_exists",
             "file_contains",
+            "file_check",
             "run_command",
-            "program_stdout_equals",
             "pytest",
             "file_matches_regex",
-            "code_lints",
             "pylint_score",
             "reference_comparison",
             "command_executed",
+            "uipath_eval",
         }
 
     registered_types = set(CriterionRegistry.list_types())

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Any, Literal
 
 from claude_agent_sdk import SdkPluginConfig
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -123,9 +123,25 @@ class TaskDefinition(BaseModel):
                 raise ValueError(f"Tag '{tag}' must be lowercase kebab-case (e.g., 'smoke', 'uipath-python')")
         return v
 
+    @field_validator("success_criteria", mode="before")
+    @classmethod
+    def check_removed_criteria_types(cls, v: Any) -> Any:
+        """Provide helpful errors for criterion types removed in the consolidation."""
+        removed: dict[str, str] = {
+            "program_stdout_equals": "Use 'run_command' with 'expected_stdout' and 'stdout_match' instead.",
+            "code_lints": "Use 'run_command' to run your linter directly instead.",
+        }
+        if isinstance(v, list):
+            for item in v:
+                if isinstance(item, dict):
+                    ctype = item.get("type")
+                    if ctype in removed:
+                        raise ValueError(f"Criterion type '{ctype}' has been removed. {removed[ctype]}")
+        return v
+
     @field_validator("success_criteria")
     @classmethod
-    def validate_success_criteria(cls, v):
+    def validate_success_criteria(cls, v: Any) -> Any:
         """Ensure at least one success criterion is defined."""
         if not v:
             raise ValueError("At least one success criterion must be defined")

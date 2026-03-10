@@ -39,9 +39,10 @@ success_criteria:
     weight: 2.0
     pass_threshold: 1.0
 
-  - type: "program_stdout_equals"
+  - type: "run_command"
     command: "python hello.py"
-    expected_output: "Hello, World!"
+    expected_stdout: "Hello, World!"
+    stdout_match: "exact"
     description: "Script should output 'Hello, World!'"
     weight: 2.0
     pass_threshold: 1.0

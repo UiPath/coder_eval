@@ -12,11 +12,11 @@ Complete reference for defining evaluation tasks in coder_eval.
   - [Continuous Scoring](#continuous-scoring)
   - [file_exists](#file_exists)
   - [file_contains](#file_contains)
+  - [file_check](#file_check)
+  - [json_check](#json_check)
   - [run_command](#run_command)
-  - [program_stdout_equals](#program_stdout_equals)
   - [pytest](#pytest)
   - [file_matches_regex](#file_matches_regex)
-  - [code_lints](#code_lints)
   - [pylint_score](#pylint_score)
   - [reference_comparison](#reference_comparison)
   - [command_executed](#command_executed)
@@ -186,8 +186,8 @@ All criteria share these fields:
 | `pass_threshold` | 0.9 | Minimum score (0.0–1.0) to pass |
 
 **Scoring types:**
-- **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `program_stdout_equals`
-- **Fractional** (0.0–1.0): `file_contains`, `pytest`, `command_executed`
+- **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`
+- **Fractional** (0.0–1.0): `file_contains`, `file_check`, `json_check`, `pytest`, `command_executed`
 - **Continuous** (0.0–1.0): `pylint_score`, `reference_comparison`
 
 **Task success:** ALL criteria must score >= their `pass_threshold`.
@@ -222,30 +222,105 @@ Checks if a file contains (or doesn't contain) specific strings. **Fractional sc
   pass_threshold: 0.9
 ```
 
-### `run_command`
+### `file_check`
 
-Runs a command and checks the exit code. **Binary scoring.**
+Unified file check that combines existence, string includes/excludes, and regex patterns into a single criterion. **Fractional scoring:** average of active sub-check scores. Replaces common `file_exists` + `file_contains` + `file_matches_regex` combinations.
+
+File existence is implicit — if the file doesn't exist, score is 0.0. If no sub-checks are specified, it behaves as a pure existence check.
 
 ```yaml
+# Full example with all features
+- type: "file_check"
+  path: "main.py"
+  includes:                           # Strings that must be present
+    - "from uipath import UiPath"
+    - "def main"
+  excludes:                           # Strings that must NOT be present
+    - "import os"
+  patterns:                           # Regex patterns to check
+    - pattern: "def main\\(.*\\):"
+      must_match: true                # true = must match (default), false = must NOT match
+      flags: 0                        # Regex flags (default: 0)
+  description: "main.py exists with correct imports and structure"
+  weight: 1.0
+  pass_threshold: 0.9
+
+# Minimal: existence-only check (equivalent to file_exists)
+- type: "file_check"
+  path: "app.py"
+  description: "app.py must be created"
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `path` | *required* | Path to the file (relative to sandbox root) |
+| `includes` | `[]` | Strings that must be present |
+| `excludes` | `[]` | Strings that must NOT be present |
+| `patterns` | `[]` | Regex pattern objects (`pattern`, `must_match`, `flags`) |
+
+**Scoring:** Only active categories (non-empty lists) contribute to the average. For example, specifying only `includes` means the score equals the includes score alone — it is not inflated by absent categories.
+
+### `json_check`
+
+Validates a JSON file: existence, parse-ability, key presence, and key-value matching. **Fractional scoring.**
+
+File existence and valid JSON are implicit — if the file is missing or unparseable, score is 0.0. If no sub-checks are specified, it's a pure "is valid JSON" check.
+
+```yaml
+# Minimal: just validate JSON syntax
+- type: "json_check"
+  path: "data.json"
+  description: "data.json is valid JSON"
+
+# Full: validate structure
+- type: "json_check"
+  path: "report.json"
+  required_keys:                      # Keys that must exist
+    - "command_used"
+    - "steps_completed"
+    - "metadata.version"              # Dot-notation for nested keys
+  key_values:                         # Key-value pairs that must match
+    validation_passed: true
+    status: "success"
+  description: "Report has expected structure"
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `path` | *required* | Path to the JSON file (relative to sandbox root) |
+| `required_keys` | `[]` | Keys that must exist (dot-notation for nested) |
+| `key_values` | `{}` | Key-value pairs that must match (dot-notation for nested) |
+
+**Scoring:** Only active categories contribute. `required_keys` score = fraction found; `key_values` score = fraction matched. Final score = average of active categories.
+
+### `run_command`
+
+Runs a command and checks the exit code, with optional stdout matching. **Binary scoring.**
+
+```yaml
+# Simple exit-code check
 - type: "run_command"
   command: "python app.py"
   timeout: 30                         # Timeout in seconds (default: 30)
   expected_exit_code: 0               # Expected exit code (default: 0)
   description: "Script must run successfully"
   weight: 2.0
-```
 
-### `program_stdout_equals`
-
-Runs a command and checks if stdout matches expected output exactly. **Binary scoring.**
-
-```yaml
-- type: "program_stdout_equals"
-  command: "python app.py"
-  expected_output: "Hello, World!"
-  timeout: 10
+# With stdout matching (replaces former program_stdout_equals)
+- type: "run_command"
+  command: "python hello.py"
+  expected_stdout: "Hello, World!"    # Optional: check stdout content
+  stdout_match: "exact"               # "exact" (default), "contains", or "regex"
   description: "Script must output the correct text"
 ```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `command` | *required* | Command to execute |
+| `timeout` | 30 | Timeout in seconds |
+| `expected_exit_code` | 0 | Expected exit code |
+| `expected_stdout` | `null` | When set, stdout is also checked |
+| `stdout_match` | `"exact"` | Match mode: `exact` (stripped), `contains` (substring), `regex` (pattern) |
 
 ### `pytest`
 
@@ -272,20 +347,6 @@ Checks if file content matches a regular expression pattern. **Binary scoring.**
   must_match: true                    # true = must match; false = must NOT match
   flags: 0                            # Regex flags (re.IGNORECASE=2, re.MULTILINE=8)
   description: "Config must define API_KEY"
-```
-
-### `code_lints`
-
-Runs a generic linter and checks for clean output. **Binary scoring.**
-
-```yaml
-- type: "code_lints"
-  linter: "ruff"                      # Linter command (ruff, flake8, eslint, etc.)
-  path: "src/"
-  args: ["check", "--select=E,F"]     # Additional linter arguments
-  allow_warnings: false               # If true, only errors fail the check
-  timeout: 60
-  description: "Code must pass ruff checks"
 ```
 
 ### `pylint_score`

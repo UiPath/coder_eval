@@ -43,11 +43,11 @@ coder_eval/
 │   ├── base.py                    # BaseCriterion class + @handle_criterion_errors
 │   ├── file_exists.py
 │   ├── file_contains.py
+│   ├── file_check.py
+│   ├── json_check.py
 │   ├── run_command.py
-│   ├── program_stdout_equals.py
 │   ├── pytest_criterion.py
 │   ├── file_matches_regex.py
-│   ├── code_lints.py
 │   ├── pylint_score.py
 │   ├── reference_comparison.py
 │   └── command_executed.py
@@ -109,17 +109,17 @@ templates/                         # Sandbox template directories
 - **Callback Streaming**: `StreamCallback` protocol with `TaskScopedCallback` wrapper for real-time LLM event output
 - **All models importable from `coder_eval.models`** regardless of submodule
 
-## Success Criteria (10 types)
+## Success Criteria (11 types)
 
 | Type | Scoring | Description |
 |------|---------|-------------|
 | `file_exists` | Binary | File must exist |
 | `file_contains` | Fractional | String presence/absence |
-| `run_command` | Binary | Command exit code |
-| `program_stdout_equals` | Binary | Exact stdout match |
+| `file_check` | Fractional | Unified file existence + content + regex check |
+| `json_check` | Fractional | JSON validation + key presence + value matching |
+| `run_command` | Binary | Command exit code + optional stdout matching |
 | `pytest` | Fractional | tests_passed / total |
 | `file_matches_regex` | Binary | Regex match on file |
-| `code_lints` | Binary | Linter pass/fail |
 | `pylint_score` | Continuous | pylint score / 10.0 |
 | `reference_comparison` | Continuous | AST/token/complexity similarity |
 | `command_executed` | Fractional | Agent tool usage verification |

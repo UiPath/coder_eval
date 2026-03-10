@@ -8,18 +8,18 @@ which submodule they're defined in.
 from claude_agent_sdk import SdkPluginConfig
 
 # Enums
-# Criteria (all 10 + union + base)
+# Criteria
 from coder_eval.models.criteria import (
     BaseSuccessCriterion,
-    CodeLintsCriterion,
     CommandExecutedCriterion,
+    FileCheckCriterion,
     FileContainsCriterion,
     FileExistsCriterion,
     FileMatchesRegexCriterion,
-    ProgramStdoutEqualsCriterion,
     PylintScoreCriterion,
     PytestCriterion,
     ReferenceComparisonCriterion,
+    RegexPattern,
     RunCommandCriterion,
     SuccessCriterion,
     UiPathEvalCriterion,
@@ -88,11 +88,11 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "BaseSuccessCriterion",
     "FileExistsCriterion",
     "FileContainsCriterion",
+    "FileCheckCriterion",
+    "RegexPattern",
     "RunCommandCriterion",
-    "ProgramStdoutEqualsCriterion",
     "PytestCriterion",
     "FileMatchesRegexCriterion",
-    "CodeLintsCriterion",
     "PylintScoreCriterion",
     "ReferenceComparisonCriterion",
     "CommandExecutedCriterion",

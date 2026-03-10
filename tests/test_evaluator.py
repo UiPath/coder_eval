@@ -6,12 +6,10 @@ from unittest.mock import Mock
 from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.evaluation.reviewer import LLMReviewer
 from coder_eval.models import (
-    CodeLintsCriterion,
     FileContainsCriterion,
     FileExistsCriterion,
     FileMatchesRegexCriterion,
     LLMReviewerConfig,
-    ProgramStdoutEqualsCriterion,
     PytestCriterion,
     RunCommandCriterion,
     SandboxConfig,
@@ -246,10 +244,9 @@ def test_success_checker_dispatch():
         FileExistsCriterion(path="test.txt", description="Test file exists"),
         FileContainsCriterion(path="app.py", includes=["test"], description="Test file contains"),
         RunCommandCriterion(command="echo test", description="Test run command"),
-        ProgramStdoutEqualsCriterion(command="echo test", expected_output="test", description="Test stdout"),
+        RunCommandCriterion(command="echo test", expected_stdout="test", description="Test stdout match"),
         PytestCriterion(path="tests/", description="Test pytest"),
         FileMatchesRegexCriterion(path="app.py", pattern="test", description="Test regex"),
-        CodeLintsCriterion(linter="ruff check", description="Test linter"),
     ]
 
     for criterion in criteria:

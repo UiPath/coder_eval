@@ -59,27 +59,40 @@ class FileContainsCriterion(BaseSuccessCriterion):
 
 
 class RunCommandCriterion(BaseSuccessCriterion):
-    """Check if a command runs successfully.
+    """Check if a command runs successfully, with optional stdout matching.
 
-    Pure data model - checking logic in SuccessChecker._check_run_command()
+    When ``expected_stdout`` is set, the criterion also compares the command's
+    stdout against the expected value using the mode specified by ``stdout_match``.
+    This subsumes the former ``program_stdout_equals`` criterion.
+
+    Pure data model - checking logic in RunCommandChecker._check_impl()
+
+    Example YAML:
+        success_criteria:
+          # Simple exit-code check (original behavior)
+          - type: "run_command"
+            command: "python app.py"
+            description: "Script must run successfully"
+
+          # With stdout matching (replaces program_stdout_equals)
+          - type: "run_command"
+            command: "python hello.py"
+            expected_stdout: "Hello, World!"
+            stdout_match: "exact"
+            description: "Script must output the correct text"
     """
 
     type: Literal["run_command"] = "run_command"
     command: str = Field(description="Command to execute")
     timeout: int = Field(default=30, description="Timeout in seconds")
     expected_exit_code: int = Field(default=0, description="Expected exit code")
-
-
-class ProgramStdoutEqualsCriterion(BaseSuccessCriterion):
-    """Check if program output matches expected output.
-
-    Pure data model - checking logic in SuccessChecker._check_program_stdout()
-    """
-
-    type: Literal["program_stdout_equals"] = "program_stdout_equals"
-    command: str = Field(description="Command to execute")
-    expected_output: str = Field(description="Expected stdout output (exact match)")
-    timeout: int = Field(default=30, description="Timeout in seconds")
+    expected_stdout: str | None = Field(
+        default=None, description="Expected stdout content. When set, stdout is also checked."
+    )
+    stdout_match: Literal["exact", "contains", "regex"] = Field(
+        default="exact",
+        description="How to match stdout: 'exact' (stripped), 'contains' (substring), 'regex' (pattern)",
+    )
 
 
 class PytestCriterion(BaseSuccessCriterion):
@@ -107,19 +120,44 @@ class FileMatchesRegexCriterion(BaseSuccessCriterion):
     flags: int = Field(default=0, description="Regex flags (e.g., re.IGNORECASE=2, re.MULTILINE=8, re.DOTALL=16)")
 
 
-class CodeLintsCriterion(BaseSuccessCriterion):
-    """Run a code linter and check for success.
+class RegexPattern(BaseModel):
+    """A single regex pattern check within FileCheckCriterion."""
 
-    Pure data model - checking logic in SuccessChecker._check_code_lints()
+    pattern: str = Field(description="Regex pattern to match against file content")
+    must_match: bool = Field(default=True, description="If True, pattern must match; if False, pattern must NOT match")
+    flags: int = Field(default=0, description="Regex flags (e.g., re.IGNORECASE=2, re.MULTILINE=8, re.DOTALL=16)")
+
+
+class FileCheckCriterion(BaseSuccessCriterion):
+    """Unified file check: existence + string includes/excludes + regex patterns.
+
+    Existence is implicit — if the file doesn't exist, all checks fail (score 0.0).
+    All other fields are optional: if none are specified, this is a pure existence check.
+
+    Scoring: fractional, computed as the average of active sub-check scores
+    (includes score, excludes score, and patterns score). Only categories with
+    non-empty lists contribute to the average, preventing score inflation.
+
+    Pure data model - checking logic in FileCheckChecker._check_impl()
+
+    Example YAML:
+        success_criteria:
+          - type: "file_check"
+            path: "main.py"
+            includes: ["from uipath import UiPath"]
+            excludes: ["import os"]
+            patterns:
+              - pattern: "def main\\(.*\\):"
+                must_match: true
+            description: "main.py exists with correct imports and structure"
     """
 
-    type: Literal["code_lints"] = "code_lints"
-    linter: str = Field(description="Linter command (e.g., 'ruff check', 'pylint', 'eslint')")
-    path: str = Field(default=".", description="Path to lint (file or directory)")
-    args: list[str] = Field(default_factory=list, description="Additional linter arguments")
-    timeout: int = Field(default=60, description="Timeout in seconds")
-    allow_warnings: bool = Field(
-        default=False, description="If True, only fail on errors; if False, fail on warnings too"
+    type: Literal["file_check"] = "file_check"
+    path: str = Field(description="Path to the file to check (relative to sandbox root)")
+    includes: list[str] = Field(default_factory=list, description="Strings that must be present in the file")
+    excludes: list[str] = Field(default_factory=list, description="Strings that must NOT be present in the file")
+    patterns: list[RegexPattern] = Field(
+        default_factory=list, description="Regex patterns to check against file content"
     )
 
 
@@ -297,10 +335,9 @@ SuccessCriterion = (
     FileExistsCriterion
     | FileContainsCriterion
     | RunCommandCriterion
-    | ProgramStdoutEqualsCriterion
     | PytestCriterion
     | FileMatchesRegexCriterion
-    | CodeLintsCriterion
+    | FileCheckCriterion
     | PylintScoreCriterion
     | ReferenceComparisonCriterion
     | CommandExecutedCriterion
