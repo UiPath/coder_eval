@@ -16,6 +16,23 @@ def get_version_info(sandbox_path: Path | None = None) -> dict[str, str]:
     """
     version_info = {}
 
+    # Get git commit hash (pinned to project root, not CWD which may be a sandbox)
+    try:
+        project_root = Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=project_root,
+        )
+        if result.returncode == 0:
+            version_info["git_commit"] = result.stdout.strip()
+        else:
+            version_info["git_commit"] = "unknown"
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        version_info["git_commit"] = "unknown"
+
     # Get coder_eval version
     try:
         from importlib.metadata import version

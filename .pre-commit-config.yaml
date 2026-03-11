@@ -31,7 +31,7 @@ repos:
     hooks:
       - id: feature-doc-naming
         name: feature doc naming convention
-        entry: bash -c 'err=0; for f; do b=$(basename "$f"); [ "$b" = "README.md" ] && continue; echo "$b" | grep -qE "^[0-9]{4}-[0-9]{2}-[0-9]{2}-.+\.md$" || { echo "ERROR: $f must be named YYYY-MM-DD-<name>.md"; err=1; }; done; exit $err'
+        entry: 'bash -c ''err=0; for f; do b=$(basename "$f"); [ "$b" = "README.md" ] && continue; echo "$b" | grep -qE "^[0-9]{4}-[0-9]{2}-[0-9]{2}-.+\.md$" || { echo "ERROR: $f must be named YYYY-MM-DD-<name>.md"; err=1; }; done; exit $err'''
         language: system
         files: ^docs/features/
         types: [markdown]
