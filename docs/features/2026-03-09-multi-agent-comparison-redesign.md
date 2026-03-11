@@ -2,7 +2,8 @@
 
 **Date**: 2026-03-09
 **Status**: Reverting PR #44, pursuing alternative architecture
-**PR**: https://github.com/UiPath/coder_eval/pull/44
+**Related PR:** #54
+**Reverts PR**: #44
 **Components**: `coder_eval/models/tasks.py`, `coder_eval/orchestration/batch.py`, `coder_eval/orchestration/task_loader.py`
 
 ## Context

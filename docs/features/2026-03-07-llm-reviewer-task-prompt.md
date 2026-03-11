@@ -1,5 +1,6 @@
 # Feature: LLM Reviewer Task-Level Custom Prompt
 
+**Related PR:** #51
 **Date**: 2026-03-07
 **Status**: Bug fix (prompt field silently ignored)
 **Components**: `coder_eval/models/tasks.py`, `coder_eval/evaluation/reviewer.py`

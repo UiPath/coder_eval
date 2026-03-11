@@ -1,5 +1,7 @@
 # Implementation Plan: Task & Turn Timeouts
 
+**Related PR:** #27
+
 ## Problem Statement
 
 The codebase has **three critical hang points** with no timeout protection:

@@ -1,5 +1,7 @@
 # Plan: Add Model Name/Version to Run Report
 
+**Related PR:** #9
+
 ## Context
 
 When running `coder-eval run tasks/hello_date.yaml`, the generated `run-report.md` shows environment info (CLI version, package versions) but **not which model was used**. This is critical for reproducibility — you can't compare evaluation results without knowing what model produced them.

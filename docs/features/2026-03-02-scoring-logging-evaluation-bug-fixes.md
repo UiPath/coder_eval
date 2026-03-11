@@ -1,5 +1,7 @@
 # Bug Fixes — 2026-03-02
 
+**Related PR:** #26
+
 Comprehensive bug review across the coder_eval codebase. 21 bugs identified (2 HIGH, 9 MEDIUM, 10 LOW).
 8 bugs confirmed and fixed, 2 marked as intentional design decisions, 1 acknowledged as a design concern (deferred),
 10 LOW severity left as informational. Additionally, a multi-model code review surfaced 2 more issues that were fixed.

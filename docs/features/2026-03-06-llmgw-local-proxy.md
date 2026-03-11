@@ -1,5 +1,6 @@
 # Local Proxy for Routing Claude Code Agent SDK Traffic Through LLM Gateway
 
+**Related PR:** #45
 **Status**: Draft
 **Date**: 2026-03-05
 

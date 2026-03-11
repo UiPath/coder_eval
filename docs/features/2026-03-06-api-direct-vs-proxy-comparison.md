@@ -1,5 +1,6 @@
 # LLM Gateway Proxy vs Direct API: Comparison Report (v1)
 
+**Related PR:** #45
 **Date**: 2026-03-06
 **Model**: claude-sonnet-4-6
 **Tasks**: `uipath_list_connectors` (v1) and `uipath_list_connectors_v2`

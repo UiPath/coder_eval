@@ -1,6 +1,7 @@
 # LLM Stdout Streaming Design
 
 **Issue**: [#29 — Please allow streaming of LLM to stdout](https://github.com/UiPath/coder_eval/issues/29)
+**Related PR:** #35
 **Date**: 2026-03-03
 **Status**: Approved
 
