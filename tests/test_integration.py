@@ -151,9 +151,9 @@ def test_cli_run_simple_success(tmp_path, simple_success_task, mock_agent_succes
     1. CLI command invocation works
     2. Task execution completes successfully
     3. Run directory structure is created correctly
-    4. run-summary.json is generated with correct content
-    5. Task-specific report.json is created
-    6. run-report.md is generated
+    4. experiment.json is generated with correct content
+    5. Task-specific task.json is created
+    6. experiment.md is generated
 
     Args:
         tmp_path: pytest temporary directory
@@ -174,33 +174,37 @@ def test_cli_run_simple_success(tmp_path, simple_success_task, mock_agent_succes
     # Verify run directory was created (when --run-dir is provided, it's used directly)
     assert run_dir.exists(), "Run directory not created"
 
-    # Verify run-summary.json exists at run-level and has correct structure
-    summary_file = run_dir / "run-summary.json"
-    assert summary_file.exists(), "run-summary.json not created"
+    # Verify experiment.json exists at run-level and has correct structure
+    summary_file = run_dir / "experiment.json"
+    assert summary_file.exists(), "experiment.json not created"
 
-    # Parse and validate summary content
+    # Parse and validate experiment result content (ExperimentResult schema)
     summary = json.loads(summary_file.read_text())
-    assert "tasks_succeeded" in summary, "Missing tasks_succeeded field"
-    assert "tasks_failed" in summary, "Missing tasks_failed field"
-    assert "task_results" in summary, "Missing task_results list"
-    assert summary["tasks_succeeded"] == 1, f"Expected 1 successful task, got {summary['tasks_succeeded']}"
-    assert summary["tasks_failed"] == 0, f"Expected 0 failed tasks, got {summary['tasks_failed']}"
+    assert "experiment_id" in summary, "Missing experiment_id field"
+    assert "variant_aggregates" in summary, "Missing variant_aggregates field"
+    assert "task_summaries" in summary, "Missing task_summaries field"
+    # Check default variant aggregate shows 1 succeeded
+    default_agg = summary["variant_aggregates"]["default"]
+    assert default_agg["tasks_succeeded"] == 1, f"Expected 1 succeeded, got {default_agg['tasks_succeeded']}"
+    assert default_agg["tasks_failed"] == 0, f"Expected 0 failed, got {default_agg['tasks_failed']}"
 
     # Verify task-specific directory and results
-    task_dir = run_dir / "integration_test_success"
+    # With experiment layer (default experiment), structure is:
+    # run_dir / variant_id / {task_id}
+    task_dir = run_dir / "default" / "integration_test_success"
     assert task_dir.exists(), "Task directory not created"
 
-    # Task results are saved as report.json, not results.json
-    report_json_file = task_dir / "report.json"
-    assert report_json_file.exists(), "report.json not created"
+    # Task results are saved as task.json
+    report_json_file = task_dir / "task.json"
+    assert report_json_file.exists(), "task.json not created"
 
     # Parse and verify task results
     task_result = json.loads(report_json_file.read_text())
     assert task_result["final_status"] == "SUCCESS", f"Expected SUCCESS status, got {task_result['final_status']}"
 
-    # Verify run-report.md was generated at run-level
-    run_report_file = run_dir / "run-report.md"
-    assert run_report_file.exists(), "run-report.md not created"
+    # Verify experiment.md was generated at run-level
+    run_report_file = run_dir / "experiment.md"
+    assert run_report_file.exists(), "experiment.md not created"
 
     # Basic content check on report
     report_content = run_report_file.read_text()
@@ -218,7 +222,7 @@ def test_cli_run_simple_failure(tmp_path, simple_failure_task, mock_agent_failur
 
     Verifies that:
     1. CLI exits with code 0 even when task fails
-    2. Failure is properly recorded in run-summary.json
+    2. Failure is properly recorded in experiment.json
     3. Task status is marked as FAILED
     4. Reports are still generated
 
@@ -240,24 +244,28 @@ def test_cli_run_simple_failure(tmp_path, simple_failure_task, mock_agent_failur
     # Verify run directory created (when --run-dir is provided, it's used directly)
     assert run_dir.exists(), "Run directory not created"
 
-    # Verify run-summary.json shows the failure at run-level
-    summary_file = run_dir / "run-summary.json"
-    assert summary_file.exists(), "run-summary.json not created"
+    # Verify experiment.json shows the failure at run-level
+    summary_file = run_dir / "experiment.json"
+    assert summary_file.exists(), "experiment.json not created"
 
     summary = json.loads(summary_file.read_text())
-    assert summary["tasks_succeeded"] == 0, f"Expected 0 successful tasks, got {summary['tasks_succeeded']}"
-    assert summary["tasks_failed"] == 1, f"Expected 1 failed task, got {summary['tasks_failed']}"
+    # ExperimentResult schema: check variant aggregate
+    default_agg = summary["variant_aggregates"]["default"]
+    assert default_agg["tasks_succeeded"] == 0, f"Expected 0 succeeded, got {default_agg['tasks_succeeded']}"
+    assert default_agg["tasks_failed"] == 1, f"Expected 1 failed, got {default_agg['tasks_failed']}"
 
-    # Verify task status marked as FAILURE in the task's report.json
-    task_dir = run_dir / "integration_test_failure"
+    # Verify task status marked as FAILURE in the task's task.json
+    # With experiment layer (default experiment), structure is:
+    # run_dir / variant_id / {task_id}
+    task_dir = run_dir / "default" / "integration_test_failure"
     assert task_dir.exists(), "Task directory not created"
 
-    report_json_file = task_dir / "report.json"
-    assert report_json_file.exists(), "report.json not created"
+    report_json_file = task_dir / "task.json"
+    assert report_json_file.exists(), "task.json not created"
 
     task_result = json.loads(report_json_file.read_text())
     assert task_result["final_status"] == "FAILURE", f"Expected FAILURE status, got {task_result['final_status']}"
 
-    # Verify run-report.md still generated even for failures
-    run_report_file = run_dir / "run-report.md"
-    assert run_report_file.exists(), "run-report.md not created for failed task"
+    # Verify experiment.md still generated even for failures
+    run_report_file = run_dir / "experiment.md"
+    assert run_report_file.exists(), "experiment.md not created for failed task"

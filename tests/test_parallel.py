@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from coder_eval.models import AgentState
+from coder_eval.models import AgentState, ResolvedTask, TaskDefinition
 from coder_eval.orchestration.config import BatchRunConfig
 from coder_eval.orchestrator import Orchestrator
 
@@ -33,6 +33,17 @@ success_criteria:
     task_file = tmp_path / "test_task.yaml"
     task_file.write_text(task_content)
 
+    # Build a ResolvedTask from the task file
+    task = TaskDefinition(
+        task_id="test_sequential",
+        description="Test sequential execution",
+        initial_prompt="Test prompt",
+        agent={"type": "claude-code"},
+        sandbox={"driver": "tempdir"},
+        max_iterations=1,
+        success_criteria=[{"type": "file_exists", "path": "test.txt", "description": "Check for test.txt"}],
+    )
+
     # Mock agent so we don't spawn the real claude CLI
     mock_agent = MagicMock()
     mock_agent.start = AsyncMock(side_effect=RuntimeError("mock agent crash"))
@@ -49,16 +60,24 @@ success_criteria:
         max_iterations=1,
     )
 
+    resolved_task = ResolvedTask(
+        task=task,
+        task_file=task_file,
+        run_dir=run_dir / "default" / "test_sequential" / "default",
+        variant_id="default",
+        original_task_id="test_sequential",
+    )
+
     # This should complete without raising an exception
     # The task will fail (ERROR status) but that's expected - we're testing the execution flow
-    summary = await Orchestrator.run_batch([task_file], config)
+    summary, _results = await Orchestrator.run_batch([resolved_task], config)
 
     # Verify summary
     assert summary.tasks_run == 1
     assert run_dir.exists()
 
     # Verify run summary was created
-    summary_file = run_dir / "run-summary.json"
+    summary_file = run_dir / "run.json"
     assert summary_file.exists(), "Run summary should be created"
 
 

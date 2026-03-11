@@ -21,10 +21,12 @@ class ModelPricing:
 _PRICING: dict[str, ModelPricing] = {
     # Claude 4.6 / 4.5 / 4 Opus
     "claude-opus-4-6": ModelPricing(15.0, 75.0, 18.75, 1.50),
+    "claude-opus-4-6-20250514": ModelPricing(15.0, 75.0, 18.75, 1.50),
     "claude-opus-4-5-20251101": ModelPricing(15.0, 75.0, 18.75, 1.50),
     "claude-opus-4-20250514": ModelPricing(15.0, 75.0, 18.75, 1.50),
     # Claude 4.6 / 4.5 / 4 Sonnet
     "claude-sonnet-4-6": ModelPricing(3.0, 15.0, 3.75, 0.30),
+    "claude-sonnet-4-6-20250514": ModelPricing(3.0, 15.0, 3.75, 0.30),
     "claude-sonnet-4-5-20250929": ModelPricing(3.0, 15.0, 3.75, 0.30),
     "claude-sonnet-4-20250514": ModelPricing(3.0, 15.0, 3.75, 0.30),
     # Claude 4.5 Haiku

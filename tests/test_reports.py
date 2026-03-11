@@ -382,7 +382,7 @@ def test_load_from_run_dir_with_markdown(tmp_path):
 
     # Create a pre-generated markdown report
     report_content = "# Test Report\n\nThis is a test report."
-    report_path = run_dir / "run-report.md"
+    report_path = run_dir / "experiment.md"
     report_path.write_text(report_content)
 
     # Load report
@@ -419,7 +419,7 @@ def test_load_from_run_dir_with_json_fallback(tmp_path):
         environment_info={},
     )
 
-    summary_path = run_dir / "run-summary.json"
+    summary_path = run_dir / "experiment.json"
     summary_path.write_text(summary.model_dump_json(indent=2))
 
     # Load report (should regenerate from JSON)
@@ -448,7 +448,7 @@ def test_load_from_run_dir_resolves_symlink(tmp_path):
     actual_run_dir.mkdir(parents=True)
 
     report_content = "# Symlink Test Report"
-    report_path = actual_run_dir / "run-report.md"
+    report_path = actual_run_dir / "experiment.md"
     report_path.write_text(report_content)
 
     # Create symlink

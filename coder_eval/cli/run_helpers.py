@@ -10,6 +10,42 @@ from ..path_utils import generate_run_id
 from .console import console
 
 
+# Resolve tasks/ relative to project root — this is a repo-only feature.
+# When running from a wheel install, users must provide explicit task file paths.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+DEFAULT_TASKS_DIR = _PROJECT_ROOT / "tasks"
+
+
+def discover_default_tasks() -> list[Path]:
+    """Recursively find all .yaml task files under the default tasks/ directory.
+
+    This feature requires a source checkout — the tasks/ directory is not
+    shipped in the wheel. When running from an installed package, provide
+    explicit task file paths instead.
+
+    Returns:
+        Sorted list of task file paths.
+
+    Raises:
+        typer.Exit: If the tasks/ directory doesn't exist or contains no YAML files.
+    """
+    if not DEFAULT_TASKS_DIR.is_dir():
+        console.print(f"[red]Default tasks directory not found: {DEFAULT_TASKS_DIR}[/red]")
+        console.print(
+            "[yellow]Hint: Zero-argument task discovery requires a source checkout. "
+            + "Provide explicit task file paths instead: coder-eval run task1.yaml task2.yaml[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    task_files = sorted(DEFAULT_TASKS_DIR.rglob("*.yaml"))
+    if not task_files:
+        console.print(f"[red]No .yaml files found in {DEFAULT_TASKS_DIR}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[dim]Discovered {len(task_files)} task(s) from {DEFAULT_TASKS_DIR}[/dim]")
+    return task_files
+
+
 def prepare_run_directory(run_dir: Path | None) -> Path:
     """Create and prepare the run directory.
 
@@ -78,18 +114,18 @@ def print_execution_summary(run_dir: Path, summary: RunSummary) -> None:
     """
     console.print(f"\n[bold green]Run complete:[/bold green] {run_dir}")
     console.print(f"[bold]Results:[/bold] {summary.tasks_succeeded}/{summary.tasks_run} succeeded")
-    console.print(f"[dim]View report: open {run_dir / 'run-report.md'}[/dim]")
+    console.print(f"[dim]View report: open {run_dir / 'experiment.md'}[/dim]")
     console.print(f"[dim]View report: uv run coder-eval report {run_dir}[/dim]")
 
     # Print log file locations
     console.print("\n[bold]Log Files:[/bold]")
-    run_log_path = run_dir / "run.log"
+    run_log_path = run_dir / "experiment.log"
     if run_log_path.exists():
-        console.print(f"  Run log: {run_log_path}")
+        console.print(f"  Experiment log: {run_log_path}")
 
-    # Print task logs
-    for task_result in summary.task_results:
-        task_id = task_result.get("task_id", "unknown")
-        task_log = run_dir / task_id / "task.log"
-        if task_log.exists():
-            console.print(f"  Task log ({task_id}): {task_log}")
+    # Print task logs (find all task.log files under variant directories)
+    for task_log in sorted(run_dir.glob("**/task.log")):
+        # Directory structure: run_dir / variant_id / task_id / task.log
+        task_name = task_log.parent.name
+        variant_name = task_log.parent.parent.name
+        console.print(f"  Task log ({variant_name}/{task_name}): {task_log}")

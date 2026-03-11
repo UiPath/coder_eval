@@ -16,8 +16,8 @@ def get_task_run_dir(run_dir: Path, task_id: str) -> Path:
 
 
 def get_task_report_path(run_dir: Path, task_id: str) -> Path:
-    """Get report path: {run_dir}/{task_id}/report.json."""
-    return get_task_run_dir(run_dir, task_id) / "report.json"
+    """Get report path: {run_dir}/{task_id}/task.json."""
+    return get_task_run_dir(run_dir, task_id) / "task.json"
 
 
 def get_task_artifact_dir(run_dir: Path, task_id: str) -> Path:

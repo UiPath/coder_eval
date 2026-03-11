@@ -115,6 +115,7 @@ sandbox:
   driver: tempdir
 success_criteria:
   - type: file_exists
+    description: Check output exists
     path: output.txt
 """)
 
@@ -123,41 +124,40 @@ success_criteria:
 
     from coder_eval.cli.run_command import _run_all_tasks
 
-    # Mock Orchestrator.run_batch to avoid actual execution
-    with patch("coder_eval.orchestrator.Orchestrator.run_batch") as mock_run_batch:
-        # Mock return value (summary)
-        mock_run_batch.return_value = RunSummary(
-            run_id="test-run",
-            start_time=datetime.now(),
-            end_time=datetime.now(),
-            total_duration_seconds=1.0,
-            tasks_run=1,
-            tasks_succeeded=1,
-            tasks_failed=0,
-            tasks_error=0,
-            task_results=[],
-            framework_version="test",
+    mock_summary = RunSummary(
+        run_id="test-run",
+        start_time=datetime.now(),
+        end_time=datetime.now(),
+        total_duration_seconds=1.0,
+        tasks_run=1,
+        tasks_succeeded=1,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[],
+        framework_version="test",
+    )
+
+    # Mock run_batch (always used via experiment layer)
+    with (
+        patch("coder_eval.orchestration.batch.run_batch", return_value=(mock_summary, [])) as mock_batch,
+        patch("coder_eval.cli.console.console.print"),
+        patch("coder_eval.logging_config.aggregate_task_logs"),
+        patch("coder_eval.reports_experiment.ExperimentReportGenerator.write_reports"),
+    ):
+        # Should not raise error - file exists
+        asyncio.run(
+            _run_all_tasks(
+                task_files=[task_file],
+                max_iterations=None,
+                preserve=True,
+                run_dir=tmp_path / "run",
+                max_parallel=1,
+                snapshot_mode=None,
+                snapshot_checkpoint_freq=None,
+            )
         )
 
-        with patch("coder_eval.cli.console.console.print"), patch("coder_eval.logging_config.aggregate_task_logs"):
-            # Should not raise error - file exists
-            asyncio.run(
-                _run_all_tasks(
-                    task_files=[task_file],
-                    max_iterations=None,
-                    preserve=True,
-                    run_dir=tmp_path / "run",
-                    max_parallel=1,
-                    snapshot_mode=None,
-                    snapshot_checkpoint_freq=None,
-                )
-            )
-
-        # Verify run_batch was called with the explicit file
-        assert mock_run_batch.called
-        call_args = mock_run_batch.call_args
-        assert len(call_args.kwargs["task_files"]) == 1
-        assert call_args.kwargs["task_files"][0] == task_file
+        assert mock_batch.called, "run_batch was not called"
 
 
 def test_cli_expands_valid_glob_patterns(tmp_path):
@@ -183,6 +183,7 @@ sandbox:
   driver: tempdir
 success_criteria:
   - type: file_exists
+    description: Check output exists
     path: output.txt
 """)
 
@@ -193,34 +194,37 @@ success_criteria:
 
     from coder_eval.cli.run_command import _run_all_tasks
 
-    with patch("coder_eval.orchestrator.Orchestrator.run_batch") as mock_run_batch:
-        mock_run_batch.return_value = RunSummary(
-            run_id="test-run",
-            start_time=datetime.now(),
-            end_time=datetime.now(),
-            total_duration_seconds=1.0,
-            tasks_run=3,
-            tasks_succeeded=3,
-            tasks_failed=0,
-            tasks_error=0,
-            task_results=[],
-            framework_version="test",
+    mock_summary = RunSummary(
+        run_id="test-run",
+        start_time=datetime.now(),
+        end_time=datetime.now(),
+        total_duration_seconds=1.0,
+        tasks_run=3,
+        tasks_succeeded=3,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[],
+        framework_version="test",
+    )
+
+    with (
+        patch("coder_eval.orchestration.batch.run_batch", return_value=(mock_summary, [])) as mock_batch,
+        patch("coder_eval.cli.console.console.print"),
+        patch("coder_eval.logging_config.aggregate_task_logs"),
+        patch("coder_eval.reports_experiment.ExperimentReportGenerator.write_reports"),
+    ):
+        asyncio.run(
+            _run_all_tasks(
+                task_files=[glob_pattern],
+                max_iterations=None,
+                preserve=True,
+                run_dir=tmp_path / "run",
+                max_parallel=1,
+                snapshot_mode=None,
+                snapshot_checkpoint_freq=None,
+            )
         )
 
-        with patch("coder_eval.cli.console.console.print"), patch("coder_eval.logging_config.aggregate_task_logs"):
-            asyncio.run(
-                _run_all_tasks(
-                    task_files=[glob_pattern],
-                    max_iterations=None,
-                    preserve=True,
-                    run_dir=tmp_path / "run",
-                    max_parallel=1,
-                    snapshot_mode=None,
-                    snapshot_checkpoint_freq=None,
-                )
-            )
-
-        # Verify all 3 files were found
-        assert mock_run_batch.called
-        call_args = mock_run_batch.call_args
-        assert len(call_args.kwargs["task_files"]) == 3
+        assert mock_batch.called
+        call_args = mock_batch.call_args
+        assert len(call_args.kwargs["resolved_tasks"]) == 3

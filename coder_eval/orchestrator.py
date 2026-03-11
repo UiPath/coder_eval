@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
@@ -23,9 +23,11 @@ from .evaluation.reviewer import LLMReviewer
 from .models import (
     AgentKind,
     EvaluationResult,
+    ResolvedTask,
     RunSummary,
     SnapshotMode,
     TaskDefinition,
+    TaskResult,
 )
 from .orchestration.batch import run_batch as run_batch_impl
 from .orchestration.config import BatchRunConfig
@@ -55,6 +57,8 @@ class Orchestrator:
         task_file: Path | None = None,
         stream_callback: StreamCallback | None = None,
         sandbox: Sandbox | None = None,
+        *,
+        variant_id: str,
     ):
         """Initialize the orchestrator.
 
@@ -65,6 +69,7 @@ class Orchestrator:
             task_file: Path to task YAML file (for resolving reference file paths)
             stream_callback: Optional callback for real-time event streaming
             sandbox: Pre-built Sandbox to use directly; if None, creates one from task config and runs the agent
+            variant_id: Experiment variant identifier for this task
         """
         self.task = task
         self.run_dir = run_dir
@@ -72,9 +77,10 @@ class Orchestrator:
         self.task_file = task_file
         self.stream_callback = stream_callback
         self.sandbox = sandbox
+        self.variant_id = variant_id
 
         # Derived paths
-        self.report_path = self.run_dir / "report.json"
+        self.report_path = self.run_dir / "task.json"
         # Note: artifacts directory (run_dir/artifacts) is created on-demand during sandbox preservation
 
         # Snapshot directory (created on-demand if snapshots enabled)
@@ -95,8 +101,9 @@ class Orchestrator:
         # Reference solution cache (loaded on-demand)
         self._reference_code: str | None = None
 
-        # Create task-specific logger with automatic task_id context
-        self.logger = logging.LoggerAdapter(logger, extra={"task_id": task.task_id})
+        # Create task-specific logger with variant_id/task_id context for log prefixes
+        self._log_task_id = f"{variant_id}/{task.task_id}"
+        self.logger = logging.LoggerAdapter(logger, extra={"task_id": self._log_task_id})
 
     async def run(self) -> EvaluationResult:
         """Run the complete evaluation.
@@ -109,6 +116,11 @@ class Orchestrator:
         """
         from .logging_config import task_log_handler
 
+        # Agent must be resolved before reaching the orchestrator
+        assert self.task.agent is not None, (
+            f"Task '{self.task.task_id}' has no agent config. Ensure experiment resolution ran before orchestration."
+        )
+
         start_time = time.time()
         started_at = datetime.now()
 
@@ -116,6 +128,7 @@ class Orchestrator:
         self.result = EvaluationResult(
             task_id=self.task.task_id,
             task_description=self.task.description,
+            variant_id=self.variant_id,
             agent_type=self.task.agent.type,
             started_at=started_at,
             final_status="FAILURE",  # Will be updated
@@ -128,7 +141,7 @@ class Orchestrator:
         task_log_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Use context manager for automatic log handler management
-        with task_log_handler(task_log_path, task_id=self.task.task_id):
+        with task_log_handler(task_log_path, task_id=self._log_task_id):
             try:
                 # Setup components
                 await self._setup()
@@ -264,10 +277,11 @@ class Orchestrator:
             # evaluate-only mode: sandbox already set up, skip agent
             assert self.result is not None
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
-            self.success_checker = SuccessChecker(self.sandbox, task_id=self.task.task_id)
+            self.success_checker = SuccessChecker(self.sandbox, task_id=self._log_task_id)
             return
 
-        # Validate API keys
+        # Validate API keys (agent guaranteed non-None after experiment resolution)
+        assert self.task.agent is not None
         settings.validate_api_keys(self.task.agent.type.value)
 
         # Create sandbox with retry logic
@@ -295,7 +309,7 @@ class Orchestrator:
             self.logger.info(f"Snapshots enabled: mode={self.task.sandbox.snapshots.mode.value}")
 
         # Create success checker
-        self.success_checker = SuccessChecker(self.sandbox, task_id=self.task.task_id)
+        self.success_checker = SuccessChecker(self.sandbox, task_id=self._log_task_id)
 
         # Create LLM reviewer if enabled
         if self.task.llm_reviewer.enabled:
@@ -363,6 +377,7 @@ class Orchestrator:
             timeout_seconds=settings.llmgw_timeout_seconds,
             vendor=settings.llmgw_proxy_vendor,
             api_flavor=settings.llmgw_proxy_api_flavor,
+            task_id=self._log_task_id,
         )
 
         self.proxy = LLMGatewayProxy(proxy_config)
@@ -378,6 +393,7 @@ class Orchestrator:
         Raises:
             ValueError: If agent type is not supported
         """
+        assert self.task.agent is not None
         if self.task.agent.type == AgentKind.CLAUDE_CODE:
             from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 
@@ -393,6 +409,7 @@ class Orchestrator:
         """
         assert self.success_checker is not None, "Success checker not initialized"
         assert self.result is not None, "Result not initialized"
+        assert self.task.agent is not None
 
         if self.agent is None:
             # evaluate-only mode: no agent, single check
@@ -433,7 +450,7 @@ class Orchestrator:
             safe_emit(
                 self.stream_callback,
                 TurnStartEvent(
-                    task_id=self.task.task_id,
+                    task_id=self._log_task_id,
                     iteration=iteration,
                     max_iterations=self.task.max_iterations,
                     prompt_preview=current_prompt[:100],
@@ -479,7 +496,7 @@ class Orchestrator:
             safe_emit(
                 self.stream_callback,
                 TurnCompleteEvent(
-                    task_id=self.task.task_id,
+                    task_id=self._log_task_id,
                     iteration=iteration,
                     duration_s=turn_record.duration_seconds or 0.0,
                     command_count=len(turn_record.commands),
@@ -549,7 +566,7 @@ class Orchestrator:
             safe_emit(
                 self.stream_callback,
                 CriteriaCheckEvent(
-                    task_id=self.task.task_id,
+                    task_id=self._log_task_id,
                     passed=passed_count,
                     total=total_count,
                     weighted_score=current_score,
@@ -611,44 +628,27 @@ class Orchestrator:
     @classmethod
     async def run_batch(
         cls,
-        task_files: list[Path],
+        resolved_tasks: list[ResolvedTask],
         config: BatchRunConfig,
-        on_task_complete: Callable[[dict[str, Any]], None] | None = None,
+        on_task_complete: Callable[[TaskResult], None] | None = None,
         on_batch_start: Callable[[int], None] | None = None,
         stream_callback_factory: Callable[[str], StreamCallback] | None = None,
-    ) -> RunSummary:
-        """Run multiple tasks in batch with optional parallelism.
+    ) -> tuple[RunSummary, list[TaskResult]]:
+        """Run resolved tasks in batch with optional parallelism.
 
         Delegates to orchestration.batch.run_batch() for the actual implementation.
-        This method is kept as a class method for backward compatibility.
 
         Args:
-            task_files: List of paths to task YAML files
-            config: Batch execution configuration
-            on_task_complete: Optional callback invoked after each task finishes
-            on_batch_start: Optional callback invoked with the final task count after filtering
+            resolved_tasks: List of fully-resolved tasks from resolve_all_tasks.
+            config: Batch execution configuration.
+            on_task_complete: Optional callback invoked after each task finishes.
+            on_batch_start: Optional callback invoked with the final task count.
 
         Returns:
-            RunSummary with aggregated results and statistics
-
-        Raises:
-            FileNotFoundError: If task files don't exist
-            ValueError: If task files are invalid
-
-        Example:
-            >>> config = BatchRunConfig(
-            ...     run_dir=Path("runs/my-run"),
-            ...     max_parallel=3,
-            ...     preserve_sandbox=True,
-            ... )
-            >>> summary = await Orchestrator.run_batch(
-            ...     task_files=[Path("task1.yaml"), Path("task2.yaml")],
-            ...     config=config,
-            ... )
-            >>> print(f"Success: {summary.tasks_succeeded}/{summary.tasks_run}")
+            Tuple of (RunSummary, list[TaskResult]).
         """
         return await run_batch_impl(
-            task_files,
+            resolved_tasks,
             config,
             on_task_complete=on_task_complete,
             on_batch_start=on_batch_start,

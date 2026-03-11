@@ -68,12 +68,13 @@ async def test_turn_timeout_fires(tmp_path):
     run_dir = tmp_path / "run" / "timeout_test"
     run_dir.mkdir(parents=True)
 
-    orchestrator = Orchestrator(task=task, run_dir=run_dir)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
 
     # Set up mocks as if _setup() ran
     orchestrator.result = EvaluationResult(
         task_id="timeout_test",
         task_description="Test",
+        variant_id="test-variant",
         agent_type=AgentKind.CLAUDE_CODE,
         started_at=datetime.now(),
         final_status="FAILURE",
@@ -117,7 +118,7 @@ async def test_task_timeout_fires(tmp_path):
     run_dir = tmp_path / "run" / "timeout_test"
     run_dir.mkdir(parents=True)
 
-    orchestrator = Orchestrator(task=task, run_dir=run_dir)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
 
     # Mock _setup to be a no-op
     orchestrator._setup = AsyncMock()  # type: ignore[method-assign]
@@ -144,7 +145,7 @@ async def test_task_timeout_populates_elapsed_seconds(tmp_path):
     run_dir = tmp_path / "run" / "timeout_test"
     run_dir.mkdir(parents=True)
 
-    orchestrator = Orchestrator(task=task, run_dir=run_dir)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
 
     # Mock _setup to be a no-op
     orchestrator._setup = AsyncMock()  # type: ignore[method-assign]
@@ -181,12 +182,13 @@ async def test_no_timeout_when_none(tmp_path):
     run_dir = tmp_path / "run" / "timeout_test"
     run_dir.mkdir(parents=True)
 
-    orchestrator = Orchestrator(task=task, run_dir=run_dir)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
 
     # Set up result
     orchestrator.result = EvaluationResult(
         task_id="timeout_test",
         task_description="Test",
+        variant_id="test-variant",
         agent_type=AgentKind.CLAUDE_CODE,
         started_at=datetime.now(),
         final_status="FAILURE",
@@ -226,12 +228,13 @@ async def test_turn_timeout_fires_before_task_timeout(tmp_path):
     run_dir = tmp_path / "run" / "timeout_test"
     run_dir.mkdir(parents=True)
 
-    orchestrator = Orchestrator(task=task, run_dir=run_dir)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
 
     # Set up result
     orchestrator.result = EvaluationResult(
         task_id="timeout_test",
         task_description="Test",
+        variant_id="test-variant",
         agent_type=AgentKind.CLAUDE_CODE,
         started_at=datetime.now(),
         final_status="FAILURE",

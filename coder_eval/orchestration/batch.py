@@ -1,10 +1,11 @@
-"""Batch execution support for running multiple tasks in parallel.
+"""Batch execution support for running resolved tasks in parallel.
 
-This module provides functions for orchestrating the execution of multiple evaluation tasks,
-managing concurrency, exception handling, and result aggregation.
+This module provides the unified run_batch() function that accepts pre-resolved
+tasks (list[ResolvedTask]) and executes them with concurrency control,
+exception handling, and result aggregation.
 
-These were extracted from Orchestrator to reduce its complexity while maintaining
-the batch execution flow logic.
+Task loading, config resolution, and CLI override application are handled
+upstream by resolve_all_tasks() in experiment.py.
 """
 
 # pyright: reportImportCycles=false
@@ -14,230 +15,93 @@ import logging
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
-from ..models import AgentKind, EvaluationResult, RunSummary, SnapshotMode, TaskDefinition
+from ..models import AgentKind, EvaluationResult, ResolvedTask, RunSummary, TaskDefinition, TaskResult
 from ..streaming.callbacks import StreamCallback
 from ..utils import get_version_info
 from .config import BatchRunConfig
-from .task_loader import load_task
 
 
 logger = logging.getLogger(__name__)
 
 
 async def run_batch(
-    task_files: list[Path],
+    resolved_tasks: list[ResolvedTask],
     config: BatchRunConfig,
-    on_task_complete: Callable[[dict[str, Any]], None] | None = None,
+    on_task_complete: Callable[[TaskResult], None] | None = None,
     on_batch_start: Callable[[int], None] | None = None,
     stream_callback_factory: Callable[[str], StreamCallback] | None = None,
-) -> RunSummary:
-    """Run multiple tasks in batch with optional parallelism.
+) -> tuple[RunSummary, list[TaskResult]]:
+    """Run resolved tasks in batch with optional parallelism.
 
-    This function orchestrates the execution of multiple evaluation tasks,
-    managing concurrency, exception handling, and result aggregation.
-    Returns a complete RunSummary with all results and statistics.
+    Tasks must be fully resolved (all config layers applied, tag filtering done).
+    This function is a pure executor — no configuration or loading logic.
 
     Args:
-        task_files: List of paths to task YAML files
-        config: Batch execution configuration
-        on_task_complete: Optional callback invoked after each task finishes,
-            receives the task result dict with keys {task_id, result, duration}
-        on_batch_start: Optional callback invoked after task loading and filtering,
-            receives the final count of tasks that will be executed
+        resolved_tasks: List of fully-resolved tasks from resolve_all_tasks.
+        config: Batch configuration (max_parallel, preserve_sandbox, run_dir).
+        on_task_complete: Optional callback invoked after each task finishes.
+        on_batch_start: Optional callback invoked with the final task count.
+        stream_callback_factory: Optional factory for streaming callbacks.
 
     Returns:
-        RunSummary with aggregated results and statistics
-
-    Raises:
-        FileNotFoundError: If task files don't exist
-        ValueError: If task files are invalid or contain duplicate task IDs
-
-    Example:
-        >>> config = BatchRunConfig(
-        ...     run_dir=Path("runs/my-run"),
-        ...     max_parallel=3,
-        ...     preserve_sandbox=True,
-        ... )
-        >>> summary = await run_batch(
-        ...     task_files=[Path("task1.yaml"), Path("task2.yaml")],
-        ...     config=config,
-        ... )
-        >>> print(f"Success: {summary.tasks_succeeded}/{summary.tasks_run}")
+        Tuple of (RunSummary, list[TaskResult]).
     """
-    # Import here to avoid circular imports
-    from ..config import settings as app_settings
     from ..orchestrator import Orchestrator
 
     start_time = datetime.now()
 
-    # Load all tasks first (fail fast if any are invalid)
-    tasks: list[tuple[Path, TaskDefinition]] = []
-    for task_file in task_files:
-        task = load_task(task_file)
-
-        # Apply CLI overrides
-        if config.max_iterations is not None:
-            task.max_iterations = config.max_iterations
-
-        # Apply snapshot overrides (consolidated logic)
-        if config.snapshot_mode or config.snapshot_checkpoint_freq:
-            from ..models import SnapshotConfig
-
-            # Determine mode: use override if provided, otherwise preserve existing
-            mode = SnapshotMode(config.snapshot_mode.lower()) if config.snapshot_mode else task.sandbox.snapshots.mode
-
-            # Determine checkpoint frequency: use override if provided, otherwise preserve existing
-            checkpoint_freq = (
-                config.snapshot_checkpoint_freq
-                if config.snapshot_checkpoint_freq is not None
-                else task.sandbox.snapshots.checkpoint_frequency
-            )
-
-            # Create new snapshot config with overridden values
-            task.sandbox.snapshots = SnapshotConfig(
-                mode=mode,
-                checkpoint_frequency=checkpoint_freq,
-                ignore_patterns=task.sandbox.snapshots.ignore_patterns,  # Preserve task-specific patterns
-            )
-
-        # Apply agent overrides (CLI > .env > task YAML)
-        effective_model = config.agent_model if config.agent_model is not None else app_settings.default_agent_model
-        if effective_model is not None:
-            task.agent.model = effective_model
-
-        effective_perm = (
-            config.permission_mode if config.permission_mode is not None else app_settings.default_permission_mode
-        )
-        if effective_perm is not None:
-            task.agent.permission_mode = effective_perm  # type: ignore[assignment]  # validated by Pydantic via validate_assignment
-
-        effective_max_turns = config.max_turns if config.max_turns is not None else app_settings.default_max_turns
-        if effective_max_turns is not None:
-            task.agent.max_turns = effective_max_turns
-
-        # Apply timeout overrides (CLI > task YAML)
-        if config.task_timeout is not None:
-            task.task_timeout = config.task_timeout
-
-        if config.turn_timeout is not None:
-            task.agent.turn_timeout = config.turn_timeout
-
-        if config.allowed_tools is not None:
-            task.agent.allowed_tools = config.allowed_tools
-
-        if config.plugins is not None:
-            task.agent.plugins = config.plugins
-
-        if config.ignore_patterns is not None:
-            task.agent.ignore_patterns = config.ignore_patterns
-
-        tasks.append((task_file, task))
-
-    # Filter tasks by tags
-    tasks = filter_tasks_by_tags(tasks, include_tags=config.include_tags, exclude_tags=config.exclude_tags)
-
-    # Validate no duplicate task IDs (would cause result clobbering)
-    _validate_unique_task_ids(tasks)
-
-    # Create semaphore for concurrency control
-    semaphore = asyncio.Semaphore(config.max_parallel)
-
-    # Build a mapping of task_id -> tags for the summary
-    task_tags: dict[str, list[str]] = {task.task_id: task.tags for _, task in tasks}
-
-    # Notify caller of final task count (after filtering)
     if on_batch_start is not None:
-        on_batch_start(len(tasks))
+        on_batch_start(len(resolved_tasks))
 
-    # Create coroutines for all tasks
-    async def run_task_with_semaphore(task_file: Path, task: TaskDefinition) -> dict[str, Any]:
-        """Run single task with semaphore for concurrency control."""
-        task_callback = stream_callback_factory(task.task_id) if stream_callback_factory else None
+    semaphore = asyncio.Semaphore(config.max_parallel)
+    task_tags: dict[str, list[str]] = {rt.task.task_id: rt.task.tags for rt in resolved_tasks}
+
+    async def run_single(rt: ResolvedTask) -> TaskResult:
+        """Run a single resolved task with semaphore for concurrency control."""
+        stream_label = f"{rt.variant_id}/{rt.task.task_id}"
+        task_callback = stream_callback_factory(stream_label) if stream_callback_factory else None
         async with semaphore:
             try:
-                task_result = await _run_single_task(
-                    orchestrator_class=Orchestrator,
-                    task_file=task_file,
-                    task=task,
-                    run_dir=config.run_dir,
-                    preserve=config.preserve_sandbox,
+                rt.run_dir.mkdir(parents=True, exist_ok=True)
+                orchestrator = Orchestrator(
+                    task=rt.task,
+                    run_dir=rt.run_dir,
+                    preserve_sandbox=config.preserve_sandbox,
+                    task_file=rt.task_file,
                     stream_callback=task_callback,
+                    variant_id=rt.variant_id,
                 )
-            except BaseException as exc:
-                _safe_notify(on_task_complete, _create_error_result(task_file, exc, task_id=task.task_id))
+                result = await orchestrator.run()
+                tr = TaskResult(
+                    task_id=rt.task.task_id, variant_id=rt.variant_id, result=result, duration=result.duration_seconds
+                )
+            except (KeyboardInterrupt, SystemExit):
                 raise
-            _safe_notify(on_task_complete, task_result)
-            return task_result
+            except Exception as exc:
+                tr = _create_error_task_result(rt.task_file, exc, task_id=rt.task.task_id, variant_id=rt.variant_id)
+            _safe_notify(on_task_complete, tr)
+            return tr
 
-    coroutines = [run_task_with_semaphore(task_file, task) for task_file, task in tasks]
+    coroutines = [run_single(rt) for rt in resolved_tasks]
+    results: list[TaskResult | BaseException] = await asyncio.gather(*coroutines, return_exceptions=True)
 
-    # Execute all tasks (with exception handling)
-    results: list[dict[str, Any] | BaseException] = await asyncio.gather(*coroutines, return_exceptions=True)
-
-    # Process results and handle exceptions
-    # Note: `results` aligns with `tasks` (post-filter), not the original `task_files`
-    processed_results: list[dict[str, Any]] = []
+    processed: list[TaskResult] = []
     for i, result in enumerate(results):
         if isinstance(result, BaseException):
-            task_file, task = tasks[i]
-            error_result = _create_error_result(task_file, result, task_id=task.task_id)
-            processed_results.append(error_result)
+            rt = resolved_tasks[i]
+            processed.append(
+                _create_error_task_result(rt.task_file, result, task_id=rt.task.task_id, variant_id=rt.variant_id)
+            )
         else:
-            processed_results.append(result)
+            processed.append(result)
 
     end_time = datetime.now()
-
-    # Generate and return summary (all-in-one)
-    return _generate_run_summary(config.run_dir, processed_results, start_time, end_time, task_tags)
-
-
-async def _run_single_task(
-    orchestrator_class: type,
-    task_file: Path,
-    task: TaskDefinition,
-    run_dir: Path,
-    preserve: bool,
-    stream_callback: StreamCallback | None = None,
-) -> dict[str, Any]:
-    """Run a single task as part of a batch (internal helper).
-
-    Args:
-        orchestrator_class: Orchestrator class to instantiate
-        task_file: Path to task file (for logging/error reporting)
-        task: Loaded task definition
-        run_dir: Run-level directory
-        preserve: Whether to preserve sandbox
-        stream_callback: Optional streaming callback for this task
-
-    Returns:
-        Dictionary with {task_id, result, duration}
-    """
-    # Create per-task subdirectory
-    task_run_dir = run_dir / task.task_id
-    task_run_dir.mkdir(parents=True, exist_ok=True)
-
-    # Create orchestrator for single task
-    orchestrator = orchestrator_class(
-        task=task,
-        run_dir=task_run_dir,
-        preserve_sandbox=preserve,
-        task_file=task_file,
-        stream_callback=stream_callback,
-    )
-
-    # Run evaluation
-    result = await orchestrator.run()
-
-    return {
-        "task_id": task.task_id,
-        "result": result,
-        "duration": result.duration_seconds,
-    }
+    summary = _generate_run_summary(config.run_dir, processed, start_time, end_time, task_tags)
+    return summary, processed
 
 
-def _safe_notify(callback: Callable[[dict[str, Any]], None] | None, result: dict[str, Any]) -> None:
+def _safe_notify(callback: Callable[[TaskResult], None] | None, result: TaskResult) -> None:
     """Invoke a progress callback, swallowing any exceptions so UI failures never affect task outcomes."""
     if callback is None:
         return
@@ -247,35 +111,35 @@ def _safe_notify(callback: Callable[[dict[str, Any]], None] | None, result: dict
         logger.warning("Progress callback failed (ignored)", exc_info=True)
 
 
-def _create_error_result(task_file: Path, error: BaseException, *, task_id: str | None = None) -> dict[str, Any]:
-    """Create an error result for a failed task.
+def _create_error_task_result(
+    task_file: Path, error: BaseException, *, task_id: str | None = None, variant_id: str
+) -> TaskResult:
+    """Create a TaskResult for a failed task.
 
     Args:
-        task_file: Path to task file that failed
-        error: Exception that was raised
-        task_id: Explicit task ID; falls back to task_file.stem when unavailable
+        task_file: Path to task file that failed.
+        error: Exception that was raised.
+        task_id: Explicit task ID; falls back to task_file.stem when unavailable.
+        variant_id: Experiment variant ID.
 
     Returns:
-        Dictionary with error result in same format as successful results
+        TaskResult with error information.
     """
-    # Include exception type for better triage
     error_type = type(error).__name__
-    resolved_task_id = task_id if task_id is not None else task_file.stem
     error_result = EvaluationResult(
-        task_id=resolved_task_id,
+        task_id=task_id if task_id is not None else task_file.stem,
         task_description=f"Failed to load task from {task_file}: {error_type}",
-        agent_type=AgentKind.UNKNOWN,  # Agent type unknown when task loading fails
+        variant_id=variant_id,
+        agent_type=AgentKind.UNKNOWN,
         started_at=datetime.now(),
         final_status="ERROR",
         error_message=str(error),
         iteration_count=0,
         environment_info={},
     )
-    return {
-        "task_id": error_result.task_id,
-        "result": error_result,
-        "duration": 0.0,
-    }
+    return TaskResult(
+        task_id=error_result.task_id, variant_id=error_result.variant_id, result=error_result, duration=0.0
+    )
 
 
 def _extract_reference_similarity(result: EvaluationResult) -> float | None:
@@ -288,7 +152,7 @@ def _extract_reference_similarity(result: EvaluationResult) -> float | None:
 
 def _generate_run_summary(
     run_dir: Path,
-    task_results: list[dict[str, Any]],
+    task_results: list[TaskResult],
     start_time: datetime,
     end_time: datetime,
     task_tags: dict[str, list[str]] | None = None,
@@ -296,21 +160,21 @@ def _generate_run_summary(
     """Generate run-level summary from batch results.
 
     Args:
-        run_dir: Run directory path
-        task_results: List of task result dictionaries
-        start_time: Batch start time
-        end_time: Batch end time
-        task_tags: Optional mapping of task_id -> tags
+        run_dir: Run directory path.
+        task_results: List of typed task results.
+        start_time: Batch start time.
+        end_time: Batch end time.
+        task_tags: Optional mapping of task_id -> tags.
 
     Returns:
-        RunSummary with aggregated statistics
+        RunSummary with aggregated statistics.
     """
     from ..reports import ReportGenerator
 
     # Create run directory first to eliminate race condition
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    statuses = [r["result"].final_status for r in task_results]
+    statuses = [r.result.final_status for r in task_results]
 
     version_info = get_version_info()
     summary = RunSummary(
@@ -324,12 +188,13 @@ def _generate_run_summary(
         tasks_error=statuses.count("ERROR"),
         task_results=[
             {
-                "task_id": r["task_id"],
-                "status": r["result"].final_status,
-                "weighted_score": r["result"].weighted_score,
-                "duration": r["duration"],
-                "iteration_count": r["result"].iteration_count,
-                "tags": (task_tags or {}).get(r["task_id"], []),
+                "task_id": r.task_id,
+                "variant_id": r.variant_id,
+                "status": r.result.final_status,
+                "weighted_score": r.result.weighted_score,
+                "duration": r.duration,
+                "iteration_count": r.result.iteration_count,
+                "tags": (task_tags or {}).get(r.task_id, []),
                 "turns": [
                     {
                         "iteration": t.iteration,
@@ -337,27 +202,23 @@ def _generate_run_summary(
                         "command_count": len(t.commands),
                         "assistant_turn_count": t.assistant_turn_count,
                     }
-                    for t in r["result"].turns
+                    for t in r.result.turns
                 ],
-                "model_used": r["result"].model_used,
-                "reference_similarity": _extract_reference_similarity(r["result"]),
-                "input_tokens": (r["result"].total_token_usage.input_tokens if r["result"].total_token_usage else None),
-                "output_tokens": (
-                    r["result"].total_token_usage.output_tokens if r["result"].total_token_usage else None
-                ),
+                "model_used": r.result.model_used,
+                "reference_similarity": _extract_reference_similarity(r.result),
+                "input_tokens": (r.result.total_token_usage.input_tokens if r.result.total_token_usage else None),
+                "output_tokens": (r.result.total_token_usage.output_tokens if r.result.total_token_usage else None),
                 "cache_creation_input_tokens": (
-                    r["result"].total_token_usage.cache_creation_input_tokens if r["result"].total_token_usage else None
+                    r.result.total_token_usage.cache_creation_input_tokens if r.result.total_token_usage else None
                 ),
                 "cache_read_input_tokens": (
-                    r["result"].total_token_usage.cache_read_input_tokens if r["result"].total_token_usage else None
+                    r.result.total_token_usage.cache_read_input_tokens if r.result.total_token_usage else None
                 ),
-                "total_tokens": (r["result"].total_token_usage.total_tokens if r["result"].total_token_usage else None),
-                "total_cost_usd": (
-                    r["result"].total_token_usage.total_cost_usd if r["result"].total_token_usage else None
-                ),
-                "agent_config": (r["result"].agent_config.model_dump() if r["result"].agent_config else None),
-                "sdk_options": r["result"].sdk_options,
-                "installed_tools": r["result"].environment_info.get("installed_tools"),
+                "total_tokens": (r.result.total_token_usage.total_tokens if r.result.total_token_usage else None),
+                "total_cost_usd": (r.result.total_token_usage.total_cost_usd if r.result.total_token_usage else None),
+                "agent_config": (r.result.agent_config.model_dump() if r.result.agent_config else None),
+                "sdk_options": r.result.sdk_options,
+                "installed_tools": r.result.environment_info.get("installed_tools"),
             }
             for r in task_results
         ],
@@ -365,27 +226,16 @@ def _generate_run_summary(
         environment_info=version_info,
     )
 
-    # Save run-summary.json
-    summary_path = run_dir / "run-summary.json"
+    # Save run.json (run-level summary — distinct from experiment.json written by ExperimentReportGenerator)
+    summary_path = run_dir / "run.json"
     summary_path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
 
-    # Generate run-report.md with command statistics
+    # Generate run.md with command statistics
     report_md = ReportGenerator.generate_markdown(summary, run_dir=run_dir)
-    report_path = run_dir / "run-report.md"
+    report_path = run_dir / "run.md"
     report_path.write_text(report_md, encoding="utf-8")
 
     return summary
-
-
-def _validate_unique_task_ids(tasks: list[tuple[Path, TaskDefinition]]) -> None:
-    """Raise ValueError if any tasks share the same task_id."""
-    seen: dict[str, list[Path]] = {}
-    for task_file, task in tasks:
-        seen.setdefault(task.task_id, []).append(task_file)
-    duplicates = {tid: files for tid, files in seen.items() if len(files) > 1}
-    if duplicates:
-        lines = [f"  - '{tid}': {', '.join(str(f) for f in files)}" for tid, files in duplicates.items()]
-        raise ValueError("Duplicate task IDs found:\n" + "\n".join(lines))
 
 
 def filter_tasks_by_tags(
@@ -396,12 +246,12 @@ def filter_tasks_by_tags(
     """Filter tasks by tag inclusion/exclusion (OR logic).
 
     Args:
-        tasks: List of (task_file, task_definition) tuples
-        include_tags: If set, only keep tasks matching ANY of these tags
-        exclude_tags: If set, remove tasks matching ANY of these tags
+        tasks: List of (task_file, task_definition) tuples.
+        include_tags: If set, only keep tasks matching ANY of these tags.
+        exclude_tags: If set, remove tasks matching ANY of these tags.
 
     Returns:
-        Filtered list of (task_file, task_definition) tuples
+        Filtered list of (task_file, task_definition) tuples.
     """
     result = tasks
     if include_tags:

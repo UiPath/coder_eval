@@ -267,8 +267,8 @@ class TestLogPersistence:
         # Aggregate
         aggregate_task_logs(tmp_path)
 
-        # Verify run.log exists
-        run_log = tmp_path / "run.log"
+        # Verify experiment.log exists
+        run_log = tmp_path / "experiment.log"
         assert run_log.exists()
 
         content = run_log.read_text()
@@ -290,7 +290,7 @@ class TestLogPersistence:
 
         aggregate_task_logs(tmp_path)
 
-        run_log = tmp_path / "run.log"
+        run_log = tmp_path / "experiment.log"
         assert run_log.exists()
         content = run_log.read_text()
         assert "No task logs found" in content

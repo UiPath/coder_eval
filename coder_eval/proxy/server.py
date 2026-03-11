@@ -71,6 +71,12 @@ class LLMGatewayProxy:
     def __init__(self, config: ProxyConfig):
         self._config = config
         self._token_manager = TokenManager(config)
+        if config.task_id:
+            self._logger: logging.Logger | logging.LoggerAdapter = logging.LoggerAdapter(
+                logger, extra={"task_id": config.task_id}
+            )
+        else:
+            self._logger = logger
         self._app = web.Application()
         self._app.router.add_post("/v1/messages", self._handle_messages)
         self._app.router.add_post("/v1/messages/count_tokens", self._handle_count_tokens)
@@ -111,7 +117,7 @@ class LLMGatewayProxy:
         port_num: int = sockets[0].getsockname()[1]
         self._port = port_num
 
-        logger.info("LLM Gateway proxy started on http://127.0.0.1:%d", port_num)
+        self._logger.info("LLM Gateway proxy started on http://127.0.0.1:%d", port_num)
         return port_num
 
     async def stop(self) -> None:
@@ -121,7 +127,7 @@ class LLMGatewayProxy:
             self._runner = None
             self._site = None
             u = self._usage
-            logger.info(
+            self._logger.info(
                 "LLM Gateway proxy stopped (total: %d requests, %d input + %d output tokens)",
                 u.requests,
                 u.input_tokens,
@@ -138,7 +144,7 @@ class LLMGatewayProxy:
         if model in DEFAULT_MODEL_MAP:
             return DEFAULT_MODEL_MAP[model]
         # Pass through as-is (may already be a gateway model name)
-        logger.warning("No model mapping for '%s', passing through as-is", model)
+        self._logger.warning("No model mapping for '%s', passing through as-is", model)
         return model
 
     def _build_target_url(self, model: str) -> str:
@@ -194,7 +200,7 @@ class LLMGatewayProxy:
         if delay is None:
             delay = min(compute_backoff(_RETRY_CFG, attempt), _MAX_BACKOFF_S)
 
-        logger.warning(
+        self._logger.warning(
             "Got %d from gateway, retrying in %.1fs (attempt %d/%d)",
             status_code,
             delay,
@@ -339,7 +345,7 @@ class LLMGatewayProxy:
         gateway_model = self._map_model(model)
         target_url = self._build_target_url(model)
         mode = "streaming" if is_streaming else "non-streaming"
-        logger.debug("Proxying %s request for model=%s (gateway: %s)", mode, model, gateway_model)
+        self._logger.debug("Proxying %s request for model=%s (gateway: %s)", mode, model, gateway_model)
 
         # Strip fields and inject version only for AWS Bedrock vendor
         if self._config.vendor == "awsbedrock":
@@ -347,7 +353,7 @@ class LLMGatewayProxy:
             for key in stripped:
                 del payload[key]
             if stripped:
-                logger.debug("Stripped non-Bedrock fields from request body: %s", stripped)
+                self._logger.debug("Stripped non-Bedrock fields from request body: %s", stripped)
 
             # Bedrock requires this specific anthropic_version
             payload["anthropic_version"] = "bedrock-2023-05-31"
@@ -373,7 +379,7 @@ class LLMGatewayProxy:
         except json.JSONDecodeError:
             return web.json_response({"error": "Invalid JSON body"}, status=400)
 
-        logger.debug("count_tokens request received — returning synthetic response")
+        self._logger.debug("count_tokens request received — returning synthetic response")
         return web.json_response({"input_tokens": 0})
 
     async def _handle_health(self, request: web.Request) -> web.Response:
@@ -400,7 +406,7 @@ class LLMGatewayProxy:
 
                     # 401 — refresh token once then retry
                     if upstream.status_code == 401 and not token_refreshed:
-                        logger.info("Got 401 from gateway, refreshing token and retrying")
+                        self._logger.info("Got 401 from gateway, refreshing token and retrying")
                         await upstream.aread()
                         token = await self._token_manager.refresh_token()
                         headers = self._build_headers(token, is_streaming=True)
@@ -438,7 +444,7 @@ class LLMGatewayProxy:
                             if len(sse_buffer) + len(chunk) > _MAX_SSE_BUFFER_BYTES:
                                 track_usage = False
                                 sse_buffer.clear()
-                                logger.warning(
+                                self._logger.warning(
                                     "SSE response exceeded %d bytes; usage tracking disabled for this response",
                                     _MAX_SSE_BUFFER_BYTES,
                                 )
@@ -476,7 +482,7 @@ class LLMGatewayProxy:
 
                 # 401 — refresh token once then retry
                 if upstream.status_code == 401 and not token_refreshed:
-                    logger.info("Got 401 from gateway, refreshing token and retrying")
+                    self._logger.info("Got 401 from gateway, refreshing token and retrying")
                     token = await self._token_manager.refresh_token()
                     headers = self._build_headers(token, is_streaming=False)
                     token_refreshed = True
@@ -496,7 +502,7 @@ class LLMGatewayProxy:
                     if usage:
                         self._track_usage(model, usage)
                 except (json.JSONDecodeError, ValueError):
-                    logger.debug("Failed to parse usage from non-streaming response")
+                    self._logger.debug("Failed to parse usage from non-streaming response")
 
             return web.Response(
                 status=upstream.status_code,

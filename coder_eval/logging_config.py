@@ -215,8 +215,8 @@ def aggregate_task_logs(run_dir: Path) -> None:
         >>> aggregate_task_logs(Path("runs/2025-10-16_14-25-18"))
         >>> # Creates: runs/2025-10-16_14-25-18/run.log
     """
-    run_log_path = run_dir / "run.log"
-    task_log_paths = sorted(run_dir.glob("*/task.log"))
+    run_log_path = run_dir / "experiment.log"
+    task_log_paths = sorted(run_dir.glob("**/task.log"))
 
     if not task_log_paths:
         # No task logs found - create empty run.log

@@ -36,7 +36,7 @@ def test_orchestrator_accepts_stream_callback():
 
     task = _make_minimal_task()
     cb = CollectingCallback()
-    orch = Orchestrator(task=task, run_dir=Path("/tmp/test-run"), stream_callback=cb)
+    orch = Orchestrator(task=task, run_dir=Path("/tmp/test-run"), stream_callback=cb, variant_id="test-variant")
     assert orch.stream_callback is cb
 
 
@@ -45,5 +45,5 @@ def test_orchestrator_defaults_stream_callback_to_none():
     from coder_eval.orchestrator import Orchestrator
 
     task = _make_minimal_task()
-    orch = Orchestrator(task=task, run_dir=Path("/tmp/test-run"))
+    orch = Orchestrator(task=task, run_dir=Path("/tmp/test-run"), variant_id="test-variant")
     assert orch.stream_callback is None

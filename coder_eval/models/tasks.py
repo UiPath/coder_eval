@@ -95,7 +95,9 @@ class TaskDefinition(BaseModel):
     initial_prompt: str = Field(description="The initial prompt to send to the agent")
     max_iterations: int = Field(default=3, description="Maximum number of agent turns")
     tags: list[str] = Field(default_factory=list, description="Tags for categorizing and filtering tasks (kebab-case)")
-    agent: AgentConfig = Field(description="Agent configuration")
+    agent: AgentConfig | None = Field(
+        default=None, description="Agent configuration (resolved from experiment if omitted)"
+    )
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
     success_criteria: list[SuccessCriterion] = Field(description="List of criteria that must all pass for task success")
     task_timeout: int | None = Field(

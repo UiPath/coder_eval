@@ -94,6 +94,7 @@ def evaluate_command(
             preserve_sandbox=preserve,
             task_file=task_file,
             sandbox=sandbox,
+            variant_id="evaluate",
         )
         return await orchestrator.run()
 

@@ -15,6 +15,7 @@ A robust, extensible framework for evaluating AI coding agents with comprehensiv
 - **Token Usage Tracking** — Input/output token counts for cost analysis
 - **Reference Comparison** — Code similarity scoring using AST, token, and complexity analysis
 - **Claude Code Plugins** — Configurable plugin support for Claude Code with marketplace directory substitution
+- **Experiment Layer** — Compare agent configurations (models, tools, settings) side-by-side with multi-variant experiments
 - **Parallel Execution** — Run multiple evaluations concurrently with configurable parallelism
 - **Real-Time Streaming** — `--stream` flag for live LLM event output (tool calls, results, text) with full/minimal verbosity modes
 - **Rich CLI** — User-friendly command-line interface with validation, execution, and reporting
@@ -62,13 +63,16 @@ cp .env.example .env
 ### Run Your First Evaluation
 
 ```bash
-# 1. Validate a task (dry-run)
-coder-eval plan tasks/hello_date.yaml
+# 1. Validate all tasks (dry-run)
+coder-eval plan
 
-# 2. Run the evaluation
+# 2. Run all evaluations (discovers tasks/ recursively)
+coder-eval run
+
+# 3. Run a specific task
 coder-eval run tasks/hello_date.yaml
 
-# 3. View results
+# 4. View results
 coder-eval report runs/latest
 
 # Alternatively: evaluate criteria against a directory without an agent
@@ -80,6 +84,9 @@ coder-eval evaluate tasks/hello_date.yaml ./my_solution
 ### `coder-eval run` — Execute Evaluations
 
 ```bash
+# Run all tasks (discovers tasks/ recursively)
+coder-eval run
+
 # Single task
 coder-eval run tasks/hello_date.yaml
 
@@ -118,6 +125,8 @@ coder-eval run tasks/hello_date.yaml --stream full
 | **Snapshots**                |                                                                                  |
 | `--snapshot-checkpoint-freq` | Checkpoint frequency for hybrid mode                                             |
 | `--snapshot-mode`            | Override snapshot mode (`disabled`, `full`, `incremental`, `hybrid`)             |
+| **Experiments**              |                                                                                  |
+| `--experiment, -e`           | Experiment definition YAML for multi-variant comparison (default: `experiments/default.yaml`) |
 | **Output & networking**      |                                                                                  |
 | `--log-file`                 | Write logs to file                                                               |
 | `--proxy / --no-proxy`       | Route API calls through the LLM Gateway proxy (default: no proxy)                |
@@ -127,6 +136,10 @@ coder-eval run tasks/hello_date.yaml --stream full
 ### `coder-eval plan` — Validate Tasks
 
 ```bash
+# Validate all tasks (discovers tasks/ recursively)
+coder-eval plan
+
+# Validate specific tasks
 coder-eval plan tasks/*.yaml
 ```
 
@@ -231,6 +244,59 @@ agent:
 - Each plugin requires `type: "local"` and a `path` to the plugin directory
 - Plugin paths support environment variable substitution (e.g., `$UIPATH_PLUGIN_MARKETPLACE_DIR/plugin-name`)
 
+## Experiments (Multi-Variant Comparison)
+
+Every run uses the experiment layer. By default, `experiments/default.yaml` provides baseline agent configuration:
+
+```yaml
+# experiments/default.yaml (always loaded)
+experiment_id: default
+description: "Default experiment - provides baseline agent configuration"
+
+base:
+  max_iterations: 3
+  agent:
+    type: claude-code
+    permission_mode: acceptEdits
+    model: claude-sonnet-4-6-20250514
+    max_turns: 3
+    turn_timeout: 300
+    allowed_tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+variants:
+  - variant_id: default
+```
+
+Tasks can omit the `agent` section entirely — defaults are resolved from the experiment layer via a 4-layer merge chain: `default.yaml` → task YAML → experiment base → experiment variant → CLI flags.
+
+To compare configurations, create a custom experiment:
+
+```yaml
+# experiments/model-comparison.yaml
+experiment_id: model-comparison
+description: "Compare Sonnet vs Opus on coding tasks"
+
+base:
+  agent:
+    type: claude-code
+    permission_mode: bypassPermissions
+
+variants:
+  - variant_id: sonnet
+    agent:
+      model: claude-sonnet-4-20250514
+  - variant_id: opus
+    agent:
+      model: claude-opus-4-20250514
+```
+
+```bash
+# Run all tasks across both variants
+coder-eval run -e experiments/model-comparison.yaml -j 4
+```
+
+This produces per-task cross-variant comparisons and experiment-level aggregates (win rates, ties, average scores, most divergent tasks). See [docs/features/2026-03-09-experiment-multi-run-configs-design.md](docs/features/2026-03-09-experiment-multi-run-configs-design.md) for the full design.
+
 ## API Routing & Benchmarking
 
 `coder-eval` supports two API routing modes:
@@ -258,16 +324,22 @@ coder-eval run tasks/hello_date.yaml --proxy
 
 ```
 runs/
-├── 2026-02-26_14-30-00/           # Timestamped run directory
-│   ├── run-report.md              # Human-readable markdown report
-│   ├── run-summary.json           # Aggregated statistics
-│   ├── task_id/
-│   │   ├── report.json            # Task evaluation result
-│   │   ├── task.log               # Task execution log
-│   │   ├── snapshots/             # Iteration snapshots (if enabled)
-│   │   └── artifacts/             # Preserved sandbox (if --preserve)
+├── 2026-02-26_14-30-00/               # Timestamped run directory
+│   ├── run.json                      # Run-level summary (tasks, durations, tokens)
+│   ├── run.md                        # Run-level markdown report
+│   ├── experiment.md                  # Cross-variant comparison report
+│   ├── experiment.json                # Full experiment result data
+│   ├── experiment.log                 # Aggregated execution log
+│   ├── <variant_id>/                  # Per-variant directory
+│   │   ├── variant.md                 # Variant aggregate report
+│   │   ├── variant.json               # Variant aggregate data
+│   │   └── task-<task_id>/            # Per-task directory
+│   │       ├── task.json              # Evaluation result
+│   │       ├── task.log               # Execution log
+│   │       ├── snapshots/             # Iteration snapshots (if enabled)
+│   │       └── artifacts/             # Preserved sandbox (if --preserve)
 │   └── ...
-└── latest -> 2026-02-26_14-30-00/ # Symlink to most recent run
+└── latest -> 2026-02-26_14-30-00/     # Symlink to most recent run
 ```
 
 ## Architecture
@@ -278,7 +350,7 @@ coder_eval/
 ├── criteria/        # Criterion checker plugins (10 types, auto-discovered)
 ├── evaluation/      # SuccessChecker + LLM reviewer
 ├── errors/          # Error categorization + retry logic
-├── orchestration/   # Batch execution + task loading
+├── orchestration/   # Batch execution + experiment resolution + task loading
 ├── cli/             # Typer CLI commands
 ├── scoring/         # Code similarity scorers (AST, token, complexity)
 ├── streaming/       # Real-time event streaming (callbacks, renderers)
@@ -404,7 +476,7 @@ See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.
 - [ ] Docker sandbox driver
 - [ ] Support for more agents (Aider, Cursor, etc.)
 - [ ] Web UI for results visualization
-- [ ] Comparative analysis reports
+- [x] Comparative analysis reports (experiment layer with multi-variant comparison)
 
 ## License
 

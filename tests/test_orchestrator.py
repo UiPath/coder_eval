@@ -40,7 +40,7 @@ def test_orchestrator_initialization(tmp_path):
 
     run_dir = tmp_path / "test_run" / "hello_date"
 
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=False)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=False, variant_id="test-variant")
 
     assert orchestrator.task == task
     assert orchestrator.run_dir == run_dir
@@ -57,7 +57,7 @@ async def test_orchestrator_create_agent(tmp_path):
 
     run_dir = tmp_path / "test_run" / "hello_date"
 
-    orchestrator = Orchestrator(task=task, run_dir=run_dir)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
 
     # Create agent
     agent = await orchestrator._create_agent()
@@ -74,7 +74,7 @@ def test_orchestrator_generate_feedback(tmp_path):
     task = load_task(task_file)
 
     run_dir = tmp_path / "test_run" / "hello_date"
-    Orchestrator(task=task, run_dir=run_dir)
+    Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
 
     # Create some failed criteria
     criteria_results = [
@@ -142,7 +142,7 @@ async def test_orchestrator_deterministic_feedback_with_failures(tmp_path):
     run_dir = tmp_path / "test_run" / "test_feedback"
     run_dir.mkdir(parents=True)
 
-    orchestrator = Orchestrator(task, run_dir, preserve_sandbox=False)
+    orchestrator = Orchestrator(task, run_dir, preserve_sandbox=False, variant_id="test-variant")
 
     # Initialize result (normally done in run())
     from datetime import datetime
@@ -150,6 +150,7 @@ async def test_orchestrator_deterministic_feedback_with_failures(tmp_path):
     orchestrator.result = EvaluationResult(
         task_id=task.task_id,
         task_description=task.description,
+        variant_id="test-variant",
         agent_type=task.agent.type,
         started_at=datetime.now(),
         final_status="FAILURE",
@@ -229,13 +230,14 @@ async def test_orchestrator_deterministic_feedback_with_partial_scores(tmp_path)
     run_dir = tmp_path / "test_run" / "test_partial"
     run_dir.mkdir(parents=True)
 
-    orchestrator = Orchestrator(task, run_dir, preserve_sandbox=False)
+    orchestrator = Orchestrator(task, run_dir, preserve_sandbox=False, variant_id="test-variant")
 
     from datetime import datetime
 
     orchestrator.result = EvaluationResult(
         task_id=task.task_id,
         task_description=task.description,
+        variant_id="test-variant",
         agent_type=task.agent.type,
         started_at=datetime.now(),
         final_status="FAILURE",
@@ -321,13 +323,14 @@ async def test_orchestrator_deterministic_feedback_mixed_results(tmp_path):
     run_dir = tmp_path / "test_run" / "test_mixed"
     run_dir.mkdir(parents=True)
 
-    orchestrator = Orchestrator(task, run_dir, preserve_sandbox=False)
+    orchestrator = Orchestrator(task, run_dir, preserve_sandbox=False, variant_id="test-variant")
 
     from datetime import datetime
 
     orchestrator.result = EvaluationResult(
         task_id=task.task_id,
         task_description=task.description,
+        variant_id="test-variant",
         agent_type=task.agent.type,
         started_at=datetime.now(),
         final_status="FAILURE",
@@ -409,10 +412,11 @@ async def test_run_batch_empty_list(tmp_path):
 
     config = BatchRunConfig(run_dir=tmp_path / "run", max_parallel=1)
 
-    # Should handle empty list gracefully
-    summary = await Orchestrator.run_batch([], config)
+    # Should handle empty list gracefully (empty list of ResolvedTask)
+    summary, task_results = await Orchestrator.run_batch([], config)
 
     # Verify empty summary
+    assert task_results == []
     assert summary.tasks_run == 0
     assert summary.tasks_succeeded == 0
     assert summary.tasks_failed == 0
@@ -420,8 +424,8 @@ async def test_run_batch_empty_list(tmp_path):
     assert len(summary.task_results) == 0
 
     # Files should still be created
-    assert (tmp_path / "run" / "run-summary.json").exists()
-    assert (tmp_path / "run" / "run-report.md").exists()
+    assert (tmp_path / "run" / "run.json").exists()
+    assert (tmp_path / "run" / "run.md").exists()
 
 
 def test_batch_run_config_validation():
@@ -444,37 +448,41 @@ def test_generate_run_summary(tmp_path):
     """Test run summary generation."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult
+    from coder_eval.models import AgentKind, EvaluationResult, TaskResult
     from coder_eval.orchestration.batch import _generate_run_summary
 
     # Create mock results
     results = [
-        {
-            "task_id": "task1",
-            "result": EvaluationResult(
+        TaskResult(
+            task_id="task1",
+            variant_id="test-variant",
+            result=EvaluationResult(
                 task_id="task1",
                 task_description="Test 1",
+                variant_id="test-variant",
                 agent_type=AgentKind.CLAUDE_CODE,
                 started_at=datetime.now(),
                 final_status="SUCCESS",
                 iteration_count=1,
                 environment_info={},
             ),
-            "duration": 10.0,
-        },
-        {
-            "task_id": "task2",
-            "result": EvaluationResult(
+            duration=10.0,
+        ),
+        TaskResult(
+            task_id="task2",
+            variant_id="test-variant",
+            result=EvaluationResult(
                 task_id="task2",
                 task_description="Test 2",
+                variant_id="test-variant",
                 agent_type=AgentKind.CLAUDE_CODE,
                 started_at=datetime.now(),
                 final_status="FAILURE",
                 iteration_count=2,
                 environment_info={},
             ),
-            "duration": 15.0,
-        },
+            duration=15.0,
+        ),
     ]
 
     summary = _generate_run_summary(
@@ -491,30 +499,27 @@ def test_generate_run_summary(tmp_path):
     assert summary.tasks_error == 0
 
     # Verify files created
-    assert (tmp_path / "run-summary.json").exists()
-    assert (tmp_path / "run-report.md").exists()
+    assert (tmp_path / "run.json").exists()
+    assert (tmp_path / "run.md").exists()
 
 
 def test_create_error_result(tmp_path):
     """Test error result creation for failed tasks."""
-    from coder_eval.orchestration.batch import _create_error_result
+    from coder_eval.models import TaskResult
+    from coder_eval.orchestration.batch import _create_error_task_result
 
     task_file = tmp_path / "failed_task.yaml"
     error = ValueError("Task loading failed")
 
-    result = _create_error_result(task_file, error)
+    result = _create_error_task_result(task_file, error, variant_id="test-variant")
 
-    # Verify structure
-    assert "task_id" in result
-    assert "result" in result
-    assert "duration" in result
-
-    # Verify contents
-    assert result["task_id"] == "failed_task"  # Stem of filename
-    assert result["duration"] == 0.0
-    assert result["result"].final_status == "ERROR"
-    assert result["result"].error_message == "Task loading failed"
-    assert result["result"].iteration_count == 0
+    # Verify typed result
+    assert isinstance(result, TaskResult)
+    assert result.task_id == "failed_task"  # Stem of filename
+    assert result.duration == 0.0
+    assert result.result.final_status == "ERROR"
+    assert result.result.error_message == "Task loading failed"
+    assert result.result.iteration_count == 0
 
 
 # ==================== Snapshot Integration Tests ====================
@@ -533,7 +538,7 @@ async def test_orchestrator_snapshot_setup_disabled(tmp_path):
     task.sandbox.python = None
 
     run_dir = tmp_path / "test_run" / "hello_date"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
 
     # Initialize result
     from datetime import datetime
@@ -543,6 +548,7 @@ async def test_orchestrator_snapshot_setup_disabled(tmp_path):
     orchestrator.result = EvaluationResult(
         task_id=task.task_id,
         task_description=task.description,
+        variant_id="test-variant",
         agent_type=AgentKind.CLAUDE_CODE,
         started_at=datetime.now(),
         final_status="FAILURE",
@@ -574,7 +580,7 @@ async def test_orchestrator_snapshot_setup_enabled(tmp_path):
     task.sandbox.python = None
 
     run_dir = tmp_path / "test_run" / "hello_date"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
 
     # Initialize result
     from datetime import datetime
@@ -584,6 +590,7 @@ async def test_orchestrator_snapshot_setup_enabled(tmp_path):
     orchestrator.result = EvaluationResult(
         task_id=task.task_id,
         task_description=task.description,
+        variant_id="test-variant",
         agent_type=AgentKind.CLAUDE_CODE,
         started_at=datetime.now(),
         final_status="FAILURE",
@@ -615,7 +622,7 @@ async def test_orchestrator_create_iteration_snapshot_disabled(tmp_path):
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.DISABLED)
 
     run_dir = tmp_path / "test_run" / "hello_date"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
 
     # Create dummy turn record
     turn_record = TurnRecord(
@@ -654,7 +661,7 @@ async def test_orchestrator_create_iteration_snapshot_full(tmp_path):
     task.sandbox.python = None
 
     run_dir = tmp_path / "test_run" / "hello_date"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
 
     # Create snapshot directory
     orchestrator.snapshot_base_dir = run_dir / "snapshots"
@@ -713,7 +720,7 @@ async def test_orchestrator_create_iteration_snapshot_hybrid(tmp_path):
     task.sandbox.python = None
 
     run_dir = tmp_path / "test_run" / "hello_date"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
 
     # Create snapshot directory
     orchestrator.snapshot_base_dir = run_dir / "snapshots"
@@ -796,7 +803,7 @@ async def test_orchestrator_snapshot_error_handling(tmp_path):
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.FULL)
 
     run_dir = tmp_path / "test_run" / "hello_date"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
 
     # Create snapshot directory but DON'T setup sandbox (will cause error)
     orchestrator.snapshot_base_dir = run_dir / "snapshots"
@@ -1021,6 +1028,7 @@ def test_evaluation_result_agent_config_default():
     result = EvaluationResult(
         task_id="test",
         task_description="test",
+        variant_id="test-variant",
         agent_type=AgentKind.CLAUDE_CODE,
         started_at=datetime.now(),
         final_status="SUCCESS",
@@ -1046,6 +1054,7 @@ def test_evaluation_result_agent_config_set():
     result = EvaluationResult(
         task_id="test",
         task_description="test",
+        variant_id="test-variant",
         agent_type=AgentKind.CLAUDE_CODE,
         started_at=datetime.now(),
         final_status="SUCCESS",
@@ -1075,6 +1084,7 @@ def test_evaluation_result_serialization_roundtrip_with_agent_config():
     original = EvaluationResult(
         task_id="roundtrip_test",
         task_description="test",
+        variant_id="test-variant",
         agent_type=AgentKind.CLAUDE_CODE,
         started_at=datetime(2025, 1, 1, 12, 0, 0),
         final_status="SUCCESS",
@@ -1101,6 +1111,7 @@ def test_evaluation_result_backward_compat_without_agent_config():
     old_json = """{
         "task_id": "old_task",
         "task_description": "old test",
+        "variant_id": "test-variant",
         "agent_type": "claude-code",
         "started_at": "2025-01-01T12:00:00",
         "final_status": "SUCCESS",
@@ -1120,37 +1131,41 @@ def test_batch_error_mapping_after_tag_filter(tmp_path):
     """Test that batch error results map to correct task file after tag filtering."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult
-    from coder_eval.orchestration.batch import _create_error_result
+    from coder_eval.models import AgentKind, EvaluationResult, TaskResult
+    from coder_eval.orchestration.batch import _create_error_task_result
 
     # Simulate: 3 original tasks, filter removes task 0, leaving tasks 1 and 2
     # If task 1 (index 0 in filtered list) errors, it should map to task_b, not task_a
 
-    task_a_result = {
-        "task_id": "task_b",
-        "result": EvaluationResult(
+    task_a_result = TaskResult(
+        task_id="task_b",
+        variant_id="test-variant",
+        result=EvaluationResult(
             task_id="task_b",
             task_description="Task B",
+            variant_id="test-variant",
             agent_type=AgentKind.CLAUDE_CODE,
             started_at=datetime.now(),
             final_status="SUCCESS",
             iteration_count=1,
         ),
-        "duration": 10.0,
-    }
+        duration=10.0,
+    )
 
-    task_b_error = _create_error_result(Path("task_c.yaml"), ValueError("Task C failed"))
+    task_b_error = _create_error_task_result(
+        Path("task_c.yaml"), ValueError("Task C failed"), variant_id="test-variant"
+    )
 
     # Both should have correct task IDs regardless of original ordering
-    assert task_a_result["task_id"] == "task_b"
-    assert task_b_error["task_id"] == "task_c"  # stem of the yaml file
+    assert task_a_result.task_id == "task_b"
+    assert task_b_error.task_id == "task_c"  # stem of the yaml file
 
 
 def test_generate_run_summary_includes_agent_config(tmp_path):
     """Test that _generate_run_summary includes agent_config in task results."""
     from datetime import datetime
 
-    from coder_eval.models import AgentConfig, AgentKind, EvaluationResult
+    from coder_eval.models import AgentConfig, AgentKind, EvaluationResult, TaskResult
     from coder_eval.orchestration.batch import _generate_run_summary
 
     config = AgentConfig(
@@ -1160,19 +1175,21 @@ def test_generate_run_summary_includes_agent_config(tmp_path):
     )
 
     results = [
-        {
-            "task_id": "task1",
-            "result": EvaluationResult(
+        TaskResult(
+            task_id="task1",
+            variant_id="test-variant",
+            result=EvaluationResult(
                 task_id="task1",
                 task_description="Test",
+                variant_id="test-variant",
                 agent_type=AgentKind.CLAUDE_CODE,
                 started_at=datetime.now(),
                 final_status="SUCCESS",
                 iteration_count=1,
                 agent_config=config,
             ),
-            "duration": 10.0,
-        },
+            duration=10.0,
+        ),
     ]
 
     summary = _generate_run_summary(
@@ -1194,22 +1211,24 @@ def test_generate_run_summary_agent_config_none(tmp_path):
     """Test that _generate_run_summary handles None agent_config."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult
+    from coder_eval.models import AgentKind, EvaluationResult, TaskResult
     from coder_eval.orchestration.batch import _generate_run_summary
 
     results = [
-        {
-            "task_id": "task1",
-            "result": EvaluationResult(
+        TaskResult(
+            task_id="task1",
+            variant_id="test-variant",
+            result=EvaluationResult(
                 task_id="task1",
                 task_description="Test",
+                variant_id="test-variant",
                 agent_type=AgentKind.CLAUDE_CODE,
                 started_at=datetime.now(),
                 final_status="ERROR",
                 iteration_count=0,
             ),
-            "duration": 0.0,
-        },
+            duration=0.0,
+        ),
     ]
 
     summary = _generate_run_summary(
@@ -1362,6 +1381,7 @@ def test_evaluation_result_sdk_options_default():
     result = EvaluationResult(
         task_id="test",
         task_description="test",
+        variant_id="test-variant",
         agent_type=AgentKind.CLAUDE_CODE,
         started_at=datetime.now(),
         final_status="SUCCESS",
@@ -1380,6 +1400,7 @@ def test_evaluation_result_serialization_roundtrip_with_sdk_options():
     original = EvaluationResult(
         task_id="roundtrip_sdk",
         task_description="test",
+        variant_id="test-variant",
         agent_type="claude-code",
         started_at=datetime(2025, 1, 1, 12, 0, 0),
         final_status="SUCCESS",
@@ -1414,6 +1435,7 @@ def test_evaluation_result_backward_compat_without_sdk_options():
     old_json = """{
         "task_id": "old_task",
         "task_description": "old test",
+        "variant_id": "test-variant",
         "agent_type": "claude-code",
         "started_at": "2025-01-01T12:00:00",
         "final_status": "SUCCESS",
@@ -1430,7 +1452,7 @@ def test_generate_run_summary_includes_sdk_options(tmp_path):
     """Test that _generate_run_summary includes sdk_options in task results."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult
+    from coder_eval.models import AgentKind, EvaluationResult, TaskResult
     from coder_eval.orchestration.batch import _generate_run_summary
 
     sdk_opts = {
@@ -1443,19 +1465,21 @@ def test_generate_run_summary_includes_sdk_options(tmp_path):
     }
 
     results = [
-        {
-            "task_id": "task1",
-            "result": EvaluationResult(
+        TaskResult(
+            task_id="task1",
+            variant_id="test-variant",
+            result=EvaluationResult(
                 task_id="task1",
                 task_description="Test",
+                variant_id="test-variant",
                 agent_type=AgentKind.CLAUDE_CODE,
                 started_at=datetime.now(),
                 final_status="SUCCESS",
                 iteration_count=1,
                 sdk_options=sdk_opts,
             ),
-            "duration": 10.0,
-        },
+            duration=10.0,
+        ),
     ]
 
     summary = _generate_run_summary(
@@ -1578,11 +1602,11 @@ async def test_run_batch_applies_max_turns_override(tmp_path):
 # ==================== Duplicate Task ID Validation Tests ====================
 
 
-@pytest.mark.asyncio
-async def test_run_batch_rejects_duplicate_task_ids(tmp_path):
-    """Test that run_batch raises ValueError when tasks share the same task_id."""
-    from coder_eval.orchestration.batch import run_batch
+def test_resolve_all_tasks_rejects_duplicate_task_ids(tmp_path):
+    """Test that resolve_all_tasks raises ValueError when tasks share the same task_id."""
+    from coder_eval.models import ExperimentBase, ExperimentDefinition, ExperimentVariant
     from coder_eval.orchestration.config import BatchRunConfig
+    from coder_eval.orchestration.experiment import resolve_all_tasks
 
     # Create two task YAML files with the same task_id
     task_yaml = """\
@@ -1603,7 +1627,23 @@ success_criteria:
     task_file_a.write_text(task_yaml)
     task_file_b.write_text(task_yaml)
 
-    config = BatchRunConfig(run_dir=tmp_path / "run")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    config = BatchRunConfig(run_dir=run_dir)
+    default_experiment = ExperimentDefinition(
+        experiment_id="default",
+        base=ExperimentBase(agent={"type": "claude-code"}),
+        variants=[ExperimentVariant(variant_id="default")],
+    )
+    experiment = ExperimentDefinition(
+        experiment_id="default",
+        variants=[ExperimentVariant(variant_id="default")],
+    )
 
     with pytest.raises(ValueError, match="Duplicate task IDs found"):
-        await run_batch(task_files=[task_file_a, task_file_b], config=config)
+        resolve_all_tasks(
+            task_files=[task_file_a, task_file_b],
+            experiment=experiment,
+            default_experiment=default_experiment,
+            config=config,
+        )

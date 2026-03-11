@@ -1,0 +1,21 @@
+# Model comparison experiment — compare Sonnet vs Opus on the same tasks.
+#
+# Usage:
+#   coder-eval run -e experiments/model-comparison.yaml
+#   coder-eval run tasks/hello_date.yaml -e experiments/model-comparison.yaml
+
+experiment_id: model-comparison
+description: "Compare Sonnet 4.6 vs Opus 4.6 on coding tasks"
+
+base:
+  agent:
+    type: claude-code
+    permission_mode: bypassPermissions
+
+variants:
+  - variant_id: sonnet
+    agent:
+      model: claude-sonnet-4-6-20250514
+  - variant_id: opus
+    agent:
+      model: claude-opus-4-6-20250514

@@ -119,6 +119,7 @@ class TestEvaluationResultTokenUsage:
         result = EvaluationResult(
             task_id="test",
             task_description="test task",
+            variant_id="test-variant",
             agent_type=AgentKind.CLAUDE_CODE,
             started_at=datetime.now(),
             final_status="SUCCESS",
@@ -135,6 +136,7 @@ class TestEvaluationResultTokenUsage:
         result = EvaluationResult(
             task_id="test",
             task_description="test task",
+            variant_id="test-variant",
             agent_type=AgentKind.CLAUDE_CODE,
             started_at=datetime.now(),
             final_status="SUCCESS",

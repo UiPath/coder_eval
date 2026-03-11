@@ -30,6 +30,19 @@ from coder_eval.models.enums import (
     SnapshotMode,
 )
 
+# Experiment
+from coder_eval.models.experiment import (
+    ExperimentBase,
+    ExperimentDefinition,
+    ExperimentResult,
+    ExperimentVariant,
+    ResolvedTask,
+    TaskExperimentSummary,
+    TaskResult,
+    VariantAggregate,
+    VariantResult,
+)
+
 # Results
 from coder_eval.models.results import (
     CriterionResult,
@@ -129,6 +142,16 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "AgentConfig",
     "LLMReviewerConfig",
     "ReferenceSource",
+    # Experiment
+    "ExperimentBase",
+    "ExperimentDefinition",
+    "ExperimentResult",
+    "ExperimentVariant",
+    "ResolvedTask",
+    "TaskExperimentSummary",
+    "TaskResult",
+    "VariantAggregate",
+    "VariantResult",
 ]
 
 # Type aliases (forward compatible)

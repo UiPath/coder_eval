@@ -1,0 +1,50 @@
+# Default experiment — provides baseline agent configuration.
+#
+# Tasks that omit the `agent` field inherit these defaults via the
+# 4-layer merge chain: default.yaml → task YAML → experiment base → variant.
+# All agent properties are listed explicitly so users know the baseline.
+
+experiment_id: default
+description: "Default experiment - provides baseline agent configuration"
+
+base:
+  # Default max iterations for the evaluation loop (task-level overrides this)
+  max_iterations: 3
+
+  agent:
+    # Agent type (currently only "claude-code" is supported)
+    type: claude-code
+
+    # Permission mode for agent actions:
+    #   default        - ask for confirmation on each action
+    #   acceptEdits    - auto-accept file edits, confirm other actions
+    #   plan           - read-only, no file modifications allowed
+    #   bypassPermissions - auto-accept all actions (use with caution)
+    permission_mode: acceptEdits
+
+    # Specific model to use (null = defer to Claude Code CLI default)
+    # Examples: claude-sonnet-4-6-20250514, claude-opus-4-20250514
+    model: claude-sonnet-4-6-20250514
+
+    # Maximum agent inner-loop turns per iteration (null = SDK default)
+    # Typical range in tasks: 3-18 depending on complexity
+    max_turns: 3
+
+    # Maximum seconds per agent turn / communicate call (null = no limit)
+    turn_timeout: 300
+
+    # Allowed tools — restrict which tools the agent can use (null = all tools)
+    # Most tasks use ["Bash"] or ["Bash", "Read", "Write"]. This default
+    # provides the common set needed for general-purpose coding tasks.
+    allowed_tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+    # Claude Code plugins to load (null = none)
+    # Example: [{"name": "my-plugin", "path": "/path/to/plugin"}]
+    plugins: null
+
+    # Additional patterns to ignore during file change detection (beyond defaults)
+    # Example: ["*.log", "__pycache__"]
+    ignore_patterns: []
+
+variants:
+  - variant_id: default

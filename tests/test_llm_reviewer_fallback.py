@@ -60,6 +60,7 @@ async def test_llm_reviewer_fallback_on_failure(tmp_path):
         run_dir=tmp_path / "run",
         preserve_sandbox=False,
         task_file=tmp_path / "task.yaml",
+        variant_id="test-variant",
     )
 
     # Mock LLM reviewer to return None (simulates failure)
@@ -70,6 +71,7 @@ async def test_llm_reviewer_fallback_on_failure(tmp_path):
     orchestrator.result = EvaluationResult(
         task_id="test_task",
         task_description="Test task",
+        variant_id="test-variant",
         agent_type=AgentKind.CLAUDE_CODE,
         started_at=datetime.now(),
         final_status="FAILURE",
@@ -139,6 +141,7 @@ async def test_llm_reviewer_succeeds_when_available(tmp_path):
         run_dir=tmp_path / "run",
         preserve_sandbox=False,
         task_file=tmp_path / "task.yaml",
+        variant_id="test-variant",
     )
 
     # Mock LLM reviewer to return decision
@@ -155,6 +158,7 @@ async def test_llm_reviewer_succeeds_when_available(tmp_path):
     orchestrator.result = EvaluationResult(
         task_id="test_task",
         task_description="Test task",
+        variant_id="test-variant",
         agent_type=AgentKind.CLAUDE_CODE,
         started_at=datetime.now(),
         final_status="FAILURE",
@@ -218,6 +222,7 @@ async def test_fallback_includes_criterion_details(tmp_path):
         run_dir=tmp_path / "run",
         preserve_sandbox=False,
         task_file=tmp_path / "task.yaml",
+        variant_id="test-variant",
     )
 
     # No LLM reviewer
@@ -226,6 +231,7 @@ async def test_fallback_includes_criterion_details(tmp_path):
     orchestrator.result = EvaluationResult(
         task_id="test_task",
         task_description="Test task",
+        variant_id="test-variant",
         agent_type=AgentKind.CLAUDE_CODE,
         started_at=datetime.now(),
         final_status="FAILURE",
@@ -294,6 +300,7 @@ async def test_fallback_with_partial_pass(tmp_path):
         run_dir=tmp_path / "run",
         preserve_sandbox=False,
         task_file=tmp_path / "task.yaml",
+        variant_id="test-variant",
     )
 
     orchestrator.llm_reviewer = None
@@ -301,6 +308,7 @@ async def test_fallback_with_partial_pass(tmp_path):
     orchestrator.result = EvaluationResult(
         task_id="test_task",
         task_description="Test task",
+        variant_id="test-variant",
         agent_type=AgentKind.CLAUDE_CODE,
         started_at=datetime.now(),
         final_status="FAILURE",

@@ -19,7 +19,8 @@ coder_eval/
 ├── config.py                      # Settings via pydantic-settings (.env loading)
 ├── sandbox.py                     # Sandbox manager (tempdir, venv, templates, snapshots)
 ├── orchestrator.py                # Main evaluation loop
-├── reports.py                     # Markdown/JSON report generation
+├── reports.py                     # Markdown/JSON report generation (run-level)
+├── reports_experiment.py          # Experiment/cross-variant report generation
 ├── analysis.py                    # Command statistics aggregation
 ├── logging_config.py              # Structured logging setup
 ├── path_utils.py                  # Run ID generation, path utilities
@@ -32,9 +33,10 @@ coder_eval/
 │   ├── __init__.py                # Unified exports for all models
 │   ├── enums.py                   # AgentKind, AgentState, SnapshotMode
 │   ├── criteria.py                # 10 success criterion types + base + union
+│   ├── experiment.py              # ExperimentDefinition, ExperimentVariant, result models
 │   ├── results.py                 # CriterionResult, TurnRecord, EvaluationResult, etc.
 │   ├── sandbox.py                 # SandboxConfig, SnapshotConfig, ResourceLimits
-│   ├── tasks.py                   # TaskDefinition, AgentConfig, LLMReviewerConfig
+│   ├── tasks.py                   # TaskDefinition, AgentConfig (agent optional)
 │   ├── telemetry.py               # CommandTelemetry, CommandStatistics, TokenUsage
 │   └── templates.py               # RepoSource, TemplateDirSource, StarterFilesSource
 │
@@ -64,9 +66,10 @@ coder_eval/
 │   └── timeout.py                 # Timeout handling
 │
 ├── orchestration/                 # Batch execution utilities
-│   ├── batch.py                   # Parallel task execution
+│   ├── batch.py                   # Parallel task execution (run_batch + run_batch_resolved)
 │   ├── config.py                  # Batch run configuration
 │   ├── evaluation.py              # Evaluation helpers
+│   ├── experiment.py              # ExperimentRunner, resolve_task_for_variant, load_experiment
 │   └── task_loader.py             # YAML task loading
 │
 ├── cli/                           # CLI commands (Typer + Rich)
@@ -94,6 +97,7 @@ coder_eval/
 │
 └── resources/                     # Package resources
 
+experiments/                        # Experiment definition YAML files
 tasks/                             # Task definition YAML files
 tests/                             # Test suite
 docs/                              # Documentation
@@ -107,6 +111,7 @@ templates/                         # Sandbox template directories
 - **Strategy Pattern**: `Agent` ABC with implementations in `agents/`
 - **Separation of Concerns**: Data models (`models/`) are pure Pydantic; logic lives in `criteria/`, `evaluation/`, etc.
 - **Callback Streaming**: `StreamCallback` protocol with `TaskScopedCallback` wrapper for real-time LLM event output
+- **Experiment Layer**: Pre-processing config resolver (`ExperimentRunner`) that resolves task × variant combinations via 5-layer merge (default → task → base → variant → CLI) before passing to `run_batch`
 - **All models importable from `coder_eval.models`** regardless of submodule
 
 ## Success Criteria (11 types)
@@ -129,9 +134,16 @@ All criteria support `weight` (default 1.0) and `pass_threshold` (default 0.9).
 ## Evaluation Flow
 
 ```
-CLI → Orchestrator → Sandbox + Agent + SuccessChecker + LLMReviewer
+CLI → ExperimentRunner (resolve task × variant) → run_batch → Orchestrator → Sandbox + Agent + SuccessChecker
 
-Loop (up to max_iterations):
+ExperimentRunner resolves configs via 5-layer merge:
+  1. experiments/default.yaml  (baseline defaults)
+  2. tasks/<task>.yaml         (task-specific config)
+  3. experiment base           (experiment-wide overrides)
+  4. experiment variant        (variant-specific overrides)
+  5. CLI flags                 (always wins)
+
+Per-task loop (up to max_iterations):
   1. Agent.communicate(prompt) → TurnRecord
   2. Create snapshot (if enabled)
   3. SuccessChecker.check_all() → List[CriterionResult]

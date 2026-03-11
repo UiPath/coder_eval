@@ -91,6 +91,7 @@ class EvaluationResult(BaseModel):
 
     task_id: str = Field(description="ID of the evaluated task")
     task_description: str = Field(description="Description of the task")
+    variant_id: str = Field(default="default", description="ID of the experiment variant")
     agent_type: AgentKind = Field(description="Type of agent used")
     model_used: str | None = Field(
         default=None, description="Model identifier used for the evaluation (resolved from turns or agent config)"

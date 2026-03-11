@@ -62,7 +62,7 @@ async def test_snapshot_e2e_hybrid_mode_checkpoint_logic(tmp_path):
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.HYBRID, checkpoint_frequency=3)
 
     run_dir = tmp_path / "test_run" / "hybrid_test"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=False)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=False, variant_id="test-variant")
 
     # Setup snapshot directory and sandbox
     orchestrator.snapshot_base_dir = run_dir / "snapshots"
@@ -171,7 +171,7 @@ async def test_snapshot_directory_structure(tmp_path):
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.FULL)
 
     run_dir = tmp_path / "test_run" / "structure_test"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=False)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=False, variant_id="test-variant")
 
     orchestrator.snapshot_base_dir = run_dir / "snapshots"
     orchestrator.snapshot_base_dir.mkdir(parents=True, exist_ok=True)
@@ -239,7 +239,7 @@ async def test_snapshot_ignore_patterns_applied(tmp_path):
     )
 
     run_dir = tmp_path / "test_run" / "ignore_test"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=False)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=False, variant_id="test-variant")
 
     orchestrator.snapshot_base_dir = run_dir / "snapshots"
     orchestrator.snapshot_base_dir.mkdir(parents=True, exist_ok=True)

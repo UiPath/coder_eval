@@ -32,7 +32,7 @@ def test_get_task_report_path():
     """Test report path construction."""
     run_dir = Path("/tmp/runs/2025-01-01_12-00-00")
     report_path = get_task_report_path(run_dir, "hello_world")
-    assert report_path == run_dir / "hello_world" / "report.json"
+    assert report_path == run_dir / "hello_world" / "task.json"
 
 
 def test_get_task_artifact_dir():

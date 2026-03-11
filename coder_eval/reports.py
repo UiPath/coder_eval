@@ -401,7 +401,7 @@ class ReportGenerator:
             if not task_dir.is_dir() or task_dir.name in {"artifacts", ".git"}:
                 continue
 
-            report_path = task_dir / "report.json"
+            report_path = task_dir / "task.json"
             if not report_path.exists():
                 continue
 
@@ -437,22 +437,23 @@ class ReportGenerator:
         if run_dir.is_symlink():
             run_dir = run_dir.resolve()
 
-        report_md_path = run_dir / "run-report.md"
-        summary_json_path = run_dir / "run-summary.json"
+        # Check for reports in order of preference:
+        # 1. experiment.md/json (written by ExperimentReportGenerator)
+        # 2. run.md/json (written by batch-level _generate_run_summary)
+        for md_name, json_name in [("experiment.md", "experiment.json"), ("run.md", "run.json")]:
+            report_md_path = run_dir / md_name
+            summary_json_path = run_dir / json_name
 
-        # Try pre-generated markdown report first
-        if report_md_path.exists():
-            return report_md_path.read_text(), report_md_path
+            if report_md_path.exists():
+                return report_md_path.read_text(), report_md_path
 
-        # Fall back to regenerating from JSON summary
-        if summary_json_path.exists():
-            from .models import RunSummary
+            if summary_json_path.exists():
+                from .models import RunSummary
 
-            summary = RunSummary.model_validate_json(summary_json_path.read_text())
-            report_md = ReportGenerator.generate_markdown(summary, run_dir=run_dir)
-            return report_md, summary_json_path
+                summary = RunSummary.model_validate_json(summary_json_path.read_text())
+                report_md = ReportGenerator.generate_markdown(summary, run_dir=run_dir)
+                return report_md, summary_json_path
 
-        # Neither file exists
         raise FileNotFoundError(
-            f"No report found in {run_dir}. Expected {report_md_path.name} or {summary_json_path.name}"
+            f"No report found in {run_dir}. Expected experiment.md, experiment.json, run.md, or run.json"
         )

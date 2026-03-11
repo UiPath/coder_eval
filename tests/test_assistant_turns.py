@@ -67,6 +67,7 @@ class TestEvaluationResultTotalAssistantTurns:
         result = EvaluationResult(
             task_id="test",
             task_description="desc",
+            variant_id="test-variant",
             agent_type="claude-code",
             started_at=datetime.now(),
             final_status="SUCCESS",
@@ -79,6 +80,7 @@ class TestEvaluationResultTotalAssistantTurns:
         result = EvaluationResult(
             task_id="test",
             task_description="desc",
+            variant_id="test-variant",
             agent_type="claude-code",
             started_at=datetime.now(),
             final_status="SUCCESS",
@@ -103,6 +105,7 @@ class TestEvaluationResultTotalAssistantTurns:
         result = EvaluationResult(
             task_id="test",
             task_description="desc",
+            variant_id="test-variant",
             agent_type="claude-code",
             started_at=datetime.now(),
             final_status="ERROR",
@@ -120,6 +123,7 @@ class TestEvaluationResultTotalAssistantTurns:
         result = EvaluationResult(
             task_id="test",
             task_description="desc",
+            variant_id="test-variant",
             agent_type="claude-code",
             started_at=datetime.now(),
             final_status="SUCCESS",
@@ -133,7 +137,7 @@ class TestEvaluationResultTotalAssistantTurns:
     def test_backward_compatible_deserialization(self):
         """Old JSON without total_assistant_turns should deserialize with None default."""
         old_json = (
-            '{"task_id": "t", "task_description": "d", "agent_type": "claude-code",'
+            '{"task_id": "t", "task_description": "d", "variant_id": "test-variant", "agent_type": "claude-code",'
             '"started_at": "2025-01-01T00:00:00", "final_status": "SUCCESS", "iteration_count": 1}'
         )
         result = EvaluationResult.model_validate_json(old_json)
@@ -264,6 +268,7 @@ class TestRunSummaryAssistantTurnCount:
         result = EvaluationResult(
             task_id="task1",
             task_description="Test",
+            variant_id="test-variant",
             agent_type=AgentKind.CLAUDE_CODE,
             started_at=datetime.now(),
             final_status="SUCCESS",
@@ -274,9 +279,11 @@ class TestRunSummaryAssistantTurnCount:
             ],
         )
 
+        from coder_eval.models import TaskResult
+
         summary = _generate_run_summary(
             run_dir=tmp_path,
-            task_results=[{"task_id": "task1", "result": result, "duration": 10.0}],
+            task_results=[TaskResult(task_id="task1", variant_id="test-variant", result=result, duration=10.0)],
             start_time=datetime.now(),
             end_time=datetime.now(),
         )
@@ -288,11 +295,13 @@ class TestRunSummaryAssistantTurnCount:
 
     def test_summary_report_renders_assistant_turns(self, tmp_path):
         """End-to-end: summary generation -> report rendering shows correct Asst Turns."""
+        from coder_eval.models import TaskResult
         from coder_eval.orchestration.batch import _generate_run_summary
 
         result = EvaluationResult(
             task_id="task1",
             task_description="Test",
+            variant_id="test-variant",
             agent_type=AgentKind.CLAUDE_CODE,
             started_at=datetime.now(),
             final_status="SUCCESS",
@@ -304,7 +313,7 @@ class TestRunSummaryAssistantTurnCount:
 
         summary = _generate_run_summary(
             run_dir=tmp_path,
-            task_results=[{"task_id": "task1", "result": result, "duration": 10.0}],
+            task_results=[TaskResult(task_id="task1", variant_id="test-variant", result=result, duration=10.0)],
             start_time=datetime.now(),
             end_time=datetime.now(),
         )
