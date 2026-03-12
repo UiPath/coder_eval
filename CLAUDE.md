@@ -32,7 +32,7 @@ coder_eval/
 ├── models/                        # Pydantic data models (subpackage)
 │   ├── __init__.py                # Unified exports for all models
 │   ├── enums.py                   # AgentKind, AgentState, SnapshotMode
-│   ├── criteria.py                # 10 success criterion types + base + union
+│   ├── criteria.py                # 12 success criterion types + base + union
 │   ├── experiment.py              # ExperimentDefinition, ExperimentVariant, result models
 │   ├── results.py                 # CriterionResult, TurnRecord, EvaluationResult, etc.
 │   ├── sandbox.py                 # SandboxConfig, SnapshotConfig, ResourceLimits
@@ -46,6 +46,7 @@ coder_eval/
 │   ├── file_exists.py
 │   ├── file_contains.py
 │   ├── file_check.py
+│   ├── json_check.py
 │   ├── run_command.py
 │   ├── pytest_criterion.py
 │   ├── file_matches_regex.py
@@ -113,13 +114,14 @@ templates/                         # Sandbox template directories
 - **Experiment Layer**: Pre-processing config resolver (`ExperimentRunner`) that resolves task × variant combinations via 5-layer merge (default → task → base → variant → CLI) before passing to `run_batch`
 - **All models importable from `coder_eval.models`** regardless of submodule
 
-## Success Criteria (10 types)
+## Success Criteria (12 types)
 
 | Type | Scoring | Description |
 |------|---------|-------------|
 | `file_exists` | Binary | File must exist |
 | `file_contains` | Fractional | String presence/absence |
 | `file_check` | Fractional | Unified file existence + content + regex check |
+| `json_check` | Fractional | JSON validation + JSON Schema + JMESPath assertions |
 | `run_command` | Binary | Command exit code + optional stdout matching |
 | `pytest` | Fractional | tests_passed / total |
 | `file_matches_regex` | Binary | Regex match on file |

@@ -262,7 +262,7 @@ File existence is implicit — if the file doesn't exist, score is 0.0. If no su
 
 ### `json_check`
 
-Validates a JSON file: existence, parse-ability, key presence, and key-value matching. **Fractional scoring.**
+Validates a JSON file: existence, parse-ability, JSON Schema conformance, and JMESPath assertions. **Fractional scoring.**
 
 File existence and valid JSON are implicit — if the file is missing or unparseable, score is 0.0. If no sub-checks are specified, it's a pure "is valid JSON" check.
 
@@ -272,26 +272,53 @@ File existence and valid JSON are implicit — if the file is missing or unparse
   path: "data.json"
   description: "data.json is valid JSON"
 
-# Full: validate structure
+# Schema validation only
+- type: "json_check"
+  path: "output.json"
+  json_schema: "schemas/output_schema.json"
+  description: "Output conforms to expected schema"
+
+# JMESPath assertions only
 - type: "json_check"
   path: "report.json"
-  required_keys:                      # Keys that must exist
-    - "command_used"
-    - "steps_completed"
-    - "metadata.version"              # Dot-notation for nested keys
-  key_values:                         # Key-value pairs that must match
-    validation_passed: true
-    status: "success"
-  description: "Report has expected structure"
+  assertions:
+    - expression: "status"
+      expected: "success"
+    - expression: "length(results)"
+      operator: "gte"
+      expected: 1
+    - expression: "metadata.version"
+      operator: "regex"
+      expected: "^\\d+\\.\\d+\\.\\d+$"
+  description: "Report has correct structure and values"
+
+# Both schema + assertions
+- type: "json_check"
+  path: "result.json"
+  json_schema: "schemas/result_schema.json"
+  assertions:
+    - expression: "status"
+      expected: "completed"
+    - expression: "items[?active].name"
+      operator: "exists"
+  description: "Result is valid and has expected values"
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `path` | *required* | Path to the JSON file (relative to sandbox root) |
-| `required_keys` | `[]` | Keys that must exist (dot-notation for nested) |
-| `key_values` | `{}` | Key-value pairs that must match (dot-notation for nested) |
+| `json_schema` | `null` | Path to a JSON Schema file (relative to sandbox root) |
+| `assertions` | `[]` | List of JMESPath assertions (see below) |
 
-**Scoring:** Only active categories contribute. `required_keys` score = fraction found; `key_values` score = fraction matched. Final score = average of active categories.
+**Assertion fields:**
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `expression` | *required* | JMESPath expression to evaluate |
+| `operator` | `"equals"` | One of: `equals`, `not_equals`, `contains`, `gt`, `gte`, `lt`, `lte`, `type`, `regex`, `exists` |
+| `expected` | `null` | Expected value (required for all operators except `exists`) |
+
+**Scoring:** Only active categories (schema, assertions) contribute. Schema scoring is binary (1.0/0.0). Assertions score = passed / total. When both are used, final score = average of the two category scores.
 
 ### `run_command`
 

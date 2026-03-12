@@ -10,7 +10,7 @@ A robust, extensible framework for evaluating AI coding agents with comprehensiv
 - **Sandbox Snapshots** — Capture complete sandbox state after each iteration for debugging and analysis
 - **Agent Abstraction** — Generic agent interface (currently supports Claude Code, extensible to others)
 - **Dual Evaluation** — Objective success criteria plus optional qualitative LLM review
-- **10 Criterion Types** — From simple file checks to pytest scoring, pylint analysis, and code similarity
+- **12 Criterion Types** — From simple file checks to pytest scoring, pylint analysis, and code similarity
 - **Command Telemetry** — Full traceability of every tool invocation with timing and status
 - **Token Usage Tracking** — Input/output token counts for cost analysis
 - **Reference Comparison** — Code similarity scoring using AST, token, and complexity analysis
@@ -215,7 +215,7 @@ success_criteria:
     description: "Script must execute successfully"
 ```
 
-For the full task definition reference — all 10 criterion types, scoring, templates, snapshots, LLM reviewer, and reference comparison — see **[docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_GUIDE.md)**.
+For the full task definition reference — all 12 criterion types, scoring, templates, snapshots, LLM reviewer, and reference comparison — see **[docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_GUIDE.md)**.
 
 > **Tip:** When creating new tasks with Claude Code, point it at the guide:
 > _"Read `docs/TASK_DEFINITION_GUIDE.md` and use it as a reference to create a new task definition for ..."_
@@ -347,7 +347,7 @@ runs/
 ```
 coder_eval/
 ├── models/          # Pydantic data models (7 submodules)
-├── criteria/        # Criterion checker plugins (10 types, auto-discovered)
+├── criteria/        # Criterion checker plugins (12 types, auto-discovered)
 ├── evaluation/      # SuccessChecker + LLM reviewer
 ├── errors/          # Error categorization + retry logic
 ├── orchestration/   # Batch execution + experiment resolution + task loading

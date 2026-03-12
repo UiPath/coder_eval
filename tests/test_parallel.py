@@ -2,7 +2,7 @@
 
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -12,7 +12,7 @@ from coder_eval.orchestrator import Orchestrator
 
 
 @pytest.mark.asyncio
-async def test_sequential_mode(tmp_path, mocker):
+async def test_sequential_mode(tmp_path):
     """Test that max_parallel=1 maintains sequential execution."""
     # Create a valid task file
     task_content = """
@@ -49,7 +49,6 @@ success_criteria:
     mock_agent.start = AsyncMock(side_effect=RuntimeError("mock agent crash"))
     mock_agent.stop = AsyncMock()
     mock_agent.get_state.return_value = AgentState.ERROR
-    mocker.patch.object(Orchestrator, "_create_agent", new=AsyncMock(return_value=mock_agent))
 
     # Configure batch execution with sequential mode
     run_dir = tmp_path / "run"
@@ -70,7 +69,8 @@ success_criteria:
 
     # This should complete without raising an exception
     # The task will fail (ERROR status) but that's expected - we're testing the execution flow
-    summary, _results = await Orchestrator.run_batch([resolved_task], config)
+    with patch.object(Orchestrator, "_create_agent", new=AsyncMock(return_value=mock_agent)):
+        summary, _results = await Orchestrator.run_batch([resolved_task], config)
 
     # Verify summary
     assert summary.tasks_run == 1

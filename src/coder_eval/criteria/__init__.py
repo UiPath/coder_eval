@@ -129,6 +129,7 @@ def validate_registry() -> None:
             "file_exists",
             "file_contains",
             "file_check",
+            "json_check",
             "run_command",
             "pytest",
             "file_matches_regex",

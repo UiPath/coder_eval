@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -126,6 +126,58 @@ class RegexPattern(BaseModel):
     pattern: str = Field(description="Regex pattern to match against file content")
     must_match: bool = Field(default=True, description="If True, pattern must match; if False, pattern must NOT match")
     flags: int = Field(default=0, description="Regex flags (e.g., re.IGNORECASE=2, re.MULTILINE=8, re.DOTALL=16)")
+
+
+_OPERATORS_REQUIRING_EXPECTED = frozenset(
+    {
+        "equals",
+        "not_equals",
+        "contains",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "type",
+        "regex",
+    }
+)
+
+
+class JMESPathAssertion(BaseModel):
+    """A single JMESPath assertion within JsonCheckCriterion."""
+
+    expression: str = Field(description="JMESPath expression to evaluate against the parsed JSON")
+    operator: Literal["equals", "not_equals", "contains", "gt", "gte", "lt", "lte", "type", "regex", "exists"] = Field(
+        default="equals", description="Comparison operator (default: 'equals')"
+    )
+    expected: Any = Field(default=None, description="Expected value. Not required when operator is 'exists'.")
+
+    @model_validator(mode="after")
+    def validate_expected_for_operator(self) -> JMESPathAssertion:
+        """Enforce that 'expected' is provided for operators that require it.
+
+        Uses model_fields_set to distinguish 'expected' not provided from
+        explicitly set to None (valid JSON null).
+        """
+        expected_provided = "expected" in self.model_fields_set
+        if self.operator in _OPERATORS_REQUIRING_EXPECTED and not expected_provided:
+            raise ValueError(f"'expected' is required when operator is '{self.operator}'")
+        return self
+
+
+class JsonCheckCriterion(BaseSuccessCriterion):
+    """Validate a JSON file: existence, parseability, schema conformance, and JMESPath assertions.
+
+    Fractional scoring. File missing or invalid JSON -> 0.0.
+    Only active categories (schema, assertions) contribute to the average.
+    """
+
+    type: Literal["json_check"] = "json_check"
+    path: str = Field(description="Path to the JSON file (relative to sandbox root)")
+    json_schema: str | None = Field(default=None, description="Path to JSON Schema file (relative to sandbox root)")
+    assertions: list[JMESPathAssertion] = Field(
+        default_factory=list, description="JMESPath assertions to evaluate against the parsed JSON"
+    )
 
 
 class FileCheckCriterion(BaseSuccessCriterion):
@@ -338,6 +390,7 @@ SuccessCriterion = (
     | PytestCriterion
     | FileMatchesRegexCriterion
     | FileCheckCriterion
+    | JsonCheckCriterion
     | PylintScoreCriterion
     | ReferenceComparisonCriterion
     | CommandExecutedCriterion
