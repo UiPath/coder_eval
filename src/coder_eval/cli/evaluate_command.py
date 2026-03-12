@@ -60,7 +60,7 @@ def evaluate_command(
     console.print("\n[bold]Evaluating Criteria[/bold]\n")
 
     try:
-        task = load_task(task_file)
+        task, source_yaml = load_task(task_file)
     except Exception as e:
         console.print(f"[red]✗ Failed to load task:[/red] {e}")
         raise typer.Exit(1) from e
@@ -95,6 +95,7 @@ def evaluate_command(
             task_file=task_file,
             sandbox=sandbox,
             variant_id="evaluate",
+            source_yaml=source_yaml,
         )
         return await orchestrator.run()
 

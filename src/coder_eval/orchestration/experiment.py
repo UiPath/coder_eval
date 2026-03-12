@@ -11,12 +11,13 @@ from __future__ import annotations
 import importlib.resources
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
 from ..models import (
     AgentConfig,
+    ConfigLineageEntry,
     EvaluationResult,
     ExperimentDefinition,
     ExperimentResult,
@@ -101,12 +102,35 @@ def _merge_agent_dicts(*layers: dict[str, Any] | None) -> dict[str, Any]:
     return merged
 
 
+type ConfigSource = Literal["default", "task", "experiment-base", "variant", "cli"]
+
+
+def _build_agent_lineage(
+    layers: list[tuple[ConfigSource, dict[str, Any] | None]],
+) -> dict[str, ConfigLineageEntry]:
+    """Replay the agent merge and record which layer set each key.
+
+    Args:
+        layers: List of (source_name, agent_dict) tuples in precedence order (later wins).
+
+    Returns:
+        Dict mapping dotted keys like "agent.model" to ConfigLineageEntry.
+    """
+    lineage: dict[str, ConfigLineageEntry] = {}
+    for source_name, layer in layers:
+        if layer is None:
+            continue
+        for key, value in layer.items():
+            lineage[f"agent.{key}"] = ConfigLineageEntry(value=value, source=source_name)
+    return lineage
+
+
 def resolve_task_for_variant(
     default_experiment: ExperimentDefinition,
     task: TaskDefinition,
     experiment: ExperimentDefinition,
     variant: ExperimentVariant,
-) -> TaskDefinition:
+) -> tuple[TaskDefinition, dict[str, ConfigLineageEntry]]:
     """Resolve a fully-configured TaskDefinition by merging the 4-layer precedence chain.
 
     Precedence (lowest to highest):
@@ -122,7 +146,7 @@ def resolve_task_for_variant(
         variant: The specific variant to resolve for.
 
     Returns:
-        A new TaskDefinition with fully-resolved agent config and scalar overrides.
+        Tuple of (resolved TaskDefinition, config lineage dict).
     """
     # Layer 1: default experiment base agent
     default_agent = default_experiment.base.agent if default_experiment.base else None
@@ -140,53 +164,93 @@ def resolve_task_for_variant(
     merged_agent_dict = _merge_agent_dicts(default_agent, task_agent, exp_base_agent, variant_agent)
     resolved_agent = AgentConfig(**merged_agent_dict)
 
-    # Resolve scalar overrides through layers 1-4
+    # Build agent lineage
+    agent_lineage = _build_agent_lineage(
+        [
+            ("default", default_agent),
+            ("task", task_agent),
+            ("experiment-base", exp_base_agent),
+            ("variant", variant_agent),
+        ]
+    )
+
+    # Resolve scalar overrides and track lineage simultaneously (4-layer precedence)
     resolved_max_iterations = task.max_iterations
     resolved_task_timeout = task.task_timeout
     resolved_turn_timeout = task.agent.turn_timeout if task.agent else None
 
+    scalar_lineage: dict[str, ConfigLineageEntry] = {}
+
+    # Record task-explicit scalars as baseline lineage
+    task_explicit = task.model_fields_set
+    if "max_iterations" in task_explicit:
+        scalar_lineage["max_iterations"] = ConfigLineageEntry(value=task.max_iterations, source="task")
+    if "task_timeout" in task_explicit:
+        scalar_lineage["task_timeout"] = ConfigLineageEntry(value=task.task_timeout, source="task")
+    if task.agent and "turn_timeout" in task.agent.model_fields_set:
+        scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=task.agent.turn_timeout, source="task")
+
     # Layer 1: default experiment base scalars (only override Pydantic defaults, not explicit task values)
     if default_experiment.base:
-        if default_experiment.base.max_iterations is not None and "max_iterations" not in task.model_fields_set:
+        if default_experiment.base.max_iterations is not None and "max_iterations" not in task_explicit:
             resolved_max_iterations = default_experiment.base.max_iterations
-        if default_experiment.base.task_timeout is not None and "task_timeout" not in task.model_fields_set:
+            scalar_lineage["max_iterations"] = ConfigLineageEntry(value=resolved_max_iterations, source="default")
+        if default_experiment.base.task_timeout is not None and "task_timeout" not in task_explicit:
             resolved_task_timeout = default_experiment.base.task_timeout
-        if default_experiment.base.turn_timeout is not None and (
-            not task.agent or "turn_timeout" not in task.agent.model_fields_set
-        ):
-            resolved_turn_timeout = default_experiment.base.turn_timeout
+            scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="default")
+        if default_experiment.base.turn_timeout is not None:
+            task_agent_explicit = task.agent.model_fields_set if task.agent else set()
+            if "turn_timeout" not in task_agent_explicit:
+                resolved_turn_timeout = default_experiment.base.turn_timeout
+                scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=resolved_turn_timeout, source="default")
 
     # Layer 3: experiment base scalars
     if experiment.base:
         if experiment.base.max_iterations is not None:
             resolved_max_iterations = experiment.base.max_iterations
+            scalar_lineage["max_iterations"] = ConfigLineageEntry(
+                value=resolved_max_iterations, source="experiment-base"
+            )
         if experiment.base.task_timeout is not None:
             resolved_task_timeout = experiment.base.task_timeout
+            scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="experiment-base")
         if experiment.base.turn_timeout is not None:
             resolved_turn_timeout = experiment.base.turn_timeout
+            scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=resolved_turn_timeout, source="experiment-base")
 
-    # Apply variant scalars (highest precedence before CLI)
+    # Layer 4: variant scalars (highest precedence before CLI)
     if variant.max_iterations is not None:
         resolved_max_iterations = variant.max_iterations
+        scalar_lineage["max_iterations"] = ConfigLineageEntry(value=resolved_max_iterations, source="variant")
     if variant.task_timeout is not None:
         resolved_task_timeout = variant.task_timeout
+        scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="variant")
     if variant.turn_timeout is not None:
         resolved_turn_timeout = variant.turn_timeout
+        scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=resolved_turn_timeout, source="variant")
 
     # Apply turn_timeout to agent config
     resolved_agent.turn_timeout = resolved_turn_timeout
 
+    # Combine lineage
+    lineage = {**agent_lineage, **scalar_lineage}
+
     # Build resolved task (copy with overrides)
-    return task.model_copy(
+    resolved_task = task.model_copy(
         update={
             "agent": resolved_agent,
             "max_iterations": resolved_max_iterations,
             "task_timeout": resolved_task_timeout,
         }
     )
+    return resolved_task, lineage
 
 
-def _apply_cli_overrides(task: TaskDefinition, config: BatchRunConfig) -> None:
+def _apply_cli_overrides(
+    task: TaskDefinition,
+    config: BatchRunConfig,
+    lineage: dict[str, ConfigLineageEntry] | None = None,
+) -> None:
     """Apply CLI and .env overrides (layer 5) to a task definition in-place.
 
     Override precedence: CLI > .env > experiment layers 1-4.
@@ -194,9 +258,14 @@ def _apply_cli_overrides(task: TaskDefinition, config: BatchRunConfig) -> None:
     Args:
         task: The task definition to mutate.
         config: Batch run configuration containing CLI overrides.
+        lineage: Optional lineage dict to update with CLI override entries.
     """
     from ..config import settings as app_settings
     from ..models import SnapshotConfig
+
+    def _record(key: str, value: Any, detail: str) -> None:
+        if lineage is not None:
+            lineage[key] = ConfigLineageEntry(value=value, source="cli", source_detail=detail)
 
     # Agent overrides (CLI > .env > task)
     assert task.agent is not None, f"Task '{task.task_id}' has no agent config"
@@ -204,34 +273,46 @@ def _apply_cli_overrides(task: TaskDefinition, config: BatchRunConfig) -> None:
     effective_model = config.agent_model if config.agent_model is not None else app_settings.default_agent_model
     if effective_model is not None:
         task.agent.model = effective_model
+        detail = "--model" if config.agent_model is not None else ".env DEFAULT_AGENT_MODEL"
+        _record("agent.model", effective_model, detail)
 
     effective_perm = (
         config.permission_mode if config.permission_mode is not None else app_settings.default_permission_mode
     )
     if effective_perm is not None:
         task.agent.permission_mode = effective_perm  # type: ignore[assignment]  # validated by Pydantic via validate_assignment
+        detail = "--permission-mode" if config.permission_mode is not None else ".env DEFAULT_PERMISSION_MODE"
+        _record("agent.permission_mode", effective_perm, detail)
 
     effective_max_turns = config.max_turns if config.max_turns is not None else app_settings.default_max_turns
     if effective_max_turns is not None:
         task.agent.max_turns = effective_max_turns
+        detail = "--max-turns" if config.max_turns is not None else ".env DEFAULT_MAX_TURNS"
+        _record("agent.max_turns", effective_max_turns, detail)
 
     # Timeout overrides (CLI > task YAML)
     if config.task_timeout is not None:
         task.task_timeout = config.task_timeout
+        _record("task_timeout", config.task_timeout, "--task-timeout")
     if config.turn_timeout is not None:
         task.agent.turn_timeout = config.turn_timeout
+        _record("turn_timeout", config.turn_timeout, "--turn-timeout")
 
     # Tool/plugin overrides
     if config.allowed_tools is not None:
         task.agent.allowed_tools = config.allowed_tools
+        _record("agent.allowed_tools", config.allowed_tools, "--allowed-tools")
     if config.plugins is not None:
         task.agent.plugins = config.plugins
+        _record("agent.plugins", config.plugins, "--plugins")
     if config.ignore_patterns is not None:
         task.agent.ignore_patterns = config.ignore_patterns
+        _record("agent.ignore_patterns", config.ignore_patterns, "--ignore-patterns")
 
     # Max iterations override
     if config.max_iterations is not None:
         task.max_iterations = config.max_iterations
+        _record("max_iterations", config.max_iterations, "--max-iterations")
 
     # Snapshot overrides
     if config.snapshot_mode or config.snapshot_checkpoint_freq:
@@ -246,6 +327,10 @@ def _apply_cli_overrides(task: TaskDefinition, config: BatchRunConfig) -> None:
             checkpoint_frequency=checkpoint_freq,
             ignore_patterns=task.sandbox.snapshots.ignore_patterns,
         )
+        if config.snapshot_mode:
+            _record("sandbox.snapshots.mode", mode, "--snapshot-mode")
+        if config.snapshot_checkpoint_freq is not None:
+            _record("sandbox.snapshots.checkpoint_frequency", checkpoint_freq, "--snapshot-checkpoint-freq")
 
 
 def resolve_all_tasks(
@@ -280,14 +365,14 @@ def resolve_all_tasks(
     resolved: list[ResolvedTask] = []
 
     for task_file in task_files:
-        task = load_task(task_file)
+        task, source_yaml = load_task(task_file)
 
         for variant in experiment.variants:
             # Apply layers 1-4 (default → task → base → variant)
-            resolved_task = resolve_task_for_variant(default_experiment, task, experiment, variant)
+            resolved_task, lineage = resolve_task_for_variant(default_experiment, task, experiment, variant)
 
             # Apply layer 5 (CLI / .env overrides)
-            _apply_cli_overrides(resolved_task, config)
+            _apply_cli_overrides(resolved_task, config, lineage)
 
             resolved.append(
                 ResolvedTask(
@@ -295,6 +380,8 @@ def resolve_all_tasks(
                     task_file=task_file,
                     run_dir=config.run_dir / variant.variant_id / resolved_task.task_id,
                     variant_id=variant.variant_id,
+                    source_yaml=source_yaml,
+                    config_lineage=lineage,
                 )
             )
 

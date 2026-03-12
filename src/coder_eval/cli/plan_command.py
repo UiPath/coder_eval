@@ -85,7 +85,7 @@ def plan_command(
     all_valid = True
     for task_file in resolved_task_files:
         try:
-            task = load_task(task_file)
+            task, _source_yaml = load_task(task_file)
 
             console.print(f"[green]\u2713[/green] {task_file.name}")
             console.print(f"  [dim]Task ID: {task.task_id}[/dim]")
@@ -102,7 +102,7 @@ def plan_command(
             # Show resolved agent per variant
             for variant in exp_def.variants:
                 try:
-                    resolved = resolve_task_for_variant(default_exp, task, exp_def, variant)
+                    resolved, _lineage = resolve_task_for_variant(default_exp, task, exp_def, variant)
                     agent_type = resolved.agent.type.value if resolved.agent else "unknown"
                     agent_model = resolved.agent.model if resolved.agent else None
                     model_str = f" ({agent_model})" if agent_model else ""

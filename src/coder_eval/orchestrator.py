@@ -23,10 +23,12 @@ from .evaluation.checker import SuccessChecker
 from .evaluation.reviewer import LLMReviewer
 from .models import (
     AgentKind,
+    ConfigLineageEntry,
     EvaluationResult,
     ResolvedTask,
     RunSummary,
     SnapshotMode,
+    TaskConfigRecord,
     TaskDefinition,
     TaskResult,
 )
@@ -60,6 +62,8 @@ class Orchestrator:
         sandbox: Sandbox | None = None,
         *,
         variant_id: str,
+        source_yaml: str = "",
+        config_lineage: dict[str, ConfigLineageEntry] | None = None,
     ):
         """Initialize the orchestrator.
 
@@ -71,6 +75,8 @@ class Orchestrator:
             stream_callback: Optional callback for real-time event streaming
             sandbox: Pre-built Sandbox to use directly; if None, creates one from task config and runs the agent
             variant_id: Experiment variant identifier for this task
+            source_yaml: Raw YAML text from the task file
+            config_lineage: Config lineage dict (dotted-path -> ConfigLineageEntry)
         """
         self.task = task
         self.run_dir = run_dir
@@ -79,6 +85,8 @@ class Orchestrator:
         self.stream_callback = stream_callback
         self.sandbox = sandbox
         self.variant_id = variant_id
+        self.source_yaml = source_yaml
+        self.config_lineage = config_lineage or {}
 
         # Derived paths
         self.report_path = self.run_dir / "task.json"
@@ -258,6 +266,17 @@ class Orchestrator:
                     # Capture SDK options from agent (if supported)
                     if self.agent:
                         self.result.sdk_options = self.agent.get_sdk_options()
+
+                    # Build task config record (resolved config + source YAML + lineage)
+                    # warnings=False: TaskDefinition contains discriminated unions (SuccessCriterion,
+                    # template sources) that produce benign Pydantic serialization warnings about
+                    # shadowed fields from the union discriminator.
+                    self.result.task_config = TaskConfigRecord(
+                        resolved=self.task.model_dump(warnings=False),
+                        source_yaml=self.source_yaml,
+                        source_file=str(self.task_file) if self.task_file else None,
+                        lineage=self.config_lineage,
+                    )
 
                     # Save report to per-task directory
                     self.report_path.parent.mkdir(parents=True, exist_ok=True)

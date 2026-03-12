@@ -13,6 +13,23 @@ from coder_eval.models.tasks import AgentConfig
 from coder_eval.models.telemetry import CommandStatistics, CommandTelemetry, TokenUsage
 
 
+class ConfigLineageEntry(BaseModel):
+    """Records which config layer provided a specific value."""
+
+    value: Any
+    source: Literal["default", "task", "experiment-base", "variant", "cli"]
+    source_detail: str | None = None
+
+
+class TaskConfigRecord(BaseModel):
+    """Full task configuration snapshot stored in per-task output."""
+
+    resolved: dict[str, Any] = Field(description="Full resolved TaskDefinition as dict")
+    source_yaml: str = Field(description="Raw YAML text from the task file")
+    source_file: str | None = Field(default=None, description="Path to the original task YAML")
+    lineage: dict[str, ConfigLineageEntry] = Field(default_factory=dict, description="Dotted-path → source layer")
+
+
 class CriterionResult(BaseModel):
     """Result of checking a single success criterion."""
 
@@ -143,6 +160,9 @@ class EvaluationResult(BaseModel):
 
     # Artifacts
     sandbox_path: str | None = Field(default=None, description="Path to preserved sandbox (if saved)")
+
+    # Full task configuration (resolved config + source YAML + lineage)
+    task_config: TaskConfigRecord | None = Field(default=None, description="Full task configuration snapshot")
 
     # Command telemetry
     command_stats: CommandStatistics | None = Field(default=None, description="Aggregated command telemetry statistics")

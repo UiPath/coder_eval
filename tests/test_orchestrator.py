@@ -14,7 +14,7 @@ from coder_eval.utils import get_version_info
 def test_orchestrator_load_task():
     """Test loading a task from YAML."""
     task_file = Path("tasks/hello_date.yaml")
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     assert task.task_id == "hello_date_smoke_test"
     assert task.max_iterations == 2
@@ -36,7 +36,7 @@ def test_orchestrator_load_task_directory():
 def test_orchestrator_initialization(tmp_path):
     """Test orchestrator initialization."""
     task_file = Path("tasks/hello_date.yaml")
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     run_dir = tmp_path / "test_run" / "hello_date"
 
@@ -53,7 +53,7 @@ def test_orchestrator_initialization(tmp_path):
 async def test_orchestrator_create_agent(tmp_path):
     """Test agent creation."""
     task_file = Path("tasks/hello_date.yaml")
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     run_dir = tmp_path / "test_run" / "hello_date"
 
@@ -71,7 +71,7 @@ def test_orchestrator_generate_feedback(tmp_path):
     from coder_eval.models import CriterionResult
 
     task_file = Path("tasks/hello_date.yaml")
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     run_dir = tmp_path / "test_run" / "hello_date"
     Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
@@ -531,7 +531,7 @@ async def test_orchestrator_snapshot_setup_disabled(tmp_path):
     from coder_eval.models import SnapshotConfig, SnapshotMode
 
     task_file = Path("tasks/hello_date.yaml")
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     # Explicitly disable snapshots; no venv needed for snapshot setup test
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.DISABLED)
@@ -573,7 +573,7 @@ async def test_orchestrator_snapshot_setup_enabled(tmp_path):
     from coder_eval.models import SnapshotConfig, SnapshotMode
 
     task_file = Path("tasks/hello_date.yaml")
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     # Enable full snapshots; no venv needed for snapshot setup test
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.FULL)
@@ -616,7 +616,7 @@ async def test_orchestrator_create_iteration_snapshot_disabled(tmp_path):
     from coder_eval.models import SnapshotConfig, SnapshotMode, TurnRecord
 
     task_file = Path("tasks/hello_date.yaml")
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     # Disable snapshots
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.DISABLED)
@@ -654,7 +654,7 @@ async def test_orchestrator_create_iteration_snapshot_full(tmp_path):
     from coder_eval.sandbox import Sandbox
 
     task_file = Path("tasks/hello_date.yaml")
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     # Enable full snapshots
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.FULL)
@@ -713,7 +713,7 @@ async def test_orchestrator_create_iteration_snapshot_hybrid(tmp_path):
     from coder_eval.sandbox import Sandbox
 
     task_file = Path("tasks/hello_date.yaml")
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     # Enable hybrid snapshots with checkpoint every 2 iterations
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.HYBRID, checkpoint_frequency=2)
@@ -797,7 +797,7 @@ async def test_orchestrator_snapshot_error_handling(tmp_path):
     from coder_eval.models import SnapshotConfig, SnapshotMode, TurnRecord
 
     task_file = Path("tasks/hello_date.yaml")
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     # Enable snapshots
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.FULL)
@@ -884,7 +884,7 @@ async def test_run_batch_applies_snapshot_mode_override(tmp_path):
     )
 
     # Load task (which has disabled snapshots by default)
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
     original_mode = task.sandbox.snapshots.mode
 
     # Simulate what run_batch does with overrides
@@ -920,7 +920,7 @@ async def test_run_batch_applies_checkpoint_freq_override(tmp_path):
     )
 
     # Load task
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     # Apply overrides (simulating run_batch logic)
     if config.snapshot_mode:
@@ -954,7 +954,7 @@ async def test_run_batch_preserves_ignore_patterns(tmp_path):
     )
 
     # Load task (has custom ignore patterns in YAML)
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
     original_patterns = task.sandbox.snapshots.ignore_patterns.copy()
 
     # Apply overrides
@@ -1542,7 +1542,7 @@ async def test_run_batch_applies_agent_model_override(tmp_path):
         agent_model="override-model",
     )
 
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
     original_model = task.agent.model
 
     # Simulate override logic from batch.py
@@ -1567,7 +1567,7 @@ async def test_run_batch_applies_permission_mode_override(tmp_path):
         permission_mode="bypassPermissions",
     )
 
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     effective_perm = config.permission_mode
     if effective_perm:
@@ -1589,7 +1589,7 @@ async def test_run_batch_applies_max_turns_override(tmp_path):
         max_turns=42,
     )
 
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
     assert task.agent.max_turns is None  # Default
 
     effective_max_turns = config.max_turns if config.max_turns is not None else None

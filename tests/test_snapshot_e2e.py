@@ -29,7 +29,7 @@ async def test_snapshot_e2e_full_mode(tmp_path):
 
     # Note: This test requires ANTHROPIC_API_KEY to actually run the agent
     # For now, we'll just verify the configuration is applied correctly
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     # Apply overrides (same logic as run_batch)
     if config.snapshot_mode:
@@ -56,7 +56,7 @@ async def test_snapshot_e2e_hybrid_mode_checkpoint_logic(tmp_path):
 
     # Create a simple task with hybrid mode
     task_file = Path("tasks/hello_date.yaml")
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     # Configure hybrid snapshots
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.HYBRID, checkpoint_frequency=3)
@@ -167,7 +167,7 @@ async def test_snapshot_directory_structure(tmp_path):
     from coder_eval.sandbox import Sandbox
 
     task_file = Path("tasks/hello_date.yaml")
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
     task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.FULL)
 
     run_dir = tmp_path / "test_run" / "structure_test"
@@ -226,7 +226,7 @@ async def test_snapshot_ignore_patterns_applied(tmp_path):
     from coder_eval.sandbox import Sandbox
 
     task_file = Path("tasks/test_snapshot_example.yaml")
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     # Task YAML has ignore patterns: ["*.log", "temp_*"]
     assert "*.log" in task.sandbox.snapshots.ignore_patterns
@@ -281,7 +281,7 @@ async def test_snapshot_ignore_patterns_applied(tmp_path):
 def test_snapshot_yaml_configuration():
     """Verify snapshot configuration can be loaded from YAML."""
     task_file = Path("tasks/test_snapshot_example.yaml")
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     # Verify YAML configuration was loaded correctly
     assert task.sandbox.snapshots.mode == SnapshotMode.HYBRID
@@ -294,7 +294,7 @@ def test_snapshot_cli_override_validation():
     from coder_eval.models import SnapshotConfig
 
     task_file = Path("tasks/hello_date.yaml")
-    task = load_task(task_file)
+    task, _ = load_task(task_file)
 
     # Test each mode can be set via CLI override
     for mode_str in ["disabled", "full", "incremental", "hybrid"]:

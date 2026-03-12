@@ -72,6 +72,8 @@ async def run_batch(
                     task_file=rt.task_file,
                     stream_callback=task_callback,
                     variant_id=rt.variant_id,
+                    source_yaml=rt.source_yaml,
+                    config_lineage=rt.config_lineage,
                 )
                 result = await orchestrator.run()
                 tr = TaskResult(

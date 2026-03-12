@@ -7,14 +7,14 @@ import yaml
 from ..models import TaskDefinition, TemplateDirSource
 
 
-def load_task(task_file: Path) -> TaskDefinition:
+def load_task(task_file: Path) -> tuple[TaskDefinition, str]:
     """Load a task definition from a YAML file.
 
     Args:
         task_file: Path to the task YAML file
 
     Returns:
-        Parsed TaskDefinition
+        Tuple of (parsed TaskDefinition, raw YAML text)
 
     Raises:
         FileNotFoundError: If task file doesn't exist
@@ -30,14 +30,14 @@ def load_task(task_file: Path) -> TaskDefinition:
         )
         raise ValueError(msg)
 
-    with open(task_file) as f:
-        task_data = yaml.safe_load(f)
+    raw_yaml = task_file.read_text(encoding="utf-8")
+    task_data = yaml.safe_load(raw_yaml)
 
     try:
         task = TaskDefinition(**task_data)
         # Resolve relative template paths
         task = resolve_template_paths(task, task_file.parent)
-        return task
+        return task, raw_yaml
     except Exception as e:
         raise ValueError(f"Invalid task definition: {e}") from e
 

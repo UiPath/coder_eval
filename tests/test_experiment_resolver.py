@@ -1,6 +1,11 @@
 """Tests for experiment config resolution (merge logic)."""
 
-from coder_eval.models import ExperimentBase, ExperimentDefinition, ExperimentVariant, TaskDefinition
+from coder_eval.models import (
+    ExperimentBase,
+    ExperimentDefinition,
+    ExperimentVariant,
+    TaskDefinition,
+)
 from coder_eval.orchestration.experiment import resolve_task_for_variant
 
 
@@ -38,10 +43,11 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="variant1")],
         )
 
-        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent is not None
         assert resolved.agent.type == "claude-code"
         assert resolved.agent.permission_mode == "acceptEdits"
+        assert lineage["agent.type"].source == "default"
 
     def test_task_agent_overrides_default(self):
         """Task agent fields override default experiment fields."""
@@ -52,8 +58,9 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="variant1")],
         )
 
-        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.permission_mode == "bypassPermissions"
+        assert lineage["agent.permission_mode"].source == "task"
 
     def test_experiment_base_overrides_task(self):
         """Experiment base overrides task agent settings."""
@@ -65,8 +72,9 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="variant1")],
         )
 
-        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.permission_mode == "bypassPermissions"
+        assert lineage["agent.permission_mode"].source == "experiment-base"
 
     def test_variant_overrides_base(self):
         """Variant settings override experiment base."""
@@ -78,8 +86,9 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="variant1", agent={"model": "variant-model"})],
         )
 
-        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.model == "variant-model"
+        assert lineage["agent.model"].source == "variant"
 
     def test_full_precedence_chain(self):
         """Full 4-layer merge: default < task < base < variant."""
@@ -106,11 +115,15 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="opus", agent={"model": "claude-opus-4-20250514"})],
         )
 
-        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.type == "claude-code"
         assert resolved.agent.allowed_tools == ["Read", "Write", "Bash"]  # from task (layer 2)
         assert resolved.agent.permission_mode == "bypassPermissions"  # from base (layer 3)
         assert resolved.agent.model == "claude-opus-4-20250514"  # from variant (layer 4)
+        # Lineage assertions
+        assert lineage["agent.allowed_tools"].source == "task"
+        assert lineage["agent.permission_mode"].source == "experiment-base"
+        assert lineage["agent.model"].source == "variant"
 
     def test_list_fields_replace_atomically(self):
         """List fields (allowed_tools) in later layers fully replace earlier values."""
@@ -121,7 +134,7 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="limited", agent={"allowed_tools": ["Read", "Bash"]})],
         )
 
-        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.allowed_tools == ["Read", "Bash"]
 
     def test_scalar_overrides(self):
@@ -134,9 +147,11 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="fast", max_iterations=2, task_timeout=120)],
         )
 
-        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.max_iterations == 2  # variant wins
         assert resolved.task_timeout == 120  # variant wins
+        assert lineage["max_iterations"].source == "variant"
+        assert lineage["task_timeout"].source == "variant"
 
     def test_resolved_task_preserves_non_agent_fields(self):
         """Resolution should not alter task_id, description, criteria, sandbox, etc."""
@@ -147,7 +162,7 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="variant1")],
         )
 
-        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.task_id == "my-task"
         assert resolved.description == "My test"
         assert len(resolved.success_criteria) == 1
@@ -174,7 +189,7 @@ class TestDefaultExperimentScalarOverrides:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.max_iterations == 5
 
     def test_default_experiment_task_timeout_applied(self):
@@ -191,7 +206,7 @@ class TestDefaultExperimentScalarOverrides:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.task_timeout == 600
 
     def test_default_experiment_turn_timeout_applied(self):
@@ -208,7 +223,7 @@ class TestDefaultExperimentScalarOverrides:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.turn_timeout == 60
 
     def test_experiment_base_overrides_default_experiment_scalars(self):
@@ -226,7 +241,7 @@ class TestDefaultExperimentScalarOverrides:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.max_iterations == 10
 
     def test_explicit_task_scalar_not_overwritten_by_default_experiment(self):
@@ -244,7 +259,7 @@ class TestDefaultExperimentScalarOverrides:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.max_iterations == 7
 
     def test_explicit_task_timeout_not_overwritten_by_default_experiment(self):
@@ -261,7 +276,7 @@ class TestDefaultExperimentScalarOverrides:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.task_timeout == 900
 
     def test_variant_overrides_default_experiment_scalars(self):
@@ -278,5 +293,5 @@ class TestDefaultExperimentScalarOverrides:
             variants=[ExperimentVariant(variant_id="v1", max_iterations=2)],
         )
 
-        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.max_iterations == 2

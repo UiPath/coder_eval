@@ -86,6 +86,100 @@ class TestAgentConfig:
         assert config.permission_mode == "bypassPermissions"
 
 
+class TestConfigLineageModels:
+    """Tests for ConfigLineageEntry and TaskConfigRecord serialization."""
+
+    def test_config_lineage_entry_roundtrip(self):
+        from coder_eval.models import ConfigLineageEntry
+
+        entry = ConfigLineageEntry(value="claude-code", source="default")
+        data = entry.model_dump()
+        restored = ConfigLineageEntry(**data)
+        assert restored.value == "claude-code"
+        assert restored.source == "default"
+        assert restored.source_detail is None
+
+    def test_config_lineage_entry_with_detail(self):
+        from coder_eval.models import ConfigLineageEntry
+
+        entry = ConfigLineageEntry(value="opus", source="cli", source_detail="--model")
+        data = entry.model_dump()
+        assert data["source_detail"] == "--model"
+        restored = ConfigLineageEntry(**data)
+        assert restored.source_detail == "--model"
+
+    def test_task_config_record_roundtrip(self):
+        from coder_eval.models import ConfigLineageEntry, TaskConfigRecord
+
+        record = TaskConfigRecord(
+            resolved={"task_id": "test", "agent": {"type": "claude-code"}},
+            source_yaml="task_id: test\n",
+            source_file="tasks/test.yaml",
+            lineage={
+                "agent.type": ConfigLineageEntry(value="claude-code", source="default"),
+                "agent.model": ConfigLineageEntry(value="opus", source="cli", source_detail="--model"),
+            },
+        )
+        json_str = record.model_dump_json()
+        restored = TaskConfigRecord.model_validate_json(json_str)
+        assert restored.resolved["task_id"] == "test"
+        assert restored.source_yaml == "task_id: test\n"
+        assert restored.source_file == "tasks/test.yaml"
+        assert restored.lineage["agent.type"].source == "default"
+        assert restored.lineage["agent.model"].source_detail == "--model"
+
+    def test_task_config_record_empty_lineage(self):
+        from coder_eval.models import TaskConfigRecord
+
+        record = TaskConfigRecord(
+            resolved={"task_id": "test"},
+            source_yaml="task_id: test\n",
+            source_file="tasks/test.yaml",
+        )
+        assert record.lineage == {}
+
+    def test_evaluation_result_with_task_config(self):
+        from datetime import datetime
+
+        from coder_eval.models import ConfigLineageEntry, EvaluationResult, TaskConfigRecord
+
+        record = TaskConfigRecord(
+            resolved={"task_id": "test"},
+            source_yaml="task_id: test\n",
+            source_file="tasks/test.yaml",
+            lineage={"agent.type": ConfigLineageEntry(value="claude-code", source="default")},
+        )
+        result = EvaluationResult(
+            task_id="test",
+            task_description="Test",
+            agent_type="claude-code",
+            started_at=datetime.now(),
+            final_status="SUCCESS",
+            iteration_count=1,
+            environment_info={},
+            task_config=record,
+        )
+        data = result.model_dump()
+        assert data["task_config"]["resolved"]["task_id"] == "test"
+        assert data["task_config"]["lineage"]["agent.type"]["source"] == "default"
+
+    def test_evaluation_result_task_config_default_none(self):
+        from datetime import datetime
+
+        from coder_eval.models import EvaluationResult
+
+        result = EvaluationResult(
+            task_id="test",
+            task_description="Test",
+            agent_type="claude-code",
+            started_at=datetime.now(),
+            final_status="SUCCESS",
+            iteration_count=1,
+            environment_info={},
+        )
+        assert result.task_config is None
+
+
 class TestSandboxConfigValidation:
     """Tests for SandboxConfig validation logic."""
 

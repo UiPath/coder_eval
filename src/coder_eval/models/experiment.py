@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from coder_eval.models.results import EvaluationResult
+from coder_eval.models.results import ConfigLineageEntry, EvaluationResult
 from coder_eval.models.tasks import TaskDefinition
 
 
@@ -115,6 +115,8 @@ class ResolvedTask(BaseModel):
     task_file: Path
     run_dir: Path
     variant_id: str
+    source_yaml: str = ""
+    config_lineage: dict[str, ConfigLineageEntry] = Field(default_factory=dict)
 
 
 class TaskResult(BaseModel):

@@ -62,9 +62,9 @@ class TestPlanCommandAgentNone:
         with (
             patch("coder_eval.cli.plan_command.check_tools"),
             patch("coder_eval.cli.plan_command.check_api_keys"),
-            patch("coder_eval.cli.plan_command.load_task", return_value=task),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
             patch(f"{_EXP}.load_experiment", return_value=experiment),
-            patch(f"{_EXP}.resolve_task_for_variant", return_value=resolved_task),
+            patch(f"{_EXP}.resolve_task_for_variant", return_value=(resolved_task, {})),
             patch("coder_eval.cli.plan_command.console") as mock_console,
         ):
             plan_command(task_files=[task_file])
@@ -87,9 +87,9 @@ class TestPlanCommandAgentNone:
         with (
             patch("coder_eval.cli.plan_command.check_tools"),
             patch("coder_eval.cli.plan_command.check_api_keys"),
-            patch("coder_eval.cli.plan_command.load_task", return_value=task),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
             patch(f"{_EXP}.load_experiment", return_value=experiment),
-            patch(f"{_EXP}.resolve_task_for_variant", return_value=resolved_task),
+            patch(f"{_EXP}.resolve_task_for_variant", return_value=(resolved_task, {})),
             patch("coder_eval.cli.plan_command.console") as mock_console,
         ):
             plan_command(task_files=[task_file])
@@ -118,9 +118,9 @@ class TestPlanCommandExperiment:
         with (
             patch("coder_eval.cli.plan_command.check_tools"),
             patch("coder_eval.cli.plan_command.check_api_keys"),
-            patch("coder_eval.cli.plan_command.load_task", return_value=task),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
             patch(f"{_EXP}.load_experiment", return_value=experiment),
-            patch(f"{_EXP}.resolve_task_for_variant", return_value=resolved_task),
+            patch(f"{_EXP}.resolve_task_for_variant", return_value=(resolved_task, {})),
             patch(f"{_EXP}.DEFAULT_EXPERIMENT_PATH", exp_file),
             patch("coder_eval.cli.plan_command.console") as mock_console,
         ):
@@ -148,9 +148,9 @@ class TestPlanCommandExperiment:
         with (
             patch("coder_eval.cli.plan_command.check_tools"),
             patch("coder_eval.cli.plan_command.check_api_keys"),
-            patch("coder_eval.cli.plan_command.load_task", return_value=task),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
             patch(f"{_EXP}.load_experiment", return_value=experiment),
-            patch(f"{_EXP}.resolve_task_for_variant", side_effect=[resolved_sonnet, resolved_opus]),
+            patch(f"{_EXP}.resolve_task_for_variant", side_effect=[(resolved_sonnet, {}), (resolved_opus, {})]),
             patch(f"{_EXP}.DEFAULT_EXPERIMENT_PATH", exp_file),
             patch("coder_eval.cli.plan_command.console") as mock_console,
         ):
@@ -174,10 +174,10 @@ class TestPlanCommandExperiment:
         with (
             patch("coder_eval.cli.plan_command.check_tools"),
             patch("coder_eval.cli.plan_command.check_api_keys"),
-            patch("coder_eval.cli.plan_command.load_task", return_value=task),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
             patch(f"{_EXP}.DEFAULT_EXPERIMENT_PATH", default_yaml),
             patch(f"{_EXP}.load_experiment", return_value=experiment),
-            patch(f"{_EXP}.resolve_task_for_variant", return_value=resolved_task),
+            patch(f"{_EXP}.resolve_task_for_variant", return_value=(resolved_task, {})),
             patch("coder_eval.cli.plan_command.console") as mock_console,
         ):
             plan_command(task_files=[task_file])
@@ -196,7 +196,7 @@ class TestPlanCommandExperiment:
         with (
             patch("coder_eval.cli.plan_command.check_tools"),
             patch("coder_eval.cli.plan_command.check_api_keys"),
-            patch("coder_eval.cli.plan_command.load_task", return_value=task),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
             patch(f"{_EXP}.DEFAULT_EXPERIMENT_PATH", tmp_path / "nonexistent.yaml"),
             patch(f"{_EXP}.load_experiment", side_effect=FileNotFoundError("not found")),
             patch("coder_eval.cli.plan_command.console") as mock_console,
@@ -247,7 +247,7 @@ class TestPlanCommandValidation:
         with (
             patch("coder_eval.cli.plan_command.check_tools"),
             patch("coder_eval.cli.plan_command.check_api_keys"),
-            patch("coder_eval.cli.plan_command.load_task", return_value=task),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
             patch(f"{_EXP}.load_experiment", side_effect=ValueError("Bad experiment")),
             patch(f"{_EXP}.DEFAULT_EXPERIMENT_PATH", tmp_path / "nonexistent.yaml"),
             patch("coder_eval.cli.plan_command.console") as mock_console,

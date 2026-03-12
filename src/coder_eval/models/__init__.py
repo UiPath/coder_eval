@@ -47,11 +47,13 @@ from coder_eval.models.experiment import (
 
 # Results
 from coder_eval.models.results import (
+    ConfigLineageEntry,
     CriterionResult,
     EvaluationResult,
     FileChange,
     LLMDecision,
     RunSummary,
+    TaskConfigRecord,
     TurnRecord,
 )
 
@@ -135,11 +137,13 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "SlowestCommandInfo",
     "TokenUsage",
     # Results
+    "ConfigLineageEntry",
     "CriterionResult",
     "LLMDecision",
     "FileChange",
     "TurnRecord",
     "EvaluationResult",
+    "TaskConfigRecord",
     "RunSummary",
     # Tasks
     "TaskDefinition",
