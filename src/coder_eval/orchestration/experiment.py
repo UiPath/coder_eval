@@ -140,12 +140,23 @@ def resolve_task_for_variant(
     merged_agent_dict = _merge_agent_dicts(default_agent, task_agent, exp_base_agent, variant_agent)
     resolved_agent = AgentConfig(**merged_agent_dict)
 
-    # Resolve scalar overrides: base < variant (task defaults are already in the TaskDefinition)
+    # Resolve scalar overrides through layers 1-4
     resolved_max_iterations = task.max_iterations
     resolved_task_timeout = task.task_timeout
     resolved_turn_timeout = task.agent.turn_timeout if task.agent else None
 
-    # Apply experiment base scalars
+    # Layer 1: default experiment base scalars (only override Pydantic defaults, not explicit task values)
+    if default_experiment.base:
+        if default_experiment.base.max_iterations is not None and "max_iterations" not in task.model_fields_set:
+            resolved_max_iterations = default_experiment.base.max_iterations
+        if default_experiment.base.task_timeout is not None and "task_timeout" not in task.model_fields_set:
+            resolved_task_timeout = default_experiment.base.task_timeout
+        if default_experiment.base.turn_timeout is not None and (
+            not task.agent or "turn_timeout" not in task.agent.model_fields_set
+        ):
+            resolved_turn_timeout = default_experiment.base.turn_timeout
+
+    # Layer 3: experiment base scalars
     if experiment.base:
         if experiment.base.max_iterations is not None:
             resolved_max_iterations = experiment.base.max_iterations

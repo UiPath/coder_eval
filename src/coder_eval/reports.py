@@ -246,38 +246,8 @@ class ReportGenerator:
             settings_source = agent_configs[0]
 
         if settings_source:
-            lines.extend(["", "## Agent Settings", ""])
-            # Common fields (shared between sdk_options and agent_config)
-            lines.append(f"- **Permission Mode**: {settings_source.get('permission_mode', 'N/A')}")
-            tools = settings_source.get("allowed_tools")
-            lines.append(f"- **Allowed Tools**: {', '.join(tools) if tools else '(all)'}")
-            model = settings_source.get("model")
-            if model:
-                lines.append(f"- **Model**: {model}")
-
-            # Additional SDK-specific fields (only when using sdk_options and non-default)
-            if is_sdk:
-                if settings_source.get("max_turns") is not None:
-                    lines.append(f"- **Max Turns**: {settings_source['max_turns']}")
-                if settings_source.get("max_budget_usd") is not None:
-                    lines.append(f"- **Max Budget (USD)**: {settings_source['max_budget_usd']}")
-                if settings_source.get("thinking") is not None:
-                    lines.append(f"- **Thinking**: {settings_source['thinking']}")
-                if settings_source.get("effort") is not None:
-                    lines.append(f"- **Effort**: {settings_source['effort']}")
-                if settings_source.get("mcp_servers"):
-                    mcp = settings_source["mcp_servers"]
-                    if isinstance(mcp, dict):
-                        lines.append(f"- **MCP Servers**: {', '.join(mcp.keys())}")
-                    else:
-                        lines.append(f"- **MCP Servers**: {mcp}")
-                if settings_source.get("betas"):
-                    lines.append(f"- **Betas**: {', '.join(settings_source['betas'])}")
-                if settings_source.get("system_prompt") is not None:
-                    prompt_str = str(settings_source["system_prompt"]).replace("\n", " ")
-                    if len(prompt_str) > 200:
-                        prompt_str = prompt_str[:200] + "..."
-                    lines.append(f"- **System Prompt**: {prompt_str}")
+            lines.append("")
+            lines.extend(ReportGenerator._generate_agent_settings_section(settings_source, is_sdk))
 
         # Installed Tools section (per-task tool versions from sandbox npm packages etc.)
         installed_tools_lines = ReportGenerator._generate_installed_tools_section(summary.task_results)
@@ -297,6 +267,50 @@ class ReportGenerator:
             lines.append(f"- **{key}**: {value}")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _generate_agent_settings_section(settings_source: dict[str, Any], is_sdk: bool) -> list[str]:
+        """Generate Agent Settings markdown lines from a settings dict.
+
+        Args:
+            settings_source: Either sdk_options or agent_config dict.
+            is_sdk: Whether settings_source is from sdk_options.
+
+        Returns:
+            List of markdown lines (including heading).
+        """
+        lines = ["## Agent Settings", ""]
+        lines.append(f"- **Permission Mode**: {settings_source.get('permission_mode', 'N/A')}")
+        tools = settings_source.get("allowed_tools")
+        lines.append(f"- **Allowed Tools**: {', '.join(tools) if tools else '(all)'}")
+        model = settings_source.get("model")
+        if model:
+            lines.append(f"- **Model**: {model}")
+
+        if is_sdk:
+            if settings_source.get("max_turns") is not None:
+                lines.append(f"- **Max Turns**: {settings_source['max_turns']}")
+            if settings_source.get("max_budget_usd") is not None:
+                lines.append(f"- **Max Budget (USD)**: {settings_source['max_budget_usd']}")
+            if settings_source.get("thinking") is not None:
+                lines.append(f"- **Thinking**: {settings_source['thinking']}")
+            if settings_source.get("effort") is not None:
+                lines.append(f"- **Effort**: {settings_source['effort']}")
+            if settings_source.get("mcp_servers"):
+                mcp = settings_source["mcp_servers"]
+                if isinstance(mcp, dict):
+                    lines.append(f"- **MCP Servers**: {', '.join(mcp.keys())}")
+                else:
+                    lines.append(f"- **MCP Servers**: {mcp}")
+            if settings_source.get("betas"):
+                lines.append(f"- **Betas**: {', '.join(settings_source['betas'])}")
+            if settings_source.get("system_prompt") is not None:
+                prompt_str = str(settings_source["system_prompt"]).replace("\n", " ")
+                if len(prompt_str) > 200:
+                    prompt_str = prompt_str[:200] + "..."
+                lines.append(f"- **System Prompt**: {prompt_str}")
+
+        return lines
 
     @staticmethod
     def _generate_token_usage_section(task_results: list[dict[str, Any]]) -> list[str]:
@@ -396,21 +410,15 @@ class ReportGenerator:
 
         all_turns: list[TurnRecord] = []
 
-        # Iterate through task subdirectories and load their reports
-        for task_dir in run_dir.iterdir():
-            if not task_dir.is_dir() or task_dir.name in {"artifacts", ".git"}:
+        # Find all task.json files recursively to handle both flat and nested (experiment) layouts
+        for report_path in run_dir.rglob("task.json"):
+            if "artifacts" in report_path.parts or ".git" in report_path.parts:
                 continue
-
-            report_path = task_dir / "task.json"
-            if not report_path.exists():
-                continue
-
             try:
                 result = EvaluationResult.model_validate_json(report_path.read_text())
                 all_turns.extend(result.turns)
             except Exception:
                 logger.warning("Failed to load report %s for command statistics", report_path, exc_info=True)
-                continue
 
         if not all_turns:
             return None

@@ -135,21 +135,34 @@ def _fmt_p(p: float | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _eval_result_to_task_dict(result: EvaluationResult) -> dict[str, Any]:
-    """Convert an EvaluationResult to the task_result dict format used by ReportGenerator."""
+def eval_result_to_task_dict(
+    result: EvaluationResult,
+    *,
+    variant_id: str | None = None,
+    tags: list[str] | None = None,
+    duration_override: float | None = None,
+) -> dict[str, Any]:
+    """Convert an EvaluationResult to the task_result dict format used by ReportGenerator.
+
+    Args:
+        result: The evaluation result to convert.
+        variant_id: Optional variant ID to include in the dict.
+        tags: Optional tags list (defaults to []).
+        duration_override: Optional duration value (defaults to result.duration_seconds).
+    """
     ref_similarity: float | None = None
     for cr in result.success_criteria_results:
         if cr.criterion_type == "reference_comparison":
             ref_similarity = cr.score
             break
 
-    return {
+    d: dict[str, Any] = {
         "task_id": result.task_id,
         "status": result.final_status,
         "weighted_score": result.weighted_score,
-        "duration": result.duration_seconds,
+        "duration": duration_override if duration_override is not None else result.duration_seconds,
         "iteration_count": result.iteration_count,
-        "tags": [],
+        "tags": tags if tags is not None else [],
         "turns": [
             {
                 "iteration": t.iteration,
@@ -175,6 +188,8 @@ def _eval_result_to_task_dict(result: EvaluationResult) -> dict[str, Any]:
         "sdk_options": result.sdk_options,
         "installed_tools": result.environment_info.get("installed_tools"),
     }
+    d["variant_id"] = variant_id
+    return d
 
 
 def _load_variant_eval_results(
@@ -502,7 +517,7 @@ class ExperimentReportGenerator:
         if run_dir:
             eval_results = _load_variant_eval_results(run_dir, variant_id, result.task_summaries)
             if eval_results:
-                task_dicts = [_eval_result_to_task_dict(er) for er in eval_results]
+                task_dicts = [eval_result_to_task_dict(er) for er in eval_results]
 
                 # Generation Metrics
                 if any(d.get("turns") for d in task_dicts):
@@ -534,23 +549,8 @@ class ExperimentReportGenerator:
                     settings_source = agent_configs[0]
 
                 if settings_source:
-                    lines.extend(["", "## Agent Settings", ""])
-                    lines.append(f"- **Permission Mode**: {settings_source.get('permission_mode', 'N/A')}")
-                    tools = settings_source.get("allowed_tools")
-                    lines.append(f"- **Allowed Tools**: {', '.join(tools) if tools else '(all)'}")
-                    model = settings_source.get("model")
-                    if model:
-                        lines.append(f"- **Model**: {model}")
-
-                    if is_sdk:
-                        if settings_source.get("max_turns") is not None:
-                            lines.append(f"- **Max Turns**: {settings_source['max_turns']}")
-                        if settings_source.get("max_budget_usd") is not None:
-                            lines.append(f"- **Max Budget (USD)**: {settings_source['max_budget_usd']}")
-                        if settings_source.get("thinking") is not None:
-                            lines.append(f"- **Thinking**: {settings_source['thinking']}")
-                        if settings_source.get("effort") is not None:
-                            lines.append(f"- **Effort**: {settings_source['effort']}")
+                    lines.append("")
+                    lines.extend(ReportGenerator._generate_agent_settings_section(settings_source, is_sdk))
 
                 # Installed Tools
                 installed_tools_lines = ReportGenerator._generate_installed_tools_section(task_dicts)

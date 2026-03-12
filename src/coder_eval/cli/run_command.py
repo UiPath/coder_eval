@@ -41,8 +41,12 @@ def _resolve_experiment_path(experiment: Path | None) -> Path | None:
     if experiment.exists():
         return experiment
 
-    # Try resolving bare name under experiments/
-    experiments_dir = Path("experiments")
+    # Try resolving bare name under experiments/ (project-root-relative, not CWD-relative).
+    # Path: cli/run_command.py → cli/ → coder_eval/ → src/ → project_root (4 levels).
+    # NOTE: This assumes a source checkout. If installed into site-packages, this won't resolve.
+    # That's acceptable since experiments/ lives in the repo, not the installed package.
+    _project_root = Path(__file__).resolve().parent.parent.parent.parent
+    experiments_dir = _project_root / "experiments"
     for candidate in [
         experiments_dir / f"{experiment}.yaml",
         experiments_dir / f"{experiment}.yml",

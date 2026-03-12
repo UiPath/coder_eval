@@ -46,14 +46,14 @@ def get_version_info(sandbox_path: Path | None = None) -> dict[str, Any]:
     try:
         result = subprocess.run(["claude", "-v"], capture_output=True, text=True, timeout=5)
         version_info["claude_code_cli"] = result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+    except Exception:
         version_info["claude_code_cli"] = "Not Found"
 
     # Try to get uv version
     try:
         result = subprocess.run(["uv", "--version"], capture_output=True, text=True, timeout=5)
         version_info["uv"] = result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+    except Exception:
         version_info["uv"] = "Not Found"
 
     # Get Python packages

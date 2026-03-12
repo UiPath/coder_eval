@@ -202,10 +202,10 @@ def task_log_handler(task_log_path: Path, level: int = logging.DEBUG, task_id: s
 
 
 def aggregate_task_logs(run_dir: Path) -> None:
-    """Aggregate all task logs into a single run.log file.
+    """Aggregate all task logs into a single experiment.log file.
 
     This function should be called after all tasks have completed.
-    It creates a run.log file by concatenating all task.log files
+    It creates an experiment.log file by concatenating all task.log files
     with clear separators and metadata.
 
     Args:
@@ -214,13 +214,13 @@ def aggregate_task_logs(run_dir: Path) -> None:
     Example:
         >>> # After running tasks
         >>> aggregate_task_logs(Path("runs/2025-10-16_14-25-18"))
-        >>> # Creates: runs/2025-10-16_14-25-18/run.log
+        >>> # Creates: runs/2025-10-16_14-25-18/experiment.log
     """
     run_log_path = run_dir / "experiment.log"
     task_log_paths = sorted(run_dir.glob("**/task.log"))
 
     if not task_log_paths:
-        # No task logs found - create empty run.log
+        # No task logs found - create empty experiment.log
         run_log_path.write_text("No task logs found.\n")
         return
 

@@ -917,3 +917,60 @@ def test_generate_markdown_no_installed_tools():
     report_md = ReportGenerator.generate_markdown(summary)
 
     assert "## Installed Tools" not in report_md
+
+
+def test_aggregate_command_statistics_nested_layout(tmp_path):
+    """_aggregate_command_statistics should find task.json in nested experiment layout."""
+    import json
+
+    # Create nested experiment layout: run_dir/variant_id/task_id/task.json
+    task_dir = tmp_path / "opus" / "my-task"
+    task_dir.mkdir(parents=True)
+
+    eval_result = {
+        "task_id": "my-task",
+        "task_description": "test",
+        "variant_id": "opus",
+        "agent_type": "claude-code",
+        "started_at": "2025-01-01T00:00:00",
+        "final_status": "SUCCESS",
+        "iteration_count": 1,
+        "environment_info": {},
+        "turns": [
+            {
+                "iteration": 1,
+                "user_input": "test prompt",
+                "agent_output": "test response",
+                "duration_seconds": 5.0,
+                "commands": [
+                    {
+                        "tool_name": "Bash",
+                        "tool_id": "tool_001",
+                        "timestamp": "2025-01-01T00:00:01",
+                        "parameters": {"command": "echo hi"},
+                        "duration_ms": 100,
+                    }
+                ],
+            }
+        ],
+    }
+    (task_dir / "task.json").write_text(json.dumps(eval_result))
+
+    stats = ReportGenerator._aggregate_command_statistics(tmp_path)
+    assert stats is not None, "Should find task.json in nested layout"
+    assert stats.total_commands == 1
+
+
+def test_report_generator_private_methods_used_by_experiment_reports():
+    """Verify all private methods called by reports_experiment.py exist on ReportGenerator."""
+    required_methods = [
+        "_generate_generation_metrics_section",
+        "_generate_token_usage_section",
+        "_aggregate_command_statistics",
+        "_generate_command_statistics_section",
+        "_generate_installed_tools_section",
+        "_generate_agent_settings_section",
+    ]
+    for method_name in required_methods:
+        assert hasattr(ReportGenerator, method_name), f"ReportGenerator.{method_name} is missing"
+        assert callable(getattr(ReportGenerator, method_name)), f"ReportGenerator.{method_name} is not callable"

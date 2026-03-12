@@ -157,3 +157,19 @@ class TestTaskResult:
         assert tr.task_id == "t1"
         assert tr.duration == 1.0
         assert tr.result.final_status == "SUCCESS"
+
+
+class TestTypedAnnotations:
+    """ResolvedTask.task and TaskResult.result should use proper types, not Any."""
+
+    def test_resolved_task_has_typed_task_field(self):
+        import typing
+
+        hints = typing.get_type_hints(ResolvedTask)
+        assert hints["task"].__name__ == "TaskDefinition", f"Expected TaskDefinition, got {hints['task']}"
+
+    def test_task_result_has_typed_result_field(self):
+        import typing
+
+        hints = typing.get_type_hints(TaskResult)
+        assert hints["result"].__name__ == "EvaluationResult", f"Expected EvaluationResult, got {hints['result']}"

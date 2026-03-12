@@ -8,6 +8,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from coder_eval.models.results import EvaluationResult
+from coder_eval.models.tasks import TaskDefinition
+
 
 class ExperimentVariant(BaseModel):
     """A named configuration variant within an experiment."""
@@ -108,7 +111,7 @@ class ResolvedTask(BaseModel):
     Consumed by run_batch() as the sole input type.
     """
 
-    task: Any  # TaskDefinition — use Any to avoid circular import between model submodules
+    task: TaskDefinition
     task_file: Path
     run_dir: Path
     variant_id: str
@@ -122,6 +125,6 @@ class TaskResult(BaseModel):
     """
 
     task_id: str
-    result: Any  # EvaluationResult — use Any to avoid circular import between model submodules
+    result: EvaluationResult
     duration: float
     variant_id: str

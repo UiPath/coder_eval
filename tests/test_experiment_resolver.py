@@ -151,3 +151,132 @@ class TestResolveTaskForVariant:
         assert resolved.task_id == "my-task"
         assert resolved.description == "My test"
         assert len(resolved.success_criteria) == 1
+
+
+class TestDefaultExperimentScalarOverrides:
+    """Tests for layer-1 default experiment scalar resolution."""
+
+    def test_default_experiment_max_iterations_applied(self):
+        """default.yaml base.max_iterations should override task's Pydantic default."""
+        default_exp = ExperimentDefinition(
+            experiment_id="default",
+            base=ExperimentBase(
+                agent={"type": "claude-code", "permission_mode": "acceptEdits"},
+                max_iterations=5,
+            ),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+        task = _make_task(agent=None)
+        assert task.max_iterations == 3  # Pydantic default
+
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+
+        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.max_iterations == 5
+
+    def test_default_experiment_task_timeout_applied(self):
+        """default.yaml base.task_timeout should be applied when task has no explicit timeout."""
+        default_exp = ExperimentDefinition(
+            experiment_id="default",
+            base=ExperimentBase(agent={"type": "claude-code"}, task_timeout=600),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+        task = _make_task(agent=None)
+
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+
+        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.task_timeout == 600
+
+    def test_default_experiment_turn_timeout_applied(self):
+        """default.yaml base.turn_timeout should be applied."""
+        default_exp = ExperimentDefinition(
+            experiment_id="default",
+            base=ExperimentBase(agent={"type": "claude-code"}, turn_timeout=60),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+        task = _make_task(agent=None)
+
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+
+        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.agent.turn_timeout == 60
+
+    def test_experiment_base_overrides_default_experiment_scalars(self):
+        """experiment.base scalars (layer 3) should override default_experiment.base (layer 1)."""
+        default_exp = ExperimentDefinition(
+            experiment_id="default",
+            base=ExperimentBase(agent={"type": "claude-code"}, max_iterations=5),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+        task = _make_task(agent=None)
+
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            base=ExperimentBase(max_iterations=10),
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+
+        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.max_iterations == 10
+
+    def test_explicit_task_scalar_not_overwritten_by_default_experiment(self):
+        """Task that explicitly sets max_iterations should NOT be overwritten by default experiment."""
+        default_exp = ExperimentDefinition(
+            experiment_id="default",
+            base=ExperimentBase(agent={"type": "claude-code"}, max_iterations=5),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+        # Task explicitly sets max_iterations=7 (layer 2 > layer 1)
+        task = _make_task(agent=None, max_iterations=7)
+
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+
+        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.max_iterations == 7
+
+    def test_explicit_task_timeout_not_overwritten_by_default_experiment(self):
+        """Task that explicitly sets task_timeout should NOT be overwritten by default experiment."""
+        default_exp = ExperimentDefinition(
+            experiment_id="default",
+            base=ExperimentBase(agent={"type": "claude-code"}, task_timeout=600),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+        task = _make_task(agent=None, task_timeout=900)
+
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+
+        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.task_timeout == 900
+
+    def test_variant_overrides_default_experiment_scalars(self):
+        """variant scalars (layer 4) should override default_experiment.base (layer 1)."""
+        default_exp = ExperimentDefinition(
+            experiment_id="default",
+            base=ExperimentBase(agent={"type": "claude-code"}, max_iterations=5),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+        task = _make_task(agent=None)
+
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="v1", max_iterations=2)],
+        )
+
+        resolved = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.max_iterations == 2

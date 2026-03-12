@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..models import AgentKind, EvaluationResult, ResolvedTask, RunSummary, TaskDefinition, TaskResult
+from ..reports_experiment import eval_result_to_task_dict
 from ..streaming.callbacks import StreamCallback
 from ..utils import get_version_info
 from .config import BatchRunConfig
@@ -86,6 +87,11 @@ async def run_batch(
     coroutines = [run_single(rt) for rt in resolved_tasks]
     results: list[TaskResult | BaseException] = await asyncio.gather(*coroutines, return_exceptions=True)
 
+    # Re-raise fatal exceptions before processing results
+    for result in results:
+        if isinstance(result, (KeyboardInterrupt, SystemExit)):
+            raise result
+
     processed: list[TaskResult] = []
     for i, result in enumerate(results):
         if isinstance(result, BaseException):
@@ -142,14 +148,6 @@ def _create_error_task_result(
     )
 
 
-def _extract_reference_similarity(result: EvaluationResult) -> float | None:
-    """Extract reference_comparison score from criteria results, if present."""
-    for cr in result.success_criteria_results:
-        if cr.criterion_type == "reference_comparison":
-            return cr.score
-    return None
-
-
 def _generate_run_summary(
     run_dir: Path,
     task_results: list[TaskResult],
@@ -187,39 +185,12 @@ def _generate_run_summary(
         tasks_failed=statuses.count("FAILURE"),
         tasks_error=statuses.count("ERROR"),
         task_results=[
-            {
-                "task_id": r.task_id,
-                "variant_id": r.variant_id,
-                "status": r.result.final_status,
-                "weighted_score": r.result.weighted_score,
-                "duration": r.duration,
-                "iteration_count": r.result.iteration_count,
-                "tags": (task_tags or {}).get(r.task_id, []),
-                "turns": [
-                    {
-                        "iteration": t.iteration,
-                        "duration_seconds": t.duration_seconds,
-                        "command_count": len(t.commands),
-                        "assistant_turn_count": t.assistant_turn_count,
-                    }
-                    for t in r.result.turns
-                ],
-                "model_used": r.result.model_used,
-                "reference_similarity": _extract_reference_similarity(r.result),
-                "input_tokens": (r.result.total_token_usage.input_tokens if r.result.total_token_usage else None),
-                "output_tokens": (r.result.total_token_usage.output_tokens if r.result.total_token_usage else None),
-                "cache_creation_input_tokens": (
-                    r.result.total_token_usage.cache_creation_input_tokens if r.result.total_token_usage else None
-                ),
-                "cache_read_input_tokens": (
-                    r.result.total_token_usage.cache_read_input_tokens if r.result.total_token_usage else None
-                ),
-                "total_tokens": (r.result.total_token_usage.total_tokens if r.result.total_token_usage else None),
-                "total_cost_usd": (r.result.total_token_usage.total_cost_usd if r.result.total_token_usage else None),
-                "agent_config": (r.result.agent_config.model_dump() if r.result.agent_config else None),
-                "sdk_options": r.result.sdk_options,
-                "installed_tools": r.result.environment_info.get("installed_tools"),
-            }
+            eval_result_to_task_dict(
+                r.result,
+                variant_id=r.variant_id,
+                tags=(task_tags or {}).get(r.task_id, []),
+                duration_override=r.duration,
+            )
             for r in task_results
         ],
         framework_version=version_info.get("coder_eval", "unknown"),

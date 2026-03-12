@@ -46,7 +46,6 @@ coder_eval/
 │   ├── file_exists.py
 │   ├── file_contains.py
 │   ├── file_check.py
-│   ├── json_check.py
 │   ├── run_command.py
 │   ├── pytest_criterion.py
 │   ├── file_matches_regex.py
@@ -114,20 +113,20 @@ templates/                         # Sandbox template directories
 - **Experiment Layer**: Pre-processing config resolver (`ExperimentRunner`) that resolves task × variant combinations via 5-layer merge (default → task → base → variant → CLI) before passing to `run_batch`
 - **All models importable from `coder_eval.models`** regardless of submodule
 
-## Success Criteria (11 types)
+## Success Criteria (10 types)
 
 | Type | Scoring | Description |
 |------|---------|-------------|
 | `file_exists` | Binary | File must exist |
 | `file_contains` | Fractional | String presence/absence |
 | `file_check` | Fractional | Unified file existence + content + regex check |
-| `json_check` | Fractional | JSON validation + key presence + value matching |
 | `run_command` | Binary | Command exit code + optional stdout matching |
 | `pytest` | Fractional | tests_passed / total |
 | `file_matches_regex` | Binary | Regex match on file |
 | `pylint_score` | Continuous | pylint score / 10.0 |
 | `reference_comparison` | Continuous | AST/token/complexity similarity |
 | `command_executed` | Fractional | Agent tool usage verification |
+| `uipath_eval` | Fractional | UiPath agent evaluation results |
 
 All criteria support `weight` (default 1.0) and `pass_threshold` (default 0.9).
 
