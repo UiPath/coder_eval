@@ -36,7 +36,7 @@ def calculate_command_statistics(turns: list[TurnRecord]) -> CommandStatistics:
         return CommandStatistics(total_commands=0)
 
     # Count by tool type
-    commands_by_tool = {}
+    commands_by_tool: dict[str, int] = {}
     for cmd in all_commands:
         commands_by_tool[cmd.tool_name] = commands_by_tool.get(cmd.tool_name, 0) + 1
 

@@ -11,6 +11,7 @@ This module provides centralized logging setup with:
 import logging
 import sys
 import threading
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -130,7 +131,7 @@ _task_handler_lock = threading.Lock()
 
 
 @contextmanager
-def task_log_handler(task_log_path: Path, level: int = logging.DEBUG, task_id: str | None = None):
+def task_log_handler(task_log_path: Path, level: int = logging.DEBUG, task_id: str | None = None) -> Generator[None]:
     """Context manager for task-specific logging.
 
     Automatically adds a FileHandler at the start and removes it at the end,
@@ -194,7 +195,7 @@ def task_log_handler(task_log_path: Path, level: int = logging.DEBUG, task_id: s
                 original = getattr(app_logger, "_task_handler_original_level", app_logger.level)
                 app_logger.setLevel(original)
                 if hasattr(app_logger, "_task_handler_original_level"):
-                    del app_logger._task_handler_original_level  # type: ignore[attr-defined]
+                    del app_logger._task_handler_original_level  # pyright: ignore[reportAttributeAccessIssue]
         if task_filter:
             handler.removeFilter(task_filter)
         handler.close()

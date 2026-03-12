@@ -695,4 +695,3 @@ sdk.tasks.retrieve(action_key: str, app_folder_path: str="", app_folder_key: str
 sdk.tasks.retrieve_async(action_key: str, app_folder_path: str="", app_folder_key: str="", app_name: str | None=None) -> uipath.platform.action_center.tasks.Task
 
 ```
-

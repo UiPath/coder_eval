@@ -12,6 +12,7 @@ maintaining the evaluation flow logic.
 import asyncio
 import logging
 from pathlib import Path
+from typing import Any
 
 from ..errors.executor import execute_with_retry
 from ..evaluation.reviewer import LLMReviewer
@@ -50,7 +51,7 @@ async def generate_next_prompt(
         logger.info("Requesting LLM review")
 
         # Wrap LLM reviewer call with retry logic for network resilience
-        async def _review_operation():
+        async def _review_operation() -> Any:
             assert llm_reviewer is not None
             return await asyncio.to_thread(
                 llm_reviewer.review,

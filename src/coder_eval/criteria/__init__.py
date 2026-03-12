@@ -5,7 +5,7 @@
 import importlib
 import logging
 import pkgutil
-from typing import ClassVar, get_args
+from typing import Any, ClassVar, get_args
 
 from coder_eval.criteria.base import BaseCriterion, handle_criterion_errors, register_criterion
 
@@ -16,11 +16,11 @@ logger = logging.getLogger(__name__)
 class CriterionRegistry:
     """Registry for criterion checker plugins with dynamic discovery."""
 
-    _checkers: ClassVar[dict[str, type[BaseCriterion]]] = {}  # type: ignore[reportMissingTypeArgument]
+    _checkers: ClassVar[dict[str, type[BaseCriterion[Any]]]] = {}
     _discovered: ClassVar[bool] = False
 
     @classmethod
-    def register(cls, checker_class: type[BaseCriterion]) -> type[BaseCriterion]:  # type: ignore[reportMissingTypeArgument]
+    def register(cls, checker_class: type[BaseCriterion[Any]]) -> type[BaseCriterion[Any]]:
         """Register a criterion checker.
 
         Args:
@@ -50,7 +50,7 @@ class CriterionRegistry:
         return checker_class
 
     @classmethod
-    def get_checker(cls, criterion_type: str) -> type[BaseCriterion]:  # type: ignore[reportMissingTypeArgument]
+    def get_checker(cls, criterion_type: str) -> type[BaseCriterion[Any]]:
         """Get checker class for a criterion type.
 
         Args:

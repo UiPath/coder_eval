@@ -140,7 +140,7 @@ def create_error_context(
     attempt: int,
     component: str | None = None,
     agent_name: str | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Create comprehensive error context for reporting.
 

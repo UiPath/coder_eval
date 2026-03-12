@@ -576,7 +576,7 @@ class Sandbox:
 
         # Combine sandbox ignore patterns with user-provided patterns
         # This reuses existing _should_ignore_template_file logic (DRY principle)
-        def ignore_func(dir_path, names):
+        def ignore_func(dir_path: str, names: list[str]) -> list[str]:
             ignored = []
             dir_path_obj = Path(dir_path)
             for name in names:
@@ -603,7 +603,7 @@ class Sandbox:
         )
 
         # Calculate size and count (also in thread pool)
-        def calc_size_and_count():
+        def calc_size_and_count() -> tuple[int, int]:
             size = sum(f.stat().st_size for f in snapshot_dir.rglob("*") if f.is_file())
             count = sum(1 for _ in snapshot_dir.rglob("*") if _.is_file())
             return size, count

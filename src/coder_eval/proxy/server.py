@@ -6,6 +6,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 import httpx
 from aiohttp import web
@@ -112,7 +113,7 @@ class LLMGatewayProxy:
 
         # Extract the actual bound port
         assert self._site._server is not None  # pyright: ignore[reportAttributeAccessIssue]
-        sockets = self._site._server.sockets  # pyright: ignore[reportAttributeAccessIssue]
+        sockets = self._site._server.sockets  # type: ignore[attr-defined]  # pyright: ignore[reportAttributeAccessIssue]
         assert sockets
         port_num: int = sockets[0].getsockname()[1]
         self._port = port_num
@@ -215,7 +216,7 @@ class LLMGatewayProxy:
         """Sleep before a retry. Extracted for testability."""
         await asyncio.sleep(delay)
 
-    def _track_usage(self, model: str, usage: dict) -> None:
+    def _track_usage(self, model: str, usage: dict[str, Any]) -> None:
         """Accumulate token usage from a response."""
         in_tok = usage.get("input_tokens", 0)
         out_tok = usage.get("output_tokens", 0)
@@ -269,7 +270,7 @@ class LLMGatewayProxy:
             self._track_usage(model, usage)
 
     @staticmethod
-    def _parse_stream_events(raw_bytes: bytes, *, content_type: str | None = None) -> list[dict]:
+    def _parse_stream_events(raw_bytes: bytes, *, content_type: str | None = None) -> list[dict[str, Any]]:
         """Extract JSON event objects from either SSE or Bedrock event stream format.
 
         Uses Content-Type header when available, falls back to a byte heuristic.
@@ -289,9 +290,9 @@ class LLMGatewayProxy:
         return LLMGatewayProxy._parse_sse_events(raw_bytes.decode("utf-8", errors="replace"))
 
     @staticmethod
-    def _parse_sse_events(text: str) -> list[dict]:
+    def _parse_sse_events(text: str) -> list[dict[str, Any]]:
         """Parse standard SSE text/event-stream format."""
-        events: list[dict] = []
+        events: list[dict[str, Any]] = []
         for line in text.split("\n"):
             line = line.strip()
             if not line.startswith("data: "):
@@ -306,14 +307,14 @@ class LLMGatewayProxy:
         return events
 
     @staticmethod
-    def _parse_bedrock_event_stream(raw_bytes: bytes) -> list[dict]:
+    def _parse_bedrock_event_stream(raw_bytes: bytes) -> list[dict[str, Any]]:
         """Parse AWS Bedrock event stream format.
 
         Bedrock wraps each event as `{"bytes": "<base64-encoded-json>"}`.
         We extract the base64 values directly from raw bytes to avoid
         corruption from UTF-8 decoding of binary headers.
         """
-        events: list[dict] = []
+        events: list[dict[str, Any]] = []
         for match in re.finditer(rb'\{"bytes":"([A-Za-z0-9+/=]+)"', raw_bytes):
             b64_bytes = match.group(1)
             try:

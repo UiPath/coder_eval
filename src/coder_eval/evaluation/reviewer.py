@@ -7,6 +7,7 @@ improvements beyond objective success criteria.
 
 import json
 import logging
+from typing import Any
 
 from ..models import LLMDecision, LLMReviewerConfig
 
@@ -53,7 +54,7 @@ class LLMReviewer:
             ) from e
 
     @property
-    def llm(self):
+    def llm(self) -> Any:
         """Lazy-initialize the LLM client on first access."""
         if self._llm is None:
             from uipath_llmgw_client import get_langchain_chat_model

@@ -6,7 +6,7 @@ from pathlib import Path
 import typer
 
 from ..logging_config import setup_logging
-from ..models import TemplateDirSource
+from ..models import EvaluationResult, TemplateDirSource
 from ..orchestration.task_loader import load_task
 from ..orchestrator import Orchestrator
 from ..sandbox import Sandbox
@@ -86,7 +86,7 @@ def evaluate_command(
     task_dir = task_file.parent.resolve()
     sandbox = Sandbox(sandbox_config, task_id=task.task_id, task_dir=task_dir)
 
-    async def _setup_and_run():
+    async def _setup_and_run() -> EvaluationResult:
         await asyncio.to_thread(sandbox.setup)
         orchestrator = Orchestrator(
             task=task,

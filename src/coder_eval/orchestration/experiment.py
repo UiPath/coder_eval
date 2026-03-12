@@ -50,7 +50,7 @@ def _find_default_experiment() -> Path:
         return pkg_path
 
     # 2. Repo-root fallback — for source checkouts / editable installs
-    project_root = Path(__file__).resolve().parent.parent.parent
+    project_root = Path(__file__).resolve().parent.parent.parent.parent
     repo_path = project_root / "experiments" / "default.yaml"
     if repo_path.is_file():
         return repo_path

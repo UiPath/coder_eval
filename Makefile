@@ -9,10 +9,10 @@ install:  ## Install project with dev dependencies
 	uv run pre-commit install
 
 format:  ## Auto-format code with ruff
-	uv run ruff format coder_eval/ tests/
+	uv run ruff format src/ tests/
 
 check:  ## Run linting checks
-	uv run ruff check coder_eval/ tests/
+	uv run ruff check src/ tests/
 
 typecheck:  ## Run type checking with pyright
 	uv run pyright
@@ -26,11 +26,11 @@ test-cov:  ## Run tests with coverage report
 
 
 verify:  ## Run all verification steps (CI equivalent)
-	uv run ruff format --check coder_eval/ tests/
-	uv run ruff check coder_eval/ tests/
+	uv run ruff format --check src/ tests/
+	uv run ruff check src/ tests/
 	uv run pyright
 	# uv run pip-audit --desc --skip-editable
-	# uv run bandit -r coder_eval/ -ll --format json -o bandit-report.json
+	# uv run bandit -r src/ -ll --format json -o bandit-report.json
 	uv run pytest tests/ -n auto --cov=coder_eval --cov-report=term-missing --cov-report=xml --cov-fail-under=80
 
 clean:  ## Clean build artifacts and cache

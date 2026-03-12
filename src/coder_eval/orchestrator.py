@@ -1,12 +1,13 @@
 """Main orchestrator for coordinating task evaluation."""
 
 import asyncio
+import functools
 import logging
 import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 
 if TYPE_CHECKING:
@@ -288,7 +289,7 @@ class Orchestrator:
         task_dir = self.task_file.parent.resolve() if self.task_file else None
         self.sandbox = Sandbox(self.task.sandbox, task_id=self.task.task_id, task_dir=task_dir)
 
-        async def _setup_sandbox():
+        async def _setup_sandbox() -> Any:
             assert self.sandbox is not None
             return await asyncio.to_thread(self.sandbox.setup)
 
@@ -325,7 +326,7 @@ class Orchestrator:
         # Create and start agent with retry logic
         self.agent = await self._create_agent()
 
-        async def _start_agent():
+        async def _start_agent() -> None:
             assert self.agent is not None
             await self.agent.start(str(sandbox_dir))
 
@@ -457,9 +458,6 @@ class Orchestrator:
                 ),
             )
 
-            # Use lambda with default arguments to safely bind variables
-            # (without defaults, closure would capture stale references)
-            # Local variable for type narrowing in lambda
             agent = self.agent
             turn_timeout = self.task.agent.turn_timeout
 
@@ -469,9 +467,7 @@ class Orchestrator:
                 agent_callback = TaskScopedCallback(self.stream_callback, self.task.task_id)
 
             communicate_coro = execute_with_retry(
-                operation=lambda prompt=prompt_with_cwd, a=agent, cb=agent_callback: a.communicate(
-                    prompt, stream_callback=cb
-                ),
+                operation=functools.partial(agent.communicate, prompt_with_cwd, stream_callback=agent_callback),
                 operation_name=f"Agent communication (iteration {iteration})",
                 context={
                     "task_id": self.task.task_id,

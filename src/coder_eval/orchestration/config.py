@@ -1,8 +1,8 @@
 """Configuration models for orchestration."""
 
 from pathlib import Path
-from typing import Any
 
+from claude_agent_sdk import SdkPluginConfig
 from pydantic import BaseModel, Field
 
 
@@ -30,7 +30,7 @@ class BatchRunConfig(BaseModel):
     max_turns: int | None = Field(default=None, description="Override max turns for all tasks")
 
     allowed_tools: list[str] | None = Field(default=None, description="Override allowed tools for all tasks")
-    plugins: list[Any] | None = Field(
+    plugins: list[SdkPluginConfig] | None = Field(
         default=None, description="Override plugins (SdkPluginConfig objects) for all tasks"
     )
     ignore_patterns: list[str] | None = Field(default=None, description="Override ignore patterns for all tasks")

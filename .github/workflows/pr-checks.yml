@@ -58,10 +58,10 @@ jobs:
 
       # PHASE 1: Fast checks (fail early)
       - name: Check code formatting (ruff format)
-        run: .venv/bin/ruff format --check coder_eval/ tests/
+        run: .venv/bin/ruff format --check src/ tests/
 
       - name: Lint code (ruff check)
-        run: .venv/bin/ruff check coder_eval/ tests/
+        run: .venv/bin/ruff check src/ tests/
 
       # PHASE 2: Type checking
       - name: Type check with pyright
@@ -72,7 +72,7 @@ jobs:
         run: .venv/bin/pip-audit --desc --skip-editable
 
       - name: Security - Code analysis (bandit)
-        run: .venv/bin/bandit -r coder_eval/ -ll --format json -o bandit-report.json
+        run: .venv/bin/bandit -r src/ -ll --format json -o bandit-report.json
 
       - name: Upload security reports
         if: always()

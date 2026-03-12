@@ -3,7 +3,8 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
-from .models import AgentState, TurnRecord
+from .models import AgentState as AgentState
+from .models import TurnRecord
 from .streaming.callbacks import StreamCallback
 
 

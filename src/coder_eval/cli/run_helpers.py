@@ -5,7 +5,7 @@ from pathlib import Path
 import typer
 
 from ..config import settings
-from ..orchestrator import RunSummary
+from ..models import RunSummary
 from ..path_utils import generate_run_id
 from .console import console
 

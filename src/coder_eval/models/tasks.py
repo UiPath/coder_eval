@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from claude_agent_sdk import SdkPluginConfig
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -78,7 +78,7 @@ class ReferenceSource(BaseModel):
     file: str | None = Field(default=None, description="Path to file containing reference code (relative to task YAML)")
 
     @model_validator(mode="after")
-    def check_exclusive_source(self):
+    def check_exclusive_source(self) -> Self:
         """Ensure exactly one source is provided."""
         if self.code is not None and self.file is not None:
             raise ValueError("Only one of 'code' or 'file' can be provided for reference code.")

@@ -8,6 +8,7 @@ from typing import Any
 
 import click
 import typer
+from claude_agent_sdk import SdkPluginConfig
 from tqdm import tqdm
 
 from ..config import settings
@@ -229,11 +230,10 @@ def run_command(
     ignore_patterns_list = [p.strip() for p in ignore_patterns.split(",") if p.strip()] if ignore_patterns else None
 
     # Parse plugins JSON and validate against SdkPluginConfig schema
-    plugins_list: list[Any] | None = None
+    plugins_list: list[SdkPluginConfig] | None = None
     if plugins is not None:
         import json
 
-        from claude_agent_sdk import SdkPluginConfig
         from pydantic import TypeAdapter, ValidationError
 
         try:
@@ -303,7 +303,7 @@ async def _run_all_tasks(
     turn_timeout: int | None = None,
     stream_mode: str | None = None,
     allowed_tools: list[str] | None = None,
-    plugins: list[dict[str, str]] | None = None,
+    plugins: list[SdkPluginConfig] | None = None,
     ignore_patterns: list[str] | None = None,
     experiment_path: Path | None = None,
 ) -> None:

@@ -2,9 +2,10 @@
 
 import subprocess
 from pathlib import Path
+from typing import Any
 
 
-def get_version_info(sandbox_path: Path | None = None) -> dict[str, str]:
+def get_version_info(sandbox_path: Path | None = None) -> dict[str, Any]:
     """Captures versions of key dependencies for reproducibility.
 
     Args:

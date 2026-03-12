@@ -4,8 +4,9 @@ import logging
 import os
 import traceback
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from functools import wraps
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from coder_eval.models import BaseSuccessCriterion, CriterionResult
 
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def handle_criterion_errors(func):
+def handle_criterion_errors(func: Callable[..., CriterionResult]) -> Callable[..., CriterionResult]:
     """Decorator to handle errors in criterion checkers.
 
     Wraps checker methods to catch exceptions and return a failed
@@ -28,7 +29,7 @@ def handle_criterion_errors(func):
 
     @wraps(func)
     def wrapper(
-        self,
+        self: Any,
         criterion: BaseSuccessCriterion,
         sandbox: "Sandbox",
         reference_code: str | None = None,
@@ -140,7 +141,7 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
 
 
 # Decorator for registration (defined here to avoid circular imports)
-def register_criterion(cls: type[BaseCriterion]) -> type[BaseCriterion]:  # type: ignore[reportMissingTypeArgument]
+def register_criterion(cls: type[BaseCriterion[Any]]) -> type[BaseCriterion[Any]]:
     """Decorator to register a criterion checker.
 
     Moved here from __init__.py to prevent circular import issues.

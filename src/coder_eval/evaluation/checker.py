@@ -6,6 +6,7 @@ the criteria registry.
 """
 
 import logging
+from typing import Any
 
 from ..criteria import BaseCriterion, CriterionRegistry, init_criteria
 from ..models import CriteriaResults, CriterionResult, SuccessCriteria, SuccessCriterion, TurnRecords
@@ -36,7 +37,7 @@ class SuccessChecker:
         """
         self.sandbox = sandbox
         self.logger = logging.LoggerAdapter(logger, extra={"task_id": task_id}) if task_id else logger
-        self._checker_instances: dict[str, BaseCriterion] = {}  # type: ignore[reportMissingTypeArgument]
+        self._checker_instances: dict[str, BaseCriterion[Any]] = {}
         # Cached reference code - automatically set by check()/check_all() when provided
         # Used by subsequent check() calls that don't explicitly pass reference_code
         self._reference_code: str | None = None
@@ -102,7 +103,7 @@ class SuccessChecker:
             results.append(result)
         return results
 
-    def _get_checker_instance(self, criterion_type: str) -> BaseCriterion:  # type: ignore[reportMissingTypeArgument]
+    def _get_checker_instance(self, criterion_type: str) -> BaseCriterion[Any]:
         """Get or create a checker instance (V3: cached).
 
         Args:

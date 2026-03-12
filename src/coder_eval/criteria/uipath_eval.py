@@ -156,7 +156,7 @@ class UiPathEvalChecker(BaseCriterion[UiPathEvalCriterion]):
         Returns:
             Dictionary with calculated metrics, keyed by evaluator ID or "*" for macro average
         """
-        evaluator_scores = {}  # evaluator_id -> list of scores
+        evaluator_scores: dict[str, list[float]] = {}  # evaluator_id -> list of scores
 
         # Iterate through all evaluations and collect scores by evaluator
         for evaluation in evaluation_set_results:

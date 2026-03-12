@@ -105,7 +105,7 @@ uv run uipath run --resume
         max_llm_concurrency: Maximum concurrent LLM requests
         input_overrides: Input field overrides mapping (direct field override with deep merge)
         resume: Resume execution from a previous suspended state
-    
+
 
 **Arguments:**
 
@@ -251,7 +251,7 @@ Manage UiPath assets.
 
         # List with ordering
         uipath assets list --orderby "Name asc"
-    
+
 
 **Subcommands:**
 
@@ -267,7 +267,7 @@ List assets in a folder.
         uipath assets list --filter "Name eq 'MyAsset'"
         uipath assets list --orderby "Name asc"
         uipath assets list --top 50 --skip 100
-    
+
 
 Options:
 - `--filter`: OData $filter expression (default: `Sentinel.UNSET`)
@@ -356,7 +356,7 @@ Delete a bucket.
     Examples:
         uipath buckets delete my-bucket --confirm
         uipath buckets delete my-bucket --dry-run
-    
+
 
 Arguments:
 - `name` (required): N/A
@@ -411,7 +411,7 @@ Manage files within buckets.
         
         # Check if file exists
         uipath buckets files exists my-bucket data.csv
-    
+
 
 **`uipath buckets files delete`**
 
@@ -426,7 +426,7 @@ Delete a file from a bucket.
     Examples:
         uipath buckets files delete my-bucket old-data.csv --confirm
         uipath buckets files delete reports archive/old.pdf --dry-run
-    
+
 
 Arguments:
 - `bucket_name` (required): N/A
@@ -454,7 +454,7 @@ Download a file from a bucket.
     Examples:
         uipath buckets files download my-bucket data.csv ./downloads/data.csv
         uipath buckets files download reports monthly/report.pdf ./report.pdf
-    
+
 
 Arguments:
 - `bucket_name` (required): N/A
@@ -480,7 +480,7 @@ Check if a file exists in a bucket.
     Examples:
         uipath buckets files exists my-bucket data.csv
         uipath buckets files exists reports monthly/report.pdf
-    
+
 
 Arguments:
 - `bucket_name` (required): N/A
@@ -506,7 +506,7 @@ List files in a bucket.
         uipath buckets files list my-bucket --prefix "data/"
         uipath buckets files list reports --limit 10 --format json
         uipath buckets files list my-bucket --all
-    
+
 
 Arguments:
 - `bucket_name` (required): N/A
@@ -537,7 +537,7 @@ Search for files using glob patterns.
         uipath buckets files search my-bucket "*.pdf"
         uipath buckets files search reports "*.csv" --recursive
         uipath buckets files search my-bucket "data_*.json" --prefix "archive/"
-    
+
 
 Arguments:
 - `bucket_name` (required): N/A
@@ -566,7 +566,7 @@ Upload a file to a bucket.
     Examples:
         uipath buckets files upload my-bucket ./data.csv remote/data.csv
         uipath buckets files upload reports ./report.pdf monthly/report.pdf
-    
+
 
 Arguments:
 - `bucket_name` (required): N/A
@@ -604,7 +604,7 @@ Retrieve a bucket by name or key.
     Examples:
         uipath buckets retrieve --name "my-bucket"
         uipath buckets retrieve --key "abc-123-def-456" --format json
-    
+
 
 Options:
 - `--name`: Bucket name (default: `Sentinel.UNSET`)
@@ -615,4 +615,3 @@ Options:
 - `--output`, `-o`: Output file (overrides global) (default: `Sentinel.UNSET`)
 
 ---
-
