@@ -81,8 +81,11 @@ def expand_task_files(task_files: list[Path]) -> list[Path]:
         if pattern.is_file():
             all_task_files.append(pattern)
         else:
-            # Try as glob pattern
-            all_task_files.extend(pattern.parent.glob(pattern.name))
+            # Try as glob pattern (supports ** for recursive matching)
+            if pattern.is_absolute():
+                all_task_files.extend(Path(pattern.anchor).glob(str(pattern.relative_to(pattern.anchor))))
+            else:
+                all_task_files.extend(Path().glob(str(pattern)))
 
     if not all_task_files:
         console.print("[red]No task files found![/red]")
