@@ -65,6 +65,7 @@ from coder_eval.models.sandbox import (
     SandboxConfig,
     SnapshotConfig,
     SnapshotManifest,
+    validate_template_sources_list,
 )
 
 # Tasks
@@ -131,6 +132,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "SnapshotConfig",
     "SnapshotManifest",
     "ResourceLimits",
+    "validate_template_sources_list",
     # Telemetry
     "CommandTelemetry",
     "CommandStatistics",

@@ -27,8 +27,11 @@ from ..models import (
     TaskDefinition,
     TaskExperimentSummary,
     TaskResult,
+    TemplateDirSource,
+    TemplateSource,
     VariantAggregate,
     VariantResult,
+    validate_template_sources_list,
 )
 from .config import BatchRunConfig
 from .task_loader import load_task
@@ -63,6 +66,30 @@ def _find_default_experiment() -> Path:
 DEFAULT_EXPERIMENT_PATH = _find_default_experiment()
 
 
+def _resolve_experiment_template_paths(experiment: ExperimentDefinition, base_dir: Path) -> None:
+    """Resolve relative TemplateDirSource paths in experiment base and variants.
+
+    Mutates paths in place, resolving relative paths against the experiment YAML directory.
+
+    Args:
+        experiment: The experiment definition to resolve paths in.
+        base_dir: Directory containing the experiment YAML file.
+    """
+    sources_lists: list[list[TemplateSource]] = []
+    if experiment.base and experiment.base.template_sources:
+        sources_lists.append(experiment.base.template_sources)
+    for variant in experiment.variants:
+        if variant.template_sources:
+            sources_lists.append(variant.template_sources)
+
+    for sources in sources_lists:
+        for i, source in enumerate(sources):
+            if isinstance(source, TemplateDirSource):
+                template_path = Path(source.path)
+                if not template_path.is_absolute():
+                    sources[i] = source.model_copy(update={"path": str((base_dir / template_path).resolve())})
+
+
 def load_experiment(experiment_file: Path) -> ExperimentDefinition:
     """Load an experiment definition from a YAML file.
 
@@ -83,7 +110,9 @@ def load_experiment(experiment_file: Path) -> ExperimentDefinition:
         data = yaml.safe_load(f)
 
     try:
-        return ExperimentDefinition(**data)
+        exp = ExperimentDefinition(**data)
+        _resolve_experiment_template_paths(exp, experiment_file.parent)
+        return exp
     except Exception as e:
         raise ValueError(f"Invalid experiment definition: {e}") from e
 
@@ -232,6 +261,19 @@ def resolve_task_for_variant(
     # Apply turn_timeout to agent config
     resolved_agent.turn_timeout = resolved_turn_timeout
 
+    # Resolve template_sources: task base + experiment base overlays + variant overlays (append semantics)
+    base_sources: list[TemplateSource] = list(task.sandbox.template_sources or [])
+    exp_base_sources: list[TemplateSource] = (
+        list(experiment.base.template_sources) if experiment.base and experiment.base.template_sources else []
+    )
+    variant_sources: list[TemplateSource] = list(variant.template_sources) if variant.template_sources else []
+
+    combined_sources = base_sources + exp_base_sources + variant_sources
+    resolved_sandbox = task.sandbox
+    if exp_base_sources or variant_sources:
+        validate_template_sources_list(combined_sources)
+        resolved_sandbox = task.sandbox.model_copy(update={"template_sources": combined_sources})
+
     # Combine lineage
     lineage = {**agent_lineage, **scalar_lineage}
 
@@ -241,6 +283,7 @@ def resolve_task_for_variant(
             "agent": resolved_agent,
             "max_iterations": resolved_max_iterations,
             "task_timeout": resolved_task_timeout,
+            "sandbox": resolved_sandbox,
         }
     )
     return resolved_task, lineage

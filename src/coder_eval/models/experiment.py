@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from coder_eval.models.results import ConfigLineageEntry, EvaluationResult
 from coder_eval.models.tasks import TaskDefinition
+from coder_eval.models.templates import TemplateSource
 
 
 class ExperimentVariant(BaseModel):
@@ -20,6 +21,9 @@ class ExperimentVariant(BaseModel):
     max_iterations: int | None = Field(default=None, description="Override max iterations for this variant")
     task_timeout: int | None = Field(default=None, ge=30, description="Override task timeout (seconds)")
     turn_timeout: int | None = Field(default=None, ge=10, description="Override turn timeout (seconds)")
+    template_sources: list[TemplateSource] | None = Field(
+        default=None, description="Additional template sources appended after task's base templates"
+    )
 
 
 class ExperimentBase(BaseModel):
@@ -29,6 +33,9 @@ class ExperimentBase(BaseModel):
     task_timeout: int | None = Field(default=None, ge=30, description="Default task timeout (seconds)")
     turn_timeout: int | None = Field(default=None, ge=10, description="Default turn timeout (seconds)")
     agent: dict[str, Any] | None = Field(default=None, description="Partial agent config overrides")
+    template_sources: list[TemplateSource] | None = Field(
+        default=None, description="Additional template sources appended after task's base templates (for all variants)"
+    )
 
 
 class ExperimentDefinition(BaseModel):

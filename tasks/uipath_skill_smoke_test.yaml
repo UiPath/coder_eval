@@ -1,0 +1,33 @@
+# Smoke test based on "pull" task — 8.2x faster with skills in evaluation report.
+# https://uipath.atlassian.net/wiki/spaces/Agents/pages/90388201631
+
+task_id: uipath-skill-smoke-test
+description: "Pull project from Studio Web — proven 8.2x faster with skills"
+tags: [uipath, coded-agents, file-sync, skills-test]
+
+agent:
+  type: claude-code
+  permission_mode: bypassPermissions
+
+sandbox:
+  driver: tempdir
+  python: {}
+  network_enabled: false
+  template_sources:
+    - type: template_dir
+      path: "../templates/uipath-starter"
+
+initial_prompt: |
+  Pull my uipath agent project in the current dir from the latest version on studio web
+  Use your skills as much as possible.
+
+max_iterations: 1
+
+success_criteria:
+  - type: command_executed
+    tool_name: "Bash"
+    command_pattern: ".*uipath pull.*"
+    min_count: 1
+    description: "Agent must run uipath pull"
+    weight: 1.0
+    pass_threshold: 1.0

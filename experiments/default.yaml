@@ -36,7 +36,7 @@ base:
     # Allowed tools — restrict which tools the agent can use (null = all tools)
     # Most tasks use ["Bash"] or ["Bash", "Read", "Write"]. This default
     # provides the common set needed for general-purpose coding tasks.
-    allowed_tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+    allowed_tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"]
 
     # Claude Code plugins to load (null = none)
     # Example: [{"name": "my-plugin", "path": "/path/to/plugin"}]

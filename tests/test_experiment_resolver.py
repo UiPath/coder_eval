@@ -1,10 +1,13 @@
 """Tests for experiment config resolution (merge logic)."""
 
+import pytest
+
 from coder_eval.models import (
     ExperimentBase,
     ExperimentDefinition,
     ExperimentVariant,
     TaskDefinition,
+    TemplateDirSource,
 )
 from coder_eval.orchestration.experiment import resolve_task_for_variant
 
@@ -295,3 +298,70 @@ class TestDefaultExperimentScalarOverrides:
 
         resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.max_iterations == 2
+
+
+class TestTemplateSourcesOverlay:
+    """Tests for variant-level template_sources overlay (append semantics)."""
+
+    def test_full_template_sources_precedence_chain(self):
+        """Task + base + variant template_sources are concatenated in order."""
+        default_exp = _make_default_experiment()
+        task = _make_task(
+            agent={"type": "claude-code"},
+            sandbox={
+                "driver": "tempdir",
+                "template_sources": [{"type": "template_dir", "path": "/task"}],
+            },
+        )
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            base=ExperimentBase(template_sources=[TemplateDirSource(path="/base")]),
+            variants=[
+                ExperimentVariant(
+                    variant_id="full",
+                    template_sources=[TemplateDirSource(path="/variant")],
+                )
+            ],
+        )
+
+        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.sandbox.template_sources is not None
+        paths = [s.path for s in resolved.sandbox.template_sources]
+        assert paths == ["/task", "/base", "/variant"]
+
+    def test_no_template_sources_anywhere(self):
+        """When no layer has template_sources, sandbox.template_sources is unchanged."""
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"})
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="bare")],
+        )
+
+        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.sandbox.template_sources is None
+
+    def test_repo_source_in_variant_after_task_sources_rejected(self):
+        """RepoSource in variant overlay is rejected when task already has sources."""
+        from coder_eval.models import RepoSource
+
+        default_exp = _make_default_experiment()
+        task = _make_task(
+            agent={"type": "claude-code"},
+            sandbox={
+                "driver": "tempdir",
+                "template_sources": [{"type": "template_dir", "path": "/base"}],
+            },
+        )
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[
+                ExperimentVariant(
+                    variant_id="bad",
+                    template_sources=[RepoSource(url="https://github.com/example/repo.git")],
+                )
+            ],
+        )
+
+        with pytest.raises(ValueError, match="RepoSource must be the first element"):
+            resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])

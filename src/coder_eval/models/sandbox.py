@@ -72,6 +72,39 @@ class NodeEnvConfig(BaseModel):
     )
 
 
+def validate_template_sources_list(sources: list[TemplateSource]) -> None:
+    """Validate a list of template sources for correctness.
+
+    Checks:
+      - At most one RepoSource
+      - RepoSource must be first (git clone requires empty directory)
+      - Warns if more than 10 sources
+
+    Args:
+        sources: List of template sources to validate.
+
+    Raises:
+        ValueError: If validation fails.
+    """
+    from coder_eval.models.templates import RepoSource
+
+    repo_sources = [src for src in sources if isinstance(src, RepoSource)]
+    if len(repo_sources) > 1:
+        raise ValueError("Only one RepoSource is allowed in template_sources.")
+
+    if len(repo_sources) == 1 and not isinstance(sources[0], RepoSource):
+        raise ValueError(
+            "RepoSource must be the first element in template_sources (git clone requires an empty directory)."
+        )
+
+    if len(sources) > 10:
+        warnings.warn(
+            f"Many template sources ({len(sources)}) - this may be a misconfiguration",
+            UserWarning,
+            stacklevel=2,
+        )
+
+
 class SandboxConfig(BaseModel):
     """Configuration for the sandboxed execution environment."""
 
@@ -107,27 +140,6 @@ class SandboxConfig(BaseModel):
     @model_validator(mode="after")
     def validate_template_sources(self) -> SandboxConfig:
         """Validate template sources configuration."""
-        # Import RepoSource locally to avoid circular import
-        from coder_eval.models.templates import RepoSource
-
         if self.template_sources:
-            # Check for multiple RepoSource entries
-            repo_sources = [src for src in self.template_sources if isinstance(src, RepoSource)]
-            if len(repo_sources) > 1:
-                raise ValueError("Only one RepoSource is allowed in template_sources.")
-
-            # Check that RepoSource (if present) is first
-            if len(repo_sources) == 1 and not isinstance(self.template_sources[0], RepoSource):
-                raise ValueError(
-                    "RepoSource must be the first element in template_sources (git clone requires an empty directory)."
-                )
-
-            # Warn if too many sources
-            if len(self.template_sources) > 10:
-                warnings.warn(
-                    f"Many template sources ({len(self.template_sources)}) - this may be a misconfiguration",
-                    UserWarning,
-                    stacklevel=2,
-                )
-
+            validate_template_sources_list(self.template_sources)
         return self
