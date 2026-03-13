@@ -1,7 +1,7 @@
 task_id: uipath-flow-process-get-detailed
 description: >
   Detailed-prompt evaluation: agent follows step-by-step instructions to get
-  the schema and details of a UiPath Flow process using uipcli CLI.
+  the schema and details of a UiPath Flow process using uip CLI.
 tags: [flow, uipcli, detailed]
 
 agent:
@@ -15,35 +15,35 @@ sandbox:
   python: {}
 
 initial_prompt: |
-  Use the `uipcli` CLI tool to get the schema and details of a Flow process.
+  Use the `uip` CLI tool to get the schema and details of a Flow process.
 
   Be efficient: redirect output directly to files. Do not run unnecessary
   verification commands.
 
   ## Step 0: Check login
-  Run `uipcli login status --format json`. If expired or not logged in,
-  run `uipcli login` first.
+  Run `uip login status --format json`. If expired or not logged in,
+  run `uip login` first.
 
   ## Step 1: List processes
-  Run `uipcli flow process list --format json > processes.json`
+  Run `uip flow process list --format json > processes.json`
   to discover available processes.
 
   ## Step 2: Get process details
   From the processes list, extract a `process-key` (e.g., `MyFlow.flow.Flow:1.0.0`)
   and `feed-id`. Then run:
-    uipcli flow process get <process-key> <feed-id> --format json > process_details.json
+    uip flow process get <process-key> <feed-id> --format json > process_details.json
   If no processes are available, write to process_details.json:
     {"status": "skipped", "reason": "no processes found"}
 
   ## Step 3: Get process details in YAML format
   Run the same get command with `--format yaml`:
-    uipcli flow process get <process-key> <feed-id> --format yaml > process_details.yaml
+    uip flow process get <process-key> <feed-id> --format yaml > process_details.yaml
   If no processes, write: {"status": "skipped", "reason": "no processes found"}
 
   ## Step 4: Write summary report
   Create process_get_report.json:
     {
-      "command_used": "uipcli flow process get",
+      "command_used": "uip flow process get",
       "process_key": "<process-key or null>",
       "feed_id": "<feed-id or null>",
       "formats_tested": ["json", "yaml"],
@@ -51,7 +51,7 @@ initial_prompt: |
     }
 
   Important notes:
-  - The `uipcli` CLI is already available in the environment.
+  - The `uip` CLI is already available in the environment.
   - `flow process get` requires two positional args: process-key and feed-id.
   - These values come from the `flow process list` output.
 
@@ -59,7 +59,7 @@ success_criteria:
   - type: command_executed
     description: "Agent listed processes"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+process\s+list'
+    command_pattern: 'uip\s+flow\s+process\s+list'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
@@ -71,9 +71,9 @@ success_criteria:
     pass_threshold: 1.0
 
   - type: command_executed
-    description: "Agent ran uipcli flow process get"
+    description: "Agent ran uip flow process get"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+process\s+get'
+    command_pattern: 'uip\s+flow\s+process\s+get'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0
@@ -95,7 +95,7 @@ success_criteria:
   - type: command_executed
     description: "Agent used --format yaml on process get"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+process\s+get.*--format\s+yaml'
+    command_pattern: 'uip\s+flow\s+process\s+get.*--format\s+yaml'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0

@@ -1,7 +1,7 @@
 task_id: uipath-flow-process-run-simple
 description: >
   Minimal-prompt evaluation: agent must figure out how to run a UiPath Flow
-  process and check its job status using uipcli CLI with no step-by-step guidance.
+  process and check its job status using uip CLI with no step-by-step guidance.
 tags: [flow, uipcli, simple]
 
 agent:
@@ -15,23 +15,23 @@ sandbox:
   python: {}
 
 initial_prompt: |
-  Use the `uipcli` CLI to run a Flow process, then check the job status and
+  Use the `uip` CLI to run a Flow process, then check the job status and
   save a summary to run_report.json. You will need to discover available processes
-  first. The `uipcli` CLI is already available.
+  first. The `uip` CLI is already available.
 
 success_criteria:
   - type: command_executed
     description: "Agent listed processes to find process-key and folder-key"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+process\s+list'
+    command_pattern: 'uip\s+flow\s+process\s+list'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
 
   - type: command_executed
-    description: "Agent ran uipcli flow process run"
+    description: "Agent ran uip flow process run"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+process\s+run'
+    command_pattern: 'uip\s+flow\s+process\s+run'
     min_count: 1
     weight: 2.0
     pass_threshold: 1.0
@@ -39,7 +39,7 @@ success_criteria:
   - type: command_executed
     description: "Agent checked job status"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+job\s+status'
+    command_pattern: 'uip\s+flow\s+job\s+status'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0

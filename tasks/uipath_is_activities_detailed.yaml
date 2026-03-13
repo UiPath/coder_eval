@@ -1,7 +1,7 @@
 task_id: uipath-is-activities-detailed
 description: >
   Detailed-prompt evaluation: agent follows step-by-step instructions to list
-  Integration Service activities using uipcli CLI.
+  Integration Service activities using uip CLI.
 tags: [is, uipcli, detailed]
 
 agent:
@@ -15,13 +15,13 @@ sandbox:
   python: {}
 
 initial_prompt: |
-  Use the `uipcli` CLI tool to list all non-trigger Integration Service activities
+  Use the `uip` CLI tool to list all non-trigger Integration Service activities
   for the Zoho Desk connector and save the output to activities.json in the current directory.
 
   Steps:
-  1. Check login status with `uipcli login status --format json`.
-     If expired or not logged in, run `uipcli login` to re-authenticate first.
-  2. Run `uipcli is activities list uipath-zoho-desk --format json > activities.json`
+  1. Check login status with `uip login status --format json`.
+     If expired or not logged in, run `uip login` to re-authenticate first.
+  2. Run `uip is activities list uipath-zoho-desk --format json > activities.json`
      to list activities and save directly to file in one command.
 
   Be efficient: redirect output directly to the file instead of running the command
@@ -29,7 +29,7 @@ initial_prompt: |
   automatically.
 
   Notes:
-  - The `uipcli` CLI is already available in the environment.
+  - The `uip` CLI is already available in the environment.
   - Some commands (like connectors list) work without auth, but activities list
     requires an active login session.
   - Only non-trigger activities are returned by the activities list command.
@@ -43,9 +43,9 @@ success_criteria:
     pass_threshold: 1.0
 
   - type: command_executed
-    description: "Agent ran uipcli is activities list"
+    description: "Agent ran uip is activities list"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+activities\s+list'
+    command_pattern: 'uip\s+is\s+activities\s+list'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0

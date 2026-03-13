@@ -1,7 +1,7 @@
 task_id: uipath-is-activities-simple
 description: >
   Minimal-prompt evaluation: agent must figure out how to list Integration Service
-  activities using uipcli CLI with no step-by-step guidance.
+  activities using uip CLI with no step-by-step guidance.
 tags: [is, uipcli, simple]
 
 agent:
@@ -15,7 +15,7 @@ sandbox:
   python: {}
 
 initial_prompt: |
-  Use the `uipcli` CLI tool to list all non-trigger Integration Service activities
+  Use the `uip` CLI tool to list all non-trigger Integration Service activities
   for the Zoho Desk connector (uipath-zoho-desk) and save the output to
   activities.json in the current directory.
 
@@ -44,9 +44,9 @@ success_criteria:
     pass_threshold: 1.0
 
   - type: command_executed
-    description: "Agent ran uipcli is activities list"
+    description: "Agent ran uip is activities list"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+activities\s+list'
+    command_pattern: 'uip\s+is\s+activities\s+list'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0

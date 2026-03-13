@@ -2,7 +2,7 @@ task_id: uipath-flow-run-e2e-detailed
 description: >
   Detailed-prompt E2E evaluation: agent follows step-by-step instructions to
   list flow processes, run the first available process, monitor job status,
-  retrieve traces, and produce a comprehensive summary report using uipcli CLI.
+  retrieve traces, and produce a comprehensive summary report using uip CLI.
 tags: [flow, uipcli, detailed, e2e]
 
 agent:
@@ -16,7 +16,7 @@ sandbox:
   python: {}
 
 initial_prompt: |
-  Perform an end-to-end UiPath Flow run using the `uipcli` CLI tool: list
+  Perform an end-to-end UiPath Flow run using the `uip` CLI tool: list
   processes, run the first one, monitor its status, retrieve traces, and
   produce a summary report.
 
@@ -24,30 +24,30 @@ initial_prompt: |
   verification commands.
 
   ## Step 0: Check login
-  Run `uipcli login status --format json`. If expired or not logged in,
-  run `uipcli login` first.
+  Run `uip login status --format json`. If expired or not logged in,
+  run `uip login` first.
 
   ## Step 1: List all flow processes
-  Run `uipcli flow process list --format json > processes.json`
+  Run `uip flow process list --format json > processes.json`
   to discover available processes with their process-key and folder-key.
 
   ## Step 2: Select and run the first process
   Parse processes.json to extract the process-key and folder-key of the
   **first** process in the list. Then run:
-    uipcli flow process run <process-key> <folder-key> --format json > run_result.json
+    uip flow process run <process-key> <folder-key> --format json > run_result.json
   If no processes are available, write to run_result.json:
     {"status": "skipped", "reason": "no processes found"}
   and skip to Step 5.
 
   ## Step 3: Check job status
   From run_result.json, extract the job-key. Then run:
-    uipcli flow job status <job-key> --format json > job_status.json
+    uip flow job status <job-key> --format json > job_status.json
   Wait a few seconds and check status again to see if it has progressed:
-    uipcli flow job status <job-key> --format json > job_status_final.json
+    uip flow job status <job-key> --format json > job_status_final.json
 
   ## Step 4: Retrieve job traces
   Get execution traces for the job:
-    uipcli flow job traces <job-key> --format json > job_traces.json 2>&1 &
+    uip flow job traces <job-key> --format json > job_traces.json 2>&1 &
     PID=$!; sleep 15; kill $PID 2>/dev/null
   If traces output is empty, write:
     {"status": "completed", "reason": "no traces captured in time window"}
@@ -66,7 +66,7 @@ initial_prompt: |
     }
 
   Important notes:
-  - The `uipcli` CLI is already available in the environment.
+  - The `uip` CLI is already available in the environment.
   - `flow process run` requires two positional args: process-key and folder-key.
   - `flow job status` and `flow job traces` require the job-key from the run result.
   - Do NOT use `timeout` command (not on macOS). Do NOT use TodoWrite.
@@ -75,7 +75,7 @@ success_criteria:
   - type: command_executed
     description: "Agent checked login status"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+login\s+status'
+    command_pattern: 'uip\s+login\s+status'
     min_count: 1
     weight: 0.5
     pass_threshold: 1.0
@@ -83,7 +83,7 @@ success_criteria:
   - type: command_executed
     description: "Agent listed flow processes"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+process\s+list'
+    command_pattern: 'uip\s+flow\s+process\s+list'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
@@ -105,7 +105,7 @@ success_criteria:
   - type: command_executed
     description: "Agent ran a flow process"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+process\s+run'
+    command_pattern: 'uip\s+flow\s+process\s+run'
     min_count: 1
     weight: 2.0
     pass_threshold: 1.0
@@ -119,7 +119,7 @@ success_criteria:
   - type: command_executed
     description: "Agent checked job status"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+job\s+status'
+    command_pattern: 'uip\s+flow\s+job\s+status'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0
@@ -139,7 +139,7 @@ success_criteria:
   - type: command_executed
     description: "Agent retrieved job traces"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+job\s+traces'
+    command_pattern: 'uip\s+flow\s+job\s+traces'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0

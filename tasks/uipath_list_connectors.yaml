@@ -12,7 +12,7 @@ sandbox:
   python: {}
 
 initial_prompt: |
-  Use the `uipcli` CLI tool to list all available UiPath Integration Service connectors
+  Use the `uip` CLI tool to list all available UiPath Integration Service connectors
   and save the output to connectors.json in the current directory. The output should be in JSON format.
   The CLI should already be installed in the virtual environment.
 
@@ -33,7 +33,7 @@ success_criteria:
   - type: command_executed
     description: "Agent ran the uipath CLI to list connectors"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+connectors\s+list'
+    command_pattern: 'uip\s+is\s+connectors\s+list'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0

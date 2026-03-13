@@ -1,7 +1,7 @@
 task_id: uipath-is-resources-simple
 description: >
   Minimal-prompt evaluation: agent must figure out how to use Integration Service
-  resources commands to create a Zoho Desk ticket using uipcli CLI with no
+  resources commands to create a Zoho Desk ticket using uip CLI with no
   step-by-step guidance.
 tags: [is, uipcli, simple]
 
@@ -16,7 +16,7 @@ sandbox:
   python: {}
 
 initial_prompt: |
-  Use the `uipcli` CLI tool to work with Integration Service resources for the
+  Use the `uip` CLI tool to work with Integration Service resources for the
   Zoho Desk connector (uipath-zoho-desk). List available resources, describe the
   create_ticket fields, resolve any required references (like departments and contacts),
   create a real ticket, and save a summary report to resources_report.json.
@@ -27,7 +27,7 @@ success_criteria:
   - type: command_executed
     description: "Agent listed resources for zoho-desk"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+resources\s+list\s+uipath-zoho-desk'
+    command_pattern: 'uip\s+is\s+resources\s+list\s+uipath-zoho-desk'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
@@ -35,7 +35,7 @@ success_criteria:
   - type: command_executed
     description: "Agent described create_ticket resource"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+resources\s+describe\s+uipath-zoho-desk\s+create_ticket'
+    command_pattern: 'uip\s+is\s+resources\s+describe\s+uipath-zoho-desk\s+create_ticket'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0
@@ -43,7 +43,7 @@ success_criteria:
   - type: command_executed
     description: "Agent executed create to make a ticket"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+resources\s+execute\s+create\s+uipath-zoho-desk\s+create_ticket.*--body'
+    command_pattern: 'uip\s+is\s+resources\s+execute\s+create\s+uipath-zoho-desk\s+create_ticket.*--body'
     min_count: 1
     weight: 2.0
     pass_threshold: 1.0

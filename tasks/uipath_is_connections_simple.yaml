@@ -1,7 +1,7 @@
 task_id: uipath-is-connections-simple
 description: >
   Minimal-prompt evaluation: agent must figure out how to list and ping
-  Integration Service connections using uipcli CLI with no step-by-step guidance.
+  Integration Service connections using uip CLI with no step-by-step guidance.
 tags: [is, uipcli, simple]
 
 agent:
@@ -15,7 +15,7 @@ sandbox:
   python: {}
 
 initial_prompt: |
-  Use the `uipcli` CLI tool to list Integration Service connections for the
+  Use the `uip` CLI tool to list Integration Service connections for the
   Zoho Desk connector (uipath-zoho-desk), verify one is active by pinging it,
   and save the results. Save the connection list to connections_list.json and the
   ping result to connection_ping.json.
@@ -47,7 +47,7 @@ success_criteria:
   - type: command_executed
     description: "Agent listed connections"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+connections\s+list'
+    command_pattern: 'uip\s+is\s+connections\s+list'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
@@ -61,7 +61,7 @@ success_criteria:
   - type: command_executed
     description: "Agent pinged a connection"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+connections\s+ping'
+    command_pattern: 'uip\s+is\s+connections\s+ping'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0

@@ -1,7 +1,7 @@
 task_id: uipath-flow-run-e2e-simple
 description: >
   Minimal-prompt E2E evaluation: agent must list flow processes, run the first
-  available process, check job status, and retrieve job traces using uipcli CLI
+  available process, check job status, and retrieve job traces using uip CLI
   with no step-by-step guidance.
 tags: [flow, uipcli, simple, e2e]
 
@@ -16,7 +16,7 @@ sandbox:
   python: {}
 
 initial_prompt: |
-  Using the `uipcli` CLI (already available), perform an end-to-end flow run:
+  Using the `uip` CLI (already available), perform an end-to-end flow run:
   list all flow processes, run the first one, check the job status, get traces,
   and save a final summary to e2e_report.json.
 
@@ -24,7 +24,7 @@ success_criteria:
   - type: command_executed
     description: "Agent listed flow processes"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+process\s+list'
+    command_pattern: 'uip\s+flow\s+process\s+list'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
@@ -32,7 +32,7 @@ success_criteria:
   - type: command_executed
     description: "Agent ran a flow process"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+process\s+run'
+    command_pattern: 'uip\s+flow\s+process\s+run'
     min_count: 1
     weight: 2.0
     pass_threshold: 1.0
@@ -40,7 +40,7 @@ success_criteria:
   - type: command_executed
     description: "Agent checked job status"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+job\s+status'
+    command_pattern: 'uip\s+flow\s+job\s+status'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0
@@ -48,7 +48,7 @@ success_criteria:
   - type: command_executed
     description: "Agent retrieved job traces"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+job\s+traces'
+    command_pattern: 'uip\s+flow\s+job\s+traces'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0

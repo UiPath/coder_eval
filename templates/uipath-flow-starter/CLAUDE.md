@@ -11,5 +11,5 @@
 ## Constraints
 
 - Work strictly with files inside this sandbox directory.
-- Use `uipcli flow` commands to discover available node types and their metadata.
+- Use `uip flow` commands to discover available node types and their metadata.
 - Do not look for or use any files outside the sandbox — expected outputs and fixtures are not available here and are only used by the evaluation criteria.

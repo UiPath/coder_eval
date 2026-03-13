@@ -1,7 +1,7 @@
 task_id: uipath-is-resources-detailed
 description: >
   Detailed-prompt evaluation: agent follows step-by-step instructions to use
-  UiPath Integration Service resources commands via uipcli CLI with Zoho Desk
+  UiPath Integration Service resources commands via uip CLI with Zoho Desk
   connector. Covers listing resources (with options), describing objects, resolving
   reference fields, and executing a create operation with a properly constructed body.
 tags: [is, uipcli, detailed]
@@ -17,7 +17,7 @@ sandbox:
   python: {}
 
 initial_prompt: |
-  You are working with the UiPath Integration Service CLI (`uipcli`).
+  You are working with the UiPath Integration Service CLI (`uip`).
   Your goal is to demonstrate the full resources workflow using the Zoho Desk
   connector (`uipath-zoho-desk`), including creating a real ticket by resolving
   all required field dependencies. Save a summary report at the end.
@@ -26,16 +26,16 @@ initial_prompt: |
   reading files back). Don't verify files manually. Don't use todo lists.
 
   ## Step 0: Check login
-  Run `uipcli login status --format json`. If expired or not logged in,
-  run `uipcli login` first.
+  Run `uip login status --format json`. If expired or not logged in,
+  run `uip login` first.
 
   ## Step 1: List resources + connections (ALL 5 in ONE parallel batch)
   IMPORTANT: Run all 5 commands as separate parallel tool calls in a SINGLE batch:
-    uipcli is resources list uipath-zoho-desk --format json | tee resources_list.json
-    uipcli is connections list uipath-zoho-desk --format json | tee zoho_connections.json
-    uipcli is resources list uipath-zoho-desk --format json --refresh > resources_list_refresh.json
-    uipcli is resources list uipath-zoho-desk --format yaml > resources_list.yaml
-    uipcli is resources list uipath-zoho-desk --operation List --format json > resources_list_operation.json
+    uip is resources list uipath-zoho-desk --format json | tee resources_list.json
+    uip is connections list uipath-zoho-desk --format json | tee zoho_connections.json
+    uip is resources list uipath-zoho-desk --format json --refresh > resources_list_refresh.json
+    uip is resources list uipath-zoho-desk --format yaml > resources_list.yaml
+    uip is resources list uipath-zoho-desk --operation List --format json > resources_list_operation.json
   Use `tee` for the first two so you can see output. Use `>` for the rest.
   Do NOT split these into multiple batches — they are all independent.
 
@@ -43,13 +43,13 @@ initial_prompt: |
   From Step 1 output, get a connection ID. These 4 commands are all independent
   — run them ALL in a SINGLE parallel batch:
   a) Describe create_ticket fields:
-       uipcli is resources describe uipath-zoho-desk create_ticket --connection-id <id> --operation Create --format json | tee resource_describe.json
+       uip is resources describe uipath-zoho-desk create_ticket --connection-id <id> --operation Create --format json | tee resource_describe.json
   b) Describe tickets with List operation:
-       uipcli is resources describe uipath-zoho-desk tickets --connection-id <id> --operation List --format json > resource_describe_operation.json
+       uip is resources describe uipath-zoho-desk tickets --connection-id <id> --operation List --format json > resource_describe_operation.json
   c) Fetch departments (needed for departmentId in create body):
-       uipcli is resources execute list uipath-zoho-desk departments --connection-id <id> --format json | tee resolve_departments.json
+       uip is resources execute list uipath-zoho-desk departments --connection-id <id> --format json | tee resolve_departments.json
   d) Fetch contacts (needed for contact email in create body):
-       uipcli is resources execute list uipath-zoho-desk contacts --connection-id <id> --query "limit=1" --format json | tee resolve_contacts.json
+       uip is resources execute list uipath-zoho-desk contacts --connection-id <id> --query "limit=1" --format json | tee resolve_contacts.json
   If no connections, write skip notes and go to Step 5.
 
   ## Step 3: Execute create (create a real ticket)
@@ -66,13 +66,13 @@ initial_prompt: |
   NOT as flat keys like `{"contact.email": "..."}` (that will cause a 422 error).
 
   Run:
-    uipcli is resources execute create uipath-zoho-desk create_ticket --connection-id <id> --body '<json>' --format json | tee execute_create.json
+    uip is resources execute create uipath-zoho-desk create_ticket --connection-id <id> --body '<json>' --format json | tee execute_create.json
 
   The body JSON must use the ACTUAL IDs resolved from Step 2, not placeholders.
 
   ## Step 4: Execute list (read back tickets)
   Verify the ticket was created by listing tickets:
-    uipcli is resources execute list uipath-zoho-desk tickets --connection-id <id> --query "limit=5" --format json > execute_list.json
+    uip is resources execute list uipath-zoho-desk tickets --connection-id <id> --query "limit=5" --format json > execute_list.json
 
   ## Step 5: Write summary report
   Create resources_report.json:
@@ -94,7 +94,7 @@ initial_prompt: |
     }
 
   Important notes:
-  - The `uipcli` CLI is already available.
+  - The `uip` CLI is already available.
   - Use --format json unless testing other formats.
   - The connector key is `uipath-zoho-desk`.
   - Execute and describe commands require --connection-id.
@@ -108,7 +108,7 @@ success_criteria:
   - type: command_executed
     description: "Agent listed resources for zoho-desk"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+resources\s+list\s+uipath-zoho-desk'
+    command_pattern: 'uip\s+is\s+resources\s+list\s+uipath-zoho-desk'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0
@@ -122,7 +122,7 @@ success_criteria:
   - type: command_executed
     description: "Agent used --refresh option on resources list"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+resources\s+list\s+uipath-zoho-desk.*--refresh'
+    command_pattern: 'uip\s+is\s+resources\s+list\s+uipath-zoho-desk.*--refresh'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
@@ -136,7 +136,7 @@ success_criteria:
   - type: command_executed
     description: "Agent used --format yaml on resources list"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+resources\s+list\s+uipath-zoho-desk.*--format\s+yaml'
+    command_pattern: 'uip\s+is\s+resources\s+list\s+uipath-zoho-desk.*--format\s+yaml'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
@@ -150,7 +150,7 @@ success_criteria:
   - type: command_executed
     description: "Agent used --operation filter on resources list"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+resources\s+list\s+uipath-zoho-desk.*--operation'
+    command_pattern: 'uip\s+is\s+resources\s+list\s+uipath-zoho-desk.*--operation'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
@@ -164,7 +164,7 @@ success_criteria:
   - type: command_executed
     description: "Agent listed connections for zoho-desk"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+connections\s+list\s+uipath-zoho-desk'
+    command_pattern: 'uip\s+is\s+connections\s+list\s+uipath-zoho-desk'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
@@ -179,7 +179,7 @@ success_criteria:
   - type: command_executed
     description: "Agent described create_ticket with --operation Create"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+resources\s+describe\s+uipath-zoho-desk\s+create_ticket.*--operation\s+Create'
+    command_pattern: 'uip\s+is\s+resources\s+describe\s+uipath-zoho-desk\s+create_ticket.*--operation\s+Create'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0
@@ -200,7 +200,7 @@ success_criteria:
   - type: command_executed
     description: "Agent fetched departments to resolve departmentId"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+resources\s+execute\s+list\s+uipath-zoho-desk\s+departments.*--connection-id'
+    command_pattern: 'uip\s+is\s+resources\s+execute\s+list\s+uipath-zoho-desk\s+departments.*--connection-id'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0
@@ -214,7 +214,7 @@ success_criteria:
   - type: command_executed
     description: "Agent fetched contacts to resolve contact email"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+resources\s+execute\s+list\s+uipath-zoho-desk\s+contacts.*--connection-id'
+    command_pattern: 'uip\s+is\s+resources\s+execute\s+list\s+uipath-zoho-desk\s+contacts.*--connection-id'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0
@@ -229,7 +229,7 @@ success_criteria:
   - type: command_executed
     description: "Agent executed create with --body"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+is\s+resources\s+execute\s+create\s+uipath-zoho-desk\s+create_ticket.*--body'
+    command_pattern: 'uip\s+is\s+resources\s+execute\s+create\s+uipath-zoho-desk\s+create_ticket.*--body'
     min_count: 1
     weight: 2.0
     pass_threshold: 1.0

@@ -1,7 +1,7 @@
 task_id: uipath-flow-init-validate-pack-simple
 description: >
   Minimal-prompt evaluation: agent must figure out how to initialize, validate,
-  and pack a Flow project using uipcli CLI with no step-by-step guidance.
+  and pack a Flow project using uip CLI with no step-by-step guidance.
 tags: [flow, uipcli, simple]
 
 agent:
@@ -15,15 +15,15 @@ sandbox:
   python: {}
 
 initial_prompt: |
-  Use the `uipcli` CLI to create a new Flow project called "TestFlow", validate
+  Use the `uip` CLI to create a new Flow project called "TestFlow", validate
   its .flow file, and pack it into a .nupkg package. Save a summary to
-  project_report.json. The `uipcli` CLI is already available.
+  project_report.json. The `uip` CLI is already available.
 
 success_criteria:
   - type: command_executed
     description: "Agent initialized a Flow project"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+init'
+    command_pattern: 'uip\s+flow\s+init'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0
@@ -31,7 +31,7 @@ success_criteria:
   - type: command_executed
     description: "Agent validated a .flow file"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+validate'
+    command_pattern: 'uip\s+flow\s+validate'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0
@@ -39,7 +39,7 @@ success_criteria:
   - type: command_executed
     description: "Agent packed the project"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+pack'
+    command_pattern: 'uip\s+flow\s+pack'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0
