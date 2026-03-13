@@ -2,7 +2,7 @@ name: Claude PR Review
 
 on:
   pull_request:
-    types: [opened]
+    types: [opened, ready_for_review]
   issue_comment:
     types: [created]
   pull_request_review_comment:
@@ -23,7 +23,7 @@ jobs:
 
     # Only run on non-fork PRs (secrets required), or on @claude mentions
     if: |
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'pull_request' && !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') && github.event.issue.pull_request) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude') && github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude') && github.event.pull_request.head.repo.full_name == github.repository)
@@ -49,10 +49,15 @@ jobs:
           claude_args: "--model claude-opus-4-6"
           prompt: |
             Review this PR focusing on:
-            - Correctness: logic errors, edge cases, off-by-one errors
-            - Security: injection, credential exposure, unsafe inputs
+            - Architecture: Does new code live in the right layer? Flag domain-specific logic in core modules, leaky abstractions, and reversed dependencies
+            - Correctness: logic errors, edge cases, off-by-one errors, truthiness traps (if x where 0/[]/'' is valid), None used as both sentinel and domain value
+            - Security: injection, credential exposure, unsafe inputs, secrets or reference data in log statements, ReDoS from config-sourced regexes
             - Performance: unnecessary allocations, N+1 queries, missing async
             - Maintainability: unclear naming, missing error handling, code duplication
+            - Config & data files: Copy-paste errors across similar YAMLs, path globs in pyproject.toml that don't match real files, stale docs after behavior changes
+            - Test coverage: New logic without tests, bug fixes without regression tests, missing edge-case coverage
+            - DRY principle: Is there duplicated logic that should be consolidated? But also: is DRY being over-applied (premature abstraction)?
+            - Simplicity: No unnecessary abstractions, speculative features, or "just in case" code. Could a junior developer follow this?
             - Alignment: adherence to CLAUDE.md guidelines and best practices
             Be concise. Only flag issues that matter. Skip style nits.
         env:
