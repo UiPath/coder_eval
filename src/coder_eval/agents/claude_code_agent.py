@@ -241,7 +241,7 @@ class ClaudeCodeAgent(Agent):
                                     tool_name=block.name,
                                     tool_id=block.id,
                                     timestamp=datetime.now(),
-                                    parameters=block.input,
+                                    parameters=block.input if isinstance(block.input, dict) else {"raw": block.input},
                                     sequence_number=sequence_number,
                                     result_status=None,  # Pending result
                                     duration_ms=None,  # Not complete yet
@@ -260,7 +260,9 @@ class ClaudeCodeAgent(Agent):
                                         task_id=self.config.type.value,
                                         tool_name=block.name,
                                         tool_id=block.id,
-                                        parameters=block.input if isinstance(block.input, dict) else {},
+                                        parameters=block.input
+                                        if isinstance(block.input, dict)
+                                        else {"raw": block.input},
                                         sequence_number=sequence_number - 1,
                                     ),
                                 )

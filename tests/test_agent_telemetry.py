@@ -4,7 +4,6 @@ import time
 
 import pytest
 
-from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.models import AgentConfig
 
 
@@ -60,10 +59,10 @@ class TestCommandTelemetryStatus:
         assistant_msg = assistant_message_cls([tool_block])
         result_msg = result_message_cls(tool_id, False, "file1.py\nfile2.py")
 
-        config = AgentConfig(type="claude-code")
-        agent = ClaudeCodeAgent(config)
-
         import coder_eval.agents.claude_code_agent as agent_module
+
+        config = AgentConfig(type="claude-code")
+        agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
             yield assistant_msg
@@ -101,10 +100,10 @@ class TestCommandTelemetryStatus:
         assistant_msg = assistant_message_cls([tool_block])
         result_msg = result_message_cls(tool_id, True, "File not found: missing.txt")
 
-        config = AgentConfig(type="claude-code")
-        agent = ClaudeCodeAgent(config)
-
         import coder_eval.agents.claude_code_agent as agent_module
+
+        config = AgentConfig(type="claude-code")
+        agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
             yield assistant_msg
@@ -139,10 +138,10 @@ class TestCommandTelemetryStatus:
         tool_block = tool_use_block_cls(tool_id, "Write", {"file_path": "test.py", "content": "code"})
         assistant_msg = assistant_message_cls([tool_block])
 
-        config = AgentConfig(type="claude-code")
-        agent = ClaudeCodeAgent(config)
-
         import coder_eval.agents.claude_code_agent as agent_module
+
+        config = AgentConfig(type="claude-code")
+        agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
             yield assistant_msg
@@ -180,10 +179,10 @@ class TestCommandTelemetryStatus:
         result2 = result_message_cls("tool2", True, "File not found")
         result3 = result_message_cls("tool3", False, "file.py")
 
-        config = AgentConfig(type="claude-code")
-        agent = ClaudeCodeAgent(config)
-
         import coder_eval.agents.claude_code_agent as agent_module
+
+        config = AgentConfig(type="claude-code")
+        agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
             yield assistant_msg
@@ -228,10 +227,10 @@ class TestCommandTelemetryStatus:
         assistant_msg = assistant_message_cls([tool_block])
         result_msg = result_message_cls(tool_id, False, "")
 
-        config = AgentConfig(type="claude-code")
-        agent = ClaudeCodeAgent(config)
-
         import coder_eval.agents.claude_code_agent as agent_module
+
+        config = AgentConfig(type="claude-code")
+        agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
             yield assistant_msg
@@ -262,12 +261,12 @@ class TestCommandTelemetryStatus:
 
         result_msg = result_message_cls("toolu_orphan", False, "orphaned result")
 
-        config = AgentConfig(type="claude-code")
-        agent = ClaudeCodeAgent(config)
-
         import logging
 
         import coder_eval.agents.claude_code_agent as agent_module
+
+        config = AgentConfig(type="claude-code")
+        agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
             yield result_msg  # Only result, no tool use!
@@ -300,12 +299,12 @@ class TestCommandTelemetryStatus:
         result1 = result_message_cls(tool_id, False, "first result")
         result2 = result_message_cls(tool_id, True, "second result (error)")
 
-        config = AgentConfig(type="claude-code")
-        agent = ClaudeCodeAgent(config)
-
         import logging
 
         import coder_eval.agents.claude_code_agent as agent_module
+
+        config = AgentConfig(type="claude-code")
+        agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
             yield assistant_msg
@@ -342,12 +341,12 @@ class TestCommandTelemetryStatus:
         tool_block = tool_use_block_cls(tool_id, "Read", {"file_path": "test.py"})
         assistant_msg = assistant_message_cls([tool_block])
 
-        config = AgentConfig(type="claude-code")
-        agent = ClaudeCodeAgent(config)
-
         import logging
 
         import coder_eval.agents.claude_code_agent as agent_module
+
+        config = AgentConfig(type="claude-code")
+        agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
             yield assistant_msg
@@ -373,5 +372,88 @@ class TestCommandTelemetryStatus:
                 # Should have warning summary about unknown statuses with message types
                 assert any("'unknown' status" in r.message for r in warnings)
 
+        finally:
+            agent_module.query = original_query
+
+    @pytest.mark.asyncio
+    async def test_command_telemetry_non_dict_input(self, tmp_path):
+        """Verify non-dict tool input doesn't crash telemetry capture.
+
+        The SDK types block.input as object. If a non-dict value arrives,
+        CommandTelemetry (which expects dict[str, Any]) should handle it
+        gracefully by wrapping it rather than raising a validation error.
+        """
+        tool_use_block_cls, assistant_message_cls, result_message_cls = create_mock_sdk_messages()
+
+        tool_id = "toolu_nondict"
+        # Simulate a tool with non-dict input (e.g., a string or list)
+        tool_block = tool_use_block_cls(tool_id, "CustomTool", "just a string input")
+        assistant_msg = assistant_message_cls([tool_block])
+        result_msg = result_message_cls(tool_id, False, "result")
+
+        import coder_eval.agents.claude_code_agent as agent_module
+
+        config = AgentConfig(type="claude-code")
+        agent = agent_module.ClaudeCodeAgent(config)
+
+        async def mock_query(prompt, options):
+            yield assistant_msg
+            yield result_msg
+
+        original_query = agent_module.query
+        agent_module.query = mock_query
+
+        try:
+            await agent.start(str(tmp_path))
+            turn = await agent.communicate("Non-dict input")
+
+            # Should capture the command without crashing
+            assert len(turn.commands) == 1
+            cmd = turn.commands[0]
+            assert cmd.tool_name == "CustomTool"
+            assert cmd.parameters == {"raw": "just a string input"}
+        finally:
+            agent_module.query = original_query
+
+    @pytest.mark.asyncio
+    async def test_stream_event_non_dict_input_preserved(self, tmp_path):
+        """Verify non-dict tool input is also preserved in ToolCallEvent (not discarded).
+
+        Both CommandTelemetry and ToolCallEvent should wrap non-dict input consistently.
+        """
+        tool_use_block_cls, assistant_message_cls, result_message_cls = create_mock_sdk_messages()
+
+        tool_id = "toolu_stream_nondict"
+        tool_block = tool_use_block_cls(tool_id, "CustomTool", ["a", "list", "input"])
+        assistant_msg = assistant_message_cls([tool_block])
+        result_msg = result_message_cls(tool_id, False, "ok")
+
+        import coder_eval.agents.claude_code_agent as agent_module
+
+        config = AgentConfig(type="claude-code")
+        agent = agent_module.ClaudeCodeAgent(config)
+
+        collected_events = []
+
+        class CollectingCallback:
+            def on_event(self, event):
+                collected_events.append(event)
+
+        async def mock_query(prompt, options):
+            yield assistant_msg
+            yield result_msg
+
+        original_query = agent_module.query
+        agent_module.query = mock_query
+
+        try:
+            await agent.start(str(tmp_path))
+            await agent.communicate("Non-dict stream", stream_callback=CollectingCallback())
+
+            from coder_eval.streaming.events import ToolCallEvent
+
+            tool_call_events = [e for e in collected_events if isinstance(e, ToolCallEvent)]
+            assert len(tool_call_events) == 1
+            assert tool_call_events[0].parameters == {"raw": ["a", "list", "input"]}
         finally:
             agent_module.query = original_query

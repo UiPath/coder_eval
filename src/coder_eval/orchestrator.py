@@ -483,7 +483,7 @@ class Orchestrator:
             # Wrap callback to stamp correct task_id on agent-emitted events
             agent_callback: StreamCallback | None = None
             if self.stream_callback is not None:
-                agent_callback = TaskScopedCallback(self.stream_callback, self.task.task_id)
+                agent_callback = TaskScopedCallback(self.stream_callback, self._log_task_id)
 
             communicate_coro = execute_with_retry(
                 operation=functools.partial(agent.communicate, prompt_with_cwd, stream_callback=agent_callback),

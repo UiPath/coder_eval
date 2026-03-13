@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any, Literal
 
@@ -11,6 +12,9 @@ from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind
 from coder_eval.models.tasks import AgentConfig
 from coder_eval.models.telemetry import CommandStatistics, CommandTelemetry, TokenUsage
+
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigLineageEntry(BaseModel):
@@ -189,7 +193,14 @@ class EvaluationResult(BaseModel):
             return
 
         if len(self.success_criteria_results) != len(criteria):
-            # Length mismatch - use simple average as fallback
+            # Length mismatch indicates a programming error upstream — log it
+            logger.warning(
+                "Results/criteria length mismatch: %d results vs %d criteria for task %s. "
+                "Falling back to unweighted average.",
+                len(self.success_criteria_results),
+                len(criteria),
+                self.task_id,
+            )
             total_score = sum(r.score for r in self.success_criteria_results)
             self.weighted_score = total_score / len(self.success_criteria_results)
             return

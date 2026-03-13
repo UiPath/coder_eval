@@ -267,6 +267,35 @@ class TestWeightedScoreCalculation:
         # Falls back to simple average: (1.0 + 0.5) / 2 = 0.75
         assert result.weighted_score == 0.75
 
+    def test_weighted_score_mismatch_logs_warning(self, caplog):
+        """Test that results/criteria length mismatch logs a warning."""
+        import logging
+
+        result = create_test_evaluation_result(
+            task_id="test",
+            final_status="SUCCESS",
+            success_criteria_results=[
+                CriterionResult(criterion_type="file_exists", description="A", score=1.0),
+                CriterionResult(criterion_type="file_exists", description="B", score=0.5),
+            ],
+            turns=[],
+        )
+
+        criteria = [
+            FileExistsCriterion(path="a.txt", description="A", weight=1.0),
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="coder_eval.models.results"):
+            result.calculate_weighted_score(criteria)
+
+        # Should still compute fallback score
+        assert result.weighted_score == 0.75
+
+        # Should log a warning about the mismatch
+        assert any("mismatch" in record.message.lower() for record in caplog.records), (
+            f"Expected a warning about mismatch, got: {[r.message for r in caplog.records]}"
+        )
+
     def test_weighted_score_single_criterion(self):
         """Test weighted score with a single criterion."""
         result = create_test_evaluation_result(
