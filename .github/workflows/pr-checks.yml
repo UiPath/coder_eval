@@ -179,3 +179,64 @@ jobs:
           name: e2e-smoke-runs
           path: runs/
           retention-days: 7
+
+  e2e-autogen-smoke:
+    name: E2E Autogen Smoke Tests (Real API)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Skip on fork PRs where secrets aren't available
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Cache dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.cache/pip
+            .venv
+          key: ${{ runner.os }}-py3.13-e2e-${{ hashFiles('**/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-py3.13-e2e-
+            ${{ runner.os }}-py3.13-
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+
+      - name: Install project dependencies
+        run: |
+          uv venv .venv --clear
+          uv pip install --python .venv/bin/python -e ".[dev]"
+
+      - name: Run autogen on mock plugin
+        run: .venv/bin/coder-eval tools autogen templates/plugins/mock-greeting-plugin tmp/autogen-out --coverage quick
+
+      - name: Verify output
+        run: |
+          TASKS=$(ls tmp/autogen-out/tasks/*.yaml 2>/dev/null | wc -l)
+          EXPERIMENTS=$(ls tmp/autogen-out/experiments/*.yaml 2>/dev/null | wc -l)
+          echo "Generated: $TASKS task(s), $EXPERIMENTS experiment(s)"
+          test "$TASKS" -gt 0 || { echo "No task YAML files generated"; exit 1; }
+          test "$EXPERIMENTS" -gt 0 || { echo "No experiment YAML files generated"; exit 1; }
+
+      - name: Upload autogen output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-autogen-output
+          path: tmp/autogen-out/
+          retention-days: 7

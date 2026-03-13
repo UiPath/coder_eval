@@ -467,8 +467,10 @@ class ClaudeCodeAgent(Agent):
                     if var_name not in os.environ:
                         logger.warning(f"Plugin path contains undefined environment variable ${var_name}: {path}")
 
-                # Expand all env vars in the path
-                processed_plugin["path"] = os.path.expandvars(path)
+                # Expand all env vars in the path, then resolve relative paths
+                # against the process cwd (not the sandbox cwd) so plugins are found
+                expanded = os.path.expandvars(path)
+                processed_plugin["path"] = str(Path(expanded).resolve())
 
             processed.append(processed_plugin)
 

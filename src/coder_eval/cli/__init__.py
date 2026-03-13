@@ -2,6 +2,8 @@
 
 import typer
 
+from coder_eval.tools.autogen.cli import autogen_command
+
 from .console import console
 from .evaluate_command import evaluate_command
 from .plan_command import plan_command
@@ -16,6 +18,14 @@ app = typer.Typer(
     add_completion=False,
 )
 
+# Tools sub-app (optional authoring utilities, not part of the core eval loop)
+tools_app = typer.Typer(
+    name="tools",
+    help="Optional authoring and utility tools (task generation, etc.)",
+    add_completion=False,
+)
+app.add_typer(tools_app, name="tools")
+
 
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context) -> None:
@@ -28,6 +38,7 @@ def main(ctx: typer.Context) -> None:
     - plan: Validate task files (dry-run)
     - evaluate: Run criteria against a directory without an agent
     - report: Display or export evaluation reports
+    - tools: Optional authoring utilities (e.g. tools autogen)
     """
     # If no subcommand was invoked, show help and exit
     if ctx.invoked_subcommand is None:
@@ -35,11 +46,14 @@ def main(ctx: typer.Context) -> None:
         raise typer.Exit(0)
 
 
-# Register commands
+# Register core commands
 app.command(name="run")(run_command)
 app.command(name="plan")(plan_command)
 app.command(name="evaluate")(evaluate_command)
 app.command(name="report")(report_command)
+
+# Register tools subcommands
+tools_app.command(name="autogen")(autogen_command)
 
 
 __all__ = ["app"]

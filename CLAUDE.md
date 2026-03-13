@@ -73,13 +73,20 @@ coder_eval/
 │   └── task_loader.py             # YAML task loading
 │
 ├── cli/                           # CLI commands (Typer + Rich)
-│   ├── __init__.py                # Typer app setup
+│   ├── __init__.py                # Typer app setup (core + tools sub-app)
 │   ├── run_command.py             # `coder-eval run`
 │   ├── plan_command.py            # `coder-eval plan`
 │   ├── report_command.py          # `coder-eval report`
 │   ├── run_helpers.py             # CLI helper functions
 │   ├── console.py                 # Rich console instance
 │   └── utils.py                   # CLI utilities
+│
+├── tools/                         # Optional authoring utilities (not part of eval loop)
+│   └── autogen/                   # Task generation from Claude Code plugin skill definitions
+│       ├── config.py              # AutogenConfig (Pydantic model)
+│       ├── generator.py           # LLM-based task + experiment generation
+│       ├── validator.py           # Pydantic validation gate for generated tasks
+│       └── cli.py                 # `coder-eval tools autogen` command
 │
 ├── scoring/                       # Code similarity scoring
 │   ├── ast_similarity.py          # AST-based comparison
@@ -112,7 +119,7 @@ templates/                         # Sandbox template directories
 - **Separation of Concerns**: Data models (`models/`) are pure Pydantic; logic lives in `criteria/`, `evaluation/`, etc.
 - **Callback Streaming**: `StreamCallback` protocol with `TaskScopedCallback` wrapper for real-time LLM event output
 - **Experiment Layer**: Pre-processing config resolver (`ExperimentRunner`) that resolves task × variant combinations via 5-layer merge (default → task → base → variant → CLI) before passing to `run_batch`
-- **All models importable from `coder_eval.models`** regardless of submodule
+- **All core models importable from `coder_eval.models`** regardless of submodule (`AutogenConfig` lives in `coder_eval.tools.autogen.config` — it's not a core model)
 
 ## Success Criteria (12 types)
 
