@@ -28,6 +28,7 @@ async def generate_next_prompt(
     llm_reviewer: LLMReviewer | None,
     reference_code: str | None,
     logger: logging.Logger | logging.LoggerAdapter[logging.Logger],
+    tool_calls_summary: str | None = None,
 ) -> str:
     """Generate the next prompt based on results and feedback.
 
@@ -42,6 +43,7 @@ async def generate_next_prompt(
         llm_reviewer: Optional LLM reviewer instance
         reference_code: Optional reference solution code
         logger: Logger for this task
+        tool_calls_summary: Optional summary of agent tool calls for reviewer context
 
     Returns:
         Next prompt to send to the agent with actionable feedback
@@ -60,6 +62,7 @@ async def generate_next_prompt(
                 current_iteration=iteration,
                 max_iterations=task.max_iterations,
                 reference_solution=reference_code,
+                tool_calls_summary=tool_calls_summary,
             )
 
         decision = await execute_with_retry(

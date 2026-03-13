@@ -134,7 +134,7 @@ async def test_task_timeout_fires(tmp_path):
     orchestrator._evaluation_loop = slow_loop  # type: ignore[method-assign]
 
     result = await orchestrator.run()
-    assert result.final_status == "ERROR"
+    assert result.final_status == "TIMEOUT"
     assert "Task timed out" in (result.error_message or "")
 
 
@@ -165,7 +165,7 @@ async def test_task_timeout_populates_elapsed_seconds(tmp_path):
         mock_create.return_value = {}
         result = await orchestrator.run()
 
-    assert result.final_status == "ERROR"
+    assert result.final_status == "TIMEOUT"
     assert "Task timed out" in (result.error_message or "")
 
     # Verify create_error_context received a TaskTimeoutError with elapsed_seconds

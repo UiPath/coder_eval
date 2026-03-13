@@ -173,6 +173,7 @@ class ClaudeCodeAgent(Agent):
         # SDK ResultMessage token usage (captured from final message)
         sdk_result_usage: dict[str, Any] | None = None
         sdk_result_cost: float | None = None
+        sdk_num_turns: int | None = None
 
         # Model identifier from AssistantMessage (last one wins)
         sdk_model_used: str | None = None
@@ -280,6 +281,7 @@ class ClaudeCodeAgent(Agent):
                 elif _is_sdk_result_message(message):
                     sdk_result_usage = getattr(message, "usage", None)
                     sdk_result_cost = getattr(message, "total_cost_usd", None)
+                    sdk_num_turns = getattr(message, "num_turns", None)
 
                 # PHASE 2: Process tool results from UserMessage content blocks.
                 # The SDK delivers tool results as UserMessage objects containing
@@ -395,6 +397,20 @@ class ClaudeCodeAgent(Agent):
         # Determine agent state from messages
         self._update_state_from_messages(messages)
 
+        # Detect max_turns exhaustion: SDK used all available turns without the agent voluntarily completing.
+        # Use strict > because if the agent finishes voluntarily on exactly turn N (== max_turns),
+        # that is a normal completion, not exhaustion. The SDK reports num_turns > max_turns when
+        # it forcibly stops the agent.
+        max_turns_exhausted = (
+            self.config.max_turns is not None and sdk_num_turns is not None and sdk_num_turns > self.config.max_turns
+        )
+        if max_turns_exhausted:
+            logger.warning(
+                "Agent exhausted max_turns (%d/%d) — the SDK hit the turn limit before the agent completed.",
+                sdk_num_turns,
+                self.config.max_turns,
+            )
+
         duration = time.monotonic() - turn_start_time
 
         return TurnRecord(
@@ -408,6 +424,7 @@ class ClaudeCodeAgent(Agent):
             token_usage=token_usage,
             model_used=sdk_model_used,
             assistant_turn_count=assistant_turn_count,
+            max_turns_exhausted=max_turns_exhausted,
         )
 
     async def stop(self) -> None:
@@ -781,11 +798,11 @@ class ClaudeCodeAgent(Agent):
                     formatted_parts.append(f"[ASSISTANT] {content}")
 
             elif msg_type_name == "ResultMessage":
-                # Tool results
-                content = getattr(msg, "content", "")
+                # SDK ResultMessage uses "result" (not "content") for the final text
+                result_text = getattr(msg, "result", "") or ""
                 is_error = getattr(msg, "is_error", False)
                 status = "ERROR" if is_error else "SUCCESS"
-                formatted_parts.append(f"[RESULT - {status}] {content}")
+                formatted_parts.append(f"[RESULT - {status}] {result_text}")
 
             elif msg_type_name == "StreamEvent":
                 # Stream events (tool use, thinking, etc.)

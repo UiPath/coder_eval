@@ -105,6 +105,10 @@ class TurnRecord(BaseModel):
         default=0,
         description="Number of AssistantMessage objects received from the SDK in this turn",
     )
+    max_turns_exhausted: bool = Field(
+        default=False,
+        description="Whether the agent hit the max_turns limit without voluntarily completing",
+    )
 
 
 class EvaluationResult(BaseModel):
@@ -124,8 +128,12 @@ class EvaluationResult(BaseModel):
     duration_seconds: float = Field(default=0.0, description="Total evaluation duration")
 
     # Results
-    final_status: Literal["SUCCESS", "FAILURE", "ERROR", "TIMEOUT"] = Field(
+    final_status: Literal["SUCCESS", "FAILURE", "ERROR", "TIMEOUT", "MAX_TURNS_EXHAUSTED"] = Field(
         description="Final status of the evaluation"
+    )
+    max_turns_exhausted: bool = Field(
+        default=False,
+        description="Whether any iteration hit the agent max_turns limit without the agent voluntarily completing",
     )
     weighted_score: float | None = Field(
         default=None, ge=0.0, le=1.0, description="Weighted average of criterion scores (0.0 to 1.0)"

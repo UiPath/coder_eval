@@ -536,7 +536,9 @@ def aggregate_results(
             variant_id=vid,
             tasks_run=len(vr_list),
             tasks_succeeded=sum(1 for v in vr_list if v.final_status == "SUCCESS"),
-            tasks_failed=sum(1 for v in vr_list if v.final_status in ("FAILURE", "ERROR")),
+            tasks_failed=sum(
+                1 for v in vr_list if v.final_status in ("FAILURE", "ERROR", "TIMEOUT", "MAX_TURNS_EXHAUSTED")
+            ),
             average_score=sum(v.weighted_score for v in vr_list) / len(vr_list),
             average_duration=sum(v.duration_seconds for v in vr_list) / len(vr_list),
             total_tokens=total_tokens,

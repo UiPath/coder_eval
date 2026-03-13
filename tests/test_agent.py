@@ -106,20 +106,20 @@ def test_claude_agent_message_formatting():
     formatted = agent._format_messages(messages)
     assert "[ASSISTANT] Hello, world!" in formatted
 
-    # Test ResultMessage (mock object with correct class name)
+    # Test ResultMessage (mock object with correct class name — SDK uses "result" attribute)
     class ResultMessage:
-        def __init__(self, content, is_error=False):
-            self.content = content
+        def __init__(self, result, is_error=False):
+            self.result = result
             self.is_error = is_error
 
     messages = [ResultMessage("File written successfully", is_error=False)]
     formatted = agent._format_messages(messages)
-    assert "[RESULT - SUCCESS]" in formatted
+    assert "[RESULT - SUCCESS] File written successfully" in formatted
 
     # Test error result
     messages = [ResultMessage("File not found", is_error=True)]
     formatted = agent._format_messages(messages)
-    assert "[RESULT - ERROR]" in formatted
+    assert "[RESULT - ERROR] File not found" in formatted
 
 
 def test_claude_agent_should_ignore_path():
@@ -228,8 +228,8 @@ def test_claude_agent_message_formatting_edge_cases():
             self.content = content
 
     class ResultMessage:
-        def __init__(self, content, is_error=False):
-            self.content = content
+        def __init__(self, result, is_error=False):
+            self.result = result
             self.is_error = is_error
 
     messages = [

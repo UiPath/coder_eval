@@ -31,6 +31,7 @@ from .models import (
     TaskConfigRecord,
     TaskDefinition,
     TaskResult,
+    TurnRecord,
 )
 from .orchestration.batch import run_batch as run_batch_impl
 from .orchestration.config import BatchRunConfig
@@ -43,6 +44,38 @@ from .utils import get_version_info
 
 # Get module logger
 logger = logging.getLogger(__name__)
+
+
+def _summarize_tool_calls(turn_record: TurnRecord) -> str | None:
+    """Build a concise summary of the agent's tool calls for the LLM reviewer.
+
+    Returns None if there were no tool calls.
+    """
+    if not turn_record.commands:
+        return None
+
+    lines = []
+    for i, cmd in enumerate(turn_record.commands, 1):
+        status = cmd.result_status or "unknown"
+        # Extract the most useful parameter for each tool type
+        detail = ""
+        params = cmd.parameters
+        if cmd.tool_name == "Bash" and "command" in params:
+            detail = f" `{params['command'][:120]}`"
+        elif cmd.tool_name in ("Read", "Write", "Edit", "Glob") and "file_path" in params:
+            detail = f" {params['file_path']}"
+        elif cmd.tool_name == "Grep" and "pattern" in params:
+            detail = f" pattern={params['pattern'][:60]}"
+        elif cmd.tool_name in ("Task", "Agent"):
+            detail = f" ({params.get('description', '')[:60]})"
+
+        result_preview = ""
+        if cmd.result_summary:
+            result_preview = f" → {cmd.result_summary[:80]}"
+
+        lines.append(f"  {i}. [{status}] {cmd.tool_name}{detail}{result_preview}")
+
+    return "\n".join(lines)
 
 
 class Orchestrator:
@@ -172,12 +205,28 @@ class Orchestrator:
                 # Update final status
                 if success:
                     self.result.final_status = "SUCCESS"
+                elif self.result.max_turns_exhausted:
+                    self.result.final_status = "MAX_TURNS_EXHAUSTED"
                 else:
                     self.result.final_status = "FAILURE"
 
             except asyncio.CancelledError:
                 # Re-raise cancellation to allow proper task cancellation
                 raise
+            except TaskTimeoutError as e:
+                # Task-level timeout gets a dedicated status (not generic ERROR)
+                self.result.final_status = "TIMEOUT"
+                self.result.error_message = str(e)
+
+                self.result.error_details = create_error_context(
+                    error=e,
+                    task_id=self.task.task_id,
+                    attempt=max(self.result.iteration_count, 1),
+                    component="orchestrator.task_timeout",
+                    agent_name=self.task.agent.type.value,
+                )
+
+                self.logger.error(f"Task timed out: {e}")
             except Exception as e:
                 # Handle catastrophic errors
                 self.result.final_status = "ERROR"
@@ -594,6 +643,22 @@ class Orchestrator:
                 success = True
                 break
 
+            # Summarize tool calls for reviewer context and logging
+            tool_calls_summary = _summarize_tool_calls(turn_record)
+            if tool_calls_summary:
+                self.logger.debug("Tool calls for iteration %d:\n%s", iteration, tool_calls_summary)
+
+            # If the agent exhausted its max_turns without completing, stop early —
+            # further iterations are unlikely to succeed.
+            if turn_record.max_turns_exhausted:
+                self.result.max_turns_exhausted = True
+                self.logger.warning(
+                    "Agent exhausted max_turns (%s) without passing criteria. "
+                    "Stopping evaluation — further iterations unlikely to succeed.",
+                    self.task.agent.max_turns,
+                )
+                break
+
             # If not successful and not at max iterations, get feedback
             if iteration < self.task.max_iterations:
                 current_prompt = await generate_next_prompt(
@@ -604,6 +669,7 @@ class Orchestrator:
                     llm_reviewer=self.llm_reviewer,
                     reference_code=reference_code,
                     logger=self.logger,
+                    tool_calls_summary=tool_calls_summary,
                 )
 
         return success

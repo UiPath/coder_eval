@@ -11,6 +11,9 @@ base:
   # Default max iterations for the evaluation loop (task-level overrides this)
   max_iterations: 3
 
+  # Maximum total seconds for the entire task evaluation (all iterations combined)
+  task_timeout: 600
+
   agent:
     # Agent type (currently only "claude-code" is supported)
     type: claude-code
@@ -28,7 +31,7 @@ base:
 
     # Maximum agent inner-loop turns per iteration (null = SDK default)
     # Typical range in tasks: 3-18 depending on complexity
-    max_turns: 3
+    max_turns: 20
 
     # Maximum seconds per agent turn / communicate call (null = no limit)
     turn_timeout: 300

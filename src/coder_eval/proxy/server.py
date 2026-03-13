@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 from aiohttp import web
+from aiohttp.client_exceptions import ClientConnectionResetError
 
 from coder_eval.errors.categories import RetryConfig
 from coder_eval.errors.retry import compute_backoff
@@ -433,32 +434,38 @@ class LLMGatewayProxy:
                             "Cache-Control": "no-cache",
                         },
                     )
-                    await response.prepare(request)
+                    try:
+                        await response.prepare(request)
 
-                    # Buffer SSE bytes for usage extraction while forwarding.
-                    # Cap at _MAX_SSE_BUFFER_BYTES to avoid unbounded memory growth.
-                    sse_buffer = bytearray()
-                    track_usage = True
-                    async for chunk in upstream.aiter_bytes():
-                        await response.write(chunk)
-                        if track_usage:
-                            if len(sse_buffer) + len(chunk) > _MAX_SSE_BUFFER_BYTES:
-                                track_usage = False
-                                sse_buffer.clear()
-                                self._logger.warning(
-                                    "SSE response exceeded %d bytes; usage tracking disabled for this response",
-                                    _MAX_SSE_BUFFER_BYTES,
-                                )
-                            else:
-                                sse_buffer.extend(chunk)
+                        # Buffer SSE bytes for usage extraction while forwarding.
+                        # Cap at _MAX_SSE_BUFFER_BYTES to avoid unbounded memory growth.
+                        sse_buffer = bytearray()
+                        track_usage = True
+                        async for chunk in upstream.aiter_bytes():
+                            await response.write(chunk)
+                            if track_usage:
+                                if len(sse_buffer) + len(chunk) > _MAX_SSE_BUFFER_BYTES:
+                                    track_usage = False
+                                    sse_buffer.clear()
+                                    self._logger.warning(
+                                        "SSE response exceeded %d bytes; usage tracking disabled for this response",
+                                        _MAX_SSE_BUFFER_BYTES,
+                                    )
+                                else:
+                                    sse_buffer.extend(chunk)
 
-                    # Extract usage from buffered SSE events
-                    if track_usage and sse_buffer and upstream.status_code == 200:
-                        self._extract_usage_from_sse(
-                            bytes(sse_buffer), model, content_type=upstream.headers.get("content-type")
+                        # Extract usage from buffered SSE events
+                        if track_usage and sse_buffer and upstream.status_code == 200:
+                            self._extract_usage_from_sse(
+                                bytes(sse_buffer), model, content_type=upstream.headers.get("content-type")
+                            )
+
+                        await response.write_eof()
+                    except (ClientConnectionResetError, ConnectionResetError):
+                        self._logger.warning(
+                            "Client disconnected during streaming response — usage tracking skipped for this request"
                         )
 
-                    await response.write_eof()
                     return response
 
         # Should not reach here, but satisfy type checker
