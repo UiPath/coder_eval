@@ -76,9 +76,14 @@ coder-eval run tasks/hello_date.yaml
 # 4. View results
 coder-eval report runs/latest
 
+# 5. Analyze results with Claude Code (diagnose failures, suggest improvements)
+claude -p '/coder-eval-run-analysis runs/latest'
+
 # Alternatively: evaluate criteria against a directory without an agent
 coder-eval evaluate tasks/hello_date.yaml ./my_solution
 ```
+
+> **Tip:** Use the `/coder-eval-run-analysis` slash command in Claude Code to get actionable recommendations for improving tasks, config, and prompts based on run results.
 
 ## CLI Commands
 
@@ -103,36 +108,36 @@ coder-eval run tasks/hello_date.yaml --stream full
 
 **Options:**
 
-| Flag                         | Description                                                                      |
-| ---------------------------- | -------------------------------------------------------------------------------- |
-| **Execution**                |                                                                                  |
-| `--max-iter, -i`             | Override max iterations for all tasks                                            |
-| `--max-parallel, -j`         | Concurrent tasks (default: 1)                                                    |
-| `--preserve / --no-preserve` | Preserve sandbox after execution (default: preserve)                             |
-| `--run-dir`                  | Custom run directory (default: timestamped in `runs/`)                           |
-| **Agent overrides**          |                                                                                  |
-| `--allowed-tools`            | Override allowed tools (comma-separated, e.g., `Read,Write,Bash`)               |
-| `--ignore-patterns`          | Override ignore patterns (comma-separated, e.g., `*.log,__pycache__`)           |
-| `--max-turns`                | Override max agent inner-loop turns per iteration                                |
-| `--model, -m`                | Override agent model for all tasks (e.g., `claude-sonnet-4-20250514`)            |
-| `--permission-mode`          | Override permission mode (`default`, `acceptEdits`, `plan`, `bypassPermissions`) |
-| `--plugins`                  | Override plugins (JSON array, e.g., `'[{"name":"x","path":"/y"}]'`)             |
-| **Timeouts**                 |                                                                                  |
-| `--task-timeout`             | Override task timeout in seconds (covers the evaluation loop)                    |
-| `--turn-timeout`             | Override turn timeout in seconds (per agent communicate call)                    |
-| **Filtering**                |                                                                                  |
-| `--exclude-tags`             | Skip tasks matching any of these tags (comma-separated)                          |
-| `--tags, -t`                 | Only run tasks matching any of these tags (comma-separated)                      |
-| **Snapshots**                |                                                                                  |
-| `--snapshot-checkpoint-freq` | Checkpoint frequency for hybrid mode                                             |
-| `--snapshot-mode`            | Override snapshot mode (`disabled`, `full`, `incremental`, `hybrid`)             |
-| **Experiments**              |                                                                                  |
+| Flag                         | Description                                                                                   |
+| ---------------------------- | --------------------------------------------------------------------------------------------- |
+| **Execution**                |                                                                                               |
+| `--max-iter, -i`             | Override max iterations for all tasks                                                         |
+| `--max-parallel, -j`         | Concurrent tasks (default: 1)                                                                 |
+| `--preserve / --no-preserve` | Preserve sandbox after execution (default: preserve)                                          |
+| `--run-dir`                  | Custom run directory (default: timestamped in `runs/`)                                        |
+| **Agent overrides**          |                                                                                               |
+| `--allowed-tools`            | Override allowed tools (comma-separated, e.g., `Read,Write,Bash`)                             |
+| `--ignore-patterns`          | Override ignore patterns (comma-separated, e.g., `*.log,__pycache__`)                         |
+| `--max-turns`                | Override max agent inner-loop turns per iteration                                             |
+| `--model, -m`                | Override agent model for all tasks (e.g., `claude-sonnet-4-20250514`)                         |
+| `--permission-mode`          | Override permission mode (`default`, `acceptEdits`, `plan`, `bypassPermissions`)              |
+| `--plugins`                  | Override plugins (JSON array, e.g., `'[{"name":"x","path":"/y"}]'`)                           |
+| **Timeouts**                 |                                                                                               |
+| `--task-timeout`             | Override task timeout in seconds (covers the evaluation loop)                                 |
+| `--turn-timeout`             | Override turn timeout in seconds (per agent communicate call)                                 |
+| **Filtering**                |                                                                                               |
+| `--exclude-tags`             | Skip tasks matching any of these tags (comma-separated)                                       |
+| `--tags, -t`                 | Only run tasks matching any of these tags (comma-separated)                                   |
+| **Snapshots**                |                                                                                               |
+| `--snapshot-checkpoint-freq` | Checkpoint frequency for hybrid mode                                                          |
+| `--snapshot-mode`            | Override snapshot mode (`disabled`, `full`, `incremental`, `hybrid`)                          |
+| **Experiments**              |                                                                                               |
 | `--experiment, -e`           | Experiment definition YAML for multi-variant comparison (default: `experiments/default.yaml`) |
-| **Output & networking**      |                                                                                  |
-| `--log-file`                 | Write logs to file                                                               |
-| `--proxy / --no-proxy`       | Route API calls through the LLM Gateway proxy (default: no proxy)                |
-| `--stream, -s`               | Stream LLM events to terminal: `full` or `minimal` (disables progress bar)       |
-| `--verbose, -v`              | DEBUG-level logging                                                              |
+| **Output & networking**      |                                                                                               |
+| `--log-file`                 | Write logs to file                                                                            |
+| `--proxy / --no-proxy`       | Route API calls through the LLM Gateway proxy (default: no proxy)                             |
+| `--stream, -s`               | Stream LLM events to terminal: `full` or `minimal` (disables progress bar)                    |
+| `--verbose, -v`              | DEBUG-level logging                                                                           |
 
 ### `coder-eval plan` — Validate Tasks
 
@@ -206,14 +211,24 @@ coder-eval tools autogen ./my-plugin ./tasks/generated --overwrite
 
 **Options:**
 
-| Flag              | Description                                                              |
-| ----------------- | ------------------------------------------------------------------------ |
-| `--coverage, -c`  | `quick` (1/skill), `golden` (2-3/skill, default), `comprehensive` (3-5/skill) |
-| `--model, -m`     | Anthropic model for generation (default: `claude-sonnet-4-6`)            |
-| `--tags`          | Extra comma-separated tags added to every generated task                 |
-| `--overwrite`     | Overwrite existing task files in the output directory                    |
+| Flag             | Description                                                                   |
+| ---------------- | ----------------------------------------------------------------------------- |
+| `--coverage, -c` | `quick` (1/skill), `golden` (2-3/skill, default), `comprehensive` (3-5/skill) |
+| `--model, -m`    | Anthropic model for generation (default: `claude-sonnet-4-6`)                 |
+| `--tags`         | Extra comma-separated tags added to every generated task                      |
+| `--overwrite`    | Overwrite existing task files in the output directory                         |
 
-> **Note:** `coder-eval tools autogen` is an optional authoring utility — it generates *inputs* to the framework but is not part of the core evaluation loop. It requires `ANTHROPIC_API_KEY` to be set.
+> **Note:** `coder-eval tools autogen` is an optional authoring utility — it generates _inputs_ to the framework but is not part of the core evaluation loop. It requires `ANTHROPIC_API_KEY` to be set.
+
+### Claude Code Slash Commands
+
+The project includes [Claude Code custom slash commands](https://docs.anthropic.com/en/docs/claude-code/slash-commands) in `.claude/commands/` for common workflows:
+
+| Command                           | Description                                                                                                           |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `/coder-eval-run-analysis <path>` | Analyze evaluation runs and suggest improvements to tasks, config, and prompts. Works at task, variant, or run scope. |
+
+These commands are available when using [Claude Code](https://docs.anthropic.com/en/docs/claude-code) within this repository.
 
 ## Task Definition
 
@@ -464,7 +479,7 @@ Installed automatically by `make install`. Includes ruff format/lint, trailing w
 | `LLMGW_REQUESTING_PRODUCT`      | No                    | Requesting product name (default: `coder-eval`)                                                              |
 | `LLMGW_REQUESTING_FEATURE`      | No                    | Requesting feature name (default: `llm-reviewer`)                                                            |
 | `LLMGW_TIMEOUT_SECONDS`         | No                    | Gateway request timeout (default: 290)                                                                       |
-| `LLMGW_PROXY_ENABLED`          | No                    | Enable LLM Gateway proxy for API routing (default: `false`). Overridden by `--proxy / --no-proxy` CLI flag   |
+| `LLMGW_PROXY_ENABLED`           | No                    | Enable LLM Gateway proxy for API routing (default: `false`). Overridden by `--proxy / --no-proxy` CLI flag   |
 | `UIPATH_PLUGIN_MARKETPLACE_DIR` | No                    | Base directory for Claude Code plugins (used to substitute `$UIPATH_PLUGIN_MARKETPLACE_DIR` in plugin paths) |
 | `LOG_LEVEL`                     | No                    | Logging level (default: INFO)                                                                                |
 | `LOG_TO_FILE`                   | No                    | Enable file logging (default: false)                                                                         |
