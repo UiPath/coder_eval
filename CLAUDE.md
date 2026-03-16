@@ -32,7 +32,7 @@ coder_eval/
 ├── models/                        # Pydantic data models (subpackage)
 │   ├── __init__.py                # Unified exports for all models
 │   ├── enums.py                   # AgentKind, AgentState, SnapshotMode
-│   ├── criteria.py                # 12 success criterion types + base + union
+│   ├── criteria.py                # 11 success criterion types + base + union
 │   ├── experiment.py              # ExperimentDefinition, ExperimentVariant, result models
 │   ├── results.py                 # CriterionResult, TurnRecord, EvaluationResult, etc.
 │   ├── sandbox.py                 # SandboxConfig, SnapshotConfig, ResourceLimits
@@ -121,7 +121,7 @@ templates/                         # Sandbox template directories
 - **Experiment Layer**: Pre-processing config resolver (`ExperimentRunner`) that resolves task × variant combinations via 5-layer merge (default → experiment defaults → task → variant → CLI) before passing to `run_batch`
 - **All core models importable from `coder_eval.models`** regardless of submodule (`AutogenConfig` lives in `coder_eval.tools.autogen.config` — it's not a core model)
 
-## Success Criteria (12 types)
+## Success Criteria (11 types)
 
 | Type | Scoring | Description |
 |------|---------|-------------|

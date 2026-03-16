@@ -20,6 +20,7 @@ Complete reference for defining evaluation tasks in coder_eval.
   - [pylint_score](#pylint_score)
   - [reference_comparison](#reference_comparison)
   - [command_executed](#command_executed)
+  - [uipath_eval](#uipath_eval)
 - [Sandbox Snapshots](#sandbox-snapshots)
 - [LLM Reviewer](#llm-reviewer)
 - [Reference Solutions](#reference-solutions)
@@ -37,7 +38,7 @@ initial_prompt: "Instructions..."     # Prompt sent to the agent (required)
 max_iterations: 3                     # Max agent iterations (required)
 tags: [smoke, golden, pure-python]    # Optional tags for filtering (kebab-case)
 
-agent: { ... }                        # Agent configuration (required)
+agent: { ... }                        # Agent configuration (optional, resolved from experiment)
 sandbox: { ... }                      # Sandbox configuration (required)
 success_criteria: [ ... ]             # List of criteria (required, at least 1)
 
@@ -173,7 +174,7 @@ template_sources:
 
 ## Success Criteria
 
-Every task needs at least one success criterion. The framework supports 10 criterion types.
+Every task needs at least one success criterion. The framework supports 11 criterion types.
 
 ### Continuous Scoring
 
@@ -187,7 +188,7 @@ All criteria share these fields:
 
 **Scoring types:**
 - **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`
-- **Fractional** (0.0–1.0): `file_contains`, `file_check`, `json_check`, `pytest`, `command_executed`
+- **Fractional** (0.0–1.0): `file_contains`, `file_check`, `json_check`, `pytest`, `command_executed`, `uipath_eval`
 - **Continuous** (0.0–1.0): `pylint_score`, `reference_comparison`
 
 **Task success:** ALL criteria must score >= their `pass_threshold`.
@@ -427,6 +428,26 @@ Checks whether the agent executed specific tools/commands during evaluation. Ins
   require_success: true               # Only count successful commands (default: false)
   description: "Agent must use curl to fetch weather"
 ```
+
+### `uipath_eval`
+
+Evaluates a UiPath agent against a named evaluation set. **Fractional scoring:** metrics passed / total metrics.
+
+```yaml
+- type: "uipath_eval"
+  agent_name: "my-agent"
+  eval_set: "regression-v1"
+  thresholds:
+    accuracy: 0.8
+    f1: 0.75
+  description: "Agent must meet accuracy and F1 thresholds"
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `agent_name` | *required* | Name of the UiPath agent to evaluate |
+| `eval_set` | *required* | Evaluation set identifier |
+| `thresholds` | *required* | Minimum acceptable value per metric (metric passes if value >= threshold) |
 
 ## Sandbox Snapshots
 

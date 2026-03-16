@@ -227,6 +227,7 @@ The project includes [Claude Code custom slash commands](https://docs.anthropic.
 | Command                           | Description                                                                                                           |
 | --------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `/coder-eval-run-analysis <path>` | Analyze evaluation runs and suggest improvements to tasks, config, and prompts. Works at task, variant, or run scope. |
+| `/coder-eval-task-create`         | Create evaluation task YAML files from a natural language description.                                                 |
 
 These commands are available when using [Claude Code](https://docs.anthropic.com/en/docs/claude-code) within this repository.
 
