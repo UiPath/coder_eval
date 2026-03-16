@@ -1,0 +1,33 @@
+# Experiment: Plugin comparison (with-plugin vs without-plugin)
+#
+# Tests whether loading a plugin improves agent task performance.
+#
+# Variants:
+#   without-plugin  — no plugin loaded
+#   with-plugin     — loads the plugin specified by PLUGIN_PATH env var
+#
+# Prerequisites:
+#   - Set PLUGIN_PATH env var to your plugin directory
+#     (e.g., ~/uipath/uipath-claude-plugins/plugins/uipath-coded-agents)
+#
+# Usage:
+#   coder-eval run -e experiments/plugin-comparison.yaml
+#   coder-eval run tasks/my-task.yaml -e plugin-comparison
+
+experiment_id: plugin-comparison
+description: "Compare agent performance with vs without a plugin"
+
+defaults:
+  agent:
+    type: claude-code
+    permission_mode: bypassPermissions
+  max_iterations: 1
+
+variants:
+  - variant_id: without-plugin
+
+  - variant_id: with-plugin
+    agent:
+      plugins:
+        - type: "local"
+          path: "$PLUGIN_PATH"

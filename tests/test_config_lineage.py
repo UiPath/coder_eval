@@ -7,7 +7,7 @@ import yaml
 
 from coder_eval.models import (
     ConfigLineageEntry,
-    ExperimentBase,
+    ExperimentDefaults,
     ExperimentDefinition,
     ExperimentVariant,
 )
@@ -41,7 +41,7 @@ def _write_task_yaml(path: Path, task_id: str, agent: dict | None = None, **extr
 def _make_default_experiment() -> ExperimentDefinition:
     return ExperimentDefinition(
         experiment_id="default",
-        base=ExperimentBase(agent={"type": "claude-code", "permission_mode": "acceptEdits", "max_turns": 3}),
+        defaults=ExperimentDefaults(agent={"type": "claude-code", "permission_mode": "acceptEdits", "max_turns": 3}),
         variants=[ExperimentVariant(variant_id="default")],
     )
 
@@ -83,7 +83,7 @@ class TestScalarLineage:
         """Default experiment with no scalar overrides (only agent config)."""
         return ExperimentDefinition(
             experiment_id="default",
-            base=ExperimentBase(agent={"type": "claude-code"}),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}),
             variants=[ExperimentVariant(variant_id="default")],
         )
 
@@ -121,7 +121,7 @@ class TestScalarLineage:
         )
         experiment = ExperimentDefinition(
             experiment_id="test",
-            base=ExperimentBase(max_iterations=5, task_timeout=300),
+            defaults=ExperimentDefaults(max_iterations=5, task_timeout=300),
             variants=[ExperimentVariant(variant_id="v1", max_iterations=2)],
         )
         _resolved, lineage = resolve_task_for_variant(
@@ -129,7 +129,7 @@ class TestScalarLineage:
         )
         assert lineage["max_iterations"].source == "variant"
         assert lineage["max_iterations"].value == 2
-        assert lineage["task_timeout"].source == "experiment-base"
+        assert lineage["task_timeout"].source == "experiment-defaults"
         assert lineage["task_timeout"].value == 300
 
     def test_pydantic_default_not_tracked(self):
@@ -169,7 +169,7 @@ class TestScalarLineage:
         )
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            base=ExperimentBase(agent={"type": "claude-code"}, task_timeout=600),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, task_timeout=600),
             variants=[ExperimentVariant(variant_id="default")],
         )
         experiment = ExperimentDefinition(
@@ -194,7 +194,7 @@ class TestScalarLineage:
         )
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            base=ExperimentBase(agent={"type": "claude-code"}, max_iterations=5, turn_timeout=300),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, max_iterations=5, turn_timeout=300),
             variants=[ExperimentVariant(variant_id="default")],
         )
         experiment = ExperimentDefinition(
@@ -221,7 +221,7 @@ class TestScalarLineage:
         )
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            base=ExperimentBase(agent={"type": "claude-code"}, max_iterations=5),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, max_iterations=5),
             variants=[ExperimentVariant(variant_id="default")],
         )
         experiment = ExperimentDefinition(
@@ -269,7 +269,7 @@ class TestResolveTaskForVariantLineage:
         )
         experiment = ExperimentDefinition(
             experiment_id="test",
-            base=ExperimentBase(agent={"model": "base-model"}),
+            defaults=ExperimentDefaults(agent={"model": "base-model"}),
             variants=[ExperimentVariant(variant_id="v1", agent={"model": "variant-model"})],
         )
         _resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])

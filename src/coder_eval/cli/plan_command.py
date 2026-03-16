@@ -77,8 +77,8 @@ def plan_command(
     console.print(
         f"  [dim]Variants ({len(exp_def.variants)}): {', '.join(v.variant_id for v in exp_def.variants)}[/dim]"
     )
-    if exp_def.base and exp_def.base.agent:
-        console.print(f"  [dim]Base agent config: {exp_def.base.agent}[/dim]")
+    if exp_def.defaults and exp_def.defaults.agent:
+        console.print(f"  [dim]Default agent config: {exp_def.defaults.agent}[/dim]")
     console.print()
 
     # Validate each task file

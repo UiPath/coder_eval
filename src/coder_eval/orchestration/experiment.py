@@ -67,7 +67,7 @@ DEFAULT_EXPERIMENT_PATH = _find_default_experiment()
 
 
 def _resolve_experiment_template_paths(experiment: ExperimentDefinition, base_dir: Path) -> None:
-    """Resolve relative TemplateDirSource paths in experiment base and variants.
+    """Resolve relative TemplateDirSource paths in experiment defaults and variants.
 
     Mutates paths in place, resolving relative paths against the experiment YAML directory.
 
@@ -76,8 +76,8 @@ def _resolve_experiment_template_paths(experiment: ExperimentDefinition, base_di
         base_dir: Directory containing the experiment YAML file.
     """
     sources_lists: list[list[TemplateSource]] = []
-    if experiment.base and experiment.base.template_sources:
-        sources_lists.append(experiment.base.template_sources)
+    if experiment.defaults and experiment.defaults.template_sources:
+        sources_lists.append(experiment.defaults.template_sources)
     for variant in experiment.variants:
         if variant.template_sources:
             sources_lists.append(variant.template_sources)
@@ -131,7 +131,7 @@ def _merge_agent_dicts(*layers: dict[str, Any] | None) -> dict[str, Any]:
     return merged
 
 
-type ConfigSource = Literal["default", "task", "experiment-base", "variant", "cli"]
+type ConfigSource = Literal["default", "task", "experiment-defaults", "variant", "cli"]
 
 
 def _build_agent_lineage(
@@ -163,9 +163,9 @@ def resolve_task_for_variant(
     """Resolve a fully-configured TaskDefinition by merging the 4-layer precedence chain.
 
     Precedence (lowest to highest):
-        1. default_experiment.base.agent
-        2. task.agent
-        3. experiment.base.agent
+        1. default_experiment.defaults.agent
+        2. experiment.defaults.agent
+        3. task.agent
         4. variant.agent
 
     Args:
@@ -177,75 +177,79 @@ def resolve_task_for_variant(
     Returns:
         Tuple of (resolved TaskDefinition, config lineage dict).
     """
-    # Layer 1: default experiment base agent
-    default_agent = default_experiment.base.agent if default_experiment.base else None
+    # Layer 1: default experiment defaults agent
+    default_agent = default_experiment.defaults.agent if default_experiment.defaults else None
 
-    # Layer 2: task agent (only explicitly-set fields, not Pydantic defaults)
+    # Layer 2: experiment defaults agent
+    exp_defaults_agent = experiment.defaults.agent if experiment.defaults else None
+
+    # Layer 3: task agent (only explicitly-set fields, not Pydantic defaults)
     task_agent = task.agent.model_dump(exclude_unset=True) if task.agent else None
-
-    # Layer 3: experiment base agent
-    exp_base_agent = experiment.base.agent if experiment.base else None
 
     # Layer 4: variant agent
     variant_agent = variant.agent
 
     # Merge agent dicts
-    merged_agent_dict = _merge_agent_dicts(default_agent, task_agent, exp_base_agent, variant_agent)
+    merged_agent_dict = _merge_agent_dicts(default_agent, exp_defaults_agent, task_agent, variant_agent)
     resolved_agent = AgentConfig(**merged_agent_dict)
 
     # Build agent lineage
     agent_lineage = _build_agent_lineage(
         [
             ("default", default_agent),
+            ("experiment-defaults", exp_defaults_agent),
             ("task", task_agent),
-            ("experiment-base", exp_base_agent),
             ("variant", variant_agent),
         ]
     )
 
     # Resolve scalar overrides and track lineage simultaneously (4-layer precedence)
+    # Order: default → experiment-defaults → task → variant (task wins over experiment defaults)
     resolved_max_iterations = task.max_iterations
     resolved_task_timeout = task.task_timeout
     resolved_turn_timeout = task.agent.turn_timeout if task.agent else None
 
     scalar_lineage: dict[str, ConfigLineageEntry] = {}
-
-    # Record task-explicit scalars as baseline lineage
     task_explicit = task.model_fields_set
+    task_agent_explicit = task.agent.model_fields_set if task.agent else set()
+
+    # Layer 1: default experiment defaults scalars
+    if default_experiment.defaults:
+        if default_experiment.defaults.max_iterations is not None and "max_iterations" not in task_explicit:
+            resolved_max_iterations = default_experiment.defaults.max_iterations
+            scalar_lineage["max_iterations"] = ConfigLineageEntry(value=resolved_max_iterations, source="default")
+        if default_experiment.defaults.task_timeout is not None and "task_timeout" not in task_explicit:
+            resolved_task_timeout = default_experiment.defaults.task_timeout
+            scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="default")
+        if default_experiment.defaults.turn_timeout is not None and "turn_timeout" not in task_agent_explicit:
+            resolved_turn_timeout = default_experiment.defaults.turn_timeout
+            scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=resolved_turn_timeout, source="default")
+
+    # Layer 2: experiment defaults scalars (overrides default, but task can still override these)
+    if experiment.defaults:
+        if experiment.defaults.max_iterations is not None and "max_iterations" not in task_explicit:
+            resolved_max_iterations = experiment.defaults.max_iterations
+            scalar_lineage["max_iterations"] = ConfigLineageEntry(
+                value=resolved_max_iterations, source="experiment-defaults"
+            )
+        if experiment.defaults.task_timeout is not None and "task_timeout" not in task_explicit:
+            resolved_task_timeout = experiment.defaults.task_timeout
+            scalar_lineage["task_timeout"] = ConfigLineageEntry(
+                value=resolved_task_timeout, source="experiment-defaults"
+            )
+        if experiment.defaults.turn_timeout is not None and "turn_timeout" not in task_agent_explicit:
+            resolved_turn_timeout = experiment.defaults.turn_timeout
+            scalar_lineage["turn_timeout"] = ConfigLineageEntry(
+                value=resolved_turn_timeout, source="experiment-defaults"
+            )
+
+    # Layer 3: task-explicit scalars (override experiment defaults)
     if "max_iterations" in task_explicit:
         scalar_lineage["max_iterations"] = ConfigLineageEntry(value=task.max_iterations, source="task")
     if "task_timeout" in task_explicit:
         scalar_lineage["task_timeout"] = ConfigLineageEntry(value=task.task_timeout, source="task")
-    if task.agent and "turn_timeout" in task.agent.model_fields_set:
+    if task.agent and "turn_timeout" in task_agent_explicit:
         scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=task.agent.turn_timeout, source="task")
-
-    # Layer 1: default experiment base scalars (only override Pydantic defaults, not explicit task values)
-    if default_experiment.base:
-        if default_experiment.base.max_iterations is not None and "max_iterations" not in task_explicit:
-            resolved_max_iterations = default_experiment.base.max_iterations
-            scalar_lineage["max_iterations"] = ConfigLineageEntry(value=resolved_max_iterations, source="default")
-        if default_experiment.base.task_timeout is not None and "task_timeout" not in task_explicit:
-            resolved_task_timeout = default_experiment.base.task_timeout
-            scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="default")
-        if default_experiment.base.turn_timeout is not None:
-            task_agent_explicit = task.agent.model_fields_set if task.agent else set()
-            if "turn_timeout" not in task_agent_explicit:
-                resolved_turn_timeout = default_experiment.base.turn_timeout
-                scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=resolved_turn_timeout, source="default")
-
-    # Layer 3: experiment base scalars
-    if experiment.base:
-        if experiment.base.max_iterations is not None:
-            resolved_max_iterations = experiment.base.max_iterations
-            scalar_lineage["max_iterations"] = ConfigLineageEntry(
-                value=resolved_max_iterations, source="experiment-base"
-            )
-        if experiment.base.task_timeout is not None:
-            resolved_task_timeout = experiment.base.task_timeout
-            scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="experiment-base")
-        if experiment.base.turn_timeout is not None:
-            resolved_turn_timeout = experiment.base.turn_timeout
-            scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=resolved_turn_timeout, source="experiment-base")
 
     # Layer 4: variant scalars (highest precedence before CLI)
     if variant.max_iterations is not None:
@@ -261,16 +265,18 @@ def resolve_task_for_variant(
     # Apply turn_timeout to agent config
     resolved_agent.turn_timeout = resolved_turn_timeout
 
-    # Resolve template_sources: task base + experiment base overlays + variant overlays (append semantics)
+    # Resolve template_sources: task base + experiment defaults overlays + variant overlays (append semantics)
     base_sources: list[TemplateSource] = list(task.sandbox.template_sources or [])
-    exp_base_sources: list[TemplateSource] = (
-        list(experiment.base.template_sources) if experiment.base and experiment.base.template_sources else []
+    exp_defaults_sources: list[TemplateSource] = (
+        list(experiment.defaults.template_sources)
+        if experiment.defaults and experiment.defaults.template_sources
+        else []
     )
     variant_sources: list[TemplateSource] = list(variant.template_sources) if variant.template_sources else []
 
-    combined_sources = base_sources + exp_base_sources + variant_sources
+    combined_sources = base_sources + exp_defaults_sources + variant_sources
     resolved_sandbox = task.sandbox
-    if exp_base_sources or variant_sources:
+    if exp_defaults_sources or variant_sources:
         validate_template_sources_list(combined_sources)
         resolved_sandbox = task.sandbox.model_copy(update={"template_sources": combined_sources})
 
@@ -411,7 +417,7 @@ def resolve_all_tasks(
         task, source_yaml = load_task(task_file)
 
         for variant in experiment.variants:
-            # Apply layers 1-4 (default → task → base → variant)
+            # Apply layers 1-4 (default → experiment-defaults → task → variant)
             resolved_task, lineage = resolve_task_for_variant(default_experiment, task, experiment, variant)
 
             # Apply layer 5 (CLI / .env overrides)

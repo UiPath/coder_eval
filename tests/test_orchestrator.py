@@ -1604,7 +1604,7 @@ async def test_run_batch_applies_max_turns_override(tmp_path):
 
 def test_resolve_all_tasks_rejects_duplicate_task_ids(tmp_path):
     """Test that resolve_all_tasks raises ValueError when tasks share the same task_id."""
-    from coder_eval.models import ExperimentBase, ExperimentDefinition, ExperimentVariant
+    from coder_eval.models import ExperimentDefaults, ExperimentDefinition, ExperimentVariant
     from coder_eval.orchestration.config import BatchRunConfig
     from coder_eval.orchestration.experiment import resolve_all_tasks
 
@@ -1632,7 +1632,7 @@ success_criteria:
     config = BatchRunConfig(run_dir=run_dir)
     default_experiment = ExperimentDefinition(
         experiment_id="default",
-        base=ExperimentBase(agent={"type": "claude-code"}),
+        defaults=ExperimentDefaults(agent={"type": "claude-code"}),
         variants=[ExperimentVariant(variant_id="default")],
     )
     experiment = ExperimentDefinition(

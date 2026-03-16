@@ -34,7 +34,7 @@ from coder_eval.models.enums import (
 
 # Experiment
 from coder_eval.models.experiment import (
-    ExperimentBase,
+    ExperimentDefaults,
     ExperimentDefinition,
     ExperimentResult,
     ExperimentVariant,
@@ -153,7 +153,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "LLMReviewerConfig",
     "ReferenceSource",
     # Experiment
-    "ExperimentBase",
+    "ExperimentDefaults",
     "ExperimentDefinition",
     "ExperimentResult",
     "ExperimentVariant",

@@ -118,7 +118,7 @@ templates/                         # Sandbox template directories
 - **Strategy Pattern**: `Agent` ABC with implementations in `agents/`
 - **Separation of Concerns**: Data models (`models/`) are pure Pydantic; logic lives in `criteria/`, `evaluation/`, etc.
 - **Callback Streaming**: `StreamCallback` protocol with `TaskScopedCallback` wrapper for real-time LLM event output
-- **Experiment Layer**: Pre-processing config resolver (`ExperimentRunner`) that resolves task × variant combinations via 5-layer merge (default → task → base → variant → CLI) before passing to `run_batch`
+- **Experiment Layer**: Pre-processing config resolver (`ExperimentRunner`) that resolves task × variant combinations via 5-layer merge (default → experiment defaults → task → variant → CLI) before passing to `run_batch`
 - **All core models importable from `coder_eval.models`** regardless of submodule (`AutogenConfig` lives in `coder_eval.tools.autogen.config` — it's not a core model)
 
 ## Success Criteria (12 types)
@@ -146,8 +146,8 @@ CLI → ExperimentRunner (resolve task × variant) → run_batch → Orchestrato
 
 ExperimentRunner resolves configs via 5-layer merge:
   1. experiments/default.yaml  (baseline defaults)
-  2. tasks/<task>.yaml         (task-specific config)
-  3. experiment base           (experiment-wide overrides)
+  2. experiment defaults       (experiment-wide defaults)
+  3. tasks/<task>.yaml         (task-specific config, wins over defaults)
   4. experiment variant        (variant-specific overrides)
   5. CLI flags                 (always wins)
 

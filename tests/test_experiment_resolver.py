@@ -3,7 +3,7 @@
 import pytest
 
 from coder_eval.models import (
-    ExperimentBase,
+    ExperimentDefaults,
     ExperimentDefinition,
     ExperimentVariant,
     TaskDefinition,
@@ -31,7 +31,7 @@ def _make_default_experiment() -> ExperimentDefinition:
     """Create the default experiment (mimics experiments/default.yaml)."""
     return ExperimentDefinition(
         experiment_id="default",
-        base=ExperimentBase(agent={"type": "claude-code", "permission_mode": "acceptEdits"}),
+        defaults=ExperimentDefaults(agent={"type": "claude-code", "permission_mode": "acceptEdits"}),
         variants=[ExperimentVariant(variant_id="default")],
     )
 
@@ -65,19 +65,28 @@ class TestResolveTaskForVariant:
         assert resolved.agent.permission_mode == "bypassPermissions"
         assert lineage["agent.permission_mode"].source == "task"
 
-    def test_experiment_base_overrides_task(self):
-        """Experiment base overrides task agent settings."""
+    def test_task_model_not_clobbered_by_default_experiment(self):
+        """Task model should not be overridden when experiment IS the default (no --experiment flag)."""
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code", "model": "custom-model"})
+        # When no --experiment is given, experiment == default_experiment
+        resolved, lineage = resolve_task_for_variant(default_exp, task, default_exp, default_exp.variants[0])
+        assert resolved.agent.model == "custom-model"
+        assert lineage["agent.model"].source == "task"
+
+    def test_task_overrides_experiment_defaults(self):
+        """Task agent settings override experiment defaults."""
         default_exp = _make_default_experiment()
         task = _make_task(agent={"type": "claude-code", "permission_mode": "acceptEdits"})
         experiment = ExperimentDefinition(
             experiment_id="test",
-            base=ExperimentBase(agent={"permission_mode": "bypassPermissions"}),
+            defaults=ExperimentDefaults(agent={"permission_mode": "bypassPermissions"}),
             variants=[ExperimentVariant(variant_id="variant1")],
         )
 
         resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.agent.permission_mode == "bypassPermissions"
-        assert lineage["agent.permission_mode"].source == "experiment-base"
+        assert resolved.agent.permission_mode == "acceptEdits"
+        assert lineage["agent.permission_mode"].source == "task"
 
     def test_variant_overrides_base(self):
         """Variant settings override experiment base."""
@@ -85,7 +94,7 @@ class TestResolveTaskForVariant:
         task = _make_task(agent={"type": "claude-code"})
         experiment = ExperimentDefinition(
             experiment_id="test",
-            base=ExperimentBase(agent={"model": "base-model"}),
+            defaults=ExperimentDefaults(agent={"model": "base-model"}),
             variants=[ExperimentVariant(variant_id="variant1", agent={"model": "variant-model"})],
         )
 
@@ -94,10 +103,10 @@ class TestResolveTaskForVariant:
         assert lineage["agent.model"].source == "variant"
 
     def test_full_precedence_chain(self):
-        """Full 4-layer merge: default < task < base < variant."""
+        """Full 4-layer merge: default < experiment-defaults < task < variant."""
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            base=ExperimentBase(
+            defaults=ExperimentDefaults(
                 agent={
                     "type": "claude-code",
                     "permission_mode": "acceptEdits",
@@ -114,18 +123,20 @@ class TestResolveTaskForVariant:
         )
         experiment = ExperimentDefinition(
             experiment_id="test",
-            base=ExperimentBase(agent={"permission_mode": "bypassPermissions"}),
+            defaults=ExperimentDefaults(agent={"permission_mode": "bypassPermissions"}),
             variants=[ExperimentVariant(variant_id="opus", agent={"model": "claude-opus-4-20250514"})],
         )
 
         resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.type == "claude-code"
-        assert resolved.agent.allowed_tools == ["Read", "Write", "Bash"]  # from task (layer 2)
-        assert resolved.agent.permission_mode == "bypassPermissions"  # from base (layer 3)
+        assert resolved.agent.allowed_tools == ["Read", "Write", "Bash"]  # from task (layer 3)
+        assert (
+            resolved.agent.permission_mode == "bypassPermissions"
+        )  # from experiment-defaults (layer 2, task didn't set it)
         assert resolved.agent.model == "claude-opus-4-20250514"  # from variant (layer 4)
         # Lineage assertions
         assert lineage["agent.allowed_tools"].source == "task"
-        assert lineage["agent.permission_mode"].source == "experiment-base"
+        assert lineage["agent.permission_mode"].source == "experiment-defaults"
         assert lineage["agent.model"].source == "variant"
 
     def test_list_fields_replace_atomically(self):
@@ -146,7 +157,7 @@ class TestResolveTaskForVariant:
         task = _make_task(agent={"type": "claude-code"}, max_iterations=3)
         experiment = ExperimentDefinition(
             experiment_id="test",
-            base=ExperimentBase(max_iterations=5, task_timeout=300),
+            defaults=ExperimentDefaults(max_iterations=5, task_timeout=300),
             variants=[ExperimentVariant(variant_id="fast", max_iterations=2, task_timeout=120)],
         )
 
@@ -178,7 +189,7 @@ class TestDefaultExperimentScalarOverrides:
         """default.yaml base.max_iterations should override task's Pydantic default."""
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            base=ExperimentBase(
+            defaults=ExperimentDefaults(
                 agent={"type": "claude-code", "permission_mode": "acceptEdits"},
                 max_iterations=5,
             ),
@@ -199,7 +210,7 @@ class TestDefaultExperimentScalarOverrides:
         """default.yaml base.task_timeout should be applied when task has no explicit timeout."""
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            base=ExperimentBase(agent={"type": "claude-code"}, task_timeout=600),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, task_timeout=600),
             variants=[ExperimentVariant(variant_id="default")],
         )
         task = _make_task(agent=None)
@@ -216,7 +227,7 @@ class TestDefaultExperimentScalarOverrides:
         """default.yaml base.turn_timeout should be applied."""
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            base=ExperimentBase(agent={"type": "claude-code"}, turn_timeout=60),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, turn_timeout=60),
             variants=[ExperimentVariant(variant_id="default")],
         )
         task = _make_task(agent=None)
@@ -230,17 +241,17 @@ class TestDefaultExperimentScalarOverrides:
         assert resolved.agent.turn_timeout == 60
 
     def test_experiment_base_overrides_default_experiment_scalars(self):
-        """experiment.base scalars (layer 3) should override default_experiment.base (layer 1)."""
+        """experiment.defaults scalars (layer 2) should override default_experiment.defaults (layer 1)."""
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            base=ExperimentBase(agent={"type": "claude-code"}, max_iterations=5),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, max_iterations=5),
             variants=[ExperimentVariant(variant_id="default")],
         )
         task = _make_task(agent=None)
 
         experiment = ExperimentDefinition(
             experiment_id="test",
-            base=ExperimentBase(max_iterations=10),
+            defaults=ExperimentDefaults(max_iterations=10),
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
@@ -251,10 +262,10 @@ class TestDefaultExperimentScalarOverrides:
         """Task that explicitly sets max_iterations should NOT be overwritten by default experiment."""
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            base=ExperimentBase(agent={"type": "claude-code"}, max_iterations=5),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, max_iterations=5),
             variants=[ExperimentVariant(variant_id="default")],
         )
-        # Task explicitly sets max_iterations=7 (layer 2 > layer 1)
+        # Task explicitly sets max_iterations=7 (layer 3 > layers 1-2)
         task = _make_task(agent=None, max_iterations=7)
 
         experiment = ExperimentDefinition(
@@ -269,7 +280,7 @@ class TestDefaultExperimentScalarOverrides:
         """Task that explicitly sets task_timeout should NOT be overwritten by default experiment."""
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            base=ExperimentBase(agent={"type": "claude-code"}, task_timeout=600),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, task_timeout=600),
             variants=[ExperimentVariant(variant_id="default")],
         )
         task = _make_task(agent=None, task_timeout=900)
@@ -283,10 +294,10 @@ class TestDefaultExperimentScalarOverrides:
         assert resolved.task_timeout == 900
 
     def test_variant_overrides_default_experiment_scalars(self):
-        """variant scalars (layer 4) should override default_experiment.base (layer 1)."""
+        """variant scalars (layer 4) should override default_experiment.defaults (layer 1)."""
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            base=ExperimentBase(agent={"type": "claude-code"}, max_iterations=5),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, max_iterations=5),
             variants=[ExperimentVariant(variant_id="default")],
         )
         task = _make_task(agent=None)
@@ -315,7 +326,7 @@ class TestTemplateSourcesOverlay:
         )
         experiment = ExperimentDefinition(
             experiment_id="test",
-            base=ExperimentBase(template_sources=[TemplateDirSource(path="/base")]),
+            defaults=ExperimentDefaults(template_sources=[TemplateDirSource(path="/base")]),
             variants=[
                 ExperimentVariant(
                     variant_id="full",

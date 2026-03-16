@@ -6,7 +6,7 @@ import pytest
 
 from coder_eval.models import (
     EvaluationResult,
-    ExperimentBase,
+    ExperimentDefaults,
     ExperimentDefinition,
     ExperimentVariant,
     ResolvedTask,
@@ -38,14 +38,14 @@ class TestExperimentVariant:
         assert variant.task_timeout == 120
 
 
-class TestExperimentBase:
+class TestExperimentDefaults:
     def test_empty_base(self):
-        base = ExperimentBase()
+        base = ExperimentDefaults()
         assert base.max_iterations is None
         assert base.agent is None
 
     def test_base_with_all_fields(self):
-        base = ExperimentBase(
+        base = ExperimentDefaults(
             max_iterations=3,
             task_timeout=300,
             turn_timeout=120,
@@ -63,21 +63,21 @@ class TestExperimentDefinition:
         )
         assert exp.experiment_id == "default"
         assert exp.description == ""
-        assert exp.base is None
+        assert exp.defaults is None
         assert len(exp.variants) == 1
 
     def test_full_experiment(self):
         exp = ExperimentDefinition(
             experiment_id="model-comparison",
             description="Compare Sonnet vs Opus",
-            base=ExperimentBase(max_iterations=3, agent={"permission_mode": "bypassPermissions"}),
+            defaults=ExperimentDefaults(max_iterations=3, agent={"permission_mode": "bypassPermissions"}),
             variants=[
                 ExperimentVariant(variant_id="sonnet", agent={"model": "claude-sonnet-4-20250514"}),
                 ExperimentVariant(variant_id="opus", agent={"model": "claude-opus-4-20250514"}),
             ],
         )
         assert len(exp.variants) == 2
-        assert exp.base.max_iterations == 3
+        assert exp.defaults.max_iterations == 3
 
     def test_no_variants_raises(self):
         with pytest.raises(ValueError, match="at least 1"):

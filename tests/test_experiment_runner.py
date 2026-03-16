@@ -8,7 +8,7 @@ import yaml
 
 from coder_eval.models import (
     EvaluationResult,
-    ExperimentBase,
+    ExperimentDefaults,
     ExperimentDefinition,
     ExperimentResult,
     ExperimentVariant,
@@ -53,7 +53,7 @@ class TestResolveAllTasks:
     def default_experiment(self):
         return ExperimentDefinition(
             experiment_id="default",
-            base=ExperimentBase(agent={"type": "claude-code", "permission_mode": "acceptEdits"}),
+            defaults=ExperimentDefaults(agent={"type": "claude-code", "permission_mode": "acceptEdits"}),
             variants=[ExperimentVariant(variant_id="default")],
         )
 
@@ -64,7 +64,7 @@ class TestResolveAllTasks:
 
         experiment = ExperimentDefinition(
             experiment_id="test-exp",
-            base=ExperimentBase(agent={"permission_mode": "bypassPermissions"}),
+            defaults=ExperimentDefaults(agent={"permission_mode": "bypassPermissions"}),
             variants=[
                 ExperimentVariant(variant_id="sonnet", agent={"model": "sonnet"}),
                 ExperimentVariant(variant_id="opus", agent={"model": "opus"}),

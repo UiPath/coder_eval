@@ -20,7 +20,7 @@
 experiment_id: skills-eval
 description: "Compare impact of docs and skills on agent SDK coding tasks"
 
-base:
+defaults:
   agent:
     type: claude-code
     permission_mode: bypassPermissions

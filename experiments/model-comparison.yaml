@@ -7,7 +7,7 @@
 experiment_id: model-comparison
 description: "Compare Sonnet 4.6 vs Opus 4.6 on coding tasks"
 
-base:
+defaults:
   agent:
     type: claude-code
     permission_mode: bypassPermissions

@@ -21,7 +21,7 @@ class ConfigLineageEntry(BaseModel):
     """Records which config layer provided a specific value."""
 
     value: Any
-    source: Literal["default", "task", "experiment-base", "variant", "cli"]
+    source: Literal["default", "task", "experiment-defaults", "variant", "cli"]
     source_detail: str | None = None
 
 

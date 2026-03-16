@@ -1,13 +1,13 @@
 # Default experiment — provides baseline agent configuration.
 #
 # Tasks that omit the `agent` field inherit these defaults via the
-# 4-layer merge chain: default.yaml → task YAML → experiment base → variant.
+# 4-layer merge chain: default.yaml → experiment defaults → task YAML → variant.
 # All agent properties are listed explicitly so users know the baseline.
 
 experiment_id: default
 description: "Default experiment - provides baseline agent configuration"
 
-base:
+defaults:
   # Default max iterations for the evaluation loop (task-level overrides this)
   max_iterations: 3
 

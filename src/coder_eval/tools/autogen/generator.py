@@ -502,7 +502,7 @@ def generate_experiment(plugin_dir: Path, config: AutogenConfig) -> dict[str, An
     return {
         "experiment_id": f"{plugin_name}-plugin-comparison",
         "description": f"Compare agent with vs without the {plugin_name} plugin loaded",
-        "base": {"agent": base_agent},
+        "defaults": {"agent": base_agent},
         "variants": [
             {
                 "variant_id": "with-plugin",

@@ -26,13 +26,13 @@ class ExperimentVariant(BaseModel):
     )
 
 
-class ExperimentBase(BaseModel):
-    """Base settings applied to all variants (overridable per-variant)."""
+class ExperimentDefaults(BaseModel):
+    """Default settings applied to all variants (overridable per-variant and per-task)."""
 
     max_iterations: int | None = Field(default=None, description="Default max iterations")
     task_timeout: int | None = Field(default=None, ge=30, description="Default task timeout (seconds)")
     turn_timeout: int | None = Field(default=None, ge=10, description="Default turn timeout (seconds)")
-    agent: dict[str, Any] | None = Field(default=None, description="Partial agent config overrides")
+    agent: dict[str, Any] | None = Field(default=None, description="Partial agent config defaults")
     template_sources: list[TemplateSource] | None = Field(
         default=None, description="Additional template sources appended after task's base templates (for all variants)"
     )
@@ -43,7 +43,7 @@ class ExperimentDefinition(BaseModel):
 
     experiment_id: str = Field(description="Kebab-case identifier for this experiment")
     description: str = Field(default="", description="Human-readable description")
-    base: ExperimentBase | None = Field(default=None, description="Base settings applied to all variants")
+    defaults: ExperimentDefaults | None = Field(default=None, description="Default settings applied to all variants")
     variants: list[ExperimentVariant] = Field(description="Configuration variants (at least 1)")
 
     @field_validator("experiment_id")
