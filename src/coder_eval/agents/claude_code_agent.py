@@ -191,7 +191,8 @@ class ClaudeCodeAgent(Agent):
             # Process plugins: copy from config and replace env vars in paths
             plugins = self._process_plugins(self.config.plugins or [])  # type: ignore[arg-type]
 
-            # Build env overrides for proxy routing
+            # Build env overrides for proxy routing.
+            # The SDK merges these with os.environ (see subprocess_cli.py), so {} is safe.
             env: dict[str, str] = {}
             if self.proxy_port is not None:
                 env = {

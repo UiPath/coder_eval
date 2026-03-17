@@ -123,22 +123,70 @@ def test_config_case_insensitive_env_vars(tmp_path, monkeypatch):
     assert settings.log_level == "DEBUG"
 
 
-def test_config_validates_required_api_keys():
-    """Test that validate_api_keys raises error for missing keys.
+def test_config_claude_code_no_key_no_proxy_succeeds():
+    """Test that claude-code agent allows missing API key when proxy is disabled.
 
-    Hypothesis: Missing ANTHROPIC_API_KEY should raise ValueError.
-    Expected: Clear error message for missing credentials.
-
-    Context: Lines 62-72 in config.py implement validation.
+    Claude Code can authenticate via cached 'claude-code login' session,
+    so we defer auth validation to the SDK.
     """
     from coder_eval.config import Settings
 
-    # Create settings with no API key and proxy disabled
     settings = Settings(anthropic_api_key=None, llmgw_proxy_enabled=False)
 
-    # Verify validation raises error for claude-code agent
-    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY is required"):
+    # Should NOT raise — SDK handles auth (API key, cached login, or error)
+    settings.validate_api_keys("claude-code")
+
+
+def test_config_claude_code_proxy_missing_gateway_settings():
+    """Test that claude-code with proxy enabled raises on missing gateway settings."""
+    from coder_eval.config import Settings
+
+    settings = Settings(
+        anthropic_api_key=None,
+        llmgw_proxy_enabled=True,
+        llmgw_url=None,
+        llmgw_client_id=None,
+        llmgw_client_secret=None,
+    )
+
+    with pytest.raises(ValueError):
         settings.validate_api_keys("claude-code")
+
+
+def test_config_claude_code_proxy_with_gateway_settings_succeeds():
+    """Test that claude-code with proxy enabled succeeds when all gateway settings are present."""
+    from coder_eval.config import Settings
+
+    settings = Settings(
+        anthropic_api_key=None,
+        llmgw_proxy_enabled=True,
+        llmgw_url="https://gateway.example.com",
+        llmgw_client_id="client-id",
+        llmgw_client_secret="client-secret",
+        llmgw_semantic_org_id="org-id",
+        llmgw_semantic_tenant_id="tenant-id",
+    )
+
+    # Should NOT raise — all required gateway settings are present
+    settings.validate_api_keys("claude-code")
+
+
+def test_config_non_claude_code_proxy_requires_semantic_ids():
+    """Test that non-claude-code agents with proxy require semantic org/tenant IDs."""
+    from coder_eval.config import Settings
+
+    settings = Settings(
+        anthropic_api_key=None,
+        llmgw_proxy_enabled=True,
+        llmgw_url="https://gateway.example.com",
+        llmgw_client_id="client-id",
+        llmgw_client_secret="client-secret",
+        llmgw_semantic_org_id=None,
+        llmgw_semantic_tenant_id=None,
+    )
+
+    with pytest.raises(ValueError):
+        settings.validate_api_keys("other-agent")
 
 
 def test_config_exports_to_os_environ(monkeypatch):

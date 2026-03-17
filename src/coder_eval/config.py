@@ -66,6 +66,29 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore")
 
+    def _validate_llmgw_settings(self) -> None:
+        """Validate that required LLM Gateway settings are present.
+
+        Raises:
+            ValueError: If required gateway settings are missing
+        """
+        missing = []
+        if not self.llmgw_url:
+            missing.append("LLMGW_URL")
+        if not self.llmgw_client_id:
+            missing.append("LLMGW_CLIENT_ID")
+        if not self.llmgw_client_secret:
+            missing.append("LLMGW_CLIENT_SECRET")
+        if not self.llmgw_semantic_org_id:
+            missing.append("LLMGW_SEMANTIC_ORG_ID")
+        if not self.llmgw_semantic_tenant_id:
+            missing.append("LLMGW_SEMANTIC_TENANT_ID")
+        if missing:
+            raise ValueError(
+                f"LLM Gateway proxy is enabled but missing required settings: {', '.join(missing)}."
+                + " Please set them in your .env file."
+            )
+
     def validate_api_keys(self, agent_type: str) -> None:
         """Validate that required API keys are present.
 
@@ -75,26 +98,18 @@ class Settings(BaseSettings):
         Raises:
             ValueError: If required API key is missing
         """
-        if agent_type == "claude-code" and not self.anthropic_api_key and not self.llmgw_proxy_enabled:
-            raise ValueError("ANTHROPIC_API_KEY is required for Claude Code agent. Please set it in your .env file.")
-
+        # Validate proxy settings for ALL agent types (the orchestrator's _start_proxy()
+        # asserts all 5 fields regardless of agent type)
         if self.llmgw_proxy_enabled:
-            missing = []
-            if not self.llmgw_url:
-                missing.append("LLMGW_URL")
-            if not self.llmgw_client_id:
-                missing.append("LLMGW_CLIENT_ID")
-            if not self.llmgw_client_secret:
-                missing.append("LLMGW_CLIENT_SECRET")
-            if not self.llmgw_semantic_org_id:
-                missing.append("LLMGW_SEMANTIC_ORG_ID")
-            if not self.llmgw_semantic_tenant_id:
-                missing.append("LLMGW_SEMANTIC_TENANT_ID")
-            if missing:
-                raise ValueError(
-                    f"LLM Gateway proxy is enabled but missing required settings: {', '.join(missing)}."
-                    + " Please set them in your .env file."
-                )
+            self._validate_llmgw_settings()
+
+        # Claude Code agent can use either:
+        # 1. ANTHROPIC_API_KEY environment variable
+        # 2. Cached CLI authentication from 'claude-code login' (subscription account)
+        # 3. LLM Gateway proxy (sets auth via proxy)
+        # We don't validate the API key here because the SDK handles auth and fails clearly if missing.
+        if agent_type == "claude-code":
+            return
 
 
 # Global settings instance
