@@ -268,6 +268,155 @@ class TestCommandExecutedCriterion:
 
         assert result.score == 1.0
 
+    def test_exclude_pattern_filters_help(self):
+        """exclude_pattern should skip --help invocations."""
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(
+                        tool_name="Bash",
+                        parameters={"command": "uip flow process get --help 2>&1"},
+                        tool_id="t1",
+                    ),
+                    _make_command(
+                        tool_name="Bash",
+                        parameters={"command": "uip flow process get --process-key pk1 --feed-id fid1"},
+                        tool_id="t2",
+                    ),
+                ]
+            )
+        ]
+
+        criterion = CommandExecutedCriterion(
+            description="Agent ran uip flow process get (not just --help)",
+            tool_name="Bash",
+            command_pattern=r"uip\s+flow\s+process\s+get",
+            exclude_pattern=r"--help",
+            min_count=1,
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion, turn_records=turn_records)
+
+        assert result.score == 1.0
+        assert "1/1" in result.details
+
+    def test_exclude_pattern_all_excluded(self):
+        """If all matches are excluded, score should be 0."""
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(
+                        tool_name="Bash",
+                        parameters={"command": "uip flow process get --help"},
+                        tool_id="t1",
+                    ),
+                    _make_command(
+                        tool_name="Bash",
+                        parameters={"command": "uip flow process get --help 2>&1"},
+                        tool_id="t2",
+                    ),
+                ]
+            )
+        ]
+
+        criterion = CommandExecutedCriterion(
+            description="Agent ran uip flow process get (not just --help)",
+            tool_name="Bash",
+            command_pattern=r"uip\s+flow\s+process\s+get",
+            exclude_pattern=r"--help",
+            min_count=1,
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion, turn_records=turn_records)
+
+        assert result.score == 0.0
+
+    def test_exclude_pattern_no_positive_matches(self):
+        """exclude_pattern with no positive matches should still yield 0."""
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(tool_name="Bash", parameters={"command": "ls -la"}, tool_id="t1"),
+                ]
+            )
+        ]
+
+        criterion = CommandExecutedCriterion(
+            description="Agent used curl",
+            tool_name="Bash",
+            command_pattern=r"curl",
+            exclude_pattern=r"--help",
+            min_count=1,
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion, turn_records=turn_records)
+
+        assert result.score == 0.0
+
+    def test_exclude_pattern_invalid_regex(self):
+        """Invalid exclude_pattern regex should return error."""
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(tool_name="Bash", parameters={"command": "uip flow process get pk1"}),
+                ]
+            )
+        ]
+
+        criterion = CommandExecutedCriterion(
+            description="Bad exclude regex",
+            command_pattern=r"uip",
+            exclude_pattern=r"[invalid",
+            min_count=1,
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion, turn_records=turn_records)
+
+        assert result.score == 0.0
+        assert result.error is not None
+        assert "Invalid regex" in result.error
+
+    def test_exclude_pattern_non_bash_tool(self):
+        """Test exclude_pattern on non-Bash tool via JSON-serialized parameters."""
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(
+                        tool_name="Write",
+                        parameters={"file_path": "output.json", "content": '{"key": "value"}'},
+                        tool_id="t1",
+                    ),
+                    _make_command(
+                        tool_name="Write",
+                        parameters={"file_path": "ignore.json", "content": '{"key": "value"}'},
+                        tool_id="t2",
+                    ),
+                ]
+            )
+        ]
+
+        criterion = CommandExecutedCriterion(
+            description="Agent wrote a json file but not ignore.json",
+            tool_name="Write",
+            command_pattern=r"\.json",
+            exclude_pattern=r"ignore\.json",
+            min_count=1,
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion, turn_records=turn_records)
+
+        assert result.score == 1.0
+
     def test_non_bash_tool(self):
         """Test matching non-Bash tool via JSON-serialized parameters."""
         sandbox = MockSandbox()

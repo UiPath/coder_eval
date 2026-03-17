@@ -607,6 +607,21 @@ class TestProxyLifecycle:
         finally:
             await proxy.stop()
 
+    async def test_messages_rejects_non_string_model(self):
+        """Non-string model (e.g. integer) should return 400, not crash with TypeError."""
+        proxy = _make_proxy()
+        port = await proxy.start()
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"http://127.0.0.1:{port}/v1/messages",
+                    json={"model": 123, "messages": [{"role": "user", "content": "hi"}]},
+                )
+            assert resp.status_code == 400
+            assert "model" in resp.json()["error"].lower()
+        finally:
+            await proxy.stop()
+
 
 # ---------------------------------------------------------------------------
 # Token manager

@@ -262,8 +262,10 @@ def resolve_task_for_variant(
         resolved_turn_timeout = variant.turn_timeout
         scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=resolved_turn_timeout, source="variant")
 
-    # Apply turn_timeout to agent config
-    resolved_agent.turn_timeout = resolved_turn_timeout
+    # Apply turn_timeout to agent config (only if scalar path resolved a value;
+    # otherwise preserve the value from the agent dict merge)
+    if resolved_turn_timeout is not None:
+        resolved_agent.turn_timeout = resolved_turn_timeout
 
     # Resolve template_sources: task base + experiment defaults overlays + variant overlays (append semantics)
     base_sources: list[TemplateSource] = list(task.sandbox.template_sources or [])

@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import re
@@ -325,6 +326,15 @@ class LLMGatewayProxy:
                 continue
         return events
 
+    @staticmethod
+    def _upstream_error_response(exc: httpx.RequestError, status: int) -> web.Response:
+        """Build a JSON error response for upstream transport failures."""
+        error_type = "timeout_error" if isinstance(exc, httpx.TimeoutException) else "connection_error"
+        return web.json_response(
+            {"type": "error", "error": {"type": error_type, "message": f"Upstream request failed: {exc}"}},
+            status=status,
+        )
+
     async def _handle_messages(self, request: web.Request) -> web.StreamResponse:
         """Handle POST /v1/messages — main completions endpoint."""
         body = await request.read()
@@ -338,7 +348,7 @@ class LLMGatewayProxy:
             return web.json_response({"error": "JSON body must be an object"}, status=400)
 
         model = payload.get("model", "")
-        if not model:
+        if not isinstance(model, str) or not model:
             return web.json_response({"error": "Missing 'model' in request body"}, status=400)
         if not re.match(r"^[a-zA-Z0-9._:-]+$", model):
             return web.json_response({"error": "Invalid 'model' format"}, status=400)
@@ -400,78 +410,87 @@ class LLMGatewayProxy:
         """Forward a streaming request and pass SSE chunks back transparently."""
         token_refreshed = False
         last_status = 0
+        response: web.StreamResponse | None = None
 
-        async with httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT) as client:
-            for attempt in range(_RETRY_CFG.max_retries + 1):
-                async with client.stream("POST", target_url, headers=headers, content=body) as upstream:
-                    last_status = upstream.status_code
+        try:
+            async with httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT) as client:
+                for attempt in range(_RETRY_CFG.max_retries + 1):
+                    async with client.stream("POST", target_url, headers=headers, content=body) as upstream:
+                        last_status = upstream.status_code
 
-                    # 401 — refresh token once then retry
-                    if upstream.status_code == 401 and not token_refreshed:
-                        self._logger.info("Got 401 from gateway, refreshing token and retrying")
-                        await upstream.aread()
-                        token = await self._token_manager.refresh_token()
-                        headers = self._build_headers(token, is_streaming=True)
-                        token_refreshed = True
-                        continue
+                        # 401 — refresh token once then retry
+                        if upstream.status_code == 401 and not token_refreshed:
+                            self._logger.info("Got 401 from gateway, refreshing token and retrying")
+                            await upstream.aread()
+                            token = await self._token_manager.refresh_token()
+                            headers = self._build_headers(token, is_streaming=True)
+                            token_refreshed = True
+                            continue
 
-                    if upstream.status_code == 401:
-                        await upstream.aread()
-                        return web.json_response(
-                            {"error": "Authentication failed after token refresh"},
-                            status=401,
-                        )
-
-                    # 429 / 529 — backoff and retry
-                    if await self._handle_retryable_status(upstream.status_code, upstream.headers, attempt):
-                        await upstream.aread()
-                        continue
-
-                    response = web.StreamResponse(
-                        status=upstream.status_code,
-                        headers={
-                            "Content-Type": upstream.headers.get("content-type", "text/event-stream"),
-                            "Cache-Control": "no-cache",
-                        },
-                    )
-                    try:
-                        await response.prepare(request)
-
-                        # Buffer SSE bytes for usage extraction while forwarding.
-                        # Cap at _MAX_SSE_BUFFER_BYTES to avoid unbounded memory growth.
-                        sse_buffer = bytearray()
-                        track_usage = True
-                        async for chunk in upstream.aiter_bytes():
-                            await response.write(chunk)
-                            if track_usage:
-                                if len(sse_buffer) + len(chunk) > _MAX_SSE_BUFFER_BYTES:
-                                    track_usage = False
-                                    sse_buffer.clear()
-                                    self._logger.warning(
-                                        "SSE response exceeded %d bytes; usage tracking disabled for this response",
-                                        _MAX_SSE_BUFFER_BYTES,
-                                    )
-                                else:
-                                    sse_buffer.extend(chunk)
-
-                        # Extract usage from buffered SSE events
-                        if track_usage and sse_buffer and upstream.status_code == 200:
-                            self._extract_usage_from_sse(
-                                bytes(sse_buffer), model, content_type=upstream.headers.get("content-type")
+                        if upstream.status_code == 401:
+                            await upstream.aread()
+                            return web.json_response(
+                                {"error": "Authentication failed after token refresh"},
+                                status=401,
                             )
 
-                        await response.write_eof()
-                    except (ClientConnectionResetError, ConnectionResetError):
-                        self._logger.warning(
-                            "Client disconnected during streaming response — usage tracking skipped for this request"
+                        # 429 / 529 — backoff and retry
+                        if await self._handle_retryable_status(upstream.status_code, upstream.headers, attempt):
+                            await upstream.aread()
+                            continue
+
+                        response = web.StreamResponse(
+                            status=upstream.status_code,
+                            headers={
+                                "Content-Type": upstream.headers.get("content-type", "text/event-stream"),
+                                "Cache-Control": "no-cache",
+                            },
                         )
+                        try:
+                            await response.prepare(request)
 
-                    return response
+                            # Buffer SSE bytes for usage extraction while forwarding.
+                            # Cap at _MAX_SSE_BUFFER_BYTES to avoid unbounded memory growth.
+                            sse_buffer = bytearray()
+                            track_usage = True
+                            async for chunk in upstream.aiter_bytes():
+                                await response.write(chunk)
+                                if track_usage:
+                                    if len(sse_buffer) + len(chunk) > _MAX_SSE_BUFFER_BYTES:
+                                        track_usage = False
+                                        sse_buffer.clear()
+                                        self._logger.warning(
+                                            "SSE response exceeded %d bytes; usage tracking disabled for this response",
+                                            _MAX_SSE_BUFFER_BYTES,
+                                        )
+                                    else:
+                                        sse_buffer.extend(chunk)
 
-        # Should not reach here, but satisfy type checker
-        return web.json_response(
-            {"error": f"Retry limit exceeded (last status: {last_status})"}, status=last_status or 500
-        )
+                            # Extract usage from buffered SSE events
+                            if track_usage and sse_buffer and upstream.status_code == 200:
+                                self._extract_usage_from_sse(
+                                    bytes(sse_buffer), model, content_type=upstream.headers.get("content-type")
+                                )
+
+                            await response.write_eof()
+                        except (ClientConnectionResetError, ConnectionResetError):
+                            self._logger.warning("Client disconnected during streaming — usage tracking skipped")
+
+                        return response
+
+            # Should not reach here, but satisfy type checker
+            return web.json_response(
+                {"error": f"Retry limit exceeded (last status: {last_status})"}, status=last_status or 500
+            )
+        except httpx.RequestError as exc:
+            status = 504 if isinstance(exc, httpx.TimeoutException) else 502
+            self._logger.warning("Upstream streaming request failed (%d): %s", status, exc)
+            if response is not None and response.prepared:
+                # Headers already sent — cannot send a new response; close the stream
+                with contextlib.suppress(ConnectionError, OSError):
+                    await response.write_eof()
+                return response
+            return self._upstream_error_response(exc, status)
 
     async def _forward_sync(
         self,
@@ -484,39 +503,44 @@ class LLMGatewayProxy:
         """Forward a non-streaming request and return the full response."""
         token_refreshed = False
 
-        async with httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT) as client:
-            for attempt in range(_RETRY_CFG.max_retries + 1):
-                upstream = await client.post(target_url, headers=headers, content=body)
+        try:
+            async with httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT) as client:
+                for attempt in range(_RETRY_CFG.max_retries + 1):
+                    upstream = await client.post(target_url, headers=headers, content=body)
 
-                # 401 — refresh token once then retry
-                if upstream.status_code == 401 and not token_refreshed:
-                    self._logger.info("Got 401 from gateway, refreshing token and retrying")
-                    token = await self._token_manager.refresh_token()
-                    headers = self._build_headers(token, is_streaming=False)
-                    token_refreshed = True
-                    continue
+                    # 401 — refresh token once then retry
+                    if upstream.status_code == 401 and not token_refreshed:
+                        self._logger.info("Got 401 from gateway, refreshing token and retrying")
+                        token = await self._token_manager.refresh_token()
+                        headers = self._build_headers(token, is_streaming=False)
+                        token_refreshed = True
+                        continue
 
-                # 429 / 529 — backoff and retry
-                if await self._handle_retryable_status(upstream.status_code, upstream.headers, attempt):
-                    continue
+                    # 429 / 529 — backoff and retry
+                    if await self._handle_retryable_status(upstream.status_code, upstream.headers, attempt):
+                        continue
 
-                break  # Success or non-retryable error
+                    break  # Success or non-retryable error
 
-            # Extract usage from non-streaming response
-            if upstream.status_code == 200:
-                try:
-                    resp_data = upstream.json()
-                    usage = resp_data.get("usage", {})
-                    if usage:
-                        self._track_usage(model, usage)
-                except (json.JSONDecodeError, ValueError):
-                    self._logger.debug("Failed to parse usage from non-streaming response")
+                # Extract usage from non-streaming response
+                if upstream.status_code == 200:
+                    try:
+                        resp_data = upstream.json()
+                        usage = resp_data.get("usage", {})
+                        if usage:
+                            self._track_usage(model, usage)
+                    except (json.JSONDecodeError, ValueError):
+                        self._logger.debug("Failed to parse usage from non-streaming response")
 
-            return web.Response(
-                status=upstream.status_code,
-                body=upstream.content,
-                content_type=upstream.headers.get("content-type", "application/json"),
-            )
+                return web.Response(
+                    status=upstream.status_code,
+                    body=upstream.content,
+                    content_type=upstream.headers.get("content-type", "application/json"),
+                )
+        except httpx.RequestError as exc:
+            status = 504 if isinstance(exc, httpx.TimeoutException) else 502
+            self._logger.warning("Upstream request failed (%d): %s", status, exc)
+            return self._upstream_error_response(exc, status)
 
     def get_total_cost(self) -> float | None:
         """Calculate total cost from accumulated usage using official Anthropic pricing.

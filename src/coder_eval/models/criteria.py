@@ -358,6 +358,12 @@ class CommandExecutedCriterion(BaseSuccessCriterion):
     )
     min_count: int = Field(default=1, ge=1, description="Minimum matching commands required.")
     require_success: bool = Field(default=False, description="If True, only count successful commands.")
+    exclude_pattern: str | None = Field(
+        default=None,
+        description=(
+            "Regex that must NOT match. Commands matching both command_pattern and exclude_pattern are skipped."
+        ),
+    )
 
 
 class UiPathEvalCriterion(BaseSuccessCriterion):

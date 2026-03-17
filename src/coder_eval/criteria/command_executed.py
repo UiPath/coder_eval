@@ -69,7 +69,7 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
                 details="No commands found in turn records",
             )
 
-        # Compile regex pattern if provided
+        # Compile regex patterns if provided
         pattern: re.Pattern[str] | None = None
         if criterion.command_pattern is not None:
             try:
@@ -80,6 +80,19 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
                     description=criterion.description,
                     score=0.0,
                     details=f"Invalid command_pattern regex: {e}",
+                    error=f"Invalid regex: {e}",
+                )
+
+        exclude_re: re.Pattern[str] | None = None
+        if criterion.exclude_pattern is not None:
+            try:
+                exclude_re = re.compile(criterion.exclude_pattern)
+            except re.error as e:
+                return CriterionResult(
+                    criterion_type=criterion.type,
+                    description=criterion.description,
+                    score=0.0,
+                    details=f"Invalid exclude_pattern regex: {e}",
                     error=f"Invalid regex: {e}",
                 )
 
@@ -94,21 +107,23 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
             if criterion.require_success and cmd.result_status != "success":
                 continue
 
+            # Extract text for pattern matching (Bash: command param; others: JSON-serialized params)
+            if cmd.tool_name == "Bash" and cmd.parameters.get("command"):
+                cmd_text = cmd.parameters["command"]
+            else:
+                cmd_text = json.dumps(cmd.parameters)
+
+            # Truncate to mitigate ReDoS on large command strings
+            if len(cmd_text) > _MAX_PATTERN_SEARCH_LEN:
+                cmd_text = cmd_text[:_MAX_PATTERN_SEARCH_LEN]
+
             # Filter by command pattern
-            if pattern is not None:
-                # For Bash: match against the "command" parameter
-                # For other tools: match against JSON-serialized parameters
-                if cmd.tool_name == "Bash" and cmd.parameters.get("command"):
-                    search_text = cmd.parameters["command"]
-                else:
-                    search_text = json.dumps(cmd.parameters)
+            if pattern is not None and not pattern.search(cmd_text):
+                continue
 
-                # Truncate to mitigate ReDoS on large command strings
-                if len(search_text) > _MAX_PATTERN_SEARCH_LEN:
-                    search_text = search_text[:_MAX_PATTERN_SEARCH_LEN]
-
-                if not pattern.search(search_text):
-                    continue
+            # Apply exclusion pattern (skip commands matching the exclusion)
+            if exclude_re is not None and exclude_re.search(cmd_text):
+                continue
 
             # Build a display label for the matched command
             if cmd.tool_name == "Bash" and cmd.parameters.get("command"):
@@ -128,6 +143,8 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
             filters.append(f"pattern=/{criterion.command_pattern}/")
         if criterion.require_success:
             filters.append("require_success=True")
+        if criterion.exclude_pattern is not None:
+            filters.append(f"exclude=/{criterion.exclude_pattern}/")
         filter_text = ", ".join(filters) if filters else "none"
 
         details = f"Matched {match_count}/{criterion.min_count} required commands (filters: {filter_text})"
