@@ -1,5 +1,7 @@
 """Tests for Claude Code plugin processing."""
 
+from pathlib import Path
+
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 
 
@@ -22,21 +24,21 @@ class TestProcessPlugins:
         """Path without env vars should pass through unchanged."""
         plugins = [{"type": "local", "path": "/absolute/path/to/plugin"}]
         result = ClaudeCodeAgent._process_plugins(plugins)
-        assert result[0]["path"] == "/absolute/path/to/plugin"
+        assert result[0]["path"] == str(Path("/absolute/path/to/plugin").resolve())
 
     def test_expandvars_single_dollar_syntax(self, monkeypatch):
         """Expand $VAR syntax in plugin paths."""
         monkeypatch.setenv("UIPATH_PLUGIN_MARKETPLACE_DIR", "/home/user/plugins")
         plugins = [{"type": "local", "path": "$UIPATH_PLUGIN_MARKETPLACE_DIR/mcp"}]
         result = ClaudeCodeAgent._process_plugins(plugins)
-        assert result[0]["path"] == "/home/user/plugins/mcp"
+        assert result[0]["path"] == str(Path("/home/user/plugins/mcp").resolve())
 
     def test_expandvars_braced_syntax(self, monkeypatch):
         """Expand ${VAR} syntax in plugin paths."""
         monkeypatch.setenv("UIPATH_PLUGIN_MARKETPLACE_DIR", "/home/user/plugins")
         plugins = [{"type": "local", "path": "${UIPATH_PLUGIN_MARKETPLACE_DIR}/mcp"}]
         result = ClaudeCodeAgent._process_plugins(plugins)
-        assert result[0]["path"] == "/home/user/plugins/mcp"
+        assert result[0]["path"] == str(Path("/home/user/plugins/mcp").resolve())
 
     def test_unset_env_var_unchanged(self, monkeypatch):
         """Path unchanged when env var is not set (logged as warning)."""
@@ -55,8 +57,8 @@ class TestProcessPlugins:
             {"type": "local", "path": "$PLUGIN_HOME/plugin2"},
         ]
         result = ClaudeCodeAgent._process_plugins(plugins)
-        assert result[0]["path"] == "/marketplace/plugin1"
-        assert result[1]["path"] == "/plugins/plugin2"
+        assert result[0]["path"] == str(Path("/marketplace/plugin1").resolve())
+        assert result[1]["path"] == str(Path("/plugins/plugin2").resolve())
 
     def test_original_dict_not_modified(self, monkeypatch):
         """Original plugin dict should not be modified."""
@@ -73,7 +75,7 @@ class TestProcessPlugins:
         monkeypatch.setenv("SUBDIR", "plugins")
         plugins = [{"type": "local", "path": "$BASE/$SUBDIR/mcp"}]
         result = ClaudeCodeAgent._process_plugins(plugins)
-        assert result[0]["path"] == "/base/plugins/mcp"
+        assert result[0]["path"] == str(Path("/base/plugins/mcp").resolve())
 
     def test_preserves_other_dict_fields(self, monkeypatch):
         """Process plugins should preserve all dict fields."""
@@ -90,7 +92,7 @@ class TestProcessPlugins:
         assert result[0]["type"] == "local"
         assert result[0]["enabled"] is True
         assert result[0]["custom_field"] == "value"
-        assert result[0]["path"] == "/dir/plugin"
+        assert result[0]["path"] == str(Path("/dir/plugin").resolve())
 
     def test_braced_syntax_not_set(self, monkeypatch):
         """Braced syntax ${VAR} also warns when not set."""

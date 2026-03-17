@@ -350,6 +350,10 @@ async def _run_all_tasks(
     # Prepare run directory
     run_dir = prepare_run_directory(run_dir)
 
+    # Create 'latest' symlink immediately so it's available during the run
+    if run_dir.parent == settings.runs_dir:
+        create_latest_symlink(settings.runs_dir, run_dir.name)
+
     # Expand glob patterns and collect task files
     all_task_files = expand_task_files(task_files)
 
@@ -376,10 +380,6 @@ async def _run_all_tasks(
 
     # Always run through experiment layer (defaults to experiments/default.yaml)
     summary = await _run_with_experiment(all_task_files, config, experiment_path, stream_mode, max_parallel)
-
-    # Create 'latest' symlink
-    if run_dir.parent == settings.runs_dir:  # Only if using default runs/ directory
-        create_latest_symlink(settings.runs_dir, run_dir.name)
 
     # Aggregate task logs into run.log
     from ..logging_config import aggregate_task_logs
