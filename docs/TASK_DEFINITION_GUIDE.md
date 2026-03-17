@@ -172,6 +172,33 @@ template_sources:
         content: "pytest>=8.0\npylint>=3.0"
 ```
 
+### Template Sources in Experiment Variants
+
+Experiment variants can add `template_sources` that are **appended after** the task's own template sources. This is useful for injecting variant-specific context (like a `CLAUDE.md` hint file) without duplicating the base task or creating separate template directories.
+
+```yaml
+# experiments/my-experiment.yaml
+variants:
+  - variant_id: baseline
+    agent:
+      model: "claude-sonnet-4-20250514"
+
+  - variant_id: with-context-hint
+    agent:
+      model: "claude-sonnet-4-20250514"
+    template_sources:
+      - type: "starter_files"
+        files:
+          - path: "CLAUDE.md"
+            content: |
+              The UiPath flows are in folder ID abc-123-def.
+              Use this folder when interacting with the Orchestrator API.
+```
+
+In this example, the `with-context-hint` variant gets the same sandbox as `baseline`, plus a `CLAUDE.md` file written into the sandbox root. Since variant template sources are appended last, they can also overwrite files from earlier sources (last-wins).
+
+This pattern is especially useful for A/B testing whether additional context improves agent performance.
+
 ## Success Criteria
 
 Every task needs at least one success criterion. The framework supports 11 criterion types.

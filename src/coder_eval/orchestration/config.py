@@ -30,6 +30,7 @@ class BatchRunConfig(BaseModel):
     max_turns: int | None = Field(default=None, description="Override max turns for all tasks")
 
     allowed_tools: list[str] | None = Field(default=None, description="Override allowed tools for all tasks")
+    disallowed_tools: list[str] | None = Field(default=None, description="Override disallowed tools for all tasks")
     plugins: list[SdkPluginConfig] | None = Field(
         default=None, description="Override plugins (SdkPluginConfig objects) for all tasks"
     )

@@ -37,7 +37,7 @@ success_criteria:
     description: "processes.json contains process data"
     path: "processes.json"
     includes:
-      - "Name"
+      - "name"
     weight: 1.0
     pass_threshold: 1.0
 

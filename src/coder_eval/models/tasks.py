@@ -16,7 +16,7 @@ from coder_eval.models.sandbox import SandboxConfig
 class AgentConfig(BaseModel):
     """Configuration for the coding agent."""
 
-    model_config = ConfigDict(validate_assignment=True, populate_by_name=True)
+    model_config = ConfigDict(validate_assignment=True, populate_by_name=True, extra="forbid")
 
     type: AgentKind = Field(description="The type of agent to use (claude-code, aider, etc.)")
     permission_mode: Literal["default", "acceptEdits", "plan", "bypassPermissions"] = Field(
@@ -24,6 +24,9 @@ class AgentConfig(BaseModel):
     )
     allowed_tools: list[str] | None = Field(
         default=None, description="List of allowed tools (e.g., ['Read', 'Write', 'Bash'])"
+    )
+    disallowed_tools: list[str] | None = Field(
+        default=None, description="List of disallowed tools (e.g., ['TodoWrite'])"
     )
     model: str | None = Field(default=None, description="Specific model to use (if applicable)")
     max_turns: int | None = Field(default=None, description="Maximum agent inner-loop turns per iteration")

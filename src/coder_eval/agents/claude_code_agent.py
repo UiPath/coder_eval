@@ -204,6 +204,7 @@ class ClaudeCodeAgent(Agent):
                 cwd=str(self.working_directory),
                 permission_mode=self.config.permission_mode,
                 allowed_tools=self.config.allowed_tools or [],
+                disallowed_tools=self.config.disallowed_tools or [],
                 model=self.config.model,
                 max_turns=self.config.max_turns,
                 plugins=plugins,  # type: ignore[arg-type]

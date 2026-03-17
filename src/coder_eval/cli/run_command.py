@@ -166,6 +166,11 @@ def run_command(
         "--allowed-tools",
         help="Override allowed tools for all tasks (comma-separated, e.g., 'Read,Write,Bash')",
     ),
+    disallowed_tools: str | None = typer.Option(
+        None,
+        "--disallowed-tools",
+        help="Override disallowed tools for all tasks (comma-separated, e.g., 'TodoWrite,Agent')",
+    ),
     plugins: str | None = typer.Option(
         None,
         "--plugins",
@@ -231,6 +236,7 @@ def run_command(
 
     # Parse comma-separated list options
     allowed_tools_list = [t.strip() for t in allowed_tools.split(",") if t.strip()] if allowed_tools else None
+    disallowed_tools_list = [t.strip() for t in disallowed_tools.split(",") if t.strip()] if disallowed_tools else None
     ignore_patterns_list = [p.strip() for p in ignore_patterns.split(",") if p.strip()] if ignore_patterns else None
 
     # Parse plugins JSON and validate against SdkPluginConfig schema
@@ -283,6 +289,7 @@ def run_command(
             turn_timeout,
             stream,
             allowed_tools_list,
+            disallowed_tools_list,
             plugins_list,
             ignore_patterns_list,
             experiment_path=resolved_experiment,
@@ -307,6 +314,7 @@ async def _run_all_tasks(
     turn_timeout: int | None = None,
     stream_mode: str | None = None,
     allowed_tools: list[str] | None = None,
+    disallowed_tools: list[str] | None = None,
     plugins: list[SdkPluginConfig] | None = None,
     ignore_patterns: list[str] | None = None,
     experiment_path: Path | None = None,
@@ -334,6 +342,7 @@ async def _run_all_tasks(
         turn_timeout: Optional override for turn timeout (seconds)
         stream_mode: Optional stream mode ('full' or 'minimal') for real-time output
         allowed_tools: Optional override for allowed tools
+        disallowed_tools: Optional override for disallowed tools
         plugins: Optional override for plugins (SdkPluginConfig objects)
         ignore_patterns: Optional override for agent file change detection ignore patterns
         experiment_path: Optional path to experiment YAML (default: experiments/default.yaml)
@@ -358,6 +367,7 @@ async def _run_all_tasks(
         permission_mode=permission_mode,
         max_turns=max_turns,
         allowed_tools=allowed_tools,
+        disallowed_tools=disallowed_tools,
         plugins=plugins,
         ignore_patterns=ignore_patterns,
         task_timeout=task_timeout,

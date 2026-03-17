@@ -351,6 +351,9 @@ def _apply_cli_overrides(
     if config.allowed_tools is not None:
         task.agent.allowed_tools = config.allowed_tools
         _record("agent.allowed_tools", config.allowed_tools, "--allowed-tools")
+    if config.disallowed_tools is not None:
+        task.agent.disallowed_tools = config.disallowed_tools
+        _record("agent.disallowed_tools", config.disallowed_tools, "--disallowed-tools")
     if config.plugins is not None:
         task.agent.plugins = config.plugins
         _record("agent.plugins", config.plugins, "--plugins")

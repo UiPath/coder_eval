@@ -151,6 +151,49 @@ class TestResolveTaskForVariant:
         resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.allowed_tools == ["Read", "Bash"]
 
+    def test_disallowed_tools_from_experiment_defaults(self):
+        """disallowed_tools in experiment defaults propagates to resolved agent config."""
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"})
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            defaults=ExperimentDefaults(agent={"disallowed_tools": ["TodoWrite"]}),
+            variants=[ExperimentVariant(variant_id="variant1")],
+        )
+
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.agent.disallowed_tools == ["TodoWrite"]
+        assert lineage["agent.disallowed_tools"].source == "experiment-defaults"
+
+    def test_disallowed_tools_from_variant_overrides_defaults(self):
+        """Variant disallowed_tools fully replaces experiment defaults."""
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"})
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            defaults=ExperimentDefaults(agent={"disallowed_tools": ["TodoWrite"]}),
+            variants=[
+                ExperimentVariant(variant_id="v1", agent={"disallowed_tools": ["TodoWrite", "Agent"]}),
+            ],
+        )
+
+        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.agent.disallowed_tools == ["TodoWrite", "Agent"]
+
+    def test_disallowed_tools_from_task_overrides_experiment(self):
+        """Task-level disallowed_tools wins over experiment defaults."""
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code", "disallowed_tools": ["Bash"]})
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            defaults=ExperimentDefaults(agent={"disallowed_tools": ["TodoWrite"]}),
+            variants=[ExperimentVariant(variant_id="variant1")],
+        )
+
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.agent.disallowed_tools == ["Bash"]
+        assert lineage["agent.disallowed_tools"].source == "task"
+
     def test_scalar_overrides(self):
         """Scalar fields (max_iterations, task_timeout) resolve through precedence."""
         default_exp = _make_default_experiment()

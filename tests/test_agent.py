@@ -51,6 +51,30 @@ async def test_claude_agent_start():
         await agent.stop()
 
 
+def test_claude_agent_disallowed_tools_passed_to_sdk_options():
+    """Test that disallowed_tools from AgentConfig reaches ClaudeAgentOptions."""
+    config = AgentConfig(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+        allowed_tools=["Read", "Write", "Bash"],
+        disallowed_tools=["TodoWrite", "Agent"],
+    )
+
+    agent = ClaudeCodeAgent(config)
+    assert agent.config.disallowed_tools == ["TodoWrite", "Agent"]
+
+
+def test_claude_agent_disallowed_tools_defaults_to_none():
+    """Test that disallowed_tools defaults to None when not specified."""
+    config = AgentConfig(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+    )
+
+    agent = ClaudeCodeAgent(config)
+    assert agent.config.disallowed_tools is None
+
+
 def test_claude_agent_file_change_detection():
     """Test file change detection logic."""
     config = AgentConfig(

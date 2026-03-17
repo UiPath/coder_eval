@@ -327,6 +327,28 @@ class TestApplyCliOverridesLineage:
         assert lineage["sandbox.snapshots.checkpoint_frequency"].source == "cli"
         assert lineage["sandbox.snapshots.checkpoint_frequency"].value == 2
 
+    def test_cli_disallowed_tools_override(self):
+        from coder_eval.models import TaskDefinition
+
+        task = TaskDefinition(
+            task_id="test",
+            description="test",
+            initial_prompt="do",
+            agent={"type": "claude-code", "disallowed_tools": ["TodoWrite"]},
+            sandbox={"driver": "tempdir"},
+            success_criteria=[{"type": "file_exists", "path": "t.py", "description": "x"}],
+        )
+        lineage: dict[str, ConfigLineageEntry] = {}
+        config = BatchRunConfig(run_dir=Path("/tmp/run"), max_parallel=1, disallowed_tools=["TodoWrite", "Agent"])
+        with patch("coder_eval.config.settings") as mock_settings:
+            mock_settings.default_agent_model = None
+            mock_settings.default_permission_mode = None
+            mock_settings.default_max_turns = None
+            _apply_cli_overrides(task, config, lineage)
+        assert task.agent.disallowed_tools == ["TodoWrite", "Agent"]
+        assert lineage["agent.disallowed_tools"].source == "cli"
+        assert lineage["agent.disallowed_tools"].source_detail == "--disallowed-tools"
+
     def test_env_model_override(self):
         from coder_eval.models import TaskDefinition
 
