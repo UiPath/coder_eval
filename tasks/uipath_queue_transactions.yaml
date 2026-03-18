@@ -81,21 +81,12 @@ success_criteria:
     weight: 1.5
     pass_threshold: 1.0
 
-  - type: run_command
-    description: "Python syntax is valid"
-    command: "python -m py_compile queue_transactions.py"
-    timeout: 10
-    expected_exit_code: 0
-    weight: 1.0
+  - type: import_check
+    description: "Python syntax valid and all imports resolve"
+    path: "queue_transactions.py"
+    weight: 3.5
     pass_threshold: 1.0
-
-  - type: run_command
-    description: "Module imports resolve correctly"
-    command: "python -c 'import queue_transactions'"
     timeout: 30
-    expected_exit_code: 0
-    weight: 2.5
-    pass_threshold: 1.0
 
 max_iterations: 1
 

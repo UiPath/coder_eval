@@ -121,7 +121,7 @@ templates/                         # Sandbox template directories
 - **Experiment Layer**: Pre-processing config resolver (`ExperimentRunner`) that resolves task × variant combinations via 5-layer merge (default → experiment defaults → task → variant → CLI) before passing to `run_batch`
 - **All core models importable from `coder_eval.models`** regardless of submodule (`AutogenConfig` lives in `coder_eval.tools.autogen.config` — it's not a core model)
 
-## Success Criteria (11 types)
+## Success Criteria (12 types)
 
 | Type | Scoring | Description |
 |------|---------|-------------|
@@ -135,6 +135,7 @@ templates/                         # Sandbox template directories
 | `pylint_score` | Continuous | pylint score / 10.0 |
 | `reference_comparison` | Continuous | AST/token/complexity similarity |
 | `command_executed` | Fractional | Agent tool usage verification |
+| `import_check` | Fractional | AST-based import extraction + importlib validation |
 | `uipath_eval` | Fractional | UiPath agent evaluation results |
 
 All criteria support `weight` (default 1.0) and `pass_threshold` (default 0.9).

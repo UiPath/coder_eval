@@ -16,6 +16,7 @@ from coder_eval.models.criteria import (
     FileContainsCriterion,
     FileExistsCriterion,
     FileMatchesRegexCriterion,
+    ImportCheckCriterion,
     JMESPathAssertion,
     JsonCheckCriterion,
     PylintScoreCriterion,
@@ -117,6 +118,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "ReferenceComparisonCriterion",
     "CommandExecutedCriterion",
     "UiPathEvalCriterion",
+    "ImportCheckCriterion",
     "SuccessCriterion",
     # Templates
     "BaseTemplateSource",

@@ -137,6 +137,7 @@ def validate_registry() -> None:
             "reference_comparison",
             "command_executed",
             "uipath_eval",
+            "import_check",
         }
 
     registered_types = set(CriterionRegistry.list_types())

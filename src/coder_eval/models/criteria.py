@@ -388,6 +388,31 @@ class UiPathEvalCriterion(BaseSuccessCriterion):
     )
 
 
+class ImportCheckCriterion(BaseSuccessCriterion):
+    """Check that a Python file parses correctly and its imports resolve.
+
+    Parses the target file with ast.parse() (replacing py_compile syntax checks),
+    extracts all import/from-import statements from the entire AST (including
+    inside functions and try/except blocks), and validates each import resolves
+    to a real module using importlib in the sandbox environment.
+
+    Fractional scoring: valid_imports / total_checked_imports.
+    If the file has a syntax error, score is 0.0.
+
+    Pure data model - checking logic in ImportCheckChecker._check_impl()
+
+    Example YAML:
+        success_criteria:
+          - type: "import_check"
+            path: "main.py"
+            description: "All imports resolve correctly"
+    """
+
+    type: Literal["import_check"] = "import_check"
+    path: str = Field(description="Path to the Python file to check (relative to sandbox root)")
+    timeout: int = Field(default=30, description="Timeout in seconds for import resolution commands")
+
+
 # Discriminated union of all success criteria
 SuccessCriterion = (
     FileExistsCriterion
@@ -401,4 +426,5 @@ SuccessCriterion = (
     | ReferenceComparisonCriterion
     | CommandExecutedCriterion
     | UiPathEvalCriterion
+    | ImportCheckCriterion
 )
