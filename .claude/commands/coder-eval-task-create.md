@@ -75,7 +75,6 @@ sandbox:
   python: {}              # Creates venv with no extra packages
   # python:
   #   env_packages: [pytest, requests]  # If packages are needed
-  network_enabled: false  # true only if task requires network access
 ```
 
 Add `template_sources` if the task needs starter files (e.g., a pre-existing codebase to modify).
@@ -132,7 +131,6 @@ tags: [<tag1>, <tag2>]
 sandbox:
   driver: "tempdir"
   python: {}
-  network_enabled: false
 
 success_criteria:
   - type: "<criterion_type>"

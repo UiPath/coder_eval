@@ -21,7 +21,6 @@ agent:
 sandbox:
   driver: "tempdir"
   python: {}
-  network_enabled: false
 
 success_criteria:
   - type: "command_executed"

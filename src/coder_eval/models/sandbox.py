@@ -119,7 +119,6 @@ class SandboxConfig(BaseModel):
         default=None,
         description="Node.js environment config; set to enable npm package installation in the sandbox",
     )
-    network_enabled: bool = Field(default=False, description="Whether network access is enabled")
     limits: ResourceLimits = Field(default_factory=ResourceLimits, description="Resource limits for execution")
 
     # Multi-source template support

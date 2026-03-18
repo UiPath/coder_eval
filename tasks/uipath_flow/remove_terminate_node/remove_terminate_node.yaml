@@ -10,7 +10,6 @@ agent:
 sandbox:
   driver: tempdir
   python_version: "3.13"
-  network_enabled: true
   node:
     env_packages:
       - "@uipath/uipcli@0.1.5"

@@ -21,7 +21,6 @@ agent:
 sandbox:
   driver: "tempdir"
   python: {}
-  network_enabled: true
   template_sources:
     - type: "template_dir"
       path: templates/word-count-agent

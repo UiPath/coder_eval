@@ -106,7 +106,6 @@ sandbox:
     env_packages:                      # Packages to install in sandbox venv
       - pytest
       - pylint>=3.0
-  network_enabled: false              # Network access (default: false)
   template_sources: [ ... ]           # Optional: preset files (see below)
   snapshots: { ... }                  # Optional: snapshot config (see below)
   limits:                             # Optional: resource limits

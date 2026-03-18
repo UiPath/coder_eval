@@ -11,7 +11,7 @@ from coder_eval.sandbox import Sandbox
 
 def test_tempdir_sandbox_basic():
     """Test basic tempdir sandbox creation and cleanup."""
-    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    config = SandboxConfig(driver="tempdir")
 
     sandbox = Sandbox(config, task_id="test_basic")
 
@@ -34,7 +34,7 @@ def test_tempdir_sandbox_basic():
 
 def test_sandbox_without_python_config():
     """Test sandbox with python=None skips venv creation."""
-    config = SandboxConfig(driver="tempdir", python=None, network_enabled=False)
+    config = SandboxConfig(driver="tempdir", python=None)
 
     sandbox = Sandbox(config, task_id="test_no_venv")
 
@@ -57,7 +57,7 @@ def test_sandbox_without_python_config():
 
 def test_sandbox_run_command():
     """Test running commands in the sandbox."""
-    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    config = SandboxConfig(driver="tempdir")
 
     sandbox = Sandbox(config, task_id="test_run_cmd")
 
@@ -80,7 +80,7 @@ def test_sandbox_run_command():
 
 def test_sandbox_run_command_task_dir_set():
     """Test that TASK_DIR env var is set when task_dir is provided."""
-    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    config = SandboxConfig(driver="tempdir")
     task_dir = Path("/some/task/dir")
 
     sandbox = Sandbox(config, task_id="test_task_dir", task_dir=task_dir)
@@ -98,7 +98,7 @@ def test_sandbox_run_command_task_dir_set():
 
 def test_sandbox_run_command_task_dir_absent():
     """Test that TASK_DIR env var is absent when task_dir is not provided."""
-    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    config = SandboxConfig(driver="tempdir")
 
     sandbox = Sandbox(config, task_id="test_no_task_dir")
 
@@ -119,7 +119,7 @@ def test_sandbox_with_packages():
     """Test sandbox with package installation."""
     from coder_eval.models import PythonEnvConfig
 
-    config = SandboxConfig(driver="tempdir", python=PythonEnvConfig(env_packages=["requests"]), network_enabled=False)
+    config = SandboxConfig(driver="tempdir", python=PythonEnvConfig(env_packages=["requests"]))
 
     sandbox = Sandbox(config, task_id="test_packages")
 
@@ -140,7 +140,7 @@ def test_sandbox_with_packages():
 
 def test_sandbox_file_operations():
     """Test file operations in the sandbox."""
-    config = SandboxConfig(driver="tempdir", python=None, network_enabled=False)
+    config = SandboxConfig(driver="tempdir", python=None)
 
     sandbox = Sandbox(config, task_id="test_files")
 
@@ -170,7 +170,7 @@ def test_sandbox_file_operations():
 
 def test_sandbox_timeout():
     """Test command timeout enforcement."""
-    config = SandboxConfig(driver="tempdir", python=None, network_enabled=False)
+    config = SandboxConfig(driver="tempdir", python=None)
 
     sandbox = Sandbox(config, task_id="test_timeout")
 
@@ -188,7 +188,7 @@ def test_sandbox_timeout():
 
 def test_sandbox_preserve():
     """Test preserving sandbox to artifact directory."""
-    config = SandboxConfig(driver="tempdir", python=None, network_enabled=False)
+    config = SandboxConfig(driver="tempdir", python=None)
 
     sandbox = Sandbox(config, task_id="test_preserve")
     artifact_dir = Path("artifacts/test")
@@ -227,7 +227,7 @@ def test_sandbox_preserve():
 @pytest.mark.asyncio
 async def test_snapshot_full():
     """Test full snapshot creation."""
-    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    config = SandboxConfig(driver="tempdir")
     sandbox = Sandbox(config, task_id="test_snapshot_full")
 
     try:
@@ -284,7 +284,7 @@ async def test_snapshot_full():
 @pytest.mark.asyncio
 async def test_snapshot_incremental():
     """Test incremental snapshot with changed files."""
-    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    config = SandboxConfig(driver="tempdir")
     sandbox = Sandbox(config, task_id="test_snapshot_incremental")
 
     try:
@@ -346,7 +346,7 @@ async def test_snapshot_incremental():
 @pytest.mark.asyncio
 async def test_snapshot_ignores_patterns():
     """Test that snapshot respects ignore patterns."""
-    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    config = SandboxConfig(driver="tempdir")
     sandbox = Sandbox(config, task_id="test_snapshot_ignore")
 
     try:
@@ -394,7 +394,7 @@ async def test_snapshot_ignores_patterns():
 @pytest.mark.asyncio
 async def test_snapshot_async_behavior():
     """Test that snapshot operations are truly async and don't block."""
-    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    config = SandboxConfig(driver="tempdir")
     sandbox = Sandbox(config, task_id="test_snapshot_async")
 
     try:
@@ -437,7 +437,7 @@ async def test_snapshot_async_behavior():
 @pytest.mark.asyncio
 async def test_snapshot_manifest_roundtrip():
     """Test manifest serialization and deserialization."""
-    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    config = SandboxConfig(driver="tempdir")
     sandbox = Sandbox(config, task_id="test_manifest_roundtrip")
 
     try:
@@ -476,7 +476,7 @@ async def test_snapshot_manifest_roundtrip():
 @pytest.mark.asyncio
 async def test_snapshot_without_sandbox_initialization():
     """Test that snapshot fails gracefully if sandbox not initialized."""
-    config = SandboxConfig(driver="tempdir", network_enabled=False)
+    config = SandboxConfig(driver="tempdir")
     sandbox = Sandbox(config, task_id="test_snapshot_uninitialized")
 
     # Don't call sandbox.setup()
@@ -523,7 +523,7 @@ def test_sandbox_run_command_logging(caplog, clean_logging):
     """Test that run_command logs output at DEBUG level."""
     import logging
 
-    config = SandboxConfig(driver="tempdir", python=None, network_enabled=False)
+    config = SandboxConfig(driver="tempdir", python=None)
     sandbox = Sandbox(config, task_id="test_logging")
 
     try:
@@ -552,7 +552,7 @@ def test_sandbox_run_command_timeout_logging(caplog, clean_logging):
     """Test that timeouts are logged at WARNING level."""
     import logging
 
-    config = SandboxConfig(driver="tempdir", python=None, network_enabled=False)
+    config = SandboxConfig(driver="tempdir", python=None)
     sandbox = Sandbox(config, task_id="test_timeout")
 
     try:
@@ -575,7 +575,7 @@ def test_sandbox_run_command_empty_output_not_logged(caplog, clean_logging):
     """Test that empty stdout/stderr is not logged."""
     import logging
 
-    config = SandboxConfig(driver="tempdir", python=None, network_enabled=False)
+    config = SandboxConfig(driver="tempdir", python=None)
     sandbox = Sandbox(config, task_id="test_empty")
 
     try:

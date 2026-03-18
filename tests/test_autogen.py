@@ -53,7 +53,7 @@ def minimal_valid_task() -> dict[str, Any]:
             "permission_mode": "acceptEdits",
             "allowed_tools": ["Bash", "Write"],
         },
-        "sandbox": {"driver": "tempdir", "python": {}, "network_enabled": False},
+        "sandbox": {"driver": "tempdir", "python": {}},
         "success_criteria": [
             {"type": "file_exists", "path": "hello.py", "description": "hello.py must exist"},
             {

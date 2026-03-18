@@ -53,7 +53,6 @@ sandbox:
   driver: "tempdir"
   python:
     env_packages: list[str]  # required pip packages
-  network_enabled: bool      # true when the skill installs packages or calls external services
 
 success_criteria:            # list[SuccessCriterion] -- see full definitions below
 ```
@@ -79,7 +78,6 @@ because criteria validate the output, not the input.
 - Always verify syntax: type: run_command, command: "python -m py_compile <file>", timeout: 10
 - Check imports with: type: run_command, command: "python -c 'import <module>'", timeout: 30
 - Use weight to signal importance (2.0-3.0 for core logic, 0.5 for existence checks)
-- Skills that run `uv`, `uipath`, or any installer need `network_enabled: true`
 """
 
 _FEW_SHOT = """\
@@ -100,7 +98,6 @@ agent:
 sandbox:
   driver: tempdir
   python: {}
-  network_enabled: false
 
 success_criteria:
   - type: file_exists
@@ -140,7 +137,6 @@ sandbox:
     env_packages:
       - uipath-langchain>=0.0.140
       - pydantic>=2.0
-  network_enabled: true
 
 success_criteria:
   - type: file_exists

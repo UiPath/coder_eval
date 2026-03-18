@@ -12,7 +12,6 @@ agent:
 sandbox:
   driver: tempdir
   python: {}
-  network_enabled: false
   template_sources:
     - type: template_dir
       path: "../templates/uipath-starter"
