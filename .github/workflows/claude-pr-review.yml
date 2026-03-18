@@ -62,17 +62,13 @@ jobs:
           track_progress: true
           claude_args: "--model claude-opus-4-6"
           prompt: |
-            Review this PR focusing on:
-            - Architecture: Does new code live in the right layer? Flag domain-specific logic in core modules, leaky abstractions, and reversed dependencies
-            - Correctness: logic errors, edge cases, off-by-one errors, truthiness traps (if x where 0/[]/'' is valid), None used as both sentinel and domain value
-            - Security: injection, credential exposure, unsafe inputs, secrets or reference data in log statements, ReDoS from config-sourced regexes
-            - Performance: unnecessary allocations, N+1 queries, missing async
-            - Maintainability: unclear naming, missing error handling, code duplication
-            - Config & data files: Copy-paste errors across similar YAMLs, path globs in pyproject.toml that don't match real files, stale docs after behavior changes
-            - Test coverage: New logic without tests, bug fixes without regression tests, missing edge-case coverage
-            - DRY principle: Is there duplicated logic that should be consolidated? But also: is DRY being over-applied (premature abstraction)?
-            - Simplicity: No unnecessary abstractions, speculative features, or "just in case" code. Could a junior developer follow this?
-            - Alignment: adherence to CLAUDE.md guidelines and best practices
-            Be concise. Only flag issues that matter. Skip style nits.
+            Review this PR following the guidelines in .github/code_review.md.
+
+            Before reviewing, gather full context:
+            1. Read .github/code_review.md for review standards and output format
+            2. Run `git diff origin/main...HEAD` to see actual code changes (you only receive a file-change summary, not diffs)
+            3. Run `gh pr view ${{ github.event.pull_request.number || github.event.issue.number }} --comments` to read existing PR conversation and review feedback
+
+            Follow the review process and output format specified in code_review.md.
         env:
           UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
