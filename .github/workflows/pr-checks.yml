@@ -69,7 +69,7 @@ jobs:
 
       # PHASE 3: Security scanning
       - name: Security - Dependency vulnerabilities (pip-audit)
-        run: .venv/bin/pip-audit --desc --skip-editable
+        run: .venv/bin/pip-audit --desc --skip-editable --ignore-vuln CVE-2026-4539  # pygments 2.19.2 ReDoS, no fix available yet
 
       - name: Security - Code analysis (bandit)
         run: .venv/bin/bandit -r src/ -ll --format json -o bandit-report.json
