@@ -15,7 +15,7 @@ defaults:
 variants:
   - variant_id: sonnet
     agent:
-      model: claude-sonnet-4-6-20250514
+      model: claude-sonnet-4-6
   - variant_id: opus
     agent:
-      model: claude-opus-4-6-20250514
+      model: claude-opus-4-6

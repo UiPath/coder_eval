@@ -71,6 +71,32 @@ class TestModelMapping:
         proxy = _make_proxy()
         assert proxy._map_model("unknown-model-xyz") == "unknown-model-xyz"
 
+    @pytest.mark.parametrize(
+        "alias, expected",
+        [
+            # Short aliases resolve to same gateway ID as dated versions
+            ("claude-opus-4-5", "anthropic.claude-opus-4-5-20251101-v1:0"),
+            ("claude-sonnet-4-5", "anthropic.claude-sonnet-4-5-20250929-v1:0"),
+            ("claude-haiku-4-5", "anthropic.claude-haiku-4-5-20251001-v1:0"),
+            # -latest aliases
+            ("claude-opus-4-5-latest", "anthropic.claude-opus-4-5-20251101-v1:0"),
+            ("claude-sonnet-4-5-latest", "anthropic.claude-sonnet-4-5-20250929-v1:0"),
+            ("claude-haiku-4-5-latest", "anthropic.claude-haiku-4-5-20251001-v1:0"),
+            ("claude-3-7-sonnet-latest", "anthropic.claude-3-7-sonnet-20250219-v1:0"),
+            ("claude-3-5-sonnet-latest", "anthropic.claude-3-5-sonnet-20241022-v2:0"),
+        ],
+    )
+    def test_new_model_aliases(self, alias, expected):
+        proxy = _make_proxy()
+        assert proxy._map_model(alias) == expected
+
+    def test_short_alias_matches_dated_version(self):
+        """Short aliases must resolve to the same gateway ID as their dated counterparts."""
+        proxy = _make_proxy()
+        assert proxy._map_model("claude-opus-4-5") == proxy._map_model("claude-opus-4-5-20251101")
+        assert proxy._map_model("claude-sonnet-4-5") == proxy._map_model("claude-sonnet-4-5-20250929")
+        assert proxy._map_model("claude-haiku-4-5") == proxy._map_model("claude-haiku-4-5-20251001")
+
     def test_all_default_map_entries_are_strings(self):
         for cli_name, gw_name in DEFAULT_MODEL_MAP.items():
             assert isinstance(cli_name, str)

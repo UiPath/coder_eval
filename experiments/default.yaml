@@ -29,8 +29,8 @@ defaults:
     permission_mode: acceptEdits
 
     # Specific model to use (null = defer to Claude Code CLI default)
-    # Examples: claude-sonnet-4-6-20250514, claude-opus-4-20250514
-    model: claude-sonnet-4-6-20250514
+    # Examples: claude-sonnet-4-6, claude-opus-4-6
+    model: claude-sonnet-4-6
 
     # Maximum agent inner-loop turns per iteration (null = SDK default)
     # Typical range in tasks: 3-18 depending on complexity
