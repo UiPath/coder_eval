@@ -1,0 +1,4 @@
+name: Send Date Email
+author: Bai Li
+prompt: Create a UiPath flow that gets the current date and time, then sends an email through Outlook with that timestamp in the message body.
+tags: [simple, script, outlook, linear]

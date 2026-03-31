@@ -1,0 +1,4 @@
+name: Dice Roller
+author: Bai Li
+prompt: Create a UiPath flow that simulates rolling a 6-sided die and returns a random number between 1 and 6.
+tags: [simple, script, no-connectors]

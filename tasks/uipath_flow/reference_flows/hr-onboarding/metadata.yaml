@@ -1,0 +1,4 @@
+name: HR Onboarding
+author: Ioana Masala
+prompt: Create a UiPath flow for end-to-end HR onboarding. It should send a job offer email and wait for a response, use an AI agent to determine if the offer was accepted, then run document validation and a background check. If everything passes, create the pre-hire record, then in parallel create a purchase requisition in Coupa, a Jira ticket for IT setup, and notify on Slack. Have an AI agent recommend training, send it through a human review, and schedule an onboarding calendar event.
+tags: [very-complex, multi-agent, parallel-branches, decisions, hitl, rpa-workflow, external-process, outlook, slack, jira, coupa, variables, mock-nodes]

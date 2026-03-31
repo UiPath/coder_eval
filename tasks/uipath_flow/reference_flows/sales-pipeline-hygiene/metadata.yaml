@@ -1,0 +1,4 @@
+name: Sales Pipeline Hygiene
+author: Gunter De Souter
+prompt: Create a UiPath flow that does a weekly risk scan of open Salesforce opportunities. An agent should review each opportunity and score the risk level. High-risk deals get escalated to a Slack sales channel with a follow-up task created, medium-risk deals notify the owner via Slack DM, and all deals get their risk level written back to Salesforce.
+tags: [complex, agent, parallel-loop, switch, scheduled-trigger, salesforce, slack, variables]
