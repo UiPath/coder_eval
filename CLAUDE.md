@@ -129,7 +129,7 @@ templates/                         # Sandbox template directories
 | `file_contains` | Fractional | String presence/absence |
 | `file_check` | Fractional | Unified file existence + content + regex check |
 | `json_check` | Fractional | JSON validation + JSON Schema + JMESPath assertions |
-| `run_command` | Binary | Command exit code + optional stdout matching |
+| `run_command` | Binary / Continuous | Command exit code + optional stdout matching or float scoring |
 | `pytest` | Fractional | tests_passed / total |
 | `file_matches_regex` | Binary | Regex match on file |
 | `pylint_score` | Continuous | pylint score / 10.0 |

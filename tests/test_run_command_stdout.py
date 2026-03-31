@@ -38,6 +38,13 @@ class TestRemovedCriteriaMigrationGuard:
                 ],
             )
 
+    def test_scored_command_rejected(self):
+        with pytest.raises(ValidationError, match=r"scored_command.*has been removed"):
+            TaskDefinition(
+                **_task_base(),
+                success_criteria=[{"type": "scored_command", "command": "echo 1", "description": "d"}],
+            )
+
     def test_code_lints_rejected(self):
         with pytest.raises(ValidationError, match=r"code_lints.*has been removed"):
             TaskDefinition(
@@ -69,6 +76,23 @@ class TestRunCommandStdoutModel:
         assert c.stdout_match == "exact"
         assert c.expected_exit_code == 0
         assert c.timeout == 30
+
+    def test_score_from_stdout_default_false(self):
+        c = RunCommandCriterion(command="echo hi", description="d")
+        assert c.score_from_stdout is False
+
+    def test_score_from_stdout_alone_valid(self):
+        c = RunCommandCriterion(command="echo 0.5", description="d", score_from_stdout=True)
+        assert c.score_from_stdout is True
+
+    def test_score_from_stdout_and_expected_stdout_mutually_exclusive(self):
+        with pytest.raises(ValidationError, match="mutually exclusive"):
+            RunCommandCriterion(
+                command="echo 0.5",
+                description="d",
+                score_from_stdout=True,
+                expected_stdout="something",
+            )
 
     def test_with_stdout_fields(self):
         c = RunCommandCriterion(
@@ -154,6 +178,97 @@ class TestRunCommandStdoutMatching:
         assert result.score == 0.0
 
 
+class TestScoreFromStdout:
+    """Unit tests for the score_from_stdout path."""
+
+    def _sandbox(self, exit_code: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
+        s = MagicMock(spec=Sandbox)
+        s.run_command.return_value = (exit_code, stdout, stderr)
+        return s
+
+    def test_valid_score_1_0(self):
+        checker = RunCommandChecker()
+        c = RunCommandCriterion(command="echo 1.0", description="d", score_from_stdout=True)
+        result = checker._check_impl(c, self._sandbox(0, "1.0\n"))
+        assert result.score == 1.0
+
+    def test_valid_score_0_75(self):
+        checker = RunCommandChecker()
+        c = RunCommandCriterion(command="echo 0.75", description="d", score_from_stdout=True)
+        result = checker._check_impl(c, self._sandbox(0, "0.75\n"))
+        assert result.score == 0.75
+
+    def test_valid_score_0_0(self):
+        checker = RunCommandChecker()
+        c = RunCommandCriterion(command="echo 0.0", description="d", score_from_stdout=True)
+        result = checker._check_impl(c, self._sandbox(0, "0.0\n"))
+        assert result.score == 0.0
+
+    def test_nonzero_exit_returns_0(self):
+        checker = RunCommandChecker()
+        c = RunCommandCriterion(command="fail", description="d", score_from_stdout=True)
+        result = checker._check_impl(c, self._sandbox(1, "0.9\n", "error msg"))
+        assert result.score == 0.0
+        assert result.error is not None
+        assert "exit" in result.error.lower() or "code" in result.error.lower()
+
+    def test_custom_expected_exit_code_respected(self):
+        checker = RunCommandChecker()
+        c = RunCommandCriterion(command="cmd", description="d", score_from_stdout=True, expected_exit_code=1)
+        result = checker._check_impl(c, self._sandbox(1, "0.8\n"))
+        assert result.score == 0.8
+
+    def test_empty_stdout_returns_0(self):
+        checker = RunCommandChecker()
+        c = RunCommandCriterion(command="cmd", description="d", score_from_stdout=True)
+        result = checker._check_impl(c, self._sandbox(0, ""))
+        assert result.score == 0.0
+        assert result.error is not None
+
+    def test_non_numeric_returns_0(self):
+        checker = RunCommandChecker()
+        c = RunCommandCriterion(command="cmd", description="d", score_from_stdout=True)
+        result = checker._check_impl(c, self._sandbox(0, "not a number\n"))
+        assert result.score == 0.0
+        assert result.error is not None
+
+    def test_nan_returns_0(self):
+        checker = RunCommandChecker()
+        c = RunCommandCriterion(command="cmd", description="d", score_from_stdout=True)
+        result = checker._check_impl(c, self._sandbox(0, "nan\n"))
+        assert result.score == 0.0
+        assert result.error is not None
+
+    def test_inf_returns_0(self):
+        checker = RunCommandChecker()
+        c = RunCommandCriterion(command="cmd", description="d", score_from_stdout=True)
+        result = checker._check_impl(c, self._sandbox(0, "inf\n"))
+        assert result.score == 0.0
+        assert result.error is not None
+
+    def test_score_above_1_clamped(self):
+        checker = RunCommandChecker()
+        c = RunCommandCriterion(command="cmd", description="d", score_from_stdout=True)
+        result = checker._check_impl(c, self._sandbox(0, "1.5\n"))
+        assert result.score == 1.0
+        assert "clamped" in result.details
+
+    def test_score_below_0_clamped(self):
+        checker = RunCommandChecker()
+        c = RunCommandCriterion(command="cmd", description="d", score_from_stdout=True)
+        result = checker._check_impl(c, self._sandbox(0, "-0.3\n"))
+        assert result.score == 0.0
+        assert "clamped" in result.details
+
+    def test_remaining_lines_in_details(self):
+        checker = RunCommandChecker()
+        c = RunCommandCriterion(command="cmd", description="d", score_from_stdout=True)
+        result = checker._check_impl(c, self._sandbox(0, "0.8\nline2\nline3\n"))
+        assert result.score == 0.8
+        assert "line2" in result.details
+        assert "line3" in result.details
+
+
 class TestRunCommandStdoutIntegration:
     """Integration tests with real sandbox."""
 
@@ -189,6 +304,22 @@ class TestRunCommandStdoutIntegration:
         result = checker.check(criterion)
 
         assert result.score == 1.0
+        sandbox.cleanup(preserve=False)
+
+    def test_score_from_stdout(self):
+        config = SandboxConfig(driver="tempdir", python=None)
+        sandbox = Sandbox(config, task_id="test_rc_score")
+        sandbox.setup()
+
+        criterion = RunCommandCriterion(
+            command="echo '0.75'",
+            score_from_stdout=True,
+            description="score from stdout",
+        )
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion)
+
+        assert result.score == 0.75
         sandbox.cleanup(preserve=False)
 
     def test_regex_stdout_match(self):

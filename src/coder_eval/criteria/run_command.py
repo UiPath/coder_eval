@@ -1,6 +1,7 @@
 """Run command criterion checker."""
 
 import logging
+import math
 import re
 from typing import TYPE_CHECKING
 
@@ -28,14 +29,22 @@ class RunCommandChecker(BaseCriterion[RunCommandCriterion]):
         reference_code: str | None = None,
         turn_records: list["TurnRecord"] | None = None,
     ) -> CriterionResult:
-        """Execute command and check exit code, with optional stdout matching.
-
-        Returns:
-            Result with binary score (1.0 if all checks pass, 0.0 otherwise)
-        """
+        """Execute command and dispatch to the appropriate scoring method."""
         logger.debug(f"Running command for criterion '{criterion.description}': {criterion.command}")
         exit_code, stdout, stderr = sandbox.run_command(criterion.command, timeout=criterion.timeout)
 
+        if criterion.score_from_stdout:
+            return self._score_from_stdout(criterion, exit_code, stdout, stderr)
+        return self._binary_check(criterion, exit_code, stdout, stderr)
+
+    def _binary_check(
+        self,
+        criterion: RunCommandCriterion,
+        exit_code: int,
+        stdout: str,
+        stderr: str,
+    ) -> CriterionResult:
+        """Binary pass/fail on exit code, with optional stdout matching."""
         exit_ok = exit_code == criterion.expected_exit_code
 
         details = f"Exit code: {exit_code} (expected: {criterion.expected_exit_code})"
@@ -44,7 +53,6 @@ class RunCommandChecker(BaseCriterion[RunCommandCriterion]):
         if stderr:
             details += f"\nStderr: {stderr[:200]}"
 
-        # Optional stdout matching
         stdout_ok = True
         if criterion.expected_stdout is not None:
             stdout_ok = self._match_stdout(stdout, criterion.expected_stdout, criterion.stdout_match)
@@ -53,6 +61,72 @@ class RunCommandChecker(BaseCriterion[RunCommandCriterion]):
                 details += f"\nExpected: {criterion.expected_stdout[:200]}"
 
         score = 1.0 if (exit_ok and stdout_ok) else 0.0
+
+        return CriterionResult(
+            criterion_type=criterion.type,
+            description=criterion.description,
+            score=score,
+            details=details,
+        )
+
+    def _score_from_stdout(
+        self,
+        criterion: RunCommandCriterion,
+        exit_code: int,
+        stdout: str,
+        stderr: str,
+    ) -> CriterionResult:
+        """Read a float score (0.0-1.0) from the first line of stdout."""
+        if exit_code != criterion.expected_exit_code:
+            details = f"Exit code: {exit_code} (expected: {criterion.expected_exit_code})"
+            if stdout:
+                details += f"\nStdout: {stdout[:200]}"
+            if stderr:
+                details += f"\nStderr: {stderr[:200]}"
+            return CriterionResult(
+                criterion_type=criterion.type,
+                description=criterion.description,
+                score=0.0,
+                details=details,
+                error=f"Command exited with code {exit_code} (expected {criterion.expected_exit_code})",
+            )
+
+        lines = stdout.splitlines()
+        if not lines or not lines[0].strip():
+            return CriterionResult(
+                criterion_type=criterion.type,
+                description=criterion.description,
+                score=0.0,
+                error="No output from command (empty stdout)",
+            )
+
+        first_line = lines[0].strip()
+        try:
+            raw_score = float(first_line)
+        except ValueError:
+            return CriterionResult(
+                criterion_type=criterion.type,
+                description=criterion.description,
+                score=0.0,
+                error=f"Could not parse score from first line: {first_line!r}",
+            )
+
+        if math.isnan(raw_score) or math.isinf(raw_score):
+            return CriterionResult(
+                criterion_type=criterion.type,
+                description=criterion.description,
+                score=0.0,
+                error=f"Invalid score value from stdout: {first_line!r}",
+            )
+
+        score = max(0.0, min(1.0, raw_score))
+        details = f"Score: {score:.3f}"
+        if score != raw_score:
+            details += f" (clamped from {raw_score:.3f})"
+
+        remaining = "\n".join(lines[1:]).strip()
+        if remaining:
+            details += f"\n{remaining[:200]}"
 
         return CriterionResult(
             criterion_type=criterion.type,

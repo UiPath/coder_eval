@@ -80,6 +80,12 @@ class RunCommandCriterion(BaseSuccessCriterion):
             expected_stdout: "Hello, World!"
             stdout_match: "exact"
             description: "Script must output the correct text"
+
+          # Continuous scoring from stdout (first line must be a float 0.0-1.0)
+          - type: "run_command"
+            command: "python score.py"
+            score_from_stdout: true
+            description: "Similarity score from scoring script"
     """
 
     type: Literal["run_command"] = "run_command"
@@ -93,6 +99,24 @@ class RunCommandCriterion(BaseSuccessCriterion):
         default="exact",
         description="How to match stdout: 'exact' (stripped), 'contains' (substring), 'regex' (pattern)",
     )
+    score_from_stdout: bool = Field(
+        default=False,
+        description=(
+            "When true, read a float score (0.0-1.0) from the first line of stdout. "
+            "Remaining lines are captured as details. Non-zero exit code or parse failure -> score 0.0. "
+            "Mutually exclusive with expected_stdout."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def check_score_from_stdout_exclusivity(self) -> RunCommandCriterion:
+        if self.score_from_stdout and self.expected_stdout is not None:
+            raise ValueError(
+                "'score_from_stdout' and 'expected_stdout' are mutually exclusive. "
+                + "Use 'score_from_stdout: true' for continuous float scoring, "
+                + "or 'expected_stdout' for exact/contains/regex string matching."
+            )
+        return self
 
 
 class PytestCriterion(BaseSuccessCriterion):

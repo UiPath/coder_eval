@@ -135,6 +135,7 @@ class TaskDefinition(BaseModel):
         removed: dict[str, str] = {
             "program_stdout_equals": "Use 'run_command' with 'expected_stdout' and 'stdout_match' instead.",
             "code_lints": "Use 'run_command' to run your linter directly instead.",
+            "scored_command": "Use 'run_command' with 'score_from_stdout: true' instead.",
         }
         if isinstance(v, list):
             for item in v:
