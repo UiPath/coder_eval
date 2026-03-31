@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 from .agent import Agent
 from .analysis import calculate_command_statistics
 from .config import settings
+from .criteria.commands_efficiency import compute_commands_efficiency
 from .errors.executor import execute_with_retry
 from .errors.retry import create_error_context
 from .errors.timeout import TaskTimeoutError, TurnTimeoutError
@@ -311,6 +312,19 @@ class Orchestrator:
                     # Aggregate assistant turns across all turns
                     if self.result.turns:
                         self.result.total_assistant_turns = sum(t.assistant_turn_count for t in self.result.turns)
+
+                    # Calculate commands efficiency
+                    # actual_commands is always set (useful on its own for telemetry);
+                    # expected_commands and commands_efficiency are only set when the
+                    # task defines expected_commands.
+                    if self.result.turns and self.result.command_stats:
+                        total_cmds = self.result.command_stats.total_commands
+                        self.result.actual_commands = total_cmds
+                        if self.task.expected_commands is not None:
+                            self.result.expected_commands = self.task.expected_commands
+                            self.result.commands_efficiency = compute_commands_efficiency(
+                                total_cmds, self.task.expected_commands
+                            )
 
                     # Capture SDK options from agent (if supported)
                     if self.agent:

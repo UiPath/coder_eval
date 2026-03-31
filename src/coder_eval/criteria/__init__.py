@@ -136,6 +136,7 @@ def validate_registry() -> None:
             "pylint_score",
             "reference_comparison",
             "command_executed",
+            "commands_efficiency",
             "uipath_eval",
             "import_check",
         }

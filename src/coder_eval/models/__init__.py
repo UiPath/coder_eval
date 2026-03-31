@@ -12,6 +12,7 @@ from claude_agent_sdk import SdkPluginConfig
 from coder_eval.models.criteria import (
     BaseSuccessCriterion,
     CommandExecutedCriterion,
+    CommandsEfficiencyCriterion,
     FileCheckCriterion,
     FileContainsCriterion,
     FileExistsCriterion,
@@ -117,6 +118,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "PylintScoreCriterion",
     "ReferenceComparisonCriterion",
     "CommandExecutedCriterion",
+    "CommandsEfficiencyCriterion",
     "UiPathEvalCriterion",
     "ImportCheckCriterion",
     "SuccessCriterion",

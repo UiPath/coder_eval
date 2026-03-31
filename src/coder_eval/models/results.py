@@ -188,6 +188,13 @@ class EvaluationResult(BaseModel):
         description="Total assistant turns across all orchestrator iterations",
     )
 
+    # Commands efficiency (orchestrator-level tracking)
+    expected_commands: int | None = Field(default=None, description="Expected commands from task definition")
+    actual_commands: int | None = Field(default=None, description="Actual tool commands executed by the agent")
+    commands_efficiency: float | None = Field(
+        default=None, description="Commands efficiency score (0-1). expected/max(actual, expected)"
+    )
+
     def calculate_weighted_score(self, criteria: list[SuccessCriterion]) -> None:
         """Calculate weighted average score from criterion results.
 

@@ -355,6 +355,17 @@ class ReferenceComparisonCriterion(BaseSuccessCriterion):
         return self
 
 
+class CommandsEfficiencyCriterion(BaseSuccessCriterion):
+    """Score agent tool-call efficiency relative to an expected budget.
+
+    Score = expected / max(actual, expected). Yields 1.0 at or under budget.
+    """
+
+    requires_agent: ClassVar[bool] = True
+    type: Literal["commands_efficiency"] = "commands_efficiency"
+    expected_commands: int = Field(ge=1, description="Expected number of tool commands to complete the task")
+
+
 class CommandExecutedCriterion(BaseSuccessCriterion):
     """Check whether the agent executed specific commands/tools.
 
@@ -449,6 +460,7 @@ SuccessCriterion = (
     | PylintScoreCriterion
     | ReferenceComparisonCriterion
     | CommandExecutedCriterion
+    | CommandsEfficiencyCriterion
     | UiPathEvalCriterion
     | ImportCheckCriterion
 )

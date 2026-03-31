@@ -159,6 +159,11 @@ class TaskDefinition(BaseModel):
             "Reference solution for LLM review and code comparison. HIDDEN from the agent - never included in prompts."
         ),
     )
+    expected_commands: int | None = Field(
+        default=None,
+        ge=1,
+        description="Expected number of tool commands for orchestrator-level efficiency tracking",
+    )
 
     @model_validator(mode="after")
     def check_prompt_fields(self) -> Self:

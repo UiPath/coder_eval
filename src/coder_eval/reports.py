@@ -181,6 +181,7 @@ class ReportGenerator:
         has_similarity = any(t.get("reference_similarity") is not None for t in summary.task_results)
         has_model = any(t.get("model_used") for t in summary.task_results)
         has_tags = any(t.get("tags") for t in summary.task_results)
+        has_cmds_efficiency = any(t.get("commands_efficiency") is not None for t in summary.task_results)
 
         header = "| Task ID | Status | Reliability Score | Iterations | Latency |"
         separator = "|---------|--------|-------------------|------------|---------|"
@@ -193,6 +194,9 @@ class ReportGenerator:
         if has_similarity:
             header += " Similarity |"
             separator += "------------|"
+        if has_cmds_efficiency:
+            header += " Cmd Efficiency |"
+            separator += "----------------|"
 
         lines.extend(["", "## Task Details", "", header, separator])
 
@@ -214,6 +218,14 @@ class ReportGenerator:
                 sim = task_result.get("reference_similarity")
                 sim_str = f"{sim:.3f}" if sim is not None else "N/A"
                 row += f" {sim_str} |"
+            if has_cmds_efficiency:
+                eff = task_result.get("commands_efficiency")
+                eff_str = f"{eff * 100:.1f}%" if eff is not None else "N/A"
+                expected = task_result.get("expected_commands")
+                actual = task_result.get("actual_commands")
+                if expected is not None and actual is not None:
+                    eff_str += f" ({expected}/{actual})"
+                row += f" {eff_str} |"
             lines.append(row)
 
         # Generation Metrics section
