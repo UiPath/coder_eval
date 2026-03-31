@@ -491,6 +491,7 @@ async def _run_with_experiment(
         experiment=experiment,
         default_experiment=default_experiment,
         config=config,
+        experiment_file=exp_path,
     )
 
     # Print execution mode

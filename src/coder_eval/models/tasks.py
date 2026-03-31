@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal, Self
 
-from claude_agent_sdk import SdkPluginConfig
+from claude_agent_sdk import SdkPluginConfig, SettingSource
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from coder_eval.models.criteria import SuccessCriterion
@@ -44,6 +44,38 @@ class AgentConfig(BaseModel):
         description="Additional patterns to ignore during file change detection (beyond defaults)",
         validation_alias=AliasChoices("ignore_patterns", "additional_ignore_patterns"),
     )
+
+    system_prompt: str | None = Field(
+        default=None,
+        description=(
+            "Custom system prompt injected into the Claude Code agent. "
+            "Replaces the default system prompt. Supports inline text or multi-line YAML strings. "
+            "Mutually exclusive with system_prompt_file."
+        ),
+    )
+    system_prompt_file: str | None = Field(
+        default=None,
+        description=(
+            "Path to a file containing the system prompt (relative to task YAML). "
+            "The file contents are loaded at task resolution time and set as system_prompt. "
+            "Mutually exclusive with system_prompt."
+        ),
+    )
+    setting_sources: list[SettingSource] | None = Field(
+        default=None,
+        description=(
+            "Claude Code setting sources to load (e.g., ['project', 'user']). "
+            "Defaults to ['project'] so .mcp.json is discovered. Set to [] to disable all settings. "
+            "None means use the framework default (['project'])."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def check_prompt_exclusivity(self) -> Self:
+        """Ensure system_prompt and system_prompt_file are mutually exclusive."""
+        if self.system_prompt is not None and self.system_prompt_file is not None:
+            raise ValueError("Only one of 'system_prompt' or 'system_prompt_file' can be provided, not both")
+        return self
 
 
 class LLMReviewerConfig(BaseModel):
@@ -95,7 +127,17 @@ class TaskDefinition(BaseModel):
 
     task_id: str = Field(description="Unique identifier for this task")
     description: str = Field(description="Human-readable description of what the task is testing")
-    initial_prompt: str = Field(description="The initial prompt to send to the agent")
+    initial_prompt: str | None = Field(
+        default=None,
+        description="The initial prompt to send to the agent. Mutually exclusive with initial_prompt_file.",
+    )
+    initial_prompt_file: str | None = Field(
+        default=None,
+        description=(
+            "Path to a file containing the initial prompt (relative to task YAML). "
+            "Mutually exclusive with initial_prompt."
+        ),
+    )
     max_iterations: int = Field(default=3, description="Maximum number of agent turns")
     tags: list[str] = Field(default_factory=list, description="Tags for categorizing and filtering tasks (kebab-case)")
     agent: AgentConfig | None = Field(
@@ -117,6 +159,15 @@ class TaskDefinition(BaseModel):
             "Reference solution for LLM review and code comparison. HIDDEN from the agent - never included in prompts."
         ),
     )
+
+    @model_validator(mode="after")
+    def check_prompt_fields(self) -> Self:
+        """Ensure exactly one of initial_prompt or initial_prompt_file is provided."""
+        if self.initial_prompt is not None and self.initial_prompt_file is not None:
+            raise ValueError("Only one of 'initial_prompt' or 'initial_prompt_file' can be provided, not both")
+        if self.initial_prompt is None and self.initial_prompt_file is None:
+            raise ValueError("Either 'initial_prompt' or 'initial_prompt_file' must be provided")
+        return self
 
     @field_validator("tags")
     @classmethod

@@ -210,7 +210,8 @@ class ClaudeCodeAgent(Agent):
                 plugins=plugins,  # type: ignore[arg-type]
                 stderr=capture_stderr,  # Capture stderr for better error messages
                 env=env,
-                setting_sources=["project"],  # Load CLAUDE.md and .claude/ settings from cwd
+                system_prompt=self.config.system_prompt,
+                setting_sources=self.config.setting_sources if self.config.setting_sources is not None else ["project"],
             )
 
             # Dump SDK options for later inspection (captures all 37+ fields including defaults)

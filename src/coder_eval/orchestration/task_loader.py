@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from ..models import TaskDefinition, TemplateDirSource
+from ..models import AgentConfig, TaskDefinition, TemplateDirSource, TemplateSource
 
 
 def load_task(task_file: Path) -> tuple[TaskDefinition, str]:
@@ -37,16 +37,33 @@ def load_task(task_file: Path) -> tuple[TaskDefinition, str]:
         task = TaskDefinition(**task_data)
         # Resolve relative template paths
         task = resolve_template_paths(task, task_file.parent)
+        task = resolve_initial_prompt_file(task, task_file.parent)
+        task = resolve_system_prompt_files(task, task_file.parent)
         return task, raw_yaml
     except Exception as e:
         raise ValueError(f"Invalid task definition: {e}") from e
 
 
+def resolve_template_source_paths(sources: list[TemplateSource], base_dir: Path) -> None:
+    """Resolve relative TemplateDirSource paths to absolute, in place.
+
+    Skips already-absolute paths and non-TemplateDirSource entries.
+
+    Args:
+        sources: List of template sources (TemplateDirSource, RepoSource, etc.)
+        base_dir: Base directory for resolving relative paths.
+    """
+    for source in sources:
+        if isinstance(source, TemplateDirSource):
+            template_path = Path(source.path)
+            if not template_path.is_absolute():
+                source.path = str((base_dir / template_path).resolve())
+
+
 def resolve_template_paths(task: TaskDefinition, base_dir: Path) -> TaskDefinition:
     """Resolve relative template paths to absolute paths.
 
-    Mutates TemplateDirSource.path in place for both new API (template_sources)
-    and legacy API (template_dir). Other source types don't need path resolution.
+    Mutates TemplateDirSource.path in place. Other source types don't need resolution.
 
     Args:
         task: Task definition with possibly relative paths
@@ -55,15 +72,47 @@ def resolve_template_paths(task: TaskDefinition, base_dir: Path) -> TaskDefiniti
     Returns:
         Task with resolved absolute paths (modified in place)
     """
-    sandbox_config = task.sandbox
+    if task.sandbox.template_sources:
+        resolve_template_source_paths(task.sandbox.template_sources, base_dir)
 
-    # Handle new API: iterate template_sources and resolve TemplateDirSource paths
-    if sandbox_config.template_sources:
-        for source in sandbox_config.template_sources:
-            if isinstance(source, TemplateDirSource):
-                template_path = Path(source.path)
-                if not template_path.is_absolute():
-                    source.path = str((base_dir / template_path).resolve())
-            # Other source types (RepoSource, StarterFilesSource) don't need resolution
+    return task
 
+
+def resolve_initial_prompt_file(task: TaskDefinition, base_dir: Path) -> TaskDefinition:
+    """Resolve initial_prompt_file to inline initial_prompt."""
+    if task.initial_prompt_file is not None:
+        prompt_path = Path(task.initial_prompt_file)
+        if not prompt_path.is_absolute():
+            prompt_path = (base_dir / prompt_path).resolve()
+        if not prompt_path.exists():
+            raise FileNotFoundError(f"initial_prompt_file not found: {prompt_path}")
+        content = prompt_path.read_text(encoding="utf-8").strip()
+        # Clear file field BEFORE setting inline to avoid mutual-exclusivity validator
+        task.initial_prompt_file = None
+        task.initial_prompt = content
+    if task.initial_prompt is None:
+        raise ValueError("Either 'initial_prompt' or 'initial_prompt_file' must be set")
+    return task
+
+
+def resolve_agent_system_prompt(agent_config: AgentConfig | None, base_dir: Path) -> None:
+    """Resolve system_prompt_file to inline system_prompt. Mutates in place."""
+    if agent_config is None:
+        return
+    if agent_config.system_prompt_file is not None:
+        prompt_path = Path(agent_config.system_prompt_file)
+        if not prompt_path.is_absolute():
+            prompt_path = (base_dir / prompt_path).resolve()
+        if not prompt_path.exists():
+            raise FileNotFoundError(f"system_prompt_file not found: {prompt_path}")
+        content = prompt_path.read_text(encoding="utf-8").strip()
+        # Clear file field BEFORE setting inline to avoid mutual-exclusivity validator
+        agent_config.system_prompt_file = None
+        agent_config.system_prompt = content
+
+
+def resolve_system_prompt_files(task: TaskDefinition, base_dir: Path) -> TaskDefinition:
+    """Resolve system_prompt_file on agent config."""
+    if task.agent is not None:
+        resolve_agent_system_prompt(task.agent, base_dir)
     return task

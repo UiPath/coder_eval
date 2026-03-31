@@ -27,14 +27,13 @@ from ..models import (
     TaskDefinition,
     TaskExperimentSummary,
     TaskResult,
-    TemplateDirSource,
     TemplateSource,
     VariantAggregate,
     VariantResult,
     validate_template_sources_list,
 )
 from .config import BatchRunConfig
-from .task_loader import load_task
+from .task_loader import load_task, resolve_agent_system_prompt, resolve_template_source_paths
 
 
 logger = logging.getLogger(__name__)
@@ -83,11 +82,7 @@ def _resolve_experiment_template_paths(experiment: ExperimentDefinition, base_di
             sources_lists.append(variant.template_sources)
 
     for sources in sources_lists:
-        for i, source in enumerate(sources):
-            if isinstance(source, TemplateDirSource):
-                template_path = Path(source.path)
-                if not template_path.is_absolute():
-                    sources[i] = source.model_copy(update={"path": str((base_dir / template_path).resolve())})
+        resolve_template_source_paths(sources, base_dir)
 
 
 def load_experiment(experiment_file: Path) -> ExperimentDefinition:
@@ -123,10 +118,17 @@ def _merge_agent_dicts(*layers: dict[str, Any] | None) -> dict[str, Any]:
     Shallow merge only — each layer's keys overwrite the previous entirely.
     Lists and nested dicts are replaced, not recursively merged.
     None layers are skipped.
+
+    Handles mutually exclusive prompt fields: when a layer sets system_prompt,
+    the previously merged system_prompt_file is cleared, and vice versa.
     """
     merged: dict[str, Any] = {}
     for layer in layers:
         if layer is not None:
+            if layer.get("system_prompt") is not None:
+                merged.pop("system_prompt_file", None)
+            if layer.get("system_prompt_file") is not None:
+                merged.pop("system_prompt", None)
             merged.update(layer)
     return merged
 
@@ -387,11 +389,33 @@ def _apply_cli_overrides(
             _record("sandbox.snapshots.checkpoint_frequency", checkpoint_freq, "--snapshot-checkpoint-freq")
 
 
+def resolve_task_files(
+    task: TaskDefinition,
+    task_file: Path,
+    experiment_file: Path | None = None,
+) -> None:
+    """Resolve relative file paths injected by experiment variants.
+
+    Paths already resolved to absolute by load_task() are skipped.
+    New relative paths (from variant/base) resolve from experiment_file.parent.
+    """
+    exp_dir = experiment_file.parent if experiment_file is not None else task_file.parent
+
+    # Resolve system_prompt_file (may be injected by variant as relative or absolute path)
+    if task.agent is not None and task.agent.system_prompt_file is not None:
+        resolve_agent_system_prompt(task.agent, exp_dir)
+
+    # Resolve relative template_sources paths
+    if task.sandbox.template_sources:
+        resolve_template_source_paths(task.sandbox.template_sources, exp_dir)
+
+
 def resolve_all_tasks(
     task_files: list[Path],
     experiment: ExperimentDefinition,
     default_experiment: ExperimentDefinition,
     config: BatchRunConfig,
+    experiment_file: Path | None = None,
 ) -> list[ResolvedTask]:
     """Resolve all (task x variant) combinations into typed, run-ready entries.
 
@@ -409,6 +433,9 @@ def resolve_all_tasks(
         experiment: The active experiment definition.
         default_experiment: The default experiment (experiments/default.yaml).
         config: Batch run configuration (provides CLI overrides, tags, run_dir).
+        experiment_file: Path to the experiment YAML file. Used to resolve
+            relative paths injected by experiment variants. Falls back to task
+            file directory when None.
 
     Returns:
         List of ResolvedTask entries ready for run_batch.
@@ -424,6 +451,9 @@ def resolve_all_tasks(
         for variant in experiment.variants:
             # Apply layers 1-4 (default → experiment-defaults → task → variant)
             resolved_task, lineage = resolve_task_for_variant(default_experiment, task, experiment, variant)
+
+            # Resolve file paths injected by variant overrides
+            resolve_task_files(resolved_task, task_file, experiment_file)
 
             # Apply layer 5 (CLI / .env overrides)
             _apply_cli_overrides(resolved_task, config, lineage)
