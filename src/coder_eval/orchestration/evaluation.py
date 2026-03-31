@@ -20,6 +20,9 @@ from ..models import CriteriaResults, SnapshotMode, TaskDefinition, TurnRecord
 from ..sandbox import Sandbox
 
 
+logger = logging.getLogger(__name__)
+
+
 async def generate_next_prompt(
     task: TaskDefinition,
     agent_output: str,
@@ -27,7 +30,6 @@ async def generate_next_prompt(
     iteration: int,
     llm_reviewer: LLMReviewer | None,
     reference_code: str | None,
-    logger: logging.Logger | logging.LoggerAdapter[logging.Logger],
     tool_calls_summary: str | None = None,
 ) -> str:
     """Generate the next prompt based on results and feedback.
@@ -42,7 +44,6 @@ async def generate_next_prompt(
         iteration: Current iteration number
         llm_reviewer: Optional LLM reviewer instance
         reference_code: Optional reference solution code
-        logger: Logger for this task
         tool_calls_summary: Optional summary of agent tool calls for reviewer context
 
     Returns:
@@ -135,7 +136,6 @@ async def create_iteration_snapshot(
     task: TaskDefinition,
     iteration: int,
     turn_record: TurnRecord,
-    logger: logging.Logger | logging.LoggerAdapter[logging.Logger],
 ) -> None:
     """Create a snapshot of the sandbox after this iteration.
 
@@ -148,7 +148,6 @@ async def create_iteration_snapshot(
         task: Task definition with snapshot configuration
         iteration: Current iteration number (1-indexed)
         turn_record: TurnRecord to update with snapshot info
-        logger: Logger for this task
     """
     snapshot_config = task.sandbox.snapshots
     if snapshot_config.mode == SnapshotMode.DISABLED:
@@ -200,7 +199,6 @@ def load_reference_code(
     task: TaskDefinition,
     task_file: Path | None,
     cached_reference: str | None,
-    logger: logging.Logger | logging.LoggerAdapter[logging.Logger],
 ) -> tuple[str | None, str | None]:
     """Load reference code from task definition.
 
@@ -208,7 +206,6 @@ def load_reference_code(
         task: Task definition with reference configuration
         task_file: Path to task YAML file (for resolving relative paths)
         cached_reference: Previously loaded reference code (for caching)
-        logger: Logger for this task
 
     Returns:
         Tuple of (reference_code, cached_reference) where cached_reference

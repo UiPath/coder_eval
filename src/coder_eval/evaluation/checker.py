@@ -25,7 +25,6 @@ class SuccessChecker:
         sandbox: Sandbox,
         init_registry: bool = True,
         validate_registry: bool = True,
-        task_id: str | None = None,
     ):
         """Initialize the success checker.
 
@@ -33,10 +32,8 @@ class SuccessChecker:
             sandbox: Sandbox instance for running checks
             init_registry: Whether to initialize the criteria registry
             validate_registry: Whether to validate all expected types are registered
-            task_id: Optional task ID for log context
         """
         self.sandbox = sandbox
-        self.logger = logging.LoggerAdapter(logger, extra={"task_id": task_id}) if task_id else logger
         self._checker_instances: dict[str, BaseCriterion[Any]] = {}
         # Cached reference code - automatically set by check()/check_all() when provided
         # Used by subsequent check() calls that don't explicitly pass reference_code
@@ -141,12 +138,12 @@ class SuccessChecker:
             checker = self._get_checker_instance(criterion_type)
             result = checker.check(criterion, self.sandbox, reference_code, turn_records=turn_records)
 
-            self.logger.info(f"Criterion '{criterion_type}' score: {result.score:.2f}")
+            logger.info(f"Criterion '{criterion_type}' score: {result.score:.2f}")
             return result
 
         except KeyError:
             # No checker registered for this type - return failed result for consistency
-            self.logger.error(f"No checker found for criterion type '{criterion_type}'")
+            logger.error(f"No checker found for criterion type '{criterion_type}'")
             return CriterionResult(
                 criterion_type=criterion_type,
                 description=criterion.description,
@@ -156,7 +153,7 @@ class SuccessChecker:
             )
         except Exception as e:
             # V3: Catch ALL exceptions, including checker __init__ failures
-            self.logger.exception(f"Checker failure for criterion '{criterion_type}': {e}")
+            logger.exception(f"Checker failure for criterion '{criterion_type}': {e}")
             return CriterionResult(
                 criterion_type=criterion_type,
                 description=criterion.description,

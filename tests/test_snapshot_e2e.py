@@ -89,7 +89,6 @@ async def test_snapshot_e2e_hybrid_mode_checkpoint_logic(tmp_path):
         task=task,
         iteration=1,
         turn_record=turn_record_1,
-        logger=orchestrator.logger,
     )
 
     # Iteration 2 (not checkpoint) - should be incremental
@@ -105,7 +104,6 @@ async def test_snapshot_e2e_hybrid_mode_checkpoint_logic(tmp_path):
         task=task,
         iteration=2,
         turn_record=turn_record_2,
-        logger=orchestrator.logger,
     )
 
     # Iteration 3 (checkpoint!) - should be full
@@ -121,7 +119,6 @@ async def test_snapshot_e2e_hybrid_mode_checkpoint_logic(tmp_path):
         task=task,
         iteration=3,
         turn_record=turn_record_3,
-        logger=orchestrator.logger,
     )
 
     # Verify all snapshots were created
@@ -193,7 +190,6 @@ async def test_snapshot_directory_structure(tmp_path):
         task=task,
         iteration=1,
         turn_record=turn_record,
-        logger=orchestrator.logger,
     )
 
     snapshot_path = Path(turn_record.snapshot_path)
@@ -261,7 +257,6 @@ async def test_snapshot_ignore_patterns_applied(tmp_path):
         task=task,
         iteration=1,
         turn_record=turn_record,
-        logger=orchestrator.logger,
     )
 
     snapshot_path = Path(turn_record.snapshot_path)

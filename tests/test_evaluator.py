@@ -466,45 +466,26 @@ def test_llm_reviewer_config_prompt_defaults_to_none():
     assert config.prompt is None
 
 
-def test_success_checker_logs_include_task_id(caplog):
-    """Test that SuccessChecker logs include task_id context when provided.
+def test_success_checker_logs_carry_task_id_in_context(tmp_path):
+    """SuccessChecker logs carry task_id when run inside task_log_handler."""
+    from coder_eval.logging_config import setup_logging, task_log_handler
 
-    Regression test: checker logs previously lacked the [task-name] prefix,
-    making it hard to trace which task a criterion result belonged to in
-    concurrent runs.
-    """
-    import logging
-
+    setup_logging(level="INFO")
     mock_sandbox = Mock()
     mock_sandbox.file_exists.return_value = True
-
-    checker = SuccessChecker(mock_sandbox, task_id="my-test-task")
-
-    # Verify logger is a LoggerAdapter with task_id
-    assert isinstance(checker.logger, logging.LoggerAdapter)
-    assert checker.logger.extra["task_id"] == "my-test-task"
-
-    # Run a check and verify the task_id appears in log records
-    criterion = FileExistsCriterion(path="test.txt", description="Test file")
-    with caplog.at_level(logging.INFO, logger="coder_eval.evaluation.checker"):
-        checker.check(criterion)
-
-    assert any("my-test-task" in r.message or getattr(r, "task_id", None) == "my-test-task" for r in caplog.records)
-
-
-def test_success_checker_logs_without_task_id():
-    """Test that SuccessChecker works correctly when task_id is omitted."""
-    import logging
-
-    mock_sandbox = Mock()
-    mock_sandbox.file_exists.return_value = True
-
     checker = SuccessChecker(mock_sandbox)
+    log_file = tmp_path / "task.log"
 
-    # Without task_id, logger should be the plain module logger (not an adapter)
-    assert not isinstance(checker.logger, logging.LoggerAdapter)
+    with task_log_handler(log_file, task_id="my-test-task"):
+        checker.check(FileExistsCriterion(path="test.txt", description="Test file"))
 
-    # Should still function normally
-    criterion = FileExistsCriterion(path="test.txt", description="Test file")
-    result = checker.check(criterion)
+    assert "file_exists" in log_file.read_text()
+
+
+def test_success_checker_works_without_task_context():
+    """SuccessChecker works normally outside any task_log_handler context."""
+    mock_sandbox = Mock()
+    mock_sandbox.file_exists.return_value = True
+    checker = SuccessChecker(mock_sandbox)
+    result = checker.check(FileExistsCriterion(path="test.txt", description="Test file"))
     assert result.score == 1.0

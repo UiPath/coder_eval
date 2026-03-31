@@ -182,7 +182,6 @@ async def test_orchestrator_deterministic_feedback_with_failures(tmp_path):
         iteration=1,
         llm_reviewer=None,
         reference_code=None,
-        logger=orchestrator.logger,
     )
 
     # Assertions
@@ -262,7 +261,6 @@ async def test_orchestrator_deterministic_feedback_with_partial_scores(tmp_path)
         iteration=1,
         llm_reviewer=None,
         reference_code=None,
-        logger=orchestrator.logger,
     )
 
     # Verify feedback shows both score and threshold
@@ -365,7 +363,6 @@ async def test_orchestrator_deterministic_feedback_mixed_results(tmp_path):
         iteration=1,
         llm_reviewer=None,
         reference_code=None,
-        logger=orchestrator.logger,
     )
 
     # Only the failed criterion should appear
@@ -639,7 +636,6 @@ async def test_orchestrator_create_iteration_snapshot_disabled(tmp_path):
         task=task,
         iteration=1,
         turn_record=turn_record,
-        logger=orchestrator.logger,
     )
 
     # Verify no snapshot created
@@ -689,7 +685,6 @@ async def test_orchestrator_create_iteration_snapshot_full(tmp_path):
         task=task,
         iteration=1,
         turn_record=turn_record,
-        logger=orchestrator.logger,
     )
 
     # Verify snapshot was created
@@ -747,7 +742,6 @@ async def test_orchestrator_create_iteration_snapshot_hybrid(tmp_path):
         task=task,
         iteration=1,
         turn_record=turn_record_1,
-        logger=orchestrator.logger,
     )
 
     # Iteration 2 (checkpoint) - should create full
@@ -763,7 +757,6 @@ async def test_orchestrator_create_iteration_snapshot_hybrid(tmp_path):
         task=task,
         iteration=2,
         turn_record=turn_record_2,
-        logger=orchestrator.logger,
     )
 
     # Verify both snapshots exist
@@ -826,7 +819,6 @@ async def test_orchestrator_snapshot_error_handling(tmp_path):
         task=task,
         iteration=1,
         turn_record=turn_record,
-        logger=orchestrator.logger,
     )
 
     # Verify snapshot fields remain None (error was handled)

@@ -144,9 +144,8 @@ class Orchestrator:
         # Reference solution cache (loaded on-demand)
         self._reference_code: str | None = None
 
-        # Create task-specific logger with variant_id/task_id context for log prefixes
+        # Task identifier used for log handler context, streaming events, and proxy config
         self._log_task_id = f"{variant_id}/{task.task_id}"
-        self.logger = logging.LoggerAdapter(logger, extra={"task_id": self._log_task_id})
 
     async def run(self) -> EvaluationResult:
         """Run the complete evaluation.
@@ -227,7 +226,7 @@ class Orchestrator:
                     agent_name=self.task.agent.type.value,
                 )
 
-                self.logger.error(f"Task timed out: {e}")
+                logger.error(f"Task timed out: {e}")
             except Exception as e:
                 # Handle catastrophic errors
                 self.result.final_status = "ERROR"
@@ -248,7 +247,7 @@ class Orchestrator:
                     agent_name=self.task.agent.type.value,
                 )
 
-                self.logger.error(f"Evaluation failed: {e}", exc_info=True)
+                logger.error(f"Evaluation failed: {e}", exc_info=True)
 
             finally:
                 # Always cleanup
@@ -360,7 +359,7 @@ class Orchestrator:
             # evaluate-only mode: sandbox already set up, skip agent
             assert self.result is not None
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
-            self.success_checker = SuccessChecker(self.sandbox, task_id=self._log_task_id)
+            self.success_checker = SuccessChecker(self.sandbox)
             return
 
         # Validate API keys (agent guaranteed non-None after experiment resolution)
@@ -389,10 +388,10 @@ class Orchestrator:
         if self.task.sandbox.snapshots.mode != SnapshotMode.DISABLED:
             self.snapshot_base_dir = self.run_dir / "snapshots"
             self.snapshot_base_dir.mkdir(parents=True, exist_ok=True)
-            self.logger.info(f"Snapshots enabled: mode={self.task.sandbox.snapshots.mode.value}")
+            logger.info(f"Snapshots enabled: mode={self.task.sandbox.snapshots.mode.value}")
 
         # Create success checker
-        self.success_checker = SuccessChecker(self.sandbox, task_id=self._log_task_id)
+        self.success_checker = SuccessChecker(self.sandbox)
 
         # Create LLM reviewer if enabled
         if self.task.llm_reviewer.enabled:
@@ -400,10 +399,10 @@ class Orchestrator:
 
         # Start LLM Gateway proxy if enabled
         if settings.llmgw_proxy_enabled:
-            self.logger.info("API routing: LLM Gateway proxy (via %s)", settings.llmgw_url)
+            logger.info("API routing: LLM Gateway proxy (via %s)", settings.llmgw_url)
             await self._start_proxy()
         else:
-            self.logger.info("API routing: direct Anthropic API")
+            logger.info("API routing: direct Anthropic API")
 
         # Create and start agent with retry logic
         self.agent = await self._create_agent()
@@ -465,7 +464,7 @@ class Orchestrator:
 
         self.proxy = LLMGatewayProxy(proxy_config)
         self.proxy_port = await self.proxy.start()
-        self.logger.info("LLM Gateway proxy started on port %d", self.proxy_port)
+        logger.info("LLM Gateway proxy started on port %d", self.proxy_port)
 
     async def _create_agent(self) -> Agent:
         """Create the appropriate agent based on task configuration.
@@ -500,7 +499,7 @@ class Orchestrator:
             assert self.result is not None
             unsupported = [c.type for c in self.task.success_criteria if c.requires_agent]
             if unsupported:
-                self.logger.warning(
+                logger.warning(
                     "Criteria %s require agent execution; results may be incomplete in evaluate-only mode",
                     unsupported,
                 )
@@ -525,11 +524,11 @@ class Orchestrator:
             iteration += 1
             self.result.iteration_count = iteration
 
-            self.logger.info(f"Starting iteration {iteration}/{self.task.max_iterations}")
+            logger.info(f"Starting iteration {iteration}/{self.task.max_iterations}")
 
             # Communicate with agent (with retry logic)
             prompt_with_cwd = f"Your working directory is: {sandbox_dir}\n\n{current_prompt}"
-            self.logger.debug(f"Sending prompt: {current_prompt[:100]}...")
+            logger.debug(f"Sending prompt: {current_prompt[:100]}...")
 
             safe_emit(
                 self.stream_callback,
@@ -583,7 +582,7 @@ class Orchestrator:
                 ),
             )
 
-            self.logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
+            logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
 
             # Create snapshot after this turn (if enabled)
             if self.snapshot_base_dir and self.sandbox:
@@ -593,16 +592,14 @@ class Orchestrator:
                     task=self.task,
                     iteration=iteration,
                     turn_record=turn_record,
-                    logger=self.logger,
                 )
 
             # Check success criteria (pass reference code for reference_comparison criterion)
-            self.logger.debug("Checking success criteria")
+            logger.debug("Checking success criteria")
             reference_code, self._reference_code = load_reference_code(
                 task=self.task,
                 task_file=self.task_file,
                 cached_reference=self._reference_code,
-                logger=self.logger,
             )
             criteria_results = await asyncio.to_thread(
                 self.success_checker.check_all,
@@ -633,9 +630,7 @@ class Orchestrator:
             total_weight = sum(c.weight for c in self.task.success_criteria)
             current_score = total_weighted / total_weight if total_weight > 0 else 0.0
 
-            self.logger.info(
-                f"Success criteria: {passed_count}/{total_count} passed, weighted score: {current_score:.3f}"
-            )
+            logger.info(f"Success criteria: {passed_count}/{total_count} passed, weighted score: {current_score:.3f}")
 
             criteria_details = [
                 f"{criterion.type}: {'PASS' if result.score >= criterion.pass_threshold else 'FAIL'}"
@@ -654,20 +649,20 @@ class Orchestrator:
             )
 
             if all_passed:
-                self.logger.info("All success criteria passed!")
+                logger.info("All success criteria passed!")
                 success = True
                 break
 
             # Summarize tool calls for reviewer context and logging
             tool_calls_summary = _summarize_tool_calls(turn_record)
             if tool_calls_summary:
-                self.logger.debug("Tool calls for iteration %d:\n%s", iteration, tool_calls_summary)
+                logger.debug("Tool calls for iteration %d:\n%s", iteration, tool_calls_summary)
 
             # If the agent exhausted its max_turns without completing, stop early —
             # further iterations are unlikely to succeed.
             if turn_record.max_turns_exhausted:
                 self.result.max_turns_exhausted = True
-                self.logger.warning(
+                logger.warning(
                     "Agent exhausted max_turns (%s) without passing criteria. "
                     "Stopping evaluation — further iterations unlikely to succeed.",
                     self.task.agent.max_turns,
@@ -683,7 +678,6 @@ class Orchestrator:
                     iteration=iteration,
                     llm_reviewer=self.llm_reviewer,
                     reference_code=reference_code,
-                    logger=self.logger,
                     tool_calls_summary=tool_calls_summary,
                 )
 
@@ -696,14 +690,14 @@ class Orchestrator:
             try:
                 await self.agent.stop()
             except Exception as e:
-                self.logger.warning(f"Failed to stop agent: {e}")
+                logger.warning(f"Failed to stop agent: {e}")
 
         # Stop proxy
         if self.proxy:
             try:
                 await self.proxy.stop()
             except Exception as e:
-                self.logger.warning(f"Failed to stop proxy: {e}")
+                logger.warning(f"Failed to stop proxy: {e}")
 
         # Cleanup sandbox
         if self.sandbox:
@@ -714,12 +708,12 @@ class Orchestrator:
                     # Use asyncio.to_thread to prevent blocking event loop
                     preserved_path = await asyncio.to_thread(self.sandbox.preserve_to, artifacts_dir)
                     self.result.sandbox_path = str(preserved_path)
-                    self.logger.info(f"Sandbox preserved to: {preserved_path}")
+                    logger.info(f"Sandbox preserved to: {preserved_path}")
 
                 # Use asyncio.to_thread to prevent blocking event loop
                 await asyncio.to_thread(self.sandbox.cleanup, preserve=False)
             except Exception as e:
-                self.logger.warning(f"Failed to cleanup sandbox: {e}")
+                logger.warning(f"Failed to cleanup sandbox: {e}")
 
     @classmethod
     async def run_batch(

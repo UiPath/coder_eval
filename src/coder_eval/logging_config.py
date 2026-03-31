@@ -3,7 +3,7 @@
 This module provides centralized logging setup with:
 - Color-coded console output (if terminal supports it)
 - Optional file logging
-- Task-specific context via LoggerAdapter
+- ContextVar-based task_id injection for parallel log isolation
 - Customizable log levels
 - Per-task log file persistence via context managers
 """
@@ -13,9 +13,15 @@ import sys
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from datetime import datetime
 from pathlib import Path
 
+
+# ContextVar that tracks the current task_id for the running async context.
+# Each asyncio task gets its own copy, so parallel tasks are isolated.
+# Set by task_log_handler; read by _TaskIdFilter to inject into plain-logger records.
+_current_task_id: ContextVar[str | None] = ContextVar("_current_task_id", default=None)
 
 # ANSI color codes for terminal output
 COLORS = {
@@ -79,7 +85,9 @@ def setup_logging(level: str = "INFO", log_file: Path | None = None, verbose: bo
     # Get the top-level coder_eval logger (all module loggers will inherit from this)
     app_logger = logging.getLogger("coder_eval")
     app_logger.setLevel(log_level)
-    app_logger.handlers.clear()  # Remove any existing handlers
+    for h in list(app_logger.handlers):
+        app_logger.removeHandler(h)
+        h.close()
 
     # Console handler (stderr) with colored output
     console_handler = logging.StreamHandler(sys.stderr)
@@ -110,11 +118,11 @@ def setup_logging(level: str = "INFO", log_file: Path | None = None, verbose: bo
 
 
 class _TaskIdFilter(logging.Filter):
-    """Filter that only accepts records matching a specific task_id.
+    """Filter that injects task_id from ContextVar and accepts only matching records.
 
-    Accepts records that either:
-    - Have a matching task_id in their extra context
-    - Have no task_id set (general/shared log messages)
+    Two responsibilities:
+    1. If a record has no task_id, inject from the ContextVar (for plain-logger modules).
+    2. Strict equality check — records without task_id are rejected (no cross-contamination).
     """
 
     def __init__(self, task_id: str):
@@ -123,7 +131,12 @@ class _TaskIdFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         record_task_id = getattr(record, "task_id", None)
-        return record_task_id is None or record_task_id == self.task_id
+        if record_task_id is None:
+            cv_task_id = _current_task_id.get()
+            if cv_task_id is not None:
+                record.task_id = cv_task_id  # type: ignore[attr-defined]
+                record_task_id = cv_task_id
+        return record_task_id == self.task_id
 
 
 # Lock for thread-safe handler add/remove and level restoration in parallel batch runs
@@ -138,8 +151,9 @@ def task_log_handler(task_log_path: Path, level: int = logging.DEBUG, task_id: s
     guaranteeing cleanup even if exceptions occur.
 
     When task_id is provided, a filter is applied so that in parallel batch runs
-    each task's log file only contains its own messages (plus shared messages
-    without a task_id).
+    each task's log file only contains its own messages. The ContextVar
+    ``_current_task_id`` is set so that plain loggers (no LoggerAdapter)
+    automatically get the correct task_id injected by ``_TaskIdFilter``.
 
     Thread-safe: uses a lock and reference counting so that concurrent handlers
     correctly restore the original log level when the last handler exits.
@@ -182,6 +196,11 @@ def task_log_handler(task_log_path: Path, level: int = logging.DEBUG, task_id: s
         if app_logger.level > level:
             app_logger.setLevel(level)
 
+    # Set ContextVar so plain loggers in this async context get the correct task_id
+    token: Token[str | None] | None = None
+    if task_id:
+        token = _current_task_id.set(task_id)
+
     try:
         yield
     finally:
@@ -196,6 +215,9 @@ def task_log_handler(task_log_path: Path, level: int = logging.DEBUG, task_id: s
                 app_logger.setLevel(original)
                 if hasattr(app_logger, "_task_handler_original_level"):
                     del app_logger._task_handler_original_level  # pyright: ignore[reportAttributeAccessIssue]
+        # Reset ContextVar (token-based reset restores previous value in nested contexts)
+        if token is not None:
+            _current_task_id.reset(token)
         if task_filter:
             handler.removeFilter(task_filter)
         handler.close()

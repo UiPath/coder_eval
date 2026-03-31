@@ -1,6 +1,5 @@
 """Tests for evaluation feedback generation: LLM reviewer integration."""
 
-import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from coder_eval.models import (
@@ -39,8 +38,6 @@ class TestLLMFeedbackWithEmptyNextSteps:
 
         criteria_results = [CriterionResult(criterion_type="file_exists", description="File exists", score=0.5)]
 
-        logger = logging.getLogger("coder_eval.test")
-
         with patch("coder_eval.orchestration.evaluation.execute_with_retry", new_callable=AsyncMock) as mock_retry:
             mock_retry.return_value = decision
 
@@ -51,7 +48,6 @@ class TestLLMFeedbackWithEmptyNextSteps:
                 iteration=1,
                 llm_reviewer=mock_reviewer,
                 reference_code=None,
-                logger=logger,
             )
 
         assert "missing error handling" in result, f"LLM issues discarded when next_steps is empty.\nGot:\n{result}"

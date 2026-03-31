@@ -105,7 +105,6 @@ async def test_llm_reviewer_fallback_on_failure(tmp_path):
         iteration=1,
         llm_reviewer=orchestrator.llm_reviewer,
         reference_code=None,
-        logger=orchestrator.logger,
     )
 
     # Verify deterministic feedback is used
@@ -184,7 +183,6 @@ async def test_llm_reviewer_succeeds_when_available(tmp_path):
         iteration=1,
         llm_reviewer=orchestrator.llm_reviewer,
         reference_code=None,
-        logger=orchestrator.logger,
     )
 
     # Verify LLM feedback is used
@@ -258,7 +256,6 @@ async def test_fallback_includes_criterion_details(tmp_path):
         iteration=1,
         llm_reviewer=orchestrator.llm_reviewer,
         reference_code=None,
-        logger=orchestrator.logger,
     )
 
     # Verify error details included
@@ -339,7 +336,6 @@ async def test_fallback_with_partial_pass(tmp_path):
         iteration=1,
         llm_reviewer=orchestrator.llm_reviewer,
         reference_code=None,
-        logger=orchestrator.logger,
     )
 
     # Verify only failed criterion in feedback

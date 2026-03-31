@@ -3,8 +3,6 @@
 Tests ensure clear FileNotFoundError for missing reference files.
 """
 
-import logging
-
 import pytest
 
 from coder_eval.models import AgentConfig, FileExistsCriterion, ReferenceSource, SandboxConfig, TaskDefinition
@@ -36,7 +34,7 @@ def test_load_reference_missing_file_raises(tmp_path):
 
     # Attempt to load reference - should raise FileNotFoundError
     with pytest.raises(FileNotFoundError) as exc_info:
-        load_reference_code(task, task_file, cached_reference=None, logger=logging.getLogger(__name__))
+        load_reference_code(task, task_file, cached_reference=None)
 
     # Verify error message contains both file path and task file
     error_msg = str(exc_info.value)
@@ -65,7 +63,7 @@ def test_load_reference_inline_code_works(tmp_path):
     )
 
     # Load reference - should succeed
-    ref_code, _ = load_reference_code(task, task_file, cached_reference=None, logger=logging.getLogger(__name__))
+    ref_code, _ = load_reference_code(task, task_file, cached_reference=None)
 
     assert ref_code == "def solution():\n    return 42"
 
@@ -96,7 +94,7 @@ def test_load_reference_existing_file_works(tmp_path):
     )
 
     # Load reference - should succeed
-    ref_code, _ = load_reference_code(task, task_file, cached_reference=None, logger=logging.getLogger(__name__))
+    ref_code, _ = load_reference_code(task, task_file, cached_reference=None)
 
     assert ref_code == "def solution():\n    return 'success'"
 
@@ -123,14 +121,14 @@ def test_load_reference_caches_result(tmp_path):
     )
 
     # First load
-    ref_code_1, cached = load_reference_code(task, task_file, cached_reference=None, logger=logging.getLogger(__name__))
+    ref_code_1, cached = load_reference_code(task, task_file, cached_reference=None)
     assert ref_code_1 == "original content"
 
     # Modify file on disk
     ref_file.write_text("modified content")
 
     # Second load - should return cached value
-    ref_code_2, _ = load_reference_code(task, task_file, cached_reference=cached, logger=logging.getLogger(__name__))
+    ref_code_2, _ = load_reference_code(task, task_file, cached_reference=cached)
     assert ref_code_2 == "original content"  # Still returns cached value
 
 
@@ -155,7 +153,7 @@ def test_load_reference_no_reference_returns_none(tmp_path):
     )
 
     # Load reference - should return None
-    ref_code, _ = load_reference_code(task, task_file, cached_reference=None, logger=logging.getLogger(__name__))
+    ref_code, _ = load_reference_code(task, task_file, cached_reference=None)
 
     assert ref_code is None
 
@@ -182,4 +180,4 @@ def test_load_reference_without_task_file_raises(tmp_path):
 
     # Attempt to load reference - should raise ValueError
     with pytest.raises(ValueError, match="task_file not set"):
-        load_reference_code(task, task_file=None, cached_reference=None, logger=logging.getLogger(__name__))
+        load_reference_code(task, task_file=None, cached_reference=None)
