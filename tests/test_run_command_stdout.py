@@ -278,7 +278,7 @@ class TestRunCommandStdoutIntegration:
         sandbox.setup()
 
         criterion = RunCommandCriterion(
-            command="echo 'Hello, World!'",
+            command="python -c \"print('Hello, World!')\"",
             expected_stdout="Hello, World!",
             stdout_match="exact",
             description="exact match",
@@ -295,7 +295,7 @@ class TestRunCommandStdoutIntegration:
         sandbox.setup()
 
         criterion = RunCommandCriterion(
-            command="echo 'hello world'",
+            command="python -c \"print('hello world')\"",
             expected_stdout="world",
             stdout_match="contains",
             description="contains match",
@@ -312,7 +312,7 @@ class TestRunCommandStdoutIntegration:
         sandbox.setup()
 
         criterion = RunCommandCriterion(
-            command="echo '0.75'",
+            command='python -c "print(0.75)"',
             score_from_stdout=True,
             description="score from stdout",
         )
@@ -328,7 +328,7 @@ class TestRunCommandStdoutIntegration:
         sandbox.setup()
 
         criterion = RunCommandCriterion(
-            command="echo 'version 3.13.0'",
+            command="python -c \"print('version 3.13.0')\"",
             expected_stdout=r"version \d+\.\d+\.\d+",
             stdout_match="regex",
             description="regex match",

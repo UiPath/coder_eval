@@ -49,6 +49,13 @@ class Sandbox:
         self._cleanup_on_exit = True
         self.installed_tool_versions: dict[str, str] = {}
 
+    @property
+    def _venv_scripts_dir(self) -> Path | None:
+        """Return the platform-appropriate scripts directory inside the venv."""
+        if self.venv_dir is None:
+            return None
+        return self.venv_dir / ("Scripts" if os.name == "nt" else "bin")
+
     def setup(self) -> Path:
         """Set up the sandbox environment.
 
@@ -260,7 +267,9 @@ class Sandbox:
             return
 
         # Get path to pip in the virtual environment
-        pip_path = self.venv_dir / "bin" / "pip"
+        scripts_dir = self._venv_scripts_dir
+        assert scripts_dir is not None  # guaranteed by venv_dir guard above
+        pip_path = scripts_dir / "pip"
 
         # Try uv first, fall back to pip
         try:
@@ -269,7 +278,7 @@ class Sandbox:
             cmd = ["uv", "pip", "install", *self.config.python.env_packages]
             env = os.environ.copy()
             env["VIRTUAL_ENV"] = str(self.venv_dir)
-            env["PATH"] = f"{self.venv_dir / 'bin'}:{env['PATH']}"
+            env["PATH"] = f"{scripts_dir}{os.pathsep}{env['PATH']}"
         except (subprocess.CalledProcessError, FileNotFoundError):
             # Fallback to regular pip
             cmd = [str(pip_path), "install", *self.config.python.env_packages]
@@ -369,11 +378,11 @@ class Sandbox:
         env = os.environ.copy()
         if self.venv_dir:
             env["VIRTUAL_ENV"] = str(self.venv_dir)
-            env["PATH"] = f"{self.venv_dir / 'bin'}:{env['PATH']}"
+            env["PATH"] = f"{self._venv_scripts_dir}{os.pathsep}{env['PATH']}"
         # Add node_modules/.bin to PATH if it exists
         node_bin = self.sandbox_dir / "node_modules" / ".bin"
         if node_bin.exists():
-            env["PATH"] = f"{node_bin}:{env['PATH']}"
+            env["PATH"] = f"{node_bin}{os.pathsep}{env['PATH']}"
 
         if self.task_dir:
             env["TASK_DIR"] = str(self.task_dir)

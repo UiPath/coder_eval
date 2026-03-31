@@ -105,16 +105,13 @@ def test_run_command_includes_node_modules_bin_in_path():
     try:
         sandbox.setup()
 
-        # Create a fake node_modules/.bin with a script
+        # Create node_modules/.bin and verify it appears in PATH
         node_bin = sandbox.sandbox_dir / "node_modules" / ".bin"
         node_bin.mkdir(parents=True)
-        fake_tool = node_bin / "my-tool"
-        fake_tool.write_text("#!/bin/sh\necho my-tool-output\n")
-        fake_tool.chmod(0o755)
 
-        exit_code, stdout, _stderr = sandbox.run_command("my-tool")
+        exit_code, stdout, _stderr = sandbox.run_command("python -c \"import os; print(os.environ['PATH'])\"")
         assert exit_code == 0
-        assert "my-tool-output" in stdout
+        assert str(node_bin) in stdout
     finally:
         sandbox.cleanup()
 

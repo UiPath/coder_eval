@@ -3,6 +3,7 @@
 Tests prevent malicious task definitions from escaping the sandbox.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -65,8 +66,9 @@ def test_starter_files_rejects_absolute_paths(tmp_path):
     with pytest.raises(RuntimeError, match="Invalid file path \\(outside sandbox\\)"):
         sandbox._apply_starter_files_source(malicious_files)
 
-    # Verify system file not modified
-    assert Path("/etc/passwd").read_text() != "malicious", "System file should not be modified"
+    # Verify system file not modified (only on Unix where /etc/passwd exists)
+    if os.name != "nt":
+        assert Path("/etc/passwd").read_text() != "malicious", "System file should not be modified"
 
 
 def test_starter_files_rejects_nested_traversal(tmp_path):

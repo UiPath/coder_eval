@@ -1,6 +1,7 @@
 """Tests for the sandbox manager."""
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,9 @@ def test_tempdir_sandbox_basic():
         # Check venv was created
         venv_dir = sandbox_dir / ".venv"
         assert venv_dir.exists()
-        assert (venv_dir / "bin" / "python").exists()
+        scripts_dir = "Scripts" if os.name == "nt" else "bin"
+        python_name = "python.exe" if os.name == "nt" else "python"
+        assert (venv_dir / scripts_dir / python_name).exists()
 
     finally:
         # Cleanup
@@ -47,7 +50,7 @@ def test_sandbox_without_python_config():
         assert sandbox.venv_dir is None
 
         # Commands still work (using system PATH)
-        exit_code, stdout, _stderr = sandbox.run_command("echo 'hello'")
+        exit_code, stdout, _stderr = sandbox.run_command("python -c \"print('hello')\"")
         assert exit_code == 0
         assert "hello" in stdout
 
@@ -65,7 +68,7 @@ def test_sandbox_run_command():
         sandbox.setup()
 
         # Run a simple command
-        exit_code, stdout, _stderr = sandbox.run_command("echo 'Hello, World!'")
+        exit_code, stdout, _stderr = sandbox.run_command("python -c \"print('Hello, World!')\"")
         assert exit_code == 0
         assert "Hello, World!" in stdout
 
@@ -178,7 +181,7 @@ def test_sandbox_timeout():
         sandbox.setup()
 
         # Run a command that sleeps longer than timeout
-        exit_code, _stdout, stderr = sandbox.run_command("sleep 10", timeout=0.1)
+        exit_code, _stdout, stderr = sandbox.run_command('python -c "import time; time.sleep(10)"', timeout=0.1)
         assert exit_code == -1
         assert "timed out" in stderr.lower()
 
@@ -531,7 +534,9 @@ def test_sandbox_run_command_logging(caplog, clean_logging):
 
         # Run command that produces output
         with caplog.at_level(logging.DEBUG):
-            exit_code, stdout, stderr = sandbox.run_command("echo 'Hello' && echo 'Error' >&2")
+            exit_code, stdout, stderr = sandbox.run_command(
+                "python -c \"import sys; print('Hello'); print('Error', file=sys.stderr)\""
+            )
 
         # Verify command succeeded
         assert exit_code == 0
@@ -540,7 +545,7 @@ def test_sandbox_run_command_logging(caplog, clean_logging):
 
         # Verify logs were created with correct messages
         log_messages = [record.message for record in caplog.records if record.name == "coder_eval.sandbox"]
-        assert any("Command 'echo" in msg and "exited with code 0" in msg for msg in log_messages)
+        assert any("Command 'python" in msg and "exited with code 0" in msg for msg in log_messages)
         assert any("STDOUT:" in msg and "Hello" in msg for msg in log_messages)
         assert any("STDERR:" in msg and "Error" in msg for msg in log_messages)
 
@@ -559,7 +564,7 @@ def test_sandbox_run_command_timeout_logging(caplog, clean_logging):
         sandbox.setup()
 
         with caplog.at_level(logging.WARNING):
-            exit_code, _stdout, _stderr = sandbox.run_command("sleep 10", timeout=0.1)
+            exit_code, _stdout, _stderr = sandbox.run_command('python -c "import time; time.sleep(10)"', timeout=0.1)
 
         # Verify timeout logged at WARNING
         assert exit_code == -1
@@ -582,7 +587,7 @@ def test_sandbox_run_command_empty_output_not_logged(caplog, clean_logging):
         sandbox.setup()
 
         with caplog.at_level(logging.DEBUG):
-            sandbox.run_command("true")  # Command with no output
+            sandbox.run_command('python -c ""')  # Command with no output
 
         # Should log command completion but not empty output blocks
         log_messages = [record.message for record in caplog.records if record.name == "coder_eval.sandbox"]

@@ -1310,12 +1310,13 @@ def test_dump_sdk_options_converts_path():
 
     from coder_eval.agents.claude_code_agent import _dump_sdk_options
 
-    options = ClaudeAgentOptions(cwd=Path("/tmp/test"))
+    test_path = Path("/tmp/test")
+    options = ClaudeAgentOptions(cwd=test_path)
 
     dump = _dump_sdk_options(options)
 
     assert isinstance(dump["cwd"], str)
-    assert dump["cwd"] == "/tmp/test"
+    assert dump["cwd"] == str(test_path)
 
 
 def test_dump_sdk_options_handles_nested_dataclasses():
