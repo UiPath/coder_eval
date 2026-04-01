@@ -23,20 +23,20 @@ initial_prompt: |
 
   ## Step 1: Pull node data from registry
   Run all of these in parallel:
-    uip flow registry pull --format json > nodes_pull.json
-    uip flow registry pull --force --format json > nodes_pull_force.json
+    uip flow registry pull --output json > nodes_pull.json
+    uip flow registry pull --force --output json > nodes_pull_force.json
 
   ## Step 2: List and search nodes (ALL 4 in ONE parallel batch)
   Run all of these in parallel:
-    uip flow registry list --format json > nodes_list.json
-    uip flow registry list --format yaml > nodes_list.yaml
-    uip flow registry search http --format json > nodes_search_http.json
-    uip flow registry search --filter "category=agent" --format json > nodes_search_agent.json
+    uip flow registry list --output json > nodes_list.json
+    uip flow registry list --output yaml > nodes_list.yaml
+    uip flow registry search http --output json > nodes_search_http.json
+    uip flow registry search --filter "category=agent" --output json > nodes_search_agent.json
 
   ## Step 3: Get node details
   From the list or search output, pick a node type (e.g., `core.action.http`).
   Run:
-    uip flow registry get <nodeType> --format json > node_details.json
+    uip flow registry get <nodeType> --output json > node_details.json
 
   ## Step 4: Write summary report
   Create nodes_report.json:
@@ -47,14 +47,14 @@ initial_prompt: |
       "search_filter_used": "category=agent",
       "node_type_inspected": "<nodeType>",
       "formats_tested": ["json", "yaml"],
-      "options_exercised": ["--format json", "--format yaml", "--force", "--filter"],
+      "options_exercised": ["--output json", "--output yaml", "--force", "--filter"],
       "steps_completed": ["pull", "pull_force", "list", "list_yaml", "search_keyword", "search_filter", "get", "report"]
     }
 
   Important notes:
   - The `uip` CLI is already available in the environment.
   - Registry commands work locally after pull — no login required for list/search/get.
-  - Use `--format json` unless testing other formats.
+  - Use `--output json` unless testing other formats.
   - Maximize parallelism: Step 1 = 2 parallel calls, Step 2 = 4 parallel calls.
 
 success_criteria:
@@ -103,7 +103,7 @@ success_criteria:
   - type: command_executed
     description: "Agent listed nodes in YAML format"
     tool_name: "Bash"
-    command_pattern: 'uip\s+flow\s+registry\s+list.*--format\s+yaml'
+    command_pattern: 'uip\s+flow\s+registry\s+list.*--output\s+yaml'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
@@ -188,8 +188,8 @@ success_criteria:
     description: "Report confirms options were exercised"
     path: "nodes_report.json"
     includes:
-      - "--format json"
-      - "--format yaml"
+      - "--output json"
+      - "--output yaml"
       - "--force"
       - "--filter"
     weight: 1.0

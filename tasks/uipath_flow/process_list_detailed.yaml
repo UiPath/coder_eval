@@ -23,19 +23,19 @@ initial_prompt: |
   validated automatically.
 
   ## Step 0: Check login
-  Run `uip login status --format json`. If expired or not logged in,
+  Run `uip login status --output json`. If expired or not logged in,
   run `uip login` first.
 
   ## Step 1: List processes in JSON format
-  Run `uip flow process list --format json > processes.json`
+  Run `uip flow process list --output json > processes.json`
   to list all flow processes and save to file.
 
   ## Step 2: List processes in YAML format
-  Run `uip flow process list --format yaml > processes.yaml`
+  Run `uip flow process list --output yaml > processes.yaml`
   to get the same data in YAML format.
 
   ## Step 3: List processes with --limit option
-  Run `uip flow process list --format json --limit 5 > processes_limited.json`
+  Run `uip flow process list --output json --limit 5 > processes_limited.json`
   to list only the first 5 processes. If `--limit` is not supported, write to
   processes_limited.json:
     {"status": "skipped", "reason": "--limit option not supported"}
@@ -46,13 +46,13 @@ initial_prompt: |
       "command_used": "uip flow process list",
       "total_processes_found": <count from step 1>,
       "formats_tested": ["json", "yaml"],
-      "options_exercised": ["--format json", "--format yaml", "--limit"],
+      "options_exercised": ["--output json", "--output yaml", "--limit"],
       "steps_completed": ["list_json", "list_yaml", "list_limited", "report"]
     }
 
   Important notes:
   - The `uip` CLI is already available in the environment.
-  - Use `--format json` for JSON output unless testing other formats.
+  - Use `--output json` for JSON output unless testing other formats.
   - Some commands may require an active login session.
 
 success_criteria:
@@ -87,9 +87,9 @@ success_criteria:
     pass_threshold: 1.0
 
   - type: command_executed
-    description: "Agent used --format yaml option"
+    description: "Agent used --output yaml option"
     tool_name: "Bash"
-    command_pattern: 'uip\s+flow\s+process\s+list.*--format\s+yaml'
+    command_pattern: 'uip\s+flow\s+process\s+list.*--output\s+yaml'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
@@ -136,8 +136,8 @@ success_criteria:
     description: "Report confirms formats were tested"
     path: "process_list_report.json"
     includes:
-      - "--format json"
-      - "--format yaml"
+      - "--output json"
+      - "--output yaml"
     weight: 1.0
     pass_threshold: 1.0
 

@@ -19,9 +19,9 @@ initial_prompt: |
   for the Zoho Desk connector and save the output to activities.json in the current directory.
 
   Steps:
-  1. Check login status with `uip login status --format json`.
+  1. Check login status with `uip login status --output json`.
      If expired or not logged in, run `uip login` to re-authenticate first.
-  2. Run `uip is activities list uipath-zoho-desk --format json > activities.json`
+  2. Run `uip is activities list uipath-zoho-desk --output json > activities.json`
      to list activities and save directly to file in one command.
 
   Be efficient: redirect output directly to the file instead of running the command
@@ -33,7 +33,7 @@ initial_prompt: |
   - Some commands (like connectors list) work without auth, but activities list
     requires an active login session.
   - Only non-trigger activities are returned by the activities list command.
-  - Use `--format json` for JSON output.
+  - Use `--output json` for JSON output.
 
 success_criteria:
   - type: file_exists

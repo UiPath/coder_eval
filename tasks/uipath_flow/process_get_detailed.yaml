@@ -21,23 +21,23 @@ initial_prompt: |
   verification commands.
 
   ## Step 0: Check login
-  Run `uip login status --format json`. If expired or not logged in,
+  Run `uip login status --output json`. If expired or not logged in,
   run `uip login` first.
 
   ## Step 1: List processes
-  Run `uip flow process list --format json > processes.json`
+  Run `uip flow process list --output json > processes.json`
   to discover available processes.
 
   ## Step 2: Get process details
   From the processes list, extract a `process-key` (e.g., `MyFlow.flow.Flow:1.0.0`)
   and `feed-id`. Then run:
-    uip flow process get <process-key> <feed-id> --format json > process_details.json
+    uip flow process get <process-key> <feed-id> --output json > process_details.json
   If no processes are available, write to process_details.json:
     {"status": "skipped", "reason": "no processes found"}
 
   ## Step 3: Get process details in YAML format
-  Run the same get command with `--format yaml`:
-    uip flow process get <process-key> <feed-id> --format yaml > process_details.yaml
+  Run the same get command with `--output yaml`:
+    uip flow process get <process-key> <feed-id> --output yaml > process_details.yaml
   If no processes, write: {"status": "skipped", "reason": "no processes found"}
 
   ## Step 4: Write summary report
@@ -93,9 +93,9 @@ success_criteria:
     pass_threshold: 1.0
 
   - type: command_executed
-    description: "Agent used --format yaml on process get"
+    description: "Agent used --output yaml on process get"
     tool_name: "Bash"
-    command_pattern: 'uip\s+flow\s+process\s+get.*--format\s+yaml'
+    command_pattern: 'uip\s+flow\s+process\s+get.*--output\s+yaml'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0

@@ -22,7 +22,7 @@ initial_prompt: |
   verification commands.
 
   ## Step 1: Initialize a new Flow project
-  Run `uip flow init TestFlow --format json > init_result.json`
+  Run `uip flow init TestFlow --output json > init_result.json`
   This creates a new Flow project directory with boilerplate files.
 
   ## Step 2: Explore the generated project
@@ -31,15 +31,15 @@ initial_prompt: |
 
   ## Step 3: Validate the generated .flow file
   Find the .flow file in the TestFlow directory and validate it:
-    uip flow validate TestFlow/TestFlow.flow --format json > validate_result.json
+    uip flow validate TestFlow/TestFlow.flow --output json > validate_result.json
   Also try with --verbose:
-    uip flow validate TestFlow/TestFlow.flow --verbose --format json > validate_verbose.json
+    uip flow validate TestFlow/TestFlow.flow --verbose --output json > validate_verbose.json
 
   ## Step 4: Pack the project
   Pack the project into a .nupkg file:
-    uip flow pack TestFlow ./output --format json > pack_result.json
+    uip flow pack TestFlow ./output --output json > pack_result.json
   Also try with custom version:
-    uip flow pack TestFlow ./output --version 2.0.0 --format json > pack_versioned.json
+    uip flow pack TestFlow ./output --version 2.0.0 --output json > pack_versioned.json
 
   ## Step 5: Write summary report
   Create project_report.json:
@@ -49,7 +49,7 @@ initial_prompt: |
       "project_files": ["<list files from step 2>"],
       "validation_passed": <true|false>,
       "package_created": <true|false>,
-      "options_exercised": ["--format json", "--verbose", "--version"],
+      "options_exercised": ["--output json", "--verbose", "--version"],
       "steps_completed": ["init", "explore", "validate", "validate_verbose", "pack", "pack_versioned", "report"]
     }
 
@@ -168,7 +168,7 @@ success_criteria:
     description: "Report confirms options were exercised"
     path: "project_report.json"
     includes:
-      - "--format json"
+      - "--output json"
       - "--verbose"
       - "--version"
     weight: 1.0

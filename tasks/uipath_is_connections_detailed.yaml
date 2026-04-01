@@ -25,40 +25,40 @@ initial_prompt: |
   manually, and don't use todo lists or other tracking tools.
 
   ## Step 0: Check login
-  Run `uip login status --format json`. If expired or not logged in,
+  Run `uip login status --output json`. If expired or not logged in,
   run `uip login` first.
 
   ## Step 1: List connections
   List connections for the Zoho Desk connector, saving output directly:
-    uip is connections list uipath-zoho-desk --format json > connections_list.json
+    uip is connections list uipath-zoho-desk --output json > connections_list.json
 
   ## Step 2: List connections with options
   a) With --refresh:
-       uip is connections list uipath-zoho-desk --format json --refresh > connections_list_refresh.json
-  b) With --format yaml:
-       uip is connections list uipath-zoho-desk --format yaml > connections_list.yaml
+       uip is connections list uipath-zoho-desk --output json --refresh > connections_list_refresh.json
+  b) With --output yaml:
+       uip is connections list uipath-zoho-desk --output yaml > connections_list.yaml
   c) With --folder-key:
     First, extract a folder key from the connections_list.json output (connections
     have a "FolderKey" or "folder.key" field). If a folder key is available, run:
-      uip is connections list uipath-zoho-desk --folder-key <folder-key> --format json > connections_list_folder.json
+      uip is connections list uipath-zoho-desk --folder-key <folder-key> --output json > connections_list_folder.json
     If no folder key is found in the connections data, write to connections_list_folder.json:
       {"status": "skipped", "reason": "no folder key found in connections"}
 
   ## Step 3: Ping a connection
   If connections exist, ping one:
-    uip is connections ping <connection-id> --format json > connection_ping.json
+    uip is connections ping <connection-id> --output json > connection_ping.json
   If no connections, write: {"status": "skipped", "reason": "no connections found"}
 
   ## Step 4: Create a connection (browser OAuth)
   Run the create command (opens browser for OAuth, polls up to 5 min).
   Run it in the background, wait 120s for the user to authenticate, then kill it:
-    uip is connections create uipath-zoho-desk --format json > /tmp/create_out.txt 2>&1 &
+    uip is connections create uipath-zoho-desk --output json > /tmp/create_out.txt 2>&1 &
     PID=$!; sleep 120; kill $PID 2>/dev/null
   Copy /tmp/create_out.txt to connection_create_attempt.json (or write a skip note if empty).
 
   ## Step 5: Attempt edit (non-interactive)
   If connections exist, attempt re-auth with --no-browser (8s timeout):
-    uip is connections edit <connection-id> --no-browser --format json > /tmp/edit_out.txt 2>&1 &
+    uip is connections edit <connection-id> --no-browser --output json > /tmp/edit_out.txt 2>&1 &
     PID=$!; sleep 8; kill $PID 2>/dev/null
   Save to connection_edit_attempt.json (or write a skip note if no connections).
 
@@ -73,13 +73,13 @@ initial_prompt: |
       "edit_attempted": <true|false>,
       "edit_used_no_browser": <true|false>,
       "folder_key_used": "<folder-key or null>",
-      "options_exercised": ["--format json", "--format yaml", "--refresh", "--folder-key"],
+      "options_exercised": ["--output json", "--output yaml", "--refresh", "--folder-key"],
       "steps_completed": ["list_connections", "list_with_options", "ping", "create_attempt", "edit_attempt", "report"]
     }
 
   Important notes:
   - The `uip` CLI is already available.
-  - Use --format json unless testing other formats.
+  - Use --output json unless testing other formats.
   - Step 5 create opens a REAL browser — wait 120s for user to complete OAuth.
   - Step 6 edit uses --no-browser and 8s timeout since it's non-interactive.
   - Do NOT use `timeout` command (not on macOS). Do NOT use TodoWrite.
@@ -116,9 +116,9 @@ success_criteria:
     pass_threshold: 1.0
 
   - type: command_executed
-    description: "Agent used --format yaml option"
+    description: "Agent used --output yaml option"
     tool_name: "Bash"
-    command_pattern: 'uip\s+is\s+connections\s+list\s+\S+.*--format\s+yaml'
+    command_pattern: 'uip\s+is\s+connections\s+list\s+\S+.*--output\s+yaml'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
@@ -207,8 +207,8 @@ success_criteria:
     description: "Report confirms options were exercised"
     path: "connections_report.json"
     includes:
-      - "--format json"
-      - "--format yaml"
+      - "--output json"
+      - "--output yaml"
       - "--refresh"
       - "--folder-key"
     weight: 1.0

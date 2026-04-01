@@ -24,30 +24,30 @@ initial_prompt: |
   verification commands.
 
   ## Step 0: Check login
-  Run `uip login status --format json`. If expired or not logged in,
+  Run `uip login status --output json`. If expired or not logged in,
   run `uip login` first.
 
   ## Step 1: List all flow processes
-  Run `uip flow process list --format json > processes.json`
+  Run `uip flow process list --output json > processes.json`
   to discover available processes with their process-key and folder-key.
 
   ## Step 2: Select and run the first process
   Parse processes.json to extract the process-key and folder-key of the
   **first** process in the list. Then run:
-    uip flow process run <process-key> <folder-key> --format json > run_result.json
+    uip flow process run <process-key> <folder-key> --output json > run_result.json
   If no processes are available, write to run_result.json:
     {"status": "skipped", "reason": "no processes found"}
   and skip to Step 5.
 
   ## Step 3: Check job status
   From run_result.json, extract the job-key. Then run:
-    uip flow job status <job-key> --format json > job_status.json
+    uip flow job status <job-key> --output json > job_status.json
   Wait a few seconds and check status again to see if it has progressed:
-    uip flow job status <job-key> --format json > job_status_final.json
+    uip flow job status <job-key> --output json > job_status_final.json
 
   ## Step 4: Retrieve job traces
   Get execution traces for the job:
-    uip flow job traces <job-key> --format json > job_traces.json 2>&1 &
+    uip flow job traces <job-key> --output json > job_traces.json 2>&1 &
     PID=$!; sleep 15; kill $PID 2>/dev/null
   If traces output is empty, write:
     {"status": "completed", "reason": "no traces captured in time window"}
