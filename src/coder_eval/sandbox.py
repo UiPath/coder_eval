@@ -320,7 +320,7 @@ class Sandbox:
         if not node_modules.exists():
             return
 
-        # Extract package names from specifiers (strip version: "@uipath/uipcli@0.1.5" -> "@uipath/uipcli")
+        # Extract package names from specifiers (strip version: "@uipath/cli@0.1.5" -> "@uipath/cli")
         requested_names: set[str] = set()
         for spec in self.config.node.env_packages:
             if spec.startswith("@"):

@@ -68,7 +68,7 @@ class NodeEnvConfig(BaseModel):
     """Configuration for Node.js environment in the sandbox."""
 
     env_packages: list[str] = Field(
-        default_factory=list, description="npm packages to install (e.g., '@uipath/uipcli@0.1.5')"
+        default_factory=list, description="npm packages to install (e.g., '@uipath/cli@0.1.5')"
     )
 
 

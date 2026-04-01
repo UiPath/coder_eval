@@ -12,7 +12,7 @@ sandbox:
   python_version: "3.13"
   node:
     env_packages:
-      - "@uipath/uipcli@0.1.5"
+      - "@uipath/cli@0.1.5"
   template_sources:
     - type: template_dir
       path: "../../../templates/uipath-flow-starter"

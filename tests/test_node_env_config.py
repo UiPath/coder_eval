@@ -15,9 +15,9 @@ def test_node_env_config_defaults():
 
 def test_node_env_config_with_packages():
     """NodeEnvConfig accepts package specifiers."""
-    config = NodeEnvConfig(env_packages=["@uipath/uipcli@0.1.5", "typescript@5.0.0"])
+    config = NodeEnvConfig(env_packages=["@uipath/cli@0.1.5", "typescript@5.0.0"])
     assert len(config.env_packages) == 2
-    assert config.env_packages[0] == "@uipath/uipcli@0.1.5"
+    assert config.env_packages[0] == "@uipath/cli@0.1.5"
 
 
 def test_sandbox_config_node_default_none():
@@ -28,17 +28,17 @@ def test_sandbox_config_node_default_none():
 
 def test_sandbox_config_with_node():
     """SandboxConfig accepts node configuration."""
-    config = SandboxConfig(node=NodeEnvConfig(env_packages=["@uipath/uipcli@0.1.5"]))
+    config = SandboxConfig(node=NodeEnvConfig(env_packages=["@uipath/cli@0.1.5"]))
     assert config.node is not None
-    assert config.node.env_packages == ["@uipath/uipcli@0.1.5"]
+    assert config.node.env_packages == ["@uipath/cli@0.1.5"]
 
 
 def test_sandbox_config_from_dict():
     """SandboxConfig can be created from dict (simulating YAML parsing)."""
-    data = {"driver": "tempdir", "node": {"env_packages": ["@uipath/uipcli@0.1.5"]}}
+    data = {"driver": "tempdir", "node": {"env_packages": ["@uipath/cli@0.1.5"]}}
     config = SandboxConfig(**data)
     assert config.node is not None
-    assert config.node.env_packages == ["@uipath/uipcli@0.1.5"]
+    assert config.node.env_packages == ["@uipath/cli@0.1.5"]
 
 
 def test_install_node_packages_called_when_configured():
@@ -46,7 +46,7 @@ def test_install_node_packages_called_when_configured():
     config = SandboxConfig(
         driver="tempdir",
         python=None,
-        node=NodeEnvConfig(env_packages=["@uipath/uipcli@0.1.5"]),
+        node=NodeEnvConfig(env_packages=["@uipath/cli@0.1.5"]),
     )
     sandbox = Sandbox(config, task_id="test_node")
 
@@ -135,22 +135,22 @@ class TestCaptureNodeToolVersions:
         (pkg_dir / "package.json").write_text(json.dumps({"name": pkg_path, "version": version}))
 
     def test_scoped_with_version(self):
-        """@uipath/uipcli@0.1.5 resolves to @uipath/uipcli."""
-        sandbox = self._setup_sandbox_with_packages(["@uipath/uipcli@0.1.5"])
+        """@uipath/cli@0.1.5 resolves to @uipath/cli."""
+        sandbox = self._setup_sandbox_with_packages(["@uipath/cli@0.1.5"])
         try:
-            self._create_package_json(sandbox, "@uipath/uipcli", "0.1.5")
+            self._create_package_json(sandbox, "@uipath/cli", "0.1.5")
             sandbox._capture_node_tool_versions()
-            assert sandbox.installed_tool_versions == {"@uipath/uipcli": "0.1.5"}
+            assert sandbox.installed_tool_versions == {"@uipath/cli": "0.1.5"}
         finally:
             sandbox.cleanup()
 
     def test_scoped_without_version(self):
-        """@uipath/uipcli (no version) resolves to @uipath/uipcli."""
-        sandbox = self._setup_sandbox_with_packages(["@uipath/uipcli"])
+        """@uipath/cli (no version) resolves to @uipath/cli."""
+        sandbox = self._setup_sandbox_with_packages(["@uipath/cli"])
         try:
-            self._create_package_json(sandbox, "@uipath/uipcli", "1.0.0")
+            self._create_package_json(sandbox, "@uipath/cli", "1.0.0")
             sandbox._capture_node_tool_versions()
-            assert sandbox.installed_tool_versions == {"@uipath/uipcli": "1.0.0"}
+            assert sandbox.installed_tool_versions == {"@uipath/cli": "1.0.0"}
         finally:
             sandbox.cleanup()
 
@@ -176,12 +176,12 @@ class TestCaptureNodeToolVersions:
 
     def test_multiple_packages(self):
         """Multiple packages are all captured."""
-        sandbox = self._setup_sandbox_with_packages(["@uipath/uipcli@0.1.5", "typescript@5.0.0"])
+        sandbox = self._setup_sandbox_with_packages(["@uipath/cli@0.1.5", "typescript@5.0.0"])
         try:
-            self._create_package_json(sandbox, "@uipath/uipcli", "0.1.5")
+            self._create_package_json(sandbox, "@uipath/cli", "0.1.5")
             self._create_package_json(sandbox, "typescript", "5.0.0")
             sandbox._capture_node_tool_versions()
-            assert sandbox.installed_tool_versions == {"@uipath/uipcli": "0.1.5", "typescript": "5.0.0"}
+            assert sandbox.installed_tool_versions == {"@uipath/cli": "0.1.5", "typescript": "5.0.0"}
         finally:
             sandbox.cleanup()
 

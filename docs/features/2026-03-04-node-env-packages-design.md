@@ -6,7 +6,7 @@
 
 ## Problem
 
-The uipath-flow evaluation tasks require `uipcli` (an npm package: `@uipath/uipcli`) to be available in the sandbox. Currently there is no mechanism to install npm packages during sandbox setup. Different versions of `uipcli` impact task performance, so we need version pinning and version reporting.
+The uipath-flow evaluation tasks require `uipcli` (an npm package: `@uipath/cli`) to be available in the sandbox. Currently there is no mechanism to install npm packages during sandbox setup. Different versions of `uipcli` impact task performance, so we need version pinning and version reporting.
 
 ## Requirements
 
@@ -24,7 +24,7 @@ New `NodeEnvConfig` in `models/sandbox.py`, mirroring `PythonEnvConfig`:
 class NodeEnvConfig(BaseModel):
     env_packages: list[str] = Field(
         default_factory=list,
-        description="npm packages to install (e.g., '@uipath/uipcli@0.1.5')"
+        description="npm packages to install (e.g., '@uipath/cli@0.1.5')"
     )
 ```
 
@@ -44,7 +44,7 @@ sandbox:
   driver: tempdir
   node:
     env_packages:
-      - "@uipath/uipcli@0.1.5"
+      - "@uipath/cli@0.1.5"
 ```
 
 ### Installation

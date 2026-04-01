@@ -837,7 +837,7 @@ def test_generate_markdown_with_installed_tools():
                 1.0,
                 60.0,
                 iteration_count=1,
-                installed_tools={"@uipath/uipcli": "0.1.5"},
+                installed_tools={"@uipath/cli": "0.1.5"},
             ),
             _make_task_result(
                 "task2",
@@ -845,7 +845,7 @@ def test_generate_markdown_with_installed_tools():
                 0.9,
                 60.0,
                 iteration_count=1,
-                installed_tools={"@uipath/uipcli": "0.1.5"},
+                installed_tools={"@uipath/cli": "0.1.5"},
             ),
         ],
         framework_version="0.1.0",
@@ -856,8 +856,8 @@ def test_generate_markdown_with_installed_tools():
 
     assert "## Installed Tools" in report_md
     assert "| Task ID | Tool | Version |" in report_md
-    assert "| task1 | @uipath/uipcli | 0.1.5 |" in report_md
-    assert "| task2 | @uipath/uipcli | 0.1.5 |" in report_md
+    assert "| task1 | @uipath/cli | 0.1.5 |" in report_md
+    assert "| task2 | @uipath/cli | 0.1.5 |" in report_md
     # Should appear before Environment
     tools_idx = report_md.index("## Installed Tools")
     env_idx = report_md.index("## Environment")
@@ -882,7 +882,7 @@ def test_generate_markdown_installed_tools_multiple_per_task():
                 1.0,
                 60.0,
                 iteration_count=1,
-                installed_tools={"@uipath/uipcli": "0.1.5", "@uipath/sdk": "2.0.0"},
+                installed_tools={"@uipath/cli": "0.1.5", "@uipath/sdk": "2.0.0"},
             ),
         ],
         framework_version="0.1.0",
@@ -893,7 +893,7 @@ def test_generate_markdown_installed_tools_multiple_per_task():
 
     assert "## Installed Tools" in report_md
     assert "| task1 | @uipath/sdk | 2.0.0 |" in report_md
-    assert "| task1 | @uipath/uipcli | 0.1.5 |" in report_md
+    assert "| task1 | @uipath/cli | 0.1.5 |" in report_md
 
 
 def test_generate_markdown_no_installed_tools():
