@@ -31,6 +31,7 @@ from coder_eval.models.criteria import (
 from coder_eval.models.enums import (
     AgentKind,
     AgentState,
+    FinalStatus,
     SnapshotMode,
 )
 
@@ -112,6 +113,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     # Enums
     "AgentKind",
     "AgentState",
+    "FinalStatus",
     "SnapshotMode",
     # Criteria
     "BaseSuccessCriterion",

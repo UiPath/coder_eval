@@ -1,6 +1,42 @@
 """Enumeration types for coder_eval."""
 
 from enum import StrEnum
+from typing import Literal
+
+
+class FinalStatus(StrEnum):
+    """Final evaluation status for a task."""
+
+    SUCCESS = "SUCCESS"
+    FAILURE = "FAILURE"
+    ERROR = "ERROR"
+    TIMEOUT = "TIMEOUT"
+    MAX_TURNS_EXHAUSTED = "MAX_TURNS_EXHAUSTED"
+
+    @property
+    def category(self) -> Literal["succeeded", "failed", "error"]:
+        """Classify this status into a reporting category."""
+        if self == FinalStatus.SUCCESS:
+            return "succeeded"
+        if self == FinalStatus.ERROR:
+            return "error"
+        return "failed"
+
+    @property
+    def icon(self) -> str:
+        """Single-character icon for reports and CLI output."""
+        return _STATUS_ICONS[self]
+
+
+_STATUS_ICONS: dict[FinalStatus, str] = {
+    FinalStatus.SUCCESS: "+",
+    FinalStatus.FAILURE: "-",
+    FinalStatus.ERROR: "!",
+    FinalStatus.TIMEOUT: "T",
+    FinalStatus.MAX_TURNS_EXHAUSTED: "M",
+}
+
+assert set(_STATUS_ICONS) == set(FinalStatus), "Missing icon for FinalStatus member"
 
 
 class AgentKind(StrEnum):

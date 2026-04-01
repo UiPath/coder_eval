@@ -566,6 +566,7 @@ def aggregate_results(
                 tasks_run=0,
                 tasks_succeeded=0,
                 tasks_failed=0,
+                tasks_error=0,
                 average_score=0.0,
                 average_duration=0.0,
             )
@@ -576,10 +577,9 @@ def aggregate_results(
         variant_aggregates[vid] = VariantAggregate(
             variant_id=vid,
             tasks_run=len(vr_list),
-            tasks_succeeded=sum(1 for v in vr_list if v.final_status == "SUCCESS"),
-            tasks_failed=sum(
-                1 for v in vr_list if v.final_status in ("FAILURE", "ERROR", "TIMEOUT", "MAX_TURNS_EXHAUSTED")
-            ),
+            tasks_succeeded=sum(1 for v in vr_list if v.final_status.category == "succeeded"),
+            tasks_failed=sum(1 for v in vr_list if v.final_status.category == "failed"),
+            tasks_error=sum(1 for v in vr_list if v.final_status.category == "error"),
             average_score=sum(v.weighted_score for v in vr_list) / len(vr_list),
             average_duration=sum(v.duration_seconds for v in vr_list) / len(vr_list),
             total_tokens=total_tokens,

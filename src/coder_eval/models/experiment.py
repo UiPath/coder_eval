@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from coder_eval.models.enums import FinalStatus
 from coder_eval.models.results import ConfigLineageEntry, EvaluationResult
 from coder_eval.models.tasks import TaskDefinition
 from coder_eval.models.templates import TemplateSource
@@ -69,7 +70,7 @@ class VariantResult(BaseModel):
     variant_id: str
     task_id: str
     weighted_score: float
-    final_status: str
+    final_status: FinalStatus
     duration_seconds: float
     total_tokens: int | None = None
     iteration_count: int | None = None
@@ -84,9 +85,19 @@ class VariantAggregate(BaseModel):
     tasks_run: int
     tasks_succeeded: int
     tasks_failed: int
+    tasks_error: int
     average_score: float
     average_duration: float
     total_tokens: int | None = None
+
+    @model_validator(mode="after")
+    def _check_task_count_invariant(self) -> VariantAggregate:
+        if self.tasks_succeeded + self.tasks_failed + self.tasks_error != self.tasks_run:
+            raise ValueError(
+                f"Task count invariant violated: {self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error}"
+                f" != {self.tasks_run}"
+            )
+        return self
 
 
 class TaskExperimentSummary(BaseModel):

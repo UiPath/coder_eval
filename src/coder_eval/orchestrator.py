@@ -30,6 +30,7 @@ from .models import (
     ConfigLineageEntry,
     DirectRoute,
     EvaluationResult,
+    FinalStatus,
     ProxyRoute,
     ResolvedTask,
     RunSummary,
@@ -180,7 +181,7 @@ class Orchestrator:
             variant_id=self.variant_id,
             agent_type=self.task.agent.type,
             started_at=started_at,
-            final_status="FAILURE",  # Will be updated
+            final_status=FinalStatus.FAILURE,  # Will be updated
             iteration_count=0,
             environment_info=get_version_info(),
         )
@@ -211,18 +212,18 @@ class Orchestrator:
 
                 # Update final status
                 if success:
-                    self.result.final_status = "SUCCESS"
+                    self.result.final_status = FinalStatus.SUCCESS
                 elif self.result.max_turns_exhausted:
-                    self.result.final_status = "MAX_TURNS_EXHAUSTED"
+                    self.result.final_status = FinalStatus.MAX_TURNS_EXHAUSTED
                 else:
-                    self.result.final_status = "FAILURE"
+                    self.result.final_status = FinalStatus.FAILURE
 
             except asyncio.CancelledError:
                 # Re-raise cancellation to allow proper task cancellation
                 raise
             except TaskTimeoutError as e:
                 # Task-level timeout gets a dedicated status (not generic ERROR)
-                self.result.final_status = "TIMEOUT"
+                self.result.final_status = FinalStatus.TIMEOUT
                 self.result.error_message = str(e)
 
                 self.result.error_details = create_error_context(
@@ -236,7 +237,7 @@ class Orchestrator:
                 logger.error(f"Task timed out: {e}")
             except Exception as e:
                 # Handle catastrophic errors
-                self.result.final_status = "ERROR"
+                self.result.final_status = FinalStatus.ERROR
                 self.result.error_message = str(e)
 
                 # Determine which component failed (setup vs. iteration N)

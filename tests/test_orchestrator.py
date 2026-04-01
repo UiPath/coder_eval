@@ -502,6 +502,76 @@ def test_generate_run_summary(tmp_path):
     assert (tmp_path / "run.md").exists()
 
 
+def test_generate_run_summary_mixed_statuses(tmp_path):
+    """Test that tasks_failed excludes ERROR tasks (counted separately in tasks_error)."""
+    from datetime import datetime
+
+    from coder_eval.models import AgentKind, EvaluationResult, TaskResult
+    from coder_eval.orchestration.batch import _generate_run_summary
+
+    results = [
+        TaskResult(
+            task_id="task1",
+            variant_id="v",
+            result=EvaluationResult(
+                task_id="task1",
+                task_description="ok",
+                variant_id="v",
+                agent_type=AgentKind.CLAUDE_CODE,
+                started_at=datetime.now(),
+                final_status="SUCCESS",
+                iteration_count=1,
+                environment_info={},
+            ),
+            duration=1.0,
+        ),
+        TaskResult(
+            task_id="task2",
+            variant_id="v",
+            result=EvaluationResult(
+                task_id="task2",
+                task_description="fail",
+                variant_id="v",
+                agent_type=AgentKind.CLAUDE_CODE,
+                started_at=datetime.now(),
+                final_status="FAILURE",
+                iteration_count=1,
+                environment_info={},
+            ),
+            duration=2.0,
+        ),
+        TaskResult(
+            task_id="task3",
+            variant_id="v",
+            result=EvaluationResult(
+                task_id="task3",
+                task_description="err",
+                variant_id="v",
+                agent_type=AgentKind.CLAUDE_CODE,
+                started_at=datetime.now(),
+                final_status="ERROR",
+                iteration_count=0,
+                environment_info={},
+            ),
+            duration=0.5,
+        ),
+    ]
+
+    summary = _generate_run_summary(
+        run_dir=tmp_path,
+        task_results=results,
+        start_time=datetime.now(),
+        end_time=datetime.now(),
+    )
+
+    assert summary.tasks_run == 3
+    assert summary.tasks_succeeded == 1
+    assert summary.tasks_failed == 1  # only FAILURE, not ERROR
+    assert summary.tasks_error == 1
+    # Invariant: succeeded + failed + error == total
+    assert summary.tasks_succeeded + summary.tasks_failed + summary.tasks_error == summary.tasks_run
+
+
 def test_create_error_result(tmp_path):
     """Test error result creation for failed tasks."""
     from coder_eval.models import TaskResult

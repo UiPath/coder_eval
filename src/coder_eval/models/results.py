@@ -6,10 +6,10 @@ import logging
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from coder_eval.models.criteria import SuccessCriterion
-from coder_eval.models.enums import AgentKind
+from coder_eval.models.enums import AgentKind, FinalStatus
 from coder_eval.models.tasks import AgentConfig
 from coder_eval.models.telemetry import CommandStatistics, CommandTelemetry, TokenUsage
 
@@ -128,9 +128,7 @@ class EvaluationResult(BaseModel):
     duration_seconds: float = Field(default=0.0, description="Total evaluation duration")
 
     # Results
-    final_status: Literal["SUCCESS", "FAILURE", "ERROR", "TIMEOUT", "MAX_TURNS_EXHAUSTED"] = Field(
-        description="Final status of the evaluation"
-    )
+    final_status: FinalStatus = Field(description="Final status of the evaluation")
     max_turns_exhausted: bool = Field(
         default=False,
         description="Whether any iteration hit the agent max_turns limit without the agent voluntarily completing",
@@ -250,3 +248,12 @@ class RunSummary(BaseModel):
     # Environment info
     framework_version: str = Field(description="Version of coder_eval framework")
     environment_info: dict[str, str] = Field(default_factory=dict, description="Environment and dependency versions")
+
+    @model_validator(mode="after")
+    def _check_task_count_invariant(self) -> RunSummary:
+        if self.tasks_succeeded + self.tasks_failed + self.tasks_error != self.tasks_run:
+            raise ValueError(
+                f"Task count invariant violated: {self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error}"
+                f" != {self.tasks_run}"
+            )
+        return self

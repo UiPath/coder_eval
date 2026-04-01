@@ -265,6 +265,52 @@ class TestAggregateResults:
         assert result.variant_aggregates["a"].tasks_run == 2
         assert result.variant_aggregates["b"].tasks_succeeded == 2
 
+    def test_aggregate_separates_error_from_failed(self):
+        """aggregate_results counts ERROR separately from FAILURE/TIMEOUT."""
+        variant_ids = ["v"]
+
+        task_results = [
+            TaskResult(
+                task_id="t1",
+                variant_id="v",
+                result=self._make_eval_result("t1", "SUCCESS", 0.9, 10.0, variant_id="v"),
+                duration=10.0,
+            ),
+            TaskResult(
+                task_id="t2",
+                variant_id="v",
+                result=self._make_eval_result("t2", "FAILURE", 0.2, 20.0, variant_id="v"),
+                duration=20.0,
+            ),
+            TaskResult(
+                task_id="t3",
+                variant_id="v",
+                result=self._make_eval_result("t3", "ERROR", 0.0, 5.0, variant_id="v"),
+                duration=5.0,
+            ),
+            TaskResult(
+                task_id="t4",
+                variant_id="v",
+                result=self._make_eval_result("t4", "TIMEOUT", 0.0, 30.0, variant_id="v"),
+                duration=30.0,
+            ),
+        ]
+
+        result = aggregate_results(
+            experiment_id="error-test",
+            description="Error separation test",
+            variant_ids=variant_ids,
+            task_results=task_results,
+            total_duration=65.0,
+        )
+
+        agg = result.variant_aggregates["v"]
+        assert agg.tasks_run == 4
+        assert agg.tasks_succeeded == 1
+        assert agg.tasks_failed == 2  # FAILURE + TIMEOUT
+        assert agg.tasks_error == 1  # only ERROR
+        assert agg.tasks_succeeded + agg.tasks_failed + agg.tasks_error == agg.tasks_run
+
     def test_aggregate_detects_ties(self):
         """aggregate_results marks tasks with equal top scores as ties."""
         variant_ids = ["a", "b"]

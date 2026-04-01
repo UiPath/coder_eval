@@ -121,7 +121,8 @@ class ReportGenerator:
         Returns:
             Markdown-formatted report string
         """
-        success_rate = (summary.tasks_succeeded / summary.tasks_run * 100) if summary.tasks_run > 0 else 0
+        evaluable = summary.tasks_run - summary.tasks_error
+        success_rate = (summary.tasks_succeeded / evaluable * 100) if evaluable > 0 else 0
 
         # Collect unique models across all tasks
         models = sorted({t["model_used"] for t in summary.task_results if t.get("model_used")})

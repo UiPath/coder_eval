@@ -58,6 +58,7 @@ class TestResultModels:
                     tasks_run=5,
                     tasks_succeeded=4,
                     tasks_failed=1,
+                    tasks_error=0,
                     average_score=0.85,
                     average_duration=30.0,
                 ),
@@ -66,6 +67,7 @@ class TestResultModels:
                     tasks_run=5,
                     tasks_succeeded=3,
                     tasks_failed=2,
+                    tasks_error=0,
                     average_score=0.7,
                     average_duration=45.0,
                 ),
@@ -136,6 +138,7 @@ class TestExperimentReportGenerator:
                     tasks_run=2,
                     tasks_succeeded=1,
                     tasks_failed=1,
+                    tasks_error=0,
                     average_score=0.7,
                     average_duration=35.0,
                     total_tokens=2200,
@@ -145,6 +148,7 @@ class TestExperimentReportGenerator:
                     tasks_run=2,
                     tasks_succeeded=1,
                     tasks_failed=1,
+                    tasks_error=0,
                     average_score=0.825,
                     average_duration=55.0,
                     total_tokens=3800,
@@ -166,6 +170,150 @@ class TestExperimentReportGenerator:
         assert "model-comparison" in md
         assert "sonnet" in md
         assert "opus" in md
+
+    def test_experiment_report_shows_errors_row(self):
+        """experiment report should show Errors row with non-zero counts."""
+        result = ExperimentResult(
+            experiment_id="error-test",
+            description="Error test",
+            variant_ids=["v"],
+            task_summaries=[
+                TaskExperimentSummary(
+                    task_id="t1",
+                    variant_results=[
+                        VariantResult(
+                            variant_id="v",
+                            task_id="t1",
+                            weighted_score=0.9,
+                            final_status="SUCCESS",
+                            duration_seconds=10.0,
+                        ),
+                    ],
+                    best_variant="v",
+                    score_spread=0.0,
+                ),
+                TaskExperimentSummary(
+                    task_id="t2",
+                    variant_results=[
+                        VariantResult(
+                            variant_id="v",
+                            task_id="t2",
+                            weighted_score=0.0,
+                            final_status="ERROR",
+                            duration_seconds=5.0,
+                        ),
+                    ],
+                    best_variant="v",
+                    score_spread=0.0,
+                ),
+            ],
+            variant_aggregates={
+                "v": VariantAggregate(
+                    variant_id="v",
+                    tasks_run=2,
+                    tasks_succeeded=1,
+                    tasks_failed=0,
+                    tasks_error=1,
+                    average_score=0.45,
+                    average_duration=7.5,
+                ),
+            },
+            total_duration_seconds=15.0,
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "| Errors" in md
+        assert "| 1 |" in md
+
+    def test_experiment_report_variant_summary_shows_errors(self):
+        """variant summary should display error count."""
+        result = ExperimentResult(
+            experiment_id="error-variant-test",
+            description="Error variant test",
+            variant_ids=["v"],
+            task_summaries=[
+                TaskExperimentSummary(
+                    task_id="t1",
+                    variant_results=[
+                        VariantResult(
+                            variant_id="v",
+                            task_id="t1",
+                            weighted_score=0.0,
+                            final_status="ERROR",
+                            duration_seconds=5.0,
+                        ),
+                    ],
+                    best_variant="v",
+                    score_spread=0.0,
+                ),
+            ],
+            variant_aggregates={
+                "v": VariantAggregate(
+                    variant_id="v",
+                    tasks_run=1,
+                    tasks_succeeded=0,
+                    tasks_failed=0,
+                    tasks_error=1,
+                    average_score=0.0,
+                    average_duration=5.0,
+                ),
+            },
+            total_duration_seconds=5.0,
+        )
+        md = ExperimentReportGenerator.generate_variant_report("v", result)
+        assert "**Errors**: 1" in md
+
+    def test_task_detail_table_shows_timeout_icon(self):
+        """TIMEOUT and MAX_TURNS_EXHAUSTED should get distinct icons, not '?'."""
+        result = ExperimentResult(
+            experiment_id="icon-test",
+            description="Icon test",
+            variant_ids=["v"],
+            task_summaries=[
+                TaskExperimentSummary(
+                    task_id="t-timeout",
+                    variant_results=[
+                        VariantResult(
+                            variant_id="v",
+                            task_id="t-timeout",
+                            weighted_score=0.0,
+                            final_status="TIMEOUT",
+                            duration_seconds=60.0,
+                        ),
+                    ],
+                    best_variant="v",
+                    score_spread=0.0,
+                ),
+                TaskExperimentSummary(
+                    task_id="t-exhausted",
+                    variant_results=[
+                        VariantResult(
+                            variant_id="v",
+                            task_id="t-exhausted",
+                            weighted_score=0.0,
+                            final_status="MAX_TURNS_EXHAUSTED",
+                            duration_seconds=30.0,
+                        ),
+                    ],
+                    best_variant="v",
+                    score_spread=0.0,
+                ),
+            ],
+            variant_aggregates={
+                "v": VariantAggregate(
+                    variant_id="v",
+                    tasks_run=2,
+                    tasks_succeeded=0,
+                    tasks_failed=2,
+                    tasks_error=0,
+                    average_score=0.0,
+                    average_duration=45.0,
+                ),
+            },
+            total_duration_seconds=90.0,
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        # TIMEOUT and MAX_TURNS_EXHAUSTED should NOT show "?" — they should have real icons
+        assert "(?)" not in md
 
     def test_generate_task_summary_json(self, sample_result):
         """task summary json should be serializable."""
@@ -237,6 +385,7 @@ class TestExperimentReportGenerator:
                     tasks_run=2,
                     tasks_succeeded=2,
                     tasks_failed=0,
+                    tasks_error=0,
                     average_score=0.85,
                     average_duration=10.0,
                 ),
@@ -245,6 +394,7 @@ class TestExperimentReportGenerator:
                     tasks_run=2,
                     tasks_succeeded=1,
                     tasks_failed=1,
+                    tasks_error=0,
                     average_score=0.65,
                     average_duration=10.0,
                 ),
@@ -319,6 +469,7 @@ class TestReportFileWriting:
                     tasks_run=2,
                     tasks_succeeded=1,
                     tasks_failed=1,
+                    tasks_error=0,
                     average_score=0.7,
                     average_duration=35.0,
                     total_tokens=2200,
@@ -328,6 +479,7 @@ class TestReportFileWriting:
                     tasks_run=2,
                     tasks_succeeded=1,
                     tasks_failed=1,
+                    tasks_error=0,
                     average_score=0.825,
                     average_duration=55.0,
                     total_tokens=3800,
@@ -436,6 +588,7 @@ class TestAggregateMetrics:
                     tasks_run=2,
                     tasks_succeeded=2,
                     tasks_failed=0,
+                    tasks_error=0,
                     average_score=0.85,
                     average_duration=35.0,
                     total_tokens=2200,
@@ -445,6 +598,7 @@ class TestAggregateMetrics:
                     tasks_run=2,
                     tasks_succeeded=0,
                     tasks_failed=2,
+                    tasks_error=0,
                     average_score=0.65,
                     average_duration=55.0,
                     total_tokens=3300,
@@ -513,6 +667,7 @@ class TestAggregateMetrics:
                     tasks_run=1,
                     tasks_succeeded=1,
                     tasks_failed=0,
+                    tasks_error=0,
                     average_score=0.9,
                     average_duration=30.0,
                 ),
@@ -521,6 +676,7 @@ class TestAggregateMetrics:
                     tasks_run=1,
                     tasks_succeeded=1,
                     tasks_failed=0,
+                    tasks_error=0,
                     average_score=0.8,
                     average_duration=40.0,
                 ),
@@ -529,6 +685,7 @@ class TestAggregateMetrics:
                     tasks_run=1,
                     tasks_succeeded=0,
                     tasks_failed=1,
+                    tasks_error=0,
                     average_score=0.7,
                     average_duration=50.0,
                 ),
@@ -654,6 +811,7 @@ class TestComprehensiveVariantReport:
                     tasks_run=1,
                     tasks_succeeded=1,
                     tasks_failed=0,
+                    tasks_error=0,
                     average_score=0.9,
                     average_duration=60.0,
                 ),
@@ -700,6 +858,7 @@ class TestComprehensiveVariantReport:
                     tasks_run=1,
                     tasks_succeeded=0,
                     tasks_failed=1,
+                    tasks_error=0,
                     average_score=0.5,
                     average_duration=10.0,
                 ),

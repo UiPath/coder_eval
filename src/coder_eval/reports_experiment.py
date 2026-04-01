@@ -334,11 +334,21 @@ class ExperimentReportGenerator:
             row += " | —"
         lines.append(row + " |")
 
-        # Row: Success Rate
+        # Row: Errors
+        row = "| Errors"
+        for vid in result.variant_ids:
+            agg = result.variant_aggregates[vid]
+            row += f" | {agg.tasks_error}"
+        if show_p_values:
+            row += " | —"
+        lines.append(row + " |")
+
+        # Row: Success Rate (errors excluded from denominator — they're infrastructure failures, not task failures)
         row = "| Success Rate"
         for vid in result.variant_ids:
             agg = result.variant_aggregates[vid]
-            rate = (agg.tasks_succeeded / agg.tasks_run * 100) if agg.tasks_run > 0 else 0
+            evaluable = agg.tasks_run - agg.tasks_error
+            rate = (agg.tasks_succeeded / evaluable * 100) if evaluable > 0 else 0
             row += f" | {rate:.1f}%"
         if show_p_values:
             row += " | —"
@@ -422,7 +432,7 @@ class ExperimentReportGenerator:
                 for vid in result.variant_ids:
                     vr = scores_by_variant.get(vid)
                     if vr:
-                        status_icon = {"SUCCESS": "+", "FAILURE": "-", "ERROR": "!"}.get(vr.final_status, "?")
+                        status_icon = vr.final_status.icon
                         cells.append(f"{vr.weighted_score:.3f} ({status_icon})")
                     else:
                         cells.append("N/A")
@@ -457,7 +467,8 @@ class ExperimentReportGenerator:
         from coder_eval.reports import ReportGenerator
 
         agg = result.variant_aggregates[variant_id]
-        success_rate = (agg.tasks_succeeded / agg.tasks_run * 100) if agg.tasks_run > 0 else 0
+        evaluable = agg.tasks_run - agg.tasks_error
+        success_rate = (agg.tasks_succeeded / evaluable * 100) if evaluable > 0 else 0
         tokens_str = f"{agg.total_tokens:,}" if agg.total_tokens is not None else "N/A"
 
         lines = [
@@ -471,6 +482,7 @@ class ExperimentReportGenerator:
             f"- **Tasks Run**: {agg.tasks_run}",
             f"- **Succeeded**: {agg.tasks_succeeded}",
             f"- **Failed**: {agg.tasks_failed}",
+            f"- **Errors**: {agg.tasks_error}",
             f"- **Success Rate**: {success_rate:.1f}%",
             f"- **Average Score**: {agg.average_score:.3f}",
             f"- **Average Duration**: {agg.average_duration:.1f}s",

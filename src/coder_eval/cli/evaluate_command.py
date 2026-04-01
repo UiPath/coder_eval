@@ -6,7 +6,7 @@ from pathlib import Path
 import typer
 
 from ..logging_config import setup_logging
-from ..models import EvaluationResult, TemplateDirSource
+from ..models import EvaluationResult, FinalStatus, TemplateDirSource
 from ..orchestration.task_loader import load_task
 from ..orchestrator import Orchestrator
 from ..sandbox import Sandbox
@@ -135,7 +135,7 @@ def evaluate_command(
     if result.sandbox_path:
         console.print(f"[dim]Artifacts: {result.sandbox_path}[/dim]")
 
-    if result.final_status == "ERROR":
+    if result.final_status == FinalStatus.ERROR:
         console.print(f"\n[red]✗ Evaluation error: {result.error_message}[/red]")
         raise typer.Exit(1)
     elif failed == 0:

@@ -426,7 +426,7 @@ async def _run_with_callbacks(
             return
         status = result.result.final_status
         label = f"{result.variant_id}/{result.task_id}"
-        status_icon = {"SUCCESS": "\u2713", "FAILURE": "\u2717", "ERROR": "!"}.get(status, "?")
+        status_icon = status.icon
         progress_bar.set_postfix_str(f"{status_icon} {label}")
         progress_bar.update(1)
 

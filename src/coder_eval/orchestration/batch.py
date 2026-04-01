@@ -16,7 +16,7 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from ..models import AgentKind, EvaluationResult, ResolvedTask, RunSummary, TaskDefinition, TaskResult
+from ..models import AgentKind, EvaluationResult, FinalStatus, ResolvedTask, RunSummary, TaskDefinition, TaskResult
 from ..reports_experiment import eval_result_to_task_dict
 from ..streaming.callbacks import StreamCallback
 from ..utils import get_version_info
@@ -140,7 +140,7 @@ def _create_error_task_result(
         variant_id=variant_id,
         agent_type=AgentKind.UNKNOWN,
         started_at=datetime.now(),
-        final_status="ERROR",
+        final_status=FinalStatus.ERROR,
         error_message=str(error),
         iteration_count=0,
         environment_info={},
@@ -183,9 +183,9 @@ def _generate_run_summary(
         end_time=end_time,
         total_duration_seconds=(end_time - start_time).total_seconds(),
         tasks_run=len(task_results),
-        tasks_succeeded=statuses.count("SUCCESS"),
-        tasks_failed=statuses.count("FAILURE"),
-        tasks_error=statuses.count("ERROR"),
+        tasks_succeeded=sum(1 for s in statuses if s.category == "succeeded"),
+        tasks_failed=sum(1 for s in statuses if s.category == "failed"),
+        tasks_error=sum(1 for s in statuses if s.category == "error"),
         task_results=[
             eval_result_to_task_dict(
                 r.result,
