@@ -128,6 +128,7 @@ class ClaudeCodeAgent(Agent):
         self._state = AgentState.WORKING
         self._iteration = 0
         self._sdk_options_dump: dict[str, Any] | None = None
+        self._session_id: str | None = None
 
     async def start(self, working_directory: str) -> None:
         """Initialize and start the Claude Code agent.
@@ -212,6 +213,7 @@ class ClaudeCodeAgent(Agent):
                 env=env,
                 system_prompt=self.config.system_prompt,
                 setting_sources=self.config.setting_sources if self.config.setting_sources is not None else ["project"],
+                resume=self._session_id,
             )
 
             # Dump SDK options for later inspection (captures all 37+ fields including defaults)
@@ -285,6 +287,11 @@ class ClaudeCodeAgent(Agent):
                     sdk_result_usage = getattr(message, "usage", None)
                     sdk_result_cost = getattr(message, "total_cost_usd", None)
                     sdk_num_turns = getattr(message, "num_turns", None)
+                    # Capture session_id so subsequent communicate() calls resume this conversation
+                    new_session_id = getattr(message, "session_id", None)
+                    if new_session_id != self._session_id:
+                        logger.debug("session_id changed: %s -> %s", self._session_id, new_session_id)
+                    self._session_id = new_session_id
 
                 # PHASE 2: Process tool results from UserMessage content blocks.
                 # The SDK delivers tool results as UserMessage objects containing

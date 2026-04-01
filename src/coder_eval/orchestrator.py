@@ -513,8 +513,8 @@ class Orchestrator:
 
         assert self.task.initial_prompt is not None, "initial_prompt must be resolved before orchestration"
         current_prompt = self.task.initial_prompt
-        # Working directory context prepended to every prompt (including feedback) since
-        # each communicate() call is stateless and the agent loses context between iterations
+        # Working directory context prepended to every prompt (including feedback).
+        # The agent resumes its session between iterations via session_id.
         assert self.sandbox is not None and self.sandbox.sandbox_dir is not None
         sandbox_dir = self.sandbox.sandbox_dir
         iteration = 0

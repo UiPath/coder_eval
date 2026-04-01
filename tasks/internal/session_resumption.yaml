@@ -1,0 +1,59 @@
+task_id: session-resumption
+description: >
+  Verifies that the agent retains conversation context across iterations.
+  Iteration 1 creates a file; criteria deliberately require a second file
+  that the prompt does not mention. Iteration 2 feedback asks the agent to
+  add the missing file — if the session is resumed, it proceeds immediately;
+  if not, it wastes turns re-exploring the sandbox.
+tags: [smoke, internal, pure-python]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash", "Read", "Write", "Edit"]
+  model: claude-haiku-4-5
+  max_turns: 10
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+initial_prompt: |
+  Create a Python file called greeter.py that defines a function greet(name)
+  which returns "Hello, <name>!". Then run it to verify it works:
+    python -c "from greeter import greet; print(greet('World'))"
+
+max_iterations: 2
+
+success_criteria:
+  # Iteration 1 should satisfy this
+  - type: file_check
+    description: "greeter.py exists with greet function"
+    path: "greeter.py"
+    includes:
+      - "def greet"
+    weight: 1.0
+
+  # Iteration 1 will NOT satisfy this — triggers iteration 2 feedback
+  - type: file_check
+    description: "farewell.py exists with farewell function"
+    path: "farewell.py"
+    includes:
+      - "def farewell"
+    weight: 1.0
+
+  # Validates iteration 2 output works
+  - type: run_command
+    description: "farewell function returns expected output"
+    command: 'python -c "from farewell import farewell; print(farewell(''World''))"'
+    expected_exit_code: 0
+    expected_stdout: "Goodbye, World!"
+    stdout_match: contains
+    weight: 1.0
+
+  # If the session was NOT resumed, the agent will call Read/Bash to explore
+  # the sandbox before acting. A resumed session should need very few commands.
+  - type: commands_efficiency
+    description: "Iteration 2 should be efficient (session was resumed)"
+    expected_commands: 4
+    weight: 0.5

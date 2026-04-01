@@ -344,3 +344,198 @@ async def test_claude_agent_process_error_no_stderr_at_all():
             pytest.raises(RuntimeError, match=r"CLI process failed \(exit code None\): No stderr captured"),
         ):
             await agent.communicate("do something")
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_session_resumption():
+    """Test that session_id from first communicate() is passed as resume on subsequent calls."""
+    config = AgentConfig(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+    )
+    agent = ClaudeCodeAgent(config)
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        # Track options passed to query() across calls
+        captured_options = []
+
+        class ResultMessage:
+            def __init__(self, session_id):
+                self.session_id = session_id
+                self.usage = {"input_tokens": 10, "output_tokens": 5}
+                self.total_cost_usd = 0.001
+                self.num_turns = 1
+                self.is_error = False
+                self.result = "Done"
+
+        class AssistantMessage:
+            def __init__(self):
+                self.content = "I did the thing."
+                self.model = "mock-model"
+
+        async def mock_query(prompt, options):
+            captured_options.append(options)
+            yield AssistantMessage()
+            yield ResultMessage(session_id="test-session-abc")
+
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            # First call: no session_id yet
+            await agent.communicate("first prompt")
+            assert captured_options[0].resume is None
+            assert agent._session_id == "test-session-abc"
+
+            # Second call: should pass session_id as resume
+            await agent.communicate("second prompt")
+            assert captured_options[1].resume == "test-session-abc"
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_session_resumption_none_degrades_gracefully():
+    """When SDK returns session_id=None, agent should degrade to a fresh session."""
+    config = AgentConfig(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+    )
+    agent = ClaudeCodeAgent(config)
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        captured_options = []
+
+        class ResultMessage:
+            def __init__(self, session_id):
+                self.session_id = session_id
+                self.usage = {"input_tokens": 10, "output_tokens": 5}
+                self.total_cost_usd = 0.001
+                self.num_turns = 1
+                self.is_error = False
+                self.result = "Done"
+
+        class AssistantMessage:
+            def __init__(self):
+                self.content = "I did the thing."
+                self.model = "mock-model"
+
+        async def mock_query(prompt, options):
+            captured_options.append(options)
+            yield AssistantMessage()
+            yield ResultMessage(session_id=None)
+
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            await agent.communicate("first prompt")
+            assert agent._session_id is None
+
+            # Second call: resume should be None (fresh session)
+            await agent.communicate("second prompt")
+            assert captured_options[1].resume is None
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_session_rotation():
+    """When SDK returns a different session_id on second call, agent should use the new one."""
+    config = AgentConfig(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+    )
+    agent = ClaudeCodeAgent(config)
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        captured_options = []
+        call_count = 0
+
+        class ResultMessage:
+            def __init__(self, session_id):
+                self.session_id = session_id
+                self.usage = {"input_tokens": 10, "output_tokens": 5}
+                self.total_cost_usd = 0.001
+                self.num_turns = 1
+                self.is_error = False
+                self.result = "Done"
+
+        class AssistantMessage:
+            def __init__(self):
+                self.content = "I did the thing."
+                self.model = "mock-model"
+
+        async def mock_query(prompt, options):
+            nonlocal call_count
+            captured_options.append(options)
+            yield AssistantMessage()
+            # Return different session_id on each call
+            call_count += 1
+            yield ResultMessage(session_id=f"session-{call_count}")
+
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            await agent.communicate("first prompt")
+            assert agent._session_id == "session-1"
+
+            await agent.communicate("second prompt")
+            assert captured_options[1].resume == "session-1"
+            assert agent._session_id == "session-2"
+
+            # Third call should use the rotated session_id
+            await agent.communicate("third prompt")
+            assert captured_options[2].resume == "session-2"
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_session_retained_on_error():
+    """On error, _session_id should retain its value from the last successful result."""
+    config = AgentConfig(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+    )
+    agent = ClaudeCodeAgent(config)
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        class ResultMessage:
+            def __init__(self, session_id):
+                self.session_id = session_id
+                self.usage = {"input_tokens": 10, "output_tokens": 5}
+                self.total_cost_usd = 0.001
+                self.num_turns = 1
+                self.is_error = False
+                self.result = "Done"
+
+        class AssistantMessage:
+            def __init__(self):
+                self.content = "I did the thing."
+                self.model = "mock-model"
+
+        # First call succeeds and sets session_id
+        async def mock_query_ok(prompt, options):
+            yield AssistantMessage()
+            yield ResultMessage(session_id="good-session")
+
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query_ok):
+            await agent.communicate("first prompt")
+            assert agent._session_id == "good-session"
+
+        # Second call raises an error mid-stream
+        async def mock_query_error(prompt, options):
+            raise RuntimeError("SDK connection lost")
+            yield
+
+        with (
+            patch("coder_eval.agents.claude_code_agent.query", mock_query_error),
+            pytest.raises(RuntimeError, match="SDK connection lost"),
+        ):
+            await agent.communicate("second prompt")
+
+        # session_id should still be the value from the successful call
+        assert agent._session_id == "good-session"
