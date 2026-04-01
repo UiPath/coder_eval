@@ -23,9 +23,14 @@ from .errors.timeout import TaskTimeoutError, TurnTimeoutError
 from .evaluation.checker import SuccessChecker
 from .evaluation.reviewer import LLMReviewer
 from .models import (
+    ROUTE_NAMES,
     AgentKind,
+    ApiRoute,
+    BedrockRoute,
     ConfigLineageEntry,
+    DirectRoute,
     EvaluationResult,
+    ProxyRoute,
     ResolvedTask,
     RunSummary,
     SnapshotMode,
@@ -136,7 +141,9 @@ class Orchestrator:
 
         # Proxy (initialized in _setup if enabled)
         self.proxy: LLMGatewayProxy | None = None
-        self.proxy_port: int | None = None
+
+        # API routing (initialized in _setup)
+        self.route: ApiRoute | None = None
 
         # Result tracking
         self.result: EvaluationResult | None = None
@@ -397,11 +404,26 @@ class Orchestrator:
         if self.task.llm_reviewer.enabled:
             self.llm_reviewer = LLMReviewer(self.task.llm_reviewer)
 
-        # Start LLM Gateway proxy if enabled
-        if settings.llmgw_proxy_enabled:
+        # Determine API routing: Bedrock > LLM Gateway proxy > direct
+        if settings.bedrock_enabled and settings.llmgw_proxy_enabled:
+            logger.warning("Both bedrock_enabled and llmgw_proxy_enabled are set; Bedrock routing takes precedence.")
+        if settings.bedrock_enabled:
+            assert settings.aws_bearer_token_bedrock is not None
+            assert settings.aws_region is not None
+            self.route = BedrockRoute(
+                bearer_token=settings.aws_bearer_token_bedrock,
+                region=settings.aws_region,
+                model=settings.bedrock_model,
+                small_model=settings.bedrock_small_model,
+            )
+            logger.info("API routing: AWS Bedrock (bearer token, region=%s)", self.route.region)
+        elif settings.llmgw_proxy_enabled:
             logger.info("API routing: LLM Gateway proxy (via %s)", settings.llmgw_url)
             await self._start_proxy()
+            assert self.proxy is not None and self.proxy.port is not None
+            self.route = ProxyRoute(port=self.proxy.port)
         else:
+            self.route = DirectRoute()
             logger.info("API routing: direct Anthropic API")
 
         # Create and start agent with retry logic
@@ -426,11 +448,14 @@ class Orchestrator:
         )
 
         # Record API routing mode
-        if settings.llmgw_proxy_enabled:
-            self.result.environment_info["api_routing"] = "llmgw_proxy"
+        assert self.route is not None
+        self.result.environment_info["api_routing"] = ROUTE_NAMES[type(self.route)]
+        if isinstance(self.route, BedrockRoute):
+            self.result.environment_info["aws_region"] = self.route.region
+            if self.route.model:
+                self.result.environment_info["bedrock_model"] = self.route.model
+        elif isinstance(self.route, ProxyRoute):
             self.result.environment_info["llmgw_url"] = settings.llmgw_url or ""
-        else:
-            self.result.environment_info["api_routing"] = "anthropic_direct"
 
         # Add installed tool versions (from npm packages etc.)
         if self.sandbox and self.sandbox.installed_tool_versions:
@@ -463,8 +488,8 @@ class Orchestrator:
         )
 
         self.proxy = LLMGatewayProxy(proxy_config)
-        self.proxy_port = await self.proxy.start()
-        logger.info("LLM Gateway proxy started on port %d", self.proxy_port)
+        await self.proxy.start()
+        logger.info("LLM Gateway proxy started on port %d", self.proxy.port)
 
     async def _create_agent(self) -> Agent:
         """Create the appropriate agent based on task configuration.
@@ -479,7 +504,8 @@ class Orchestrator:
         if self.task.agent.type == AgentKind.CLAUDE_CODE:
             from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 
-            return ClaudeCodeAgent(self.task.agent, proxy_port=self.proxy_port)
+            assert self.route is not None
+            return ClaudeCodeAgent(self.task.agent, route=self.route)
         else:
             raise ValueError(f"Unsupported agent type: {self.task.agent.type}")
 

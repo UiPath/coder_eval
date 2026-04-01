@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     llmgw_proxy_vendor: str = "awsbedrock"
     llmgw_proxy_api_flavor: str = "invoke"
 
+    # AWS Bedrock settings (direct Bedrock routing, not via proxy)
+    bedrock_enabled: bool = False
+    aws_bearer_token_bedrock: str | None = None
+    aws_region: str | None = None
+    bedrock_model: str | None = None  # Cross-region model ID
+    bedrock_small_model: str | None = None  # Cross-region small model ID
+
     # Logging
     log_level: str = "INFO"  # Default log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     log_to_file: bool = False  # Whether to enable file logging
@@ -89,6 +96,23 @@ class Settings(BaseSettings):
                 + " Please set them in your .env file."
             )
 
+    def _validate_bedrock_settings(self) -> None:
+        """Validate that required AWS Bedrock settings are present.
+
+        Raises:
+            ValueError: If required Bedrock settings are missing
+        """
+        missing = []
+        if not self.aws_bearer_token_bedrock:
+            missing.append("AWS_BEARER_TOKEN_BEDROCK")
+        if not self.aws_region:
+            missing.append("AWS_REGION")
+        if missing:
+            raise ValueError(
+                f"Bedrock routing is enabled but missing required settings: {', '.join(missing)}."
+                + " Please set them in your .env file."
+            )
+
     def validate_api_keys(self, agent_type: str) -> None:
         """Validate that required API keys are present.
 
@@ -98,9 +122,13 @@ class Settings(BaseSettings):
         Raises:
             ValueError: If required API key is missing
         """
-        # Validate proxy settings for ALL agent types (the orchestrator's _start_proxy()
-        # asserts all 5 fields regardless of agent type)
-        if self.llmgw_proxy_enabled:
+        # Validate Bedrock first (it takes precedence over proxy in the orchestrator)
+        if self.bedrock_enabled:
+            self._validate_bedrock_settings()
+
+        # Only validate proxy settings if proxy is enabled AND Bedrock is not
+        # (Bedrock takes precedence, so proxy won't be started)
+        if self.llmgw_proxy_enabled and not self.bedrock_enabled:
             self._validate_llmgw_settings()
 
         # Claude Code agent can use either:

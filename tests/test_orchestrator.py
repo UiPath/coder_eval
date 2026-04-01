@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from coder_eval.models import DirectRoute
 from coder_eval.orchestration.evaluation import create_iteration_snapshot, generate_next_prompt
 from coder_eval.orchestration.task_loader import load_task
 from coder_eval.orchestrator import Orchestrator, _summarize_tool_calls
@@ -58,6 +59,7 @@ async def test_orchestrator_create_agent(tmp_path):
     run_dir = tmp_path / "test_run" / "hello_date"
 
     orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator.route = DirectRoute()
 
     # Create agent
     agent = await orchestrator._create_agent()

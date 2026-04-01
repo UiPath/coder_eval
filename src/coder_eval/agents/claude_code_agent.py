@@ -12,7 +12,19 @@ from typing import Any
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, Message, ProcessError, query
 
 from coder_eval.agent import Agent, AgentState
-from coder_eval.models import AgentConfig, CommandTelemetry, FileChange, FileChanges, FileTree, TokenUsage, TurnRecord
+from coder_eval.models import (
+    AgentConfig,
+    ApiRoute,
+    BedrockRoute,
+    CommandTelemetry,
+    DirectRoute,
+    FileChange,
+    FileChanges,
+    FileTree,
+    ProxyRoute,
+    TokenUsage,
+    TurnRecord,
+)
 from coder_eval.resources import get_ignore_patterns, should_ignore_path
 from coder_eval.streaming.callbacks import StreamCallback, safe_emit
 from coder_eval.streaming.events import TextChunkEvent, ToolCallEvent, ToolResultEvent
@@ -91,11 +103,25 @@ def _serialize_value(value: Any) -> Any:
     return str(value)
 
 
+_SENSITIVE_ENV_KEYWORDS = {"TOKEN", "KEY", "SECRET"}
+
+
+def _redact_env(env: dict[str, str]) -> dict[str, str]:
+    """Redact sensitive values from an environment variable dict.
+
+    Keys containing TOKEN, KEY, or SECRET (case-insensitive) are replaced with ***REDACTED***.
+    """
+    return {
+        k: "***REDACTED***" if any(kw in k.upper() for kw in _SENSITIVE_ENV_KEYWORDS) else v for k, v in env.items()
+    }
+
+
 def _dump_sdk_options(opts: ClaudeAgentOptions) -> dict[str, Any]:
     """Dump ClaudeAgentOptions to a plain dict, skipping non-serializable values.
 
     Recursively traverses dataclass fields and nested structures (dicts, lists,
     dataclasses). Skips callables and file-like objects. Converts Path to str.
+    Redacts sensitive environment variables (tokens, keys, secrets).
 
     Args:
         opts: ClaudeAgentOptions dataclass instance
@@ -107,6 +133,8 @@ def _dump_sdk_options(opts: ClaudeAgentOptions) -> dict[str, Any]:
     for field in dataclasses.fields(opts):
         value = _serialize_value(getattr(opts, field.name))
         if value is not _SKIP:
+            if field.name == "env" and isinstance(value, dict):
+                value = _redact_env(value)
             result[field.name] = value
     return result
 
@@ -114,15 +142,15 @@ def _dump_sdk_options(opts: ClaudeAgentOptions) -> dict[str, Any]:
 class ClaudeCodeAgent(Agent):
     """Implementation of the Agent interface for Claude Code using the SDK."""
 
-    def __init__(self, config: AgentConfig, proxy_port: int | None = None):
+    def __init__(self, config: AgentConfig, route: ApiRoute | None = None):
         """Initialize the Claude Code agent.
 
         Args:
             config: Agent configuration
-            proxy_port: If set, route API traffic through the local LLM Gateway proxy on this port
+            route: API routing configuration. If None, uses DirectRoute.
         """
         self.config = config
-        self.proxy_port = proxy_port
+        self.route = route or DirectRoute()
         self.client: ClaudeSDKClient | None = None
         self.working_directory: Path | None = None
         self._state = AgentState.WORKING
@@ -139,6 +167,40 @@ class ClaudeCodeAgent(Agent):
         self.working_directory = Path(working_directory)
         self._state = AgentState.WORKING
         # Note: Client is created per-communication to avoid transport issues
+
+    @staticmethod
+    def _build_sdk_env(route: ApiRoute) -> tuple[dict[str, str], str | None]:
+        """Build SDK environment variables and resolve effective model for the given route.
+
+        Returns:
+            Tuple of (env_vars_dict, model_override_or_None).
+        """
+        match route:
+            case BedrockRoute() as br:
+                env: dict[str, str] = {
+                    "CLAUDE_CODE_USE_BEDROCK": "1",
+                    "AWS_BEARER_TOKEN_BEDROCK": br.bearer_token,
+                    "AWS_REGION": br.region,
+                }
+                if br.disable_attribution_header:
+                    # FIXME(SDK#24168): Remove when SDK no longer injects reserved header
+                    env["CLAUDE_CODE_ATTRIBUTION_HEADER"] = "0"
+                if br.model:
+                    env["ANTHROPIC_MODEL"] = br.model
+                if br.small_model:
+                    env["ANTHROPIC_SMALL_FAST_MODEL"] = br.small_model
+                return env, br.model
+
+            case ProxyRoute() as pr:
+                return {
+                    "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{pr.port}",
+                    "ANTHROPIC_API_KEY": "llmgw-proxy",
+                }, None
+
+            case DirectRoute():
+                return {}, None
+
+        raise AssertionError(f"Unhandled route type: {type(route).__name__}")
 
     async def communicate(self, user_input: str, *, stream_callback: StreamCallback | None = None) -> TurnRecord:
         """Send a message to Claude and receive its response.
@@ -192,21 +254,16 @@ class ClaudeCodeAgent(Agent):
             # Process plugins: copy from config and replace env vars in paths
             plugins = self._process_plugins(self.config.plugins or [])  # type: ignore[arg-type]
 
-            # Build env overrides for proxy routing.
-            # The SDK merges these with os.environ (see subprocess_cli.py), so {} is safe.
-            env: dict[str, str] = {}
-            if self.proxy_port is not None:
-                env = {
-                    "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{self.proxy_port}",
-                    "ANTHROPIC_API_KEY": "llmgw-proxy",  # Dummy key, required by CLI
-                }
+            # Build env overrides and resolve model for the configured API route
+            env, route_model = self._build_sdk_env(self.route)
+            effective_model = route_model or self.config.model
 
             options = ClaudeAgentOptions(
                 cwd=str(self.working_directory),
                 permission_mode=self.config.permission_mode,
                 allowed_tools=self.config.allowed_tools or [],
                 disallowed_tools=self.config.disallowed_tools or [],
-                model=self.config.model,
+                model=effective_model,
                 max_turns=self.config.max_turns,
                 plugins=plugins,  # type: ignore[arg-type]
                 stderr=capture_stderr,  # Capture stderr for better error messages

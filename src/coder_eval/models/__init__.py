@@ -59,6 +59,15 @@ from coder_eval.models.results import (
     TurnRecord,
 )
 
+# Routing
+from coder_eval.models.routing import (
+    ROUTE_NAMES,
+    ApiRoute,
+    BedrockRoute,
+    DirectRoute,
+    ProxyRoute,
+)
+
 # Sandbox
 from coder_eval.models.sandbox import (
     NodeEnvConfig,
@@ -122,6 +131,12 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "UiPathEvalCriterion",
     "ImportCheckCriterion",
     "SuccessCriterion",
+    # Routing
+    "ROUTE_NAMES",
+    "ApiRoute",
+    "DirectRoute",
+    "ProxyRoute",
+    "BedrockRoute",
     # Templates
     "BaseTemplateSource",
     "RepoSource",

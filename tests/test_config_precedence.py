@@ -9,36 +9,24 @@ from pathlib import Path
 import pytest
 
 
-def test_config_shell_overrides_dotenv_for_api_keys(tmp_path, monkeypatch):
-    """Test that shell environment overrides .env for ANTHROPIC_API_KEY.
+def test_config_dotenv_overrides_shell_for_api_keys(tmp_path, monkeypatch):
+    """Test that env vars override .env file for ANTHROPIC_API_KEY.
 
-    Hypothesis: Shell environment should take precedence for API keys.
-    Expected: Shell value used when both shell and .env define the key.
-
-    Context: Lines 10-11 in config.py use load_dotenv(override=False).
+    In pydantic-settings, env vars have higher priority than _env_file.
+    Verifies that monkeypatched env var wins over _env_file value.
     """
-    # Set shell environment
+    # Import BEFORE monkeypatch so module-level load_dotenv doesn't overwrite
+    from coder_eval.config import Settings
+
     monkeypatch.setenv("ANTHROPIC_API_KEY", "shell_key_value")
 
-    # Create .env in temp directory
     env_file = tmp_path / ".env"
     env_file.write_text("ANTHROPIC_API_KEY=dotenv_key_value\n")
 
-    # Change to temp directory and load settings
-    original_cwd = os.getcwd()
-    try:
-        os.chdir(tmp_path)
+    settings = Settings(_env_file=str(env_file))
 
-        # Create new Settings instance which will read environment
-        from coder_eval.config import Settings
-
-        settings = Settings(_env_file=str(env_file))
-
-        # Verify shell environment took precedence
-        assert settings.anthropic_api_key == "shell_key_value"
-
-    finally:
-        os.chdir(original_cwd)
+    # env vars win over _env_file in pydantic-settings
+    assert settings.anthropic_api_key == "shell_key_value"
 
 
 def test_config_dotenv_overrides_shell_for_llmgw(tmp_path, monkeypatch):
@@ -104,22 +92,21 @@ def test_config_loads_defaults_when_no_env_vars():
     # Don't assert llmgw_requesting_product as it may be overridden by system environment
 
 
-def test_config_case_insensitive_env_vars(tmp_path, monkeypatch):
+def test_config_case_insensitive_env_vars(monkeypatch):
     """Test that environment variable names are case-insensitive.
 
-    Hypothesis: Config should accept LOG_LEVEL and log_level equally.
-    Expected: Both formats work without errors.
-
-    Context: Line 60 in config.py sets case_sensitive=False.
+    Context: SettingsConfigDict sets case_sensitive=False, so LOG_LEVEL
+    and log_level both map to the log_level field.
     """
-    # Set lowercase environment variable
-    monkeypatch.setenv("log_level", "DEBUG")
-
+    # Import BEFORE monkeypatch so module-level load_dotenv doesn't overwrite
     from coder_eval.config import Settings
 
-    settings = Settings()
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
 
-    # Verify lowercase was accepted (case-insensitive)
+    # Use _env_file to avoid real .env polluting the test
+    settings = Settings(_env_file=os.devnull)
+
+    # Verify uppercase LOG_LEVEL matched the lowercase log_level field
     assert settings.log_level == "DEBUG"
 
 
@@ -143,6 +130,7 @@ def test_config_claude_code_proxy_missing_gateway_settings():
 
     settings = Settings(
         anthropic_api_key=None,
+        bedrock_enabled=False,
         llmgw_proxy_enabled=True,
         llmgw_url=None,
         llmgw_client_id=None,
@@ -177,6 +165,7 @@ def test_config_non_claude_code_proxy_requires_semantic_ids():
 
     settings = Settings(
         anthropic_api_key=None,
+        bedrock_enabled=False,
         llmgw_proxy_enabled=True,
         llmgw_url="https://gateway.example.com",
         llmgw_client_id="client-id",
@@ -189,28 +178,21 @@ def test_config_non_claude_code_proxy_requires_semantic_ids():
         settings.validate_api_keys("other-agent")
 
 
-def test_config_exports_to_os_environ(monkeypatch):
+def test_config_exports_to_os_environ():
     """Test that settings are exported to os.environ for external libraries.
 
-    Hypothesis: Settings values should be available via os.getenv().
-    Expected: All non-None settings exported as uppercase env vars.
-
-    Context: Lines 81-90 in config.py export settings to os.environ.
+    Context: Lines 148-157 in config.py export settings to os.environ.
+    Uses constructor kwargs (highest priority) to avoid .env pollution.
     """
-    # Set test values
-    monkeypatch.setenv("LOG_LEVEL", "WARNING")
-    monkeypatch.setenv("DEFAULT_AGENT_MODEL", "claude-sonnet-4-20250514")
-
     from coder_eval.config import Settings
 
-    settings = Settings()
+    # Use kwargs to set values deterministically (kwargs beat env vars and .env)
+    settings = Settings(log_level="WARNING", default_agent_model="claude-sonnet-4-20250514")
 
-    # Manually export to os.environ (simulating lines 81-90)
+    # Manually export to os.environ (simulating lines 148-157)
     for key, value in settings.model_dump().items():
         if value is not None:
             env_key = key.upper()
-            from pathlib import Path
-
             if isinstance(value, Path):
                 os.environ[env_key] = str(value)
             elif isinstance(value, bool):
@@ -221,6 +203,80 @@ def test_config_exports_to_os_environ(monkeypatch):
     # Verify settings are in os.environ
     assert os.getenv("LOG_LEVEL") == "WARNING"
     assert os.getenv("DEFAULT_AGENT_MODEL") == "claude-sonnet-4-20250514"
+
+
+def test_config_bedrock_missing_token():
+    """Bedrock enabled + missing token raises ValueError."""
+    from coder_eval.config import Settings
+
+    settings = Settings(
+        bedrock_enabled=True,
+        aws_bearer_token_bedrock=None,
+        aws_region="us-east-1",
+    )
+
+    with pytest.raises(ValueError, match="AWS_BEARER_TOKEN_BEDROCK"):
+        settings.validate_api_keys("claude-code")
+
+
+def test_config_bedrock_missing_region():
+    """Bedrock enabled + missing region raises ValueError."""
+    from coder_eval.config import Settings
+
+    settings = Settings(
+        bedrock_enabled=True,
+        aws_bearer_token_bedrock="tok-123",
+        aws_region=None,
+    )
+
+    with pytest.raises(ValueError, match="AWS_REGION"):
+        settings.validate_api_keys("claude-code")
+
+
+def test_config_bedrock_valid():
+    """Bedrock enabled with valid settings passes."""
+    from coder_eval.config import Settings
+
+    settings = Settings(
+        bedrock_enabled=True,
+        aws_bearer_token_bedrock="tok-123",
+        aws_region="us-east-1",
+    )
+
+    # Should NOT raise
+    settings.validate_api_keys("claude-code")
+
+
+def test_config_bedrock_disabled_skips_validation():
+    """Bedrock disabled skips validation even if settings are empty."""
+    from coder_eval.config import Settings
+
+    settings = Settings(
+        bedrock_enabled=False,
+        aws_bearer_token_bedrock=None,
+        aws_region=None,
+    )
+
+    # Should NOT raise — bedrock is disabled
+    settings.validate_api_keys("claude-code")
+
+
+def test_config_bedrock_skips_proxy_validation():
+    """Bedrock enabled skips proxy validation even if proxy is enabled with missing settings."""
+    from coder_eval.config import Settings
+
+    settings = Settings(
+        bedrock_enabled=True,
+        aws_bearer_token_bedrock="tok-123",
+        aws_region="us-east-1",
+        llmgw_proxy_enabled=True,
+        llmgw_url=None,
+        llmgw_client_id=None,
+        llmgw_client_secret=None,
+    )
+
+    # Should NOT raise — Bedrock takes precedence, proxy won't be started
+    settings.validate_api_keys("claude-code")
 
 
 def test_agent_override_precedence_cli_over_env_over_yaml():
