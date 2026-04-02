@@ -1,0 +1,158 @@
+"""Tests for prompt mutation models and apply_prompt_mutations()."""
+
+import re
+from unittest.mock import MagicMock
+
+import pytest
+from pydantic import TypeAdapter
+
+from coder_eval.models import (
+    PromptMutation,
+    PromptPrefix,
+    PromptRephrase,
+    PromptReplace,
+    PromptSuffix,
+    PromptTemplate,
+    apply_prompt_mutations,
+)
+
+
+class TestPromptPrefix:
+    def test_prepends_with_default_separator(self):
+        result = apply_prompt_mutations("base prompt", [PromptPrefix(content="Think step by step.")])
+        assert result == "Think step by step.\n\nbase prompt"
+
+    def test_custom_separator(self):
+        result = apply_prompt_mutations("base", [PromptPrefix(content="prefix", separator=" ")])
+        assert result == "prefix base"
+
+
+class TestPromptSuffix:
+    def test_appends_with_default_separator(self):
+        result = apply_prompt_mutations("base prompt", [PromptSuffix(content="Include type hints.")])
+        assert result == "base prompt\n\nInclude type hints."
+
+    def test_custom_separator(self):
+        result = apply_prompt_mutations("base", [PromptSuffix(content="suffix", separator=" -- ")])
+        assert result == "base -- suffix"
+
+
+class TestPromptReplace:
+    def test_literal_replacement(self):
+        result = apply_prompt_mutations("Create a Python file", [PromptReplace(pattern="Create", replacement="Write")])
+        assert result == "Write a Python file"
+
+    def test_literal_multiple_occurrences(self):
+        result = apply_prompt_mutations("foo bar foo", [PromptReplace(pattern="foo", replacement="baz")])
+        assert result == "baz bar baz"
+
+    def test_literal_no_match(self):
+        result = apply_prompt_mutations("hello world", [PromptReplace(pattern="xyz", replacement="abc")])
+        assert result == "hello world"
+
+    def test_regex_replacement(self):
+        result = apply_prompt_mutations(
+            "version 123 build 456", [PromptReplace(pattern=r"\d+", replacement="N", regex=True)]
+        )
+        assert result == "version N build N"
+
+    def test_regex_with_groups(self):
+        result = apply_prompt_mutations(
+            "hello world",
+            [PromptReplace(pattern=r"(\w+) (\w+)", replacement=r"\2 \1", regex=True)],
+        )
+        assert result == "world hello"
+
+    def test_invalid_regex_raises(self):
+        with pytest.raises(re.error):
+            apply_prompt_mutations("text", [PromptReplace(pattern="[invalid", replacement="x", regex=True)])
+
+
+class TestPromptTemplate:
+    def test_single_variable(self):
+        result = apply_prompt_mutations(
+            "Create a {language} file",
+            [PromptTemplate(variables={"language": "Python"})],
+        )
+        assert result == "Create a Python file"
+
+    def test_multiple_variables(self):
+        result = apply_prompt_mutations(
+            "Write {language} code using {style} style",
+            [PromptTemplate(variables={"language": "Python", "style": "functional"})],
+        )
+        assert result == "Write Python code using functional style"
+
+    def test_missing_variable_left_intact(self):
+        result = apply_prompt_mutations(
+            "Use {known} and {unknown} variables",
+            [PromptTemplate(variables={"known": "resolved"})],
+        )
+        assert result == "Use resolved and {unknown} variables"
+
+
+class TestPromptRephrase:
+    def test_calls_callback(self):
+        mutation = PromptRephrase(instructions="Make concise")
+        mock_fn = MagicMock(return_value="rephrased text")
+        result = apply_prompt_mutations("original prompt", [mutation], rephrase_fn=mock_fn)
+        assert result == "rephrased text"
+        mock_fn.assert_called_once_with("original prompt", mutation)
+
+    def test_without_callback_raises(self):
+        mutation = PromptRephrase(instructions="Make concise")
+        with pytest.raises(ValueError, match="rephrase mutation requires rephrase_fn callback"):
+            apply_prompt_mutations("text", [mutation])
+
+    def test_composes_with_other_mutations(self):
+        mock_fn = MagicMock(return_value="rephrased")
+        mutations: list[PromptMutation] = [
+            PromptPrefix(content="PREFIX"),
+            PromptRephrase(instructions="rephrase"),
+            PromptSuffix(content="SUFFIX"),
+        ]
+        result = apply_prompt_mutations("base", mutations, rephrase_fn=mock_fn)
+        # After prefix: "PREFIX\n\nbase"
+        # After rephrase: "rephrased" (mock returns this)
+        # After suffix: "rephrased\n\nSUFFIX"
+        assert result == "rephrased\n\nSUFFIX"
+        mock_fn.assert_called_once_with("PREFIX\n\nbase", mutations[1])
+
+
+class TestComposition:
+    def test_mutations_compose_sequentially(self):
+        mutations: list[PromptMutation] = [
+            PromptPrefix(content="Step 1:"),
+            PromptSuffix(content="Step 3: done."),
+        ]
+        result = apply_prompt_mutations("Step 2: work", mutations)
+        assert result == "Step 1:\n\nStep 2: work\n\nStep 3: done."
+
+    def test_empty_mutations_list(self):
+        result = apply_prompt_mutations("unchanged", [])
+        assert result == "unchanged"
+
+    def test_mutation_on_empty_prompt(self):
+        result = apply_prompt_mutations("", [PromptPrefix(content="hello")])
+        assert result == "hello\n\n"
+
+
+class TestPydanticDiscriminator:
+    def test_round_trip_serialize_deserialize(self):
+        adapter = TypeAdapter(list[PromptMutation])
+        mutations: list[PromptMutation] = [
+            PromptPrefix(content="pre"),
+            PromptSuffix(content="suf"),
+            PromptReplace(pattern="a", replacement="b"),
+            PromptTemplate(variables={"x": "y"}),
+            PromptRephrase(instructions="rephrase it"),
+        ]
+        data = adapter.dump_python(mutations, mode="json")
+        restored = adapter.validate_python(data)
+        assert len(restored) == 5
+        assert isinstance(restored[0], PromptPrefix)
+        assert isinstance(restored[1], PromptSuffix)
+        assert isinstance(restored[2], PromptReplace)
+        assert isinstance(restored[3], PromptTemplate)
+        assert isinstance(restored[4], PromptRephrase)
+        assert restored[4].instructions == "rephrase it"

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from coder_eval.models.enums import FinalStatus
+from coder_eval.models.mutations import PromptMutation
 from coder_eval.models.results import ConfigLineageEntry, EvaluationResult
 from coder_eval.models.tasks import TaskDefinition
 from coder_eval.models.templates import TemplateSource
@@ -25,6 +26,34 @@ class ExperimentVariant(BaseModel):
     template_sources: list[TemplateSource] | None = Field(
         default=None, description="Additional template sources appended after task's base templates"
     )
+    prompt_mutations: list[PromptMutation] | None = Field(
+        default=None, description="Ordered list of mutations to apply to the task's initial_prompt"
+    )
+    initial_prompt: str | None = Field(
+        default=None,
+        description="Full replacement for the task's initial_prompt. Mutually exclusive with prompt_mutations.",
+    )
+    initial_prompt_file: str | None = Field(
+        default=None,
+        description=(
+            "Path to a file containing a full replacement initial_prompt (relative to experiment YAML). "
+            "Mutually exclusive with initial_prompt and prompt_mutations."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def check_prompt_exclusivity(self) -> Self:
+        """Ensure prompt_mutations, initial_prompt, and initial_prompt_file are mutually exclusive."""
+        set_fields = []
+        if self.prompt_mutations is not None:
+            set_fields.append("prompt_mutations")
+        if self.initial_prompt is not None:
+            set_fields.append("initial_prompt")
+        if self.initial_prompt_file is not None:
+            set_fields.append("initial_prompt_file")
+        if len(set_fields) > 1:
+            raise ValueError(f"Only one of {', '.join(set_fields)} can be provided, not multiple")
+        return self
 
 
 class ExperimentDefaults(BaseModel):
@@ -36,6 +65,9 @@ class ExperimentDefaults(BaseModel):
     agent: dict[str, Any] | None = Field(default=None, description="Partial agent config defaults")
     template_sources: list[TemplateSource] | None = Field(
         default=None, description="Additional template sources appended after task's base templates (for all variants)"
+    )
+    prompt_mutations: list[PromptMutation] | None = Field(
+        default=None, description="Default prompt mutations applied to all variants (before variant-specific mutations)"
     )
 
 

@@ -512,6 +512,6 @@ async def _run_with_experiment(
         total_duration=summary.total_duration_seconds,
     )
     # Reports are written at run root level (no experiment_id subfolder)
-    ExperimentReportGenerator.write_reports(experiment_result, config.run_dir)
+    ExperimentReportGenerator.write_reports(experiment_result, config.run_dir, experiment=experiment)
 
     return summary

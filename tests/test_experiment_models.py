@@ -9,6 +9,8 @@ from coder_eval.models import (
     ExperimentDefaults,
     ExperimentDefinition,
     ExperimentVariant,
+    PromptPrefix,
+    PromptSuffix,
     ResolvedTask,
     TaskDefinition,
     TaskResult,
@@ -157,6 +159,87 @@ class TestTaskResult:
         assert tr.task_id == "t1"
         assert tr.duration == 1.0
         assert tr.result.final_status == "SUCCESS"
+
+
+class TestVariantPromptFields:
+    """Tests for prompt_mutations, initial_prompt, initial_prompt_file on ExperimentVariant."""
+
+    def test_variant_prompt_mutations_accepted(self):
+        variant = ExperimentVariant(
+            variant_id="mutated",
+            prompt_mutations=[{"type": "prefix", "content": "Think step by step."}],
+        )
+        assert variant.prompt_mutations is not None
+        assert len(variant.prompt_mutations) == 1
+
+    def test_variant_initial_prompt_accepted(self):
+        variant = ExperimentVariant(variant_id="override", initial_prompt="Custom prompt")
+        assert variant.initial_prompt == "Custom prompt"
+
+    def test_variant_initial_prompt_file_accepted(self):
+        variant = ExperimentVariant(variant_id="file-override", initial_prompt_file="prompts/custom.md")
+        assert variant.initial_prompt_file == "prompts/custom.md"
+
+    def test_variant_prompt_mutations_and_initial_prompt_rejected(self):
+        with pytest.raises(ValueError, match=r"prompt_mutations.*initial_prompt"):
+            ExperimentVariant(
+                variant_id="bad",
+                prompt_mutations=[{"type": "prefix", "content": "x"}],
+                initial_prompt="y",
+            )
+
+    def test_variant_prompt_mutations_and_initial_prompt_file_rejected(self):
+        with pytest.raises(ValueError, match=r"prompt_mutations.*initial_prompt_file"):
+            ExperimentVariant(
+                variant_id="bad",
+                prompt_mutations=[{"type": "prefix", "content": "x"}],
+                initial_prompt_file="prompts/x.md",
+            )
+
+    def test_variant_initial_prompt_and_file_rejected(self):
+        with pytest.raises(ValueError, match=r"initial_prompt.*initial_prompt_file"):
+            ExperimentVariant(
+                variant_id="bad",
+                initial_prompt="inline",
+                initial_prompt_file="prompts/x.md",
+            )
+
+    def test_variant_all_three_rejected(self):
+        with pytest.raises(ValueError, match="Only one of"):
+            ExperimentVariant(
+                variant_id="bad",
+                prompt_mutations=[{"type": "prefix", "content": "x"}],
+                initial_prompt="inline",
+                initial_prompt_file="prompts/x.md",
+            )
+
+    def test_defaults_prompt_mutations_accepted(self):
+        defaults = ExperimentDefaults(
+            prompt_mutations=[{"type": "suffix", "content": "Be concise."}],
+        )
+        assert defaults.prompt_mutations is not None
+        assert len(defaults.prompt_mutations) == 1
+
+    def test_experiment_round_trip_with_mutations(self):
+        exp = ExperimentDefinition(
+            experiment_id="prompt-test",
+            defaults=ExperimentDefaults(
+                prompt_mutations=[PromptPrefix(content="default prefix")],
+            ),
+            variants=[
+                ExperimentVariant(variant_id="baseline"),
+                ExperimentVariant(
+                    variant_id="mutated",
+                    prompt_mutations=[PromptSuffix(content="extra instruction")],
+                ),
+            ],
+        )
+        data = exp.model_dump(mode="json")
+        restored = ExperimentDefinition(**data)
+        assert restored.defaults.prompt_mutations is not None
+        assert len(restored.defaults.prompt_mutations) == 1
+        assert restored.variants[1].prompt_mutations is not None
+        assert len(restored.variants[1].prompt_mutations) == 1
 
 
 class TestTypedAnnotations:

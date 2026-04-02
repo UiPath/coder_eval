@@ -7,7 +7,13 @@ import math
 from pathlib import Path
 from typing import Any
 
-from coder_eval.models import EvaluationResult, ExperimentResult, TaskExperimentSummary
+from coder_eval.models import (
+    EvaluationResult,
+    ExperimentDefinition,
+    ExperimentResult,
+    ExperimentVariant,
+    TaskExperimentSummary,
+)
 from coder_eval.reports import resolve_agent_settings
 
 
@@ -220,6 +226,23 @@ def _load_variant_eval_results(
     return results
 
 
+def _describe_prompt_config(variant: ExperimentVariant) -> str:
+    """Return a short description of the variant's prompt configuration.
+
+    Args:
+        variant: The experiment variant to describe.
+
+    Returns:
+        A concise string like "(base prompt)", "(prompt override)", or "(2 mutations: prefix, suffix)".
+    """
+    if variant.initial_prompt is not None or variant.initial_prompt_file is not None:
+        return "(prompt override)"
+    if variant.prompt_mutations:
+        type_names = [m.type for m in variant.prompt_mutations]
+        return f"({len(type_names)} mutations: {', '.join(type_names)})"
+    return "(base prompt)"
+
+
 class ExperimentReportGenerator:
     """Generates markdown reports for experiment results."""
 
@@ -255,7 +278,10 @@ class ExperimentReportGenerator:
         return "\n".join(lines)
 
     @staticmethod
-    def generate_experiment_report(result: ExperimentResult) -> str:
+    def generate_experiment_report(
+        result: ExperimentResult,
+        experiment: ExperimentDefinition | None = None,
+    ) -> str:
         """Generate experiment-report content for the full experiment.
 
         Produces a vertical "Aggregate Metrics" table (metrics as rows, variants
@@ -263,6 +289,7 @@ class ExperimentReportGenerator:
 
         Args:
             result: Complete experiment result.
+            experiment: Optional experiment definition (enables prompt config display).
 
         Returns:
             Markdown string.
@@ -274,6 +301,19 @@ class ExperimentReportGenerator:
             f"**Variants**: {', '.join(result.variant_ids)}",
             f"**Total Duration**: {result.total_duration_seconds:.1f}s",
         ]
+
+        # ── Variant prompt configuration (if experiment definition available) ──
+        if experiment is not None:
+            variant_map = {v.variant_id: v for v in experiment.variants}
+            has_prompt_config = bool(experiment.defaults and experiment.defaults.prompt_mutations) or any(
+                v.prompt_mutations or v.initial_prompt or v.initial_prompt_file for v in experiment.variants
+            )
+            if has_prompt_config:
+                lines.extend(["", "## Prompt Configuration", ""])
+                for vid in result.variant_ids:
+                    v = variant_map.get(vid)
+                    desc = _describe_prompt_config(v) if v else "(unknown)"
+                    lines.append(f"- **{vid}**: {desc}")
 
         # ── Aggregate Metrics (vertical: metrics as rows, variants as columns) ──
         # Collect per-task values for each variant
@@ -578,7 +618,11 @@ class ExperimentReportGenerator:
         return "\n".join(lines)
 
     @staticmethod
-    def write_reports(result: ExperimentResult, run_dir: Path) -> None:
+    def write_reports(
+        result: ExperimentResult,
+        run_dir: Path,
+        experiment: ExperimentDefinition | None = None,
+    ) -> None:
         """Write all experiment reports to disk.
 
         Creates:
@@ -590,11 +634,12 @@ class ExperimentReportGenerator:
         Args:
             result: Complete experiment result.
             run_dir: Top-level run directory.
+            experiment: Optional experiment definition (enables prompt config in reports).
         """
         run_dir.mkdir(parents=True, exist_ok=True)
 
         # Experiment-level reports at run root
-        exp_report = ExperimentReportGenerator.generate_experiment_report(result)
+        exp_report = ExperimentReportGenerator.generate_experiment_report(result, experiment=experiment)
         (run_dir / "experiment.md").write_text(exp_report, encoding="utf-8")
         (run_dir / "experiment.json").write_text(result.model_dump_json(indent=2), encoding="utf-8")
 

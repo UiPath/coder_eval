@@ -4,8 +4,17 @@ import json
 
 import pytest
 
-from coder_eval.models import ExperimentResult, TaskExperimentSummary, VariantAggregate, VariantResult
-from coder_eval.reports_experiment import ExperimentReportGenerator
+from coder_eval.models import (
+    ExperimentDefinition,
+    ExperimentResult,
+    ExperimentVariant,
+    PromptPrefix,
+    PromptSuffix,
+    TaskExperimentSummary,
+    VariantAggregate,
+    VariantResult,
+)
+from coder_eval.reports_experiment import ExperimentReportGenerator, _describe_prompt_config
 
 
 class TestResultModels:
@@ -873,3 +882,90 @@ class TestComprehensiveVariantReport:
         # Should NOT have rich sections without run_dir
         assert "## Generation Metrics" not in md
         assert "## Agent Settings" not in md
+
+
+class TestDescribePromptConfig:
+    """Tests for _describe_prompt_config helper."""
+
+    def test_no_mutations(self):
+        variant = ExperimentVariant(variant_id="baseline")
+        assert _describe_prompt_config(variant) == "(base prompt)"
+
+    def test_with_override(self):
+        variant = ExperimentVariant(variant_id="override", initial_prompt="custom")
+        assert _describe_prompt_config(variant) == "(prompt override)"
+
+    def test_with_mutations(self):
+        variant = ExperimentVariant(
+            variant_id="mutated",
+            prompt_mutations=[PromptPrefix(content="pre"), PromptSuffix(content="suf")],
+        )
+        result = _describe_prompt_config(variant)
+        assert result == "(2 mutations: prefix, suffix)"
+
+    def test_prompt_config_in_experiment_report(self):
+        """When experiment is passed, report includes prompt config section."""
+        experiment = ExperimentDefinition(
+            experiment_id="prompt-test",
+            variants=[
+                ExperimentVariant(variant_id="baseline"),
+                ExperimentVariant(
+                    variant_id="mutated",
+                    prompt_mutations=[PromptPrefix(content="Think step by step.")],
+                ),
+            ],
+        )
+        result = ExperimentResult(
+            experiment_id="prompt-test",
+            description="Test prompt mutations",
+            variant_ids=["baseline", "mutated"],
+            task_summaries=[],
+            variant_aggregates={
+                "baseline": VariantAggregate(
+                    variant_id="baseline",
+                    tasks_run=0,
+                    tasks_succeeded=0,
+                    tasks_failed=0,
+                    tasks_error=0,
+                    average_score=0.0,
+                    average_duration=0.0,
+                ),
+                "mutated": VariantAggregate(
+                    variant_id="mutated",
+                    tasks_run=0,
+                    tasks_succeeded=0,
+                    tasks_failed=0,
+                    tasks_error=0,
+                    average_score=0.0,
+                    average_duration=0.0,
+                ),
+            },
+            total_duration_seconds=0.0,
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result, experiment=experiment)
+        assert "## Prompt Configuration" in md
+        assert "(base prompt)" in md
+        assert "(1 mutations: prefix)" in md
+
+    def test_no_prompt_config_without_experiment(self):
+        """Without experiment definition, no prompt config section."""
+        result = ExperimentResult(
+            experiment_id="test",
+            description="Test",
+            variant_ids=["v1"],
+            task_summaries=[],
+            variant_aggregates={
+                "v1": VariantAggregate(
+                    variant_id="v1",
+                    tasks_run=0,
+                    tasks_succeeded=0,
+                    tasks_failed=0,
+                    tasks_error=0,
+                    average_score=0.0,
+                    average_duration=0.0,
+                ),
+            },
+            total_duration_seconds=0.0,
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "## Prompt Configuration" not in md

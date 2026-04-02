@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from ..models import AgentConfig, TaskDefinition, TemplateDirSource, TemplateSource
+from ..models import AgentConfig, ExperimentVariant, TaskDefinition, TemplateDirSource, TemplateSource
 
 
 def load_task(task_file: Path) -> tuple[TaskDefinition, str]:
@@ -93,6 +93,29 @@ def resolve_initial_prompt_file(task: TaskDefinition, base_dir: Path) -> TaskDef
     if task.initial_prompt is None:
         raise ValueError("Either 'initial_prompt' or 'initial_prompt_file' must be set")
     return task
+
+
+def resolve_variant_initial_prompt_file(variant: ExperimentVariant, base_dir: Path) -> None:
+    """Resolve initial_prompt_file on a variant to inline initial_prompt. Mutates in place.
+
+    Args:
+        variant: The experiment variant (may have initial_prompt_file set).
+        base_dir: Directory to resolve relative paths against (experiment YAML dir).
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist.
+    """
+    if variant.initial_prompt_file is None:
+        return
+    prompt_path = Path(variant.initial_prompt_file)
+    if not prompt_path.is_absolute():
+        prompt_path = (base_dir / prompt_path).resolve()
+    if not prompt_path.exists():
+        raise FileNotFoundError(f"variant initial_prompt_file not found: {prompt_path}")
+    content = prompt_path.read_text(encoding="utf-8").strip()
+    # Clear file field BEFORE setting inline to avoid mutual-exclusivity validator
+    variant.initial_prompt_file = None
+    variant.initial_prompt = content
 
 
 def resolve_agent_system_prompt(agent_config: AgentConfig | None, base_dir: Path) -> None:

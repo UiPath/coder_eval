@@ -78,6 +78,10 @@ class AgentConfig(BaseModel):
         return self
 
 
+DEFAULT_GATEWAY_MODEL = "anthropic.claude-sonnet-4-6"
+"""Default LLM Gateway model used by LLMReviewer and PromptRephrase."""
+
+
 class LLMReviewerConfig(BaseModel):
     """Configuration for the LLM-based qualitative reviewer.
 
@@ -87,7 +91,7 @@ class LLMReviewerConfig(BaseModel):
 
     enabled: bool = Field(default=False, description="Whether to enable LLM review")
     model: str = Field(
-        default="anthropic.claude-3-5-sonnet-20240620-v1:0",
+        default=DEFAULT_GATEWAY_MODEL,
         description="Gateway model name (e.g., anthropic.claude-3-5-sonnet-20240620-v1:0, gpt-4o-2024-08-06)",
     )
     temperature: float = Field(default=0.0, ge=0.0, le=2.0, description="Temperature for LLM sampling")

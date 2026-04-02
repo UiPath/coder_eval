@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.resources
 import logging
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -22,6 +23,7 @@ from ..models import (
     ExperimentDefinition,
     ExperimentResult,
     ExperimentVariant,
+    PromptRephrase,
     ResolvedTask,
     SnapshotMode,
     TaskDefinition,
@@ -30,10 +32,16 @@ from ..models import (
     TemplateSource,
     VariantAggregate,
     VariantResult,
+    apply_prompt_mutations,
     validate_template_sources_list,
 )
 from .config import BatchRunConfig
-from .task_loader import load_task, resolve_agent_system_prompt, resolve_template_source_paths
+from .task_loader import (
+    load_task,
+    resolve_agent_system_prompt,
+    resolve_template_source_paths,
+    resolve_variant_initial_prompt_file,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -154,6 +162,73 @@ def _build_agent_lineage(
         for key, value in layer.items():
             lineage[f"agent.{key}"] = ConfigLineageEntry(value=value, source=source_name)
     return lineage
+
+
+def _apply_prompt_overrides(
+    task: TaskDefinition,
+    experiment: ExperimentDefinition,
+    variant: ExperimentVariant,
+    lineage: dict[str, ConfigLineageEntry],
+) -> None:
+    """Apply variant-level prompt overrides or mutations to a resolved task. Mutates in place.
+
+    Resolution order:
+      1. If variant.initial_prompt is set → full replacement (skip all mutations)
+      2. Else → apply experiment.defaults.prompt_mutations, then variant.prompt_mutations
+
+    Args:
+        task: The resolved task definition (initial_prompt already inlined from task YAML).
+        experiment: The active experiment definition (for defaults.prompt_mutations).
+        variant: The specific variant being resolved.
+        lineage: Config lineage dict to update.
+    """
+    # Full replacement — skip all mutations
+    if variant.initial_prompt is not None:
+        task.initial_prompt = variant.initial_prompt
+        lineage["initial_prompt"] = ConfigLineageEntry(
+            value="(overridden)", source="variant", source_detail="initial_prompt override"
+        )
+        return
+
+    # Collect mutations: defaults first, then variant
+    defaults_mutations = (
+        list(experiment.defaults.prompt_mutations)
+        if experiment.defaults and experiment.defaults.prompt_mutations
+        else []
+    )
+    variant_mutations = list(variant.prompt_mutations) if variant.prompt_mutations else []
+    combined = defaults_mutations + variant_mutations
+
+    if not combined:
+        return
+
+    if task.initial_prompt is None:
+        raise ValueError(f"initial_prompt must be resolved before applying mutations (task '{task.task_id}')")
+
+    # Lazily create rephrase_fn only if any rephrase mutation exists
+    rephrase_fn = None
+    if any(isinstance(m, PromptRephrase) for m in combined):
+        from .rephrase import create_rephrase_fn
+
+        rephrase_fn = create_rephrase_fn()
+
+    try:
+        task.initial_prompt = apply_prompt_mutations(task.initial_prompt, combined, rephrase_fn=rephrase_fn)
+    except re.error as e:
+        raise ValueError(
+            f"Invalid regex in prompt_mutations for variant '{variant.variant_id}' on task '{task.task_id}': {e}"
+        ) from e
+
+    # Build descriptive detail
+    type_names = [m.type for m in combined]
+    sources = []
+    if defaults_mutations:
+        sources.append("experiment-defaults")
+    if variant_mutations:
+        sources.append(f"variant '{variant.variant_id}'")
+    detail = f"{len(combined)} ops ({', '.join(type_names)}) from {' + '.join(sources)}"
+
+    lineage["initial_prompt"] = ConfigLineageEntry(value="(mutated)", source="mutation", source_detail=detail)
 
 
 def resolve_task_for_variant(
@@ -448,6 +523,17 @@ def resolve_all_tasks(
     """
     resolved: list[ResolvedTask] = []
 
+    # Resolve variant-level initial_prompt_file paths before the main loop
+    exp_dir = experiment_file.parent if experiment_file is not None else None
+    for variant in experiment.variants:
+        if variant.initial_prompt_file is not None:
+            if exp_dir is None:
+                raise ValueError(
+                    f"variant '{variant.variant_id}' uses initial_prompt_file but no experiment file path "
+                    "is available for resolving relative paths"
+                )
+            resolve_variant_initial_prompt_file(variant, exp_dir)
+
     for task_file in task_files:
         task, source_yaml = load_task(task_file)
 
@@ -457,6 +543,9 @@ def resolve_all_tasks(
 
             # Resolve file paths injected by variant overrides
             resolve_task_files(resolved_task, task_file, experiment_file)
+
+            # Apply prompt mutations or overrides (between file resolution and CLI overrides)
+            _apply_prompt_overrides(resolved_task, experiment, variant, lineage)
 
             # Apply layer 5 (CLI / .env overrides)
             _apply_cli_overrides(resolved_task, config, lineage)

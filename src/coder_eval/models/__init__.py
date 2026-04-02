@@ -48,6 +48,18 @@ from coder_eval.models.experiment import (
     VariantResult,
 )
 
+# Mutations
+from coder_eval.models.mutations import (
+    PromptMutation,
+    PromptPrefix,
+    PromptRephrase,
+    PromptReplace,
+    PromptSuffix,
+    PromptTemplate,
+    RephraseFn,
+    apply_prompt_mutations,
+)
+
 # Results
 from coder_eval.models.results import (
     ConfigLineageEntry,
@@ -82,6 +94,7 @@ from coder_eval.models.sandbox import (
 
 # Tasks
 from coder_eval.models.tasks import (
+    DEFAULT_GATEWAY_MODEL,
     AgentConfig,
     LLMReviewerConfig,
     ReferenceSource,
@@ -170,9 +183,19 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "RunSummary",
     # Tasks
     "TaskDefinition",
+    "DEFAULT_GATEWAY_MODEL",
     "AgentConfig",
     "LLMReviewerConfig",
     "ReferenceSource",
+    # Mutations
+    "PromptPrefix",
+    "PromptSuffix",
+    "PromptReplace",
+    "PromptTemplate",
+    "PromptRephrase",
+    "PromptMutation",
+    "RephraseFn",
+    "apply_prompt_mutations",
     # Experiment
     "ExperimentDefaults",
     "ExperimentDefinition",

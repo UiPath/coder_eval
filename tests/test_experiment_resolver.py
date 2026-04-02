@@ -6,10 +6,14 @@ from coder_eval.models import (
     ExperimentDefaults,
     ExperimentDefinition,
     ExperimentVariant,
+    PromptPrefix,
+    PromptReplace,
+    PromptSuffix,
+    PromptTemplate,
     TaskDefinition,
     TemplateDirSource,
 )
-from coder_eval.orchestration.experiment import resolve_task_for_variant
+from coder_eval.orchestration.experiment import _apply_prompt_overrides, resolve_task_for_variant
 
 
 def _make_task(agent: dict | None = None, **kwargs) -> TaskDefinition:
@@ -480,3 +484,208 @@ class TestTemplateSourcesOverlay:
 
         with pytest.raises(ValueError, match="RepoSource must be the first element"):
             resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+
+
+class TestPromptMutations:
+    """Tests for prompt mutation resolution via _apply_prompt_overrides."""
+
+    def test_variant_prefix_mutation_applied(self):
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"}, initial_prompt="Do something")
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[
+                ExperimentVariant(
+                    variant_id="prefixed",
+                    prompt_mutations=[PromptPrefix(content="Think step by step.")],
+                )
+            ],
+        )
+
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
+        assert resolved.initial_prompt == "Think step by step.\n\nDo something"
+
+    def test_variant_suffix_mutation(self):
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"}, initial_prompt="Do something")
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[
+                ExperimentVariant(
+                    variant_id="suffixed",
+                    prompt_mutations=[PromptSuffix(content="Include type hints.")],
+                )
+            ],
+        )
+
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
+        assert resolved.initial_prompt == "Do something\n\nInclude type hints."
+
+    def test_variant_replace_mutation(self):
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"}, initial_prompt="Create a Python file")
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[
+                ExperimentVariant(
+                    variant_id="replaced",
+                    prompt_mutations=[PromptReplace(pattern="Create", replacement="Write a minimal")],
+                )
+            ],
+        )
+
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
+        assert resolved.initial_prompt == "Write a minimal a Python file"
+
+    def test_variant_template_mutation(self):
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"}, initial_prompt="Create a {language} file")
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[
+                ExperimentVariant(
+                    variant_id="templated",
+                    prompt_mutations=[PromptTemplate(variables={"language": "Rust"})],
+                )
+            ],
+        )
+
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
+        assert resolved.initial_prompt == "Create a Rust file"
+
+    def test_defaults_mutations_applied_before_variant(self):
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"}, initial_prompt="base")
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            defaults=ExperimentDefaults(
+                prompt_mutations=[PromptPrefix(content="DEFAULT")],
+            ),
+            variants=[
+                ExperimentVariant(
+                    variant_id="combined",
+                    prompt_mutations=[PromptSuffix(content="VARIANT")],
+                )
+            ],
+        )
+
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
+        # defaults prefix first, then variant suffix
+        assert resolved.initial_prompt == "DEFAULT\n\nbase\n\nVARIANT"
+
+    def test_variant_initial_prompt_overrides_task_prompt(self):
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"}, initial_prompt="original prompt")
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="override", initial_prompt="completely new prompt")],
+        )
+
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
+        assert resolved.initial_prompt == "completely new prompt"
+
+    def test_variant_initial_prompt_skips_defaults_mutations(self):
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"}, initial_prompt="original")
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            defaults=ExperimentDefaults(
+                prompt_mutations=[PromptPrefix(content="THIS SHOULD NOT APPEAR")],
+            ),
+            variants=[ExperimentVariant(variant_id="override", initial_prompt="replacement")],
+        )
+
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
+        assert resolved.initial_prompt == "replacement"
+        assert "THIS SHOULD NOT APPEAR" not in resolved.initial_prompt
+
+    def test_no_mutations_preserves_prompt(self):
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"}, initial_prompt="unchanged prompt")
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="baseline")],
+        )
+
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
+        assert resolved.initial_prompt == "unchanged prompt"
+
+    def test_multiple_mutations_compose(self):
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"}, initial_prompt="Create a file")
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[
+                ExperimentVariant(
+                    variant_id="multi",
+                    prompt_mutations=[
+                        PromptPrefix(content="STEP1", separator=": "),
+                        PromptReplace(pattern="file", replacement="script"),
+                        PromptSuffix(content="STEP3", separator=". "),
+                    ],
+                )
+            ],
+        )
+
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
+        # prefix -> "STEP1: Create a file" -> replace -> "STEP1: Create a script"
+        # -> suffix -> "STEP1: Create a script. STEP3"
+        assert resolved.initial_prompt == "STEP1: Create a script. STEP3"
+
+    def test_prompt_mutation_lineage_tracking(self):
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"}, initial_prompt="base")
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[
+                ExperimentVariant(
+                    variant_id="tracked",
+                    prompt_mutations=[PromptPrefix(content="pre")],
+                )
+            ],
+        )
+
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
+        assert "initial_prompt" in lineage
+        assert lineage["initial_prompt"].source == "mutation"
+        assert "prefix" in lineage["initial_prompt"].source_detail
+
+    def test_variant_initial_prompt_lineage(self):
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"}, initial_prompt="original")
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="override", initial_prompt="new")],
+        )
+
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
+        assert "initial_prompt" in lineage
+        assert lineage["initial_prompt"].source == "variant"
+
+    def test_regex_replace_mutation(self):
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"}, initial_prompt="version 123 build 456")
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[
+                ExperimentVariant(
+                    variant_id="regex",
+                    prompt_mutations=[PromptReplace(pattern=r"\d+", replacement="N", regex=True)],
+                )
+            ],
+        )
+
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
+        assert resolved.initial_prompt == "version N build N"
