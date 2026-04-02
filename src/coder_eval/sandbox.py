@@ -59,6 +59,10 @@ class Sandbox:
     def setup(self) -> Path:
         """Set up the sandbox environment.
 
+        The sandbox is a plain temporary directory on the host -- there is no
+        container or cgroup isolation.  Only command-level timeouts are enforced;
+        memory and disk limits in :class:`ResourceLimits` are not enforced.
+
         Returns:
             Path to the sandbox directory
 
@@ -80,20 +84,26 @@ class Sandbox:
         # Create temporary directory
         self.sandbox_dir = Path(tempfile.mkdtemp(prefix=f"coder_eval_{self.task_id}_"))
 
-        # Setup template content (repo, directory, or inline files)
-        self._setup_template()
+        try:
+            # Setup template content (repo, directory, or inline files)
+            self._setup_template()
 
-        # Set up Python virtual environment (only if python config is provided)
-        if self.config.python:
-            self._setup_virtualenv()
+            # Set up Python virtual environment (only if python config is provided)
+            if self.config.python:
+                self._setup_virtualenv()
 
-            # Install required packages
-            if self.config.python.env_packages:
-                self._install_packages()
+                # Install required packages
+                if self.config.python.env_packages:
+                    self._install_packages()
 
-        # Install Node.js packages
-        if self.config.node and self.config.node.env_packages:
-            self._install_node_packages()
+            # Install Node.js packages
+            if self.config.node and self.config.node.env_packages:
+                self._install_node_packages()
+        except Exception:
+            # Clean up temp directory if setup fails partway through
+            shutil.rmtree(self.sandbox_dir, ignore_errors=True)
+            self.sandbox_dir = None
+            raise
 
         return self.sandbox_dir
 

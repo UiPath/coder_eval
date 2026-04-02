@@ -13,6 +13,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def resolve_agent_settings(task_dicts: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, bool]:
+    """Pick the best agent settings source from a list of task result dicts.
+
+    Prefers ``sdk_options`` (full SDK dump) over ``agent_config``.
+
+    Returns:
+        Tuple of (settings_dict_or_None, is_sdk_options).
+    """
+    sdk_opts_list = [t["sdk_options"] for t in task_dicts if t.get("sdk_options")]
+    if sdk_opts_list:
+        return sdk_opts_list[0], True
+    agent_configs = [t["agent_config"] for t in task_dicts if t.get("agent_config")]
+    if agent_configs:
+        return agent_configs[0], False
+    return None, False
+
+
 class ReportGenerator:
     """Generates reports from evaluation results."""
 
@@ -254,16 +271,7 @@ class ReportGenerator:
                 lines.extend(ReportGenerator._generate_command_statistics_section(aggregated_stats))
 
         # Agent Settings section — prefer sdk_options (full SDK dump), fall back to agent_config
-        sdk_opts_list = [t["sdk_options"] for t in summary.task_results if t.get("sdk_options")]
-        agent_configs = [t["agent_config"] for t in summary.task_results if t.get("agent_config")]
-        settings_source: dict[str, Any] | None = None
-        is_sdk = False
-        if sdk_opts_list:
-            settings_source = sdk_opts_list[0]
-            is_sdk = True
-        elif agent_configs:
-            settings_source = agent_configs[0]
-
+        settings_source, is_sdk = resolve_agent_settings(summary.task_results)
         if settings_source:
             lines.append("")
             lines.extend(ReportGenerator._generate_agent_settings_section(settings_source, is_sdk))

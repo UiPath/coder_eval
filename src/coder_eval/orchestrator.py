@@ -258,104 +258,100 @@ class Orchestrator:
                 logger.error(f"Evaluation failed: {e}", exc_info=True)
 
             finally:
-                # Always cleanup
                 await self._cleanup()
-
-                # Finalize result
-                if self.result:
-                    self.result.completed_at = datetime.now()
-                    self.result.duration_seconds = time.time() - start_time
-
-                    # Calculate final weighted score
-                    self.result.calculate_weighted_score(self.task.success_criteria)
-
-                    # Calculate command statistics using analysis module
-                    if self.result.turns:
-                        self.result.command_stats = calculate_command_statistics(self.result.turns)
-
-                    # Resolve model_used from turns (last turn with model wins) or agent config
-                    if self.result.turns:
-                        for turn in reversed(self.result.turns):
-                            if turn.model_used:
-                                self.result.model_used = turn.model_used
-                                break
-                    if not self.result.model_used and self.task.agent.model:
-                        self.result.model_used = self.task.agent.model
-
-                    # Aggregate token usage across all turns
-                    if self.result.turns:
-                        from .models.telemetry import TokenUsage
-
-                        usages = [t.token_usage for t in self.result.turns if t.token_usage is not None]
-                        if usages:
-                            costs = [u.total_cost_usd for u in usages if u.total_cost_usd is not None]
-                            self.result.total_token_usage = TokenUsage(
-                                input_tokens=sum(u.input_tokens for u in usages),
-                                output_tokens=sum(u.output_tokens for u in usages),
-                                cache_creation_input_tokens=sum(u.cache_creation_input_tokens for u in usages),
-                                cache_read_input_tokens=sum(u.cache_read_input_tokens for u in usages),
-                                total_cost_usd=sum(costs) if costs else None,
-                            )
-
-                    # Override with proxy usage when SDK reports zeros (proxy intercepts all traffic)
-                    if self.proxy is not None:
-                        from .models.telemetry import TokenUsage
-
-                        pu = self.proxy.usage
-                        sdk_usage = self.result.total_token_usage
-                        sdk_is_zero = sdk_usage is None or (
-                            sdk_usage.input_tokens == 0 and sdk_usage.output_tokens == 0
-                        )
-                        if sdk_is_zero and (pu.input_tokens > 0 or pu.output_tokens > 0):
-                            proxy_cost = self.proxy.get_total_cost()
-                            self.result.total_token_usage = TokenUsage(
-                                input_tokens=pu.input_tokens,
-                                output_tokens=pu.output_tokens,
-                                cache_creation_input_tokens=pu.cache_creation_input_tokens,
-                                cache_read_input_tokens=pu.cache_read_input_tokens,
-                                total_cost_usd=proxy_cost,
-                            )
-
-                    # Aggregate assistant turns across all turns
-                    if self.result.turns:
-                        self.result.total_assistant_turns = sum(t.assistant_turn_count for t in self.result.turns)
-
-                    # Calculate commands efficiency
-                    # actual_commands is always set (useful on its own for telemetry);
-                    # expected_commands and commands_efficiency are only set when the
-                    # task defines expected_commands.
-                    if self.result.turns and self.result.command_stats:
-                        total_cmds = self.result.command_stats.total_commands
-                        self.result.actual_commands = total_cmds
-                        if self.task.expected_commands is not None:
-                            self.result.expected_commands = self.task.expected_commands
-                            self.result.commands_efficiency = compute_commands_efficiency(
-                                total_cmds, self.task.expected_commands
-                            )
-
-                    # Capture SDK options from agent (if supported)
-                    if self.agent:
-                        self.result.sdk_options = self.agent.get_sdk_options()
-
-                    # Build task config record (resolved config + source YAML + lineage)
-                    # warnings=False: TaskDefinition contains discriminated unions (SuccessCriterion,
-                    # template sources) that produce benign Pydantic serialization warnings about
-                    # shadowed fields from the union discriminator.
-                    self.result.task_config = TaskConfigRecord(
-                        resolved=self.task.model_dump(warnings=False),
-                        source_yaml=self.source_yaml,
-                        source_file=str(self.task_file) if self.task_file else None,
-                        lineage=self.config_lineage,
-                    )
-
-                    # Save report to per-task directory
-                    self.report_path.parent.mkdir(parents=True, exist_ok=True)
-                    self.report_path.write_text(
-                        self.result.model_dump_json(indent=2),
-                        encoding="utf-8",
-                    )
+                self._finalize_result(start_time)
 
         return self.result
+
+    def _finalize_result(self, start_time: float) -> None:
+        """Finalize the evaluation result: scores, telemetry, and persistence."""
+        if not self.result:
+            return
+
+        if self.task.agent is None:
+            logger.error("Cannot finalize result: task.agent is None")
+            return
+
+        self.result.completed_at = datetime.now()
+        self.result.duration_seconds = time.time() - start_time
+
+        # Weighted score
+        self.result.calculate_weighted_score(self.task.success_criteria)
+
+        # Command statistics
+        if self.result.turns:
+            self.result.command_stats = calculate_command_statistics(self.result.turns)
+
+        # Resolve model_used (last turn with model wins, then agent config)
+        if self.result.turns:
+            for turn in reversed(self.result.turns):
+                if turn.model_used:
+                    self.result.model_used = turn.model_used
+                    break
+        if not self.result.model_used and self.task.agent.model:
+            self.result.model_used = self.task.agent.model
+
+        # Aggregate token usage
+        self._aggregate_token_usage()
+
+        # Aggregate assistant turns
+        if self.result.turns:
+            self.result.total_assistant_turns = sum(t.assistant_turn_count for t in self.result.turns)
+
+        # Commands efficiency
+        if self.result.turns and self.result.command_stats:
+            total_cmds = self.result.command_stats.total_commands
+            self.result.actual_commands = total_cmds
+            if self.task.expected_commands is not None:
+                self.result.expected_commands = self.task.expected_commands
+                self.result.commands_efficiency = compute_commands_efficiency(total_cmds, self.task.expected_commands)
+
+        # SDK options snapshot
+        if self.agent:
+            self.result.sdk_options = self.agent.get_sdk_options()
+
+        # Task config record (warnings=False: discriminated unions produce benign warnings)
+        self.result.task_config = TaskConfigRecord(
+            resolved=self.task.model_dump(warnings=False),
+            source_yaml=self.source_yaml,
+            source_file=str(self.task_file) if self.task_file else None,
+            lineage=self.config_lineage,
+        )
+
+        # Persist
+        self.report_path.parent.mkdir(parents=True, exist_ok=True)
+        self.report_path.write_text(self.result.model_dump_json(indent=2), encoding="utf-8")
+
+    def _aggregate_token_usage(self) -> None:
+        """Aggregate token usage from turns and proxy, storing on self.result."""
+        assert self.result is not None
+        from .models.telemetry import TokenUsage
+
+        if self.result.turns:
+            usages = [t.token_usage for t in self.result.turns if t.token_usage is not None]
+            if usages:
+                costs = [u.total_cost_usd for u in usages if u.total_cost_usd is not None]
+                self.result.total_token_usage = TokenUsage(
+                    input_tokens=sum(u.input_tokens for u in usages),
+                    output_tokens=sum(u.output_tokens for u in usages),
+                    cache_creation_input_tokens=sum(u.cache_creation_input_tokens for u in usages),
+                    cache_read_input_tokens=sum(u.cache_read_input_tokens for u in usages),
+                    total_cost_usd=sum(costs) if costs else None,
+                )
+
+        # Override with proxy usage when SDK reports zeros
+        if self.proxy is not None:
+            pu = self.proxy.usage
+            sdk_usage = self.result.total_token_usage
+            sdk_is_zero = sdk_usage is None or (sdk_usage.input_tokens == 0 and sdk_usage.output_tokens == 0)
+            if sdk_is_zero and (pu.input_tokens > 0 or pu.output_tokens > 0):
+                self.result.total_token_usage = TokenUsage(
+                    input_tokens=pu.input_tokens,
+                    output_tokens=pu.output_tokens,
+                    cache_creation_input_tokens=pu.cache_creation_input_tokens,
+                    cache_read_input_tokens=pu.cache_read_input_tokens,
+                    total_cost_usd=self.proxy.get_total_cost(),
+                )
 
     async def _setup(self) -> None:
         """Set up all components for evaluation.
@@ -637,25 +633,14 @@ class Orchestrator:
             self.result.success_criteria_results = criteria_results
 
             # Determine if all criteria passed their thresholds
-            all_passed = all(
-                result.score >= criterion.pass_threshold
-                for result, criterion in zip(criteria_results, self.task.success_criteria, strict=True)
-            )
+            pairs = list(zip(criteria_results, self.task.success_criteria, strict=True))
+            passed_count = sum(1 for r, c in pairs if r.score >= c.pass_threshold)
+            total_count = len(pairs)
+            all_passed = passed_count == total_count
 
-            passed_count = sum(
-                1
-                for result, criterion in zip(criteria_results, self.task.success_criteria, strict=True)
-                if result.score >= criterion.pass_threshold
-            )
-            total_count = len(criteria_results)
-
-            # Calculate current weighted score for logging
-            total_weighted = sum(
-                result.score * criterion.weight
-                for result, criterion in zip(criteria_results, self.task.success_criteria, strict=True)
-            )
-            total_weight = sum(c.weight for c in self.task.success_criteria)
-            current_score = total_weighted / total_weight if total_weight > 0 else 0.0
+            # Reuse the model method for weighted score (single source of truth)
+            self.result.calculate_weighted_score(self.task.success_criteria)
+            current_score = self.result.weighted_score or 0.0
 
             logger.info(f"Success criteria: {passed_count}/{total_count} passed, weighted score: {current_score:.3f}")
 

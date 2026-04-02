@@ -167,7 +167,7 @@ class LLMGatewayProxy:
             "X-UiPath-LlmGateway-RequestingProduct": self._config.requesting_product,
             "X-UiPath-LlmGateway-RequestingFeature": self._config.requesting_feature,
             "X-UiPath-LlmGateway-UserId": self._config.user_id,
-            "X-UiPath-LlmGateway-TimeoutSeconds": self._config.timeout_seconds,
+            "X-UiPath-LlmGateway-TimeoutSeconds": str(self._config.timeout_seconds),
             "X-UiPath-LLMGateway-AllowFull4xxResponse": "true",
             "X-UiPath-LlmGateway-ApiFlavor": self._config.api_flavor,
             "X-UiPath-Streaming-Enabled": str(is_streaming).lower(),
@@ -502,6 +502,7 @@ class LLMGatewayProxy:
     ) -> web.Response:
         """Forward a non-streaming request and return the full response."""
         token_refreshed = False
+        upstream: httpx.Response | None = None
 
         try:
             async with httpx.AsyncClient(timeout=_UPSTREAM_TIMEOUT) as client:
@@ -521,6 +522,10 @@ class LLMGatewayProxy:
                         continue
 
                     break  # Success or non-retryable error
+
+                if upstream is None:
+                    self._logger.warning("No upstream response after retries (loop body never executed)")
+                    return web.Response(status=502, text="No upstream response after retries")
 
                 # Extract usage from non-streaming response
                 if upstream.status_code == 200:

@@ -109,9 +109,9 @@ sandbox:
   template_sources: [ ... ]           # Optional: preset files (see below)
   snapshots: { ... }                  # Optional: snapshot config (see below)
   limits:                             # Optional: resource limits
-    timeout: 300
-    memory_mb: 512
-    disk_mb: 1024
+    timeout: 300                       # Enforced via subprocess timeout
+    max_memory_mb: 512                 # NOT enforced (reserved for future use)
+    max_disk_mb: 1024                  # NOT enforced (reserved for future use)
 ```
 
 ## Template Sources

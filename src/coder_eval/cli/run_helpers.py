@@ -12,7 +12,7 @@ from .console import console
 
 # Resolve tasks/ relative to project root — this is a repo-only feature.
 # When running from a wheel install, users must provide explicit task file paths.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 DEFAULT_TASKS_DIR = _PROJECT_ROOT / "tasks"
 
 

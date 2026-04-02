@@ -186,16 +186,14 @@ def test_evaluator_handles_empty_response(reviewer, caplog):
     assert any("Failed to parse LLM response" in record.message for record in caplog.records)
 
 
-def test_evaluator_handles_llm_gateway_exception(reviewer, caplog):
-    """Test that LLM Gateway exceptions are caught gracefully.
+def test_evaluator_handles_non_retryable_exception(reviewer, caplog):
+    """Test that non-retryable errors (ValueError etc.) are caught gracefully.
 
-    Hypothesis: LLM Gateway may raise exceptions (timeout, auth error).
-    Expected: Exception caught in review(), warning logged, None returned.
-
-    Context: Lines 223-235 wrap llm.invoke() in try-except.
+    Non-retryable errors (parse/logic failures) return None so the orchestrator
+    falls back to deterministic feedback.  Retryable errors (timeouts, network)
+    propagate so execute_with_retry can handle them.
     """
-    # Mock LLM Gateway raising exception
-    reviewer.llm.invoke.side_effect = Exception("LLM Gateway timeout")
+    reviewer.llm.invoke.side_effect = ValueError("bad config value")
 
     result = reviewer.review(
         task_description="Test task",
@@ -206,6 +204,22 @@ def test_evaluator_handles_llm_gateway_exception(reviewer, caplog):
 
     assert result is None
     assert any("LLM review failed" in record.message for record in caplog.records)
+
+
+def test_evaluator_propagates_retryable_exception(reviewer):
+    """Test that retryable errors (timeouts, network) propagate to the caller.
+
+    This allows execute_with_retry to categorize and retry the operation.
+    """
+    reviewer.llm.invoke.side_effect = Exception("LLM Gateway timeout")
+
+    with pytest.raises(Exception, match="LLM Gateway timeout"):
+        reviewer.review(
+            task_description="Test task",
+            agent_output="Agent output",
+            current_iteration=1,
+            max_iterations=3,
+        )
 
 
 def test_evaluator_returns_none_when_disabled(reviewer_config):

@@ -189,7 +189,7 @@ def test_config_exports_to_os_environ(monkeypatch):
     # Use kwargs to set values deterministically (kwargs beat env vars and .env)
     settings = Settings(log_level="WARNING", default_agent_model="claude-sonnet-4-20250514")
 
-    # Manually export to os.environ (simulating lines 148-157)
+    # Manually export to os.environ (simulating lines 148-157) using monkeypatch for cleanup
     for key, value in settings.model_dump().items():
         if value is not None:
             env_key = key.upper()

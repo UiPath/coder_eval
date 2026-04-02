@@ -58,7 +58,7 @@ class ProxyConfig:
     requesting_product: str = "coder-eval"
     requesting_feature: str = "claude-code-agent"
     user_id: str = ""
-    timeout_seconds: str = "300"
+    timeout_seconds: int = 300
 
     # Passthrough endpoint settings
     vendor: str = "awsbedrock"

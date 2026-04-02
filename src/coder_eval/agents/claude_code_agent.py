@@ -404,64 +404,12 @@ class ClaudeCodeAgent(Agent):
                 error_details += f"\nStderr output:\n{stderr}"
             raise RuntimeError(f"Communication with agent failed: {error_details}") from e
 
-        # PHASE 3: Finalize commands - convert pending to list and handle missing results
-        commands: list[CommandTelemetry] = []
-        unknown_status_count = 0
-
-        for tool_id, cmd_data in pending_commands.items():
-            cmd = cmd_data["telemetry"]
-
-            # Mark commands without results as "unknown"
-            if cmd.result_status is None:
-                cmd.result_status = "unknown"
-                unknown_status_count += 1
-                logger.warning(
-                    f"Command {cmd.tool_name}:{tool_id} completed without tool result. "
-                    + "Status set to 'unknown'. This may indicate agent interruption or SDK issue."
-                )
-
-            # Estimate duration for commands without results
-            if cmd.duration_ms is None:
-                cmd.duration_ms = 0.0  # Conservative estimate
-
-            commands.append(cmd)
-
-        # Log summary of unknown statuses with message type breakdown for debugging
-        if unknown_status_count > 0:
-            msg_type_counts: dict[str, int] = {}
-            for msg in messages:
-                type_name = type(msg).__name__
-                msg_type_counts[type_name] = msg_type_counts.get(type_name, 0) + 1
-            type_summary = ", ".join(f"{k}={v}" for k, v in sorted(msg_type_counts.items()))
-            logger.warning(
-                f"Turn completed with {unknown_status_count} command(s) in 'unknown' status. "
-                + f"Messages received: [{type_summary}]. "
-                + "This may indicate an SDK message type mismatch or agent interruption."
-            )
-
-        # Commands are in sequence order as they were captured
-
-        # Build TokenUsage from SDK ResultMessage data
-        token_usage: TokenUsage | None = None
-        if sdk_result_usage:
-            token_usage = TokenUsage(
-                input_tokens=sdk_result_usage.get("input_tokens", 0),
-                output_tokens=sdk_result_usage.get("output_tokens", 0),
-                cache_creation_input_tokens=sdk_result_usage.get("cache_creation_input_tokens", 0) or 0,
-                cache_read_input_tokens=sdk_result_usage.get("cache_read_input_tokens", 0) or 0,
-                total_cost_usd=sdk_result_cost,
-            )
-
-        # Capture file state after the turn
+        # PHASE 3: Finalize commands and build turn record
+        commands = self._finalize_commands(pending_commands, messages)
+        token_usage = self._build_token_usage(sdk_result_usage, sdk_result_cost)
         files_after = self._capture_file_tree()
-
-        # Detect file changes
         file_changes = self._detect_file_changes(files_before, files_after)
-
-        # Format agent output from messages
         agent_output = self._format_messages(messages)
-
-        # Determine agent state from messages
         self._update_state_from_messages(messages)
 
         # Detect max_turns exhaustion: SDK used all available turns without the agent voluntarily completing.
@@ -484,7 +432,7 @@ class ClaudeCodeAgent(Agent):
             iteration=self._iteration,
             user_input=user_input,
             agent_output=agent_output,
-            commands=commands,  # NEW: Structured telemetry
+            commands=commands,
             files_changed=file_changes,
             timestamp=datetime.now(),
             duration_seconds=duration,
@@ -508,6 +456,54 @@ class ClaudeCodeAgent(Agent):
             Current agent state
         """
         return self._state
+
+    @staticmethod
+    def _finalize_commands(
+        pending_commands: dict[str, dict[str, Any]], messages: list[Message]
+    ) -> list[CommandTelemetry]:
+        """Convert pending commands to a finalized list, marking unresolved ones as unknown."""
+        commands: list[CommandTelemetry] = []
+        unknown_status_count = 0
+
+        for tool_id, cmd_data in pending_commands.items():
+            cmd = cmd_data["telemetry"]
+            if cmd.result_status is None:
+                cmd.result_status = "unknown"
+                unknown_status_count += 1
+                logger.warning(
+                    f"Command {cmd.tool_name}:{tool_id} completed without tool result. "
+                    + "Status set to 'unknown'. This may indicate agent interruption or SDK issue."
+                )
+            if cmd.duration_ms is None:
+                cmd.duration_ms = 0.0
+            commands.append(cmd)
+
+        if unknown_status_count > 0:
+            msg_type_counts: dict[str, int] = {}
+            for msg in messages:
+                type_name = type(msg).__name__
+                msg_type_counts[type_name] = msg_type_counts.get(type_name, 0) + 1
+            type_summary = ", ".join(f"{k}={v}" for k, v in sorted(msg_type_counts.items()))
+            logger.warning(
+                f"Turn completed with {unknown_status_count} command(s) in 'unknown' status. "
+                + f"Messages received: [{type_summary}]. "
+                + "This may indicate an SDK message type mismatch or agent interruption."
+            )
+
+        return commands
+
+    @staticmethod
+    def _build_token_usage(sdk_result_usage: dict[str, Any] | None, sdk_result_cost: float | None) -> TokenUsage | None:
+        """Build a TokenUsage from SDK ResultMessage data, or None if unavailable."""
+        if not sdk_result_usage:
+            return None
+        return TokenUsage(
+            input_tokens=sdk_result_usage.get("input_tokens", 0),
+            output_tokens=sdk_result_usage.get("output_tokens", 0),
+            cache_creation_input_tokens=sdk_result_usage.get("cache_creation_input_tokens", 0) or 0,
+            cache_read_input_tokens=sdk_result_usage.get("cache_read_input_tokens", 0) or 0,
+            total_cost_usd=sdk_result_cost,
+        )
 
     def get_sdk_options(self) -> dict[str, Any] | None:
         """Get the raw SDK options used for the last agent query.

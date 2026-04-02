@@ -68,35 +68,38 @@ async def test_orchestrator_create_agent(tmp_path):
     assert agent.config.type == "claude-code"
 
 
-def test_orchestrator_generate_feedback(tmp_path):
-    """Test feedback generation from failed criteria."""
+@pytest.mark.asyncio
+async def test_orchestrator_generate_feedback(tmp_path):
+    """Test that generate_next_prompt produces meaningful feedback from failed criteria."""
     from coder_eval.models import CriterionResult
+    from coder_eval.orchestration.evaluation import generate_next_prompt
 
     task_file = Path("tasks/hello_date.yaml")
     task, _ = load_task(task_file)
 
-    run_dir = tmp_path / "test_run" / "hello_date"
-    Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
-
-    # Create some failed criteria
+    # Build one failing CriterionResult per success criterion so lengths match
     criteria_results = [
         CriterionResult(
-            criterion_type="file_exists", description="app.py should exist", score=0.0, error="File not found"
-        ),
-        CriterionResult(
-            criterion_type="run_command", description="Script should run", score=0.0, details="Exit code: 1"
-        ),
+            criterion_type=c.type,
+            description=getattr(c, "description", c.type),
+            score=0.0,
+            error=f"{c.type} failed",
+        )
+        for c in task.success_criteria
     ]
 
-    # This would normally be async, but we can test the logic
-    # by checking that it would generate meaningful feedback
-    assert len(criteria_results) == 2
-    assert not all(r.score >= 0.9 for r in criteria_results)
+    feedback = await generate_next_prompt(
+        task=task,
+        agent_output="I created something",
+        criteria_results=criteria_results,
+        iteration=1,
+        llm_reviewer=None,
+        reference_code=None,
+    )
 
-
-# Note: We can't easily test the full run() method without a real API key
-# and without the agent actually executing. That would be an integration test.
-# For now, we test the components individually.
+    # Feedback should mention at least one failing criterion type
+    feedback_lower = feedback.lower()
+    assert any(c.type in feedback_lower for c in task.success_criteria)
 
 
 @pytest.mark.asyncio

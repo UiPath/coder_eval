@@ -74,18 +74,16 @@ async def execute_with_retry(
 
             # Categorize error
             category = categorize_error(e, context)
-
-            # Check if we should retry
-            if not should_retry(category, attempt):
-                logger.error(f"[{task_id}] {operation_name} failed (non-retryable): {category.value} - {e}")
-                raise
-
-            # Check if we've exhausted attempts
             config = RETRY_CONFIG.get(category, RetryConfig())
-            if attempt >= config.max_retries:
-                logger.error(
-                    f"[{task_id}] {operation_name} failed after {attempt + 1} attempts: {category.value} - {e}"
-                )
+
+            # Check if we should retry (handles both non-retryable categories and exhausted attempts)
+            if not should_retry(category, attempt):
+                if config.max_retries == 0:
+                    logger.error(f"[{task_id}] {operation_name} failed (non-retryable): {category.value} - {e}")
+                else:
+                    logger.error(
+                        f"[{task_id}] {operation_name} failed after {attempt + 1} attempts: {category.value} - {e}"
+                    )
                 raise
 
             # Calculate backoff with jitter

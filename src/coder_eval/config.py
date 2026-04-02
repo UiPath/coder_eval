@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     llmgw_semantic_user_id: str | None = None
     llmgw_requesting_product: str = "coder-eval"
     llmgw_requesting_feature: str = "llm-reviewer"
-    llmgw_timeout_seconds: str = "290"
+    llmgw_timeout_seconds: int = 290
 
     # Paths
     runs_dir: Path = Path("runs")  # Base directory for timestamped runs

@@ -13,11 +13,24 @@ from coder_eval.models.templates import TemplateSource
 
 
 class ResourceLimits(BaseModel):
-    """Resource limits for sandbox execution."""
+    """Resource limits for sandbox execution.
+
+    Note: The sandbox uses a temporary directory on the host filesystem with no
+    containerisation or cgroup enforcement.  Only ``timeout`` is actively enforced
+    (via ``subprocess.run(timeout=...)``).  ``max_memory_mb`` and ``max_disk_mb``
+    are reserved for future use and are **not** enforced today -- agent commands
+    can consume arbitrary host memory and disk.
+    """
 
     timeout: int = Field(default=300, description="Maximum execution time in seconds")
-    max_memory_mb: int | None = Field(default=None, description="Maximum memory in MB (currently not enforced)")
-    max_disk_mb: int | None = Field(default=None, description="Maximum disk usage in MB (currently not enforced)")
+    max_memory_mb: int | None = Field(
+        default=None,
+        description="Maximum memory in MB (reserved -- not enforced today)",
+    )
+    max_disk_mb: int | None = Field(
+        default=None,
+        description="Maximum disk usage in MB (reserved -- not enforced today)",
+    )
 
 
 class SnapshotConfig(BaseModel):
@@ -106,7 +119,14 @@ def validate_template_sources_list(sources: list[TemplateSource]) -> None:
 
 
 class SandboxConfig(BaseModel):
-    """Configuration for the sandboxed execution environment."""
+    """Configuration for the sandboxed execution environment.
+
+    The only supported driver is ``tempdir``, which creates a plain temporary
+    directory on the host.  There is no container or VM isolation -- commands
+    executed inside the sandbox share the host's network, process table, and
+    filesystem (outside the temp directory).  See :class:`ResourceLimits` for
+    details on which limits are enforced.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 

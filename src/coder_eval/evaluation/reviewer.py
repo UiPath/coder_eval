@@ -115,8 +115,9 @@ class LLMReviewer:
 
             return self._parse_response(content)
 
-        except Exception as e:
-            logger.warning(f"LLM review failed: {e}")
+        except (ValueError, KeyError, TypeError) as e:
+            # Non-retryable parse/logic errors -- return None to fall back to deterministic feedback
+            logger.warning(f"LLM review failed (non-retryable): {e}")
             return None
 
     def _build_review_prompt(

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from coder_eval.models import EvaluationResult, ExperimentResult, TaskExperimentSummary
+from coder_eval.reports import resolve_agent_settings
 
 
 logger = logging.getLogger(__name__)
@@ -553,16 +554,7 @@ class ExperimentReportGenerator:
                     lines.extend(ReportGenerator._generate_command_statistics_section(aggregated_stats))
 
                 # Agent Settings (from first task with data)
-                sdk_opts_list = [d["sdk_options"] for d in task_dicts if d.get("sdk_options")]
-                agent_configs = [d["agent_config"] for d in task_dicts if d.get("agent_config")]
-                settings_source = None
-                is_sdk = False
-                if sdk_opts_list:
-                    settings_source = sdk_opts_list[0]
-                    is_sdk = True
-                elif agent_configs:
-                    settings_source = agent_configs[0]
-
+                settings_source, is_sdk = resolve_agent_settings(task_dicts)
                 if settings_source:
                     lines.append("")
                     lines.extend(ReportGenerator._generate_agent_settings_section(settings_source, is_sdk))
