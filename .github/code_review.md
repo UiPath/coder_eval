@@ -26,6 +26,28 @@ Be concise. Only flag issues that matter. Skip style nits.
 - Read full files, not just diffs. For removal PRs, search the repo for stale references. For renames, grep for the old name.
 - Read existing PR comments and review threads to avoid repeating resolved issues or contradicting prior discussion.
 
+### Cross-file consistency checks
+
+When a field, type, or enum is added or changed:
+1. **Grep the full codebase** (`src/` and `tests/`) for all usages of the old pattern. Flag any that weren't updated.
+2. **Compare parallel models**: If the same field exists on multiple models (e.g., `RunSummary` and `VariantAggregate`), verify the type, default, and validation are consistent. Flag mismatches.
+3. **Check exhaustiveness**: If an enum, Literal, or status set changed, verify all `dict` lookups, `if/match` chains, and display mappings handle every value. Flag any that fall through to a generic default like `"?"`.
+
+### "What's missing" analysis
+
+After reviewing what changed, explicitly ask: **what should have changed but didn't?**
+- **Parallel code paths**: If `batch.py` was updated, was `experiment.py` also updated (and vice versa)?
+- **Tests**: Is there a test for every new code path, display element, and edge case? If a report row was added, is there a test with non-zero values?
+- **Downstream consumers**: If a counting/classification formula changed, were all places that compute rates, averages, or percentages from those counts also updated?
+- **Display/icon/mapping dicts**: If new enum values were added, do all rendering dicts cover them?
+
+### Design-level scrutiny
+
+Don't just verify the code is correct — ask whether the approach is robust:
+- **Denylist vs allowlist**: If code uses `not in (A, B)` instead of `in (C, D, E)`, flag it. Denylists silently absorb new values; allowlists force explicit classification.
+- **Implicit defaults**: If a field defaults to `0` or `None`, ask whether that silently swallows missing data vs. failing loudly.
+- **Invariants**: If a set of fields should always sum to a total, ask whether that invariant is enforced (validator) or just happens to hold.
+
 ## Output Format
 
 Post review as a SINGLE PR comment (not inline comments) using this structure:
@@ -43,6 +65,13 @@ Post review as a SINGLE PR comment (not inline comments) using this structure:
 
 #### 2. <file or logical change>
 ...
+
+## What's Missing
+
+<List anything that should have been changed/added but wasn't. If nothing, write "Nothing identified.">
+- Missing tests for X
+- Y dict/mapping not updated for new enum value Z
+- Parallel code path in A.py not updated to match B.py
 
 ## Area Ratings
 
@@ -70,4 +99,4 @@ Post review as a SINGLE PR comment (not inline comments) using this structure:
 
 - Only report real issues. Each must reference the file path and line number.
 - Only elaborate on issues rated Medium or above — mark clean changes as OK and move on.
-- If the PR is clean: `## Summary\n\n<what the PR does>\n\n## Conclusion\n\nNo issues found. ✅`
+- If the PR is clean: `## Summary\n\n<what the PR does>\n\n## Conclusion\n\nNo issues found.`

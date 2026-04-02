@@ -64,11 +64,11 @@ jobs:
           prompt: |
             Review this PR following the guidelines in .github/code_review.md.
 
-            Before reviewing, gather full context:
-            1. Read .github/code_review.md for review standards and output format
-            2. Run `git diff origin/main...HEAD` to see actual code changes (you only receive a file-change summary, not diffs)
-            3. Run `gh pr view ${{ github.event.pull_request.number || github.event.issue.number }} --comments` to read existing PR conversation and review feedback
+            1. Read .github/code_review.md for review standards, process, and output format.
+            2. Read CLAUDE.md for project conventions.
+            3. Run `git diff origin/main...HEAD` to see the full diff.
+            4. Run `gh pr view ${{ github.event.pull_request.number || github.event.issue.number }} --comments` to read existing PR conversation.
+            5. For each changed file, read the FULL file (not just the diff hunk) so you see surrounding context.
+            6. Follow the cross-file consistency checks, "what's missing" analysis, and design-level scrutiny sections from code_review.md. Do not skip these.
 
-            Follow the review process and output format specified in code_review.md.
-        env:
-          UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+            Follow the output format specified in code_review.md. Include the "What's Missing" section even if empty.
