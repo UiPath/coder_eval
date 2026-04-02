@@ -736,6 +736,9 @@ class Orchestrator:
                     preserved_path = await asyncio.to_thread(self.sandbox.preserve_to, artifacts_dir)
                     self.result.sandbox_path = str(preserved_path)
                     logger.info(f"Sandbox preserved to: {preserved_path}")
+                elif self.result:
+                    # Sandbox will be deleted; clear stale tempdir path
+                    self.result.sandbox_path = None
 
                 # Use asyncio.to_thread to prevent blocking event loop
                 await asyncio.to_thread(self.sandbox.cleanup, preserve=False)

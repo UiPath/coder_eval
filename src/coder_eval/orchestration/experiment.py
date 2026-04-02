@@ -165,10 +165,13 @@ def resolve_task_for_variant(
     """Resolve a fully-configured TaskDefinition by merging the 4-layer precedence chain.
 
     Precedence (lowest to highest):
-        1. default_experiment.defaults.agent
-        2. experiment.defaults.agent
-        3. task.agent
-        4. variant.agent
+        1. default_experiment.defaults.agent   (global baseline defaults)
+        2. experiment.defaults.agent           (experiment-wide defaults, below task)
+        3. task.agent                          (task-explicit fields only via exclude_unset)
+        4. variant.agent                       (per-variant overrides, highest)
+
+    After resolution, CLI / .env overrides (layer 5) are applied separately
+    by _apply_cli_overrides().
 
     Args:
         default_experiment: The default experiment (experiments/default.yaml).

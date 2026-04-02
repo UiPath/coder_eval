@@ -6,10 +6,11 @@ import asyncio
 from pathlib import Path
 
 import typer
+from pydantic import ValidationError
 
 from coder_eval.cli.console import console
 from coder_eval.config import Settings
-from coder_eval.models import AgentConfig
+from coder_eval.models import AgentConfig, ExperimentDefinition
 from coder_eval.models.enums import AgentKind
 from coder_eval.tools.autogen.config import AutogenConfig
 from coder_eval.tools.autogen.generator import generate_experiment, generate_tasks, task_to_yaml
@@ -213,6 +214,14 @@ async def _run_autogen(
 
     if written:
         experiment_dict = generate_experiment(plugins, config)
+
+        # Validate the generated experiment against the Pydantic schema
+        try:
+            ExperimentDefinition.model_validate(experiment_dict)
+        except ValidationError as exc:
+            console.print(f"[red]Generated experiment failed validation: {exc}[/red]")
+            raise typer.Exit(1) from exc
+
         experiment_id = experiment_dict["experiment_id"]
         experiment_path = experiments_dir / f"{experiment_id}.yaml"
         experiment_path.write_text(task_to_yaml(experiment_dict))

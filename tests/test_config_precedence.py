@@ -56,7 +56,7 @@ def test_config_dotenv_overrides_shell_for_llmgw(tmp_path, monkeypatch):
         for key in ["LLMGW_CLIENT_ID"]:
             value = env_values.get(key)
             if value:
-                os.environ[key] = value
+                monkeypatch.setenv(key, value)
 
         from coder_eval.config import Settings
 
@@ -178,7 +178,7 @@ def test_config_non_claude_code_proxy_requires_semantic_ids():
         settings.validate_api_keys("other-agent")
 
 
-def test_config_exports_to_os_environ():
+def test_config_exports_to_os_environ(monkeypatch):
     """Test that settings are exported to os.environ for external libraries.
 
     Context: Lines 148-157 in config.py export settings to os.environ.
@@ -194,11 +194,11 @@ def test_config_exports_to_os_environ():
         if value is not None:
             env_key = key.upper()
             if isinstance(value, Path):
-                os.environ[env_key] = str(value)
+                monkeypatch.setenv(env_key, str(value))
             elif isinstance(value, bool):
-                os.environ[env_key] = str(value).lower()
+                monkeypatch.setenv(env_key, str(value).lower())
             else:
-                os.environ[env_key] = str(value)
+                monkeypatch.setenv(env_key, str(value))
 
     # Verify settings are in os.environ
     assert os.getenv("LOG_LEVEL") == "WARNING"

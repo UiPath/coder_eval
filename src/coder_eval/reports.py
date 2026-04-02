@@ -68,6 +68,12 @@ class ReportGenerator:
         if stats.most_common_sequence:
             lines.extend(["", f"**Most Common Pattern**: `{stats.most_common_sequence}`"])
 
+        # Skill tool usage callout — useful for skill-impact experiments
+        if stats.commands_by_tool:
+            skill_count = stats.commands_by_tool.get("Skill", 0)
+            if skill_count > 0:
+                lines.extend(["", f"**Skill Tool Invoked**: {skill_count} time(s)"])
+
         return lines
 
     @staticmethod
@@ -322,6 +328,15 @@ class ReportGenerator:
                 if len(prompt_str) > 200:
                     prompt_str = prompt_str[:200] + "..."
                 lines.append(f"- **System Prompt**: {prompt_str}")
+
+        # Plugins (rendered for both sdk_options and agent_config)
+        plugins = settings_source.get("plugins")
+        if plugins is not None:
+            if isinstance(plugins, list) and len(plugins) > 0:
+                plugin_paths = [p.get("path", "unknown") if isinstance(p, dict) else str(p) for p in plugins]
+                lines.append(f"- **Plugins**: {', '.join(plugin_paths)}")
+            elif isinstance(plugins, list) and len(plugins) == 0:
+                lines.append("- **Plugins**: (none)")
 
         return lines
 
