@@ -21,6 +21,7 @@ from coder_eval.proxy.server import (
     _RETRY_CFG,
     LLMGatewayProxy,
     ProxyUsage,
+    _strip_cache_control,
 )
 
 
@@ -945,3 +946,74 @@ class TestRateLimitRetry:
             assert resp.status_code == 429
         finally:
             await proxy.stop()
+
+
+# ---------------------------------------------------------------------------
+# _strip_cache_control
+# ---------------------------------------------------------------------------
+
+
+class TestStripCacheControl:
+    """Tests for _strip_cache_control Bedrock compatibility helper."""
+
+    def test_strips_from_system_blocks(self):
+        payload: dict = {
+            "system": [
+                {"type": "text", "text": "You are helpful", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "Be concise"},
+            ],
+            "messages": [],
+        }
+        _strip_cache_control(payload)
+        assert "cache_control" not in payload["system"][0]
+        assert payload["system"][0]["text"] == "You are helpful"
+
+    def test_strips_from_message_content_blocks(self):
+        payload: dict = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Hello", "cache_control": {"type": "ephemeral"}},
+                    ],
+                }
+            ],
+        }
+        _strip_cache_control(payload)
+        assert "cache_control" not in payload["messages"][0]["content"][0]
+
+    def test_strips_from_tools(self):
+        """Tools can have cache_control for prompt caching — Bedrock doesn't support it."""
+        payload: dict = {
+            "messages": [],
+            "tools": [
+                {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "input_schema": {"type": "object"},
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {"name": "get_time", "description": "Get time", "input_schema": {"type": "object"}},
+            ],
+        }
+        _strip_cache_control(payload)
+        assert "cache_control" not in payload["tools"][0]
+        assert payload["tools"][0]["name"] == "get_weather"
+        assert payload["tools"][1]["name"] == "get_time"
+
+    def test_handles_string_system(self):
+        """system can be a plain string — should not crash."""
+        payload: dict = {"system": "You are helpful", "messages": []}
+        _strip_cache_control(payload)
+        assert payload["system"] == "You are helpful"
+
+    def test_handles_string_message_content(self):
+        """message content can be a plain string — should not crash."""
+        payload: dict = {"messages": [{"role": "user", "content": "Hello"}]}
+        _strip_cache_control(payload)
+        assert payload["messages"][0]["content"] == "Hello"
+
+    def test_handles_empty_payload(self):
+        payload: dict = {}
+        _strip_cache_control(payload)
+        assert payload == {}

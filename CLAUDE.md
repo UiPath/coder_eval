@@ -77,9 +77,16 @@ coder_eval/
 │   ├── run_command.py             # `coder-eval run`
 │   ├── plan_command.py            # `coder-eval plan`
 │   ├── report_command.py          # `coder-eval report`
+│   ├── proxy_command.py           # `coder-eval proxy`
 │   ├── run_helpers.py             # CLI helper functions
 │   ├── console.py                 # Rich console instance
 │   └── utils.py                   # CLI utilities
+│
+├── proxy/                         # LLM Gateway proxy (local Anthropic API → LLMGW)
+│   ├── auth.py                    # OAuth2 S2S token management
+│   ├── config.py                  # ProxyConfig, DEFAULT_MODEL_MAP
+│   ├── pricing.py                 # Token cost calculation
+│   └── server.py                  # aiohttp proxy server (LLMGatewayProxy)
 │
 ├── tools/                         # Optional authoring utilities (not part of eval loop)
 │   └── autogen/                   # Task generation from Claude Code plugin skill definitions

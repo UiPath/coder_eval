@@ -20,6 +20,7 @@ A robust, extensible framework for evaluating AI coding agents with comprehensiv
 - **Real-Time Streaming** — `--stream` flag for live LLM event output (tool calls, results, text) with full/minimal verbosity modes
 - **Rich CLI** — User-friendly command-line interface with validation, execution, and reporting
 - **Task Autogen** (`coder-eval tools autogen`) — Generate task YAML files from Claude Code plugin skill definitions using an LLM
+- **Standalone Proxy** (`coder-eval proxy`) — Run the LLM Gateway proxy standalone to use `claude` CLI without an Anthropic API key
 
 ## Quick Start
 
@@ -220,6 +221,40 @@ coder-eval tools autogen ./my-plugin ./tasks/generated --overwrite
 
 > **Note:** `coder-eval tools autogen` is an optional authoring utility — it generates _inputs_ to the framework but is not part of the core evaluation loop. It requires `ANTHROPIC_API_KEY` to be set.
 
+### `coder-eval proxy` — Standalone LLM Gateway Proxy
+
+Starts a local proxy that routes Anthropic API calls through the UiPath LLM Gateway. This lets you use `claude` CLI without an `ANTHROPIC_API_KEY` — the proxy handles OAuth2 authentication transparently.
+
+```bash
+# Terminal 1: start proxy
+coder-eval proxy --port 8080
+
+# Terminal 2: use claude
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
+export ANTHROPIC_API_KEY=llmgw-proxy
+claude
+```
+
+For scripted / CI usage:
+
+```bash
+eval "$(coder-eval proxy --port 8080 -q &)"
+sleep 2
+claude -p "hello"
+```
+
+**Options:**
+
+| Flag | Default | Description |
+| -------------- | ----------- | ---------------------------------------------------------- |
+| `--port` | `0` (auto) | Port to bind to (`0` = auto-assign a free port) |
+| `--env-file` | `.env` | Path to `.env` file with LLM Gateway credentials |
+| `--vendor` | `awsbedrock` | Gateway vendor (`awsbedrock`, `anthropic`) |
+| `--api-flavor` | `invoke` | Gateway API flavor |
+| `--quiet, -q` | `false` | Only print `export` commands to stdout (for `eval` usage) |
+
+Requires `LLMGW_URL`, `LLMGW_CLIENT_ID`, `LLMGW_CLIENT_SECRET`, `LLMGW_SEMANTIC_ORG_ID`, and `LLMGW_SEMANTIC_TENANT_ID` in your `.env` file or environment. See [docs/features/2026-04-03-standalone-proxy-cli.md](docs/features/2026-04-03-standalone-proxy-cli.md) for the full spec.
+
 ### Claude Code Slash Commands
 
 The project includes [Claude Code custom slash commands](https://docs.anthropic.com/en/docs/claude-code/slash-commands) in `.claude/commands/` for common workflows:
@@ -407,10 +442,11 @@ coder_eval/
 ├── evaluation/      # SuccessChecker + LLM reviewer
 ├── errors/          # Error categorization + retry logic
 ├── orchestration/   # Batch execution + experiment resolution + task loading
-├── cli/             # Typer CLI commands (run, plan, evaluate, report, tools)
+├── cli/             # Typer CLI commands (run, plan, evaluate, report, proxy, tools)
 ├── scoring/         # Code similarity scorers (AST, token, complexity)
 ├── streaming/       # Real-time event streaming (callbacks, renderers)
 ├── agents/          # Agent implementations (Claude Code)
+├── proxy/           # LLM Gateway proxy (local Anthropic API → LLMGW)
 ├── tools/           # Optional authoring utilities (not part of eval loop)
 │   └── autogen/     #   Task generation from Claude Code plugin skill definitions
 ├── agent.py         # Agent ABC
