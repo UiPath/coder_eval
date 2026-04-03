@@ -1,0 +1,61 @@
+task_id: "ca-create-data-transformer"
+description: Build an agent that transforms JSON data records with filter, sort, and aggregate operations.
+tags: [agents, create, simple-function, t3]
+initial_prompt_file: prompts/data_transformer.md
+max_iterations: 3
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+  template_sources:
+    - type: "template_dir"
+      path: ../templates/pyproject-starter
+
+success_criteria:
+  - type: "file_check"
+    path: "main.py"
+    includes: ["@traced()", "def transform_data", "result", "record_count", "operation_applied"]
+    patterns:
+      - pattern: "class Input\\(BaseModel\\)"
+        must_match: true
+      - pattern: "class Output\\(BaseModel\\)"
+        must_match: true
+    description: "main.py has correct agent structure"
+    weight: 2.0
+
+  - type: "file_exists"
+    path: "entry-points.json"
+    description: "uipath init was run"
+    weight: 2.0
+
+  - type: "import_check"
+    path: "main.py"
+    description: "All imports resolve"
+    weight: 1.0
+
+  - type: "run_command"
+    command: "uv run uipath run transform_data '{\"records\": \"[{\\\"name\\\": \\\"Alice\\\", \\\"age\\\": 30}, {\\\"name\\\": \\\"Bob\\\", \\\"age\\\": 25}]\", \"operation\": \"filter\", \"field\": \"name\", \"value\": \"Alice\"}'"
+    timeout: 60
+    expected_stdout: "Alice"
+    stdout_match: "contains"
+    description: "Filter operation returns correct records"
+    weight: 3.0
+
+  - type: "run_command"
+    command: "uv run uipath run transform_data '{\"records\": \"[{\\\"name\\\": \\\"Charlie\\\", \\\"score\\\": 85}, {\\\"name\\\": \\\"Alice\\\", \\\"score\\\": 92}]\", \"operation\": \"sort\", \"field\": \"score\", \"value\": \"desc\"}'"
+    timeout: 60
+    expected_stdout: "Alice"
+    stdout_match: "contains"
+    description: "Sort operation works"
+    weight: 3.0
+
+  - type: "commands_efficiency"
+    expected_commands: 18
+    description: "Complete within command budget"
+    weight: 0.5
+    pass_threshold: 0.3

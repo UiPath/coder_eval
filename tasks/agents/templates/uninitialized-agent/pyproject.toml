@@ -1,0 +1,9 @@
+[project]
+name = "item-sorter"
+version = "0.1.0"
+description = "Sort a list of strings"
+requires-python = ">=3.11"
+dependencies = ["uipath"]
+
+[dependency-groups]
+dev = ["uipath-dev"]

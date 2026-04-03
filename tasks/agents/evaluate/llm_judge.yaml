@@ -1,0 +1,94 @@
+task_id: "ca-eval-add-llm-judge"
+description: >
+  Add comprehensive evaluations to a text-summarizer agent using LLMJudgeOutputEvaluator
+  (not just ExactMatch) because the output is non-deterministic text.
+initial_prompt: |
+  I have a text-summarizer UiPath agent in the current directory. I need to add evaluations for it.
+  Since the output is non-deterministic text, use LLMJudgeOutputEvaluator (not ExactMatch).
+  Also add a ContainsEvaluator to check that key facts appear in the summary.
+
+  Create:
+  1. evaluations/evaluators/llm-judge-output.json
+     - id: "LLMJudgeOutputEvaluator"
+     - evaluatorTypeId: "uipath-llm-judge-output"
+     - model: "gpt-4o-2024-11-20"
+  2. evaluations/evaluators/contains.json
+     - id: "ContainsEvaluator"
+     - evaluatorTypeId: "uipath-contains"
+  3. evaluations/eval-sets/smoke-test.json with 3 test cases covering:
+     - A short paragraph (2-3 sentences)
+     - A longer passage (5+ sentences)
+     - A single-sentence input (edge case)
+
+  Do NOT run the evals — just create the files.
+max_iterations: 3
+tags: [agents, evaluate, llm-judge, t3]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+  template_sources:
+    - type: "template_dir"
+      path: ../templates/summarizer-agent
+
+success_criteria:
+  - type: "file_exists"
+    path: "evaluations/evaluators/llm-judge-output.json"
+    description: "LLM Judge evaluator file must exist"
+    weight: 2.0
+
+  - type: "json_check"
+    path: "evaluations/evaluators/llm-judge-output.json"
+    assertions:
+      - expression: "evaluatorTypeId"
+        operator: "equals"
+        expected: "uipath-llm-judge-output"
+      - expression: "id"
+        operator: "equals"
+        expected: "LLMJudgeOutputEvaluator"
+      - expression: "evaluatorConfig.model"
+        operator: "exists"
+    description: "LLM Judge evaluator has correct structure"
+    weight: 2.0
+
+  - type: "file_exists"
+    path: "evaluations/evaluators/contains.json"
+    description: "Contains evaluator file must exist"
+    weight: 1.0
+
+  - type: "json_check"
+    path: "evaluations/evaluators/contains.json"
+    assertions:
+      - expression: "evaluatorTypeId"
+        operator: "equals"
+        expected: "uipath-contains"
+    description: "Contains evaluator has correct type"
+    weight: 1.0
+
+  - type: "file_exists"
+    path: "evaluations/eval-sets/smoke-test.json"
+    description: "Smoke test eval set must exist"
+    weight: 1.0
+
+  - type: "json_check"
+    path: "evaluations/eval-sets/smoke-test.json"
+    assertions:
+      - expression: "evaluations | length(@)"
+        operator: "gte"
+        expected: 3
+      - expression: "evaluatorRefs"
+        operator: "contains"
+        expected: "LLMJudgeOutputEvaluator"
+    description: "Eval set has 3+ cases and references LLMJudgeOutputEvaluator"
+    weight: 3.0
+
+  - type: "commands_efficiency"
+    expected_commands: 20
+    description: "Complete within command budget"
+    weight: 0.5
+    pass_threshold: 0.3

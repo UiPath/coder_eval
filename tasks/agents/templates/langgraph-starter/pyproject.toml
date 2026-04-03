@@ -1,0 +1,15 @@
+[project]
+name = "my-langgraph-agent"
+version = "0.1.0"
+description = "A UiPath LangGraph agent"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "uipath",
+    "uipath-langchain",
+]
+
+[dependency-groups]
+dev = [
+    "uipath-dev",
+]

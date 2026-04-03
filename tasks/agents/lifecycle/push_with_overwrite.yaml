@@ -1,0 +1,38 @@
+task_id: "ca-lifecycle-push-with-overwrite"
+description: >
+  Push an agent to Studio Web when a version conflict exists, using --overwrite.
+initial_prompt: |
+  I have a UiPath agent I want to push to Studio Web.
+  My project ID is "PROJ-12345".
+  The previous push failed because my local version is behind the remote.
+  Please push using --overwrite to force the upload.
+  Assume you are already authenticated.
+max_iterations: 2
+tags: [agents, lifecycle, push, file-sync, t2]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+  template_sources:
+    - type: "template_dir"
+      path: ../templates/uninitialized-agent
+
+success_criteria:
+  - type: "file_check"
+    path: ".env"
+    includes: ["UIPATH_PROJECT_ID", "PROJ-12345"]
+    description: ".env has UIPATH_PROJECT_ID set"
+    weight: 2.0
+
+  - type: "command_executed"
+    tool_name: "Bash"
+    command_pattern: ".*uipath push.*--overwrite.*"
+    min_count: 1
+    description: "uipath push --overwrite was used"
+    weight: 4.0
+    pass_threshold: 1.0

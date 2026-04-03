@@ -1,0 +1,38 @@
+{
+  "version": "1.0",
+  "id": "tax-calc-smoke",
+  "name": "Tax Calculator Smoke Test",
+  "evaluatorRefs": ["ExactMatchEvaluator"],
+  "evaluations": [
+    {
+      "id": "test-low-income-single",
+      "name": "Low income single filer (10% bracket only)",
+      "inputs": {"income": 10000, "filing_status": "single"},
+      "evaluationCriterias": {
+        "ExactMatchEvaluator": {
+          "expectedOutput": {"tax_owed": 1000.0, "effective_rate": 0.1}
+        }
+      }
+    },
+    {
+      "id": "test-mid-income-single",
+      "name": "Mid income single filer — tests 12% bracket boundary at 44725",
+      "inputs": {"income": 42000, "filing_status": "single"},
+      "evaluationCriterias": {
+        "ExactMatchEvaluator": {
+          "expectedOutput": {"tax_owed": 4820.0, "effective_rate": 0.1148}
+        }
+      }
+    },
+    {
+      "id": "test-married-mid",
+      "name": "Mid income married filer",
+      "inputs": {"income": 50000, "filing_status": "married"},
+      "evaluationCriterias": {
+        "ExactMatchEvaluator": {
+          "expectedOutput": {"tax_owed": 5560.0, "effective_rate": 0.1112}
+        }
+      }
+    }
+  ]
+}

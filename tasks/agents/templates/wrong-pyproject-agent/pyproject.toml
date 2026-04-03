@@ -1,0 +1,13 @@
+[project]
+name = "word-count"
+version = "0.1.0"
+description = "Word count agent"
+requires-python = ">=3.11"
+dependencies = ["uipath"]
+
+[dependency-groups]
+dev = ["uipath-dev"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

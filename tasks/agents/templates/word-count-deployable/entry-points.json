@@ -1,0 +1,20 @@
+{
+  "entryPoints": [
+    {
+      "filePath": "main.py",
+      "uniqueId": "word_count",
+      "type": "function",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {"text": {"type": "string", "description": "Input text to count words in"}},
+        "required": ["text"]
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {"word_count": {"type": "integer"}}
+      }
+    }
+  ]
+}

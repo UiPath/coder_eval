@@ -1,0 +1,61 @@
+task_id: "ca-create-email-classifier"
+description: Build an agent that classifies customer emails by category and priority using keyword matching.
+tags: [agents, create, simple-function, t2]
+initial_prompt_file: prompts/email_classifier.md
+max_iterations: 3
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+  template_sources:
+    - type: "template_dir"
+      path: ../templates/pyproject-starter
+
+success_criteria:
+  - type: "file_check"
+    path: "main.py"
+    includes: ["@traced()", "def classify_email", "category", "priority", "summary"]
+    patterns:
+      - pattern: "class Input\\(BaseModel\\)"
+        must_match: true
+      - pattern: "class Output\\(BaseModel\\)"
+        must_match: true
+    description: "main.py has correct agent structure"
+    weight: 2.0
+
+  - type: "file_exists"
+    path: "entry-points.json"
+    description: "uipath init was run"
+    weight: 2.0
+
+  - type: "import_check"
+    path: "main.py"
+    description: "All imports resolve"
+    weight: 1.0
+
+  - type: "run_command"
+    command: "uv run uipath run classify_email '{\"email_text\": \"I was charged twice for my order and I am very disappointed\", \"sender\": \"john@example.com\"}'"
+    timeout: 60
+    expected_stdout: "billing"
+    stdout_match: "contains"
+    description: "Billing email correctly classified"
+    weight: 3.0
+
+  - type: "run_command"
+    command: "uv run uipath run classify_email '{\"email_text\": \"The app keeps crashing when I try to login\", \"sender\": \"jane@example.com\"}'"
+    timeout: 60
+    expected_stdout: "technical"
+    stdout_match: "contains"
+    description: "Technical email correctly classified"
+    weight: 3.0
+
+  - type: "commands_efficiency"
+    expected_commands: 18
+    description: "Complete within command budget"
+    weight: 0.5
+    pass_threshold: 0.3

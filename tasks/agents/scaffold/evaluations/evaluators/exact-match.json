@@ -1,0 +1,12 @@
+{
+  "version": "1.0",
+  "id": "ExactMatchEvaluator",
+  "description": "Exact output matching for deterministic agents",
+  "evaluatorTypeId": "uipath-exact-match",
+  "evaluatorConfig": {
+    "name": "ExactMatchEvaluator",
+    "targetOutputKey": "*",
+    "case_sensitive": false,
+    "negated": false
+  }
+}

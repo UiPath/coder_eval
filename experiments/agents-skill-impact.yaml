@@ -1,0 +1,44 @@
+# Experiment: UiPath agents skill impact evaluation
+#
+# Measures the impact of the uipath-agents skill on task completion.
+# Covers both coded agents (Python) and low-code agents (agent.json) —
+# they are two flavors of the same thing.
+#
+# Prerequisites:
+#   - Clone the skills repo as a sibling directory (../skills)
+#
+# Usage:
+#   # All agent tasks
+#   coder-eval run -e experiments/agents-skill-impact.yaml tasks/agents/{fix,scaffold,create,lifecycle,evaluate}/*.yaml
+#
+#   # Just the create-10 suite
+#   coder-eval run -e experiments/agents-skill-impact.yaml tasks/agents/create/*.yaml
+#
+#   # Just fix tasks
+#   coder-eval run -e experiments/agents-skill-impact.yaml tasks/agents/fix/*.yaml
+
+experiment_id: agents-skill-impact
+description: >
+  Measures the impact of the uipath-agents skill on task completion
+  across fix, scaffold, create, evaluate, and lifecycle categories.
+
+defaults:
+  agent:
+    type: claude-code
+    permission_mode: bypassPermissions
+    model: claude-sonnet-4-6
+    allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_iterations: 3
+
+variants:
+  - variant_id: bare
+    description: "No skill — baseline"
+    agent:
+      plugins: []
+
+  - variant_id: with-skill
+    description: "uipath-agents skill from skills repo"
+    agent:
+      plugins:
+        - type: "local"
+          path: "../skills"

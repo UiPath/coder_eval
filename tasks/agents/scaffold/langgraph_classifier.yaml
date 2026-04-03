@@ -1,0 +1,89 @@
+task_id: "ca-scaffold-langgraph-classifier"
+description: >
+  Create a LangGraph agent that classifies support tickets into categories
+  (billing, technical, general) with a confidence score. Tests LangGraph-specific
+  patterns: langgraph.json, StateGraph, lazy UiPathAzureChatOpenAI init.
+initial_prompt: |
+  Create a new UiPath LangGraph agent in the current directory.
+  - Agent name: ticket-classifier
+  - Input: ticket_text (string), customer_tier (string, default="standard")
+  - Output: category (string — one of "billing", "technical", "general"),
+    confidence (float 0.0-1.0), reasoning (string)
+  - Use UiPathAzureChatOpenAI with model "gpt-4o-2024-11-20"
+  - Initialize the LLM INSIDE the graph node function, NOT at module level
+  - Create langgraph.json pointing to the compiled graph
+  - Run `uv run uipath init` after scaffolding
+  - Do NOT add a [build-system] section to pyproject.toml
+max_iterations: 4
+tags: [agents, scaffold, langgraph, t3]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+  template_sources:
+    - type: "template_dir"
+      path: ../templates/langgraph-starter
+
+success_criteria:
+  - type: "file_exists"
+    path: "main.py"
+    description: "main.py must exist"
+    weight: 1.0
+
+  - type: "file_exists"
+    path: "langgraph.json"
+    description: "langgraph.json config must exist"
+    weight: 2.0
+
+  - type: "file_check"
+    path: "main.py"
+    includes:
+      - "StateGraph"
+      - "UiPathAzureChatOpenAI"
+      - "class Input(BaseModel)"
+      - "class Output(BaseModel)"
+      - "ticket_text"
+      - "category"
+      - "confidence"
+    patterns:
+      - pattern: "^(?:llm|model|chat)\\s*=\\s*UiPathAzureChatOpenAI"
+        must_match: false
+        flags: 8
+    description: "main.py has LangGraph structure with no module-level LLM init"
+    weight: 3.0
+
+  - type: "json_check"
+    path: "langgraph.json"
+    assertions:
+      - expression: "graphs"
+        operator: "exists"
+    description: "langgraph.json has 'graphs' key"
+    weight: 2.0
+
+  - type: "file_exists"
+    path: "entry-points.json"
+    description: "uipath init was run"
+    weight: 2.0
+
+  - type: "file_check"
+    path: "pyproject.toml"
+    includes: ["uipath-langchain"]
+    excludes: ["[build-system]"]
+    description: "pyproject.toml has uipath-langchain and no [build-system]"
+    weight: 2.0
+
+  - type: "import_check"
+    path: "main.py"
+    description: "All imports resolve"
+    weight: 1.0
+
+  - type: "commands_efficiency"
+    expected_commands: 12
+    description: "Complete within command budget"
+    weight: 1.0
+    pass_threshold: 0.5

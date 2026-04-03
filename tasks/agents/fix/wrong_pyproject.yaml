@@ -1,0 +1,38 @@
+task_id: "ca-fix-wrong-pyproject"
+description: >
+  The agent's pyproject.toml has a [build-system] section which prevents
+  uipath pack from working. Fix it so packing succeeds.
+initial_prompt: |
+  My UiPath agent fails when I try to pack it with `uv run uipath pack`.
+  Please diagnose and fix the issue.
+max_iterations: 2
+tags: [agents, fix, pyproject, t1]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+  template_sources:
+    - type: "template_dir"
+      path: ../templates/wrong-pyproject-agent
+
+success_criteria:
+  - type: "file_check"
+    path: "pyproject.toml"
+    excludes: ["[build-system]", "hatchling", "setuptools", "flit"]
+    includes: ["uipath", "requires-python"]
+    description: "pyproject.toml must not have [build-system] section"
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: "command_executed"
+    tool_name: "Bash"
+    command_pattern: ".*uipath pack.*"
+    min_count: 1
+    require_success: true
+    description: "uipath pack must succeed"
+    weight: 4.0

@@ -1,0 +1,47 @@
+task_id: "uipath_deploy_agent"
+description: "Prepare a UiPath word count agent for deployment by adding author info and packaging it."
+initial_prompt: |
+  My name is "UiPath Developer" and my email is "developer@uipath.com".
+  I have a word count UiPath agent in the current directory that I'd like to deploy to UiPath Orchestrator.
+  I just successfully deployed version 0.0.1.
+
+  Please deploy this agent.
+  If you need to authenticate, stop immediately.
+max_iterations: 3
+tags: [uipath, agents, deploy]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Glob", "Grep"]
+  plugins:
+    - type: "local"
+      path: ../skills
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+  template_sources:
+    - type: "template_dir"
+      path: templates/word-count-agent
+
+success_criteria:
+  - type: "file_contains"
+    path: "pyproject.toml"
+    includes: ["authors", "UiPath Developer", "developer@uipath.com"]
+    description: "pyproject.toml must have authors field for deployment"
+    weight: 2.0
+
+  - type: "file_matches_regex"
+    path: "pyproject.toml"
+    pattern: 'version\s*=\s*"0\.0\.[2-9]"'
+    must_match: true
+    description: "Version must be bumped from 0.0.1 (deploy would fail with 409 conflict)"
+    weight: 2.0
+
+  - type: "command_executed"
+    tool_name: "Bash"
+    command_pattern: ".*uipath deploy.*"
+    min_count: 1
+    description: "Agent must run uipath deploy"
+    weight: 3.0

@@ -1,0 +1,32 @@
+task_id: "uipath_auth_config_setup"
+description: "Set up interactive authentication for a UiPath agent project."
+initial_prompt: |
+  I have a word count UiPath agent in the current directory that I'd like to deploy to UiPath Orchestrator.
+  I'm currently not authenticated. Please help me authenticate interactively.
+
+  Instructions you MUST follow:
+  1. Any commands that you run must timeout in 2 seconds. You must enforce this.
+  2. At any point if you see a browser link for authentication, stop immediately.
+max_iterations: 2
+tags: [uipath, agents, authentication]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Glob", "Grep"]
+  plugins:
+    - type: "local"
+      path: ../skills
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+
+success_criteria:
+  - type: "command_executed"
+    tool_name: "Bash"
+    command_pattern: ".*uipath auth.*(login|interactive|--cloud|--tenant).*"
+    min_count: 1
+    exclude_pattern: ".*--help.*"
+    description: "Agent must attempt uipath auth login (not just --help)"
+    weight: 3.0

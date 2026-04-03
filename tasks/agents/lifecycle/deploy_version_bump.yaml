@@ -1,0 +1,47 @@
+task_id: "ca-lifecycle-deploy-version-bump"
+description: >
+  A word-count agent version 0.0.1 was already published. Bump the version
+  and deploy again. Must add author info and bump the patch version.
+initial_prompt: |
+  I have a UiPath word-count agent ready to redeploy. Version 0.0.1 was already
+  published so you'll get a 409 conflict if you try again with the same version.
+  Please bump the patch version and deploy.
+  My name is "Agent Developer", email "developer@uipath.com".
+  Assume you are already authenticated.
+max_iterations: 3
+tags: [agents, lifecycle, deploy, version-bump, t3]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+  template_sources:
+    - type: "template_dir"
+      path: ../templates/word-count-deployable
+
+success_criteria:
+  - type: "file_check"
+    path: "pyproject.toml"
+    includes: ["authors", "Agent Developer", "developer@uipath.com"]
+    description: "Authors field is populated"
+    weight: 1.0
+
+  - type: "file_check"
+    path: "pyproject.toml"
+    patterns:
+      - pattern: 'version\s*=\s*"0\.0\.([2-9]|\d{2,})"'
+        must_match: true
+    description: "Version bumped to at least 0.0.2"
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: "command_executed"
+    tool_name: "Bash"
+    command_pattern: ".*uipath deploy.*"
+    min_count: 1
+    description: "uipath deploy must be attempted"
+    weight: 4.0

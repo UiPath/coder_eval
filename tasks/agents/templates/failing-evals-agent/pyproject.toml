@@ -1,0 +1,9 @@
+[project]
+name = "tax-calculator"
+version = "0.1.0"
+description = "Calculate simplified federal income tax"
+requires-python = ">=3.11"
+dependencies = ["uipath"]
+
+[dependency-groups]
+dev = ["uipath-dev"]

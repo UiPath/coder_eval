@@ -1,0 +1,39 @@
+task_id: "ca-fix-format-json-mistake"
+description: >
+  The user has a deployment script that incorrectly adds --format json to
+  forwarded Python CLI commands. The skill explicitly warns against this.
+  The agent must fix the script and explain why --format json only works
+  on native uip commands, not forwarded ones.
+initial_prompt: |
+  I have a deployment script (deploy.sh) that fails when it tries to run
+  my UiPath agent commands. Please fix the script so it works correctly.
+  The agent is already set up and authenticated.
+max_iterations: 2
+tags: [agents, fix, format-json, t1]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+  template_sources:
+    - type: "template_dir"
+      path: ../templates/format-json-mistake
+
+success_criteria:
+  - type: "file_matches_regex"
+    path: "deploy.sh"
+    pattern: "--format json"
+    must_match: false
+    description: "deploy.sh must not contain --format json on any command"
+    weight: 4.0
+    pass_threshold: 1.0
+
+  - type: "file_check"
+    path: "deploy.sh"
+    includes: ["uip codedagents init", "uip codedagents run", "uip codedagents deploy"]
+    description: "deploy.sh still contains all three commands"
+    weight: 2.0

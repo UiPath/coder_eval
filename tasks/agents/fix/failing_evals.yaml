@@ -1,0 +1,61 @@
+task_id: "ca-fix-failing-evals"
+description: >
+  The tax-calculator agent has evaluations that are failing because its tax bracket
+  logic is wrong. The agent must diagnose by running evals, identify the code bug,
+  fix the agent logic (NOT the eval expectations), and verify evals pass.
+initial_prompt: |
+  My UiPath agent has failing evaluations. Please:
+  1. Run the evaluations to see what's failing:
+     `uv run uipath eval calculate_tax evaluations/eval-sets/smoke-test.json --no-report`
+  2. Diagnose the root cause
+  3. Fix the agent code (do NOT modify the evaluation files)
+  4. Re-run evaluations to confirm they pass
+max_iterations: 4
+tags: [agents, fix, evaluations, t3]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+  template_sources:
+    - type: "template_dir"
+      path: ../templates/failing-evals-agent
+
+success_criteria:
+  - type: "command_executed"
+    tool_name: "Bash"
+    command_pattern: ".*uipath eval calculate_tax.*"
+    min_count: 2
+    description: "Agent must run evaluations at least twice (diagnose + verify)"
+    weight: 1.0
+
+  - type: "file_check"
+    path: "main.py"
+    includes: ["44725"]
+    description: "Agent must fix the single bracket boundary to 44725"
+    weight: 2.0
+
+  - type: "file_check"
+    path: "main.py"
+    includes: ["44725", "5147"]
+    description: "Both tax bracket boundary (44725) and base tax (5147) must be corrected"
+    weight: 2.0
+
+  - type: "uipath_eval"
+    description: "Tax calculator evals must pass after fix"
+    agent_name: calculate_tax
+    eval_set: evaluations/eval-sets/smoke-test.json
+    thresholds:
+      ExactMatchEvaluator: 1.0
+    weight: 5.0
+    pass_threshold: 1.0
+
+  - type: "commands_efficiency"
+    expected_commands: 10
+    description: "Diagnose and fix within command budget"
+    weight: 1.0
+    pass_threshold: 0.5
