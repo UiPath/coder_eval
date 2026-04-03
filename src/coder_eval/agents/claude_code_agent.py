@@ -175,6 +175,11 @@ class ClaudeCodeAgent(Agent):
         Returns:
             Tuple of (env_vars_dict, model_override_or_None).
         """
+        # Start with PATH from parent environment to ensure agent can locate executables
+        base_env: dict[str, str] = {}
+        if path := os.environ.get("PATH"):
+            base_env["PATH"] = path
+
         match route:
             case BedrockRoute() as br:
                 env: dict[str, str] = {
@@ -189,16 +194,17 @@ class ClaudeCodeAgent(Agent):
                     env["ANTHROPIC_MODEL"] = br.model
                 if br.small_model:
                     env["ANTHROPIC_SMALL_FAST_MODEL"] = br.small_model
-                return env, br.model
+                return {**base_env, **env}, br.model
 
             case ProxyRoute() as pr:
                 return {
+                    **base_env,
                     "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{pr.port}",
                     "ANTHROPIC_API_KEY": "llmgw-proxy",
                 }, None
 
             case DirectRoute():
-                return {}, None
+                return base_env, None
 
         raise AssertionError(f"Unhandled route type: {type(route).__name__}")
 

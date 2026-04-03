@@ -9,30 +9,45 @@ from coder_eval.models import BedrockRoute, DirectRoute, ProxyRoute
 class TestBuildSdkEnv:
     """Test ClaudeCodeAgent._build_sdk_env() for all route types."""
 
-    def test_direct_returns_empty_env(self):
-        """DirectRoute produces empty env and no model override."""
+    def test_direct_forwards_path_when_set(self, monkeypatch):
+        """DirectRoute forwards PATH when set in parent environment."""
+        custom_path = "/custom/bin:/usr/bin"
+        monkeypatch.setenv("PATH", custom_path)
         env, model = ClaudeCodeAgent._build_sdk_env(DirectRoute())
-        assert env == {}
+        assert env["PATH"] == custom_path
         assert model is None
 
-    def test_proxy_returns_base_url_and_dummy_key(self):
-        """ProxyRoute produces ANTHROPIC_BASE_URL and dummy API key."""
-        env, _model = ClaudeCodeAgent._build_sdk_env(ProxyRoute(port=8080))
+    def test_direct_omits_path_when_unset(self, monkeypatch):
+        """DirectRoute omits PATH if not set in parent environment."""
+        monkeypatch.delenv("PATH", raising=False)
+        env, model = ClaudeCodeAgent._build_sdk_env(DirectRoute())
+        assert "PATH" not in env
+        assert model is None
+
+    def test_proxy_returns_base_url_and_dummy_key(self, monkeypatch):
+        """ProxyRoute produces ANTHROPIC_BASE_URL, dummy API key, and forwards PATH."""
+        custom_path = "/proxy/bin:/usr/bin"
+        monkeypatch.setenv("PATH", custom_path)
+        env, _ = ClaudeCodeAgent._build_sdk_env(ProxyRoute(port=8080))
         assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8080"
         assert env["ANTHROPIC_API_KEY"] == "llmgw-proxy"
+        assert env["PATH"] == custom_path
 
     def test_proxy_no_model_override(self):
         """ProxyRoute does not override model."""
         _, model = ClaudeCodeAgent._build_sdk_env(ProxyRoute(port=9999))
         assert model is None
 
-    def test_bedrock_basic_env(self):
-        """BedrockRoute produces CLAUDE_CODE_USE_BEDROCK, token, region."""
+    def test_bedrock_basic_env(self, monkeypatch):
+        """BedrockRoute produces CLAUDE_CODE_USE_BEDROCK, token, region, and forwards PATH."""
+        custom_path = "/bedrock/bin:/usr/bin"
+        monkeypatch.setenv("PATH", custom_path)
         route = BedrockRoute(bearer_token="tok-123", region="us-east-1")
         env, _ = ClaudeCodeAgent._build_sdk_env(route)
         assert env["CLAUDE_CODE_USE_BEDROCK"] == "1"
         assert env["AWS_BEARER_TOKEN_BEDROCK"] == "tok-123"
         assert env["AWS_REGION"] == "us-east-1"
+        assert env["PATH"] == custom_path
 
     def test_bedrock_attribution_header_disabled(self):
         """disable_attribution_header=True sets CLAUDE_CODE_ATTRIBUTION_HEADER=0."""
