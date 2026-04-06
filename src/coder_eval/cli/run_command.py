@@ -17,6 +17,7 @@ from ..models import RunSummary
 from ..orchestration.config import BatchRunConfig
 from ..path_utils import create_latest_symlink
 from ..streaming.renderers import RichStreamRenderer
+from .console import console
 from .run_helpers import (
     discover_default_tasks,
     expand_task_files,
@@ -271,30 +272,34 @@ def run_command(
     resolved_experiment = _resolve_experiment_path(experiment)
 
     # Run the async entry point
-    asyncio.run(
-        _run_all_tasks(
-            resolved_task_files,
-            max_iterations,
-            preserve,
-            run_dir,
-            max_parallel,
-            snapshot_mode,
-            snapshot_checkpoint_freq,
-            include_tags,
-            exclude_tags_set,
-            model,
-            permission_mode,
-            max_turns,
-            task_timeout,
-            turn_timeout,
-            stream,
-            allowed_tools_list,
-            disallowed_tools_list,
-            plugins_list,
-            ignore_patterns_list,
-            experiment_path=resolved_experiment,
+    try:
+        asyncio.run(
+            _run_all_tasks(
+                resolved_task_files,
+                max_iterations,
+                preserve,
+                run_dir,
+                max_parallel,
+                snapshot_mode,
+                snapshot_checkpoint_freq,
+                include_tags,
+                exclude_tags_set,
+                model,
+                permission_mode,
+                max_turns,
+                task_timeout,
+                turn_timeout,
+                stream,
+                allowed_tools_list,
+                disallowed_tools_list,
+                plugins_list,
+                ignore_patterns_list,
+                experiment_path=resolved_experiment,
+            )
         )
-    )
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Execution interrupted.[/yellow]")
+        raise typer.Exit(2) from None
 
 
 async def _run_all_tasks(
@@ -388,6 +393,10 @@ async def _run_all_tasks(
 
     # Print execution summary
     print_execution_summary(run_dir, summary)
+
+    # Exit with non-zero code if any tasks failed or errored
+    if summary.tasks_failed > 0 or summary.tasks_error > 0:
+        raise typer.Exit(1)
 
 
 async def _run_with_callbacks(

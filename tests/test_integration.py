@@ -218,10 +218,10 @@ def test_cli_run_simple_success(tmp_path, simple_success_task, mock_agent_succes
 
 
 def test_cli_run_simple_failure(tmp_path, simple_failure_task, mock_agent_failure):
-    """Test task failure path (task fails, but CLI succeeds).
+    """Test task failure path (CLI exits non-zero on task failure).
 
     Verifies that:
-    1. CLI exits with code 0 even when task fails
+    1. CLI exits with code 1 when a task fails
     2. Failure is properly recorded in experiment.json
     3. Task status is marked as FAILED
     4. Reports are still generated
@@ -238,8 +238,8 @@ def test_cli_run_simple_failure(tmp_path, simple_failure_task, mock_agent_failur
         ["run", str(simple_failure_task), "--run-dir", str(run_dir)],
     )
 
-    # CLI should exit 0 even when task fails (task failure is expected, not an error)
-    assert result.exit_code == 0, f"CLI should exit 0 even on task failure: {result.stdout}"
+    # CLI should exit 1 when a task fails
+    assert result.exit_code == 1, f"CLI should exit 1 on task failure: {result.stdout}"
 
     # Verify run directory created (when --run-dir is provided, it's used directly)
     assert run_dir.exists(), "Run directory not created"
@@ -269,3 +269,26 @@ def test_cli_run_simple_failure(tmp_path, simple_failure_task, mock_agent_failur
     # Verify experiment.md still generated even for failures
     run_report_file = run_dir / "experiment.md"
     assert run_report_file.exists(), "experiment.md not created for failed task"
+
+
+def test_cli_run_keyboard_interrupt(tmp_path, simple_success_task, monkeypatch):
+    """Test that KeyboardInterrupt during execution exits with code 2.
+
+    Verifies that Ctrl+C is caught and translated to exit code 2,
+    following the pytest convention for interrupted execution.
+    """
+    import asyncio
+
+    def _interrupted_run(coro, **kwargs):
+        # Close the coroutine to avoid RuntimeWarning
+        coro.close()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(asyncio, "run", _interrupted_run)
+
+    result = runner.invoke(
+        app,
+        ["run", str(simple_success_task), "--run-dir", str(tmp_path / "runs")],
+    )
+
+    assert result.exit_code == 2, f"CLI should exit 2 on interrupt: {result.stdout}"
