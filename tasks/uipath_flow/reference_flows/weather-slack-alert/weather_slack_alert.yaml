@@ -1,0 +1,93 @@
+task_id: uipath-flow-weather-slack-alert
+description: >
+  Create a UiPath Flow JSON file that fetches Denver's temperature from a free
+  weather API, evaluates if it's warm (>60F) or cold (≤60F), and sends a
+  Slack message with the appropriate response. Validate the flow structure.
+initial_prompt: |
+  Create a UiPath Flow definition as a JSON file named `weather_alert.flow` with the following structure:
+  1. HTTP Request node to fetch Denver's current temperature from a free API (e.g., Open-Meteo)
+  2. Decision node to check if temperature > 60°F
+  3. Send Message node to Slack with either "its warm" (if > 60F) or "its cold" (if ≤ 60F)
+
+  The flow should follow standard UiPath Flow JSON structure with nodes, edges, and valid node definitions.
+  After creating it, validate the JSON syntax and structure.
+tags: [flow, integration, intermediate]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Glob", "Grep"]
+  plugins:
+    - type: "local"
+      path: $UIPATH_PLUGIN_MARKETPLACE_DIR/
+  max_turns: 30
+
+sandbox:
+  driver: tempdir
+  python:
+    env_packages:
+      - requests
+      - jsonschema
+
+success_criteria:
+  # ── File existence ────────────────────────────────────────────────────────
+  - type: file_exists
+    path: "weather_alert.flow"
+    description: "weather_alert.flow file exists"
+    weight: 1.0
+
+  # ── Valid JSON structure ───────────────────────────────────────────────────
+  - type: json_check
+    path: "weather_alert.flow"
+    description: "File is valid JSON with nodes and edges"
+    assertions:
+      - expression: "nodes"
+        operator: "exists"
+      - expression: "edges"
+        operator: "exists"
+      - expression: "length(nodes)"
+        operator: "gte"
+        expected: 3
+    weight: 2.0
+    pass_threshold: 0.9
+
+  # ── HTTP/API node ─────────────────────────────────────────────────────────
+  - type: file_check
+    description: "Flow contains HTTP request node for weather API"
+    path: "weather_alert.flow"
+    includes:
+      - "HTTP"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  # ── Decision logic ─────────────────────────────────────────────────────────
+  - type: file_check
+    description: "Flow contains decision node for temperature threshold"
+    path: "weather_alert.flow"
+    includes:
+      - "Decision"
+      - "60"
+    weight: 1.5
+    pass_threshold: 0.8
+
+  # ── Slack integration ──────────────────────────────────────────────────────
+  - type: file_check
+    description: "Flow contains Slack message nodes"
+    path: "weather_alert.flow"
+    includes:
+      - "Slack"
+      - "its warm"
+      - "its cold"
+    weight: 1.5
+    pass_threshold: 0.8
+
+  # ── Validate with uipcli ────────────────────────────────────────────────────
+  - type: run_command
+    description: "Flow passes uipcli flow validate"
+    command: "uipcli flow validate weather_alert.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+max_iterations: 2

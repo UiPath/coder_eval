@@ -1,0 +1,164 @@
+task_id: uipath-flow-output-filter-planning
+description: >
+  Create a UiPath Flow planning document that demonstrates the new --output-filter
+  CLI feature with JMESPath expressions. The agent must use `uip flow registry`
+  commands with --output-filter to discover and validate specific connector
+  properties, then create a properly formatted implementation plan document
+  following the new template structure (Summary, Open Questions, Global Variables).
+  Tests registry discovery, output filtering, and planning documentation.
+tags: [flow, uipcli, output-filter, jmespath, planning, registry, intermediate]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Glob", "Grep"]
+  max_turns: 50
+  plugins:
+    - type: "local"
+      path: $UIPATH_PLUGIN_MARKETPLACE_DIR/
+
+sandbox:
+  driver: tempdir
+  python: {}
+  node:
+    env_packages:
+      - "@uipath/uipcli@0.1.3"
+  template_sources:
+    - type: template_dir
+      path: "../../../../templates/uipath-flow-starter"
+
+initial_prompt: |
+  I need you to create an implementation plan for a UiPath Flow called "DataProcessing".
+  The flow will read records from Salesforce, transform the data, write results to Google Sheets,
+  and log the status to a Slack channel.
+
+  Create a comprehensive implementation plan document that covers the flow architecture,
+  node configuration, variables, and any open questions that need to be resolved.
+  The plan should include a visual flow diagram, a table of resolved nodes with their
+  properties, and clearly document what was validated during planning.
+
+  Use the registry to discover connector and logic node types, then create the implementation
+  plan document following professional standards.
+
+success_criteria:
+  # ── Understanding of new features ──────────────────────────────────────────
+  - type: file_contains
+    description: "Plan mentions --output-filter or JMESPath"
+    path: "DataProcessing.impl.plan.md"
+    includes:
+      - "output-filter"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  # ── Implementation plan document structure ──────────────────────────────────
+  - type: file_exists
+    description: "Implementation plan document exists"
+    path: "DataProcessing.impl.plan.md"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Plan has Summary section at the top"
+    path: "DataProcessing.impl.plan.md"
+    includes:
+      - "## Summary"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Plan has Flow Diagram section with Mermaid"
+    path: "DataProcessing.impl.plan.md"
+    includes:
+      - "## Flow Diagram"
+      - "graph"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Plan has Resolved Node Table section"
+    path: "DataProcessing.impl.plan.md"
+    includes:
+      - "## Resolved Node Table"
+      - "Node ID"
+      - "Node Type"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Plan has Global Variables section (not 'Variables')"
+    path: "DataProcessing.impl.plan.md"
+    includes:
+      - "## Global Variables"
+    excludes:
+      - "## Variables"
+    weight: 1.5
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Plan has Open Questions section with required/optional items"
+    path: "DataProcessing.impl.plan.md"
+    includes:
+      - "## Open Questions"
+      - "[REQUIRED]"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Plan has Changes from Architectural Plan section"
+    path: "DataProcessing.impl.plan.md"
+    includes:
+      - "## Changes from Architectural Plan"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_check
+    description: "Implementation plan is valid Markdown"
+    path: "DataProcessing.impl.plan.md"
+    patterns:
+      - pattern: '^#'
+        must_match: true
+    weight: 1.0
+    pass_threshold: 1.0
+
+  # ── Content validation ─────────────────────────────────────────────────────
+  - type: run_command
+    description: "Implementation plan references Salesforce, Google Sheets, and Slack connectors"
+    command: |
+      grep -i "salesforce\|google.*sheets\|slack" DataProcessing.impl.plan.md || false
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Node table has proper Markdown table format"
+    command: |
+      python3 -c "
+      import re
+      with open('DataProcessing.impl.plan.md') as f:
+          content = f.read()
+      # Check for table with at least 4 rows (header + separator + 2 data rows)
+      tables = re.findall(r'\|.*\|.*\n\|.*-+.*\|.*\n\|.*\|.*\n\|.*\|', content)
+      assert len(tables) >= 1, 'No valid Markdown table found'
+      print('OK')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.5
+    pass_threshold: 1.0
+
+max_iterations: 2
+
+llm_reviewer:
+  enabled: true
+  prompt: |
+    Evaluate the agent's implementation plan document against these requirements:
+
+    1. Does the Summary section clearly describe the flow's purpose and what was validated?
+    2. Is the Flow Diagram present and does it show the correct flow (Salesforce → Transform → Sheets → Slack)?
+    3. Is the Resolved Node Table properly formatted with Node ID, Name, Type, Ports, Inputs, Outputs, Connection Key, and Notes columns?
+    4. Are all node types mentioned (Salesforce, Script/Transform, Google Sheets, Slack)?
+    5. Is the Global Variables section present and correctly named (not "Variables")?
+    6. Are there Open Questions with proper [REQUIRED] and [OPTIONAL] prefixes?
+    7. Does the plan mention using --output-filter to discover connector properties?
+    8. Are all major sections from the new maestro-flow template present (Summary, Diagram, Node Table, Edge Table, Global Variables, Open Questions)?
