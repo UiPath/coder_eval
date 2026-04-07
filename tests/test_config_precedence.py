@@ -110,28 +110,29 @@ def test_config_case_insensitive_env_vars(monkeypatch):
     assert settings.log_level == "DEBUG"
 
 
-def test_config_claude_code_no_key_no_proxy_succeeds():
-    """Test that claude-code agent allows missing API key when proxy is disabled.
+def test_config_claude_code_no_key_direct_succeeds():
+    """Test that claude-code agent allows missing API key with direct backend.
 
     Claude Code can authenticate via cached 'claude-code login' session,
     so we defer auth validation to the SDK.
     """
     from coder_eval.config import Settings
+    from coder_eval.models.enums import ApiBackend
 
-    settings = Settings(anthropic_api_key=None, llmgw_proxy_enabled=False)
+    settings = Settings(anthropic_api_key=None, api_backend=ApiBackend.DIRECT)
 
     # Should NOT raise — SDK handles auth (API key, cached login, or error)
     settings.validate_api_keys("claude-code")
 
 
 def test_config_claude_code_proxy_missing_gateway_settings():
-    """Test that claude-code with proxy enabled raises on missing gateway settings."""
+    """Test that claude-code with proxy backend raises on missing gateway settings."""
     from coder_eval.config import Settings
+    from coder_eval.models.enums import ApiBackend
 
     settings = Settings(
         anthropic_api_key=None,
-        bedrock_enabled=False,
-        llmgw_proxy_enabled=True,
+        api_backend=ApiBackend.PROXY,
         llmgw_url=None,
         llmgw_client_id=None,
         llmgw_client_secret=None,
@@ -142,12 +143,13 @@ def test_config_claude_code_proxy_missing_gateway_settings():
 
 
 def test_config_claude_code_proxy_with_gateway_settings_succeeds():
-    """Test that claude-code with proxy enabled succeeds when all gateway settings are present."""
+    """Test that claude-code with proxy backend succeeds when all gateway settings are present."""
     from coder_eval.config import Settings
+    from coder_eval.models.enums import ApiBackend
 
     settings = Settings(
         anthropic_api_key=None,
-        llmgw_proxy_enabled=True,
+        api_backend=ApiBackend.PROXY,
         llmgw_url="https://gateway.example.com",
         llmgw_client_id="client-id",
         llmgw_client_secret="client-secret",
@@ -162,11 +164,11 @@ def test_config_claude_code_proxy_with_gateway_settings_succeeds():
 def test_config_non_claude_code_proxy_requires_semantic_ids():
     """Test that non-claude-code agents with proxy require semantic org/tenant IDs."""
     from coder_eval.config import Settings
+    from coder_eval.models.enums import ApiBackend
 
     settings = Settings(
         anthropic_api_key=None,
-        bedrock_enabled=False,
-        llmgw_proxy_enabled=True,
+        api_backend=ApiBackend.PROXY,
         llmgw_url="https://gateway.example.com",
         llmgw_client_id="client-id",
         llmgw_client_secret="client-secret",
@@ -206,11 +208,12 @@ def test_config_exports_to_os_environ(monkeypatch):
 
 
 def test_config_bedrock_missing_token():
-    """Bedrock enabled + missing token raises ValueError."""
+    """Bedrock backend + missing token raises ValueError."""
     from coder_eval.config import Settings
+    from coder_eval.models.enums import ApiBackend
 
     settings = Settings(
-        bedrock_enabled=True,
+        api_backend=ApiBackend.BEDROCK,
         aws_bearer_token_bedrock=None,
         aws_region="us-east-1",
     )
@@ -220,11 +223,12 @@ def test_config_bedrock_missing_token():
 
 
 def test_config_bedrock_missing_region():
-    """Bedrock enabled + missing region raises ValueError."""
+    """Bedrock backend + missing region raises ValueError."""
     from coder_eval.config import Settings
+    from coder_eval.models.enums import ApiBackend
 
     settings = Settings(
-        bedrock_enabled=True,
+        api_backend=ApiBackend.BEDROCK,
         aws_bearer_token_bedrock="tok-123",
         aws_region=None,
     )
@@ -234,11 +238,12 @@ def test_config_bedrock_missing_region():
 
 
 def test_config_bedrock_valid():
-    """Bedrock enabled with valid settings passes."""
+    """Bedrock backend with valid settings passes."""
     from coder_eval.config import Settings
+    from coder_eval.models.enums import ApiBackend
 
     settings = Settings(
-        bedrock_enabled=True,
+        api_backend=ApiBackend.BEDROCK,
         aws_bearer_token_bedrock="tok-123",
         aws_region="us-east-1",
     )
@@ -247,35 +252,18 @@ def test_config_bedrock_valid():
     settings.validate_api_keys("claude-code")
 
 
-def test_config_bedrock_disabled_skips_validation():
-    """Bedrock disabled skips validation even if settings are empty."""
+def test_config_direct_skips_bedrock_validation():
+    """Direct backend skips bedrock validation even if settings are empty."""
     from coder_eval.config import Settings
+    from coder_eval.models.enums import ApiBackend
 
     settings = Settings(
-        bedrock_enabled=False,
+        api_backend=ApiBackend.DIRECT,
         aws_bearer_token_bedrock=None,
         aws_region=None,
     )
 
-    # Should NOT raise — bedrock is disabled
-    settings.validate_api_keys("claude-code")
-
-
-def test_config_bedrock_skips_proxy_validation():
-    """Bedrock enabled skips proxy validation even if proxy is enabled with missing settings."""
-    from coder_eval.config import Settings
-
-    settings = Settings(
-        bedrock_enabled=True,
-        aws_bearer_token_bedrock="tok-123",
-        aws_region="us-east-1",
-        llmgw_proxy_enabled=True,
-        llmgw_url=None,
-        llmgw_client_id=None,
-        llmgw_client_secret=None,
-    )
-
-    # Should NOT raise — Bedrock takes precedence, proxy won't be started
+    # Should NOT raise — bedrock is not selected
     settings.validate_api_keys("claude-code")
 
 
@@ -322,3 +310,98 @@ def test_agent_override_precedence_cli_over_env_over_yaml():
     assert task.agent.model == "cli-model"
     assert task.agent.permission_mode == "bypassPermissions"
     assert task.agent.max_turns == 99
+
+
+def test_api_backend_enum_values():
+    """Verify ApiBackend has exactly 3 values with expected string representations."""
+    from coder_eval.models.enums import ApiBackend
+
+    assert set(ApiBackend) == {ApiBackend.DIRECT, ApiBackend.BEDROCK, ApiBackend.PROXY}
+    assert str(ApiBackend.DIRECT) == "direct"
+    assert str(ApiBackend.BEDROCK) == "bedrock"
+    assert str(ApiBackend.PROXY) == "proxy"
+
+
+def test_settings_api_backend_default():
+    """Verify default api_backend is DIRECT."""
+    from coder_eval.config import Settings
+    from coder_eval.models.enums import ApiBackend
+
+    settings = Settings()
+    assert settings.api_backend == ApiBackend.DIRECT
+
+
+def test_settings_api_backend_from_env(monkeypatch):
+    """Setting API_BACKEND env var coerces to ApiBackend enum."""
+    import os
+
+    from coder_eval.config import Settings
+    from coder_eval.models.enums import ApiBackend
+
+    monkeypatch.setenv("API_BACKEND", "bedrock")
+    settings = Settings(_env_file=os.devnull)
+    assert settings.api_backend == ApiBackend.BEDROCK
+
+
+def test_resolve_route_direct():
+    """resolve_route with DIRECT returns DirectRoute."""
+    from coder_eval.config import Settings
+    from coder_eval.models import DirectRoute, resolve_route
+    from coder_eval.models.enums import ApiBackend
+
+    s = Settings(api_backend=ApiBackend.DIRECT)
+    route = resolve_route(s)
+    assert isinstance(route, DirectRoute)
+
+
+def test_resolve_route_bedrock():
+    """resolve_route with BEDROCK returns BedrockRoute."""
+    from coder_eval.config import Settings
+    from coder_eval.models import BedrockRoute, resolve_route
+    from coder_eval.models.enums import ApiBackend
+
+    s = Settings(
+        api_backend=ApiBackend.BEDROCK,
+        aws_bearer_token_bedrock="tok-123",
+        aws_region="us-east-1",
+        bedrock_model="eu.anthropic.claude-sonnet-4-6",
+    )
+    route = resolve_route(s)
+    assert isinstance(route, BedrockRoute)
+    assert route.bearer_token == "tok-123"
+    assert route.region == "us-east-1"
+    assert route.model == "eu.anthropic.claude-sonnet-4-6"
+
+
+def test_resolve_route_proxy():
+    """resolve_route with PROXY returns ProxyRoute with given port."""
+    from coder_eval.config import Settings
+    from coder_eval.models import ProxyRoute, resolve_route
+    from coder_eval.models.enums import ApiBackend
+
+    s = Settings(api_backend=ApiBackend.PROXY)
+    route = resolve_route(s, proxy_port=8080)
+    assert isinstance(route, ProxyRoute)
+    assert route.port == 8080
+
+
+def test_resolve_route_proxy_no_port_asserts():
+    """resolve_route with PROXY and no port raises AssertionError."""
+    from coder_eval.config import Settings
+    from coder_eval.models import resolve_route
+    from coder_eval.models.enums import ApiBackend
+
+    s = Settings(api_backend=ApiBackend.PROXY)
+    with pytest.raises(AssertionError, match="proxy_port"):
+        resolve_route(s)
+
+
+def test_resolve_route_bedrock_missing_token_asserts():
+    """resolve_route with BEDROCK and missing token raises AssertionError."""
+    from coder_eval.config import Settings
+    from coder_eval.models import resolve_route
+    from coder_eval.models.enums import ApiBackend
+
+    s = Settings(api_backend=ApiBackend.BEDROCK, aws_bearer_token_bedrock=None, aws_region="us-east-1")
+    with pytest.raises(AssertionError, match="aws_bearer_token_bedrock"):
+        resolve_route(s)

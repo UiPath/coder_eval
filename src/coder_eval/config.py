@@ -6,6 +6,8 @@ from pathlib import Path
 from dotenv import dotenv_values, load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from coder_eval.models.enums import ApiBackend
+
 
 # Load .env file with override so .env values always win over shell environment
 load_dotenv(override=True)
@@ -55,13 +57,14 @@ class Settings(BaseSettings):
     default_permission_mode: str | None = None
     default_max_turns: int | None = None
 
-    # LLM Gateway Proxy settings
-    llmgw_proxy_enabled: bool = False
+    # API Backend routing
+    api_backend: ApiBackend = ApiBackend.DIRECT
+
+    # LLM Gateway Proxy settings (used when api_backend == "proxy")
     llmgw_proxy_vendor: str = "awsbedrock"
     llmgw_proxy_api_flavor: str = "invoke"
 
-    # AWS Bedrock settings (direct Bedrock routing, not via proxy)
-    bedrock_enabled: bool = False
+    # AWS Bedrock settings (used when api_backend == "bedrock")
     aws_bearer_token_bedrock: str | None = None
     aws_region: str | None = None
     bedrock_model: str | None = None  # Cross-region model ID
@@ -122,13 +125,9 @@ class Settings(BaseSettings):
         Raises:
             ValueError: If required API key is missing
         """
-        # Validate Bedrock first (it takes precedence over proxy in the orchestrator)
-        if self.bedrock_enabled:
+        if self.api_backend == ApiBackend.BEDROCK:
             self._validate_bedrock_settings()
-
-        # Only validate proxy settings if proxy is enabled AND Bedrock is not
-        # (Bedrock takes precedence, so proxy won't be started)
-        if self.llmgw_proxy_enabled and not self.bedrock_enabled:
+        elif self.api_backend == ApiBackend.PROXY:
             self._validate_llmgw_settings()
 
         # Claude Code agent can use either:

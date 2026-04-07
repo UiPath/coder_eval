@@ -1,5 +1,7 @@
 # Local Proxy for Routing Claude Code Agent SDK Traffic Through LLM Gateway
 
+> **Note:** As of 2026-04-06, `LLMGW_PROXY_ENABLED` was replaced by `API_BACKEND=proxy`. See README.md for current configuration.
+
 **Related PR:** #45
 **Status**: Draft
 **Date**: 2026-03-05

@@ -25,10 +25,10 @@ from .evaluation.reviewer import LLMReviewer
 from .models import (
     ROUTE_NAMES,
     AgentKind,
+    ApiBackend,
     ApiRoute,
     BedrockRoute,
     ConfigLineageEntry,
-    DirectRoute,
     EvaluationResult,
     FinalStatus,
     ProxyRoute,
@@ -39,6 +39,8 @@ from .models import (
     TaskDefinition,
     TaskResult,
     TurnRecord,
+    proxy_config_from_settings,
+    resolve_route,
 )
 from .orchestration.batch import run_batch as run_batch_impl
 from .orchestration.config import BatchRunConfig
@@ -401,27 +403,19 @@ class Orchestrator:
         if self.task.llm_reviewer.enabled:
             self.llm_reviewer = LLMReviewer(self.task.llm_reviewer)
 
-        # Determine API routing: Bedrock > LLM Gateway proxy > direct
-        if settings.bedrock_enabled and settings.llmgw_proxy_enabled:
-            logger.warning("Both bedrock_enabled and llmgw_proxy_enabled are set; Bedrock routing takes precedence.")
-        if settings.bedrock_enabled:
-            assert settings.aws_bearer_token_bedrock is not None
-            assert settings.aws_region is not None
-            self.route = BedrockRoute(
-                bearer_token=settings.aws_bearer_token_bedrock,
-                region=settings.aws_region,
-                model=settings.bedrock_model,
-                small_model=settings.bedrock_small_model,
-            )
-            logger.info("API routing: AWS Bedrock (bearer token, region=%s)", self.route.region)
-        elif settings.llmgw_proxy_enabled:
-            logger.info("API routing: LLM Gateway proxy (via %s)", settings.llmgw_url)
-            await self._start_proxy()
-            assert self.proxy is not None and self.proxy.port is not None
-            self.route = ProxyRoute(port=self.proxy.port)
-        else:
-            self.route = DirectRoute()
-            logger.info("API routing: direct Anthropic API")
+        # Determine API routing from settings.api_backend enum
+        proxy_port: int | None = None
+        if settings.api_backend == ApiBackend.PROXY:
+            from .proxy import LLMGatewayProxy
+
+            proxy_config = proxy_config_from_settings(settings, task_id=self._log_task_id)
+            self.proxy = LLMGatewayProxy(proxy_config)
+            await self.proxy.start()
+            proxy_port = self.proxy.port
+            logger.info("LLM Gateway proxy started on port %d", proxy_port)
+
+        self.route = resolve_route(settings, proxy_port=proxy_port)
+        logger.info("API routing: %s", ROUTE_NAMES[type(self.route)])
 
         # Create and start agent with retry logic
         self.agent = await self._create_agent()
@@ -457,36 +451,6 @@ class Orchestrator:
         # Add installed tool versions (from npm packages etc.)
         if self.sandbox and self.sandbox.installed_tool_versions:
             self.result.environment_info["installed_tools"] = self.sandbox.installed_tool_versions
-
-    async def _start_proxy(self) -> None:
-        """Start the LLM Gateway proxy server."""
-        from .proxy import LLMGatewayProxy
-        from .proxy.config import ProxyConfig
-
-        assert settings.llmgw_url is not None
-        assert settings.llmgw_client_id is not None
-        assert settings.llmgw_client_secret is not None
-        assert settings.llmgw_semantic_org_id is not None
-        assert settings.llmgw_semantic_tenant_id is not None
-
-        proxy_config = ProxyConfig(
-            llmgw_url=settings.llmgw_url,
-            client_id=settings.llmgw_client_id,
-            client_secret=settings.llmgw_client_secret,
-            org_id=settings.llmgw_semantic_org_id,
-            tenant_id=settings.llmgw_semantic_tenant_id,
-            requesting_product=settings.llmgw_requesting_product,
-            requesting_feature=settings.llmgw_requesting_feature,
-            user_id=settings.llmgw_semantic_user_id or "",
-            timeout_seconds=settings.llmgw_timeout_seconds,
-            vendor=settings.llmgw_proxy_vendor,
-            api_flavor=settings.llmgw_proxy_api_flavor,
-            task_id=self._log_task_id,
-        )
-
-        self.proxy = LLMGatewayProxy(proxy_config)
-        await self.proxy.start()
-        logger.info("LLM Gateway proxy started on port %d", self.proxy.port)
 
     async def _create_agent(self) -> Agent:
         """Create the appropriate agent based on task configuration.

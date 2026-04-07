@@ -136,7 +136,7 @@ coder-eval run tasks/hello_date.yaml --stream full
 | `--experiment, -e`           | Experiment definition YAML for multi-variant comparison (default: `experiments/default.yaml`) |
 | **Output & networking**      |                                                                                               |
 | `--log-file`                 | Write logs to file                                                                            |
-| `--proxy / --no-proxy`       | Route API calls through the LLM Gateway proxy (default: no proxy)                             |
+| `--backend, -b`              | API backend: `direct`, `bedrock`, or `proxy` (default: from `API_BACKEND` env var)            |
 | `--stream, -s`               | Stream LLM events to terminal: `full` or `minimal` (disables progress bar)                    |
 | `--verbose, -v`              | DEBUG-level logging                                                                           |
 
@@ -383,27 +383,24 @@ This produces per-task cross-variant comparisons and experiment-level aggregates
 
 ## API Routing & Benchmarking
 
-`coder-eval` supports three API routing modes (selected automatically based on `.env` settings):
+`coder-eval` supports three API routing modes, selected via the `--backend` flag or `API_BACKEND` env var:
 
-- **Direct API** (default): Calls the Anthropic API directly using your `ANTHROPIC_API_KEY`. This is the standard path with accurate token/cost reporting from the SDK.
-- **AWS Bedrock** (`BEDROCK_ENABLED=true`): Routes through AWS Bedrock using bearer token authentication. Useful for cross-region model access and organization-managed AWS deployments. Takes precedence over proxy if both are enabled.
-- **LLM Gateway Proxy** (`--proxy`): Routes all API traffic through a local proxy that forwards requests to the UiPath LLM Gateway. Useful for testing gateway integration and using organization-managed model access.
+- **Direct API** (`--backend direct`, default): Calls the Anthropic API directly using your `ANTHROPIC_API_KEY`. This is the standard path with accurate token/cost reporting from the SDK.
+- **AWS Bedrock** (`--backend bedrock`): Routes through AWS Bedrock using bearer token authentication. Useful for cross-region model access and organization-managed AWS deployments.
+- **LLM Gateway Proxy** (`--backend proxy`): Routes all API traffic through a local proxy that forwards requests to the UiPath LLM Gateway. Useful for testing gateway integration and using organization-managed model access.
 
 ```bash
 # Direct API (default) — use for official benchmarks
 coder-eval run tasks/hello_date.yaml
 
 # Via AWS Bedrock (configure BEDROCK_* vars in .env)
-# Automatically used when BEDROCK_ENABLED=true
+coder-eval run tasks/hello_date.yaml --backend bedrock
 
 # Via LLM Gateway proxy
-coder-eval run tasks/hello_date.yaml --proxy
+coder-eval run tasks/hello_date.yaml --backend proxy
 ```
 
-> **Routing precedence:** Bedrock > LLM Gateway Proxy > Direct API.
-> If both `BEDROCK_ENABLED` and `LLMGW_PROXY_ENABLED` are set, Bedrock wins (with a warning logged).
-
-> **For official benchmarking, always use direct API (`--no-proxy` with `BEDROCK_ENABLED=false`).**
+> **For official benchmarking, always use direct API (`--backend direct`).**
 >
 > - Proxy adds ~2x latency on simple tasks (S2S auth, extra network hops, per-turn routing)
 > - SDK reports zero token/cost usage through the proxy; tokens are estimated by the proxy server instead
@@ -523,8 +520,7 @@ Installed automatically by `make install`. Includes ruff format/lint, trailing w
 | `LLMGW_REQUESTING_PRODUCT`      | No                    | Requesting product name (default: `coder-eval`)                                                              |
 | `LLMGW_REQUESTING_FEATURE`      | No                    | Requesting feature name (default: `llm-reviewer`)                                                            |
 | `LLMGW_TIMEOUT_SECONDS`         | No                    | Gateway request timeout (default: 290)                                                                       |
-| `LLMGW_PROXY_ENABLED`           | No                    | Enable LLM Gateway proxy for API routing (default: `false`). Overridden by `--proxy / --no-proxy` CLI flag   |
-| `BEDROCK_ENABLED`               | No                    | Enable AWS Bedrock routing (default: `false`). Takes precedence over proxy if both are enabled                |
+| `API_BACKEND`                   | No                    | API backend: `direct`, `bedrock`, or `proxy` (default: `direct`). Overridden by `--backend` CLI flag         |
 | `AWS_BEARER_TOKEN_BEDROCK`      | For Bedrock           | AWS Bedrock bearer token for authentication                                                                  |
 | `AWS_REGION`                    | For Bedrock           | AWS region for Bedrock endpoint (e.g., `eu-north-1`)                                                         |
 | `BEDROCK_MODEL`                 | No                    | Cross-region Bedrock model ID (e.g., `eu.anthropic.claude-sonnet-4-5-20250929-v1:0`)                         |

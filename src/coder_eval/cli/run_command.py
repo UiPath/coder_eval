@@ -185,10 +185,12 @@ def run_command(
             " Does not affect sandbox/snapshot ignore patterns."
         ),
     ),
-    proxy: bool | None = typer.Option(
+    backend: str | None = typer.Option(
         None,
-        "--proxy/--no-proxy",
-        help="Override LLM Gateway proxy setting from .env (LLMGW_PROXY_ENABLED)",
+        "--backend",
+        "-b",
+        click_type=click.Choice(["direct", "bedrock", "proxy"], case_sensitive=False),
+        help="API backend (default: from API_BACKEND env var)",
     ),
     experiment: Path | None = typer.Option(  # noqa: B008
         None,
@@ -257,9 +259,11 @@ def run_command(
         except ValidationError as e:
             raise typer.BadParameter(f"--plugins validation failed: {e}") from e
 
-    # Override proxy setting if --proxy or --no-proxy was passed
-    if proxy is not None:
-        settings.llmgw_proxy_enabled = proxy
+    # Override API backend if --backend was passed
+    if backend is not None:
+        from coder_eval.models import ApiBackend
+
+        settings.api_backend = ApiBackend(backend)
 
     # Setup logging before running tasks
     log_level = settings.log_level

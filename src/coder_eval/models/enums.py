@@ -39,6 +39,14 @@ _STATUS_ICONS: dict[FinalStatus, str] = {
 assert set(_STATUS_ICONS) == set(FinalStatus), "Missing icon for FinalStatus member"
 
 
+class ApiBackend(StrEnum):
+    """API backend for LLM calls."""
+
+    DIRECT = "direct"  # Anthropic API directly (ANTHROPIC_API_KEY)
+    BEDROCK = "bedrock"  # AWS Bedrock (bearer token auth)
+    PROXY = "proxy"  # Local LLM Gateway proxy (OAuth2 S2S)
+
+
 class AgentKind(StrEnum):
     """Supported agent types."""
 

@@ -1,5 +1,7 @@
 # API Routing Refactor: Implementation Plan (v2)
 
+> **Note:** As of 2026-04-06, `BEDROCK_ENABLED` was replaced by `API_BACKEND=bedrock`. See README.md for current configuration.
+
 > v2 incorporates feedback from gemini-3 and codex review against KISS/DRY/YAGNI.
 > Changes from v1: deleted `resolve_api_route_from_settings()` (YAGNI), deleted `BedrockRoute.validate()` (DRY — validation lives in config only), moved route models to `models/routing.py` (follows existing pattern), removed `self.proxy_port` from orchestrator (redundant with `self.route`), added explicit justification for approach choice.
 

@@ -31,6 +31,7 @@ from coder_eval.models.criteria import (
 from coder_eval.models.enums import (
     AgentKind,
     AgentState,
+    ApiBackend,
     FinalStatus,
     SnapshotMode,
 )
@@ -79,6 +80,8 @@ from coder_eval.models.routing import (
     BedrockRoute,
     DirectRoute,
     ProxyRoute,
+    proxy_config_from_settings,
+    resolve_route,
 )
 
 # Sandbox
@@ -126,6 +129,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     # Enums
     "AgentKind",
     "AgentState",
+    "ApiBackend",
     "FinalStatus",
     "SnapshotMode",
     # Criteria
@@ -152,6 +156,8 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "DirectRoute",
     "ProxyRoute",
     "BedrockRoute",
+    "resolve_route",
+    "proxy_config_from_settings",
     # Templates
     "BaseTemplateSource",
     "RepoSource",

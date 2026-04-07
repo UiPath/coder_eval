@@ -4,7 +4,7 @@ These tests hit the real LLM Gateway with real credentials from .env.
 They are skipped by default and only run with: pytest -m live
 
 Requirements:
-  - LLMGW_PROXY_ENABLED=true in .env
+  - API_BACKEND=proxy in .env
   - Valid LLMGW_* credentials in .env
 """
 
@@ -17,11 +17,12 @@ import httpx
 import pytest
 
 from coder_eval.config import settings
+from coder_eval.models.enums import ApiBackend
 from coder_eval.proxy.config import ProxyConfig
 from coder_eval.proxy.server import LLMGatewayProxy
 
 
-_skip_reason = "Live LLMGW tests require LLMGW_PROXY_ENABLED=true and valid credentials"
+_skip_reason = "Live LLMGW tests require API_BACKEND=proxy and valid credentials"
 
 _live = pytest.mark.live
 
@@ -29,7 +30,7 @@ _live = pytest.mark.live
 def _can_run_live() -> bool:
     """Check if live tests can run based on settings."""
     return bool(
-        settings.llmgw_proxy_enabled
+        settings.api_backend == ApiBackend.PROXY
         and settings.llmgw_url
         and settings.llmgw_client_id
         and settings.llmgw_client_secret
@@ -40,24 +41,9 @@ def _can_run_live() -> bool:
 
 def _make_live_config() -> ProxyConfig:
     """Build ProxyConfig from live .env settings."""
-    assert settings.llmgw_url
-    assert settings.llmgw_client_id
-    assert settings.llmgw_client_secret
-    assert settings.llmgw_semantic_org_id
-    assert settings.llmgw_semantic_tenant_id
-    return ProxyConfig(
-        llmgw_url=settings.llmgw_url,
-        client_id=settings.llmgw_client_id,
-        client_secret=settings.llmgw_client_secret,
-        org_id=settings.llmgw_semantic_org_id,
-        tenant_id=settings.llmgw_semantic_tenant_id,
-        requesting_product=settings.llmgw_requesting_product,
-        requesting_feature=settings.llmgw_requesting_feature,
-        user_id=settings.llmgw_semantic_user_id or "",
-        timeout_seconds=settings.llmgw_timeout_seconds,
-        vendor=settings.llmgw_proxy_vendor,
-        api_flavor=settings.llmgw_proxy_api_flavor,
-    )
+    from coder_eval.models.routing import proxy_config_from_settings
+
+    return proxy_config_from_settings(settings, task_id="live-test")
 
 
 @_live
