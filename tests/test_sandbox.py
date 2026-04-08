@@ -224,6 +224,129 @@ def test_sandbox_preserve():
             shutil.rmtree(artifact_dir.parent)
 
 
+# ==================== Persistent Target Dir Tests ====================
+
+
+def test_sandbox_setup_with_target_dir(tmp_path):
+    """Test sandbox setup with a persistent target directory instead of tempdir."""
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_target_dir")
+
+    target = tmp_path / "artifacts" / "test_target_dir"
+    sandbox_dir = sandbox.setup(target_dir=target)
+
+    assert sandbox_dir == target
+    assert sandbox_dir.exists()
+    assert sandbox.is_persistent
+
+    # Create a test file
+    (sandbox_dir / "hello.txt").write_text("persistent")
+
+    # Cleanup should NOT delete the directory
+    sandbox.cleanup(preserve=False)
+    assert target.exists()
+    assert (target / "hello.txt").read_text() == "persistent"
+
+
+def test_sandbox_setup_target_dir_cleanup_on_exit_false(tmp_path):
+    """Test that cleanup is a no-op when target_dir was used."""
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_noop_cleanup")
+
+    target = tmp_path / "persist"
+    sandbox.setup(target_dir=target)
+    (target / "data.txt").write_text("keep me")
+
+    # Multiple cleanups should all be no-ops
+    sandbox.cleanup(preserve=False)
+    sandbox.cleanup(preserve=False)
+    assert target.exists()
+    assert (target / "data.txt").exists()
+
+
+def test_sandbox_setup_target_dir_failure_cleans_up(tmp_path, monkeypatch):
+    """Test that a failed setup with target_dir still cleans up and resets state."""
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_fail_cleanup")
+
+    target = tmp_path / "will_fail"
+
+    # Force _setup_template to raise
+    monkeypatch.setattr(sandbox, "_setup_template", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        sandbox.setup(target_dir=target)
+
+    # Directory should be cleaned up and state reset
+    assert not target.exists()
+    assert sandbox.sandbox_dir is None
+    assert not sandbox.is_persistent
+
+
+def test_sandbox_preserve_to_self_referential_guard(tmp_path):
+    """Test that preserve_to() is a no-op when sandbox is already at the target path."""
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_self_ref")
+
+    # Set up sandbox in a persistent target dir (simulates orchestrator behavior)
+    artifacts_dir = tmp_path / "artifacts"
+    target = artifacts_dir / "test_self_ref"
+    sandbox.setup(target_dir=target)
+
+    # Create a test file to verify contents are preserved
+    (target / "result.txt").write_text("important output")
+
+    # Call preserve_to with the parent artifacts dir — this would normally
+    # copy sandbox_dir to artifacts_dir/task_id, but since sandbox is already
+    # there, the guard should short-circuit and return the existing path.
+    preserved_path = sandbox.preserve_to(artifacts_dir)
+
+    assert preserved_path == target
+    assert preserved_path.exists()
+    assert (preserved_path / "result.txt").read_text() == "important output"
+
+
+def test_sandbox_persistent_full_flow(tmp_path):
+    """Integration test: persistent sandbox → files created → cleanup is no-op → files remain."""
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_flow")
+
+    target = tmp_path / "artifacts" / "test_flow"
+    sandbox_dir = sandbox.setup(target_dir=target)
+
+    # Simulate agent work
+    (sandbox_dir / "hello.py").write_text("print('hello')")
+    (sandbox_dir / "subdir").mkdir()
+    (sandbox_dir / "subdir" / "data.json").write_text('{"key": "value"}')
+
+    assert sandbox.is_persistent
+
+    # Cleanup should be a no-op for persistent dirs
+    sandbox.cleanup(preserve=False)
+
+    # All files should still be there
+    assert target.exists()
+    assert (target / "hello.py").read_text() == "print('hello')"
+    assert (target / "subdir" / "data.json").read_text() == '{"key": "value"}'
+
+    # sandbox_dir should NOT be reset (cleanup is a no-op)
+    assert sandbox.sandbox_dir is not None
+
+
+def test_sandbox_default_setup_still_uses_tempdir():
+    """Test that setup() without target_dir still creates a temp directory."""
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_default_temp")
+
+    try:
+        sandbox_dir = sandbox.setup()
+        assert sandbox_dir.exists()
+        assert not sandbox.is_persistent
+        assert "coder_eval_test_default_temp_" in str(sandbox_dir)
+    finally:
+        sandbox.cleanup()
+
+
 # ==================== Snapshot Tests ====================
 
 

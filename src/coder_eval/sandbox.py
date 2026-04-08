@@ -56,12 +56,25 @@ class Sandbox:
             return None
         return self.venv_dir / ("Scripts" if os.name == "nt" else "bin")
 
-    def setup(self) -> Path:
+    @property
+    def is_persistent(self) -> bool:
+        """Whether this sandbox was created with a persistent target directory.
+
+        When True, the sandbox was created in a specific target directory (typically
+        the artifacts directory) and will not be deleted on cleanup().
+        """
+        return not self._cleanup_on_exit
+
+    def setup(self, target_dir: Path | None = None) -> Path:
         """Set up the sandbox environment.
 
         The sandbox is a plain temporary directory on the host -- there is no
         container or cgroup isolation.  Only command-level timeouts are enforced;
         memory and disk limits in :class:`ResourceLimits` are not enforced.
+
+        Args:
+            target_dir: If provided, use this directory instead of creating a temp dir.
+                        The directory will NOT be deleted on cleanup (persistent mode).
 
         Returns:
             Path to the sandbox directory
@@ -71,18 +84,28 @@ class Sandbox:
             RuntimeError: If setup fails
         """
         if self.config.driver == "tempdir":
-            return self._setup_tempdir()
+            return self._setup_tempdir(target_dir=target_dir)
         else:
             raise ValueError(f"Unsupported sandbox driver: {self.config.driver}")
 
-    def _setup_tempdir(self) -> Path:
-        """Set up a temporary directory sandbox.
+    def _setup_tempdir(self, target_dir: Path | None = None) -> Path:
+        """Set up a sandbox directory.
+
+        Args:
+            target_dir: If provided, use this directory instead of creating a temp dir.
+                        Sets _cleanup_on_exit=False so cleanup() preserves the directory.
 
         Returns:
             Path to the sandbox directory
         """
-        # Create temporary directory
-        self.sandbox_dir = Path(tempfile.mkdtemp(prefix=f"coder_eval_{self.task_id}_"))
+        if target_dir is not None:
+            # Persistent mode: work directly in the target directory
+            target_dir.mkdir(parents=True, exist_ok=True)
+            self.sandbox_dir = target_dir
+            self._cleanup_on_exit = False
+        else:
+            # Default: create a temporary directory
+            self.sandbox_dir = Path(tempfile.mkdtemp(prefix=f"coder_eval_{self.task_id}_"))
 
         try:
             # Setup template content (repo, directory, or inline files)
@@ -100,9 +123,10 @@ class Sandbox:
             if self.config.node and self.config.node.env_packages:
                 self._install_node_packages()
         except Exception:
-            # Clean up temp directory if setup fails partway through
+            # Clean up directory if setup fails partway through
             shutil.rmtree(self.sandbox_dir, ignore_errors=True)
             self.sandbox_dir = None
+            self._cleanup_on_exit = True  # Reset flag on failure
             raise
 
         return self.sandbox_dir
@@ -511,6 +535,11 @@ class Sandbox:
 
         # Create unique directory for this sandbox
         preserve_path = artifact_dir / self.task_id
+
+        # Guard against self-referential copy (sandbox already in target location)
+        if self.sandbox_dir.resolve() == preserve_path.resolve():
+            return preserve_path
+
         if preserve_path.exists():
             shutil.rmtree(preserve_path)
 

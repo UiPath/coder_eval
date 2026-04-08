@@ -594,6 +594,106 @@ def test_create_error_result(tmp_path):
     assert result.result.iteration_count == 0
 
 
+# ==================== Persistent Sandbox / Cleanup Tests ====================
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_cleanup_persistent_sandbox(tmp_path):
+    """Test that _cleanup with preserve_sandbox=True and a persistent sandbox skips copy."""
+    from datetime import datetime
+
+    from coder_eval.models import AgentKind, EvaluationResult, SnapshotConfig, SnapshotMode
+    from coder_eval.sandbox import Sandbox
+
+    task_file = Path("tasks/hello_date.yaml")
+    task, _ = load_task(task_file)
+    task.sandbox.python = None
+    task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.DISABLED)
+
+    run_dir = tmp_path / "test_run" / "hello_date"
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=True, variant_id="test-variant")
+
+    # Initialize result (normally done in run())
+    orchestrator.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        variant_id="test-variant",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+
+    # Set up sandbox with persistent target (simulates what _setup does)
+    persist_target = run_dir / "artifacts" / task.task_id
+    orchestrator.sandbox = Sandbox(task.sandbox, task_id=task.task_id)
+    orchestrator.sandbox.setup(target_dir=persist_target)
+
+    # Create a test file in sandbox
+    (persist_target / "output.txt").write_text("agent output")
+    assert orchestrator.sandbox.is_persistent
+
+    # Run cleanup
+    await orchestrator._cleanup()
+
+    # Verify: sandbox directory still exists (no deletion)
+    assert persist_target.exists()
+    assert (persist_target / "output.txt").read_text() == "agent output"
+
+    # Verify: result.sandbox_path is set to the persistent sandbox dir
+    assert orchestrator.result.sandbox_path == str(persist_target)
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_cleanup_non_persistent_sandbox_with_preserve(tmp_path):
+    """Test that _cleanup with preserve_sandbox=True and a non-persistent sandbox copies to artifacts."""
+    from datetime import datetime
+
+    from coder_eval.models import AgentKind, EvaluationResult, SnapshotConfig, SnapshotMode
+    from coder_eval.sandbox import Sandbox
+
+    task_file = Path("tasks/hello_date.yaml")
+    task, _ = load_task(task_file)
+    task.sandbox.python = None
+    task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.DISABLED)
+
+    run_dir = tmp_path / "test_run" / "hello_date"
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=True, variant_id="test-variant")
+
+    # Initialize result
+    orchestrator.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        variant_id="test-variant",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+
+    # Set up sandbox WITHOUT target_dir (non-persistent / legacy path)
+    orchestrator.sandbox = Sandbox(task.sandbox, task_id=task.task_id)
+    sandbox_dir = orchestrator.sandbox.setup()
+
+    # Create a test file
+    (sandbox_dir / "output.txt").write_text("agent output")
+    assert not orchestrator.sandbox.is_persistent
+
+    # Run cleanup
+    await orchestrator._cleanup()
+
+    # Verify: sandbox was copied to artifacts dir (legacy path)
+    expected_preserve_path = run_dir / "artifacts" / task.task_id
+    assert expected_preserve_path.exists()
+    assert (expected_preserve_path / "output.txt").read_text() == "agent output"
+    assert orchestrator.result.sandbox_path == str(expected_preserve_path)
+
+    # Original temp dir should be cleaned up
+    assert not sandbox_dir.exists()
+
+
 # ==================== Snapshot Integration Tests ====================
 
 

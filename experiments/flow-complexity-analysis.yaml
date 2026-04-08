@@ -1,0 +1,51 @@
+# Experiment: Flow Complexity Analysis
+#
+# Benchmark coding agent performance across 5 complexity tiers (5, 10, 25, 50,
+# 100 nodes). Measures duration, error rates, accuracy (criteria pass rate),
+# and token consumption at each tier.
+#
+# Tasks are independent and run in parallel via run_batch. Each variant
+# targets a different model to enable cross-model comparison at every
+# complexity level.
+#
+# Usage (all tasks, default model):
+#   coder-eval run \
+#     tasks/uipath_flow/complexity_analysis/generate_flow_5_nodes.yaml \
+#     tasks/uipath_flow/complexity_analysis/generate_flow_10_nodes.yaml \
+#     tasks/uipath_flow/complexity_analysis/generate_flow_25_nodes.yaml \
+#     tasks/uipath_flow/complexity_analysis/generate_flow_50_nodes.yaml \
+#     tasks/uipath_flow/complexity_analysis/generate_flow_100_nodes.yaml \
+#     -e experiments/flow-complexity-analysis.yaml \
+#     --parallel 5
+#
+# Usage (single tier, compare models):
+#   coder-eval run \
+#     tasks/uipath_flow/complexity_analysis/generate_flow_50_nodes.yaml \
+#     -e experiments/flow-complexity-analysis.yaml
+#
+# Report generation:
+#   coder-eval report <run-dir> --format markdown --format json
+
+experiment_id: flow-complexity-analysis
+description: >
+  Benchmark agent flow-generation across complexity tiers (5/10/25/50/100 nodes).
+  Captures duration, error rates, accuracy, and token consumption per tier and
+  per model variant. All 5 tasks run in parallel for maximum throughput.
+
+defaults:
+  max_iterations: 3
+  task_timeout: 1800
+  turn_timeout: 600
+
+  agent:
+    type: claude-code
+    permission_mode: bypassPermissions
+    allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+    ignore_patterns: []
+
+variants:
+  # ── Sonnet (fast, cost-effective baseline) ──────────────────────────────
+  - variant_id: plugin
+    agent:
+      model: claude-sonnet-4-6
+      max_turns: 1000
