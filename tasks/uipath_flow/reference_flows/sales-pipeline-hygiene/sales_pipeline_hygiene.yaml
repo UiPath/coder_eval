@@ -1,0 +1,105 @@
+task_id: uipath-flow-sales-pipeline-hygiene
+description: >
+  Create a UiPath Flow JSON file for weekly Salesforce opportunity risk scanning.
+  The flow should retrieve open opportunities, use an agent to score risk levels,
+  escalate high-risk deals to Slack, notify owners of medium-risk deals, and write
+  risk scores back to Salesforce. Validate the flow structure.
+initial_prompt: |
+  Create a UiPath flow that does a weekly risk scan of open Salesforce opportunities. An agent should review each opportunity and score the risk level. High-risk deals get escalated to a Slack sales channel with a follow-up task created, medium-risk deals notify the owner via Slack DM, and all deals get their risk level written back to Salesforce.
+tags: [flow, integration, complex, agent]
+task_timeout: 2400
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Glob", "Grep"]
+  plugins:
+    - type: "local"
+      path: $UIPATH_PLUGIN_MARKETPLACE_DIR/
+  max_turns: 100
+  turn_timeout: 1200
+
+sandbox:
+  driver: tempdir
+  python:
+    env_packages:
+      - requests
+      - jsonschema
+
+success_criteria:
+  # ── File existence ────────────────────────────────────────────────────────
+  - type: file_exists
+    path: "sales_pipeline_hygiene/sales_pipeline_hygiene/sales_pipeline_hygiene.flow"
+    description: "sales_pipeline_hygiene.flow file exists"
+    weight: 1.0
+
+  # ── Valid JSON structure ───────────────────────────────────────────────────
+  - type: json_check
+    path: "sales_pipeline_hygiene/sales_pipeline_hygiene/sales_pipeline_hygiene.flow"
+    description: "File is valid JSON with nodes array"
+    assertions:
+      - expression: "nodes"
+        operator: "exists"
+      - expression: "edges"
+        operator: "exists"
+      - expression: "length(nodes)"
+        operator: "gte"
+        expected: 1
+    weight: 2.0
+    pass_threshold: 0.9
+
+  # ── Salesforce integration ──────────────────────────────────────────────────
+  - type: file_check
+    description: "Flow contains Salesforce connector"
+    path: "sales_pipeline_hygiene/sales_pipeline_hygiene/sales_pipeline_hygiene.flow"
+    includes:
+      - "salesforce"
+    weight: 1.5
+    pass_threshold: 0.8
+
+  # ── AI Agent nodes ────────────────────────────────────────────────────────
+  - type: file_check
+    description: "Flow contains AI agent for risk scoring"
+    path: "sales_pipeline_hygiene/sales_pipeline_hygiene/sales_pipeline_hygiene.flow"
+    includes:
+      - "agent"
+    weight: 1.5
+    pass_threshold: 0.8
+
+  # ── Slack integration ───────────────────────────────────────────────────────
+  - type: file_check
+    description: "Flow contains Slack notification nodes"
+    path: "sales_pipeline_hygiene/sales_pipeline_hygiene/sales_pipeline_hygiene.flow"
+    includes:
+      - "slack"
+    weight: 1.5
+    pass_threshold: 0.8
+
+  # ── Decision logic (switch for risk levels) ────────────────────────────────
+  - type: file_check
+    description: "Flow contains decision nodes for risk branching"
+    path: "sales_pipeline_hygiene/sales_pipeline_hygiene/sales_pipeline_hygiene.flow"
+    includes:
+      - "core.logic.decision"
+    weight: 1.5
+    pass_threshold: 0.8
+
+  # ── Loop control (for iterating through opportunities) ─────────────────────
+  - type: file_check
+    description: "Flow contains loop constructs"
+    path: "sales_pipeline_hygiene/sales_pipeline_hygiene/sales_pipeline_hygiene.flow"
+    includes:
+      - "core.logic.loop"
+    weight: 1.5
+    pass_threshold: 0.8
+
+  # ── Validate with uipcli ────────────────────────────────────────────────────
+  - type: run_command
+    description: "Flow passes uip flow validate"
+    command: "cd sales_pipeline_hygiene && uip flow validate sales_pipeline_hygiene/sales_pipeline_hygiene.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+max_iterations: 2

@@ -1,0 +1,75 @@
+task_id: uipath-flow-complexity-100-nodes
+description: >
+  Generate a UiPath Flow with exactly 100 nodes covering every available node
+  type: all core triggers, all core actions, all control flow types, all
+  connector families (Outlook, Slack, Salesforce, Jira, Confluence), AI agents,
+  sub-processes, RPA workflows, and mock nodes. This extreme-complexity tier
+  stress-tests the agent's ability to manage large-scale flow generation with
+  deeply nested logic, multiple parallel pipelines, and comprehensive error
+  handling across all integration points.
+tags: [flow, uipcli, generate, complexity-analysis, 100-nodes]
+max_iterations: 2
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  turn_timeout: 1200
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+initial_prompt: |
+  Create a UiPath Flow project named "ComplexityTest100" that contains exactly
+  100 nodes implementing a large-scale enterprise automation platform.
+
+  ## Scenario: End-to-End Customer Lifecycle Management
+  Build a comprehensive flow that manages the entire customer lifecycle across
+  multiple departments: marketing lead capture, sales qualification, contract
+  management, customer onboarding, ongoing support, and churn prevention.
+
+success_criteria:
+  # ── CLI usage ────────────────────────────────────────────────────────────
+  - type: command_executed
+    description: "Agent explored the node registry"
+    tool_name: "Bash"
+    command_pattern: 'uip\s+flow\s+registry\s+(pull|list|get|search)'
+    min_count: 1
+    require_success: false
+    weight: 1.0
+    pass_threshold: 1.0
+
+  # ── Node count ───────────────────────────────────────────────────────────
+  - type: run_command
+    description: "Flow contains more than 80 nodes"
+    command: "python3 -c \"import json,sys; nodes=json.load(open('ComplexityTest100/ComplexityTest100/ComplexityTest100.flow'))['nodes']; print(f'{len(nodes)} nodes'); sys.exit(0 if len(nodes)>80 else 1)\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+  # ── Edge count ───────────────────────────────────────────────────────────
+  - type: run_command
+    description: "Flow contains more than 79 edges"
+    command: "python3 -c \"import json,sys; edges=json.load(open('ComplexityTest100/ComplexityTest100/ComplexityTest100.flow'))['edges']; print(f'{len(edges)} edges'); sys.exit(0 if len(edges)>79 else 1)\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+  # ── CLI validation ──────────────────────────────────────────────────────
+  - type: run_command
+    description: "uip flow validate passes"
+    command: "uip flow validate ComplexityTest100/ComplexityTest100/ComplexityTest100.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+llm_reviewer:
+  enabled: true
+  prompt: |
+    Evaluate the generated 100-node flow:
+    1. Does it contain ~100 nodes?
+    2. Is the flow semantically correct?

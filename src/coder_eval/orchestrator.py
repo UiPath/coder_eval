@@ -519,7 +519,7 @@ class Orchestrator:
             logger.info(f"Starting iteration {iteration}/{self.task.max_iterations}")
 
             # Communicate with agent (with retry logic)
-            prompt_with_cwd = f"Your working directory is: {sandbox_dir}\n\n{current_prompt}"
+            prompt_with_cwd = f"Your working directory is: {sandbox_dir.resolve()}\n\n{current_prompt}"
             logger.debug(f"Sending prompt: {current_prompt[:100]}...")
 
             safe_emit(
