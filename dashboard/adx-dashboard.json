@@ -1,0 +1,1041 @@
+{
+  "$schema": "https://dataexplorer.azure.com/static/d/schema/69/dashboard.json",
+  "schema_version": 69,
+  "title": "Coder Eval Runs Dashboard",
+  "dataSources": [
+    {
+      "id": "88f9a710-4258-4726-8b16-cacbbee0bb4b",
+      "kind": "manual-kusto",
+      "name": "coder-eval-runs-cluster",
+      "clusterUri": "https://kvc-6xx4u3sa8nz1hq7dxn.southcentralus.kusto.windows.net/",
+      "database": "coder-eval-runs-db",
+      "scopeId": "kusto"
+    }
+  ],
+  "parameters": [
+    {
+      "kind": "duration",
+      "id": "526c72c6-8694-46d1-ac2f-cc1836fd9d62",
+      "displayName": "Time range",
+      "description": "Filter by run start time",
+      "beginVariableName": "_startTime",
+      "endVariableName": "_endTime",
+      "defaultValue": {
+        "kind": "dynamic",
+        "count": 30,
+        "unit": "days"
+      },
+      "showOnPages": {
+        "kind": "all"
+      }
+    },
+    {
+      "kind": "string",
+      "selectionType": "freetext",
+      "id": "311e88d8-f287-4428-b46e-bc50967b9ec6",
+      "displayName": "Tag",
+      "description": "Filter tasks by tag (e.g. smoke, golden). Leave empty for all.",
+      "variableName": "_tag",
+      "defaultValue": {
+        "kind": "value",
+        "value": ""
+      },
+      "showOnPages": {
+        "kind": "all"
+      }
+    },
+    {
+      "kind": "string",
+      "selectionType": "freetext",
+      "id": "e8009a93-cc05-488f-8bb9-a165c269edfd",
+      "displayName": "Task ID",
+      "description": "Filter by task_id (substring match). Leave empty for all.",
+      "variableName": "_taskId",
+      "defaultValue": {
+        "kind": "value",
+        "value": ""
+      },
+      "showOnPages": {
+        "kind": "all"
+      }
+    },
+    {
+      "kind": "string",
+      "selectionType": "freetext",
+      "id": "dc2e6718-113d-49a1-8c0f-b18a8ccd8a6a",
+      "displayName": "Model",
+      "description": "Filter by model (e.g. sonnet). Leave empty for all.",
+      "variableName": "_model",
+      "defaultValue": {
+        "kind": "value",
+        "value": ""
+      },
+      "showOnPages": {
+        "kind": "all"
+      }
+    }
+  ],
+  "pages": [
+    {
+      "name": "Overview",
+      "id": "dde58291-b947-47a8-bf16-c795944c539e"
+    },
+    {
+      "name": "Daily Trends",
+      "id": "db370fd9-d3ee-463a-b15f-b582691037dd"
+    },
+    {
+      "name": "Task Deep Dive",
+      "id": "5a863c27-24d9-41ac-8016-709eb13a60cc"
+    },
+    {
+      "name": "Cost & Efficiency",
+      "id": "8f1de152-e7ab-4856-a56e-e797e43ec6c6"
+    },
+    {
+      "name": "Analysis",
+      "id": "6e9ab79b-d4e3-4755-abb4-8c118dc5362c"
+    }
+  ],
+  "baseQueries": [],
+  "queries": [
+    {
+      "id": "a9b021a5-944f-43c6-861f-9283a2ad0137",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize avg_success_rate = round(100.0 * countif(status == 'SUCCESS') / count(), 1) by day = startofday(run_start_time)\n| order by day asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "e2d873d8-44bb-4de4-9cc5-8ba17ee11dca",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize avg_duration_sec = round(avg(duration_seconds), 1) by day = startofday(run_start_time)\n| order by day asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "6f076e7b-bcec-4ce4-a07b-3adaa9651466",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| mv-expand tag = tags to typeof(string)\n| summarize\n    tasks = dcount(task_id),\n    runs = count(),\n    pass_rate = round(100.0 * countif(status == 'SUCCESS') / count(), 1),\n    avg_score = round(avg(weighted_score), 3),\n    avg_iterations = round(avg(iteration_count), 1),\n    avg_latency_sec = round(avg(duration_seconds), 1),\n    avg_assistant_turns = round(avg(todouble(total_assistant_turns)), 1),\n    avg_commands = round(avg(todouble(total_commands)), 1),\n    avg_cost_usd = round(avg(total_cost_usd), 5),\n    total_cost_usd = round(sum(total_cost_usd), 4),\n    avg_tokens = round(avg(todouble(total_tokens)), 0)\n  by tag\n| order by pass_rate asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "905843bb-c770-46b1-854d-80acf698d82e",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize\n    status = take_any(status),\n    reliability_score = round(avg(weighted_score), 3),\n    iterations = round(avg(iteration_count), 1),\n    latency_sec = round(avg(duration_seconds), 1),\n    assistant_turns = sum(total_assistant_turns),\n    total_commands = sum(total_commands),\n    cmd_success_pct = round(avg(command_success_rate), 1),\n    input_tokens = sum(input_tokens),\n    output_tokens = sum(output_tokens),\n    cache_write = sum(cache_creation_input_tokens),\n    cache_read = sum(cache_read_input_tokens),\n    cost_usd = round(sum(total_cost_usd), 5),\n    model = take_any(model_used),\n    tags = take_any(tags)\n  by day = startofday(run_start_time), task_id\n| order by day asc, task_id asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "6f597e0e-9285-48c5-b183-e9ca524a0303",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize\n    succeeded = countif(status == 'SUCCESS'),\n    failed = countif(status in ('FAILED', 'MAX_TURNS_EXHAUSTED', 'MAX_ITERATIONS_EXHAUSTED')),\n    errors = countif(status == 'ERROR')\n  by day = startofday(run_start_time)\n| order by day asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "f9558043-c8a8-4c79-8add-b0502e7d0307",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize\n    total_cost_usd = round(sum(total_cost_usd), 4),\n    avg_cost_per_task = round(avg(total_cost_usd), 5)\n  by day = startofday(run_start_time)\n| order by day asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "eafbb80e-950e-4cf3-a4e9-26537bd62b4c",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize\n    input = sum(input_tokens),\n    output = sum(output_tokens),\n    cache_write = sum(cache_creation_input_tokens),\n    cache_read = sum(cache_read_input_tokens)\n  by day = startofday(run_start_time)\n| order by day asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "fa799549-eb48-4252-95c8-484728942496",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize avg_score = round(avg(weighted_score), 3) by day = startofday(run_start_time), task_id\n| order by day asc, task_id asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "bf575d35-507e-4278-9a2d-7c5115058749",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize avg_duration = round(avg(duration_seconds), 1) by day = startofday(run_start_time), task_id\n| order by day asc, task_id asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "b30ad95b-e31b-4945-a419-41a1c949273f",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\nCriteriaResults\n| join kind=inner (\n    _filteredTasks | project run_id, task_id, variant_id, run_start_time\n  ) on run_id, task_id, variant_id\n| summarize\n    pass_rate = round(100.0 * countif(score >= 0.9) / count(), 1)\n  by day = startofday(run_start_time), criterion_type\n| order by day asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "ec3e17d0-5257-4bd4-ab6b-e563c62c7062",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| extend run_url = strcat('https://portal.azure.com/#view/Microsoft_Azure_Storage/ContainerMenuBlade/~/overview/storageAccountId/%2Fsubscriptions%2F5db48574-8a20-418f-b488-1fafd8d021df%2FresourceGroups%2Frg-coder-eval-tests%2Fproviders%2FMicrosoft.Storage%2FstorageAccounts%2Fcoderevaltests/path/runs/', run_id, '/'),\n         task_url = strcat('https://portal.azure.com/#view/Microsoft_Azure_Storage/ContainerMenuBlade/~/overview/storageAccountId/%2Fsubscriptions%2F5db48574-8a20-418f-b488-1fafd8d021df%2FresourceGroups%2Frg-coder-eval-tests%2Fproviders%2FMicrosoft.Storage%2FstorageAccounts%2Fcoderevaltests/path/runs/', run_id, '/', variant_id, '/', task_id, '/task.json')\n| project\n    run_start_time, run_id, task_id, variant_id, status, weighted_score,\n    duration_sec = round(duration_seconds, 1), iteration_count,\n    model_used, tags, cost_usd = round(total_cost_usd, 5),\n    total_commands, error_message, run_url, task_url\n| order by run_start_time desc, task_id asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "cfcadc80-2106-4a93-a672-0c7b80d40a2c",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\nCriteriaResults\n| join kind=inner (\n    _filteredTasks | project run_id, task_id, variant_id\n  ) on run_id, task_id, variant_id\n| extend run_url = strcat('https://portal.azure.com/#view/Microsoft_Azure_Storage/ContainerMenuBlade/~/overview/storageAccountId/%2Fsubscriptions%2F5db48574-8a20-418f-b488-1fafd8d021df%2FresourceGroups%2Frg-coder-eval-tests%2Fproviders%2FMicrosoft.Storage%2FstorageAccounts%2Fcoderevaltests/path/runs/', run_id, '/'),\n         task_url = strcat('https://portal.azure.com/#view/Microsoft_Azure_Storage/ContainerMenuBlade/~/overview/storageAccountId/%2Fsubscriptions%2F5db48574-8a20-418f-b488-1fafd8d021df%2FresourceGroups%2Frg-coder-eval-tests%2Fproviders%2FMicrosoft.Storage%2FstorageAccounts%2Fcoderevaltests/path/runs/', run_id, '/', variant_id, '/', task_id, '/task.json')\n| project run_id, task_id, criterion_type, description, score, details, error, run_url, task_url\n| order by run_id desc, task_id asc, criterion_type asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "0ce5a0e9-8b09-4a8d-8c66-82be52d17496",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| where status != 'SUCCESS' and isnotempty(error_message)\n| extend run_url = strcat('https://portal.azure.com/#view/Microsoft_Azure_Storage/ContainerMenuBlade/~/overview/storageAccountId/%2Fsubscriptions%2F5db48574-8a20-418f-b488-1fafd8d021df%2FresourceGroups%2Frg-coder-eval-tests%2Fproviders%2FMicrosoft.Storage%2FstorageAccounts%2Fcoderevaltests/path/runs/', run_id, '/'),\n         task_url = strcat('https://portal.azure.com/#view/Microsoft_Azure_Storage/ContainerMenuBlade/~/overview/storageAccountId/%2Fsubscriptions%2F5db48574-8a20-418f-b488-1fafd8d021df%2FresourceGroups%2Frg-coder-eval-tests%2Fproviders%2FMicrosoft.Storage%2FstorageAccounts%2Fcoderevaltests/path/runs/', run_id, '/', variant_id, '/', task_id, '/task.json')\n| project run_start_time, run_id, task_id, status, error_message, duration_sec = round(duration_seconds, 1), run_url, task_url\n| order by run_start_time desc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "52e89f75-a5a9-49e8-b1c2-37b1c8954e13",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize\n    avg_commands = round(avg(total_commands), 1),\n    avg_cmd_success = round(avg(command_success_rate), 1),\n    total_commands = sum(total_commands)\n  by task_id\n| order by total_commands desc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "4a22121d-035c-4b74-b64d-d1138b56ac96",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| project commands_by_tool\n| mv-apply tool = bag_keys(commands_by_tool) on (\n    project tool = tostring(tool), calls = tolong(commands_by_tool[tostring(tool)])\n  )\n| summarize total_calls = sum(calls) by tool\n| order by total_calls desc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "27576aac-6400-4294-90ff-4f61c9717b73",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize total_cost_usd = round(sum(total_cost_usd), 4) by day = startofday(run_start_time)\n| order by day asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "e40bfb4b-22eb-494a-bf4d-001c45e7edbe",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize\n    avg_cost = round(avg(total_cost_usd), 5),\n    total_cost = round(sum(total_cost_usd), 4),\n    runs = count()\n  by task_id\n| order by total_cost desc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "6cac7236-55c1-4da6-8c37-32251539fd14",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize\n    input = sum(input_tokens),\n    output = sum(output_tokens),\n    cache_write = sum(cache_creation_input_tokens),\n    cache_read = sum(cache_read_input_tokens)\n  by day = startofday(run_start_time)\n| order by day asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "1d1a2dbb-4f97-4969-a5d0-e45790ba5cbc",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize\n    cache_reads = sum(cache_read_input_tokens),\n    total_input = sum(input_tokens) + sum(cache_read_input_tokens)\n  by day = startofday(run_start_time)\n| extend cache_hit_pct = iff(total_input > 0, round(100.0 * todouble(cache_reads) / todouble(total_input), 1), 0.0)\n| project day, cache_hit_pct\n| order by day asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "1b5ab778-1ba9-46fb-b1da-5ab7e1fe3858",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize avg_cost_usd = round(avg(total_cost_usd), 5) by day = startofday(run_start_time), task_id\n| order by day asc, task_id asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "8f1f6011-618a-4f28-bce6-462609bbd2d4",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| project task_id, weighted_score, total_cost_usd, status",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "e0a9d5f4-95ce-44b3-a2b6-331fe82903be",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize task_count = count() by iteration_count\n| order by iteration_count asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "dc590d01-288e-4cf4-9ca7-bb30a60ea8ad",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize avg_success_rate = round(100.0 * countif(status == 'SUCCESS') / count(), 1) by day = startofday(run_start_time)\n| order by day asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "2fa5fa63-f9fe-413d-b5a9-f382e66bf0b2",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize\n    total_cost_usd = round(sum(total_cost_usd), 2),\n    avg_cost_per_run = round(sum(total_cost_usd) / dcount(run_id), 4),\n    avg_cost_per_task = round(avg(total_cost_usd), 5),\n    total_tokens = sum(total_tokens)",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "8c735760-0c4e-4a3b-84eb-be2a13b4b76e",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | where tasks_run > 0\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize\n    avg_score = round(avg(weighted_score), 3),\n    pass_rate = round(100.0 * countif(status == 'SUCCESS') / count(), 1),\n    runs = count(),\n    avg_latency_sec = round(avg(duration_seconds), 1),\n    avg_iterations = round(avg(iteration_count), 1),\n    avg_cost_usd = round(avg(total_cost_usd), 5)\n  by task_id\n| top 10 by avg_score asc\n| order by avg_score asc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "f49d4ee2-1eae-4452-81fe-d78c13bad12d",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time, total_duration_seconds\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize\n    start_time = min(run_start_time),\n    tasks_run = count(),\n    tasks_succeeded = countif(status == 'SUCCESS'),\n    tasks_failed = countif(status in ('FAILED', 'MAX_TURNS_EXHAUSTED', 'MAX_ITERATIONS_EXHAUSTED')),\n    tasks_error = countif(status == 'ERROR'),\n    duration_min = round(avg(total_duration_seconds) / 60.0, 1)\n  by run_id\n| extend\n    success_pct = round(100.0 * tasks_succeeded / tasks_run, 1),\n    run_url = strcat('https://portal.azure.com/#view/Microsoft_Azure_Storage/ContainerMenuBlade/~/overview/storageAccountId/%2Fsubscriptions%2F5db48574-8a20-418f-b488-1fafd8d021df%2FresourceGroups%2Frg-coder-eval-tests%2Fproviders%2FMicrosoft.Storage%2FstorageAccounts%2Fcoderevaltests/path/runs/', run_id, '/')\n| project run_id, start_time, success_pct, tasks_run, tasks_succeeded, tasks_failed, tasks_error, duration_min, run_url\n| order by start_time desc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "f7dc001c-17cd-4aa6-9d0b-cadf08f8d47b",
+      "text": "let _filteredTasks = TaskResults\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | where tasks_run > 0\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| where isempty(_tag) or tags has _tag\n| where isempty(_taskId) or task_id has _taskId\n| where isempty(_model) or model_used has _model;\n_filteredTasks\n| summarize\n    avg_latency_sec = round(avg(duration_seconds), 1),\n    max_latency_sec = round(max(duration_seconds), 1),\n    avg_score = round(avg(weighted_score), 3),\n    runs = count(),\n    avg_iterations = round(avg(iteration_count), 1),\n    avg_assistant_turns = round(avg(todouble(total_assistant_turns)), 1),\n    avg_cost_usd = round(avg(total_cost_usd), 5)\n  by task_id\n| top 10 by avg_latency_sec desc\n| order by avg_latency_sec desc",
+      "usedVariables": [
+        "_startTime",
+        "_endTime",
+        "_tag",
+        "_taskId",
+        "_model"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "08f59b51-cc62-4b3e-976d-d37d95a1dbfc",
+      "text": "RunAnalysis\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time\n  ) on run_id\n| project-away run_id1\n| order by run_start_time desc\n| take 1\n| project run_id, generated_at, analysis_markdown",
+      "usedVariables": [
+        "_startTime",
+        "_endTime"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    },
+    {
+      "id": "067ffb96-a976-4e9e-82d5-26f2afb3193c",
+      "text": "RunAnalysis\n| join kind=inner (\n    SmokeRuns\n    | where start_time between (_startTime .. _endTime)\n    | project run_id, run_start_time = start_time, success_rate, tasks_run, experiment_id\n  ) on run_id\n| project-away run_id1\n| order by run_start_time desc\n| project run_id, experiment_id, run_start_time, success_rate, tasks_run, generated_at",
+      "usedVariables": [
+        "_startTime",
+        "_endTime"
+      ],
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "88f9a710-4258-4726-8b16-cacbbee0bb4b"
+      }
+    }
+  ],
+  "tiles": [
+    {
+      "id": "1ccf436b-4aad-4820-bcda-6df1bb07e867",
+      "title": "Daily Success Rate (%)",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "a9b021a5-944f-43c6-861f-9283a2ad0137"
+      },
+      "layout": {
+        "x": 0,
+        "y": 2,
+        "width": 24,
+        "height": 7
+      },
+      "pageId": "dde58291-b947-47a8-bf16-c795944c539e",
+      "visualType": "line",
+      "visualOptions": {}
+    },
+    {
+      "id": "c5b76391-20f7-4aed-b4d7-e6badabadb20",
+      "title": "Daily Avg Run Duration (sec)",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "e2d873d8-44bb-4de4-9cc5-8ba17ee11dca"
+      },
+      "layout": {
+        "x": 0,
+        "y": 9,
+        "width": 24,
+        "height": 7
+      },
+      "pageId": "dde58291-b947-47a8-bf16-c795944c539e",
+      "visualType": "line",
+      "visualOptions": {}
+    },
+    {
+      "id": "28204215-73ff-455f-a78d-502cc5cedac3",
+      "title": "Top 10 Failing Tasks (lowest score)",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "8c735760-0c4e-4a3b-84eb-be2a13b4b76e"
+      },
+      "layout": {
+        "x": 0,
+        "y": 16,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "dde58291-b947-47a8-bf16-c795944c539e",
+      "visualType": "table",
+      "visualOptions": {}
+    },
+    {
+      "id": "8da444ef-8a02-4164-a0a1-a7b7771912f3",
+      "title": "Performance by Tag",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "6f076e7b-bcec-4ce4-a07b-3adaa9651466"
+      },
+      "layout": {
+        "x": 0,
+        "y": 23,
+        "width": 24,
+        "height": 7
+      },
+      "pageId": "dde58291-b947-47a8-bf16-c795944c539e",
+      "visualType": "table",
+      "visualOptions": {}
+    },
+    {
+      "id": "a5de3bbd-fced-4957-9b5b-4a31a0614902",
+      "title": "Score Heatmap (Day x Task)",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "905843bb-c770-46b1-854d-80acf698d82e"
+      },
+      "layout": {
+        "x": 0,
+        "y": 30,
+        "width": 24,
+        "height": 7
+      },
+      "pageId": "dde58291-b947-47a8-bf16-c795944c539e",
+      "visualType": "table",
+      "visualOptions": {}
+    },
+    {
+      "id": "2f87ae8c-f4f5-4b40-96a8-f34bb51d1c5a",
+      "title": "Daily Success Rate (%)",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "dc590d01-288e-4cf4-9ca7-bb30a60ea8ad"
+      },
+      "layout": {
+        "x": 0,
+        "y": 0,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "db370fd9-d3ee-463a-b15f-b582691037dd",
+      "visualType": "line",
+      "visualOptions": {}
+    },
+    {
+      "id": "8e525dcf-ec1f-4685-bde9-8b3aa3ce5758",
+      "title": "Daily Tasks: Passed / Failed / Errors",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "6f597e0e-9285-48c5-b183-e9ca524a0303"
+      },
+      "layout": {
+        "x": 0,
+        "y": 7,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "db370fd9-d3ee-463a-b15f-b582691037dd",
+      "visualType": "area",
+      "visualOptions": {}
+    },
+    {
+      "id": "0b88c7a9-444e-49b1-a51f-3afbdc7daac5",
+      "title": "Daily Cost (USD)",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "f9558043-c8a8-4c79-8add-b0502e7d0307"
+      },
+      "layout": {
+        "x": 0,
+        "y": 14,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "db370fd9-d3ee-463a-b15f-b582691037dd",
+      "visualType": "area",
+      "visualOptions": {}
+    },
+    {
+      "id": "6851d72b-a8b1-4808-84db-b0dd8ac471e8",
+      "title": "Daily Token Usage",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "eafbb80e-950e-4cf3-a4e9-26537bd62b4c"
+      },
+      "layout": {
+        "x": 0,
+        "y": 21,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "db370fd9-d3ee-463a-b15f-b582691037dd",
+      "visualType": "area",
+      "visualOptions": {}
+    },
+    {
+      "id": "fe11c2fe-4d9a-403f-bd5f-7c04a5e5c2fa",
+      "title": "Avg Score by Task Over Time",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "fa799549-eb48-4252-95c8-484728942496"
+      },
+      "layout": {
+        "x": 0,
+        "y": 28,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "db370fd9-d3ee-463a-b15f-b582691037dd",
+      "visualType": "line",
+      "visualOptions": {}
+    },
+    {
+      "id": "ada40d1f-d165-4790-aa96-3f38689b0bb0",
+      "title": "Avg Duration by Task Over Time (sec)",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "bf575d35-507e-4278-9a2d-7c5115058749"
+      },
+      "layout": {
+        "x": 0,
+        "y": 35,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "db370fd9-d3ee-463a-b15f-b582691037dd",
+      "visualType": "line",
+      "visualOptions": {}
+    },
+    {
+      "id": "69de15f4-3e24-4616-9c5f-eec5fdf89b01",
+      "title": "Criteria Pass Rate Over Time (%)",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "b30ad95b-e31b-4945-a419-41a1c949273f"
+      },
+      "layout": {
+        "x": 0,
+        "y": 42,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "db370fd9-d3ee-463a-b15f-b582691037dd",
+      "visualType": "line",
+      "visualOptions": {}
+    },
+    {
+      "id": "15f9a815-9466-40ee-86e2-dceadd6eeb65",
+      "title": "Task Results",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "ec3e17d0-5257-4bd4-ab6b-e563c62c7062"
+      },
+      "layout": {
+        "x": 0,
+        "y": 0,
+        "width": 12,
+        "height": 8
+      },
+      "pageId": "5a863c27-24d9-41ac-8016-709eb13a60cc",
+      "visualType": "table",
+      "visualOptions": {}
+    },
+    {
+      "id": "f4bff7eb-da64-4e57-a3e0-6a51898b8c6e",
+      "title": "Success Criteria Results",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "cfcadc80-2106-4a93-a672-0c7b80d40a2c"
+      },
+      "layout": {
+        "x": 0,
+        "y": 8,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "5a863c27-24d9-41ac-8016-709eb13a60cc",
+      "visualType": "table",
+      "visualOptions": {}
+    },
+    {
+      "id": "b4a9bf57-be70-4fb5-b916-9dbac8603364",
+      "title": "Recent Errors",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "0ce5a0e9-8b09-4a8d-8c66-82be52d17496"
+      },
+      "layout": {
+        "x": 0,
+        "y": 15,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "5a863c27-24d9-41ac-8016-709eb13a60cc",
+      "visualType": "table",
+      "visualOptions": {}
+    },
+    {
+      "id": "af5f5dd8-4ca1-44bf-b27c-0c7147c08195",
+      "title": "Command Usage by Task",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "52e89f75-a5a9-49e8-b1c2-37b1c8954e13"
+      },
+      "layout": {
+        "x": 0,
+        "y": 22,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "5a863c27-24d9-41ac-8016-709eb13a60cc",
+      "visualType": "table",
+      "visualOptions": {}
+    },
+    {
+      "id": "d07a3ee9-eeb0-4e66-bf63-d299dbfcf352",
+      "title": "Tool Distribution",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "4a22121d-035c-4b74-b64d-d1138b56ac96"
+      },
+      "layout": {
+        "x": 0,
+        "y": 29,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "5a863c27-24d9-41ac-8016-709eb13a60cc",
+      "visualType": "pie",
+      "visualOptions": {}
+    },
+    {
+      "id": "370781e5-503e-4395-a82f-38b283e91cb5",
+      "title": "Cost Summary",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "2fa5fa63-f9fe-413d-b5a9-f382e66bf0b2"
+      },
+      "layout": {
+        "x": 0,
+        "y": 0,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "8f1de152-e7ab-4856-a56e-e797e43ec6c6",
+      "visualType": "table",
+      "visualOptions": {}
+    },
+    {
+      "id": "f9d11957-5173-4515-af09-27dbf7413e1f",
+      "title": "Daily Cost (USD)",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "27576aac-6400-4294-90ff-4f61c9717b73"
+      },
+      "layout": {
+        "x": 0,
+        "y": 7,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "8f1de152-e7ab-4856-a56e-e797e43ec6c6",
+      "visualType": "bar",
+      "visualOptions": {}
+    },
+    {
+      "id": "2b97f9d7-b080-48fb-ba69-d7968037dd99",
+      "title": "Cost by Task",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "e40bfb4b-22eb-494a-bf4d-001c45e7edbe"
+      },
+      "layout": {
+        "x": 0,
+        "y": 14,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "8f1de152-e7ab-4856-a56e-e797e43ec6c6",
+      "visualType": "table",
+      "visualOptions": {}
+    },
+    {
+      "id": "4771fede-b5a2-4d43-bf77-8d8ad61698f4",
+      "title": "Token Usage by Day",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "6cac7236-55c1-4da6-8c37-32251539fd14"
+      },
+      "layout": {
+        "x": 0,
+        "y": 21,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "8f1de152-e7ab-4856-a56e-e797e43ec6c6",
+      "visualType": "area",
+      "visualOptions": {}
+    },
+    {
+      "id": "3186591c-92ac-41fd-bd10-79b9343aa487",
+      "title": "Cache Hit Ratio (%)",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "1d1a2dbb-4f97-4969-a5d0-e45790ba5cbc"
+      },
+      "layout": {
+        "x": 0,
+        "y": 28,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "8f1de152-e7ab-4856-a56e-e797e43ec6c6",
+      "visualType": "line",
+      "visualOptions": {}
+    },
+    {
+      "id": "a072ceff-a82d-4d24-a63e-11a77d1be63b",
+      "title": "Cost per Task Over Time (USD)",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "1b5ab778-1ba9-46fb-b1da-5ab7e1fe3858"
+      },
+      "layout": {
+        "x": 0,
+        "y": 35,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "8f1de152-e7ab-4856-a56e-e797e43ec6c6",
+      "visualType": "line",
+      "visualOptions": {}
+    },
+    {
+      "id": "67eab9e4-e5bd-43bb-9851-26e8b08dca33",
+      "title": "Score vs. Cost (per execution)",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "8f1f6011-618a-4f28-bce6-462609bbd2d4"
+      },
+      "layout": {
+        "x": 0,
+        "y": 42,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "8f1de152-e7ab-4856-a56e-e797e43ec6c6",
+      "visualType": "scatter",
+      "visualOptions": {}
+    },
+    {
+      "id": "53d45cc7-7f03-49c0-80ad-291c6b91c9e6",
+      "title": "Iteration Count Distribution",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "e0a9d5f4-95ce-44b3-a2b6-331fe82903be"
+      },
+      "layout": {
+        "x": 0,
+        "y": 49,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "8f1de152-e7ab-4856-a56e-e797e43ec6c6",
+      "visualType": "bar",
+      "visualOptions": {}
+    },
+    {
+      "id": "af13d2c7-16b2-4eaf-82ad-b76ae8b84efd",
+      "title": "Recent Runs",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "f49d4ee2-1eae-4452-81fe-d78c13bad12d"
+      },
+      "layout": {
+        "x": 0,
+        "y": 37,
+        "width": 24,
+        "height": 9
+      },
+      "pageId": "dde58291-b947-47a8-bf16-c795944c539e",
+      "visualType": "table",
+      "visualOptions": {}
+    },
+    {
+      "id": "54c36c6d-0663-453c-b92e-5b65ed360da1",
+      "title": "Top 10 Slowest Tasks",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "f7dc001c-17cd-4aa6-9d0b-cadf08f8d47b"
+      },
+      "layout": {
+        "x": 12,
+        "y": 16,
+        "width": 12,
+        "height": 7
+      },
+      "pageId": "dde58291-b947-47a8-bf16-c795944c539e",
+      "visualType": "table",
+      "visualOptions": {}
+    },
+    {
+      "id": "b334192e-9235-4c90-a5b6-ad3f79b14427",
+      "title": "Links",
+      "visualType": "markdownCard",
+      "pageId": "dde58291-b947-47a8-bf16-c795944c539e",
+      "layout": {
+        "x": 0,
+        "y": 0,
+        "width": 24,
+        "height": 2
+      },
+      "markdownText": "[Coder Eval Blob Storage](https://portal.azure.com/#view/Microsoft_Azure_Storage/ContainerMenuBlade/~/overview/storageAccountId/%2Fsubscriptions%2F5db48574-8a20-418f-b488-1fafd8d021df%2FresourceGroups%2Frg-coder-eval-tests%2Fproviders%2FMicrosoft.Storage%2FstorageAccounts%2Fcoderevaltests/path/runs/etag/%220x8DE8051805F7679%22/defaultId//publicAccessVal/None)  | [Coder Eval Repo](https://github.com/UiPath/coder_eval)\n\n",
+      "visualOptions": {}
+    },
+    {
+      "id": "b14d6316-30d4-4752-b8b4-c2e024ceb66e",
+      "title": "Analyzed Runs",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "067ffb96-a976-4e9e-82d5-26f2afb3193c"
+      },
+      "pageId": "6e9ab79b-d4e3-4755-abb4-8c118dc5362c",
+      "layout": {
+        "x": 0,
+        "y": 0,
+        "width": 24,
+        "height": 5
+      },
+      "visualType": "table",
+      "visualOptions": {}
+    },
+    {
+      "id": "4ae3236c-4cb5-4d1a-beae-992e31a92a8f",
+      "title": "Latest Run Analysis",
+      "queryRef": {
+        "kind": "query",
+        "queryId": "08f59b51-cc62-4b3e-976d-d37d95a1dbfc"
+      },
+      "pageId": "6e9ab79b-d4e3-4755-abb4-8c118dc5362c",
+      "layout": {
+        "x": 0,
+        "y": 5,
+        "width": 24,
+        "height": 16
+      },
+      "visualType": "table",
+      "visualOptions": {}
+    }
+  ]
+}

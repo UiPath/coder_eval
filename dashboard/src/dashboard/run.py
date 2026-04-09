@@ -1,0 +1,96 @@
+"""Run coder-eval tests."""
+
+import os
+import subprocess
+from glob import glob
+from pathlib import Path
+
+from .config import CODER_EVAL_DIR
+
+
+def _env_without_claudecode() -> dict[str, str]:
+    """Return a copy of os.environ without CLAUDECODE to avoid nested-session guard."""
+    return {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+
+
+def uip_login(
+    *,
+    authority: str,
+    client_id: str,
+    client_secret: str,
+    tenant: str,
+    scope: str = "OR.Default",
+) -> None:
+    """Authenticate the UiPath CLI before running flow tasks.
+
+    The secret is passed via the UIP_CLIENT_SECRET environment variable
+    (instead of --client-secret CLI arg) to avoid exposing it in process
+    listings (ps, /proc). The `uip` CLI reads this env var automatically.
+    """
+    env = {**os.environ, "UIP_CLIENT_SECRET": client_secret}
+    subprocess.run(
+        [
+            "uip",
+            "login",
+            "--authority",
+            authority,
+            "--client-id",
+            client_id,
+            "--tenant",
+            tenant,
+            "--scope",
+            scope,
+        ],
+        env=env,
+        check=True,
+    )
+
+
+def pull_coder_eval() -> None:
+    subprocess.run(["git", "pull"], cwd=CODER_EVAL_DIR, check=True)
+
+
+def run_tests(
+    *,
+    model: str = "claude-sonnet-4-6",
+    max_iter: int = 2,
+    tags: str | None = "smoke",
+    task_patterns: list[str] | None = None,
+    concurrency: int | None = None,
+    experiment: str | None = None,
+) -> Path:
+    """Run coder-eval and return the resolved path of the latest run."""
+    if task_patterns is None:
+        task_patterns = ["tasks/*.yaml"]
+
+    task_files: list[str] = []
+    for pattern in task_patterns:
+        task_files.extend(sorted(glob(str(CODER_EVAL_DIR / pattern))))
+
+    if not task_files:
+        raise FileNotFoundError(f"No task YAML files found for patterns {task_patterns}")
+
+    cmd = [
+        "uv",
+        "run",
+        "coder-eval",
+        "run",
+        *task_files,
+        "--model",
+        model,
+        "--max-iter",
+        str(max_iter),
+    ]
+    if tags:
+        cmd.extend(["--tags", tags])
+    if concurrency is not None:
+        cmd.extend(["-j", str(concurrency)])
+    if experiment:
+        cmd.extend(["--experiment", experiment])
+
+    subprocess.run(cmd, cwd=CODER_EVAL_DIR, env=_env_without_claudecode(), check=True)
+
+    latest = (CODER_EVAL_DIR / "runs" / "latest").resolve()
+    if not latest.exists():
+        raise FileNotFoundError(f"Expected run symlink not found: {latest}")
+    return latest

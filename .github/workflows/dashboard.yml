@@ -1,0 +1,147 @@
+name: Dashboard — Scheduled Evaluation
+
+on:
+  schedule:
+    # Daily at 06:00 UTC (Monday–Friday)
+    - cron: "0 6 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Suite to run (leave empty for all)"
+        required: false
+        default: ""
+        type: choice
+        options:
+          - ""
+          - smoke
+          - flow-init
+          - flow
+      model:
+        description: "Model to evaluate"
+        required: false
+        default: "claude-sonnet-4-6"
+      max_iter:
+        description: "Max iterations per task"
+        required: false
+        default: "2"
+      skip_analysis:
+        description: "Skip AI analysis generation"
+        required: false
+        type: boolean
+        default: false
+
+# Only one dashboard run at a time — don't cancel, queue instead
+concurrency:
+  group: dashboard-eval
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  dashboard-run:
+    name: Dashboard Pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+    steps:
+      # ── Checkout repos ────────────────────────────────────────────
+      - name: Checkout coder_eval
+        uses: actions/checkout@v6
+
+      - name: Clone UiPath CLI (sibling directory)
+        run: |
+          git clone --depth 1 \
+            "https://x-access-token:${{ secrets.UIPATH_CODER_EVAL_REPO_CLASSIC }}@github.com/UiPath/cli.git" \
+            "${{ github.workspace }}/../cli"
+
+      # ── Tool setup ────────────────────────────────────────────────
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # ── Python dependencies ───────────────────────────────────────
+      - name: Install uv
+        run: pip install uv
+
+      - name: Cache uv/pip
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.cache/pip
+            .venv
+          key: ${{ runner.os }}-dashboard-${{ hashFiles('pyproject.toml', 'dashboard/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-dashboard-
+
+      - name: Install coder-eval + dashboard
+        run: |
+          uv venv .venv --clear
+          uv pip install --python .venv/bin/python -e ".[dev]"
+          uv pip install --python .venv/bin/python -e "./dashboard"
+
+      # ── Dashboard .env from secrets ───────────────────────────────
+      - name: Write dashboard .env
+        run: |
+          cat > dashboard/.env << 'DOTENV'
+          ADX_CLUSTER_URI=${{ secrets.ADX_CLUSTER_URI }}
+          ADX_DATABASE=${{ secrets.ADX_DATABASE }}
+          AZURE_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_STORAGE_ACCOUNT=${{ secrets.AZURE_STORAGE_ACCOUNT }}
+          AZURE_BLOB_CONTAINER=runs
+          UIP_AUTHORITY=${{ secrets.UIP_AUTHORITY }}
+          UIP_CLIENT_ID=${{ secrets.UIP_CLIENT_ID }}
+          UIP_CLIENT_SECRET=${{ secrets.UIP_CLIENT_SECRET }}
+          UIP_TENANT=${{ secrets.UIP_TENANT }}
+          UIP_SCOPE=${{ secrets.UIP_SCOPE || 'OR.Default' }}
+          DOTENV
+
+      # ── Run the pipeline ──────────────────────────────────────────
+      - name: Run dashboard pipeline
+        run: |
+          ARGS="--skip-pull"
+          ARGS="$ARGS --model ${{ inputs.model || 'claude-sonnet-4-6' }}"
+          ARGS="$ARGS --max-iter ${{ inputs.max_iter || '2' }}"
+
+          SUITE="${{ inputs.suite }}"
+          if [ -n "$SUITE" ]; then
+            ARGS="$ARGS --suite $SUITE"
+          fi
+
+          if [ "${{ inputs.skip_analysis }}" = "true" ]; then
+            ARGS="$ARGS --skip-analysis"
+          fi
+
+          echo "Running: .venv/bin/dashboard run $ARGS"
+          .venv/bin/dashboard run $ARGS
+
+      # ── Artifacts ─────────────────────────────────────────────────
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-run-${{ github.run_id }}
+          path: runs/
+          retention-days: 30

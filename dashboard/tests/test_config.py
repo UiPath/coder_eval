@@ -1,0 +1,32 @@
+"""Tests for config module."""
+
+from pathlib import Path
+
+from dashboard.config import CODER_EVAL_DIR, DASHBOARD_DIR, Config
+
+
+def test_dashboard_dir_points_to_dashboard_root():
+    assert (DASHBOARD_DIR / "pyproject.toml").exists()
+
+
+def test_coder_eval_dir_is_parent_of_dashboard():
+    assert DASHBOARD_DIR.parent == CODER_EVAL_DIR
+
+
+def test_config_loads_from_env(monkeypatch):
+    monkeypatch.setenv("ADX_CLUSTER_URI", "https://test-cluster")
+    monkeypatch.setenv("ADX_DATABASE", "test-db")
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "00000000-0000-0000-0000-000000000000")
+    monkeypatch.setenv("AZURE_STORAGE_ACCOUNT", "teststorage")
+    cfg = Config()
+    assert cfg.adx_cluster_uri == "https://test-cluster"
+    assert cfg.adx_database == "test-db"
+    assert cfg.azure_storage_account == "teststorage"
+    assert cfg.azure_blob_container == "runs"  # default
+
+
+def test_config_cli_dir_default():
+    """cli_dir defaults to a sibling of the coder_eval repo."""
+    cfg_cli = Config.model_fields["cli_dir"].default
+    assert isinstance(cfg_cli, Path)
+    assert cfg_cli.name == "cli"
