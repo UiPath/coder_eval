@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
-from dashboard.cli import cli
+from dashboard.cli import _build_skills_suite, cli
 
 
 @patch("dashboard.cli.Config")
@@ -97,3 +97,12 @@ def test_schema_drop_only(mock_get_client, mock_config_cls):
 
     # Only 4 drop calls, no create
     assert mock_client.execute_mgmt.call_count == 4
+
+
+def test_build_skills_suite():
+    """Test that _build_skills_suite constructs the right suite."""
+    suite = _build_skills_suite("/path/to/skills")
+    assert suite.name == "skills"
+    assert suite.task_patterns == ["/path/to/skills/tests/tasks/**/*.yaml"]
+    assert suite.experiment == "/path/to/skills/tests/experiments/default.yaml"
+    assert suite.env == {"SKILLS_REPO_PATH": "/path/to/skills"}

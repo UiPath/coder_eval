@@ -13,6 +13,7 @@ on:
         type: choice
         options:
           - ""
+          - skills
           - smoke
           - flow-init
           - flow
@@ -29,6 +30,20 @@ on:
         required: false
         type: boolean
         default: false
+      verbose:
+        description: "Enable verbose (DEBUG) logging"
+        required: false
+        type: boolean
+        default: true
+      backend:
+        description: "API backend"
+        required: false
+        default: "bedrock"
+        type: choice
+        options:
+          - bedrock
+          - direct
+          - proxy
 
 # Only one dashboard run at a time — don't cancel, queue instead
 concurrency:
@@ -47,17 +62,33 @@ jobs:
     env:
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
 
     steps:
       # ── Checkout repos ────────────────────────────────────────────
       - name: Checkout coder_eval
         uses: actions/checkout@v6
 
-      - name: Clone UiPath CLI (sibling directory)
+      - name: Checkout UiPath CLI
+        uses: actions/checkout@v6
+        with:
+          repository: UiPath/cli
+          token: ${{ secrets.UIPATH_CODER_EVAL_REPO_CLASSIC }}
+          path: repos/cli
+
+      - name: Configure GitHub NPM registry for UiPath CLI
         run: |
-          git clone --depth 1 \
-            "https://x-access-token:${{ secrets.UIPATH_CODER_EVAL_REPO_CLASSIC }}@github.com/UiPath/cli.git" \
-            "${{ github.workspace }}/../cli"
+          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GH_NPM_REGISTRY_TOKEN }}" > repos/cli/.npmrc
+          echo "@uipath:registry=https://npm.pkg.github.com" >> repos/cli/.npmrc
+
+      - name: Checkout Skills
+        uses: actions/checkout@v6
+        with:
+          repository: UiPath/skills
+          token: ${{ secrets.UIPATH_CODER_EVAL_REPO_CLASSIC }}
+          path: repos/skills
 
       # ── Tool setup ────────────────────────────────────────────────
       - name: Set up Python 3.13
@@ -105,7 +136,9 @@ jobs:
       # ── Dashboard .env from secrets ───────────────────────────────
       - name: Write dashboard .env
         run: |
-          cat > dashboard/.env << 'DOTENV'
+          cat > dashboard/.env <<'DOTENV'
+          CLI_DIR=${{ github.workspace }}/repos/cli
+          SKILLS_DIR=${{ github.workspace }}/repos/skills
           ADX_CLUSTER_URI=${{ secrets.ADX_CLUSTER_URI }}
           ADX_DATABASE=${{ secrets.ADX_DATABASE }}
           AZURE_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}
@@ -125,14 +158,19 @@ jobs:
           ARGS="$ARGS --model ${{ inputs.model || 'claude-sonnet-4-6' }}"
           ARGS="$ARGS --max-iter ${{ inputs.max_iter || '2' }}"
 
-          SUITE="${{ inputs.suite }}"
-          if [ -n "$SUITE" ]; then
-            ARGS="$ARGS --suite $SUITE"
-          fi
+          SUITE="${{ inputs.suite || 'skills' }}"
+          ARGS="$ARGS --suite $SUITE"
 
           if [ "${{ inputs.skip_analysis }}" = "true" ]; then
             ARGS="$ARGS --skip-analysis"
           fi
+
+          if [ "${{ inputs.verbose || 'true' }}" = "true" ]; then
+            ARGS="$ARGS --verbose"
+          fi
+
+          BACKEND="${{ inputs.backend || 'bedrock' }}"
+          ARGS="$ARGS --backend $BACKEND"
 
           echo "Running: .venv/bin/dashboard run $ARGS"
           .venv/bin/dashboard run $ARGS

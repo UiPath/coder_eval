@@ -31,6 +31,9 @@ class Config(BaseSettings):
     # UiPath CLI repo path (sibling of coder_eval by default)
     cli_dir: Path = CODER_EVAL_DIR.parent / "cli"
 
+    # Skills repo path (sibling of coder_eval by default)
+    skills_dir: Path = CODER_EVAL_DIR.parent / "skills"
+
     # UiPath CLI login (required for flow tasks)
     uip_authority: str = ""
     uip_client_id: str = ""

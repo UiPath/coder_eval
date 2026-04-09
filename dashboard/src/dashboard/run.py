@@ -58,6 +58,9 @@ def run_tests(
     task_patterns: list[str] | None = None,
     concurrency: int | None = None,
     experiment: str | None = None,
+    extra_env: dict[str, str] | None = None,
+    verbose: bool = False,
+    backend: str | None = None,
 ) -> Path:
     """Run coder-eval and return the resolved path of the latest run."""
     if task_patterns is None:
@@ -65,7 +68,7 @@ def run_tests(
 
     task_files: list[str] = []
     for pattern in task_patterns:
-        task_files.extend(sorted(glob(str(CODER_EVAL_DIR / pattern))))
+        task_files.extend(sorted(glob(str(CODER_EVAL_DIR / pattern), recursive=True)))
 
     if not task_files:
         raise FileNotFoundError(f"No task YAML files found for patterns {task_patterns}")
@@ -87,8 +90,18 @@ def run_tests(
         cmd.extend(["-j", str(concurrency)])
     if experiment:
         cmd.extend(["--experiment", experiment])
+    if verbose:
+        cmd.append("--verbose")
+    if backend:
+        cmd.extend(["--backend", backend])
 
-    subprocess.run(cmd, cwd=CODER_EVAL_DIR, env=_env_without_claudecode(), check=True)
+    env = _env_without_claudecode()
+    if extra_env:
+        env.update(extra_env)
+
+    result = subprocess.run(cmd, cwd=CODER_EVAL_DIR, env=env)
+    if result.returncode != 0:
+        print(f"WARNING: coder-eval exited with code {result.returncode} (some tasks may have failed)")
 
     latest = (CODER_EVAL_DIR / "runs" / "latest").resolve()
     if not latest.exists():

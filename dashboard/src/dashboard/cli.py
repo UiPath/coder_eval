@@ -16,6 +16,7 @@ class Suite:
     concurrency: int | None = None
     experiment: str | None = None
     uip_login: bool = False
+    env: dict[str, str] | None = None
 
 
 SUITES: list[Suite] = [
@@ -31,6 +32,16 @@ SUITES: list[Suite] = [
 ]
 
 
+def _build_skills_suite(skills_dir: str) -> Suite:
+    """Build a skills suite with absolute paths resolved from skills_dir."""
+    return Suite(
+        name="skills",
+        task_patterns=[f"{skills_dir}/tests/tasks/**/*.yaml"],
+        experiment=f"{skills_dir}/tests/experiments/default.yaml",
+        env={"SKILLS_REPO_PATH": skills_dir},
+    )
+
+
 @click.group()
 def cli() -> None:
     """Coder-eval dashboard: run tests, upload results, ingest into ADX."""
@@ -40,10 +51,12 @@ def cli() -> None:
 @click.option("--model", default="claude-sonnet-4-6", help="Model to evaluate.")
 @click.option("--max-iter", default=2, type=int, help="Max iterations per task.")
 @click.option("--tags", default=None, help="Task tag filter (overrides suite defaults).")
-@click.option("--suite", default=None, help="Run only the named suite (e.g. 'smoke', 'flow-init', 'flow').")
+@click.option("--suite", default=None, help="Run only the named suite (e.g. 'skills', 'smoke', 'flow-init', 'flow').")
 @click.option("--skip-build", is_flag=True, help="Skip UiPath CLI build step.")
 @click.option("--skip-pull", is_flag=True, help="Skip git pull steps.")
 @click.option("--skip-analysis", is_flag=True, help="Skip AI analysis generation.")
+@click.option("--verbose", "-v", is_flag=True, help="Enable verbose (DEBUG) logging in coder-eval.")
+@click.option("--backend", "-b", default=None, type=click.Choice(["direct", "bedrock", "proxy"]), help="API backend.")
 def run(
     model: str,
     max_iter: int,
@@ -52,6 +65,8 @@ def run(
     skip_build: bool,
     skip_pull: bool,
     skip_analysis: bool,
+    verbose: bool,
+    backend: str | None,
 ) -> None:
     """Full pipeline: pull repos, build CLI, run tests, upload, ingest."""
     from .blob import upload_run
@@ -77,13 +92,14 @@ def run(
         pull_coder_eval()
 
     # 3. Determine which suites to run
+    all_suites = [_build_skills_suite(str(cfg.skills_dir)), *SUITES]
     if suite:
-        suites_to_run = [s for s in SUITES if s.name == suite]
+        suites_to_run = [s for s in all_suites if s.name == suite]
         if not suites_to_run:
-            names = ", ".join(s.name for s in SUITES)
+            names = ", ".join(s.name for s in all_suites)
             raise click.BadParameter(f"Unknown suite '{suite}'. Available: {names}")
     else:
-        suites_to_run = SUITES
+        suites_to_run = all_suites
 
     # 3b. UiPath CLI login (once, if any suite needs it)
     needs_login = any(s.uip_login for s in suites_to_run)
@@ -115,6 +131,9 @@ def run(
             task_patterns=s.task_patterns,
             concurrency=s.concurrency,
             experiment=s.experiment,
+            extra_env=s.env,
+            verbose=verbose,
+            backend=backend,
         )
         run_id = latest_run.name
         print(f"Run completed: {run_id}")

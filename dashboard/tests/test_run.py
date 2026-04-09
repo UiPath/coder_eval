@@ -94,3 +94,56 @@ def test_run_tests_strips_claudecode_env(mock_run):
 
     env = mock_run.call_args[1]["env"]
     assert "CLAUDECODE" not in env
+
+
+@patch("dashboard.run.subprocess.run")
+@patch("dashboard.run.glob")
+def test_run_tests_verbose_flag(mock_glob, mock_run, tmp_path):
+    """Test that --verbose is passed through to coder-eval."""
+    mock_glob.return_value = ["/fake/task.yaml"]
+
+    with patch.object(Path, "resolve", return_value=tmp_path), patch.object(Path, "exists", return_value=True):
+        run_tests(tags="smoke", verbose=True)
+
+    cmd = mock_run.call_args[0][0]
+    assert "--verbose" in cmd
+
+
+@patch("dashboard.run.subprocess.run")
+@patch("dashboard.run.glob")
+def test_run_tests_backend_flag(mock_glob, mock_run, tmp_path):
+    """Test that --backend is passed through to coder-eval."""
+    mock_glob.return_value = ["/fake/task.yaml"]
+
+    with patch.object(Path, "resolve", return_value=tmp_path), patch.object(Path, "exists", return_value=True):
+        run_tests(tags="smoke", backend="bedrock")
+
+    cmd = mock_run.call_args[0][0]
+    assert "--backend" in cmd
+    assert "bedrock" in cmd
+
+
+@patch("dashboard.run.subprocess.run")
+@patch("dashboard.run.glob")
+def test_run_tests_extra_env(mock_glob, mock_run, tmp_path):
+    """Test that extra_env is merged into the subprocess environment."""
+    mock_glob.return_value = ["/fake/task.yaml"]
+
+    with patch.object(Path, "resolve", return_value=tmp_path), patch.object(Path, "exists", return_value=True):
+        run_tests(tags="smoke", extra_env={"SKILLS_REPO_PATH": "/path/to/skills"})
+
+    env = mock_run.call_args[1]["env"]
+    assert env["SKILLS_REPO_PATH"] == "/path/to/skills"
+
+
+@patch("dashboard.run.subprocess.run")
+@patch("dashboard.run.glob")
+def test_run_tests_tolerates_nonzero_exit(mock_glob, mock_run, tmp_path):
+    """Test that run_tests doesn't crash when coder-eval exits non-zero."""
+    mock_glob.return_value = ["/fake/task.yaml"]
+    mock_run.return_value.returncode = 1
+
+    with patch.object(Path, "resolve", return_value=tmp_path), patch.object(Path, "exists", return_value=True):
+        result = run_tests(tags="smoke")
+
+    assert result == tmp_path

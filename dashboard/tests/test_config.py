@@ -30,3 +30,10 @@ def test_config_cli_dir_default():
     cfg_cli = Config.model_fields["cli_dir"].default
     assert isinstance(cfg_cli, Path)
     assert cfg_cli.name == "cli"
+
+
+def test_config_skills_dir_default():
+    """skills_dir defaults to a sibling of the coder_eval repo."""
+    cfg_skills = Config.model_fields["skills_dir"].default
+    assert isinstance(cfg_skills, Path)
+    assert cfg_skills.name == "skills"
