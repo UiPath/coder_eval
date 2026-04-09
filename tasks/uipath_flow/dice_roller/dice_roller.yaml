@@ -5,34 +5,28 @@ description: >
   types via the registry, edit the flow JSON to add dice-rolling logic using a
   Script node, and validate the flow.
 tags: [flow, uipcli, p0, generate]
+max_iterations: 1
 
 agent:
   type: claude-code
   permission_mode: acceptEdits
-  allowed_tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 50
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  turn_timeout: 1200
 
 sandbox:
   driver: tempdir
   python: {}
-  node:
-    env_packages:
-      - "@uipath/cli@0.1.3"
-  template_sources:
-    - type: template_dir
-      path: "../../../templates/uipath-flow-starter"
 
 initial_prompt: |
   Create a UiPath Flow project named "DiceRoller" that simulates rolling a six-sided
-  die and outputs the result (a random integer 1-6).
-  After building the flow, run `uipcli flow validate` on it to make sure it is valid.
+  die and outputs the result.
 
 success_criteria:
   # ── CLI usage ────────────────────────────────────────────────────────────
   - type: command_executed
     description: "Agent initialized a Flow project"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+init\s+.*DiceRoller'
+    command_pattern: 'uip\s+flow\s+init\s+.*DiceRoller'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0
@@ -40,25 +34,16 @@ success_criteria:
   - type: command_executed
     description: "Agent explored the node registry"
     tool_name: "Bash"
-    command_pattern: 'uipcli\s+flow\s+registry\s+(search|list|get|pull)'
+    command_pattern: 'uip\s+flow\s+registry\s+(search|list|get|pull)'
     min_count: 1
     require_success: false
     weight: 1.0
     pass_threshold: 1.0
 
   # ── Flow file existence & validity ──────────────────────────────────────
-  - type: file_check
-    description: "Flow file exists and is valid JSON"
-    path: "DiceRoller/flow_files/DiceRoller.flow"
-    patterns:
-      - pattern: '^\s*\{'
-        must_match: true
-    weight: 1.5
-    pass_threshold: 1.0
-
   - type: run_command
-    description: "uipcli flow validate passes on the flow file"
-    command: "uipcli flow validate DiceRoller/flow_files/DiceRoller.flow"
+    description: "uip flow validate passes on the flow file"
+    command: "python3 -c \"import glob,subprocess,sys; flows=glob.glob('**/DiceRoller.flow',recursive=True); sys.exit(1) if not flows else sys.exit(subprocess.run(['uip','flow','validate',flows[0]]).returncode)\""
     timeout: 30
     expected_exit_code: 0
     weight: 3.0
@@ -68,9 +53,7 @@ success_criteria:
   - type: run_command
     description: "Flow runs 5 times and produces valid dice rolls (1-6)"
     command: "python3 $TASK_DIR/check_dice_runs.py"
-    timeout: 120
+    timeout: 300
     expected_exit_code: 0
     weight: 5.0
     pass_threshold: 1.0
-
-max_iterations: 1

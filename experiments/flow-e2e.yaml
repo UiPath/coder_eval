@@ -1,0 +1,32 @@
+# Experiment: Flow E2E Tests
+#
+# End-to-end flow generation tests: dice roller (simple script flow)
+# and Slack channel description (IS connector flow with real API calls).
+#
+# Usage:
+#   coder-eval run tasks/uipath_flow/dice_roller/dice_roller.yaml -e experiments/flow-e2e.yaml
+#   coder-eval run tasks/uipath_flow/slack_channel_description/slack_channel_description.yaml -e experiments/flow-e2e.yaml
+
+experiment_id: flow-e2e
+description: >
+  End-to-end flow generation with the local skills plugin.
+  Dice roller validates structure + debug execution.
+  Slack channel description validates IS connector wiring + real API output.
+
+defaults:
+  max_iterations: 1
+  task_timeout: 2400
+
+  agent:
+    type: claude-code
+    permission_mode: acceptEdits
+    allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+    turn_timeout: 1200
+
+variants:
+  - variant_id: with-skill
+    agent:
+      max_turns: 50
+      plugins:
+        - type: "local"
+          path: "$UIPATH_PLUGIN_MARKETPLACE_DIR"
