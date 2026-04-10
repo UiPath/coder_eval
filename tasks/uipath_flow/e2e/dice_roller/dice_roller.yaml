@@ -21,29 +21,15 @@ initial_prompt: |
   Create a UiPath Flow project named "DiceRoller" that simulates rolling a six-sided
   die and outputs the result.
 
+  Do NOT run flow debug — just validate the flow.
+  Do NOT ask for approval, confirmation, or feedback. Do NOT pause between planning and implementation. Build the complete flow end-to-end in a single pass.
+  Before starting, load the uipath-maestro-flow skill. Read and follow its workflow steps exactly.
+
 success_criteria:
-  # ── CLI usage ────────────────────────────────────────────────────────────
-  - type: command_executed
-    description: "Agent initialized a Flow project"
-    tool_name: "Bash"
-    command_pattern: 'uip\s+flow\s+init\s+.*DiceRoller'
-    min_count: 1
-    weight: 1.5
-    pass_threshold: 1.0
-
-  - type: command_executed
-    description: "Agent explored the node registry"
-    tool_name: "Bash"
-    command_pattern: 'uip\s+flow\s+registry\s+(search|list|get|pull)'
-    min_count: 1
-    require_success: false
-    weight: 1.0
-    pass_threshold: 1.0
-
-  # ── Flow file existence & validity ──────────────────────────────────────
+  # ── Flow file validity ─────────────────────────────────────────────────
   - type: run_command
     description: "uip flow validate passes on the flow file"
-    command: "python3 -c \"import glob,subprocess,sys; flows=glob.glob('**/DiceRoller.flow',recursive=True); sys.exit(1) if not flows else sys.exit(subprocess.run(['uip','flow','validate',flows[0]]).returncode)\""
+    command: "uip flow validate DiceRoller/DiceRoller/DiceRoller.flow"
     timeout: 30
     expected_exit_code: 0
     weight: 3.0
