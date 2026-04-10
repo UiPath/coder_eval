@@ -1,0 +1,54 @@
+task_id: flow-mode-selection-cli
+description: >
+  Verify the agent selects CLI mode when the user says
+  "use uip commands" — should use uip flow init or uip flow node add.
+tags: [flow, mode-selection, cli]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 50
+
+sandbox:
+  driver: tempdir
+  python: {}
+  node:
+    env_packages:
+      - "@uipath/cli@0.1.21"
+initial_prompt: |
+  Before starting, load the uipath-flow skill. Read and follow its workflow steps exactly.
+  Do NOT ask for approval, confirmation, or feedback. Do NOT pause between planning and implementation. Build the complete flow end-to-end in a single pass.
+
+  Use uip CLI commands to create a flow named "Greeter" with a manual
+  trigger and a script node that returns { greeting: "Hello, World!" }.
+
+  Follow the skill's CLI workflow guide. Use uip flow init, uip flow
+  node add, and uip flow edge add. Validate with uip flow validate.
+
+success_criteria:
+  - type: command_executed
+    description: "Agent used uip flow init or uip flow node add (chose CLI mode)"
+    tool_name: "Bash"
+    command_pattern: "uip\\s+flow\\s+(init|node\\s+add)"
+    min_count: 1
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Flow file exists (found via glob)"
+    command: "python3 -c \"import glob,sys; flows=glob.glob('**/Greeter.flow',recursive=True); assert flows, 'No Greeter.flow found'; print(f'OK: {flows[0]}'); sys.exit(0)\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "uip flow validate passes"
+    command: "python3 -c \"import glob,subprocess,sys; flows=glob.glob('**/Greeter.flow',recursive=True); sys.exit(1) if not flows else sys.exit(subprocess.run(['uip','flow','validate',flows[0],'--output','json']).returncode)\""
+    timeout: 60
+    expected_exit_code: 0
+    weight: 4.0
+    pass_threshold: 1.0
+
+max_iterations: 1

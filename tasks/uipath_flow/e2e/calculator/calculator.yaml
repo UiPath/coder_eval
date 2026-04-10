@@ -22,13 +22,13 @@ initial_prompt: |
 
   Do NOT run flow debug — just validate the flow.
   Do NOT ask for approval, confirmation, or feedback. Do NOT pause between planning and implementation. Build the complete flow end-to-end in a single pass.
-  Before starting, load the uipath-maestro-flow skill. Read and follow its workflow steps exactly.
+  Before starting, load the uipath-flow skill. Read and follow its workflow steps exactly.
 
 success_criteria:
   # ── Flow file validity ─────────────────────────────────────────────────
   - type: run_command
     description: "uip flow validate passes on the flow file"
-    command: "uip flow validate Calculator/Calculator/Calculator.flow"
+    command: "python3 -c \"import glob,subprocess,sys; flows=glob.glob('**/Calculator*.flow',recursive=True); sys.exit(1) if not flows else sys.exit(subprocess.run(['uip','flow','validate',flows[0],'--output','json']).returncode)\""
     timeout: 30
     expected_exit_code: 0
     weight: 3.0

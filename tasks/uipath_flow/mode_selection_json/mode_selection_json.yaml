@@ -1,0 +1,70 @@
+task_id: flow-mode-selection-json
+description: >
+  Verify the agent selects JSON authoring mode when the user says
+  "edit the flow JSON directly" — should NOT use CLI commands.
+  Bash is excluded from allowed_tools to enforce JSON-only mode.
+tags: [flow, mode-selection, flow-json, no-cli]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 30
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../../skills/skills/uipath-flow"
+
+initial_prompt: |
+  You have the uipath-flow skill available in the current directory.
+  Read SKILL.md for complete instructions.
+
+  I want to edit the flow JSON directly — no CLI.
+
+  Create a simple flow named "Greeter" with a manual trigger and a
+  script node that returns { greeting: "Hello, World!" }. Save as
+  Greeter/flow_files/Greeter.flow with Greeter/project.uiproj.
+
+  Follow the skill's JSON authoring workflow guide.
+
+success_criteria:
+  - type: file_exists
+    description: "Flow file created"
+    path: "Greeter/flow_files/Greeter.flow"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_exists
+    description: "Project file created"
+    path: "Greeter/project.uiproj"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: json_check
+    description: "Valid flow structure with nodes and definitions"
+    path: "Greeter/flow_files/Greeter.flow"
+    assertions:
+      - expression: "nodes"
+        operator: "type"
+        expected: "array"
+      - expression: "definitions"
+        operator: "type"
+        expected: "array"
+      - expression: "edges"
+        operator: "type"
+        expected: "array"
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Flow has a script node with greeting logic"
+    command: "python3 -c \"import json; f=json.load(open('Greeter/flow_files/Greeter.flow')); scripts=[n for n in f['nodes'] if n['type']=='core.action.script']; assert len(scripts)>=1, 'No script node'; s=scripts[0].get('inputs',{}).get('script',''); assert 'Hello' in s or 'greeting' in s.lower(), f'No greeting logic: {s[:100]}'; print('OK')\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+max_iterations: 1

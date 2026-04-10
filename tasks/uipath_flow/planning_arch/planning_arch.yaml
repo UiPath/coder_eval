@@ -1,0 +1,71 @@
+task_id: flow-planning-arch
+description: >
+  Produce an architectural plan (.arch.plan.md) for a 10-node
+  weather notification flow — tests the two-phase planning methodology.
+tags: [flow, planning, arch, tier-3]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 40
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../../skills/skills/uipath-flow"
+
+initial_prompt: |
+  You have the uipath-flow skill available in the current directory.
+  Read SKILL.md, then read references/planning-guide.md.
+
+  I need an architectural plan for a "WeatherAlert" flow that:
+  - Runs on a schedule (every hour)
+  - Fetches weather data from an HTTP API
+  - Checks if temperature exceeds a threshold (Decision node)
+  - If yes: logs the alert via a Script node, then ends
+  - If no: ends immediately
+
+  Produce WeatherAlert.arch.plan.md following the planning guide's
+  output format. Include a mermaid diagram. Do NOT proceed to Phase 2
+  or build anything — just the architectural plan.
+
+success_criteria:
+  - type: file_exists
+    description: "Architectural plan exists"
+    path: "WeatherAlert.arch.plan.md"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Plan has mermaid diagram"
+    path: "WeatherAlert.arch.plan.md"
+    includes: ["```mermaid", "graph"]
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Plan has required sections"
+    path: "WeatherAlert.arch.plan.md"
+    includes: ["Node Table", "Edge Table"]
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Plan includes correct node types"
+    path: "WeatherAlert.arch.plan.md"
+    includes: ["core.trigger.scheduled", "core.action.http", "core.logic.decision"]
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Plan has at least 4 distinct node types documented"
+    command: "python3 -c \"import re; content=open('WeatherAlert.arch.plan.md').read(); node_types=set(re.findall(r'core\\.\\w+\\.\\w+', content)); assert len(node_types)>=4, f'Only {len(node_types)} node types: {node_types}'; print(f'OK: {len(node_types)} node types: {node_types}')\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+max_iterations: 1

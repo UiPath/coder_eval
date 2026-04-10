@@ -1,0 +1,65 @@
+task_id: flow-connector-discovery
+description: >
+  Discover available Slack connectors via IS CLI and select the
+  correct tier from the 4-tier decision ladder.
+tags: [flow, connector, discovery, tier-4, integration]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 30
+
+sandbox:
+  driver: tempdir
+  python: {}
+  node:
+    env_packages:
+      - "@uipath/cli@0.1.21"
+initial_prompt: |
+  Before starting, load the uipath-flow skill. Read and follow its workflow steps exactly.
+  Do NOT ask for approval, confirmation, or feedback. Do NOT pause between planning and implementation. Build the complete flow end-to-end in a single pass.
+
+  I want to send a Slack message from a flow. Using the connector
+  guide's 4-tier decision ladder, determine:
+  1. Does a Slack connector exist? (use registry search or is connectors list)
+  2. Does it have a send-message activity?
+  3. Is there a healthy connection available?
+
+  Write your findings to connector-discovery-report.md including:
+  - Which tier applies
+  - The connector key
+  - Connection status
+  - Recommended node type
+
+success_criteria:
+  - type: file_exists
+    description: "Discovery report exists"
+    path: "connector-discovery-report.md"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Agent searched the registry or IS connectors"
+    tool_name: "Bash"
+    command_pattern: "uip.*(registry.*search|is.*connectors.*list)"
+    min_count: 1
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: file_contains
+    description: "Report mentions Slack connector"
+    path: "connector-discovery-report.md"
+    includes: ["slack"]
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_matches_regex
+    description: "Report identifies the tier"
+    path: "connector-discovery-report.md"
+    pattern: "(?i)(tier [12]|IS connector)"
+    must_match: true
+    weight: 2.0
+    pass_threshold: 1.0
+
+max_iterations: 1

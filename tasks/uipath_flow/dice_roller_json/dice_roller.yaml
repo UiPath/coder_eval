@@ -1,0 +1,73 @@
+task_id: flow-json-dice-roller
+description: >
+  Create a dice-roller .flow project using the uipath-flow skill's bundled
+  schemas and templates — no CLI, no registry, pure JSON authoring.
+tags: [flow, flow-json, generate, no-cli]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 30
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../../skills/skills/uipath-flow"
+
+initial_prompt: |
+  You have the uipath-flow skill available in the current directory.
+  Read SKILL.md for complete instructions on building .flow files.
+
+  Create a UiPath Flow project named "DiceRoller" that simulates rolling a
+  six-sided die and outputs the result (a random integer 1-6).
+
+  Follow the skill's Quick Start workflow:
+  1. Create DiceRoller/project.uiproj
+  2. Use minimal-flow-template.json as your starting point
+  3. Customize the script node for dice rolling
+  4. Save as DiceRoller/flow_files/DiceRoller.flow
+  5. Run the validation checklist
+
+success_criteria:
+  - type: file_exists
+    description: "project.uiproj exists"
+    path: "DiceRoller/project.uiproj"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: json_check
+    description: "Flow file is valid JSON with required top-level fields"
+    path: "DiceRoller/flow_files/DiceRoller.flow"
+    assertions:
+      - expression: "nodes"
+        operator: "type"
+        expected: "array"
+      - expression: "edges"
+        operator: "type"
+        expected: "array"
+      - expression: "definitions"
+        operator: "type"
+        expected: "array"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Structural comparison against reference flow"
+    command: "python3 $TASK_DIR/../shared/check_flow_structure.py DiceRoller/flow_files/DiceRoller.flow $TASK_DIR/../shared/references/dice-roller.flow"
+    timeout: 10
+    score_from_stdout: true
+    weight: 5.0
+    pass_threshold: 0.7
+
+  - type: run_command
+    description: "Flow contains a script node with dice-rolling logic"
+    command: "python3 -c \"import json; f=json.load(open('DiceRoller/flow_files/DiceRoller.flow')); scripts=[n for n in f['nodes'] if n['type']=='core.action.script']; assert len(scripts)>=1, 'No script node'; s=scripts[0].get('inputs',{}).get('script',''); assert 'Math.random' in s or 'random' in s.lower(), f'Script does not contain random logic: {s[:100]}'; print('OK: Script node has dice logic')\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+max_iterations: 1

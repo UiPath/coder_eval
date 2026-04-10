@@ -1,0 +1,71 @@
+task_id: flow-connector-configure
+description: >
+  Full 6-step connector configuration — discover Slack connector, fetch
+  connection, describe resource, and configure a connector node in a flow.
+tags: [flow, connector, configure, tier-4, integration]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 50
+
+sandbox:
+  driver: tempdir
+  python: {}
+  node:
+    env_packages:
+      - "@uipath/cli@0.1.21"
+initial_prompt: |
+  Before starting, load the uipath-flow skill. Read and follow its workflow steps exactly.
+  Do NOT ask for approval, confirmation, or feedback. Do NOT pause between planning and implementation. Build the complete flow end-to-end in a single pass.
+
+  Create a flow named "SlackNotifier" that sends a Slack message.
+  Follow the connector guide's 6-step configuration workflow:
+
+  1. Fetch available Slack connections (uip is connections list)
+  2. Get enriched registry definition (uip flow registry get with --connection-id)
+  3. Describe the resource (uip is resources describe)
+  4. Resolve any reference fields (uip is resources execute list)
+  5. Validate required fields
+  6. Configure the connector node in the flow
+
+  The flow should have: Manual Trigger -> Slack Connector Node -> End
+
+  Save the flow as SlackNotifier/flow_files/SlackNotifier.flow with
+  SlackNotifier/project.uiproj. Also create bindings_v2.json if needed.
+
+success_criteria:
+  - type: command_executed
+    description: "Agent fetched Slack connections"
+    tool_name: "Bash"
+    command_pattern: "uip.*is.*connections.*list"
+    min_count: 1
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Agent used enriched registry get with connection"
+    tool_name: "Bash"
+    command_pattern: "uip.*flow.*registry.*get"
+    min_count: 1
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Flow file exists and is valid JSON"
+    command: "python3 -c \"import json,glob; flows=glob.glob('**/SlackNotifier*.flow',recursive=True); assert flows, 'No flow found'; f=json.load(open(flows[0])); assert 'nodes' in f and 'edges' in f; nn=len(f['nodes']); ne=len(f['edges']); print('OK: %d nodes, %d edges'%(nn,ne))\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Flow has a connector node"
+    command: "python3 -c \"import json,glob; flows=glob.glob('**/SlackNotifier*.flow',recursive=True); assert flows; f=json.load(open(flows[0])); connector_nodes=[n for n in f['nodes'] if 'connector' in n.get('type','').lower() or 'slack' in json.dumps(n).lower()]; assert len(connector_nodes)>=1, f'No connector/Slack node found in {[n[\"type\"] for n in f[\"nodes\"]]}'; print('OK: Connector node present')\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+max_iterations: 1

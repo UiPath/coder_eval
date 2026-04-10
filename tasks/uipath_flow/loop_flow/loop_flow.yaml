@@ -1,0 +1,65 @@
+task_id: flow-json-loop
+description: >
+  Create a flow with loop iteration pattern using OOTB nodes and mock
+  placeholders — no CLI, pure JSON authoring.
+tags: [flow, flow-json, generate, no-cli, tier-2]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 40
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../../skills/skills/uipath-flow"
+
+initial_prompt: |
+  You have the uipath-flow skill available in the current directory.
+  Read SKILL.md for complete instructions on building .flow files.
+
+  Create a UiPath Flow project named "BatchProcessor" that:
+  1. Starts with a manual trigger
+  2. Uses a mock node as a placeholder for fetching a list of records
+  3. Loops over the records using a Loop node (core.logic.loop)
+  4. Inside the loop, uses a mock node as a placeholder for processing each record
+  5. After the loop completes, ends with an End node
+
+  Use loop-flow-template.json as your starting point.
+  Wire the loop correctly: loop.output → body node → loop.loopBack, loop.success → End.
+  Save as BatchProcessor/flow_files/BatchProcessor.flow with project.uiproj.
+
+success_criteria:
+  - type: json_check
+    description: "Flow file is valid JSON"
+    path: "BatchProcessor/flow_files/BatchProcessor.flow"
+    assertions:
+      - expression: "nodes"
+        operator: "type"
+        expected: "array"
+      - expression: "edges"
+        operator: "type"
+        expected: "array"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Has trigger, loop, mock, and end nodes with correct wiring"
+    command: "python3 -c \"import json; f=json.load(open('BatchProcessor/flow_files/BatchProcessor.flow')); types=[n['type'] for n in f['nodes']]; assert 'core.trigger.manual' in types; assert 'core.logic.loop' in types; assert 'core.control.end' in types; loop_id=[n['id'] for n in f['nodes'] if n['type']=='core.logic.loop'][0]; loopback=[e for e in f['edges'] if e.get('targetNodeId')==loop_id and e.get('targetPort')=='loopBack']; assert len(loopback)>=1, 'No loopBack edge'; print(f'OK: Loop flow with loopBack wiring')\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 4.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "All node types have definitions"
+    command: "python3 -c \"import json; f=json.load(open('BatchProcessor/flow_files/BatchProcessor.flow')); used={n['type'] for n in f['nodes']}; defined={d['nodeType'] for d in f.get('definitions',[])}; missing=used-defined; assert not missing, f'Missing: {missing}'; print('OK')\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+max_iterations: 1

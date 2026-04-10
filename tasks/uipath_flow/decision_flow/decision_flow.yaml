@@ -1,0 +1,71 @@
+task_id: flow-json-decision
+description: >
+  Create a flow with switch/branching pattern using OOTB nodes and mock
+  placeholders for dynamic nodes — no CLI, pure JSON authoring.
+tags: [flow, flow-json, generate, no-cli, tier-2]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 40
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../../skills/skills/uipath-flow"
+
+initial_prompt: |
+  You have the uipath-flow skill available in the current directory.
+  Read SKILL.md for complete instructions on building .flow files.
+
+  Create a UiPath Flow project named "EmailClassifier" that:
+  1. Starts with a manual trigger
+  2. Uses a mock node as a placeholder for reading an email (since the email
+     connector isn't available offline)
+  3. Uses a Switch node to classify the email into 3 categories:
+     "needs-response", "take-action", "other"
+  4. Each branch goes to a separate mock node (placeholder for the action)
+  5. All branches end
+
+  Use decision-flow-template.json as your starting point.
+  Use core.logic.mock for all placeholder nodes (set display.description to
+  note what each mock replaces).
+  Save as EmailClassifier/flow_files/EmailClassifier.flow with project.uiproj.
+
+success_criteria:
+  - type: json_check
+    description: "Flow file is valid JSON with required fields"
+    path: "EmailClassifier/flow_files/EmailClassifier.flow"
+    assertions:
+      - expression: "nodes"
+        operator: "type"
+        expected: "array"
+      - expression: "edges"
+        operator: "type"
+        expected: "array"
+      - expression: "definitions"
+        operator: "type"
+        expected: "array"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Has trigger, switch, and mock nodes"
+    command: "python3 -c \"import json; f=json.load(open('EmailClassifier/flow_files/EmailClassifier.flow')); types=[n['type'] for n in f['nodes']]; m='core.logic.mock'; assert 'core.trigger.manual' in types, 'No trigger'; assert 'core.logic.switch' in types, 'No switch'; assert types.count(m)>=2, f'Expected >=2 mock nodes, got {types.count(m)}'; print(f'OK: {len(types)} nodes, types={sorted(set(types))}')\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "All node types have definitions and edges reference existing nodes"
+    command: "python3 -c \"import json; f=json.load(open('EmailClassifier/flow_files/EmailClassifier.flow')); used={n['type'] for n in f['nodes']}; defined={d['nodeType'] for d in f.get('definitions',[])}; missing=used-defined; assert not missing, f'Missing definitions: {missing}'; nids={n['id'] for n in f['nodes']}; bad_src=[e for e in f['edges'] if e['sourceNodeId'] not in nids]; bad_tgt=[e for e in f['edges'] if e['targetNodeId'] not in nids]; assert not bad_src, f'Bad sources: {bad_src}'; assert not bad_tgt, f'Bad targets: {bad_tgt}'; print('OK: All definitions present, all edges valid')\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+max_iterations: 1

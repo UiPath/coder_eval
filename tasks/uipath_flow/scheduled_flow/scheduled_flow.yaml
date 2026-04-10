@@ -1,0 +1,62 @@
+task_id: flow-json-scheduled
+description: >
+  Create a flow with a scheduled trigger, loop, and switch using OOTB nodes
+  and mock placeholders — no CLI, pure JSON authoring.
+tags: [flow, flow-json, generate, no-cli, tier-2]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 40
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../../skills/skills/uipath-flow"
+
+initial_prompt: |
+  You have the uipath-flow skill available in the current directory.
+  Read SKILL.md for complete instructions on building .flow files.
+
+  Create a UiPath Flow project named "WeeklyScanner" that:
+  1. Starts with a scheduled trigger set to run weekly (timerPreset: "R/P1W")
+  2. Uses a mock node to fetch data (placeholder for a connector)
+  3. Loops over the results using a Loop node
+  4. Inside the loop, uses a mock node to process each item
+  5. After the loop, ends
+
+  Use scheduled-trigger-template.json as your starting point.
+  The scheduled trigger must have timerType: "timeCycle" and timerPreset: "R/P1W".
+  Save as WeeklyScanner/flow_files/WeeklyScanner.flow with project.uiproj.
+
+success_criteria:
+  - type: json_check
+    description: "Flow file is valid JSON"
+    path: "WeeklyScanner/flow_files/WeeklyScanner.flow"
+    assertions:
+      - expression: "nodes"
+        operator: "type"
+        expected: "array"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Has scheduled trigger with weekly preset"
+    command: "python3 -c \"import json; f=json.load(open('WeeklyScanner/flow_files/WeeklyScanner.flow')); triggers=[n for n in f['nodes'] if n['type']=='core.trigger.scheduled']; assert len(triggers)>=1, 'No scheduled trigger'; t=triggers[0]; inp=t.get('inputs',{}); assert inp.get('timerPreset')=='R/P1W' or inp.get('timerValue','').startswith('R/P1W'), f'Timer not weekly: {inp}'; print('OK: Scheduled trigger with weekly preset')\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Has loop node and end node"
+    command: "python3 -c \"import json; f=json.load(open('WeeklyScanner/flow_files/WeeklyScanner.flow')); types={n['type'] for n in f['nodes']}; assert 'core.logic.loop' in types, 'No loop'; assert 'core.control.end' in types, 'No end'; used={n['type'] for n in f['nodes']}; defined={d['nodeType'] for d in f.get('definitions',[])}; missing=used-defined; assert not missing, f'Missing: {missing}'; print('OK')\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+max_iterations: 1
