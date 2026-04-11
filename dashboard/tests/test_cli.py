@@ -105,4 +105,5 @@ def test_build_skills_suite():
     assert suite.name == "skills"
     assert suite.task_patterns == ["/path/to/skills/tests/tasks/**/*.yaml"]
     assert suite.experiment == "/path/to/skills/tests/experiments/default.yaml"
+    assert suite.uip_login is True
     assert suite.env == {"SKILLS_REPO_PATH": "/path/to/skills"}

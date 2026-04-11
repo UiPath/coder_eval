@@ -28,6 +28,8 @@ def generate_analysis(run_path: Path) -> Path:
         [
             "claude",
             "--print",
+            "--permission-mode",
+            "bypassPermissions",
             f"/coder-eval-run-analysis {rel_path}",
         ],
         cwd=str(CODER_EVAL_DIR),

@@ -16,6 +16,7 @@ class Suite:
     concurrency: int | None = None
     experiment: str | None = None
     uip_login: bool = False
+    uip_tenant: str | None = None
     env: dict[str, str] | None = None
 
 
@@ -38,6 +39,7 @@ def _build_skills_suite(skills_dir: str) -> Suite:
         name="skills",
         task_patterns=[f"{skills_dir}/tests/tasks/**/*.yaml"],
         experiment=f"{skills_dir}/tests/experiments/default.yaml",
+        uip_login=True,
         env={"SKILLS_REPO_PATH": skills_dir},
     )
 
@@ -101,26 +103,31 @@ def run(
     else:
         suites_to_run = all_suites
 
-    # 3b. UiPath CLI login (once, if any suite needs it)
-    needs_login = any(s.uip_login for s in suites_to_run)
-    if needs_login:
-        if not all([cfg.uip_authority, cfg.uip_client_id, cfg.uip_client_secret, cfg.uip_tenant]):
+    # 3b. Validate UiPath credentials and tenant eagerly (fail-fast before any suite runs)
+    login_suites = [s for s in suites_to_run if s.uip_login]
+    if login_suites:
+        if not all([cfg.uip_authority, cfg.uip_client_id, cfg.uip_client_secret]):
             raise click.UsageError(
-                "UIP_AUTHORITY, UIP_CLIENT_ID, UIP_CLIENT_SECRET, and UIP_TENANT "
-                "must be set in .env for suites that require uip login."
+                "UIP_AUTHORITY, UIP_CLIENT_ID, and UIP_CLIENT_SECRET must be set in .env"
+                " for suites that require uip login."
             )
-        print("Authenticating UiPath CLI...")
-        uip_login(
-            authority=cfg.uip_authority,
-            client_id=cfg.uip_client_id,
-            client_secret=cfg.uip_client_secret,
-            tenant=cfg.uip_tenant,
-            scope=cfg.uip_scope,
-        )
-        print("UiPath CLI login succeeded")
+        for s in login_suites:
+            if not (s.uip_tenant or cfg.uip_tenant):
+                raise click.UsageError(f"Suite '{s.name}' requires uip login but no tenant is configured.")
 
-    # 4. Run each suite → analyze → upload → ingest
+    # 4. Run each suite → login (if needed) → run → analyze → upload → ingest
     for s in suites_to_run:
+        if s.uip_login:
+            tenant = s.uip_tenant or cfg.uip_tenant
+            print(f"Authenticating UiPath CLI (tenant={tenant})...")
+            uip_login(
+                authority=cfg.uip_authority,
+                client_id=cfg.uip_client_id,
+                client_secret=cfg.uip_client_secret,
+                tenant=tenant,
+                scope=cfg.uip_scope,
+            )
+            print("UiPath CLI login succeeded")
         suite_tags = tags if tags is not None else s.tags
         print(f"\n--- Suite: {s.name} (tags={suite_tags}) ---")
 

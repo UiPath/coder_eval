@@ -21,8 +21,10 @@ def test_generate_analysis_success(mock_run, tmp_path):
     mock_run.assert_called_once()
     cmd = mock_run.call_args[0][0]
     assert cmd[0] == "claude"
-    assert cmd[1] == "--print"
-    assert "/coder-eval-run-analysis" in cmd[2]
+    assert "--print" in cmd
+    assert "--permission-mode" in cmd
+    assert "bypassPermissions" in cmd
+    assert any("/coder-eval-run-analysis" in arg for arg in cmd)
 
 
 @patch("dashboard.analysis.subprocess.run")
