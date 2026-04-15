@@ -51,7 +51,7 @@ class RunCommandChecker(BaseCriterion[RunCommandCriterion]):
         if stdout:
             details += f"\nStdout: {stdout[:200]}"
         if stderr:
-            details += f"\nStderr: {stderr[:200]}"
+            details += f"\nStderr: {stderr[:500]}"
 
         stdout_ok = True
         if criterion.expected_stdout is not None:
@@ -82,7 +82,7 @@ class RunCommandChecker(BaseCriterion[RunCommandCriterion]):
             if stdout:
                 details += f"\nStdout: {stdout[:200]}"
             if stderr:
-                details += f"\nStderr: {stderr[:200]}"
+                details += f"\nStderr: {stderr[:500]}"
             return CriterionResult(
                 criterion_type=criterion.type,
                 description=criterion.description,

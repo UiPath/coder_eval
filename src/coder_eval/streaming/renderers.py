@@ -8,6 +8,7 @@ from rich.markup import escape
 
 from coder_eval.streaming.events import (
     CriteriaCheckEvent,
+    CriterionSummary,
     StreamEvent,
     TextChunkEvent,
     ToolCallEvent,
@@ -83,14 +84,36 @@ class RichStreamRenderer:
             )
 
         if isinstance(event, CriteriaCheckEvent):
-            details_str = escape(" | ".join(event.details)) if event.details else ""
             score_color = "green" if event.passed == event.total else "yellow"
-            line = (
+            header = (
                 f"[{score_color}]Criteria: {event.passed}/{event.total} passed"
                 + f" (score: {event.weighted_score:.3f})[/{score_color}]"
             )
-            if details_str:
-                line += f" \\[{details_str}]"
-            return line
+            if event.criteria:
+                return self._format_criteria_details(header, event.criteria)
+            # Fallback to legacy flat details
+            if event.details:
+                header += f" \\[{escape(' | '.join(event.details))}]"
+            return header
 
         return None
+
+    @staticmethod
+    def _format_criteria_details(header: str, criteria: list[CriterionSummary]) -> str:
+        """Format criteria with per-criterion lines and failure reasons.
+
+        For failed criteria, the first line of the failure reason is shown
+        at normal brightness; subsequent lines are dimmed.
+        """
+        lines = [header]
+        for c in criteria:
+            if c.passed:
+                lines.append(f"  [green]PASS[/green]  {escape(c.criterion_type)}  {escape(c.description)}")
+            else:
+                lines.append(f"  [red]FAIL[/red]  {escape(c.criterion_type)}  {escape(c.description)}")
+                if c.failure_reason:
+                    reason_lines = c.failure_reason.splitlines()
+                    lines.append(f"        > {escape(reason_lines[0])}")
+                    for extra in reason_lines[1:]:
+                        lines.append(f"        [dim]{escape(extra)}[/dim]")
+        return "\n".join(lines)

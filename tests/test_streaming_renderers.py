@@ -6,6 +6,7 @@ from rich.console import Console
 
 from coder_eval.streaming.events import (
     CriteriaCheckEvent,
+    CriterionSummary,
     TextChunkEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -170,3 +171,63 @@ def test_rich_markup_in_text_chunk_is_escaped():
     renderer.on_event(TextChunkEvent(task_id="t1", text="I'll use [bold]formatting[/bold] here"))
     output = buf.getvalue()
     assert "\\[bold]formatting" in output or "[bold]formatting" in output
+
+
+def test_criteria_check_renders_detailed_pass_and_fail():
+    """CriteriaCheckEvent with criteria summaries renders per-criterion lines."""
+    renderer, buf = _make_renderer()
+    renderer.on_event(
+        CriteriaCheckEvent(
+            task_id="t1",
+            passed=1,
+            total=2,
+            weighted_score=0.375,
+            criteria=[
+                CriterionSummary(
+                    criterion_type="run_command",
+                    description="uip flow validate passes",
+                    score=1.0,
+                    passed=True,
+                ),
+                CriterionSummary(
+                    criterion_type="run_command",
+                    description="Flow debug returns correct output",
+                    score=0.0,
+                    passed=False,
+                    failure_reason="FAIL: 'mckinney' found in outputs",
+                ),
+            ],
+        )
+    )
+    output = buf.getvalue()
+    assert "1/2" in output
+    assert "0.375" in output
+    assert "PASS" in output
+    assert "validate passes" in output
+    assert "FAIL" in output
+    assert "correct output" in output
+    assert "mckinney" in output
+
+
+def test_criteria_check_omits_reason_for_passing():
+    """Passing criteria don't render a failure reason line."""
+    renderer, buf = _make_renderer()
+    renderer.on_event(
+        CriteriaCheckEvent(
+            task_id="t1",
+            passed=1,
+            total=1,
+            weighted_score=1.0,
+            criteria=[
+                CriterionSummary(
+                    criterion_type="file_exists",
+                    description="Output file exists",
+                    score=1.0,
+                    passed=True,
+                ),
+            ],
+        )
+    )
+    output = buf.getvalue()
+    assert "PASS" in output
+    assert ">" not in output  # No failure reason indicator

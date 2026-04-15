@@ -60,6 +60,17 @@ class TurnCompleteEvent(StreamEvent):
 
 
 @dataclass
+class CriterionSummary:
+    """Summary of a single criterion check for display."""
+
+    criterion_type: str = ""
+    description: str = ""
+    score: float = 0.0
+    passed: bool = False
+    failure_reason: str | None = None
+
+
+@dataclass
 class CriteriaCheckEvent(StreamEvent):
     """Emitted after success criteria are evaluated."""
 
@@ -67,3 +78,4 @@ class CriteriaCheckEvent(StreamEvent):
     total: int = 0
     weighted_score: float = 0.0
     details: list[str] = field(default_factory=list)
+    criteria: list[CriterionSummary] = field(default_factory=list)

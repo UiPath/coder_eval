@@ -29,6 +29,7 @@ from .models import (
     ApiRoute,
     BedrockRoute,
     ConfigLineageEntry,
+    CriterionResult,
     EvaluationResult,
     FinalStatus,
     ProxyRoute,
@@ -47,12 +48,37 @@ from .orchestration.config import BatchRunConfig
 from .orchestration.evaluation import create_iteration_snapshot, generate_next_prompt, load_reference_code
 from .sandbox import Sandbox
 from .streaming.callbacks import StreamCallback, TaskScopedCallback, safe_emit
-from .streaming.events import CriteriaCheckEvent, TurnCompleteEvent, TurnStartEvent
+from .streaming.events import CriteriaCheckEvent, CriterionSummary, TurnCompleteEvent, TurnStartEvent
 from .utils import get_version_info
 
 
 # Get module logger
 logger = logging.getLogger(__name__)
+
+
+def _extract_failure_reason(result: CriterionResult) -> str | None:
+    """Extract the failure reason from a criterion result.
+
+    Returns the stderr content (up to 500 chars) when available,
+    otherwise the first non-empty line from details.
+    """
+    if result.error:
+        return result.error
+    if not result.details:
+        return None
+    # Prefer stderr — that's where check scripts put the failure message
+    for line in result.details.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("stderr:"):
+            reason = stripped[len("stderr:") :].strip()
+            if reason:
+                return reason
+    # Fall back to first non-empty line
+    for line in result.details.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return None
 
 
 def _summarize_tool_calls(turn_record: TurnRecord) -> str | None:
@@ -618,6 +644,16 @@ class Orchestrator:
                 + f" ({result.score:.2f})"
                 for result, criterion in zip(criteria_results, self.task.success_criteria, strict=True)
             ]
+            criteria_summaries = [
+                CriterionSummary(
+                    criterion_type=criterion.type,
+                    description=result.description or criterion.description,
+                    score=result.score,
+                    passed=result.score >= criterion.pass_threshold,
+                    failure_reason=_extract_failure_reason(result) if result.score < criterion.pass_threshold else None,
+                )
+                for result, criterion in zip(criteria_results, self.task.success_criteria, strict=True)
+            ]
             safe_emit(
                 self.stream_callback,
                 CriteriaCheckEvent(
@@ -626,6 +662,7 @@ class Orchestrator:
                     total=total_count,
                     weighted_score=current_score,
                     details=criteria_details,
+                    criteria=criteria_summaries,
                 ),
             )
 
