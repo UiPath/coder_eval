@@ -60,8 +60,8 @@ def test_run_tests_with_concurrency(mock_glob, mock_run, tmp_path):
 
 
 @patch("dashboard.run.subprocess.run")
-def test_uip_login_does_not_pass_secret_as_arg(mock_run):
-    """Test that uip_login passes the secret via env, not as a CLI argument."""
+def test_uip_login_passes_secret_via_env_indirection(mock_run):
+    """Test that uip_login uses env indirection for the secret, not the raw value."""
     uip_login(
         authority="https://auth.example.com",
         client_id="my-client",
@@ -71,12 +71,16 @@ def test_uip_login_does_not_pass_secret_as_arg(mock_run):
     )
     mock_run.assert_called_once()
     cmd = mock_run.call_args[0][0]
-    # Secret should NOT appear in the command arguments
+    # Raw secret should NOT appear in the command arguments
     assert "super-secret" not in cmd
+    # --client-secret should reference the env var, not the raw value
+    assert "--client-secret" in cmd
+    secret_idx = cmd.index("--client-secret")
+    assert cmd[secret_idx + 1] == "env.UIP_CLIENT_SECRET"
     # Scope should be passed as a CLI argument
     assert "--scope" in cmd
     assert "OR.Default" in cmd
-    # But secret should be in the environment
+    # Secret should be in the environment so the CLI can resolve it
     env = mock_run.call_args[1]["env"]
     assert env["UIP_CLIENT_SECRET"] == "super-secret"
 

@@ -38,7 +38,7 @@ def _build_skills_suite(skills_dir: str) -> Suite:
     return Suite(
         name="skills",
         task_patterns=[f"{skills_dir}/tests/tasks/**/*.yaml"],
-        experiment=f"{skills_dir}/tests/experiments/default.yaml",
+        experiment=f"{skills_dir}/tests/experiments/e2e.yaml",
         uip_login=True,
         env={"SKILLS_REPO_PATH": skills_dir},
     )

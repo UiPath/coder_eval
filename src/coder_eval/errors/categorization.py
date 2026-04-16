@@ -112,6 +112,10 @@ def categorize_error(
             return ErrorCategory.LLM_REVIEWER_ERROR
         return ErrorCategory.UNKNOWN
 
+    # Content filtering (Bedrock guardrails) — NOT retryable, same output will be blocked again
+    if any(pat in error_str for pat in ["content filtering policy", "content filter", "guardrail"]):
+        return ErrorCategory.AGENT_INVALID_OUTPUT
+
     # API/Network errors
     if any(pat in error_str for pat in ["api error", "connection", "network", "502", "503", "504"]):
         if component == "agent":

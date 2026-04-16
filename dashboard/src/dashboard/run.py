@@ -24,8 +24,8 @@ def uip_login(
     """Authenticate the UiPath CLI before running flow tasks.
 
     The secret is passed via the UIP_CLIENT_SECRET environment variable
-    (instead of --client-secret CLI arg) to avoid exposing it in process
-    listings (ps, /proc). The `uip` CLI reads this env var automatically.
+    and referenced with ``--client-secret env.UIP_CLIENT_SECRET`` so the
+    CLI reads it from the env (avoids exposing it in process listings).
     """
     env = {**os.environ, "UIP_CLIENT_SECRET": client_secret}
     subprocess.run(
@@ -36,6 +36,8 @@ def uip_login(
             authority,
             "--client-id",
             client_id,
+            "--client-secret",
+            "env.UIP_CLIENT_SECRET",
             "--tenant",
             tenant,
             "--scope",

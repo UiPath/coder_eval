@@ -23,6 +23,7 @@ class TestErrorCategory:
         retryable = [
             ErrorCategory.AGENT_API_ERROR,
             ErrorCategory.AGENT_RATE_LIMIT,
+            ErrorCategory.AGENT_CRASH,
             ErrorCategory.LLM_REVIEWER_ERROR,
             ErrorCategory.SANDBOX_SETUP_ERROR,
             ErrorCategory.SANDBOX_COMMAND_ERROR,
@@ -53,7 +54,6 @@ class TestErrorCategory:
         """Verify which categories are non-retryable (not in RETRY_CONFIG)."""
         non_retryable = [
             ErrorCategory.AGENT_TIMEOUT,
-            ErrorCategory.AGENT_CRASH,
             ErrorCategory.AGENT_INVALID_OUTPUT,
             ErrorCategory.AGENT_AUTH_ERROR,
             ErrorCategory.AGENT_BILLING_ERROR,
@@ -131,7 +131,7 @@ class TestCategorizeError:
         assert result == ErrorCategory.AGENT_CRASH
 
     def test_categorize_agent_cli_process_failure(self):
-        """CLI process failure with exit code → AGENT_CRASH (not retryable)."""
+        """CLI process failure with exit code → AGENT_CRASH (retryable)."""
         error = RuntimeError("CLI process failed (exit code 1): some error output")
         result = categorize_error(error, {"component": "agent"})
         assert result == ErrorCategory.AGENT_CRASH
@@ -148,6 +148,18 @@ class TestCategorizeError:
         error = Exception("Malformed JSON response")
         result = categorize_error(error, {"component": "agent"})
         assert result == ErrorCategory.AGENT_INVALID_OUTPUT
+
+    def test_categorize_content_filter(self):
+        """Bedrock content filter/guardrail errors → AGENT_INVALID_OUTPUT (non-retryable)."""
+        test_cases = [
+            Exception("Blocked by content filtering policy"),
+            Exception("Request rejected by content filter"),
+            Exception("Guardrail blocked the request"),
+        ]
+
+        for error in test_cases:
+            result = categorize_error(error, {"component": "agent"})
+            assert result == ErrorCategory.AGENT_INVALID_OUTPUT, f"Failed for: {error}"
 
     # Evaluator component errors (CRITICAL: LLM reviewer retry functionality)
     def test_categorize_evaluator_timeout_exception(self):

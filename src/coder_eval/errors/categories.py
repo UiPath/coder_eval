@@ -28,7 +28,7 @@ class ErrorCategory(Enum):
     AGENT_RATE_LIMIT = "agent_rate_limit"  # API rate limit (retryable with long delay)
     AGENT_AUTH_ERROR = "agent_auth_error"  # Invalid API key (NOT retryable)
     AGENT_BILLING_ERROR = "agent_billing_error"  # Insufficient credits/billing issue (NOT retryable)
-    AGENT_CRASH = "agent_crash"  # Agent process crashed (NOT retryable)
+    AGENT_CRASH = "agent_crash"  # Agent process crashed (retryable — CLI crashes are often transient)
     AGENT_INVALID_OUTPUT = "agent_invalid_output"  # Malformed response (NOT retryable)
 
     # Sandbox Errors - Environment setup and execution
@@ -103,6 +103,11 @@ RETRY_CONFIG: dict[ErrorCategory, RetryConfig] = {
         max_retries=5,
         backoff_multiplier=3.0,
         initial_delay=60.0,  # 1 minute initial delay
+    ),
+    ErrorCategory.AGENT_CRASH: RetryConfig(
+        max_retries=2,
+        backoff_multiplier=2.0,
+        initial_delay=5.0,
     ),
     # Sandbox errors - transient failures are retryable
     ErrorCategory.SANDBOX_SETUP_ERROR: RetryConfig(
