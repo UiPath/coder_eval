@@ -126,6 +126,20 @@ class ReferenceSource(BaseModel):
         return self
 
 
+class PostRunCommand(BaseModel):
+    """A command to execute after evaluation completes.
+
+    Post-run commands run inside the sandbox after the evaluation verdict is finalized.
+    They do NOT affect pass/fail status — they are for artifact generation, data extraction,
+    cleanup, or any side effects needed after the run.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    command: str = Field(description="Shell command to execute (run via shell, supports pipes/redirects)")
+    timeout: int = Field(default=30, ge=1, le=300, description="Maximum seconds to wait for the command to complete")
+
+
 class TaskDefinition(BaseModel):
     """Complete definition of an evaluation task."""
 
@@ -167,6 +181,10 @@ class TaskDefinition(BaseModel):
         default=None,
         ge=1,
         description="Expected number of tool commands for orchestrator-level efficiency tracking",
+    )
+    post_run: list[PostRunCommand] = Field(
+        default_factory=list,
+        description="Commands to execute after evaluation completes. Do not affect pass/fail.",
     )
 
     @model_validator(mode="after")

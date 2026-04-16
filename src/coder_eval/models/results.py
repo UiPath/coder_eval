@@ -111,6 +111,17 @@ class TurnRecord(BaseModel):
     )
 
 
+class PostRunResult(BaseModel):
+    """Result of executing a single post-run command."""
+
+    command: str = Field(description="Command as specified in the task definition")
+    exit_code: int | None = Field(default=None, description="Process exit code (None if timed out or failed to start)")
+    stdout: str = Field(default="", description="Captured stdout")
+    stderr: str = Field(default="", description="Captured stderr")
+    duration_seconds: float = Field(default=0.0, description="Execution duration in seconds")
+    error: str | None = Field(default=None, description="Error message if the command failed to execute")
+
+
 class EvaluationResult(BaseModel):
     """Complete result of a task evaluation."""
 
@@ -191,6 +202,11 @@ class EvaluationResult(BaseModel):
     actual_commands: int | None = Field(default=None, description="Actual tool commands executed by the agent")
     commands_efficiency: float | None = Field(
         default=None, description="Commands efficiency score (0-1). expected/max(actual, expected)"
+    )
+
+    # Post-run script results
+    post_run_results: list[PostRunResult] = Field(
+        default_factory=list, description="Results of post-run scripts (informational, do not affect pass/fail)"
     )
 
     def calculate_weighted_score(self, criteria: list[SuccessCriterion]) -> None:

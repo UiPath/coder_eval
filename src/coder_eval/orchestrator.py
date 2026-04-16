@@ -3,6 +3,7 @@
 import asyncio
 import functools
 import logging
+import subprocess
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -32,6 +33,7 @@ from .models import (
     CriterionResult,
     EvaluationResult,
     FinalStatus,
+    PostRunResult,
     ProxyRoute,
     ResolvedTask,
     RunSummary,
@@ -286,6 +288,7 @@ class Orchestrator:
                 logger.error(f"Evaluation failed: {e}", exc_info=True)
 
             finally:
+                await self._run_post_run_commands()
                 await self._cleanup()
                 self._finalize_result(start_time)
 
@@ -700,6 +703,69 @@ class Orchestrator:
                 )
 
         return success
+
+    _POST_RUN_MAX_OUTPUT = 100_000  # Truncate stdout/stderr to 100KB
+
+    async def _run_post_run_commands(self) -> None:
+        """Execute post-run commands inside the sandbox after evaluation.
+
+        Results are stored on self.result for observability but never affect pass/fail.
+        Errors are logged as warnings and captured in the result.
+        """
+        if not self.task.post_run or not self.sandbox or not self.sandbox.sandbox_dir or not self.result:
+            return
+
+        sandbox_dir = self.sandbox.sandbox_dir
+        max_out = self._POST_RUN_MAX_OUTPUT
+
+        for post_run in self.task.post_run:
+            start = time.time()
+            logger.info("Running post-run command: %s", post_run.command)
+
+            try:
+                proc = await asyncio.to_thread(
+                    subprocess.run,
+                    post_run.command,
+                    shell=True,  # nosec B602,B604 - commands come from task YAML, not user input
+                    cwd=str(sandbox_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=post_run.timeout,
+                )
+                self.result.post_run_results.append(
+                    PostRunResult(
+                        command=post_run.command,
+                        exit_code=proc.returncode,
+                        stdout=proc.stdout[:max_out],
+                        stderr=proc.stderr[:max_out],
+                        duration_seconds=time.time() - start,
+                    )
+                )
+                if proc.returncode != 0:
+                    logger.warning(
+                        "Post-run command '%s' exited with code %d: %s",
+                        post_run.command,
+                        proc.returncode,
+                        proc.stderr[:200],
+                    )
+            except subprocess.TimeoutExpired:
+                self.result.post_run_results.append(
+                    PostRunResult(
+                        command=post_run.command,
+                        error=f"Timed out after {post_run.timeout}s",
+                        duration_seconds=time.time() - start,
+                    )
+                )
+                logger.warning("Post-run command '%s' timed out after %ds", post_run.command, post_run.timeout)
+            except Exception as e:
+                self.result.post_run_results.append(
+                    PostRunResult(
+                        command=post_run.command,
+                        error=str(e),
+                        duration_seconds=time.time() - start,
+                    )
+                )
+                logger.warning("Post-run command '%s' failed: %s", post_run.command, e)
 
     async def _cleanup(self) -> None:
         """Clean up all resources."""

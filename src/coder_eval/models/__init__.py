@@ -68,6 +68,7 @@ from coder_eval.models.results import (
     EvaluationResult,
     FileChange,
     LLMDecision,
+    PostRunResult,
     RunSummary,
     TaskConfigRecord,
     TurnRecord,
@@ -100,6 +101,7 @@ from coder_eval.models.tasks import (
     DEFAULT_GATEWAY_MODEL,
     AgentConfig,
     LLMReviewerConfig,
+    PostRunCommand,
     ReferenceSource,
     TaskDefinition,
 )
@@ -183,6 +185,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "CriterionResult",
     "LLMDecision",
     "FileChange",
+    "PostRunResult",
     "TurnRecord",
     "EvaluationResult",
     "TaskConfigRecord",
@@ -192,6 +195,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "DEFAULT_GATEWAY_MODEL",
     "AgentConfig",
     "LLMReviewerConfig",
+    "PostRunCommand",
     "ReferenceSource",
     # Mutations
     "PromptPrefix",

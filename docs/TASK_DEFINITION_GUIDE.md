@@ -24,6 +24,7 @@ Complete reference for defining evaluation tasks in coder_eval.
 - [Sandbox Snapshots](#sandbox-snapshots)
 - [LLM Reviewer](#llm-reviewer)
 - [Reference Solutions](#reference-solutions)
+- [Post-Run Commands](#post-run-commands)
 - [Command Telemetry](#command-telemetry)
 - [Complete Example](#complete-example)
 
@@ -44,6 +45,7 @@ success_criteria: [ ... ]             # List of criteria (required, at least 1)
 
 llm_reviewer: { ... }                 # Optional LLM reviewer
 reference: { ... }                    # Optional reference solution
+post_run: [ ... ]                     # Optional post-run commands
 ```
 
 ## Tags
@@ -548,6 +550,28 @@ reference:
             return n
         return fibonacci(n - 1) + fibonacci(n - 2)
 ```
+
+## Post-Run Commands
+
+Run shell commands inside the sandbox after evaluation completes. Post-run commands are **informational only** — they never affect pass/fail status. Use them for artifact generation, data extraction, validation reports, or cleanup.
+
+```yaml
+post_run:
+  - command: "python3 validate_flow.py output.flow 12 4"
+    timeout: 60
+
+  - command: "cat results.json | jq '.summary'"
+
+  - command: "tar czf /tmp/artifacts.tar.gz ."
+    timeout: 120
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `command` | *required* | Shell command to execute (supports pipes, redirects, etc.) |
+| `timeout` | 30 | Maximum seconds to wait (1–300) |
+
+Commands run sequentially with `cwd` set to the sandbox directory. stdout and stderr are captured on the `post_run_results` field of the evaluation result (truncated to 100KB each).
 
 ## Command Telemetry
 
