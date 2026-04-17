@@ -362,6 +362,14 @@ def resolve_task_for_variant(
         validate_template_sources_list(combined_sources)
         resolved_sandbox = task.sandbox.model_copy(update={"template_sources": combined_sources})
 
+    # Resolve post_run: task-level commands first, experiment defaults appended after.
+    # Experiment defaults are typically tenant/sandbox cleanup that should run last,
+    # after any task-specific artifact extraction.
+    exp_defaults_post_run = (
+        list(experiment.defaults.post_run) if experiment.defaults and experiment.defaults.post_run else []
+    )
+    resolved_post_run = list(task.post_run) + exp_defaults_post_run
+
     # Combine lineage
     lineage = {**agent_lineage, **scalar_lineage}
 
@@ -372,6 +380,7 @@ def resolve_task_for_variant(
             "max_iterations": resolved_max_iterations,
             "task_timeout": resolved_task_timeout,
             "sandbox": resolved_sandbox,
+            "post_run": resolved_post_run,
         }
     )
     return resolved_task, lineage

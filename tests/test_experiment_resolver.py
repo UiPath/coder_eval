@@ -6,6 +6,7 @@ from coder_eval.models import (
     ExperimentDefaults,
     ExperimentDefinition,
     ExperimentVariant,
+    PostRunCommand,
     PromptPrefix,
     PromptReplace,
     PromptSuffix,
@@ -484,6 +485,51 @@ class TestTemplateSourcesOverlay:
 
         with pytest.raises(ValueError, match="RepoSource must be the first element"):
             resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+
+
+class TestPostRunMerge:
+    """Tests for experiment-level post_run defaults appended to task post_run."""
+
+    def test_experiment_defaults_appended_after_task(self):
+        """Task post_run runs first, then experiment defaults (cleanup-last semantics)."""
+        default_exp = _make_default_experiment()
+        task = _make_task(
+            agent={"type": "claude-code"},
+            post_run=[PostRunCommand(command="echo task-1"), PostRunCommand(command="echo task-2")],
+        )
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            defaults=ExperimentDefaults(post_run=[PostRunCommand(command="echo cleanup")]),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+
+        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert [p.command for p in resolved.post_run] == ["echo task-1", "echo task-2", "echo cleanup"]
+
+    def test_experiment_defaults_only(self):
+        """A task with no post_run still picks up experiment-defaults post_run."""
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"})
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            defaults=ExperimentDefaults(post_run=[PostRunCommand(command="echo cleanup")]),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+
+        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert [p.command for p in resolved.post_run] == ["echo cleanup"]
+
+    def test_no_post_run_anywhere(self):
+        """When neither task nor defaults declare post_run, the resolved list is empty."""
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"})
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+
+        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.post_run == []
 
 
 class TestPromptMutations:

@@ -3,7 +3,6 @@
 import asyncio
 import functools
 import logging
-import subprocess
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -56,6 +55,42 @@ from .utils import get_version_info
 
 # Get module logger
 logger = logging.getLogger(__name__)
+
+
+async def _pump_stream(
+    stream: asyncio.StreamReader | None,
+    log_fn: Callable[..., None],
+    label: str,
+    chunks: list[str],
+) -> None:
+    """Read ``stream`` line-by-line, log each non-empty line via ``log_fn``,
+    and accumulate the raw text into ``chunks`` for later capture.
+
+    Used to forward post_run subprocess output to the orchestrator log in
+    real time while still preserving it for ``PostRunResult``. If a single
+    line exceeds the StreamReader buffer (rare — only for binary-ish or
+    malformed output), it is drained as a chunk and logged as a partial.
+    """
+    if stream is None:
+        return
+    while True:
+        try:
+            raw = await stream.readline()
+        except asyncio.LimitOverrunError as e:
+            # Single line larger than the buffer; drain the buffered bytes so
+            # readline() can make progress on the next iteration.
+            raw = await stream.readexactly(e.consumed)
+            text = raw.decode(errors="replace")
+            chunks.append(text)
+            log_fn("[%s] (partial line, %d bytes)", label, len(raw))
+            continue
+        if not raw:
+            break
+        text = raw.decode(errors="replace")
+        chunks.append(text)
+        line = text.rstrip()
+        if line:
+            log_fn("[%s] %s", label, line)
 
 
 def _extract_failure_reason(result: CriterionResult) -> str | None:
@@ -705,12 +740,17 @@ class Orchestrator:
         return success
 
     _POST_RUN_MAX_OUTPUT = 100_000  # Truncate stdout/stderr to 100KB
+    _POST_RUN_STREAM_LIMIT = 262_144  # StreamReader per-line buffer (256KB)
 
     async def _run_post_run_commands(self) -> None:
         """Execute post-run commands inside the sandbox after evaluation.
 
-        Results are stored on self.result for observability but never affect pass/fail.
-        Errors are logged as warnings and captured in the result.
+        stdout/stderr are streamed line-by-line to the orchestrator logger as
+        the command runs (so long-running cleanup scripts show progress in the
+        live log) AND captured in ``post_run_results`` for the report.
+
+        Results never affect pass/fail. Errors are logged as warnings and
+        captured in the result.
         """
         if not self.task.post_run or not self.sandbox or not self.sandbox.sandbox_dir or not self.result:
             return
@@ -723,21 +763,49 @@ class Orchestrator:
             logger.info("Running post-run command: %s", post_run.command)
 
             try:
-                proc = await asyncio.to_thread(
-                    subprocess.run,
+                proc = await asyncio.create_subprocess_shell(
                     post_run.command,
-                    shell=True,  # nosec B602,B604 - commands come from task YAML, not user input
                     cwd=str(sandbox_dir),
-                    capture_output=True,
-                    text=True,
-                    timeout=post_run.timeout,
-                )
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    limit=self._POST_RUN_STREAM_LIMIT,
+                )  # nosec B602,B604 - commands come from task YAML, not user input
+
+                stdout_chunks: list[str] = []
+                stderr_chunks: list[str] = []
+
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(
+                            _pump_stream(proc.stdout, logger.info, "post_run stdout", stdout_chunks),
+                            _pump_stream(proc.stderr, logger.warning, "post_run stderr", stderr_chunks),
+                            proc.wait(),
+                        ),
+                        timeout=post_run.timeout,
+                    )
+                except TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    self.result.post_run_results.append(
+                        PostRunResult(
+                            command=post_run.command,
+                            stdout="".join(stdout_chunks)[:max_out],
+                            stderr="".join(stderr_chunks)[:max_out],
+                            error=f"Timed out after {post_run.timeout}s",
+                            duration_seconds=time.time() - start,
+                        )
+                    )
+                    logger.warning("Post-run command '%s' timed out after %ds", post_run.command, post_run.timeout)
+                    continue
+
+                stdout_text = "".join(stdout_chunks)[:max_out]
+                stderr_text = "".join(stderr_chunks)[:max_out]
                 self.result.post_run_results.append(
                     PostRunResult(
                         command=post_run.command,
                         exit_code=proc.returncode,
-                        stdout=proc.stdout[:max_out],
-                        stderr=proc.stderr[:max_out],
+                        stdout=stdout_text,
+                        stderr=stderr_text,
                         duration_seconds=time.time() - start,
                     )
                 )
@@ -746,17 +814,8 @@ class Orchestrator:
                         "Post-run command '%s' exited with code %d: %s",
                         post_run.command,
                         proc.returncode,
-                        proc.stderr[:200],
+                        stderr_text[:200],
                     )
-            except subprocess.TimeoutExpired:
-                self.result.post_run_results.append(
-                    PostRunResult(
-                        command=post_run.command,
-                        error=f"Timed out after {post_run.timeout}s",
-                        duration_seconds=time.time() - start,
-                    )
-                )
-                logger.warning("Post-run command '%s' timed out after %ds", post_run.command, post_run.timeout)
             except Exception as e:
                 self.result.post_run_results.append(
                     PostRunResult(

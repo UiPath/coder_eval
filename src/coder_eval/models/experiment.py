@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from coder_eval.models.enums import FinalStatus
 from coder_eval.models.mutations import PromptMutation
 from coder_eval.models.results import ConfigLineageEntry, EvaluationResult
-from coder_eval.models.tasks import TaskDefinition
+from coder_eval.models.tasks import PostRunCommand, TaskDefinition
 from coder_eval.models.templates import TemplateSource
 
 
@@ -68,6 +68,10 @@ class ExperimentDefaults(BaseModel):
     )
     prompt_mutations: list[PromptMutation] | None = Field(
         default=None, description="Default prompt mutations applied to all variants (before variant-specific mutations)"
+    )
+    post_run: list[PostRunCommand] | None = Field(
+        default=None,
+        description="Default post-run commands appended after each task's own post_run (run for every task).",
     )
 
 

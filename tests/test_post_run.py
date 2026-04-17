@@ -1,5 +1,6 @@
 """Tests for post-run command model and orchestrator integration."""
 
+import logging
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -235,6 +236,41 @@ async def test_post_run_cwd_is_sandbox(tmp_path):
 
     result = orch.result.post_run_results[0]
     assert result.stdout.strip() == str(sandbox_dir)
+
+
+@pytest.mark.asyncio
+async def test_post_run_streams_stdout_to_logger(tmp_path, caplog):
+    """Each line of stdout is forwarded to the orchestrator logger as it is read."""
+    task = _make_task(post_run=[PostRunCommand(command="python3 -c \"print('line-one'); print('line-two')\"")])
+    orch = _make_orchestrator(task, tmp_path)
+    orch.sandbox = AsyncMock()
+    orch.sandbox.sandbox_dir = tmp_path
+
+    with caplog.at_level(logging.INFO, logger="coder_eval.orchestrator"):
+        await orch._run_post_run_commands()
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("[post_run stdout] line-one" in m for m in messages)
+    assert any("[post_run stdout] line-two" in m for m in messages)
+    # And the final result still captures the full stdout.
+    result = orch.result.post_run_results[0]
+    assert "line-one" in result.stdout
+    assert "line-two" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_post_run_streams_stderr_as_warning(tmp_path, caplog):
+    """Stderr lines are forwarded at WARNING level (separate from stdout)."""
+    task = _make_task(post_run=[PostRunCommand(command="python3 -c \"import sys; print('boom', file=sys.stderr)\"")])
+    orch = _make_orchestrator(task, tmp_path)
+    orch.sandbox = AsyncMock()
+    orch.sandbox.sandbox_dir = tmp_path
+
+    with caplog.at_level(logging.WARNING, logger="coder_eval.orchestrator"):
+        await orch._run_post_run_commands()
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("[post_run stderr] boom" in m for m in warnings)
 
 
 @pytest.mark.asyncio
