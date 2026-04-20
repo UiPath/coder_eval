@@ -1,6 +1,7 @@
 """Claude Code agent implementation using the Claude Agent SDK."""
 
 import dataclasses
+import json
 import logging
 import os
 import re
@@ -104,6 +105,8 @@ def _serialize_value(value: Any) -> Any:
 
 
 _SENSITIVE_ENV_KEYWORDS = {"TOKEN", "KEY", "SECRET"}
+
+_JSON_START_SEARCH_LIMIT = 200
 
 
 def _redact_env(env: dict[str, str]) -> dict[str, str]:
@@ -620,6 +623,56 @@ class ClaudeCodeAgent(Agent):
             logger.debug(f"--- {msg_type}: {str(message)[:200]}")
 
     @staticmethod
+    def _try_parse_json_value(content: Any) -> dict[str, Any] | list[Any] | None:
+        """Return the parsed JSON object or array from content, else None.
+
+        Accepts the two SDK-delivered shapes for ToolResultBlock.content: a plain
+        string, or a list of content blocks (MCP tools use this, e.g.
+        [{"type": "text", "text": "..."}]). Within the first 200 characters,
+        looks for the first line whose first non-whitespace character is `{` or
+        `[` and parses from there using raw_decode, so prefix noise (e.g. warning
+        lines the `uip` CLI prints before the JSON body) and trailing garbage are
+        tolerated. Requiring the brace to start a line avoids false positives
+        from incidental `{` or `[` embedded inside text (e.g. the Read tool's
+        line-numbered source where `items: list = []` would otherwise parse as
+        an empty list). The 200-char cap further rules out braces buried deep in
+        long text output. If the candidate fails to parse, returns None — no
+        fragment fallback, which would surface misleading partial captures from
+        truncated payloads. Bare empty containers (`{}` / `[]`) are rejected:
+        a non-empty dict or list is evidence of real structured content.
+        Primitives (strings, numbers, booleans, null) are rejected for the same
+        reason — a bare primitive adds no information beyond result_summary.
+        Non-JSON tool output is normal; parse failures are swallowed silently.
+        """
+        if isinstance(content, list):
+            text_parts = [
+                block["text"]
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+            ]
+            if not text_parts:
+                return None
+            content = "".join(text_parts)
+        if not isinstance(content, str):
+            return None
+        # Only look for the JSON start within the first 200 chars — enough to skip
+        # a few prefix warning lines but not so lax that a brace buried in a long
+        # text body gets mistaken for a structured payload.
+        match = re.search(r"(?:^|\n)[^\S\n]*[{[]", content[:_JSON_START_SEARCH_LIMIT])
+        if not match:
+            return None
+        try:
+            parsed, _ = json.JSONDecoder().raw_decode(content, match.end() - 1)
+        except ValueError:
+            return None
+        # Reject bare empty containers ({} / []): a non-empty dict or list is
+        # evidence of real structured content, an empty one is indistinguishable
+        # from an accidental match and adds nothing over result_summary.
+        if isinstance(parsed, (dict, list)) and parsed:
+            return parsed
+        return None
+
+    @staticmethod
     def _resolve_pending_command(
         tool_use_id: str,
         is_error: bool,
@@ -652,6 +705,7 @@ class ClaudeCodeAgent(Agent):
             cmd.result_status = "error" if is_error else "success"
             cmd.duration_ms = duration_ms
             cmd.result_summary = content_str[:200] if content_str else None
+            cmd.result_data = ClaudeCodeAgent._try_parse_json_value(content)
 
             if is_error:
                 cmd.error_message = content_str

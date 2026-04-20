@@ -55,6 +55,18 @@ class CommandTelemetry(BaseModel):
         default=None, description="Brief summary of result (e.g., 'File read: 245 bytes', 'Exit code: 0')"
     )
     error_message: str | None = Field(default=None, description="Error message if command failed")
+    result_data: dict[str, Any] | list[Any] | None = Field(
+        default=None,
+        description=(
+            "First parsed JSON object or array found in the tool result content. "
+            "Prefix noise (e.g. CLI warning lines before the JSON body) and trailing "
+            "garbage are tolerated. None for content without any parseable JSON object "
+            "or array and for bare primitives (strings, numbers, booleans, null). "
+            "Complements result_summary (a short text preview) by preserving the full "
+            "structured payload so downstream consumers can extract specialised views "
+            "without re-parsing the log."
+        ),
+    )
 
     # Metadata
     sequence_number: int = Field(default=0, description="Order within the turn (0-indexed)")
