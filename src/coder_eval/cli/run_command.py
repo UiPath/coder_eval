@@ -1,6 +1,7 @@
 """Run command - execute evaluation tasks."""
 
 import asyncio
+import logging
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -198,6 +199,12 @@ def run_command(
         "-e",
         help="Experiment definition YAML (default: experiments/default.yaml)",
     ),
+    sample: int | None = typer.Option(
+        None,
+        "--sample",
+        help="For dataset-backed tasks, use only the first N rows. Lets you smoke-test datasets cheaply.",
+        min=1,
+    ),
 ) -> None:
     """Run evaluation tasks (optionally in parallel).
 
@@ -299,6 +306,7 @@ def run_command(
                 plugins_list,
                 ignore_patterns_list,
                 experiment_path=resolved_experiment,
+                max_rows=sample,
             )
         )
     except KeyboardInterrupt:
@@ -327,6 +335,7 @@ async def _run_all_tasks(
     plugins: list[SdkPluginConfig] | None = None,
     ignore_patterns: list[str] | None = None,
     experiment_path: Path | None = None,
+    max_rows: int | None = None,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -385,10 +394,13 @@ async def _run_all_tasks(
         ignore_patterns=ignore_patterns,
         task_timeout=task_timeout,
         turn_timeout=turn_timeout,
+        max_rows=max_rows,
     )
 
     # Always run through experiment layer (defaults to experiments/default.yaml)
-    summary = await _run_with_experiment(all_task_files, config, experiment_path, stream_mode, max_parallel)
+    summary, failed_suite_gates = await _run_with_experiment(
+        all_task_files, config, experiment_path, stream_mode, max_parallel
+    )
 
     # Aggregate task logs into run.log
     from ..logging_config import aggregate_task_logs
@@ -398,8 +410,8 @@ async def _run_all_tasks(
     # Print execution summary
     print_execution_summary(run_dir, summary)
 
-    # Exit with non-zero code if any tasks failed or errored
-    if summary.tasks_failed > 0 or summary.tasks_error > 0:
+    # Exit with non-zero code if any tasks failed, errored, or any suite failed its thresholds.
+    if summary.tasks_failed > 0 or summary.tasks_error > 0 or failed_suite_gates > 0:
         raise typer.Exit(1)
 
 
@@ -457,7 +469,7 @@ async def _run_with_experiment(
     experiment_path: Path | None,
     stream_mode: str | None,
     max_parallel: int,
-) -> RunSummary:
+) -> tuple[RunSummary, int]:
     """Run tasks through the experiment resolution layer.
 
     Loads experiments, resolves task configs (all 5 layers), executes via
@@ -527,4 +539,17 @@ async def _run_with_experiment(
     # Reports are written at run root level (no experiment_id subfolder)
     ExperimentReportGenerator.write_reports(experiment_result, config.run_dir, experiment=experiment)
 
-    return summary
+    # Per-suite pass-rate rollups for dataset-backed tasks (no-op when none were used).
+    # Pass `resolved` through so suite_thresholds on each criterion can be evaluated.
+    from ..reports import write_suite_rollups
+
+    rollups = write_suite_rollups(config.run_dir, task_results, resolved_tasks=resolved)
+    failed_gates = [r for r in rollups if not r.passed]
+    if failed_gates:
+        logging.getLogger(__name__).warning(
+            "%d suite gate(s) failed thresholds: %s",
+            len(failed_gates),
+            ", ".join(f"{r.variant_id}/{r.suite_id}" for r in failed_gates),
+        )
+
+    return summary, len(failed_gates)

@@ -1,0 +1,27 @@
+task_id: "dataset-example"
+description: "Demonstrates dataset fan-out: one task file, N sub-tasks, one per row."
+initial_prompt: "Write the string '${row.expected}' into out.txt. Say nothing else."
+max_iterations: 1
+tags: [smoke, dataset]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Write"]
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+
+dataset:
+  rows:
+    - id: alpha
+      expected: "alpha"
+    - id: beta
+      expected: "beta"
+
+success_criteria:
+  - type: "file_check"
+    path: "out.txt"
+    includes: ["${row.expected}"]
+    description: "out.txt contains '${row.expected}'"

@@ -2,13 +2,14 @@
 
 import logging
 import os
+import statistics
 import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from functools import wraps
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from coder_eval.models import BaseSuccessCriterion, CriterionResult
+from coder_eval.models import BaseSuccessCriterion, CriterionAggregate, CriterionResult
 
 
 if TYPE_CHECKING:
@@ -138,6 +139,48 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             Any exception - will be caught by @handle_criterion_errors decorator
         """
         pass
+
+    def aggregate(
+        self,
+        criterion: C,
+        per_row_results: list[CriterionResult],
+    ) -> CriterionAggregate | None:
+        """Across-row aggregate for dataset-backed tasks.
+
+        Default implementation emits summary statistics over the per-row scores:
+        ``count``, ``mean``, ``median``, ``std``, ``min``, ``max``. This gives
+        every criterion a thresholdable baseline for free (e.g. a ``file_exists``
+        task can gate on ``suite_thresholds: {mean: 0.9}``).
+
+        Returns ``None`` only when there are no per-row results (empty dataset).
+
+        Subclasses with richer signals (classification, per-label metrics, etc.)
+        should override and call ``super().aggregate(...)`` to inherit these
+        baseline stats, then merge their own metrics and details on top.
+        """
+        if not per_row_results:
+            return None
+
+        scores = [r.score for r in per_row_results]
+        std = statistics.pstdev(scores) if len(scores) > 1 else 0.0
+        metrics: dict[str, float] = {
+            "count": float(len(scores)),
+            "mean": statistics.fmean(scores),
+            "median": statistics.median(scores),
+            "std": std,
+            "min": min(scores),
+            "max": max(scores),
+        }
+        # `type` is a Literal on every concrete subclass of BaseSuccessCriterion,
+        # but the bound doesn't expose it — reach through getattr for pyright.
+        criterion_type = getattr(criterion, "type", "unknown")
+        return CriterionAggregate(
+            criterion_type=criterion_type,
+            metrics=metrics,
+            threshold_checks=[],
+            passed=True,
+            details={},
+        )
 
 
 # Decorator for registration (defined here to avoid circular imports)

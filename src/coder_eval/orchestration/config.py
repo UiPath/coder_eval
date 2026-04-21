@@ -39,3 +39,10 @@ class BatchRunConfig(BaseModel):
     # Timeout overrides (CLI > task YAML)
     task_timeout: int | None = Field(default=None, ge=30, description="Override task timeout for all tasks")
     turn_timeout: int | None = Field(default=None, ge=10, description="Override turn timeout for all tasks")
+
+    # Dataset sampling (for cheap smoke runs on dataset-backed tasks)
+    max_rows: int | None = Field(
+        default=None,
+        ge=1,
+        description="Cap rows per dataset-backed task to first N. Non-dataset tasks unaffected.",
+    )

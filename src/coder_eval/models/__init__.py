@@ -11,6 +11,7 @@ from claude_agent_sdk import SdkPluginConfig
 # Criteria
 from coder_eval.models.criteria import (
     BaseSuccessCriterion,
+    ClassificationMatchCriterion,
     CommandExecutedCriterion,
     CommandsEfficiencyCriterion,
     FileCheckCriterion,
@@ -25,6 +26,7 @@ from coder_eval.models.criteria import (
     ReferenceComparisonCriterion,
     RegexPattern,
     RunCommandCriterion,
+    SkillTriggeredCriterion,
     SuccessCriterion,
     UiPathEvalCriterion,
 )
@@ -63,14 +65,22 @@ from coder_eval.models.mutations import (
 
 # Results
 from coder_eval.models.results import (
+    ClassificationCriterionResult,
+    ClassLabelStats,
     ConfigLineageEntry,
+    ConfusionEntry,
+    CriterionAggregate,
     CriterionResult,
+    CriterionStats,
     EvaluationResult,
+    FailedRowSummary,
     FileChange,
     LLMDecision,
     PostRunResult,
     RunSummary,
+    SuiteRollup,
     TaskConfigRecord,
+    ThresholdCheck,
     TurnRecord,
 )
 
@@ -100,6 +110,7 @@ from coder_eval.models.sandbox import (
 from coder_eval.models.tasks import (
     DEFAULT_GATEWAY_MODEL,
     AgentConfig,
+    Dataset,
     LLMReviewerConfig,
     PostRunCommand,
     ReferenceSource,
@@ -136,6 +147,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "SnapshotMode",
     # Criteria
     "BaseSuccessCriterion",
+    "ClassificationMatchCriterion",
     "FileExistsCriterion",
     "FileContainsCriterion",
     "FileCheckCriterion",
@@ -151,6 +163,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "CommandsEfficiencyCriterion",
     "UiPathEvalCriterion",
     "ImportCheckCriterion",
+    "SkillTriggeredCriterion",
     "SuccessCriterion",
     # Routing
     "ROUTE_NAMES",
@@ -181,19 +194,28 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "SlowestCommandInfo",
     "TokenUsage",
     # Results
+    "ClassificationCriterionResult",
+    "ClassLabelStats",
     "ConfigLineageEntry",
+    "ConfusionEntry",
+    "CriterionAggregate",
     "CriterionResult",
+    "CriterionStats",
+    "FailedRowSummary",
+    "ThresholdCheck",
     "LLMDecision",
     "FileChange",
     "PostRunResult",
     "TurnRecord",
     "EvaluationResult",
+    "SuiteRollup",
     "TaskConfigRecord",
     "RunSummary",
     # Tasks
     "TaskDefinition",
     "DEFAULT_GATEWAY_MODEL",
     "AgentConfig",
+    "Dataset",
     "LLMReviewerConfig",
     "PostRunCommand",
     "ReferenceSource",

@@ -24,7 +24,7 @@ defaults:
   max_iterations: 1
 
 variants:
-  - variant_id: without-plugin
+#  - variant_id: without-plugin
 
   - variant_id: with-plugin
     agent:

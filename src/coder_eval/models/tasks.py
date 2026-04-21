@@ -126,6 +126,52 @@ class ReferenceSource(BaseModel):
         return self
 
 
+class Dataset(BaseModel):
+    """Dataset that fans out a single task into N sub-tasks, one per row.
+
+    Exactly one of ``rows`` (inline list of dicts) or ``path`` (JSONL file
+    relative to the task YAML) must be provided. Each row must contain the
+    field named by ``id_field``; that value is used as the stable row
+    identifier and becomes a suffix on the task_id ("<task_id>/<row.id>").
+
+    Row values are substituted into the task's ``initial_prompt`` and into
+    string fields of each ``success_criteria`` entry using ``${row.<field>}``
+    syntax. Substitution happens in ``task_loader.expand_dataset`` before
+    variant resolution, so variants cannot override the dataset.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str | None = Field(
+        default=None,
+        description="Path to a JSONL file (one JSON object per line), relative to the task YAML.",
+    )
+    rows: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="Inline list of row dicts. Mutually exclusive with 'path'.",
+    )
+    id_field: str = Field(
+        default="id",
+        description="Field in each row to use as the row identifier (default: 'id').",
+    )
+    sample: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Task-level default: use only the first N rows. Overridden by CLI '--sample' when provided. "
+            "Useful for committing a cheap-smoke default while still allowing full runs on demand."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def check_source(self) -> Self:
+        if self.path is None and self.rows is None:
+            raise ValueError("Dataset must specify either 'path' or 'rows'")
+        if self.path is not None and self.rows is not None:
+            raise ValueError("Dataset must specify only one of 'path' or 'rows', not both")
+        return self
+
+
 class PostRunCommand(BaseModel):
     """A command to execute after evaluation completes.
 
@@ -186,6 +232,25 @@ class TaskDefinition(BaseModel):
         default_factory=list,
         description="Commands to execute after evaluation completes. Do not affect pass/fail.",
     )
+    dataset: Dataset | None = Field(
+        default=None,
+        description=(
+            "Optional dataset to fan out this task into one sub-task per row. "
+            "Row values substitute into initial_prompt and success_criteria via ${row.<field>}. "
+            "Expansion happens before variant resolution, so variants cannot override the dataset."
+        ),
+    )
+    suite_id: str | None = Field(
+        default=None,
+        description=(
+            "Set by the dataset expander on expanded row-tasks to the original task_id. "
+            "Signal for suite-level pass-rate rollup reporting."
+        ),
+    )
+    row_id: str | None = Field(
+        default=None,
+        description="Set by the dataset expander on expanded row-tasks to the value from Dataset.id_field.",
+    )
 
     @model_validator(mode="after")
     def check_prompt_fields(self) -> Self:
@@ -194,6 +259,22 @@ class TaskDefinition(BaseModel):
             raise ValueError("Only one of 'initial_prompt' or 'initial_prompt_file' can be provided, not both")
         if self.initial_prompt is None and self.initial_prompt_file is None:
             raise ValueError("Either 'initial_prompt' or 'initial_prompt_file' must be provided")
+        return self
+
+    @model_validator(mode="after")
+    def check_suite_thresholds_require_dataset(self) -> Self:
+        """Across-row suite_thresholds only make sense for dataset-backed tasks.
+
+        Skipped for expanded row-tasks (``suite_id`` set), which have dataset
+        cleared by design — the original parent task already passed this check.
+        """
+        if self.dataset is None and self.suite_id is None:
+            for c in self.success_criteria:
+                if getattr(c, "suite_thresholds", None):
+                    raise ValueError(
+                        f"success_criteria[{c.type!r}].suite_thresholds requires a dataset: block "
+                        + "(thresholds are evaluated on aggregated across-row metrics)"
+                    )
         return self
 
     @field_validator("tags")

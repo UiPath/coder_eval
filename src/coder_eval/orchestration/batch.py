@@ -77,12 +77,24 @@ async def run_batch(
                 )
                 result = await orchestrator.run()
                 tr = TaskResult(
-                    task_id=rt.task.task_id, variant_id=rt.variant_id, result=result, duration=result.duration_seconds
+                    task_id=rt.task.task_id,
+                    variant_id=rt.variant_id,
+                    result=result,
+                    duration=result.duration_seconds,
+                    suite_id=rt.task.suite_id,
+                    row_id=rt.task.row_id,
                 )
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as exc:
-                tr = _create_error_task_result(rt.task_file, exc, task_id=rt.task.task_id, variant_id=rt.variant_id)
+                tr = _create_error_task_result(
+                    rt.task_file,
+                    exc,
+                    task_id=rt.task.task_id,
+                    variant_id=rt.variant_id,
+                    suite_id=rt.task.suite_id,
+                    row_id=rt.task.row_id,
+                )
             _safe_notify(on_task_complete, tr)
             return tr
 
@@ -99,7 +111,14 @@ async def run_batch(
         if isinstance(result, BaseException):
             rt = resolved_tasks[i]
             processed.append(
-                _create_error_task_result(rt.task_file, result, task_id=rt.task.task_id, variant_id=rt.variant_id)
+                _create_error_task_result(
+                    rt.task_file,
+                    result,
+                    task_id=rt.task.task_id,
+                    variant_id=rt.variant_id,
+                    suite_id=rt.task.suite_id,
+                    row_id=rt.task.row_id,
+                )
             )
         else:
             processed.append(result)
@@ -120,7 +139,13 @@ def _safe_notify(callback: Callable[[TaskResult], None] | None, result: TaskResu
 
 
 def _create_error_task_result(
-    task_file: Path, error: BaseException, *, task_id: str | None = None, variant_id: str
+    task_file: Path,
+    error: BaseException,
+    *,
+    task_id: str | None = None,
+    variant_id: str,
+    suite_id: str | None = None,
+    row_id: str | None = None,
 ) -> TaskResult:
     """Create a TaskResult for a failed task.
 
@@ -129,6 +154,8 @@ def _create_error_task_result(
         error: Exception that was raised.
         task_id: Explicit task ID; falls back to task_file.stem when unavailable.
         variant_id: Experiment variant ID.
+        suite_id: Parent suite id (dataset expansion).
+        row_id: Row id within the suite.
 
     Returns:
         TaskResult with error information.
@@ -146,7 +173,12 @@ def _create_error_task_result(
         environment_info={},
     )
     return TaskResult(
-        task_id=error_result.task_id, variant_id=error_result.variant_id, result=error_result, duration=0.0
+        task_id=error_result.task_id,
+        variant_id=error_result.variant_id,
+        result=error_result,
+        duration=0.0,
+        suite_id=suite_id,
+        row_id=row_id,
     )
 
 

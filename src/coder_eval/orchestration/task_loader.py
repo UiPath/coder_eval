@@ -1,10 +1,19 @@
 """Task definition loading and validation."""
 
+from __future__ import annotations
+
+import json
+import re
 from pathlib import Path
+from typing import Any
 
 import yaml
 
-from ..models import AgentConfig, ExperimentVariant, TaskDefinition, TemplateDirSource, TemplateSource
+from ..models import AgentConfig, Dataset, ExperimentVariant, TaskDefinition, TemplateDirSource, TemplateSource
+
+
+_ROW_VAR_PATTERN = re.compile(r"\$\{row\.([A-Za-z_][A-Za-z0-9_]*)\}")
+_ROW_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 
 
 def load_task(task_file: Path) -> tuple[TaskDefinition, str]:
@@ -139,3 +148,134 @@ def resolve_system_prompt_files(task: TaskDefinition, base_dir: Path) -> TaskDef
     if task.agent is not None:
         resolve_agent_system_prompt(task.agent, base_dir)
     return task
+
+
+def _load_dataset_rows(dataset: Dataset, task_file_dir: Path) -> list[dict[str, Any]]:
+    """Load dataset rows from inline list or a JSONL file."""
+    if dataset.rows is not None:
+        return [dict(r) for r in dataset.rows]
+
+    assert dataset.path is not None  # guaranteed by Dataset.check_source
+    p = Path(dataset.path)
+    if not p.is_absolute():
+        p = (task_file_dir / p).resolve()
+    if not p.exists():
+        raise FileNotFoundError(f"Dataset file not found: {p}")
+
+    rows: list[dict[str, Any]] = []
+    with p.open(encoding="utf-8") as f:
+        for line_num, raw_line in enumerate(f, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Dataset {p}: invalid JSON on line {line_num}: {e}") from e
+            if not isinstance(row, dict):
+                raise ValueError(f"Dataset {p}: row on line {line_num} is not a JSON object: {row!r}")
+            rows.append(row)
+    return rows
+
+
+def _substitute_row_in_str(s: str, row: dict[str, Any]) -> str:
+    """Replace ${row.<field>} occurrences in s with scalar values from row."""
+
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key not in row:
+            raise KeyError(f"${{row.{key}}}: key not found (available: {sorted(row.keys())})")
+        value = row[key]
+        if isinstance(value, dict | list):
+            raise TypeError(
+                f"${{row.{key}}}: value must be a scalar (str/int/float/bool/None), got {type(value).__name__}"
+            )
+        return "" if value is None else str(value)
+
+    return _ROW_VAR_PATTERN.sub(replace, s)
+
+
+def _substitute_row_in_tree(obj: Any, row: dict[str, Any]) -> Any:
+    """Walk a nested dict/list structure and substitute ${row.X} in every string leaf."""
+    if isinstance(obj, str):
+        return _substitute_row_in_str(obj, row)
+    if isinstance(obj, list):
+        return [_substitute_row_in_tree(x, row) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _substitute_row_in_tree(v, row) for k, v in obj.items()}
+    return obj
+
+
+def expand_dataset(
+    task: TaskDefinition,
+    task_file_dir: Path,
+    max_rows: int | None = None,
+) -> list[TaskDefinition]:
+    """Fan out a task with ``dataset:`` into one TaskDefinition per row.
+
+    Tasks without ``dataset:`` pass through unchanged as ``[task]``.
+
+    Each expanded task:
+      - has task_id rewritten to ``"<original_task_id>/<row_id>"``
+      - has ``dataset`` cleared (prevents re-expansion downstream)
+      - has ``${row.<field>}`` substituted in ``initial_prompt`` and in all
+        string leaves of ``success_criteria`` entries
+
+    Row ids are validated against a safe pattern so they're filesystem-safe
+    when used as directory names under the run_dir.
+
+    Args:
+        task: Task that may carry a dataset.
+        task_file_dir: Directory of the source task YAML (for resolving dataset.path).
+        max_rows: Optional CLI cap on rows used (for cheap smoke runs). First
+            N rows. When provided, overrides ``dataset.sample`` from the task YAML.
+
+    Returns:
+        Expanded list of TaskDefinitions. Length is 1 when dataset is None.
+
+    Raises:
+        ValueError: Empty dataset, duplicate row ids, missing id_field, or
+            malformed row id.
+        FileNotFoundError: Dataset path does not exist.
+    """
+    if task.dataset is None:
+        return [task]
+
+    rows = _load_dataset_rows(task.dataset, task_file_dir)
+    if not rows:
+        raise ValueError(f"Dataset for task '{task.task_id}' is empty")
+
+    # Precedence: CLI --sample (max_rows) wins over task-level dataset.sample.
+    effective_cap = max_rows if max_rows is not None else task.dataset.sample
+    if effective_cap is not None:
+        rows = rows[:effective_cap]
+
+    id_field = task.dataset.id_field
+    seen_ids: set[str] = set()
+    expanded: list[TaskDefinition] = []
+
+    for i, row in enumerate(rows):
+        if id_field not in row:
+            raise ValueError(f"Dataset row {i} for task '{task.task_id}' missing id_field '{id_field}': {row}")
+        row_id = str(row[id_field])
+        if not _ROW_ID_PATTERN.match(row_id):
+            raise ValueError(
+                f"Dataset row id {row_id!r} must match {_ROW_ID_PATTERN.pattern}"
+                + " (letters, digits, underscore, hyphen, dot)"
+            )
+        if row_id in seen_ids:
+            raise ValueError(f"Duplicate dataset row id for task '{task.task_id}': {row_id!r}")
+        seen_ids.add(row_id)
+
+        data = task.model_dump()
+        if isinstance(data.get("initial_prompt"), str):
+            data["initial_prompt"] = _substitute_row_in_str(data["initial_prompt"], row)
+        if isinstance(data.get("success_criteria"), list):
+            data["success_criteria"] = [_substitute_row_in_tree(c, row) for c in data["success_criteria"]]
+        data["suite_id"] = task.task_id
+        data["row_id"] = row_id
+        data["task_id"] = f"{task.task_id}/{row_id}"
+        data["dataset"] = None
+        expanded.append(TaskDefinition(**data))
+
+    return expanded

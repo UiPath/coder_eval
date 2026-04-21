@@ -139,6 +139,8 @@ def validate_registry() -> None:
             "commands_efficiency",
             "uipath_eval",
             "import_check",
+            "classification_match",
+            "skill_triggered",
         }
 
     registered_types = set(CriterionRegistry.list_types())

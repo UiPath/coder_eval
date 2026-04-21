@@ -19,7 +19,7 @@ coder_eval/
 ├── config.py                      # Settings via pydantic-settings (.env loading)
 ├── sandbox.py                     # Sandbox manager (tempdir, venv, templates, snapshots)
 ├── orchestrator.py                # Main evaluation loop
-├── reports.py                     # Markdown/JSON report generation (run-level)
+├── reports.py                     # Markdown/JSON report generation (run-level + per-suite rollup via write_suite_rollups)
 ├── reports_experiment.py          # Experiment/cross-variant report generation
 ├── analysis.py                    # Command statistics aggregation
 ├── logging_config.py              # Structured logging setup
@@ -31,28 +31,36 @@ coder_eval/
 │
 ├── models/                        # Pydantic data models (subpackage)
 │   ├── __init__.py                # Unified exports for all models
-│   ├── enums.py                   # AgentKind, AgentState, SnapshotMode
-│   ├── criteria.py                # 11 success criterion types + base + union
-│   ├── experiment.py              # ExperimentDefinition, ExperimentVariant, result models
-│   ├── results.py                 # CriterionResult, TurnRecord, EvaluationResult, etc.
+│   ├── enums.py                   # AgentKind, AgentState, SnapshotMode, FinalStatus, ApiBackend
+│   ├── criteria.py                # 15 success criterion types + base + union
+│   ├── experiment.py              # ExperimentDefinition, ExperimentVariant, ResolvedTask, result models
+│   ├── mutations.py               # PromptMutation variants (prefix/suffix/replace/template/rephrase)
+│   ├── results.py                 # CriterionResult (+ ClassificationCriterionResult), TurnRecord, EvaluationResult, CriterionAggregate, ThresholdCheck, SuiteRollup
+│   ├── routing.py                 # ApiRoute (DirectRoute/ProxyRoute/BedrockRoute)
 │   ├── sandbox.py                 # SandboxConfig, SnapshotConfig, ResourceLimits
-│   ├── tasks.py                   # TaskDefinition, AgentConfig (agent optional)
+│   ├── tasks.py                   # TaskDefinition, AgentConfig, Dataset (dataset fan-out + sample)
 │   ├── telemetry.py               # CommandTelemetry, CommandStatistics, TokenUsage
 │   └── templates.py               # RepoSource, TemplateDirSource, StarterFilesSource
 │
 ├── criteria/                      # Criterion checker plugins (one file per type)
 │   ├── __init__.py                # CriterionRegistry with auto-discovery
-│   ├── base.py                    # BaseCriterion class + @handle_criterion_errors
-│   ├── file_exists.py
-│   ├── file_contains.py
+│   ├── base.py                    # BaseCriterion (incl. default aggregate()) + @handle_criterion_errors
+│   ├── _classification_aggregate.py  # Shared overlay: accuracy / P/R/F1 / confusion matrix
+│   ├── classification_match.py    # File-based label matcher
+│   ├── command_executed.py
+│   ├── commands_efficiency.py
 │   ├── file_check.py
-│   ├── json_check.py
-│   ├── run_command.py
-│   ├── pytest_criterion.py
+│   ├── file_contains.py
+│   ├── file_exists.py
 │   ├── file_matches_regex.py
+│   ├── import_check.py
+│   ├── json_check.py
 │   ├── pylint_score.py
+│   ├── pytest_criterion.py
 │   ├── reference_comparison.py
-│   └── command_executed.py
+│   ├── run_command.py
+│   ├── skill_triggered.py         # Binary: did the agent invoke a Skill tool?
+│   └── uipath_eval.py
 │
 ├── evaluation/                    # Evaluation orchestration
 │   ├── checker.py                 # SuccessChecker (dispatches to criteria/)
@@ -127,8 +135,10 @@ templates/                         # Sandbox template directories
 - **Callback Streaming**: `StreamCallback` protocol with `TaskScopedCallback` wrapper for real-time LLM event output
 - **Experiment Layer**: Pre-processing config resolver (`ExperimentRunner`) that resolves task × variant combinations via 5-layer merge (default → experiment defaults → task → variant → CLI) before passing to `run_batch`
 - **All core models importable from `coder_eval.models`** regardless of submodule (`AutogenConfig` lives in `coder_eval.tools.autogen.config` — it's not a core model)
+- **Dataset fan-out**: `TaskDefinition.dataset` (inline rows or JSONL path) expands a single task into N row-tasks with `${row.<field>}` substitution in `initial_prompt` and `success_criteria` string fields. Expansion runs in `task_loader.expand_dataset` **before** variant resolution, so variants cannot override the dataset. Row cap: CLI `--sample N` > task-level `dataset.sample`.
+- **Per-criterion aggregation**: Each `BaseCriterion` subclass exposes `aggregate(criterion, per_row_results) -> CriterionAggregate | None`. Default emits `count / mean / median / std / min / max` so every criterion is suite-thresholdable for free. Classification-style criteria return `ClassificationCriterionResult` (subclass of `CriterionResult`) and layer accuracy / P/R/F1 / confusion via the shared `overlay_classification_metrics` utility. `BaseSuccessCriterion.suite_thresholds` gates the suite on those metrics; CLI exits non-zero on any gate failure.
 
-## Success Criteria (13 types)
+## Success Criteria (15 types)
 
 | Type | Scoring | Description |
 |------|---------|-------------|
@@ -145,8 +155,10 @@ templates/                         # Sandbox template directories
 | `commands_efficiency` | Continuous | Agent tool-call efficiency relative to expected budget |
 | `import_check` | Fractional | AST-based import extraction + importlib validation |
 | `uipath_eval` | Fractional | UiPath agent evaluation results |
+| `classification_match` | Binary | File-based label match (observed vs expected) with `(none)`/`(other)` sentinels; emits `ClassificationCriterionResult` for suite-level P/R/F1 |
+| `skill_triggered` | Binary | Did the agent invoke a `Skill` tool during the run? Emits `ClassificationCriterionResult` for suite-level P/R/F1 |
 
-All criteria support `weight` (default 1.0) and `pass_threshold` (default 0.9).
+All criteria support `weight` (default 1.0) and `pass_threshold` (default 0.9). On dataset-backed tasks, criteria may also set `suite_thresholds: {metric: min_value}` — the suite gate passes iff every listed metric (from the criterion's `aggregate()` output) meets its minimum.
 
 ## Evaluation Flow
 

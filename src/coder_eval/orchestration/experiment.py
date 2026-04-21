@@ -37,6 +37,7 @@ from ..models import (
 )
 from .config import BatchRunConfig
 from .task_loader import (
+    expand_dataset,
     load_task,
     resolve_agent_system_prompt,
     resolve_template_source_paths,
@@ -561,29 +562,37 @@ def resolve_all_tasks(
     for task_file in task_files:
         task, source_yaml = load_task(task_file)
 
-        for variant in experiment.variants:
-            # Apply layers 1-4 (default → experiment-defaults → task → variant)
-            resolved_task, lineage = resolve_task_for_variant(default_experiment, task, experiment, variant)
+        # Dataset fan-out BEFORE variant resolution: one task per row, each
+        # treated as an independent task for the 4-layer merge below. This
+        # locks the invariant that variants cannot override the dataset.
+        expanded_tasks = expand_dataset(task, task_file.parent, max_rows=config.max_rows)
 
-            # Resolve file paths injected by variant overrides
-            resolve_task_files(resolved_task, task_file, experiment_file)
-
-            # Apply prompt mutations or overrides (between file resolution and CLI overrides)
-            _apply_prompt_overrides(resolved_task, experiment, variant, lineage)
-
-            # Apply layer 5 (CLI / .env overrides)
-            _apply_cli_overrides(resolved_task, config, lineage)
-
-            resolved.append(
-                ResolvedTask(
-                    task=resolved_task,
-                    task_file=task_file,
-                    run_dir=config.run_dir / variant.variant_id / resolved_task.task_id,
-                    variant_id=variant.variant_id,
-                    source_yaml=source_yaml,
-                    config_lineage=lineage,
+        for expanded_task in expanded_tasks:
+            for variant in experiment.variants:
+                # Apply layers 1-4 (default → experiment-defaults → task → variant)
+                resolved_task, lineage = resolve_task_for_variant(
+                    default_experiment, expanded_task, experiment, variant
                 )
-            )
+
+                # Resolve file paths injected by variant overrides
+                resolve_task_files(resolved_task, task_file, experiment_file)
+
+                # Apply prompt mutations or overrides (between file resolution and CLI overrides)
+                _apply_prompt_overrides(resolved_task, experiment, variant, lineage)
+
+                # Apply layer 5 (CLI / .env overrides)
+                _apply_cli_overrides(resolved_task, config, lineage)
+
+                resolved.append(
+                    ResolvedTask(
+                        task=resolved_task,
+                        task_file=task_file,
+                        run_dir=config.run_dir / variant.variant_id / resolved_task.task_id,
+                        variant_id=variant.variant_id,
+                        source_yaml=source_yaml,
+                        config_lineage=lineage,
+                    )
+                )
 
     # Filter by tags
     if config.include_tags or config.exclude_tags:

@@ -30,6 +30,16 @@ class BaseSuccessCriterion(BaseModel, ABC):
         default=0.9, ge=0.0, le=1.0, description="Minimum score required to pass (default: 0.9 = 90%)"
     )
 
+    suite_thresholds: dict[str, float] | None = Field(
+        default=None,
+        description=(
+            "Across-row thresholds as {metric_name: minimum}. Only valid on tasks that declare a dataset:. "
+            "The criterion passes at the suite level iff every listed metric meets its minimum. "
+            "Metric names come from the criterion's aggregate() output (e.g. 'accuracy', 'f1.macro', "
+            "'recall.positive' for classification_match)."
+        ),
+    )
+
     requires_agent: ClassVar[bool] = False
     """True if this criterion requires agent turn records to evaluate correctly."""
 
@@ -423,6 +433,77 @@ class UiPathEvalCriterion(BaseSuccessCriterion):
     )
 
 
+class ClassificationMatchCriterion(BaseSuccessCriterion):
+    """Match a single label written by the agent to a file against ground truth.
+
+    Reads the file, normalizes the content (strip + optional lowercase), and
+    compares it to ``expected_label``. The observed label is the canonical form
+    from ``allowed_labels`` when it matches; otherwise ``'(none)'`` when the
+    file is missing / empty and ``'(other)'`` when the content is not in the
+    allowed set. Both are recorded as sentinels so the suite rollup can show
+    them as real failure classes in the confusion matrix.
+
+    The checker returns a ``ClassificationCriterionResult`` (subclass of
+    ``CriterionResult``) carrying observed + expected labels, which the
+    suite aggregator reads to compute P/R/F1 per class and a confusion matrix.
+
+    Example YAML:
+
+        success_criteria:
+          - type: "classification_match"
+            path: "result.txt"
+            expected_label: "positive"
+            allowed_labels: [positive, negative]
+            description: "Sentiment label matches ground truth"
+    """
+
+    type: Literal["classification_match"] = "classification_match"
+    path: str = Field(description="Path to the file (relative to sandbox) containing the agent's predicted label")
+    expected_label: str = Field(description="Ground-truth label for this row")
+    allowed_labels: list[str] = Field(
+        min_length=1,
+        description="Canonical label set. File content not in this set is treated as '(other)'.",
+    )
+    case_sensitive: bool = Field(
+        default=False,
+        description="When False (default), matching is case-insensitive and labels are canonicalised.",
+    )
+
+
+class SkillTriggeredCriterion(BaseSuccessCriterion):
+    """Binary classifier: did the agent invoke a Skill tool during the run?
+
+    Observed label is ``"yes"`` when any ``Skill`` tool invocation is
+    recorded in ``turn_records`` (optionally filtered by ``skill_name``),
+    otherwise ``"no"``. Compared to the ``expected`` label threaded from
+    the dataset row. Returns a ``ClassificationCriterionResult`` so the
+    suite-level aggregator produces accuracy / recall / F1 / confusion.
+
+    Example YAML:
+
+        success_criteria:
+          - type: "skill_triggered"
+            expected: "${row.should_trigger}"
+            description: "Agent invoked a flow skill for row ${row.id}"
+            suite_thresholds:
+              accuracy: 0.75
+              recall.yes: 0.7
+              recall.no: 0.7
+    """
+
+    requires_agent: ClassVar[bool] = True
+
+    type: Literal["skill_triggered"] = "skill_triggered"
+    expected: str = Field(description="Expected label ('yes' or 'no' after row substitution).")
+    skill_name: str | None = Field(
+        default=None,
+        description=(
+            "Optional filter: only count Skill invocations whose 'skill' parameter matches this name. "
+            "Default (None) counts any Skill call."
+        ),
+    )
+
+
 class ImportCheckCriterion(BaseSuccessCriterion):
     """Check that a Python file parses correctly and its imports resolve.
 
@@ -463,4 +544,6 @@ SuccessCriterion = (
     | CommandsEfficiencyCriterion
     | UiPathEvalCriterion
     | ImportCheckCriterion
+    | ClassificationMatchCriterion
+    | SkillTriggeredCriterion
 )

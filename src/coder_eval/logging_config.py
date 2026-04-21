@@ -253,7 +253,11 @@ def aggregate_task_logs(run_dir: Path) -> None:
         outfile.write("\n" + "=" * 80 + "\n\n")
 
         for task_log_path in task_log_paths:
-            task_id = task_log_path.parent.name
+            # Use the path relative to run_dir so nested task ids from dataset
+            # fan-out (variant/suite/row) render with full context, not just
+            # the leaf directory name. as_posix() keeps the header consistent
+            # across platforms (experiment.log is commonly shared / pasted).
+            task_id = task_log_path.parent.relative_to(run_dir).as_posix()
             outfile.write(f"\n{'=' * 80}\n")
             outfile.write(f"TASK: {task_id}\n")
             outfile.write(f"{'=' * 80}\n\n")

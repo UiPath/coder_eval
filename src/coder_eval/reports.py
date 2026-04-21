@@ -3,14 +3,31 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from collections import defaultdict
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
+
+from .models import (
+    CriterionAggregate,
+    CriterionStats,
+    FailedRowSummary,
+    SuiteRollup,
+    TaskResult,
+    ThresholdCheck,
+)
 
 
 if TYPE_CHECKING:
     from .models import CommandStatistics, RunSummary
 
 logger = logging.getLogger(__name__)
+
+# Cap on how many failed rows are carried in suite.json / rendered in suite.md.
+_FAILED_SAMPLE_LIMIT = 20
+# Cap on how many criterion failure reasons we record per failed row.
+_FAILURE_REASONS_PER_ROW = 3
+# Cap on each failure-reason string so suite.md stays readable.
+_FAILURE_REASON_MAX_LEN = 240
 
 
 SYSTEM_PROMPT_PREVIEW_CHARS = 200
@@ -506,3 +523,363 @@ class ReportGenerator:
         raise FileNotFoundError(
             f"No report found in {run_dir}. Expected experiment.md, experiment.json, run.md, or run.json"
         )
+
+
+def _evaluate_thresholds(
+    aggregate: CriterionAggregate, suite_thresholds: dict[str, float] | None
+) -> CriterionAggregate:
+    """Return a new CriterionAggregate with threshold_checks + passed filled in.
+
+    When a threshold references a metric the aggregate didn't produce, the check
+    records actual_value=None and fails.
+    """
+    if not suite_thresholds:
+        return aggregate.model_copy(update={"threshold_checks": [], "passed": True})
+
+    checks: list[ThresholdCheck] = []
+    for metric, min_value in suite_thresholds.items():
+        actual = aggregate.metrics.get(metric)
+        passed = actual is not None and actual >= min_value
+        checks.append(ThresholdCheck(metric=metric, min_value=min_value, actual_value=actual, passed=passed))
+
+    return aggregate.model_copy(update={"threshold_checks": checks, "passed": all(c.passed for c in checks)})
+
+
+def _build_missing_aggregator(criterion_type: str, suite_thresholds: dict[str, float]) -> CriterionAggregate:
+    """A stub aggregate used when a criterion declares suite_thresholds but its
+    checker doesn't implement ``aggregate()``. Marks every threshold as failed
+    with no actual value and records an error."""
+    checks = [
+        ThresholdCheck(metric=metric, min_value=min_value, actual_value=None, passed=False)
+        for metric, min_value in suite_thresholds.items()
+    ]
+    return CriterionAggregate(
+        criterion_type=criterion_type,
+        metrics={},
+        threshold_checks=checks,
+        passed=False,
+        details={},
+        error="Criterion checker did not produce an aggregate, so thresholds cannot be evaluated.",
+    )
+
+
+def _compute_suite_rollup(
+    suite_id: str,
+    variant_id: str,
+    rows: list[TaskResult],
+    run_dir: Path,
+    task_criteria: list[Any] | None = None,
+) -> SuiteRollup:
+    """Compute a SuiteRollup from a list of row-level TaskResults in one variant.
+
+    ``task_criteria`` is the original ``success_criteria`` list from the task
+    definition. It drives per-criterion ``aggregate()`` invocation and
+    ``suite_thresholds`` evaluation. Pass None when unavailable — per-criterion
+    stats still compute but no aggregate/threshold gating happens.
+    """
+    from .criteria import CriterionRegistry, init_criteria
+
+    rows_total = len(rows)
+    rows_passed = sum(1 for r in rows if r.result.final_status.category == "succeeded")
+    rows_failed = sum(1 for r in rows if r.result.final_status.category == "failed")
+    rows_error = sum(1 for r in rows if r.result.final_status.category == "error")
+
+    scored = [r.result.weighted_score for r in rows if r.result.weighted_score is not None]
+    average_weighted_score = sum(scored) / len(scored) if scored else None
+
+    # Per-criterion-type tallies: scores, errors, and the per-row CriterionResults
+    # that each checker's aggregate() will consume.
+    by_type: dict[str, list[float]] = defaultdict(list)
+    errors_by_type: dict[str, int] = defaultdict(int)
+    results_by_type: dict[str, list[Any]] = defaultdict(list)
+    for row in rows:
+        for cr in row.result.success_criteria_results:
+            by_type[cr.criterion_type].append(cr.score)
+            if cr.error is not None:
+                errors_by_type[cr.criterion_type] += 1
+            results_by_type[cr.criterion_type].append(cr)
+
+    criterion_stats = [
+        CriterionStats(
+            criterion_type=ctype,
+            rows_evaluated=len(scores),
+            average_score=sum(scores) / len(scores) if scores else 0.0,
+            error_count=errors_by_type.get(ctype, 0),
+        )
+        for ctype, scores in sorted(by_type.items())
+    ]
+
+    # Drive each criterion's aggregate() + evaluate suite_thresholds.
+    criterion_aggregates: list[CriterionAggregate] = []
+    if task_criteria is not None:
+        init_criteria(validate=False)
+        for criterion in task_criteria:
+            ctype = criterion.type
+            per_rows = results_by_type.get(ctype, [])
+            suite_thresholds = getattr(criterion, "suite_thresholds", None)
+            try:
+                checker_cls = CriterionRegistry.get_checker(ctype)
+            except KeyError:
+                logger.warning("No checker registered for criterion type %s; skipping aggregate", ctype)
+                continue
+            checker = checker_cls()
+            aggregate = checker.aggregate(criterion, per_rows)
+            if aggregate is None:
+                if suite_thresholds:
+                    # Thresholds declared but nothing produced — fail loudly.
+                    criterion_aggregates.append(_build_missing_aggregator(ctype, suite_thresholds))
+                continue
+            criterion_aggregates.append(_evaluate_thresholds(aggregate, suite_thresholds))
+
+    suite_passed = all(a.passed for a in criterion_aggregates)
+
+    # Sample up to K failed/errored rows for error analysis
+    failed_samples: list[FailedRowSummary] = []
+    for row in rows:
+        if row.result.final_status.category == "succeeded":
+            continue
+        if len(failed_samples) >= _FAILED_SAMPLE_LIMIT:
+            break
+        reasons: list[str] = []
+        for cr in row.result.success_criteria_results:
+            if cr.error is not None or cr.score < 1.0:
+                reason = cr.error or cr.details or f"{cr.criterion_type}: score={cr.score:.2f}"
+                reasons.append(reason[:_FAILURE_REASON_MAX_LEN])
+            if len(reasons) >= _FAILURE_REASONS_PER_ROW:
+                break
+        task_json_path = run_dir / variant_id / row.task_id / "task.json"
+        try:
+            # Persist as POSIX — this value lands in suite.json and in
+            # suite.md markdown links, both of which must be platform-agnostic.
+            rel = task_json_path.relative_to(run_dir).as_posix()
+        except ValueError:
+            rel = task_json_path.as_posix()
+        failed_samples.append(
+            FailedRowSummary(
+                row_id=row.row_id,
+                task_id=row.task_id,
+                final_status=row.result.final_status,
+                weighted_score=row.result.weighted_score,
+                failure_reasons=reasons,
+                error_message=row.result.error_message,
+                task_json_relpath=rel,
+            )
+        )
+
+    return SuiteRollup(
+        suite_id=suite_id,
+        variant_id=variant_id,
+        rows_total=rows_total,
+        rows_passed=rows_passed,
+        rows_failed=rows_failed,
+        rows_error=rows_error,
+        pass_rate=rows_passed / rows_total if rows_total else 0.0,
+        average_weighted_score=average_weighted_score,
+        criterion_stats=criterion_stats,
+        failed_samples=failed_samples,
+        criterion_aggregates=criterion_aggregates,
+        passed=suite_passed,
+    )
+
+
+def _render_suite_markdown(rollup: SuiteRollup) -> str:
+    """Render a SuiteRollup as a concise markdown report."""
+    lines: list[str] = [
+        f"# Suite Rollup: {rollup.suite_id}",
+        "",
+        f"**Variant**: `{rollup.variant_id}`",
+        (
+            f"**Rows**: {rollup.rows_total} total — "
+            f"{rollup.rows_passed} passed, {rollup.rows_failed} failed, {rollup.rows_error} errored"
+        ),
+        f"**Pass rate**: {rollup.pass_rate * 100:.1f}%",
+    ]
+    if rollup.average_weighted_score is not None:
+        lines.append(f"**Average weighted score**: {rollup.average_weighted_score:.3f}")
+
+    if rollup.criterion_stats:
+        lines.extend(
+            [
+                "",
+                "## Criterion stats",
+                "",
+                "| Criterion | Rows | Avg score | Errors |",
+                "|---|---|---|---|",
+            ]
+        )
+        for cs in rollup.criterion_stats:
+            lines.append(f"| `{cs.criterion_type}` | {cs.rows_evaluated} | {cs.average_score:.3f} | {cs.error_count} |")
+
+    if rollup.criterion_aggregates:
+        for aggregate in rollup.criterion_aggregates:
+            lines.extend(_render_criterion_aggregate(aggregate))
+        lines.extend(
+            [
+                "",
+                f"**Suite gate**: {'PASSED' if rollup.passed else 'FAILED'}",
+            ]
+        )
+
+    if rollup.failed_samples:
+        lines.extend(
+            [
+                "",
+                f"## Failed/errored samples (up to {_FAILED_SAMPLE_LIMIT})",
+                "",
+            ]
+        )
+        for s in rollup.failed_samples:
+            lines.append(f"### `{s.task_id}` — {s.final_status.value}")
+            if s.weighted_score is not None:
+                lines.append(f"- score: {s.weighted_score:.3f}")
+            if s.error_message:
+                lines.append(f"- error: {s.error_message[:_FAILURE_REASON_MAX_LEN]}")
+            for r in s.failure_reasons:
+                lines.append(f"- {r}")
+            # Strip the leading variant segment so the link resolves from the
+            # suite dir where suite.md lives. PurePosixPath keeps the separator
+            # POSIX on Windows too.
+            suite_rel = PurePosixPath(s.task_json_relpath).relative_to(rollup.variant_id)
+            lines.append(f"- [task.json](./{suite_rel})")
+            lines.append("")
+
+    return "\n".join(lines) + "\n"
+
+
+def _render_criterion_aggregate(aggregate: CriterionAggregate) -> list[str]:
+    """Render one CriterionAggregate as a markdown section.
+
+    Shape:
+      - flat metrics table (always)
+      - threshold_checks table (when thresholds were configured)
+      - confusion matrix (when details carry 'labels' + 'confusion' — by convention)
+      - per-label P/R/F1 table (when details carry 'per_label')
+    """
+    status = "PASSED" if aggregate.passed else "FAILED"
+    lines: list[str] = [
+        "",
+        f"## Aggregate metrics — `{aggregate.criterion_type}` ({status})",
+        "",
+    ]
+    if aggregate.error:
+        lines.append(f"_Error: {aggregate.error}_")
+        lines.append("")
+
+    if aggregate.metrics:
+        lines.extend(["| metric | value |", "|---|---|"])
+        for key in sorted(aggregate.metrics):
+            lines.append(f"| `{key}` | {aggregate.metrics[key]:.3f} |")
+
+    if aggregate.threshold_checks:
+        lines.extend(
+            [
+                "",
+                "### Thresholds",
+                "",
+                "| metric | minimum | actual | passed |",
+                "|---|---|---|---|",
+            ]
+        )
+        for check in aggregate.threshold_checks:
+            actual = f"{check.actual_value:.3f}" if check.actual_value is not None else "—"
+            passed = "✓" if check.passed else "✗"
+            lines.append(f"| `{check.metric}` | {check.min_value:.3f} | {actual} | {passed} |")
+
+    per_label = aggregate.details.get("per_label") if aggregate.details else None
+    if isinstance(per_label, list) and per_label:
+        lines.extend(
+            [
+                "",
+                "### Per-label breakdown",
+                "",
+                "| label | precision | recall | f1 | support |",
+                "|---|---|---|---|---|",
+            ]
+        )
+        for row in per_label:
+            lines.append(
+                f"| `{row['label']}` | {row['precision']:.3f} | {row['recall']:.3f}"
+                + f" | {row['f1']:.3f} | {row['support']} |"
+            )
+
+    labels = aggregate.details.get("labels") if aggregate.details else None
+    confusion = aggregate.details.get("confusion") if aggregate.details else None
+    if isinstance(labels, list) and isinstance(confusion, list) and confusion:
+        lines.extend(
+            [
+                "",
+                "### Confusion matrix",
+                "",
+                "| expected \\\\ observed | " + " | ".join(f"`{lbl}`" for lbl in labels) + " |",
+                "|---" * (len(labels) + 1) + "|",
+            ]
+        )
+        grid: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        for entry in confusion:
+            grid[entry["expected"]][entry["observed"]] = entry["count"]
+        for expected in labels:
+            cells = [str(grid[expected].get(observed, 0)) for observed in labels]
+            lines.append(f"| `{expected}` | " + " | ".join(cells) + " |")
+
+    return lines
+
+
+def write_suite_rollups(
+    run_dir: Path,
+    task_results: list[TaskResult],
+    resolved_tasks: list[Any] | None = None,
+) -> list[SuiteRollup]:
+    """Write per-suite pass-rate rollups for all dataset-backed tasks in this run.
+
+    Groups results by ``(variant_id, suite_id)`` for rows where ``suite_id`` is
+    set by the dataset expander. Non-dataset tasks are ignored — this is a
+    no-op when no task used ``dataset:``.
+
+    ``resolved_tasks`` carries the resolved TaskDefinitions used to drive
+    across-row ``aggregate()`` and to evaluate each criterion's
+    ``suite_thresholds``. When omitted, aggregates + threshold gating are
+    skipped (per-criterion stats + failed-sample listing still work).
+
+    For each group, writes:
+        ``<run_dir>/<variant_id>/<suite_id>/suite.json``
+        ``<run_dir>/<variant_id>/<suite_id>/suite.md``
+
+    Returns the computed SuiteRollup objects (useful for CLI exit-code logic).
+    """
+    groups: dict[tuple[str, str], list[TaskResult]] = defaultdict(list)
+    for tr in task_results:
+        if tr.suite_id is None:
+            continue
+        groups[(tr.variant_id, tr.suite_id)].append(tr)
+
+    # Map (variant_id, suite_id) -> task_criteria from the first matching resolved task.
+    # Rows in the same suite share identical criteria (expand_dataset copies them).
+    criteria_by_group: dict[tuple[str, str], list[Any]] = {}
+    if resolved_tasks is not None:
+        for rt in resolved_tasks:
+            task = rt.task
+            if task.suite_id is None:
+                continue
+            key = (rt.variant_id, task.suite_id)
+            if key not in criteria_by_group:
+                criteria_by_group[key] = list(task.success_criteria)
+
+    rollups: list[SuiteRollup] = []
+    for (variant_id, suite_id), rows in groups.items():
+        suite_dir = run_dir / variant_id / suite_id
+        suite_dir.mkdir(parents=True, exist_ok=True)
+        task_criteria = criteria_by_group.get((variant_id, suite_id))
+        rollup = _compute_suite_rollup(suite_id, variant_id, rows, run_dir, task_criteria=task_criteria)
+        (suite_dir / "suite.json").write_text(rollup.model_dump_json(indent=2))
+        (suite_dir / "suite.md").write_text(_render_suite_markdown(rollup))
+        rollups.append(rollup)
+        logger.info(
+            "Wrote suite rollup: variant=%s suite=%s pass_rate=%.1f%% (%d/%d) gate=%s",
+            variant_id,
+            suite_id,
+            rollup.pass_rate * 100,
+            rollup.rows_passed,
+            rollup.rows_total,
+            "PASS" if rollup.passed else "FAIL",
+        )
+    return rollups

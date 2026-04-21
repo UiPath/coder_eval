@@ -52,6 +52,21 @@ class CriterionResult(BaseModel):
     )
 
 
+class ClassificationCriterionResult(CriterionResult):
+    """Per-row result for classification criteria.
+
+    Carries the observed and expected labels alongside the standard score so
+    the suite-level aggregator can compute P/R/F1 and a confusion matrix.
+    Keeping these fields on a subclass (rather than the base) means results
+    for non-classification criteria don't carry dead label fields.
+    """
+
+    observed_label: str = Field(
+        description="Observed label emitted by the criterion (sentinels like '(none)' / '(other)' allowed)."
+    )
+    expected_label: str = Field(description="Ground-truth label threaded through from the task / dataset row.")
+
+
 class LLMDecision(BaseModel):
     """Decision from the LLM reviewer with direct, developer-style feedback.
 
@@ -248,6 +263,124 @@ class EvaluationResult(BaseModel):
             total_weight += criterion.weight
 
         self.weighted_score = total_weighted_score / total_weight if total_weight > 0 else 0.0
+
+
+class CriterionStats(BaseModel):
+    """Per-criterion-type aggregate stats across a suite's rows."""
+
+    criterion_type: str = Field(description="Criterion type (e.g., 'file_exists')")
+    rows_evaluated: int = Field(description="Rows where this criterion appeared at least once")
+    average_score: float = Field(ge=0.0, le=1.0, description="Mean score across all evaluations of this criterion")
+    error_count: int = Field(default=0, description="Evaluations that surfaced a checker-level error")
+
+
+class FailedRowSummary(BaseModel):
+    """Per-row summary for a row that did not succeed — used for error-sample rendering."""
+
+    row_id: str | None = Field(description="Row id within the suite (None if unavailable)")
+    task_id: str = Field(description="Full task id (suite_id/row_id)")
+    final_status: FinalStatus = Field(description="Final status of this row")
+    weighted_score: float | None = Field(default=None, description="Weighted score (None on error)")
+    failure_reasons: list[str] = Field(
+        default_factory=list,
+        description="Short descriptions of failed criteria (up to a few, truncated per row).",
+    )
+    error_message: str | None = Field(default=None, description="Top-level error message if the row errored out.")
+    task_json_relpath: str = Field(description="Path to the row's task.json, relative to run_dir.")
+
+
+class ClassLabelStats(BaseModel):
+    """Per-class precision / recall / F1. Used by classification_match's aggregate details."""
+
+    label: str = Field(description="Class label (may be a sentinel like '(none)' / '(other)')")
+    precision: float = Field(ge=0.0, le=1.0, description="TP / (TP + FP); 0.0 when denom is 0")
+    recall: float = Field(ge=0.0, le=1.0, description="TP / (TP + FN); 0.0 when denom is 0")
+    f1: float = Field(ge=0.0, le=1.0, description="Harmonic mean of precision and recall; 0.0 when both are 0")
+    support: int = Field(ge=0, description="Rows where expected_label == this class")
+
+
+class ConfusionEntry(BaseModel):
+    """A single cell of the confusion matrix. Used by classification_match's aggregate details."""
+
+    expected: str
+    observed: str
+    count: int = Field(ge=0)
+
+
+class ThresholdCheck(BaseModel):
+    """Pass/fail for a single {metric: min_value} threshold at suite level."""
+
+    metric: str = Field(description="Metric name as emitted by the criterion's aggregate() output.")
+    min_value: float = Field(description="Configured minimum. The check passes when actual_value >= min_value.")
+    actual_value: float | None = Field(
+        default=None,
+        description="Observed metric value. None when the aggregator did not emit this metric.",
+    )
+    passed: bool
+
+
+class CriterionAggregate(BaseModel):
+    """Across-row aggregate produced by a criterion's aggregate() method.
+
+    Each success_criterion on a dataset-backed task can emit one of these. The
+    ``metrics`` dict holds flat named values (e.g. ``'accuracy'``, ``'f1.macro'``,
+    ``'recall.positive'``) that ``suite_thresholds`` on the criterion reference.
+    ``details`` carries shape-specific extras for rendering — for
+    ``classification_match`` that's labels, per-label stats, and the confusion
+    matrix.
+    """
+
+    criterion_type: str
+    metrics: dict[str, float] = Field(default_factory=dict, description="Flat metric name -> value")
+    threshold_checks: list[ThresholdCheck] = Field(default_factory=list)
+    passed: bool = Field(description="True when all threshold_checks passed (trivially true when no thresholds).")
+    details: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Criterion-specific structured data used for markdown rendering (e.g. confusion matrix).",
+    )
+    error: str | None = Field(
+        default=None,
+        description="Populated when the criterion declared suite_thresholds but aggregate() returned nothing.",
+    )
+
+
+class SuiteRollup(BaseModel):
+    """Pass-rate rollup for a dataset-backed suite under a single variant.
+
+    Written to ``<run_dir>/<variant_id>/<suite_id>/suite.json`` and
+    ``suite.md`` next to the per-row directories. Presence is gated on
+    the task having been expanded from a Dataset.
+    """
+
+    suite_id: str
+    variant_id: str
+    rows_total: int
+    rows_passed: int
+    rows_failed: int
+    rows_error: int
+    pass_rate: float = Field(ge=0.0, le=1.0, description="rows_passed / rows_total")
+    average_weighted_score: float | None = Field(
+        default=None, description="Mean weighted_score across rows that produced one."
+    )
+    criterion_stats: list[CriterionStats] = Field(default_factory=list)
+    failed_samples: list[FailedRowSummary] = Field(
+        default_factory=list,
+        description="Up to K failed/errored rows with failure reasons for error analysis.",
+    )
+    criterion_aggregates: list[CriterionAggregate] = Field(
+        default_factory=list,
+        description=(
+            "One entry per criterion_type whose aggregate() returned a result. "
+            "Empty when no criterion opted into across-row aggregation."
+        ),
+    )
+    passed: bool = Field(
+        default=True,
+        description=(
+            "True when every criterion_aggregate passed its thresholds (or none had thresholds). "
+            "Drives CLI exit code for dataset-backed tasks."
+        ),
+    )
 
 
 class RunSummary(BaseModel):

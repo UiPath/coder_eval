@@ -284,6 +284,32 @@ class TestLogPersistence:
         assert "Task 1 log content" in content
         assert "Task 2 log content" in content
 
+    def test_aggregate_task_logs_nested_dataset_paths(self, tmp_path):
+        """Nested task logs (variant/suite/row) render with full relative paths in headers."""
+        from coder_eval.logging_config import aggregate_task_logs
+
+        # Simulate dataset fan-out layout: runs/<run>/<variant>/<suite>/<row>/task.log
+        row_a = tmp_path / "v1" / "suite" / "row-a"
+        row_b = tmp_path / "v1" / "suite" / "row-b"
+        flat = tmp_path / "v1" / "plain"  # non-dataset task lives one level up
+        for d in (row_a, row_b, flat):
+            d.mkdir(parents=True)
+        (row_a / "task.log").write_text("row a content\n")
+        (row_b / "task.log").write_text("row b content\n")
+        (flat / "task.log").write_text("plain content\n")
+
+        aggregate_task_logs(tmp_path)
+
+        content = (tmp_path / "experiment.log").read_text()
+        # Nested paths rendered with full relative segments, not just leaf name.
+        assert "TASK: v1/suite/row-a" in content
+        assert "TASK: v1/suite/row-b" in content
+        assert "TASK: v1/plain" in content
+        # All three bodies preserved.
+        assert "row a content" in content
+        assert "row b content" in content
+        assert "plain content" in content
+
     def test_aggregate_task_logs_no_tasks(self, tmp_path):
         """Aggregation handles case with no task logs gracefully."""
         from coder_eval.logging_config import aggregate_task_logs

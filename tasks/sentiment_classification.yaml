@@ -1,0 +1,40 @@
+task_id: "sentiment-classification"
+description: "Binary sentiment classification over a 3-row dataset with one intentionally mislabeled ground truth, to exercise non-trivial P/R/F1."
+tags: [classification, smoke]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Write"]
+
+sandbox:
+  driver: "tempdir"
+  python: null
+
+max_iterations: 1
+
+# Row 3 is intentionally mislabeled (text is clearly positive but expected=negative).
+# A correct model produces: accuracy 2/3, recall(positive)=1/2, recall(negative)=1/1,
+# precision(positive)=1/1, precision(negative)=1/2, f1(positive)=f1(negative)=2/3.
+dataset:
+  path: "datasets/sentiment.jsonl"
+
+initial_prompt: |
+  Classify the sentiment of the following text as exactly one word: 'positive' or 'negative'.
+  Write only that single word (lowercase, no punctuation, no other text) to a file named result.txt.
+
+  Text: "${row.text}"
+
+success_criteria:
+  - type: "classification_match"
+    path: "result.txt"
+    expected_label: "${row.expected}"
+    allowed_labels: [positive, negative]
+    description: "Predicted label matches expected for row ${row.id}"
+    # Suite-level thresholds: evaluated against the aggregated metrics.
+    # With the one intentionally mislabeled row the expected numbers are
+    # accuracy=0.667, macro_f1=0.667, recall.positive=1.0.
+    suite_thresholds:
+      accuracy: 0.6
+      macro_f1: 0.5
+      recall.positive: 0.9

@@ -189,3 +189,11 @@ class TaskResult(BaseModel):
     result: EvaluationResult
     duration: float
     variant_id: str
+    suite_id: str | None = Field(
+        default=None,
+        description="Parent suite id when this task came from dataset fan-out. Signal for suite rollup reporting.",
+    )
+    row_id: str | None = Field(
+        default=None,
+        description="Row id within the suite (from Dataset.id_field) when this task came from dataset fan-out.",
+    )
