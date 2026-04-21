@@ -13,6 +13,7 @@ from typing import Any
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, Message, ProcessError, query
 
 from coder_eval.agent import Agent, AgentState
+from coder_eval.formatting import format_payload
 from coder_eval.models import (
     AgentConfig,
     ApiRoute,
@@ -379,7 +380,6 @@ class ClaudeCodeAgent(Agent):
                                     processed_results,
                                 )
                                 is_error_flag = getattr(block, "is_error", False) or False
-                                result_content = str(block.content) if block.content is not None else ""
                                 safe_emit(
                                     stream_callback,
                                     ToolResultEvent(
@@ -387,7 +387,7 @@ class ClaudeCodeAgent(Agent):
                                         tool_id=block.tool_use_id,
                                         tool_name=tool_name,
                                         success=not is_error_flag,
-                                        result_preview=result_content[:200],
+                                        result_preview=format_payload(block.content),
                                     ),
                                 )
 
@@ -581,7 +581,7 @@ class ClaudeCodeAgent(Agent):
             if content and isinstance(content, list):
                 for block in content:
                     if _is_tool_use_block(block):
-                        params_str = str(block.input)[:300]
+                        params_str = format_payload(block.input, max_chars=800)
                         logger.debug(f">>> TOOL CALL: {block.name} | id={block.id} | params={params_str}")
                     elif hasattr(block, "text"):
                         text = str(block.text)[:500]
@@ -599,7 +599,9 @@ class ClaudeCodeAgent(Agent):
                     if _is_tool_result_block(block):
                         is_error = getattr(block, "is_error", False) or False
                         status = "ERROR" if is_error else "OK"
-                        result_preview = str(block.content)[:300] if block.content is not None else "(empty)"
+                        result_preview = (
+                            format_payload(block.content, max_chars=800) if block.content is not None else "(empty)"
+                        )
                         logger.debug(f"<<< TOOL RESULT [{status}]: id={block.tool_use_id} | {result_preview}")
 
         elif msg_type == "ResultMessage":
@@ -625,6 +627,12 @@ class ClaudeCodeAgent(Agent):
     @staticmethod
     def _try_parse_json_value(content: Any) -> dict[str, Any] | list[Any] | None:
         """Return the parsed JSON object or array from content, else None.
+
+        Strict telemetry-capture variant. ``coder_eval.formatting._extract_json``
+        is the lenient display-path variant — keep behaviour aligned when you
+        change one, but they are intentionally separate: the telemetry path
+        feeds ``CommandTelemetry.result_data`` where false positives persist
+        into ``task.json`` and downstream dashboards.
 
         Accepts the two SDK-delivered shapes for ToolResultBlock.content: a plain
         string, or a list of content blocks (MCP tools use this, e.g.
@@ -710,13 +718,14 @@ class ClaudeCodeAgent(Agent):
             if is_error:
                 cmd.error_message = content_str
 
-                # Detect permission-blocked tool use and log at INFO level
+                # Permission-blocked tool use is abnormal flow — warn so it
+                # surfaces in runs that don't have DEBUG enabled.
                 content_lower = content_str.lower()
                 if any(
                     phrase in content_lower
                     for phrase in ("permission", "not allowed", "requires approval", "denied", "blocked")
                 ):
-                    logger.info(
+                    logger.warning(
                         f"Tool use blocked: {cmd.tool_name} (id={tool_use_id}) "
                         + f"- permission denied. Error: {content_str[:200]}"
                     )

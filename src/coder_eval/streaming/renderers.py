@@ -1,11 +1,11 @@
 """Rich terminal renderer for streaming events."""
 
-import json
 import threading
 
 from rich.console import Console
 from rich.markup import escape
 
+from coder_eval.formatting import format_payload
 from coder_eval.streaming.events import (
     CriteriaCheckEvent,
     CriterionSummary,
@@ -18,8 +18,10 @@ from coder_eval.streaming.events import (
 )
 
 
-_MAX_PARAMS_LEN = 120
-_MAX_RESULT_LEN = 200
+# Budgets tuned so that a typical JSON payload (agent params + one tool
+# result) fits without truncation but runaway stdout still stays bounded.
+_MAX_PARAMS_LEN = 800
+_MAX_RESULT_LEN = 800
 
 
 def _truncate(text: str, max_len: int) -> str:
@@ -64,15 +66,16 @@ class RichStreamRenderer:
             return f"[bold]--- Iteration {event.iteration}/{event.max_iterations} ---[/bold]"
 
         if isinstance(event, ToolCallEvent):
-            params_str = escape(_truncate(json.dumps(event.parameters, default=str), _MAX_PARAMS_LEN))
+            params_str = escape(format_payload(event.parameters, max_chars=_MAX_PARAMS_LEN))
             return f"[cyan]>>> TOOL: {escape(event.tool_name)}[/cyan] | {params_str}"
 
         if isinstance(event, ToolResultEvent):
-            if event.success:
-                preview = escape(_truncate(event.result_preview, _MAX_RESULT_LEN))
-                return f"[green]<<< OK[/green] ({len(event.result_preview)} chars) {preview}"
-            preview = escape(_truncate(event.result_preview, _MAX_RESULT_LEN))
-            return f"[red]<<< ERROR:[/red] {preview}"
+            # ``result_preview`` is already ``format_payload``-rendered and
+            # capped by the agent; re-truncating here would clip off the
+            # ``…(N more chars)`` marker.
+            preview = escape(event.result_preview)
+            tag = "[green]<<< OK[/green]" if event.success else "[red]<<< ERROR:[/red]"
+            return f"{tag} ({len(event.result_preview)} chars) {preview}"
 
         if isinstance(event, TextChunkEvent):
             return f"[dim]{escape(event.text)}[/dim]"
