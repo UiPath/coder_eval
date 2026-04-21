@@ -50,6 +50,86 @@ def test_success_criterion_discriminated_union():
     assert criterion.type == "run_command"
 
 
+class TestLLMJudgeCriterion:
+    """Tests for the new llm_judge success criterion model."""
+
+    def test_llm_judge_criterion_defaults(self):
+        """Constructing with the minimum required fields yields documented defaults."""
+        from coder_eval.models import DEFAULT_GATEWAY_MODEL, LLMJudgeCriterion
+
+        criterion = LLMJudgeCriterion(description="x", prompt="grade this code")
+        assert criterion.type == "llm_judge"
+        assert criterion.model == DEFAULT_GATEWAY_MODEL
+        assert criterion.temperature == 0.0
+        assert criterion.max_tokens == 1000
+        assert criterion.max_file_chars == 20_000
+        assert criterion.files == []
+        assert criterion.include_reference is False
+        assert criterion.include_agent_output is False
+        assert criterion.include_tool_calls is False
+
+    def test_llm_judge_criterion_requires_prompt(self):
+        """prompt is required — Pydantic raises ValidationError when missing."""
+        from pydantic import ValidationError
+
+        from coder_eval.models import LLMJudgeCriterion
+
+        with pytest.raises(ValidationError):
+            LLMJudgeCriterion(description="x")  # type: ignore[call-arg]
+
+    def test_llm_judge_criterion_temperature_bounds(self):
+        """temperature is bounded to [0.0, 2.0]."""
+        from pydantic import ValidationError
+
+        from coder_eval.models import LLMJudgeCriterion
+
+        with pytest.raises(ValidationError):
+            LLMJudgeCriterion(description="x", prompt="p", temperature=-0.1)
+        with pytest.raises(ValidationError):
+            LLMJudgeCriterion(description="x", prompt="p", temperature=2.1)
+
+    def test_llm_judge_criterion_max_tokens_positive(self):
+        """max_tokens must be > 0."""
+        from pydantic import ValidationError
+
+        from coder_eval.models import LLMJudgeCriterion
+
+        with pytest.raises(ValidationError):
+            LLMJudgeCriterion(description="x", prompt="p", max_tokens=0)
+
+    def test_llm_judge_criterion_max_file_chars_positive(self):
+        """max_file_chars must be > 0."""
+        from pydantic import ValidationError
+
+        from coder_eval.models import LLMJudgeCriterion
+
+        with pytest.raises(ValidationError):
+            LLMJudgeCriterion(description="x", prompt="p", max_file_chars=0)
+
+    def test_llm_judge_criterion_in_task_definition(self):
+        """A YAML-style dict with type='llm_judge' resolves to LLMJudgeCriterion via the discriminated union."""
+        from coder_eval.models import LLMJudgeCriterion
+
+        td = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            agent=None,
+            sandbox=SandboxConfig(driver="tempdir"),
+            success_criteria=[
+                {"type": "llm_judge", "description": "grade output", "prompt": "rubric..."},
+            ],
+        )
+        assert isinstance(td.success_criteria[0], LLMJudgeCriterion)
+
+    def test_default_gateway_model_moved(self):
+        """DEFAULT_GATEWAY_MODEL is importable both from its new home and via coder_eval.models."""
+        from coder_eval import models as models_pkg
+        from coder_eval.models import gateway as gateway_mod
+
+        assert models_pkg.DEFAULT_GATEWAY_MODEL == gateway_mod.DEFAULT_GATEWAY_MODEL
+
+
 class TestAgentConfig:
     """Tests for AgentConfig fields."""
 

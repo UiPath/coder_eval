@@ -21,6 +21,7 @@ Complete reference for defining evaluation tasks in coder_eval.
   - [reference_comparison](#reference_comparison)
   - [command_executed](#command_executed)
   - [uipath_eval](#uipath_eval)
+  - [llm_judge](#llm_judge)
 - [Sandbox Snapshots](#sandbox-snapshots)
 - [LLM Reviewer](#llm-reviewer)
 - [Reference Solutions](#reference-solutions)
@@ -202,7 +203,7 @@ This pattern is especially useful for A/B testing whether additional context imp
 
 ## Success Criteria
 
-Every task needs at least one success criterion. The framework supports 11 criterion types.
+Every task needs at least one success criterion. The framework supports 14 criterion types.
 
 ### Continuous Scoring
 
@@ -217,7 +218,7 @@ All criteria share these fields:
 **Scoring types:**
 - **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`
 - **Fractional** (0.0–1.0): `file_contains`, `file_check`, `json_check`, `pytest`, `command_executed`, `uipath_eval`
-- **Continuous** (0.0–1.0): `pylint_score`, `reference_comparison`
+- **Continuous** (0.0–1.0): `pylint_score`, `reference_comparison`, `llm_judge`
 
 **Task success:** ALL criteria must score >= their `pass_threshold`.
 
@@ -476,6 +477,56 @@ Evaluates a UiPath agent against a named evaluation set. **Fractional scoring:**
 | `agent_name` | *required* | Name of the UiPath agent to evaluate |
 | `eval_set` | *required* | Evaluation set identifier |
 | `thresholds` | *required* | Minimum acceptable value per metric (metric passes if value >= threshold) |
+
+### `llm_judge`
+
+Have an LLM grade the task against a rubric written in the task YAML. **Continuous scoring** from a JSON verdict `{"score": 0.0-1.0, "rationale": "..."}`; parse failure, non-numeric score, or LLM error all produce `score=0.0` with an `error` populated.
+
+```yaml
+- type: "llm_judge"
+  description: "Implementation follows the rubric"
+  prompt: |
+    Grade the implementation on correctness and idiomatic style.
+    - 1.0: correct and idiomatic
+    - 0.5: correct but not idiomatic
+    - 0.0: incorrect or missing
+  files: ["main.py", "tests/test_main.py"]
+  include_reference: true            # Opt-in: show reference solution to the judge (never to the agent)
+  include_agent_output: false        # Opt-in: include the latest turn's raw agent output
+  include_tool_calls: false          # Opt-in: include a summary of the latest turn's tool calls
+  model: "anthropic.claude-sonnet-4-6"
+  temperature: 0.0
+  max_tokens: 1000
+  max_file_chars: 20000              # Per-file content truncation
+  weight: 2.0
+  pass_threshold: 0.7
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `prompt` | *required* | Grading instructions shown to the judge |
+| `files` | `[]` | Sandbox-relative paths whose contents are shown to the judge (missing files render as `<file not found>`) |
+| `include_reference` | `false` | Include the task's reference solution in the judge prompt (silently omitted if no reference is configured). Never shown to the agent. |
+| `include_agent_output` | `false` | Include the latest agent turn's raw output (wrapped as UNTRUSTED DATA) |
+| `include_tool_calls` | `false` | Include a summary of the latest agent turn's tool calls |
+| `model` | `anthropic.claude-sonnet-4-6` | UiPath LLM Gateway model name |
+| `temperature` | `0.0` | Sampling temperature (0.0 = deterministic) |
+| `max_tokens` | `1000` | Maximum tokens in the judge's response |
+| `max_file_chars` | `20000` | Per-file (and agent_output) truncation applied before building the prompt |
+
+**Requires** UiPath LLM Gateway access (see `.env.example` for configuration).
+
+**Security**
+
+- The three opt-in context blocks (`files`, `include_agent_output`, `include_tool_calls`) are wrapped with an `UNTRUSTED DATA` preamble to mitigate prompt-injection via tool output.
+- The reference solution is shown only to the judge — never to the agent — and any occurrence of the reference is scrubbed from `CriterionResult.details` before persistence.
+
+**Failure modes** — each sets `score=0.0` and populates `error`:
+
+- Non-JSON response from the model (parse failure)
+- `score` key missing from the JSON verdict
+- `score` is not coercible to float
+- LLM Gateway unavailable / network error (handled by `@handle_criterion_errors`)
 
 ## Sandbox Snapshots
 

@@ -10,6 +10,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind
+from coder_eval.models.gateway import DEFAULT_GATEWAY_MODEL
 from coder_eval.models.sandbox import SandboxConfig
 
 
@@ -76,10 +77,6 @@ class AgentConfig(BaseModel):
         if self.system_prompt is not None and self.system_prompt_file is not None:
             raise ValueError("Only one of 'system_prompt' or 'system_prompt_file' can be provided, not both")
         return self
-
-
-DEFAULT_GATEWAY_MODEL = "anthropic.claude-sonnet-4-6"
-"""Default LLM Gateway model used by LLMReviewer and PromptRephrase."""
 
 
 class LLMReviewerConfig(BaseModel):

@@ -7,6 +7,8 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from coder_eval.models.gateway import DEFAULT_GATEWAY_MODEL
+
 
 class BaseSuccessCriterion(BaseModel, ABC):
     """Base class for success criteria - pure data container.
@@ -529,6 +531,67 @@ class ImportCheckCriterion(BaseSuccessCriterion):
     timeout: int = Field(default=30, description="Timeout in seconds for import resolution commands")
 
 
+class LLMJudgeCriterion(BaseSuccessCriterion):
+    """Have an LLM grade the task's final state against an author-supplied prompt.
+
+    The judge can be given any combination of: sandbox files, the agent's last-turn
+    output, a tool-call summary, and the reference solution. It returns a JSON verdict
+    {"score": <float 0..1>, "rationale": "<1-2 sentences>"}; the float is the score.
+
+    Continuous scoring. LLM error or JSON parse failure -> 0.0 with error.
+    Score is clamped to [0.0, 1.0]. Non-numeric score -> 0.0 with error.
+    """
+
+    type: Literal["llm_judge"] = "llm_judge"
+
+    prompt: str = Field(
+        description=(
+            "Grading instructions shown to the judge. Describe what 'good' looks like "
+            "and how observations map to a 0.0-1.0 score. Field name matches "
+            "LLMReviewerConfig.prompt for consistency."
+        )
+    )
+    files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Sandbox-relative paths whose contents are shown to the judge. "
+            "Missing files are rendered as '<file not found>' so the rubric can penalize them."
+        ),
+    )
+    include_reference: bool = Field(
+        default=False,
+        description=(
+            "When true and task.reference is set, include the reference solution in the "
+            "judge prompt. Silently omitted if no reference is configured. Never shown to the agent."
+        ),
+    )
+    include_agent_output: bool = Field(
+        default=False,
+        description=(
+            "When true, include the latest agent turn's raw output in the judge prompt. "
+            "Wrapped as UNTRUSTED DATA. No-op when turn_records is unavailable."
+        ),
+    )
+    include_tool_calls: bool = Field(
+        default=False,
+        description=(
+            "When true, include a summary of the latest agent turn's tool calls "
+            "(via summarize_commands). No-op when turn_records is unavailable."
+        ),
+    )
+    model: str = Field(
+        default=DEFAULT_GATEWAY_MODEL,
+        description="Gateway model name (e.g. 'anthropic.claude-sonnet-4-6').",
+    )
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=1000, gt=0)
+    max_file_chars: int = Field(
+        default=20_000,
+        gt=0,
+        description="Per-file content truncation applied before building the prompt.",
+    )
+
+
 # Discriminated union of all success criteria
 SuccessCriterion = (
     FileExistsCriterion
@@ -546,4 +609,5 @@ SuccessCriterion = (
     | ImportCheckCriterion
     | ClassificationMatchCriterion
     | SkillTriggeredCriterion
+    | LLMJudgeCriterion
 )

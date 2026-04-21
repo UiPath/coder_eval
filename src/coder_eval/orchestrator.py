@@ -22,6 +22,7 @@ from .errors.retry import create_error_context
 from .errors.timeout import TaskTimeoutError, TurnTimeoutError
 from .evaluation.checker import SuccessChecker
 from .evaluation.reviewer import LLMReviewer
+from .evaluation.summaries import summarize_commands
 from .models import (
     ROUTE_NAMES,
     AgentKind,
@@ -117,38 +118,6 @@ def _extract_failure_reason(result: CriterionResult) -> str | None:
         if stripped:
             return stripped
     return None
-
-
-def _summarize_tool_calls(turn_record: TurnRecord) -> str | None:
-    """Build a concise summary of the agent's tool calls for the LLM reviewer.
-
-    Returns None if there were no tool calls.
-    """
-    if not turn_record.commands:
-        return None
-
-    lines = []
-    for i, cmd in enumerate(turn_record.commands, 1):
-        status = cmd.result_status or "unknown"
-        # Extract the most useful parameter for each tool type
-        detail = ""
-        params = cmd.parameters
-        if cmd.tool_name == "Bash" and "command" in params:
-            detail = f" `{params['command'][:120]}`"
-        elif cmd.tool_name in ("Read", "Write", "Edit", "Glob") and "file_path" in params:
-            detail = f" {params['file_path']}"
-        elif cmd.tool_name == "Grep" and "pattern" in params:
-            detail = f" pattern={params['pattern'][:60]}"
-        elif cmd.tool_name in ("Task", "Agent"):
-            detail = f" ({params.get('description', '')[:60]})"
-
-        result_preview = ""
-        if cmd.result_summary:
-            result_preview = f" → {cmd.result_summary[:80]}"
-
-        lines.append(f"  {i}. [{status}] {cmd.tool_name}{detail}{result_preview}")
-
-    return "\n".join(lines)
 
 
 class Orchestrator:
@@ -719,7 +688,7 @@ class Orchestrator:
                 break
 
             # Summarize tool calls for reviewer context and logging
-            tool_calls_summary = _summarize_tool_calls(turn_record)
+            tool_calls_summary = summarize_commands(turn_record.commands)
             if tool_calls_summary:
                 logger.debug("Tool calls for iteration %d:\n%s", iteration, tool_calls_summary)
 

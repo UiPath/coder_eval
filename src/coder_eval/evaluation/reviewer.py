@@ -12,6 +12,7 @@ import os
 from collections.abc import Callable
 
 from ..models import LLMDecision, LLMReviewerConfig
+from .llmgw import get_llmgw_chat_model, llmgw_available
 
 
 # Get module logger
@@ -49,11 +50,8 @@ def _make_anthropic_invoker(config: LLMReviewerConfig) -> Callable[[str], str]:
 
 def _make_llmgw_invoker(config: LLMReviewerConfig) -> Callable[[str], str]:
     """Build a string-returning invoker that calls the UiPath LLM Gateway."""
-    from uipath_llmgw_client import get_langchain_chat_model
-
-    chat_model = get_langchain_chat_model(
+    chat_model = get_llmgw_chat_model(
         model=config.model,
-        llmgw_client_type="normalized",
         temperature=config.temperature,
         max_tokens=config.max_tokens,
     )
@@ -114,16 +112,13 @@ class LLMReviewer:
                 )
 
         if self._backend is None:
-            try:
-                from uipath_llmgw_client import get_langchain_chat_model  # noqa: F401
-
+            if llmgw_available():
                 self._backend = "llmgw"
                 logger.info("LLM reviewer: using UiPath LLM Gateway")
-            except ImportError:
+            else:
                 logger.warning(
                     "LLM reviewer: 'uipath_llmgw_client' package could not be imported; "
-                    + "LLM review will be unavailable unless the anthropic backend succeeded.",
-                    exc_info=True,
+                    + "LLM review will be unavailable unless the anthropic backend succeeded."
                 )
 
         if self._backend is None:

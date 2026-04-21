@@ -141,6 +141,7 @@ def validate_registry() -> None:
             "import_check",
             "classification_match",
             "skill_triggered",
+            "llm_judge",
         }
 
     registered_types = set(CriterionRegistry.list_types())

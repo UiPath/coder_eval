@@ -13,7 +13,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
-from coder_eval.models.tasks import DEFAULT_GATEWAY_MODEL
+from coder_eval.models.gateway import DEFAULT_GATEWAY_MODEL
 
 
 class PromptPrefix(BaseModel):

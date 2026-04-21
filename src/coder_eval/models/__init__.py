@@ -21,6 +21,7 @@ from coder_eval.models.criteria import (
     ImportCheckCriterion,
     JMESPathAssertion,
     JsonCheckCriterion,
+    LLMJudgeCriterion,
     PylintScoreCriterion,
     PytestCriterion,
     ReferenceComparisonCriterion,
@@ -50,6 +51,9 @@ from coder_eval.models.experiment import (
     VariantAggregate,
     VariantResult,
 )
+
+# Gateway
+from coder_eval.models.gateway import DEFAULT_GATEWAY_MODEL
 
 # Mutations
 from coder_eval.models.mutations import (
@@ -108,7 +112,6 @@ from coder_eval.models.sandbox import (
 
 # Tasks
 from coder_eval.models.tasks import (
-    DEFAULT_GATEWAY_MODEL,
     AgentConfig,
     Dataset,
     LLMReviewerConfig,
@@ -163,6 +166,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "CommandsEfficiencyCriterion",
     "UiPathEvalCriterion",
     "ImportCheckCriterion",
+    "LLMJudgeCriterion",
     "SkillTriggeredCriterion",
     "SuccessCriterion",
     # Routing
@@ -211,9 +215,10 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "SuiteRollup",
     "TaskConfigRecord",
     "RunSummary",
+    # Gateway
+    "DEFAULT_GATEWAY_MODEL",
     # Tasks
     "TaskDefinition",
-    "DEFAULT_GATEWAY_MODEL",
     "AgentConfig",
     "Dataset",
     "LLMReviewerConfig",
