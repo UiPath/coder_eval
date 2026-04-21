@@ -9,7 +9,7 @@ You are creating coder_eval task YAML files. The user's request is: `$ARGUMENTS`
 
 This skill generates well-structured, minimal task definitions that follow project conventions. Tasks use simple prompts — state the goal and expected output, let the agent figure out the approach.
 
-A single user request can produce **multiple task files** — e.g., "create tasks for all uip flow registry subcommands" should produce one task per subcommand (pull, list, search, get, etc.).
+A single user request can produce **multiple task files** — e.g., "create tasks for all uip maestro flow registry subcommands" should produce one task per subcommand (pull, list, search, get, etc.).
 
 ## Step 1: Understand the Request
 

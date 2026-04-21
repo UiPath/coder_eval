@@ -1,7 +1,7 @@
 task_id: flow-cli-add-node
 description: >
   Add a Decision node to an existing dice-roller flow using CLI mode —
-  uip flow node add and edge add. Tests CLI editing of existing flows.
+  uip maestro flow node add and edge add. Tests CLI editing of existing flows.
 tags: [flow, cli, modify, tier-2]
 
 agent:
@@ -21,7 +21,7 @@ sandbox:
       path: "./artifacts"
 
 initial_prompt: |
-  Before starting, load the uipath-flow skill. Read and follow its workflow steps exactly.
+  Before starting, load the uipath-maestro-flow skill. Read and follow its workflow steps exactly.
   Do NOT ask for approval, confirmation, or feedback. Do NOT pause between planning and implementation. Build the complete flow end-to-end in a single pass.
 
   Read the existing flow at baseline.flow. This is a dice-roller flow with a
@@ -33,7 +33,7 @@ initial_prompt: |
   End node (labeled "Low Roll"). You may need to use JSON editing for
   rewiring since CLI edge management may require it.
 
-  Save the result as result.flow. Validate with uip flow validate.
+  Save the result as result.flow. Validate with uip maestro flow validate.
 
 success_criteria:
   - type: file_exists
@@ -43,9 +43,9 @@ success_criteria:
     pass_threshold: 1.0
 
   - type: command_executed
-    description: "Agent used uip flow commands"
+    description: "Agent used uip maestro flow commands"
     tool_name: "Bash"
-    command_pattern: "uip\\s+flow"
+    command_pattern: "uip\\s+maestro\\s+flow"
     min_count: 1
     weight: 2.0
     pass_threshold: 1.0

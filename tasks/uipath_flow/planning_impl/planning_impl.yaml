@@ -21,7 +21,7 @@ sandbox:
       path: "./artifacts"
 
 initial_prompt: |
-  Before starting, load the uipath-flow skill. Read and follow its workflow steps exactly.
+  Before starting, load the uipath-maestro-flow skill. Read and follow its workflow steps exactly.
   Do NOT ask for approval, confirmation, or feedback. Do NOT pause between planning and implementation.
 
   I have an approved architectural plan: WeatherAlert.arch.plan.md
@@ -30,7 +30,7 @@ initial_prompt: |
   Now produce the Phase 2 implementation plan: WeatherAlert.impl.plan.md
 
   Follow the planning guide's Phase 2 instructions:
-  1. Run `uip flow registry get` for each node type to validate definitions
+  1. Run `uip maestro flow registry get` for each node type to validate definitions
   2. Resolve all placeholders from Phase 1
   3. Document any changes from the architectural plan
   4. Include the resolved node and edge tables

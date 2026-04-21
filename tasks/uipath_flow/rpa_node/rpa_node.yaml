@@ -1,6 +1,6 @@
 task_id: flow-json-rpa-node
 description: >
-  Create a flow with a dynamic RPA workflow resource node using the uipath-flow
+  Create a flow with a dynamic RPA workflow resource node using the uipath-maestro-flow
   skill's resource node guides and the uip registry CLI.
 tags: [flow, flow-json, generate, dynamic, tier-3, integration]
 
@@ -21,7 +21,7 @@ sandbox:
       path: "../../../templates/uipath-flow-starter"
 
 initial_prompt: |
-  Before starting, load the uipath-flow skill. Read and follow its workflow steps exactly.
+  Before starting, load the uipath-maestro-flow skill. Read and follow its workflow steps exactly.
   Do NOT ask for approval, confirmation, or feedback. Do NOT pause between planning and implementation. Build the complete flow end-to-end in a single pass.
 
   Create a UiPath Flow project named "InvoiceFlow" that:

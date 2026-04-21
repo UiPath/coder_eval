@@ -25,25 +25,25 @@ initial_prompt: |
   run `uip login` first.
 
   ## Step 1: List processes
-  Run `uip flow process list --output json > processes.json`
+  Run `uip maestro flow process list --output json > processes.json`
   to discover available processes.
 
   ## Step 2: Get process details
   From the processes list, extract a `process-key` (e.g., `MyFlow.flow.Flow:1.0.0`)
   and `feed-id`. Then run:
-    uip flow process get <process-key> <feed-id> --output json > process_details.json
+    uip maestro flow process get <process-key> <feed-id> --output json > process_details.json
   If no processes are available, write to process_details.json:
     {"status": "skipped", "reason": "no processes found"}
 
   ## Step 3: Get process details in YAML format
   Run the same get command with `--output yaml`:
-    uip flow process get <process-key> <feed-id> --output yaml > process_details.yaml
+    uip maestro flow process get <process-key> <feed-id> --output yaml > process_details.yaml
   If no processes, write: {"status": "skipped", "reason": "no processes found"}
 
   ## Step 4: Write summary report
   Create process_get_report.json:
     {
-      "command_used": "uip flow process get",
+      "command_used": "uip maestro flow process get",
       "process_key": "<process-key or null>",
       "feed_id": "<feed-id or null>",
       "formats_tested": ["json", "yaml"],
@@ -59,7 +59,7 @@ success_criteria:
   - type: command_executed
     description: "Agent listed processes"
     tool_name: "Bash"
-    command_pattern: 'uip\s+flow\s+process\s+list'
+    command_pattern: 'uip\s+maestro\s+flow\s+process\s+list'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
@@ -71,9 +71,9 @@ success_criteria:
     pass_threshold: 1.0
 
   - type: command_executed
-    description: "Agent ran uip flow process get"
+    description: "Agent ran uip maestro flow process get"
     tool_name: "Bash"
-    command_pattern: 'uip\s+flow\s+process\s+get'
+    command_pattern: 'uip\s+maestro\s+flow\s+process\s+get'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0
@@ -95,7 +95,7 @@ success_criteria:
   - type: command_executed
     description: "Agent used --output yaml on process get"
     tool_name: "Bash"
-    command_pattern: 'uip\s+flow\s+process\s+get.*--output\s+yaml'
+    command_pattern: 'uip\s+maestro\s+flow\s+process\s+get.*--output\s+yaml'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0

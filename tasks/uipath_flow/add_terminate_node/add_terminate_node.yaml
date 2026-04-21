@@ -73,7 +73,7 @@ success_criteria:
     pass_threshold: 1.0
 
   - type: command_executed
-    description: "Agent used uip flow command to explore nodes"
+    description: "Agent used uip maestro flow command to explore nodes"
     tool_name: "Bash"
     command_pattern: "uip.*flow"
     min_count: 1
@@ -90,6 +90,6 @@ llm_reviewer:
 
     1. Was a Terminate node successfully added to the workflow?
     2. Is the Terminate node connected to the HTTP Request step's error handling?
-    3. Did the agent use uip flow commands to explore available nodes and metadata?
+    3. Did the agent use uip maestro flow commands to explore available nodes and metadata?
     4. Is the resulting flow file valid and well-structured JSON?
     5. Does the modification preserve the existing workflow structure?

@@ -41,10 +41,10 @@
 {"id": "r041", "prompt": "Add a node to my graph", "should_trigger": "no"}
 {"id": "r042", "prompt": "Validate my JSON schema", "should_trigger": "no"}
 {"id": "r043", "prompt": "Open my ProjectName.flow file and add an HTTP node", "should_trigger": "yes"}
-{"id": "r044", "prompt": "Show me how to run uip flow validate", "should_trigger": "yes"}
+{"id": "r044", "prompt": "Show me how to run uip maestro flow validate", "should_trigger": "yes"}
 {"id": "r045", "prompt": "I need to edit the nodes in my flow", "should_trigger": "yes"}
 {"id": "r046", "prompt": "Create a Maestro flow project from scratch", "should_trigger": "yes"}
-{"id": "r047", "prompt": "What does uip flow registry search do?", "should_trigger": "yes"}
+{"id": "r047", "prompt": "What does uip maestro flow registry search do?", "should_trigger": "yes"}
 {"id": "r048", "prompt": "Add an end node with output mapping to my flow", "should_trigger": "yes"}
 {"id": "r049", "prompt": "Replace a mock node with a real RPA process node in my .flow", "should_trigger": "yes"}
 {"id": "r050", "prompt": "Build a .flow that listens to a Gmail connector trigger for new emails, parses with a script node, branches on sender domain, posts matching ones to Teams, and writes a queue record", "should_trigger": "yes"}
@@ -99,8 +99,8 @@
 {"id": "r099", "prompt": "Add an edge between two nodes in my flow", "should_trigger": "yes"}
 {"id": "r100", "prompt": "What's the syntax for the .flow JSON format?", "should_trigger": "yes"}
 {"id": "r101", "prompt": "Show me how to add an input variable to my flow", "should_trigger": "yes"}
-{"id": "r102", "prompt": "Run uip flow debug on my project", "should_trigger": "yes"}
-{"id": "r103", "prompt": "How do I use uip flow registry list?", "should_trigger": "yes"}
+{"id": "r102", "prompt": "Run uip maestro flow debug on my project", "should_trigger": "yes"}
+{"id": "r103", "prompt": "How do I use uip maestro flow registry list?", "should_trigger": "yes"}
 {"id": "r104", "prompt": "Add a decision node to branch my flow", "should_trigger": "yes"}
 {"id": "r105", "prompt": "Rename a node in my .flow file", "should_trigger": "yes"}
 {"id": "r106", "prompt": "Configure the ports on a flow node", "should_trigger": "yes"}
@@ -111,7 +111,7 @@
 {"id": "r111", "prompt": "Help me with the .flow file format", "should_trigger": "yes"}
 {"id": "r112", "prompt": "How do I declare an inout variable in a flow?", "should_trigger": "yes"}
 {"id": "r113", "prompt": "Add a targetPort to every edge in my flow", "should_trigger": "yes"}
-{"id": "r114", "prompt": "What is the difference between uip flow validate and uip flow debug?", "should_trigger": "yes"}
+{"id": "r114", "prompt": "What is the difference between uip maestro flow validate and uip maestro flow debug?", "should_trigger": "yes"}
 {"id": "r115", "prompt": "I'm new to UiPath Flow — how do I create my first project?", "should_trigger": "yes"}
 {"id": "r116", "prompt": "Scaffold a new .flow project in my current directory", "should_trigger": "yes"}
 {"id": "r117", "prompt": "Build a .flow that reads rows from a SharePoint list, validates each address via an HTTP node, routes invalid rows to a Google Sheet via decision, valid rows into a Salesforce create-contact connector, and emails a summary via Outlook at End", "should_trigger": "yes"}

@@ -185,7 +185,7 @@ def test_criteria_check_renders_detailed_pass_and_fail():
             criteria=[
                 CriterionSummary(
                     criterion_type="run_command",
-                    description="uip flow validate passes",
+                    description="uip maestro flow validate passes",
                     score=1.0,
                     passed=True,
                 ),

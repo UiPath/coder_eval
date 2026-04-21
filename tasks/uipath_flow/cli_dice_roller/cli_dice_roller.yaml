@@ -1,6 +1,6 @@
 task_id: flow-cli-dice-roller
 description: >
-  Create a dice-roller flow using CLI mode — uip flow node add,
+  Create a dice-roller flow using CLI mode — uip maestro flow node add,
   edge add, and validate. Agent should follow cli/workflow-guide.md.
 tags: [flow, cli, generate, tier-2]
 
@@ -17,36 +17,36 @@ sandbox:
     env_packages:
       - "@uipath/cli@0.1.21"
 initial_prompt: |
-  Before starting, load the uipath-flow skill. Read and follow its workflow steps exactly.
+  Before starting, load the uipath-maestro-flow skill. Read and follow its workflow steps exactly.
   Do NOT ask for approval, confirmation, or feedback. Do NOT pause between planning and implementation. Build the complete flow end-to-end in a single pass.
 
   Use CLI mode (uip commands) to create a UiPath Flow project named
   "DiceRoller" that simulates rolling a six-sided die and outputs the
   result (random integer 1-6).
 
-  Follow the skill's cli/workflow-guide.md. Use uip flow node add and
-  uip flow edge add. Validate with uip flow validate.
+  Follow the skill's cli/workflow-guide.md. Use uip maestro flow node add and
+  uip maestro flow edge add. Validate with uip maestro flow validate.
 
 success_criteria:
   - type: command_executed
-    description: "Used uip flow node add"
+    description: "Used uip maestro flow node add"
     tool_name: "Bash"
-    command_pattern: "uip\\s+flow\\s+node\\s+add"
+    command_pattern: "uip\\s+maestro\\s+flow\\s+node\\s+add"
     min_count: 1
     weight: 2.0
     pass_threshold: 1.0
 
   - type: command_executed
-    description: "Used uip flow edge add"
+    description: "Used uip maestro flow edge add"
     tool_name: "Bash"
-    command_pattern: "uip\\s+flow\\s+edge\\s+add"
+    command_pattern: "uip\\s+maestro\\s+flow\\s+edge\\s+add"
     min_count: 1
     weight: 2.0
     pass_threshold: 1.0
 
   - type: run_command
-    description: "uip flow validate passes"
-    command: "python3 -c \"import glob,subprocess,sys; flows=glob.glob('**/DiceRoller.flow',recursive=True); sys.exit(1) if not flows else sys.exit(subprocess.run(['uip','flow','validate',flows[0],'--output','json']).returncode)\""
+    description: "uip maestro flow validate passes"
+    command: "python3 -c \"import glob,subprocess,sys; flows=glob.glob('**/DiceRoller.flow',recursive=True); sys.exit(1) if not flows else sys.exit(subprocess.run(['uip','maestro','flow','validate',flows[0],'--output','json']).returncode)\""
     timeout: 60
     expected_exit_code: 0
     weight: 4.0

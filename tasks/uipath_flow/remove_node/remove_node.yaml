@@ -15,12 +15,12 @@ sandbox:
   python: {}
   template_sources:
     - type: template_dir
-      path: "../../../../skills/skills/uipath-flow"
+      path: "../../../../skills/skills/uipath-maestro-flow"
     - type: template_dir
       path: "../shared/baselines"
 
 initial_prompt: |
-  You have the uipath-flow skill available in the current directory.
+  You have the uipath-maestro-flow skill available in the current directory.
   Read SKILL.md for instructions on editing .flow files.
 
   Read the existing flow at baseline.flow. This is a dice-roller flow with a

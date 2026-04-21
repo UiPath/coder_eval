@@ -25,25 +25,25 @@ initial_prompt: |
   run `uip login` first.
 
   ## Step 1: List processes
-  Run `uip flow process list --output json > processes.json`
+  Run `uip maestro flow process list --output json > processes.json`
   to discover available processes with their process-key and folder-key.
 
   ## Step 2: Run a process
   From the list output, extract a `process-key` and `folder-key`. Then run:
-    uip flow process run <process-key> <folder-key> --output json > run_result.json
+    uip maestro flow process run <process-key> <folder-key> --output json > run_result.json
   If no processes are available, write to run_result.json:
     {"status": "skipped", "reason": "no processes found"}
   and skip to Step 5.
 
   ## Step 3: Check job status
   From the run result, extract the job-key. Then run:
-    uip flow job status <job-key> --output json > job_status.json
+    uip maestro flow job status <job-key> --output json > job_status.json
   Also try with --detailed flag:
-    uip flow job status <job-key> --detailed --output json > job_status_detailed.json
+    uip maestro flow job status <job-key> --detailed --output json > job_status_detailed.json
 
   ## Step 4: Get job traces
   Stream traces for the job (use a short timeout since the job may complete quickly):
-    uip flow job traces <job-key> --output json > job_traces.json 2>&1 &
+    uip maestro flow job traces <job-key> --output json > job_traces.json 2>&1 &
     PID=$!; sleep 15; kill $PID 2>/dev/null
   If traces output is empty, write:
     {"status": "completed", "reason": "no traces captured in time window"}
@@ -51,7 +51,7 @@ initial_prompt: |
   ## Step 5: Write summary report
   Create run_report.json:
     {
-      "command_used": "uip flow process run",
+      "command_used": "uip maestro flow process run",
       "process_key": "<process-key or null>",
       "folder_key": "<folder-key or null>",
       "job_key": "<job-key or null>",
@@ -71,7 +71,7 @@ success_criteria:
   - type: command_executed
     description: "Agent listed processes"
     tool_name: "Bash"
-    command_pattern: 'uip\s+flow\s+process\s+list'
+    command_pattern: 'uip\s+maestro\s+flow\s+process\s+list'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
@@ -83,9 +83,9 @@ success_criteria:
     pass_threshold: 1.0
 
   - type: command_executed
-    description: "Agent ran uip flow process run"
+    description: "Agent ran uip maestro flow process run"
     tool_name: "Bash"
-    command_pattern: 'uip\s+flow\s+process\s+run'
+    command_pattern: 'uip\s+maestro\s+flow\s+process\s+run'
     min_count: 1
     weight: 2.0
     pass_threshold: 1.0
@@ -99,7 +99,7 @@ success_criteria:
   - type: command_executed
     description: "Agent checked job status"
     tool_name: "Bash"
-    command_pattern: 'uip\s+flow\s+job\s+status'
+    command_pattern: 'uip\s+maestro\s+flow\s+job\s+status'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0
@@ -113,7 +113,7 @@ success_criteria:
   - type: command_executed
     description: "Agent used --detailed flag on job status"
     tool_name: "Bash"
-    command_pattern: 'uip\s+flow\s+job\s+status.*--detailed'
+    command_pattern: 'uip\s+maestro\s+flow\s+job\s+status.*--detailed'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
@@ -127,7 +127,7 @@ success_criteria:
   - type: command_executed
     description: "Agent captured job traces"
     tool_name: "Bash"
-    command_pattern: 'uip\s+flow\s+job\s+traces'
+    command_pattern: 'uip\s+maestro\s+flow\s+job\s+traces'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0

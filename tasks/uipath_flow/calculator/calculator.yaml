@@ -1,6 +1,6 @@
 task_id: flow-json-calculator
 description: >
-  Create a calculator .flow project with input variables using the uipath-flow
+  Create a calculator .flow project with input variables using the uipath-maestro-flow
   skill — no CLI, pure JSON authoring with bundled schemas.
 tags: [flow, flow-json, generate, no-cli]
 
@@ -15,10 +15,10 @@ sandbox:
   python: {}
   template_sources:
     - type: template_dir
-      path: "../../../../skills/skills/uipath-flow"
+      path: "../../../../skills/skills/uipath-maestro-flow"
 
 initial_prompt: |
-  You have the uipath-flow skill available in the current directory.
+  You have the uipath-maestro-flow skill available in the current directory.
   Read SKILL.md for complete instructions on building .flow files.
 
   Create a UiPath Flow project named "Calculator" that takes two number inputs

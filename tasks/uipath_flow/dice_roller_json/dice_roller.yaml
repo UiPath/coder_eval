@@ -1,6 +1,6 @@
 task_id: flow-json-dice-roller
 description: >
-  Create a dice-roller .flow project using the uipath-flow skill's bundled
+  Create a dice-roller .flow project using the uipath-maestro-flow skill's bundled
   schemas and templates — no CLI, no registry, pure JSON authoring.
 tags: [flow, flow-json, generate, no-cli]
 
@@ -15,10 +15,10 @@ sandbox:
   python: {}
   template_sources:
     - type: template_dir
-      path: "../../../../skills/skills/uipath-flow"
+      path: "../../../../skills/skills/uipath-maestro-flow"
 
 initial_prompt: |
-  You have the uipath-flow skill available in the current directory.
+  You have the uipath-maestro-flow skill available in the current directory.
   Read SKILL.md for complete instructions on building .flow files.
 
   Create a UiPath Flow project named "DiceRoller" that simulates rolling a

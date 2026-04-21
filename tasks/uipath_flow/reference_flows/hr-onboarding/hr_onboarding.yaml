@@ -100,8 +100,8 @@ success_criteria:
 
   # ── Validate with uipcli ────────────────────────────────────────────────────
   - type: run_command
-    description: "Flow passes uip flow validate"
-    command: "cd hr_onboarding && uip flow validate hr_onboarding/hr_onboarding.flow"
+    description: "Flow passes uip maestro flow validate"
+    command: "cd hr_onboarding && uip maestro flow validate hr_onboarding/hr_onboarding.flow"
     timeout: 30
     expected_exit_code: 0
     weight: 2.0

@@ -276,12 +276,12 @@ class TestCommandExecutedCriterion:
                 [
                     _make_command(
                         tool_name="Bash",
-                        parameters={"command": "uip flow process get --help 2>&1"},
+                        parameters={"command": "uip maestro flow process get --help 2>&1"},
                         tool_id="t1",
                     ),
                     _make_command(
                         tool_name="Bash",
-                        parameters={"command": "uip flow process get --process-key pk1 --feed-id fid1"},
+                        parameters={"command": "uip maestro flow process get --process-key pk1 --feed-id fid1"},
                         tool_id="t2",
                     ),
                 ]
@@ -289,9 +289,9 @@ class TestCommandExecutedCriterion:
         ]
 
         criterion = CommandExecutedCriterion(
-            description="Agent ran uip flow process get (not just --help)",
+            description="Agent ran uip maestro flow process get (not just --help)",
             tool_name="Bash",
-            command_pattern=r"uip\s+flow\s+process\s+get",
+            command_pattern=r"uip\s+maestro\s+flow\s+process\s+get",
             exclude_pattern=r"--help",
             min_count=1,
         )
@@ -310,12 +310,12 @@ class TestCommandExecutedCriterion:
                 [
                     _make_command(
                         tool_name="Bash",
-                        parameters={"command": "uip flow process get --help"},
+                        parameters={"command": "uip maestro flow process get --help"},
                         tool_id="t1",
                     ),
                     _make_command(
                         tool_name="Bash",
-                        parameters={"command": "uip flow process get --help 2>&1"},
+                        parameters={"command": "uip maestro flow process get --help 2>&1"},
                         tool_id="t2",
                     ),
                 ]
@@ -323,9 +323,9 @@ class TestCommandExecutedCriterion:
         ]
 
         criterion = CommandExecutedCriterion(
-            description="Agent ran uip flow process get (not just --help)",
+            description="Agent ran uip maestro flow process get (not just --help)",
             tool_name="Bash",
-            command_pattern=r"uip\s+flow\s+process\s+get",
+            command_pattern=r"uip\s+maestro\s+flow\s+process\s+get",
             exclude_pattern=r"--help",
             min_count=1,
         )
@@ -365,7 +365,7 @@ class TestCommandExecutedCriterion:
         turn_records = [
             _make_turn(
                 [
-                    _make_command(tool_name="Bash", parameters={"command": "uip flow process get pk1"}),
+                    _make_command(tool_name="Bash", parameters={"command": "uip maestro flow process get pk1"}),
                 ]
             )
         ]

@@ -26,7 +26,7 @@ initial_prompt: |
 
   Do NOT run flow debug — just validate the flow.
   Do NOT ask for approval, confirmation, or feedback. Do NOT pause between planning and implementation. Build the complete flow end-to-end in a single pass.
-  Before starting, load the uipath-flow skill. Read and follow its workflow steps exactly.
+  Before starting, load the uipath-maestro-flow skill. Read and follow its workflow steps exactly.
 
 success_criteria:
   # --- Flow correctness ---
@@ -62,11 +62,11 @@ success_criteria:
     weight: 2.0
     pass_threshold: 1.0
 
-  # --- Mode detection: agent should NOT use uip flow node add ---
+  # --- Mode detection: agent should NOT use uip maestro flow node add ---
   # The skill should default to JSON authoring for OOTB-only flows.
   # Use run_command to check turn records since command_executed has no max_count.
   - type: run_command
-    description: "Agent did NOT use uip flow node add (defaulted to JSON authoring)"
+    description: "Agent did NOT use uip maestro flow node add (defaulted to JSON authoring)"
     command: "echo 'OK: mode detection requires turn records — checked via eval logs'"
     timeout: 5
     expected_exit_code: 0

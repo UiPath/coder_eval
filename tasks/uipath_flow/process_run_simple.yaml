@@ -23,15 +23,15 @@ success_criteria:
   - type: command_executed
     description: "Agent listed processes to find process-key and folder-key"
     tool_name: "Bash"
-    command_pattern: 'uip\s+flow\s+process\s+list'
+    command_pattern: 'uip\s+maestro\s+flow\s+process\s+list'
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
 
   - type: command_executed
-    description: "Agent ran uip flow process run (not just --help)"
+    description: "Agent ran uip maestro flow process run (not just --help)"
     tool_name: "Bash"
-    command_pattern: 'uip\s+flow\s+process\s+run'
+    command_pattern: 'uip\s+maestro\s+flow\s+process\s+run'
     exclude_pattern: '--help'
     min_count: 1
     weight: 2.0
@@ -40,7 +40,7 @@ success_criteria:
   - type: command_executed
     description: "Agent checked job status"
     tool_name: "Bash"
-    command_pattern: 'uip\s+flow\s+job\s+status'
+    command_pattern: 'uip\s+maestro\s+flow\s+job\s+status'
     min_count: 1
     weight: 1.5
     pass_threshold: 1.0

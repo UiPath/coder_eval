@@ -229,7 +229,7 @@ export function parseFlowDebug(
         };
     };
     // FlowDebug payloads are captured verbatim in the details string of the
-    // run_command success criterion that invokes `uip flow debug`. Walk
+    // run_command success criterion that invokes `uip maestro flow debug`. Walk
     // backwards from the marker to find the enclosing JSON object, tolerating
     // whatever stdout/stderr prefix the criterion wraps around it.
     for (const c of criteria) {

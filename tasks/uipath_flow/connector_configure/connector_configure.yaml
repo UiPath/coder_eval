@@ -17,14 +17,14 @@ sandbox:
     env_packages:
       - "@uipath/cli@0.1.21"
 initial_prompt: |
-  Before starting, load the uipath-flow skill. Read and follow its workflow steps exactly.
+  Before starting, load the uipath-maestro-flow skill. Read and follow its workflow steps exactly.
   Do NOT ask for approval, confirmation, or feedback. Do NOT pause between planning and implementation. Build the complete flow end-to-end in a single pass.
 
   Create a flow named "SlackNotifier" that sends a Slack message.
   Follow the connector guide's 6-step configuration workflow:
 
   1. Fetch available Slack connections (uip is connections list)
-  2. Get enriched registry definition (uip flow registry get with --connection-id)
+  2. Get enriched registry definition (uip maestro flow registry get with --connection-id)
   3. Describe the resource (uip is resources describe)
   4. Resolve any reference fields (uip is resources execute list)
   5. Validate required fields

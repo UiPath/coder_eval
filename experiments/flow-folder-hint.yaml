@@ -35,7 +35,7 @@ variants:
               - Folder ID: 2553540
               - Folder key: 44d4ea33-f9c0-471f-a18d-376a3a5ef8d6
 
-              When using `uip flow` commands, pass `--folder-id 2553540` to target this folder.
+              When using `uip maestro flow` commands, pass `--folder-id 2553540` to target this folder.
 
               ## Known Issues
               The `[ERROR] Failed to load tool codedapp-tool` message on stderr is

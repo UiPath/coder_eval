@@ -95,8 +95,8 @@ success_criteria:
 
   # ── Validate with uipcli ────────────────────────────────────────────────────
   - type: run_command
-    description: "Flow passes uip flow validate"
-    command: "cd sales_pipeline_hygiene && uip flow validate sales_pipeline_hygiene/sales_pipeline_hygiene.flow"
+    description: "Flow passes uip maestro flow validate"
+    command: "cd sales_pipeline_hygiene && uip maestro flow validate sales_pipeline_hygiene/sales_pipeline_hygiene.flow"
     timeout: 30
     expected_exit_code: 0
     weight: 2.0

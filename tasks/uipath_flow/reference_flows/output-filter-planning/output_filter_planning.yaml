@@ -1,7 +1,7 @@
 task_id: uipath-flow-output-filter-planning
 description: >
   Create a UiPath Flow planning document that demonstrates the new --output-filter
-  CLI feature with JMESPath expressions. The agent must use `uip flow registry`
+  CLI feature with JMESPath expressions. The agent must use `uip maestro flow registry`
   commands with --output-filter to discover and validate specific connector
   properties, then create a properly formatted implementation plan document
   following the new template structure (Summary, Open Questions, Global Variables).

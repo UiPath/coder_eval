@@ -54,7 +54,7 @@ class TestSummarizeCommands:
     def test_multiple_commands_numbered(self):
         cmds = [
             _make_cmd(tool_name="Bash", params={"command": "uip --help"}, seq=0),
-            _make_cmd(tool_name="Bash", params={"command": "uip flow --help"}, seq=1),
+            _make_cmd(tool_name="Bash", params={"command": "uip maestro flow --help"}, seq=1),
             _make_cmd(tool_name="Read", params={"file_path": "out.json"}, seq=2),
         ]
         result = summarize_commands(cmds)
