@@ -6,6 +6,7 @@ from coder_eval.models import (
     ExperimentDefaults,
     ExperimentDefinition,
     ExperimentVariant,
+    LLMReviewerConfig,
     PostRunCommand,
     PromptPrefix,
     PromptReplace,
@@ -228,6 +229,45 @@ class TestResolveTaskForVariant:
         assert resolved.task_id == "my-task"
         assert resolved.description == "My test"
         assert len(resolved.success_criteria) == 1
+
+
+class TestLLMReviewerFromExperimentDefaults:
+    """Tests for layer-2 experiment defaults llm_reviewer resolution."""
+
+    def test_experiment_defaults_llm_reviewer_applied(self):
+        """llm_reviewer in experiment defaults flows into a task that didn't set one."""
+        default_exp = _make_default_experiment()
+        task = _make_task()  # No explicit llm_reviewer
+        experiment = ExperimentDefinition(
+            experiment_id="with-review",
+            defaults=ExperimentDefaults(
+                llm_reviewer={
+                    "enabled": True,
+                    "prompt": "Review against skill Critical Rules.",
+                },
+            ),
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.llm_reviewer.enabled is True
+        assert resolved.llm_reviewer.prompt == "Review against skill Critical Rules."
+        assert lineage["llm_reviewer"].source == "experiment-defaults"
+
+    def test_task_llm_reviewer_beats_experiment_defaults(self):
+        """Task-level llm_reviewer wins over experiment defaults."""
+        default_exp = _make_default_experiment()
+        task = _make_task(
+            llm_reviewer=LLMReviewerConfig(enabled=True, prompt="task-specific"),
+        )
+        experiment = ExperimentDefinition(
+            experiment_id="with-review",
+            defaults=ExperimentDefaults(llm_reviewer={"enabled": True, "prompt": "experiment-level"}),
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.llm_reviewer.prompt == "task-specific"
+        # Task's explicit value wins — no experiment-defaults lineage entry.
+        assert "llm_reviewer" not in lineage or lineage["llm_reviewer"].source != "experiment-defaults"
 
 
 class TestDefaultExperimentScalarOverrides:

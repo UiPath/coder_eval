@@ -177,6 +177,89 @@ class TestRunCommandStdoutMatching:
         result = checker._check_impl(c, self._sandbox(0, "anything"))
         assert result.score == 0.0
 
+    def test_match_stdout_regex_preserves_whitespace_in_pattern(self):
+        """Regex mode must not strip the authored pattern — whitespace is meaningful."""
+        assert RunCommandChecker._match_stdout("  hello  ", r"^\s*hello\s*$", "regex") is True
+        # actual does NOT have leading spaces, so this pattern that requires
+        # them must fail (it would pass today if actual and expected were stripped).
+        assert RunCommandChecker._match_stdout("hello", r"^   hello$", "regex") is False
+
+    def test_match_stdout_exact_still_strips_both_sides(self):
+        """exact still strips — preserving today's forgiving behaviour."""
+        assert RunCommandChecker._match_stdout("  hi\n", "hi", "exact") is True
+
+    def test_match_stdout_contains_still_strips_both_sides(self):
+        """contains still strips — preserving today's forgiving behaviour."""
+        assert RunCommandChecker._match_stdout("  hello world  ", "hello", "contains") is True
+
+
+class TestRunCommandDetailsSurfacing:
+    """Details must surface command, exit code, and both streams — even when
+    stdout or stderr is empty — so reviewers can debug failures from the HTML
+    report without diving back into raw logs."""
+
+    def _sandbox(self, exit_code: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
+        s = MagicMock(spec=Sandbox)
+        s.run_command.return_value = (exit_code, stdout, stderr)
+        return s
+
+    def test_failure_details_include_command_exit_and_both_streams(self):
+        """A non-zero exit must always include the command + labeled streams."""
+        checker = RunCommandChecker()
+        c = RunCommandCriterion(
+            command="uip rpa get-errors --project-dir .",
+            description="get-errors",
+            expected_exit_code=0,
+        )
+        result = checker._check_impl(c, self._sandbox(1, "", "Project not found: .\n"))
+        assert result.score == 0.0
+        details = result.details or ""
+        assert "Command: uip rpa get-errors --project-dir ." in details
+        assert "Exit code: 1 (expected: 0)" in details
+        assert "Stdout: (empty)" in details
+        assert "Stderr:" in details
+        assert "Project not found" in details
+
+    def test_success_details_include_command_and_both_streams(self):
+        """On success we still emit the full exec block so the report shows
+        what was actually run."""
+        checker = RunCommandChecker()
+        c = RunCommandCriterion(command="echo hello", description="d")
+        result = checker._check_impl(c, self._sandbox(0, "hello\n"))
+        assert result.score == 1.0
+        details = result.details or ""
+        assert "Command: echo hello" in details
+        assert "Exit code: 0 (expected: 0)" in details
+        assert "Stdout:\nhello" in details
+        assert "Stderr: (empty)" in details
+
+    def test_long_stream_is_truncated_with_marker(self):
+        """Output longer than the per-stream budget is truncated with a
+        visible marker so the HTML stays bounded."""
+        checker = RunCommandChecker()
+        big = "x" * 9000
+        c = RunCommandCriterion(command="cmd", description="d")
+        result = checker._check_impl(c, self._sandbox(1, big, ""))
+        details = result.details or ""
+        # Budget is 4000 chars — the full 9000 must not appear verbatim.
+        assert "x" * 9000 not in details
+        assert "more chars truncated" in details
+
+    def test_score_from_stdout_failure_includes_stdout_and_stderr(self):
+        """The score_from_stdout failure path also surfaces captured output."""
+        checker = RunCommandChecker()
+        c = RunCommandCriterion(
+            command="pytest --tb=short -q",
+            description="tests",
+            score_from_stdout=True,
+        )
+        result = checker._check_impl(c, self._sandbox(2, "", "ImportError: no module named foo"))
+        assert result.score == 0.0
+        details = result.details or ""
+        assert "Command: pytest --tb=short -q" in details
+        assert "Exit code: 2" in details
+        assert "ImportError" in details
+
 
 class TestScoreFromStdout:
     """Unit tests for the score_from_stdout path."""

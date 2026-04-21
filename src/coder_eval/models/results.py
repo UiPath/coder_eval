@@ -44,6 +44,12 @@ class CriterionResult(BaseModel):
     )
     details: str | None = Field(default=None, description="Additional details about the result")
     error: str | None = Field(default=None, description="Error message if the check failed")
+    pass_threshold: float = Field(
+        default=0.9,
+        ge=0.0,
+        le=1.0,
+        description="Score required to pass this criterion (mirrors BaseSuccessCriterion.pass_threshold).",
+    )
 
 
 class LLMDecision(BaseModel):
@@ -224,8 +230,8 @@ class EvaluationResult(BaseModel):
         if len(self.success_criteria_results) != len(criteria):
             # Length mismatch indicates a programming error upstream — log it
             logger.warning(
-                "Results/criteria length mismatch: %d results vs %d criteria for task %s. "
-                "Falling back to unweighted average.",
+                "Results/criteria length mismatch: %d results vs %d criteria for task %s."
+                + " Falling back to unweighted average.",
                 len(self.success_criteria_results),
                 len(criteria),
                 self.task_id,
@@ -268,8 +274,6 @@ class RunSummary(BaseModel):
     @model_validator(mode="after")
     def _check_task_count_invariant(self) -> RunSummary:
         if self.tasks_succeeded + self.tasks_failed + self.tasks_error != self.tasks_run:
-            raise ValueError(
-                f"Task count invariant violated: {self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error}"
-                f" != {self.tasks_run}"
-            )
+            total = f"{self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error}"
+            raise ValueError(f"Task count invariant violated: {total} != {self.tasks_run}")
         return self

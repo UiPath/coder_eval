@@ -14,7 +14,8 @@ from coder_eval.models import (
     VariantAggregate,
     VariantResult,
 )
-from coder_eval.reports_experiment import ExperimentReportGenerator, _describe_prompt_config
+from coder_eval.reports_experiment import ExperimentReportGenerator
+from coder_eval.reports_stats import describe_prompt_config
 
 
 class TestResultModels:
@@ -713,42 +714,42 @@ class TestStatisticalHelpers:
 
     def test_welch_t_test_identical_groups(self):
         """Identical groups should produce p-value of 1.0."""
-        from coder_eval.reports_experiment import _welch_t_test
+        from coder_eval.reports_stats import welch_t_test
 
-        p = _welch_t_test([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])
+        p = welch_t_test([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])
         assert p is not None
         assert p == 1.0
 
     def test_welch_t_test_different_groups(self):
         """Very different groups should produce low p-value."""
-        from coder_eval.reports_experiment import _welch_t_test
+        from coder_eval.reports_stats import welch_t_test
 
-        p = _welch_t_test([1.0, 1.1, 0.9, 1.0, 1.05], [5.0, 5.1, 4.9, 5.0, 5.05])
+        p = welch_t_test([1.0, 1.1, 0.9, 1.0, 1.05], [5.0, 5.1, 4.9, 5.0, 5.05])
         assert p is not None
         assert p < 0.001
 
     def test_welch_t_test_insufficient_data(self):
         """Single observation per group should return None."""
-        from coder_eval.reports_experiment import _welch_t_test
+        from coder_eval.reports_stats import welch_t_test
 
-        assert _welch_t_test([1.0], [2.0]) is None
+        assert welch_t_test([1.0], [2.0]) is None
 
     def test_mean_and_stddev(self):
         """Basic mean and stddev calculations."""
-        from coder_eval.reports_experiment import _mean, _stddev
+        from coder_eval.reports_stats import mean, stddev
 
-        assert _mean([1.0, 2.0, 3.0]) == 2.0
-        assert abs(_stddev([1.0, 2.0, 3.0]) - 1.0) < 1e-10
-        assert _stddev([5.0]) == 0.0  # Single value
+        assert mean([1.0, 2.0, 3.0]) == 2.0
+        assert abs(stddev([1.0, 2.0, 3.0]) - 1.0) < 1e-10
+        assert stddev([5.0]) == 0.0  # Single value
 
     def test_fmt_mean_sd(self):
         """Format mean ± stddev string."""
-        from coder_eval.reports_experiment import _fmt_mean_sd
+        from coder_eval.reports_stats import fmt_mean_sd
 
-        result = _fmt_mean_sd([1.0, 2.0, 3.0])
+        result = fmt_mean_sd([1.0, 2.0, 3.0])
         assert "2.000" in result
         assert "±" in result
-        assert _fmt_mean_sd([]) == "N/A"
+        assert fmt_mean_sd([]) == "N/A"
 
 
 class TestComprehensiveVariantReport:
@@ -885,22 +886,22 @@ class TestComprehensiveVariantReport:
 
 
 class TestDescribePromptConfig:
-    """Tests for _describe_prompt_config helper."""
+    """Tests for describe_prompt_config helper."""
 
     def test_no_mutations(self):
         variant = ExperimentVariant(variant_id="baseline")
-        assert _describe_prompt_config(variant) == "(base prompt)"
+        assert describe_prompt_config(variant) == "(base prompt)"
 
     def test_with_override(self):
         variant = ExperimentVariant(variant_id="override", initial_prompt="custom")
-        assert _describe_prompt_config(variant) == "(prompt override)"
+        assert describe_prompt_config(variant) == "(prompt override)"
 
     def test_with_mutations(self):
         variant = ExperimentVariant(
             variant_id="mutated",
             prompt_mutations=[PromptPrefix(content="pre"), PromptSuffix(content="suf")],
         )
-        result = _describe_prompt_config(variant)
+        result = describe_prompt_config(variant)
         assert result == "(2 mutations: prefix, suffix)"
 
     def test_prompt_config_in_experiment_report(self):

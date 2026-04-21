@@ -23,30 +23,19 @@ def reviewer_config():
 
 @pytest.fixture
 def reviewer(reviewer_config):
-    """Initialized LLM reviewer with mocked LLM Gateway client."""
+    """Initialized LLM reviewer with its ``_llm`` replaced by a MagicMock callable.
+
+    After Phase 1 ``LLMReviewer._llm`` is a ``Callable[[str], str]``. Tests set
+    ``reviewer._llm.return_value`` / ``.side_effect`` directly.
+    """
     reviewer = LLMReviewer(reviewer_config)
-    # Mock the LLM client (set private attr to bypass lazy property)
     reviewer._llm = MagicMock()
     return reviewer
 
 
-def create_mock_response(content: str):
-    """Create mock LLM response with given content."""
-    response = MagicMock()
-    response.content = content
-    return response
-
-
 def test_evaluator_handles_no_json_in_response(reviewer, caplog):
-    """Test that pure text response without JSON returns None gracefully.
-
-    Hypothesis: LLM may return plain text instead of JSON.
-    Expected: Parse failure logged, None returned, no crash.
-
-    Context: Lines 339-340 in evaluator.py check for JSON boundaries.
-    """
-    # Mock LLM returning plain text, no JSON
-    reviewer.llm.invoke.return_value = create_mock_response("This is just plain text with no JSON object.")
+    """Test that pure text response without JSON returns None gracefully."""
+    reviewer._llm.return_value = "This is just plain text with no JSON object."
 
     result = reviewer.review(
         task_description="Test task",
@@ -60,16 +49,8 @@ def test_evaluator_handles_no_json_in_response(reviewer, caplog):
 
 
 def test_evaluator_handles_invalid_json_syntax(reviewer, caplog):
-    """Test that syntactically invalid JSON returns None gracefully.
-
-    Hypothesis: LLM may return malformed JSON with syntax errors.
-    Expected: JSON parse error caught, None returned, no crash.
-
-    Context: Lines 343-350 handle json.loads() exceptions.
-    """
-    # Mock LLM returning invalid JSON (missing quote, trailing comma)
-    invalid_json = '{"issues": "Test issue, "score": 0.5,}'
-    reviewer.llm.invoke.return_value = create_mock_response(invalid_json)
+    """Test that syntactically invalid JSON returns None gracefully."""
+    reviewer._llm.return_value = '{"issues": "Test issue, "score": 0.5,}'
 
     result = reviewer.review(
         task_description="Test task",
@@ -83,16 +64,8 @@ def test_evaluator_handles_invalid_json_syntax(reviewer, caplog):
 
 
 def test_evaluator_handles_json_with_missing_required_fields(reviewer, caplog):
-    """Test that JSON missing required fields returns None gracefully.
-
-    Hypothesis: LLM may return JSON that doesn't match LLMDecision schema.
-    Expected: Pydantic validation error caught, None returned, no crash.
-
-    Context: Line 345 creates LLMDecision, which validates required fields.
-    """
-    # Mock LLM returning valid JSON but missing required "issues" field
-    incomplete_json = json.dumps({"score": 0.7, "should_continue": True})
-    reviewer.llm.invoke.return_value = create_mock_response(incomplete_json)
+    """Test that JSON missing required fields returns None gracefully."""
+    reviewer._llm.return_value = json.dumps({"score": 0.7, "should_continue": True})
 
     result = reviewer.review(
         task_description="Test task",
@@ -106,16 +79,10 @@ def test_evaluator_handles_json_with_missing_required_fields(reviewer, caplog):
 
 
 def test_evaluator_handles_json_with_wrong_field_types(reviewer, caplog):
-    """Test that JSON with incorrect field types returns None gracefully.
-
-    Hypothesis: LLM may return JSON with score as string instead of float.
-    Expected: Type validation error caught, None returned, no crash.
-    """
-    # Mock LLM returning JSON with wrong types (score as string)
-    wrong_types_json = json.dumps(
+    """Test that JSON with incorrect field types returns None gracefully."""
+    reviewer._llm.return_value = json.dumps(
         {"issues": "Test issue", "score": "not_a_number", "next_steps": ["Fix X"], "should_continue": True}
     )
-    reviewer.llm.invoke.return_value = create_mock_response(wrong_types_json)
 
     result = reviewer.review(
         task_description="Test task",
@@ -129,14 +96,7 @@ def test_evaluator_handles_json_with_wrong_field_types(reviewer, caplog):
 
 
 def test_evaluator_handles_json_wrapped_in_markdown(reviewer):
-    """Test that JSON wrapped in markdown code blocks is extracted correctly.
-
-    Hypothesis: LLM may return JSON inside markdown code blocks.
-    Expected: JSON extracted and parsed successfully.
-
-    Context: Lines 336-342 find JSON boundaries ignoring surrounding text.
-    """
-    # Mock LLM returning JSON wrapped in markdown
+    """Test that JSON wrapped in markdown code blocks is extracted correctly."""
     markdown_wrapped = """Sure, here is the review:
 
 ```json
@@ -149,7 +109,7 @@ def test_evaluator_handles_json_wrapped_in_markdown(reviewer):
 ```
 
 Hope this helps!"""
-    reviewer.llm.invoke.return_value = create_mock_response(markdown_wrapped)
+    reviewer._llm.return_value = markdown_wrapped
 
     result = reviewer.review(
         task_description="Test task",
@@ -158,7 +118,6 @@ Hope this helps!"""
         max_iterations=3,
     )
 
-    # Should succeed - JSON extraction handles surrounding text
     assert result is not None
     assert result.issues == "Missing error handling"
     assert result.score == 0.6
@@ -167,13 +126,8 @@ Hope this helps!"""
 
 
 def test_evaluator_handles_empty_response(reviewer, caplog):
-    """Test that empty LLM response returns None gracefully.
-
-    Hypothesis: LLM may return empty string on timeout or error.
-    Expected: Parse failure logged, None returned, no crash.
-    """
-    # Mock LLM returning empty response
-    reviewer.llm.invoke.return_value = create_mock_response("")
+    """Test that empty LLM response returns None gracefully."""
+    reviewer._llm.return_value = ""
 
     result = reviewer.review(
         task_description="Test task",
@@ -190,10 +144,10 @@ def test_evaluator_handles_non_retryable_exception(reviewer, caplog):
     """Test that non-retryable errors (ValueError etc.) are caught gracefully.
 
     Non-retryable errors (parse/logic failures) return None so the orchestrator
-    falls back to deterministic feedback.  Retryable errors (timeouts, network)
+    falls back to deterministic feedback. Retryable errors (timeouts, network)
     propagate so execute_with_retry can handle them.
     """
-    reviewer.llm.invoke.side_effect = ValueError("bad config value")
+    reviewer._llm.side_effect = ValueError("bad config value")
 
     result = reviewer.review(
         task_description="Test task",
@@ -211,9 +165,9 @@ def test_evaluator_propagates_retryable_exception(reviewer):
 
     This allows execute_with_retry to categorize and retry the operation.
     """
-    reviewer.llm.invoke.side_effect = Exception("LLM Gateway timeout")
+    reviewer._llm.side_effect = RuntimeError("LLM Gateway timeout")
 
-    with pytest.raises(Exception, match="LLM Gateway timeout"):
+    with pytest.raises(RuntimeError, match="LLM Gateway timeout"):
         reviewer.review(
             task_description="Test task",
             agent_output="Agent output",
@@ -223,14 +177,7 @@ def test_evaluator_propagates_retryable_exception(reviewer):
 
 
 def test_evaluator_returns_none_when_disabled(reviewer_config):
-    """Test that disabled reviewer returns None without calling LLM.
-
-    Hypothesis: When LLM reviewer is disabled, no LLM calls should be made.
-    Expected: None returned immediately, no LLM invocation.
-
-    Context: Lines 208-209 check config.enabled.
-    """
-    # Create reviewer with disabled config
+    """Test that disabled reviewer returns None without calling LLM."""
     disabled_config = LLMReviewerConfig(enabled=False, model="test-model")
     reviewer = LLMReviewer(disabled_config)
     reviewer._llm = MagicMock()
@@ -243,16 +190,12 @@ def test_evaluator_returns_none_when_disabled(reviewer_config):
     )
 
     assert result is None
-    reviewer.llm.invoke.assert_not_called()
+    reviewer._llm.assert_not_called()
 
 
 def test_evaluator_succeeds_with_valid_json(reviewer):
-    """Test happy path where LLM returns properly formatted JSON.
-
-    Hypothesis: Well-formed JSON should parse successfully.
-    Expected: LLMDecision object returned with correct values.
-    """
-    valid_json = json.dumps(
+    """Test happy path where LLM returns properly formatted JSON."""
+    reviewer._llm.return_value = json.dumps(
         {
             "issues": "Logic error in calculate() function",
             "score": 0.75,
@@ -260,7 +203,6 @@ def test_evaluator_succeeds_with_valid_json(reviewer):
             "should_continue": True,
         }
     )
-    reviewer.llm.invoke.return_value = create_mock_response(valid_json)
 
     result = reviewer.review(
         task_description="Test task",

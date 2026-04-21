@@ -16,6 +16,38 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Per-stream output budget included in criterion details. Large enough for
+# typical tool diagnostics (e.g. uip --output json, pytest tracebacks) while
+# preventing a runaway process from blowing up the JSON trace or HTML report.
+_OUTPUT_BUDGET_CHARS = 4000
+
+
+def _format_stream(label: str, text: str) -> str:
+    """Render a stream (stdout or stderr) with clear truncation markers.
+
+    Always emits a header so an empty stream reads as "(empty)" rather than
+    being silently dropped, making it obvious that the checker actually
+    captured the stream instead of missing it.
+    """
+    if not text:
+        return f"{label}: (empty)"
+    stripped = text
+    if len(stripped) > _OUTPUT_BUDGET_CHARS:
+        dropped = len(stripped) - _OUTPUT_BUDGET_CHARS
+        stripped = stripped[:_OUTPUT_BUDGET_CHARS] + f"\n… ({dropped} more chars truncated)"
+    return f"{label}:\n{stripped}"
+
+
+def _build_exec_details(command: str, exit_code: int, expected_exit: int, stdout: str, stderr: str) -> str:
+    """Build a stable details block covering command, exit, and both streams."""
+    return (
+        f"Command: {command}\n"
+        f"Exit code: {exit_code} (expected: {expected_exit})\n"
+        f"{_format_stream('Stdout', stdout)}\n"
+        f"{_format_stream('Stderr', stderr)}"
+    )
+
+
 @register_criterion
 class RunCommandChecker(BaseCriterion[RunCommandCriterion]):
     """Checker for RunCommandCriterion."""
@@ -47,11 +79,13 @@ class RunCommandChecker(BaseCriterion[RunCommandCriterion]):
         """Binary pass/fail on exit code, with optional stdout matching."""
         exit_ok = exit_code == criterion.expected_exit_code
 
-        details = f"Exit code: {exit_code} (expected: {criterion.expected_exit_code})"
-        if stdout:
-            details += f"\nStdout: {stdout[:200]}"
-        if stderr:
-            details += f"\nStderr: {stderr[:500]}"
+        details = _build_exec_details(
+            criterion.command,
+            exit_code,
+            criterion.expected_exit_code,
+            stdout,
+            stderr,
+        )
 
         stdout_ok = True
         if criterion.expected_stdout is not None:
@@ -78,11 +112,13 @@ class RunCommandChecker(BaseCriterion[RunCommandCriterion]):
     ) -> CriterionResult:
         """Read a float score (0.0-1.0) from the first line of stdout."""
         if exit_code != criterion.expected_exit_code:
-            details = f"Exit code: {exit_code} (expected: {criterion.expected_exit_code})"
-            if stdout:
-                details += f"\nStdout: {stdout[:200]}"
-            if stderr:
-                details += f"\nStderr: {stderr[:500]}"
+            details = _build_exec_details(
+                criterion.command,
+                exit_code,
+                criterion.expected_exit_code,
+                stdout,
+                stderr,
+            )
             return CriterionResult(
                 criterion_type=criterion.type,
                 description=criterion.description,
@@ -97,6 +133,13 @@ class RunCommandChecker(BaseCriterion[RunCommandCriterion]):
                 criterion_type=criterion.type,
                 description=criterion.description,
                 score=0.0,
+                details=_build_exec_details(
+                    criterion.command,
+                    exit_code,
+                    criterion.expected_exit_code,
+                    stdout,
+                    stderr,
+                ),
                 error="No output from command (empty stdout)",
             )
 
@@ -108,6 +151,13 @@ class RunCommandChecker(BaseCriterion[RunCommandCriterion]):
                 criterion_type=criterion.type,
                 description=criterion.description,
                 score=0.0,
+                details=_build_exec_details(
+                    criterion.command,
+                    exit_code,
+                    criterion.expected_exit_code,
+                    stdout,
+                    stderr,
+                ),
                 error=f"Could not parse score from first line: {first_line!r}",
             )
 
@@ -116,17 +166,29 @@ class RunCommandChecker(BaseCriterion[RunCommandCriterion]):
                 criterion_type=criterion.type,
                 description=criterion.description,
                 score=0.0,
+                details=_build_exec_details(
+                    criterion.command,
+                    exit_code,
+                    criterion.expected_exit_code,
+                    stdout,
+                    stderr,
+                ),
                 error=f"Invalid score value from stdout: {first_line!r}",
             )
 
         score = max(0.0, min(1.0, raw_score))
-        details = f"Score: {score:.3f}"
+        details_header = f"Score: {score:.3f}"
         if score != raw_score:
-            details += f" (clamped from {raw_score:.3f})"
+            details_header += f" (clamped from {raw_score:.3f})"
 
-        remaining = "\n".join(lines[1:]).strip()
-        if remaining:
-            details += f"\n{remaining[:200]}"
+        exec_details = _build_exec_details(
+            criterion.command,
+            exit_code,
+            criterion.expected_exit_code,
+            stdout,
+            stderr,
+        )
+        details = f"{details_header}\n{exec_details}"
 
         return CriterionResult(
             criterion_type=criterion.type,
@@ -137,17 +199,20 @@ class RunCommandChecker(BaseCriterion[RunCommandCriterion]):
 
     @staticmethod
     def _match_stdout(actual: str, expected: str, mode: str) -> bool:
-        """Compare stdout against expected value using the given mode."""
-        actual_stripped = actual.strip()
-        expected_stripped = expected.strip()
+        """Compare stdout against expected value using the given mode.
+
+        Only ``exact``/``contains`` strip both sides — ``regex`` passes the
+        pattern verbatim so authored whitespace (e.g. ``^   indented$``)
+        reaches ``re.search`` intact.
+        """
         if mode == "exact":
-            return actual_stripped == expected_stripped
+            return actual.strip() == expected.strip()
         if mode == "contains":
-            return expected_stripped in actual_stripped
+            return expected.strip() in actual.strip()
         if mode == "regex":
             try:
-                return re.search(expected_stripped, actual_stripped) is not None
+                return re.search(expected, actual) is not None
             except re.error as e:
-                logger.warning("Invalid stdout regex pattern '%s': %s", expected_stripped, e)
+                logger.warning("Invalid stdout regex pattern '%s': %s", expected, e)
                 return False
         raise ValueError(f"Unknown stdout_match mode: {mode!r}")

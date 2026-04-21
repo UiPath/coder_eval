@@ -13,6 +13,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+SYSTEM_PROMPT_PREVIEW_CHARS = 200
+SLOW_PARAMS_PREVIEW_CHARS = 50
+
+
 def resolve_agent_settings(task_dicts: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, bool]:
     """Pick the best agent settings source from a list of task result dicts.
 
@@ -28,6 +32,52 @@ def resolve_agent_settings(task_dicts: list[dict[str, Any]]) -> tuple[dict[str, 
     if agent_configs:
         return agent_configs[0], False
     return None, False
+
+
+def collect_agent_settings_rows(settings_source: dict[str, Any], is_sdk: bool) -> list[tuple[str, str]]:
+    """Extract ordered label/value pairs from an agent settings dict.
+
+    Shared by markdown and HTML reporters so field ordering, defaulting,
+    and truncation stay consistent between the two formats.
+    """
+    rows: list[tuple[str, str]] = [
+        ("Permission Mode", str(settings_source.get("permission_mode", "N/A"))),
+    ]
+    tools = settings_source.get("allowed_tools")
+    rows.append(("Allowed Tools", ", ".join(tools) if tools else "(all)"))
+    model = settings_source.get("model")
+    if model:
+        rows.append(("Model", str(model)))
+
+    if is_sdk:
+        for key, label in (
+            ("max_turns", "Max Turns"),
+            ("max_budget_usd", "Max Budget (USD)"),
+            ("thinking", "Thinking"),
+            ("effort", "Effort"),
+        ):
+            if settings_source.get(key) is not None:
+                rows.append((label, str(settings_source[key])))
+        mcp = settings_source.get("mcp_servers")
+        if mcp:
+            rows.append(("MCP Servers", ", ".join(mcp.keys()) if isinstance(mcp, dict) else str(mcp)))
+        betas = settings_source.get("betas")
+        if betas:
+            rows.append(("Betas", ", ".join(betas)))
+        if settings_source.get("system_prompt") is not None:
+            prompt_str = str(settings_source["system_prompt"]).replace("\n", " ")
+            if len(prompt_str) > SYSTEM_PROMPT_PREVIEW_CHARS:
+                prompt_str = prompt_str[:SYSTEM_PROMPT_PREVIEW_CHARS] + "..."
+            rows.append(("System Prompt", prompt_str))
+
+    plugins = settings_source.get("plugins")
+    if isinstance(plugins, list):
+        if plugins:
+            paths = [p.get("path", "unknown") if isinstance(p, dict) else str(p) for p in plugins]
+            rows.append(("Plugins", ", ".join(paths)))
+        else:
+            rows.append(("Plugins", "(none)"))
+    return rows
 
 
 class ReportGenerator:
@@ -297,55 +347,10 @@ class ReportGenerator:
 
     @staticmethod
     def _generate_agent_settings_section(settings_source: dict[str, Any], is_sdk: bool) -> list[str]:
-        """Generate Agent Settings markdown lines from a settings dict.
-
-        Args:
-            settings_source: Either sdk_options or agent_config dict.
-            is_sdk: Whether settings_source is from sdk_options.
-
-        Returns:
-            List of markdown lines (including heading).
-        """
+        """Generate Agent Settings markdown lines from a settings dict."""
         lines = ["## Agent Settings", ""]
-        lines.append(f"- **Permission Mode**: {settings_source.get('permission_mode', 'N/A')}")
-        tools = settings_source.get("allowed_tools")
-        lines.append(f"- **Allowed Tools**: {', '.join(tools) if tools else '(all)'}")
-        model = settings_source.get("model")
-        if model:
-            lines.append(f"- **Model**: {model}")
-
-        if is_sdk:
-            if settings_source.get("max_turns") is not None:
-                lines.append(f"- **Max Turns**: {settings_source['max_turns']}")
-            if settings_source.get("max_budget_usd") is not None:
-                lines.append(f"- **Max Budget (USD)**: {settings_source['max_budget_usd']}")
-            if settings_source.get("thinking") is not None:
-                lines.append(f"- **Thinking**: {settings_source['thinking']}")
-            if settings_source.get("effort") is not None:
-                lines.append(f"- **Effort**: {settings_source['effort']}")
-            if settings_source.get("mcp_servers"):
-                mcp = settings_source["mcp_servers"]
-                if isinstance(mcp, dict):
-                    lines.append(f"- **MCP Servers**: {', '.join(mcp.keys())}")
-                else:
-                    lines.append(f"- **MCP Servers**: {mcp}")
-            if settings_source.get("betas"):
-                lines.append(f"- **Betas**: {', '.join(settings_source['betas'])}")
-            if settings_source.get("system_prompt") is not None:
-                prompt_str = str(settings_source["system_prompt"]).replace("\n", " ")
-                if len(prompt_str) > 200:
-                    prompt_str = prompt_str[:200] + "..."
-                lines.append(f"- **System Prompt**: {prompt_str}")
-
-        # Plugins (rendered for both sdk_options and agent_config)
-        plugins = settings_source.get("plugins")
-        if plugins is not None:
-            if isinstance(plugins, list) and len(plugins) > 0:
-                plugin_paths = [p.get("path", "unknown") if isinstance(p, dict) else str(p) for p in plugins]
-                lines.append(f"- **Plugins**: {', '.join(plugin_paths)}")
-            elif isinstance(plugins, list) and len(plugins) == 0:
-                lines.append("- **Plugins**: (none)")
-
+        for label, value in collect_agent_settings_rows(settings_source, is_sdk):
+            lines.append(f"- **{label}**: {value}")
         return lines
 
     @staticmethod

@@ -137,6 +137,7 @@ class SuccessChecker:
             # Get cached instance
             checker = self._get_checker_instance(criterion_type)
             result = checker.check(criterion, self.sandbox, reference_code, turn_records=turn_records)
+            result.pass_threshold = criterion.pass_threshold
 
             logger.info(f"Criterion '{criterion_type}' score: {result.score:.2f}")
             return result
@@ -150,6 +151,7 @@ class SuccessChecker:
                 score=0.0,
                 details=f"No checker registered for criterion type '{criterion_type}'",
                 error=f"Unsupported criterion type: '{criterion_type}'",
+                pass_threshold=criterion.pass_threshold,
             )
         except Exception as e:
             # V3: Catch ALL exceptions, including checker __init__ failures
@@ -160,4 +162,5 @@ class SuccessChecker:
                 score=0.0,
                 details="Error running checker",
                 error=str(e),
+                pass_threshold=criterion.pass_threshold,
             )

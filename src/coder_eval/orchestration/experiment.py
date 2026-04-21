@@ -373,6 +373,20 @@ def resolve_task_for_variant(
     # Combine lineage
     lineage = {**agent_lineage, **scalar_lineage}
 
+    # Resolve llm_reviewer: experiment defaults fill in only if the task did
+    # not explicitly set one. Task-level llm_reviewer always wins.
+    resolved_llm_reviewer = task.llm_reviewer
+    if "llm_reviewer" not in task_explicit:
+        from ..models import LLMReviewerConfig
+
+        exp_llm = experiment.defaults.llm_reviewer if experiment.defaults else None
+        default_llm = default_experiment.defaults.llm_reviewer if default_experiment.defaults else None
+        chosen = exp_llm if exp_llm is not None else default_llm
+        if chosen is not None:
+            source = "experiment-defaults" if exp_llm is not None else "default"
+            resolved_llm_reviewer = LLMReviewerConfig(**chosen)
+            lineage["llm_reviewer"] = ConfigLineageEntry(value=chosen, source=source)
+
     # Build resolved task (copy with overrides)
     resolved_task = task.model_copy(
         update={
@@ -381,6 +395,7 @@ def resolve_task_for_variant(
             "task_timeout": resolved_task_timeout,
             "sandbox": resolved_sandbox,
             "post_run": resolved_post_run,
+            "llm_reviewer": resolved_llm_reviewer,
         }
     )
     return resolved_task, lineage
@@ -539,7 +554,7 @@ def resolve_all_tasks(
             if exp_dir is None:
                 raise ValueError(
                     f"variant '{variant.variant_id}' uses initial_prompt_file but no experiment file path "
-                    "is available for resolving relative paths"
+                    + "is available for resolving relative paths"
                 )
             resolve_variant_initial_prompt_file(variant, exp_dir)
 

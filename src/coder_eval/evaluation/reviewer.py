@@ -1,13 +1,15 @@
 """LLM-based qualitative code review for agent outputs.
 
-This module provides the LLMReviewer class which uses UiPath LLM Gateway
-to provide human-like feedback on code quality, approach, and suggested
-improvements beyond objective success criteria.
+This module provides the LLMReviewer class which uses either the Anthropic
+API directly (when ANTHROPIC_API_KEY is set) or UiPath LLM Gateway as a
+fallback, to provide human-like feedback on code quality, approach, and
+suggested improvements beyond objective success criteria.
 """
 
 import json
 import logging
-from typing import Any
+import os
+from collections.abc import Callable
 
 from ..models import LLMDecision, LLMReviewerConfig
 
@@ -16,14 +18,63 @@ from ..models import LLMDecision, LLMReviewerConfig
 logger = logging.getLogger(__name__)
 
 
+def _make_anthropic_invoker(config: LLMReviewerConfig) -> Callable[[str], str]:
+    """Build a string-returning invoker that calls the Anthropic API directly.
+
+    The returned callable takes a prompt and returns the concatenated text
+    from every TextBlock in the response, ignoring ThinkingBlock or
+    ToolUseBlock content.
+    """
+    from anthropic import Anthropic
+
+    client = Anthropic()
+
+    # Map Gateway model names to Anthropic model IDs
+    model = config.model
+    if model.startswith("anthropic."):
+        # Strip gateway prefix: "anthropic.claude-sonnet-4-6" -> "claude-sonnet-4-6"
+        model = model[len("anthropic.") :]
+
+    def invoke(prompt: str) -> str:
+        response = client.messages.create(
+            model=model,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return "".join(getattr(block, "text", "") for block in response.content if getattr(block, "type", "") == "text")
+
+    return invoke
+
+
+def _make_llmgw_invoker(config: LLMReviewerConfig) -> Callable[[str], str]:
+    """Build a string-returning invoker that calls the UiPath LLM Gateway."""
+    from uipath_llmgw_client import get_langchain_chat_model
+
+    chat_model = get_langchain_chat_model(
+        model=config.model,
+        llmgw_client_type="normalized",
+        temperature=config.temperature,
+        max_tokens=config.max_tokens,
+    )
+
+    def invoke(prompt: str) -> str:
+        response = chat_model.invoke(prompt)
+        content = response.content
+        return content if isinstance(content, str) else str(content)
+
+    return invoke
+
+
 class LLMReviewer:
-    """Qualitative evaluator using LLM Gateway for all models.
+    """Qualitative evaluator using LLM for code review.
 
     Provides human-like feedback on code quality, approach, and
     suggests improvements beyond objective success criteria.
 
-    All LLM calls are routed through UiPath LLM Gateway using LangChain
-    integration, providing unified access to Anthropic, OpenAI, and other models.
+    Backend selection (in priority order):
+    1. Anthropic API — when ANTHROPIC_API_KEY is set in the environment
+    2. UiPath LLM Gateway — when uipath_llmgw_client is installed
     """
 
     def __init__(self, config: LLMReviewerConfig):
@@ -37,34 +88,58 @@ class LLMReviewer:
             config: LLM reviewer configuration
 
         Raises:
-            RuntimeError: If uipath_llmgw_client package is not installed
+            RuntimeError: If neither Anthropic API key nor LLMGW client is available
         """
         self.config = config
-        self._llm = None
+        self._llm: Callable[[str], str] | None = None
+        self._backend: str | None = None
 
         if not config.enabled:
             return
 
-        # Verify import is available (fail fast if package missing)
-        try:
-            from uipath_llmgw_client import get_langchain_chat_model  # noqa: F401
-        except ImportError as e:
+        # Determine backend at init time (fail fast). Each except block logs at
+        # WARNING so CodeQL's py/empty-except rule sees a meaningful side effect
+        # (the earlier logger.debug call was below its visibility threshold).
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            try:
+                import anthropic  # noqa: F401
+
+                self._backend = "anthropic"
+                logger.info("LLM reviewer: using Anthropic API")
+            except ImportError:
+                logger.warning(
+                    "LLM reviewer: ANTHROPIC_API_KEY is set but the 'anthropic' package could not be imported; "
+                    + "falling back to the UiPath LLM Gateway backend.",
+                    exc_info=True,
+                )
+
+        if self._backend is None:
+            try:
+                from uipath_llmgw_client import get_langchain_chat_model  # noqa: F401
+
+                self._backend = "llmgw"
+                logger.info("LLM reviewer: using UiPath LLM Gateway")
+            except ImportError:
+                logger.warning(
+                    "LLM reviewer: 'uipath_llmgw_client' package could not be imported; "
+                    + "LLM review will be unavailable unless the anthropic backend succeeded.",
+                    exc_info=True,
+                )
+
+        if self._backend is None:
             raise RuntimeError(
-                "uipath_llmgw_client is required for LLM reviewer. Install with: pip install uipath-llmgw-client"
-            ) from e
+                "LLM reviewer requires either ANTHROPIC_API_KEY in the environment "
+                + "(with the anthropic package installed) or the uipath_llmgw_client package."
+            )
 
     @property
-    def llm(self) -> Any:
+    def llm(self) -> Callable[[str], str] | None:
         """Lazy-initialize the LLM client on first access."""
         if self._llm is None:
-            from uipath_llmgw_client import get_langchain_chat_model
-
-            self._llm = get_langchain_chat_model(
-                model=self.config.model,
-                llmgw_client_type="normalized",
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-            )
+            if self._backend == "anthropic":
+                self._llm = _make_anthropic_invoker(self.config)
+            elif self._backend == "llmgw":
+                self._llm = _make_llmgw_invoker(self.config)
         return self._llm
 
     def review(
@@ -76,7 +151,7 @@ class LLMReviewer:
         reference_solution: str | None = None,
         tool_calls_summary: str | None = None,
     ) -> LLMDecision | None:
-        """Review the agent's work using LLM Gateway.
+        """Review the agent's work.
 
         Args:
             task_description: Description of the task
@@ -92,6 +167,10 @@ class LLMReviewer:
         if not self.config.enabled:
             return None
 
+        invoker = self.llm
+        if invoker is None:
+            return None
+
         prompt = self._build_review_prompt(
             task_description,
             agent_output,
@@ -105,14 +184,8 @@ class LLMReviewer:
         logger.debug(f"LLM Review Prompt:\n{prompt}")
 
         try:
-            response = self.llm.invoke(prompt)
-
-            content = response.content
-            if not isinstance(content, str):
-                content = str(content)
-
+            content = invoker(prompt)
             logger.debug(f"LLM Review Response:\n{content}")
-
             return self._parse_response(content)
 
         except (ValueError, KeyError, TypeError) as e:

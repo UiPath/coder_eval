@@ -12,76 +12,40 @@ maintaining the evaluation flow logic.
 import asyncio
 import logging
 from pathlib import Path
-from typing import Any
 
-from ..errors.executor import execute_with_retry
-from ..evaluation.reviewer import LLMReviewer
-from ..models import CriteriaResults, SnapshotMode, TaskDefinition, TurnRecord
+from ..models import CriteriaResults, LLMDecision, SnapshotMode, TaskDefinition, TurnRecord
 from ..sandbox import Sandbox
 
 
 logger = logging.getLogger(__name__)
 
 
-async def generate_next_prompt(
+def generate_next_prompt(
     task: TaskDefinition,
-    agent_output: str,
     criteria_results: CriteriaResults,
-    iteration: int,
-    llm_reviewer: LLMReviewer | None,
-    reference_code: str | None,
-    tool_calls_summary: str | None = None,
+    decision: LLMDecision | None,
 ) -> str:
-    """Generate the next prompt based on results and feedback.
+    """Generate the next prompt based on results and the optional LLM review.
 
-    Tries LLM review first if configured. Falls back to deterministic
-    feedback listing failed criteria (those with score < pass_threshold).
+    If ``decision`` is provided, use the LLM reviewer's issues/next_steps as
+    feedback. Otherwise fall through to a deterministic block listing failed
+    criteria.
 
     Args:
-        task: Task definition with criteria and configuration
-        agent_output: The agent's output from this turn
-        criteria_results: Results of success criteria checks
-        iteration: Current iteration number
-        llm_reviewer: Optional LLM reviewer instance
-        reference_code: Optional reference solution code
-        tool_calls_summary: Optional summary of agent tool calls for reviewer context
+        task: Task definition with criteria and configuration.
+        criteria_results: Results of success criteria checks.
+        decision: Optional LLM reviewer decision for this iteration.
 
     Returns:
-        Next prompt to send to the agent with actionable feedback
+        Next prompt to send to the agent with actionable feedback.
     """
-    # Try LLM review first if enabled
-    if llm_reviewer:
-        logger.info("Requesting LLM review")
+    if decision is not None:
+        logger.info(f"Issues:\n{decision.issues[:100]}...")
+        logger.info(f"LLM Score: {decision.score}")
 
-        # Wrap LLM reviewer call with retry logic for network resilience
-        async def _review_operation() -> Any:
-            assert llm_reviewer is not None
-            return await asyncio.to_thread(
-                llm_reviewer.review,
-                task_description=task.description,
-                agent_output=agent_output,
-                current_iteration=iteration,
-                max_iterations=task.max_iterations,
-                reference_solution=reference_code,
-                tool_calls_summary=tool_calls_summary,
-            )
-
-        decision = await execute_with_retry(
-            operation=_review_operation,
-            operation_name="LLM reviewer",
-            context={
-                "task_id": task.task_id,
-                "component": "evaluator",
-            },
-        )
-
-        if decision:
-            logger.info(f"Issues:\n{decision.issues[:100]}...")
-            logger.info(f"LLM Score: {decision.score}")
-
-            if decision.next_steps:
-                steps_text = "\n".join(f"- {s}" for s in decision.next_steps)
-                return f"""The task is not yet complete. Here's the feedback:
+        if decision.next_steps:
+            steps_text = "\n".join(f"- {s}" for s in decision.next_steps)
+            return f"""The task is not yet complete. Here's the feedback:
 
 Issues:
 {decision.issues}
@@ -90,8 +54,8 @@ Next steps:
 {steps_text}
 
 Please address these issues and continue working on the task."""
-            elif decision.issues:
-                return f"""The task is not yet complete. Here's the feedback:
+        if decision.issues:
+            return f"""The task is not yet complete. Here's the feedback:
 
 Issues:
 {decision.issues}
@@ -124,7 +88,7 @@ Please address these issues and continue working on the task."""
 
     # Fallback message if no specific feedback (rare edge case)
     logger.warning(
-        f"No specific failures detected but task did not pass (iteration {iteration}). "
+        "No specific failures detected but task did not pass. "
         + "This may indicate an issue with success criteria configuration."
     )
     return "The task is not yet complete. Please continue working on it."

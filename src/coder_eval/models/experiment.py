@@ -63,6 +63,13 @@ class ExperimentDefaults(BaseModel):
     task_timeout: int | None = Field(default=None, ge=30, description="Default task timeout (seconds)")
     turn_timeout: int | None = Field(default=None, ge=10, description="Default turn timeout (seconds)")
     agent: dict[str, Any] | None = Field(default=None, description="Partial agent config defaults")
+    llm_reviewer: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Default LLM reviewer config applied to tasks that do not set one explicitly. "
+            "Fields (enabled, model, temperature, max_tokens, prompt) map to LLMReviewerConfig."
+        ),
+    )
     template_sources: list[TemplateSource] | None = Field(
         default=None, description="Additional template sources appended after task's base templates (for all variants)"
     )
@@ -129,10 +136,8 @@ class VariantAggregate(BaseModel):
     @model_validator(mode="after")
     def _check_task_count_invariant(self) -> VariantAggregate:
         if self.tasks_succeeded + self.tasks_failed + self.tasks_error != self.tasks_run:
-            raise ValueError(
-                f"Task count invariant violated: {self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error}"
-                f" != {self.tasks_run}"
-            )
+            total = f"{self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error}"
+            raise ValueError(f"Task count invariant violated: {total} != {self.tasks_run}")
         return self
 
 

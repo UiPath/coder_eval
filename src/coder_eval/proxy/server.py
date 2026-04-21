@@ -94,7 +94,7 @@ class LLMGatewayProxy:
         self._config = config
         self._token_manager = TokenManager(config)
         if config.task_id:
-            self._logger: logging.Logger | logging.LoggerAdapter = logging.LoggerAdapter(
+            self._logger: logging.Logger | logging.LoggerAdapter[logging.Logger] = logging.LoggerAdapter(
                 logger, extra={"task_id": config.task_id}
             )
         else:

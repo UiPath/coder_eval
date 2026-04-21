@@ -88,13 +88,10 @@ async def test_orchestrator_generate_feedback(tmp_path):
         for c in task.success_criteria
     ]
 
-    feedback = await generate_next_prompt(
+    feedback = generate_next_prompt(
         task=task,
-        agent_output="I created something",
         criteria_results=criteria_results,
-        iteration=1,
-        llm_reviewer=None,
-        reference_code=None,
+        decision=None,
     )
 
     # Feedback should mention at least one failing criterion type
@@ -180,13 +177,10 @@ async def test_orchestrator_deterministic_feedback_with_failures(tmp_path):
     ]
 
     # Generate feedback
-    feedback = await generate_next_prompt(
+    feedback = generate_next_prompt(
         task=task,
-        agent_output="I tried to create the file",
         criteria_results=criteria_results,
-        iteration=1,
-        llm_reviewer=None,
-        reference_code=None,
+        decision=None,
     )
 
     # Assertions
@@ -259,13 +253,10 @@ async def test_orchestrator_deterministic_feedback_with_partial_scores(tmp_path)
         ),
     ]
 
-    feedback = await generate_next_prompt(
+    feedback = generate_next_prompt(
         task=task,
-        agent_output="I wrote some tests",
         criteria_results=criteria_results,
-        iteration=1,
-        llm_reviewer=None,
-        reference_code=None,
+        decision=None,
     )
 
     # Verify feedback shows both score and threshold
@@ -361,13 +352,10 @@ async def test_orchestrator_deterministic_feedback_mixed_results(tmp_path):
         ),
     ]
 
-    feedback = await generate_next_prompt(
+    feedback = generate_next_prompt(
         task=task,
-        agent_output="Created and ran script",
         criteria_results=criteria_results,
-        iteration=1,
-        llm_reviewer=None,
-        reference_code=None,
+        decision=None,
     )
 
     # Only the failed criterion should appear
@@ -2024,3 +2012,286 @@ async def test_evaluation_loop_breaks_on_max_turns_exhausted(tmp_path):
     assert mock_agent.communicate.call_count == 1
     # max_turns_exhausted should be propagated to the result
     assert orchestrator.result.max_turns_exhausted is True
+
+
+# --- LLM reviewer invocation counting (Phase 2) ---
+
+
+def _make_review_loop_task(max_iterations: int = 3):
+    """Build a TaskDefinition suitable for eval-loop tests."""
+    from coder_eval.models import (
+        AgentConfig,
+        AgentKind,
+        FileExistsCriterion,
+        SandboxConfig,
+        TaskDefinition,
+    )
+
+    agent_cfg = AgentConfig.model_construct(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+        allowed_tools=None,
+        model=None,
+        max_turns=20,
+        turn_timeout=None,
+        ignore_patterns=[],
+    )
+    return TaskDefinition.model_construct(
+        task_id="review_count_test",
+        description="Test review invocation count",
+        initial_prompt="Do something",
+        max_iterations=max_iterations,
+        tags=[],
+        agent=agent_cfg,
+        sandbox=SandboxConfig(driver="tempdir"),
+        success_criteria=[FileExistsCriterion(type="file_exists", path="x.py", description="x must exist")],
+        task_timeout=None,
+        llm_reviewer=None,
+        reference=None,
+    )
+
+
+def _make_orchestrator_for_review_test(task, tmp_path, scores: list[float], mock_review):
+    """Wire up an orchestrator whose success checker returns ``scores`` per call
+    and whose agent returns a benign TurnRecord each iteration."""
+    from datetime import datetime
+    from unittest.mock import AsyncMock, MagicMock
+
+    from coder_eval.models import (
+        AgentKind,
+        CriterionResult,
+        EvaluationResult,
+        TurnRecord,
+    )
+
+    run_dir = tmp_path / "run" / "review_count_test"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        variant_id="test-variant",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+
+    turn_counter = {"i": 0}
+
+    async def _fake_communicate(*args, **kwargs):
+        turn_counter["i"] += 1
+        return TurnRecord(
+            iteration=turn_counter["i"],
+            user_input="test",
+            agent_output="response",
+            duration_seconds=1.0,
+            max_turns_exhausted=False,
+        )
+
+    mock_agent = AsyncMock()
+    mock_agent.communicate = _fake_communicate
+    orchestrator.agent = mock_agent
+
+    mock_sandbox = MagicMock()
+    sandbox_dir = tmp_path / "sandbox"
+    sandbox_dir.mkdir(exist_ok=True)
+    mock_sandbox.sandbox_dir = sandbox_dir
+    orchestrator.sandbox = mock_sandbox
+
+    iteration_scores = iter(scores)
+    mock_checker = MagicMock()
+    mock_checker.check_all = MagicMock(
+        side_effect=lambda *a, **kw: [
+            CriterionResult(criterion_type="file_exists", description="x must exist", score=next(iteration_scores))
+        ]
+    )
+    orchestrator.success_checker = mock_checker
+
+    # Fake LLM reviewer
+    mock_reviewer = MagicMock()
+    mock_reviewer.review = mock_review
+    orchestrator.llm_reviewer = mock_reviewer
+
+    return orchestrator, mock_reviewer
+
+
+@pytest.mark.asyncio
+async def test_review_skipped_on_first_iteration_success(tmp_path):
+    """When criteria pass on iteration 1, the reviewer is NOT invoked."""
+    from unittest.mock import MagicMock, patch
+
+    mock_review = MagicMock(return_value=None)
+    task = _make_review_loop_task(max_iterations=3)
+    orchestrator, reviewer = _make_orchestrator_for_review_test(task, tmp_path, scores=[1.0], mock_review=mock_review)
+
+    with patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)):
+        success = await orchestrator._evaluation_loop()
+
+    assert success is True
+    assert reviewer.review.call_count == 0
+    assert orchestrator.result.llm_review is None
+
+
+@pytest.mark.asyncio
+async def test_review_runs_on_each_failing_iteration(tmp_path):
+    """A 3-iteration all-failing run calls the reviewer exactly 3 times and persists
+    the last decision on ``result.llm_review``."""
+    from unittest.mock import MagicMock, patch
+
+    from coder_eval.models import LLMDecision
+
+    decisions = [
+        LLMDecision(issues=f"iter {i}", score=0.1 * i, next_steps=[], should_continue=True) for i in range(1, 4)
+    ]
+    mock_review = MagicMock(side_effect=decisions)
+
+    task = _make_review_loop_task(max_iterations=3)
+    orchestrator, reviewer = _make_orchestrator_for_review_test(
+        task, tmp_path, scores=[0.0, 0.0, 0.0], mock_review=mock_review
+    )
+
+    with patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)):
+        success = await orchestrator._evaluation_loop()
+
+    assert success is False
+    assert reviewer.review.call_count == 3
+    assert orchestrator.result.llm_review is not None
+    assert orchestrator.result.llm_review.issues == "iter 3"
+
+
+@pytest.mark.asyncio
+async def test_review_runs_only_when_criteria_fail(tmp_path):
+    """When iter 1 fails and iter 2 succeeds, the reviewer is called exactly once."""
+    from unittest.mock import MagicMock, patch
+
+    from coder_eval.models import LLMDecision
+
+    decision = LLMDecision(issues="iter 1 fail", score=0.3, next_steps=["fix X"], should_continue=True)
+    mock_review = MagicMock(return_value=decision)
+
+    task = _make_review_loop_task(max_iterations=3)
+    orchestrator, reviewer = _make_orchestrator_for_review_test(
+        task, tmp_path, scores=[0.0, 1.0], mock_review=mock_review
+    )
+
+    with patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)):
+        success = await orchestrator._evaluation_loop()
+
+    assert success is True
+    assert reviewer.review.call_count == 1
+    assert orchestrator.result.llm_review is decision
+
+
+@pytest.mark.asyncio
+async def test_review_runs_before_max_turns_exhausted_break(tmp_path):
+    """When the agent exhausts max_turns on a failing iteration, the reviewer still
+    runs for that iteration before the loop exits early."""
+    from datetime import datetime
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from coder_eval.models import (
+        AgentConfig,
+        AgentKind,
+        CriterionResult,
+        EvaluationResult,
+        FileExistsCriterion,
+        LLMDecision,
+        SandboxConfig,
+        TaskDefinition,
+        TurnRecord,
+    )
+
+    agent_cfg = AgentConfig.model_construct(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+        allowed_tools=None,
+        model=None,
+        max_turns=20,
+        turn_timeout=None,
+        ignore_patterns=[],
+    )
+    task = TaskDefinition.model_construct(
+        task_id="review_with_exhaustion",
+        description="test",
+        initial_prompt="p",
+        max_iterations=3,
+        tags=[],
+        agent=agent_cfg,
+        sandbox=SandboxConfig(driver="tempdir"),
+        success_criteria=[FileExistsCriterion(type="file_exists", path="x.py", description="x must exist")],
+        task_timeout=None,
+        # bypasses validation — _setup() is skipped in this test, so the config is unused.
+        llm_reviewer=None,
+        reference=None,
+    )
+
+    run_dir = tmp_path / "run" / "review_with_exhaustion"
+    run_dir.mkdir(parents=True)
+
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        variant_id="test-variant",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+
+    exhausted_turn = TurnRecord(
+        iteration=1,
+        user_input="p",
+        agent_output="ran out",
+        duration_seconds=1.0,
+        max_turns_exhausted=True,
+    )
+    mock_agent = AsyncMock()
+    mock_agent.communicate = AsyncMock(return_value=exhausted_turn)
+    orchestrator.agent = mock_agent
+
+    mock_sandbox = MagicMock()
+    mock_sandbox.sandbox_dir = tmp_path / "sandbox"
+    mock_sandbox.sandbox_dir.mkdir()
+    orchestrator.sandbox = mock_sandbox
+
+    mock_checker = MagicMock()
+    mock_checker.check_all = MagicMock(
+        return_value=[CriterionResult(criterion_type="file_exists", description="x", score=0.0)]
+    )
+    orchestrator.success_checker = mock_checker
+
+    decision = LLMDecision(issues="ran out", score=0.2, next_steps=[], should_continue=False)
+    mock_reviewer = MagicMock()
+    mock_reviewer.review = MagicMock(return_value=decision)
+    orchestrator.llm_reviewer = mock_reviewer
+
+    with patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)):
+        success = await orchestrator._evaluation_loop()
+
+    assert success is False
+    assert orchestrator.result.max_turns_exhausted is True
+    assert mock_reviewer.review.call_count == 1
+    assert orchestrator.result.llm_review is decision
+
+
+@pytest.mark.asyncio
+async def test_review_failure_is_swallowed(tmp_path):
+    """Reviewer exceptions are logged and swallowed; the loop completes without raising."""
+    from unittest.mock import MagicMock, patch
+
+    mock_review = MagicMock(side_effect=RuntimeError("network dead"))
+    task = _make_review_loop_task(max_iterations=1)
+    orchestrator, reviewer = _make_orchestrator_for_review_test(task, tmp_path, scores=[0.0], mock_review=mock_review)
+
+    with patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)):
+        success = await orchestrator._evaluation_loop()
+
+    assert success is False
+    # review is retried via execute_with_retry — only assert it was attempted at least once
+    assert reviewer.review.call_count >= 1
+    assert orchestrator.result.llm_review is None

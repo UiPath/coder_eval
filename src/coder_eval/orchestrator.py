@@ -32,6 +32,7 @@ from .models import (
     CriterionResult,
     EvaluationResult,
     FinalStatus,
+    LLMDecision,
     PostRunResult,
     ProxyRoute,
     ResolvedTask,
@@ -195,6 +196,7 @@ class Orchestrator:
 
         # Derived paths
         self.report_path = self.run_dir / "task.json"
+        self.html_report_path = self.run_dir / "task.html"
         # Note: artifacts directory (run_dir/artifacts) is created on-demand during sandbox preservation
 
         # Snapshot directory (created on-demand if snapshots enabled)
@@ -387,6 +389,13 @@ class Orchestrator:
         # Persist
         self.report_path.parent.mkdir(parents=True, exist_ok=True)
         self.report_path.write_text(self.result.model_dump_json(indent=2), encoding="utf-8")
+
+        # Also emit an HTML trace/report alongside task.json. HTML failure must
+        # never mask the underlying run outcome — write_task_html logs and
+        # returns None on failure.
+        from .reports_html import write_task_html
+
+        write_task_html(self.result, self.html_report_path)
 
     def _aggregate_token_usage(self) -> None:
         """Aggregate token usage from turns and proxy, storing on self.result."""
@@ -714,30 +723,74 @@ class Orchestrator:
             if tool_calls_summary:
                 logger.debug("Tool calls for iteration %d:\n%s", iteration, tool_calls_summary)
 
+            # Criteria failed — run the LLM reviewer (if configured) and persist
+            # its decision for this iteration to self.result.llm_review.
+            decision = await self._review_iteration(turn_record, reference_code, tool_calls_summary)
+
             # If the agent exhausted its max_turns without completing, stop early —
             # further iterations are unlikely to succeed.
             if turn_record.max_turns_exhausted:
                 self.result.max_turns_exhausted = True
                 logger.warning(
-                    "Agent exhausted max_turns (%s) without passing criteria. "
-                    "Stopping evaluation — further iterations unlikely to succeed.",
+                    "Agent exhausted max_turns (%s) without passing criteria."
+                    + " Stopping evaluation — further iterations unlikely to succeed.",
                     self.task.agent.max_turns,
                 )
                 break
 
-            # If not successful and not at max iterations, get feedback
+            # If not at max iterations, build feedback for the next turn.
             if iteration < self.task.max_iterations:
-                current_prompt = await generate_next_prompt(
+                current_prompt = generate_next_prompt(
                     task=self.task,
-                    agent_output=turn_record.agent_output,
                     criteria_results=criteria_results,
-                    iteration=iteration,
-                    llm_reviewer=self.llm_reviewer,
-                    reference_code=reference_code,
-                    tool_calls_summary=tool_calls_summary,
+                    decision=decision,
                 )
 
         return success
+
+    async def _review_iteration(
+        self,
+        turn_record: TurnRecord,
+        reference_code: str | None,
+        tool_calls_summary: str | None,
+    ) -> LLMDecision | None:
+        """Invoke the LLM reviewer for the current iteration.
+
+        Returns the decision (persisting it to ``self.result.llm_review``) or
+        None if no reviewer is configured or the call fails. Failures are
+        logged and swallowed so they never mask the run outcome.
+        """
+        if self.llm_reviewer is None or self.result is None:
+            return None
+
+        logger.info("Requesting LLM review")
+        reviewer = self.llm_reviewer
+
+        async def _review_operation() -> LLMDecision | None:
+            return await asyncio.to_thread(
+                reviewer.review,
+                task_description=self.task.description,
+                agent_output=turn_record.agent_output or "",
+                current_iteration=turn_record.iteration,
+                max_iterations=self.task.max_iterations,
+                reference_solution=reference_code,
+                tool_calls_summary=tool_calls_summary,
+            )
+
+        try:
+            decision = await execute_with_retry(
+                operation=_review_operation,
+                operation_name="LLM reviewer",
+                context={"task_id": self.task.task_id, "component": "evaluator"},
+            )
+        except Exception:
+            logger.exception("LLM review failed — continuing without review")
+            return None
+
+        if decision is not None:
+            self.result.llm_review = decision
+            logger.info("LLM review score: %s", decision.score)
+        return decision
 
     _POST_RUN_MAX_OUTPUT = 100_000  # Truncate stdout/stderr to 100KB
     _POST_RUN_STREAM_LIMIT = 262_144  # StreamReader per-line buffer (256KB)

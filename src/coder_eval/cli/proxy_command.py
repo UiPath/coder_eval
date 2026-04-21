@@ -143,10 +143,11 @@ async def _run_proxy(port: int, env_file: str, vendor: str, api_flavor: str, qui
         usage = proxy.usage
         if usage.requests > 0 and not quiet:
             cost_str = f"${usage.total_cost:.4f}"
-            err_console.print(
+            summary = (
                 f"[dim]Total: {usage.requests} requests, "
-                f"{usage.input_tokens} input + {usage.output_tokens} output tokens, "
-                f"cost: {cost_str}[/dim]"
+                + f"{usage.input_tokens} input + {usage.output_tokens} output tokens, "
+                + f"cost: {cost_str}[/dim]"
             )
+            err_console.print(summary)
         if not quiet:
             err_console.print("[green]Proxy stopped.[/green]")

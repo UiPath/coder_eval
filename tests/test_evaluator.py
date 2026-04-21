@@ -44,6 +44,34 @@ def test_success_checker_file_exists():
         sandbox.cleanup()
 
 
+def test_success_checker_populates_pass_threshold_on_results():
+    """Every CriterionResult returned by SuccessChecker carries the criterion's pass_threshold."""
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_eval_threshold")
+
+    try:
+        sandbox.setup()
+        checker = SuccessChecker(sandbox)
+
+        # Custom pass_threshold — result must reflect it
+        criterion = FileExistsCriterion(path="missing.txt", description="missing", pass_threshold=0.5)
+        result = checker.check(criterion)
+        assert result.pass_threshold == 0.5
+
+        # Unsupported type hits the KeyError branch — still carries the threshold
+        class _Fake:
+            type = "unsupported_type"
+            description = "fake"
+            pass_threshold = 0.42
+
+        result = checker._check_single(_Fake(), reference_code=None)  # type: ignore[arg-type]
+        assert result.pass_threshold == 0.42
+        assert result.score == 0.0
+
+    finally:
+        sandbox.cleanup()
+
+
 def test_success_checker_file_contains():
     """Test file content checking."""
     config = SandboxConfig(driver="tempdir", python=None)
@@ -266,6 +294,7 @@ def test_success_checker_unsupported_type():
     bad_criterion = Mock()
     bad_criterion.type = "invalid_type_that_does_not_exist"
     bad_criterion.description = "Test criterion with unsupported type"
+    bad_criterion.pass_threshold = 0.9
 
     # Should return failed result instead of raising
     result = checker.check(bad_criterion)
