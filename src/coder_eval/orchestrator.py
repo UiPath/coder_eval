@@ -5,6 +5,7 @@ import functools
 import logging
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -238,6 +239,12 @@ class Orchestrator:
                     try:
                         success = await asyncio.wait_for(self._evaluation_loop(), timeout=task_timeout)
                     except TimeoutError:
+                        # Task-level wait_for fired; force-kill any in-flight
+                        # CLI subprocess so the SDK doesn't keep running past
+                        # the deadline (anyio cancellation alone won't stop it).
+                        if self.agent is not None:
+                            with suppress(Exception):
+                                await self.agent.kill()
                         raise TaskTimeoutError(
                             task_timeout,
                             task_id=self.task.task_id,
@@ -582,8 +589,18 @@ class Orchestrator:
             if self.stream_callback is not None:
                 agent_callback = TaskScopedCallback(self.stream_callback, self._log_task_id)
 
+            # Pass the timeout into the agent so it can enforce it via
+            # subprocess kill (the SDK's anyio task groups swallow asyncio
+            # cancellation, so wait_for alone is not sufficient). The outer
+            # wait_for stays as a backstop and lets mock-based tests exercise
+            # the timeout path without spawning a real subprocess.
             communicate_coro = execute_with_retry(
-                operation=functools.partial(agent.communicate, prompt_with_cwd, stream_callback=agent_callback),
+                operation=functools.partial(
+                    agent.communicate,
+                    prompt_with_cwd,
+                    stream_callback=agent_callback,
+                    timeout=turn_timeout,
+                ),
                 operation_name=f"Agent communication (iteration {iteration})",
                 context={
                     "task_id": self.task.task_id,
@@ -596,6 +613,10 @@ class Orchestrator:
                 try:
                     turn_record = await asyncio.wait_for(communicate_coro, timeout=turn_timeout)
                 except TimeoutError:
+                    # wait_for fired before the agent's own watchdog; force-kill
+                    # any in-flight subprocess so the SDK can't keep running.
+                    with suppress(Exception):
+                        await agent.kill()
                     raise TurnTimeoutError(
                         turn_timeout,
                         task_id=self.task.task_id,

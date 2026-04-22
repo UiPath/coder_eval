@@ -1,18 +1,27 @@
 """Claude Code agent implementation using the Claude Agent SDK."""
 
+import asyncio
 import dataclasses
 import json
 import logging
 import os
 import re
 import time
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, Message, ProcessError, query
 
+# Private SDK import — the public `query()` API doesn't expose the subprocess
+# handle, but we need it to hard-kill on timeout (the SDK's anyio task groups
+# swallow asyncio cancellation, so wait_for alone doesn't preempt a stuck CLI).
+# If this import breaks on an SDK upgrade, fall back to the wait_for-only path.
+from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
 from coder_eval.agent import Agent, AgentState
+from coder_eval.errors.timeout import TurnTimeoutError
 from coder_eval.formatting import format_payload
 from coder_eval.models import (
     AgentConfig,
@@ -161,6 +170,10 @@ class ClaudeCodeAgent(Agent):
         self._iteration = 0
         self._sdk_options_dump: dict[str, Any] | None = None
         self._session_id: str | None = None
+        # Transport reference held only while a communicate() call is in flight,
+        # so kill() can reach into the CLI subprocess when the SDK swallows
+        # asyncio cancellation.
+        self._active_transport: SubprocessCLITransport | None = None
 
     async def start(self, working_directory: str) -> None:
         """Initialize and start the Claude Code agent.
@@ -212,23 +225,37 @@ class ClaudeCodeAgent(Agent):
 
         raise AssertionError(f"Unhandled route type: {type(route).__name__}")
 
-    async def communicate(self, user_input: str, *, stream_callback: StreamCallback | None = None) -> TurnRecord:
+    async def communicate(
+        self,
+        user_input: str,
+        *,
+        stream_callback: StreamCallback | None = None,
+        timeout: float | None = None,
+    ) -> TurnRecord:
         """Send a message to Claude and receive its response.
 
         Args:
             user_input: The message/prompt to send
+            stream_callback: Optional callback for real-time event streaming
+            timeout: Hard wall-clock deadline in seconds. When exceeded, a
+                watchdog task force-kills the CLI subprocess (the SDK's anyio
+                task groups suppress cooperative cancellation, so a graceful
+                asyncio.wait_for is not sufficient).
 
         Returns:
             TurnRecord containing the complete interaction
 
         Raises:
             RuntimeError: If agent is not started
+            TurnTimeoutError: If timeout elapsed before the turn completed
         """
         if not self.working_directory:
             raise RuntimeError("Agent not started. Call start() first.")
 
         self._iteration += 1
         turn_start_time = time.monotonic()
+        deadline = turn_start_time + timeout if timeout is not None else None
+        timeout_hit = False
 
         # Capture file state before the turn
         files_before = self._capture_file_tree()
@@ -260,6 +287,10 @@ class ClaudeCodeAgent(Agent):
         def capture_stderr(line: str) -> None:
             stderr_lines.append(line)
 
+        # Hoisted out of the try so the finally can reference them on any
+        # exit path (including an exception raised before the loop starts).
+        watchdog_task: asyncio.Task[None] | None = None
+
         try:
             # Process plugins: copy from config and replace env vars in paths
             plugins = self._process_plugins(self.config.plugins or [])  # type: ignore[arg-type]
@@ -286,9 +317,54 @@ class ClaudeCodeAgent(Agent):
             # Dump SDK options for later inspection (captures all 37+ fields including defaults)
             self._sdk_options_dump = _dump_sdk_options(options)
 
-            # Use the query function for one-shot interaction
+            # When a timeout is set, pre-construct the transport ourselves and
+            # hand it to query() so we retain a reference to the subprocess
+            # for hard-kill. The SDK's default path creates this internally
+            # and never exposes it. When no timeout is set we pass
+            # transport=None so the SDK uses its own default (keeps the door
+            # open for tests that mock query() without needing a real CLI).
+            transport: SubprocessCLITransport | None = None
+            if timeout is not None:
+                transport = SubprocessCLITransport(prompt=user_input, options=options)
+                self._active_transport = transport
+
+                # Watchdog: the only reliable way to preempt a stuck SDK call.
+                # Runs independently of the message loop, so even if the CLI
+                # stops streaming (no messages to check against the deadline)
+                # the kill still fires after `timeout` seconds.
+                # IMPORTANT: the transport is captured in the closure (not
+                # read from self._active_transport) so a stale watchdog from
+                # an earlier turn cannot kill a subsequent turn's subprocess.
+                watchdog_target = transport
+
+                async def _watchdog(duration_s: float) -> None:
+                    nonlocal timeout_hit
+                    await asyncio.sleep(duration_s)
+                    timeout_hit = True
+                    logger.warning(
+                        "Turn timeout (%.0fs) watchdog firing — hard-killing Claude CLI subprocess", duration_s
+                    )
+                    self._kill_transport(watchdog_target)
+
+                watchdog_task = asyncio.create_task(_watchdog(timeout))
+
+            # Use the query function for one-shot interaction. Only forward
+            # the transport kwarg when we actually built one — otherwise keep
+            # the call shape identical to the pre-timeout code path so mocks
+            # with strict signatures (prompt, options) keep working.
+            query_kwargs: dict[str, Any] = {"prompt": user_input, "options": options}
+            if transport is not None:
+                query_kwargs["transport"] = transport
             logger.debug("Starting agent query stream...")
-            async for message in query(prompt=user_input, options=options):
+            async for message in query(**query_kwargs):
+                # Wall-clock guard inside the loop. Triggers the cooperative
+                # exit path when messages are still flowing; the watchdog is
+                # the fallback when they aren't.
+                if deadline is not None and time.monotonic() > deadline:
+                    timeout_hit = True
+                    logger.warning("Turn timeout reached mid-stream; breaking out of message loop")
+                    break
+
                 messages.append(message)
                 msg_type = type(message).__name__
 
@@ -394,12 +470,25 @@ class ClaudeCodeAgent(Agent):
             logger.debug("Agent query stream ended")
 
         except ProcessError as e:
+            # When the watchdog SIGKILLs the subprocess, the SDK surfaces it
+            # as a ProcessError (exit code -9). Classify as a timeout so the
+            # retry system doesn't treat it as a transient AGENT_CRASH.
+            if self._timed_out(timeout_hit, deadline):
+                self._state = AgentState.ERROR
+                raise TurnTimeoutError(timeout if timeout is not None else 0.0, iteration=self._iteration) from e
             self._state = AgentState.ERROR
             stderr = self._build_stderr_message(e.stderr, stderr_lines)
             error_info = self._extract_error_from_messages(messages)
             detail = error_info or stderr
             raise RuntimeError(f"CLI process failed (exit code {e.exit_code}): {detail}") from e
         except Exception as e:
+            # Same race as above: the watchdog may have killed the subprocess
+            # and the SDK may have re-raised as a generic Exception. Check
+            # both the flag AND the wall-clock in case the flag flip races
+            # with our catch-entry.
+            if self._timed_out(timeout_hit, deadline):
+                self._state = AgentState.ERROR
+                raise TurnTimeoutError(timeout if timeout is not None else 0.0, iteration=self._iteration) from e
             self._state = AgentState.ERROR
             # The SDK wraps ProcessError as a generic Exception via the message stream.
             # Extract useful info from collected messages and stderr.
@@ -412,6 +501,19 @@ class ClaudeCodeAgent(Agent):
             elif stderr:
                 error_details += f"\nStderr output:\n{stderr}"
             raise RuntimeError(f"Communication with agent failed: {error_details}") from e
+        finally:
+            if watchdog_task is not None and not watchdog_task.done():
+                watchdog_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await watchdog_task
+            self._active_transport = None
+
+        # Only trust `timeout_hit` in the happy path: if the loop completed
+        # cleanly, a wall-clock drift during post-loop cleanup would falsely
+        # classify a successful turn as a timeout. The watchdog and in-loop
+        # guard are the authoritative signals.
+        if timeout_hit:
+            raise TurnTimeoutError(timeout if timeout is not None else 0.0, iteration=self._iteration)
 
         # PHASE 3: Finalize commands and build turn record
         commands = self._finalize_commands(pending_commands, messages)
@@ -457,6 +559,49 @@ class ClaudeCodeAgent(Agent):
         # Note: Client is created per-communication using async context manager
         self.client = None
         self._state = AgentState.FINISHED
+
+    async def kill(self) -> None:
+        """Force-terminate the in-flight Claude CLI subprocess, if any.
+
+        Called by the orchestrator when a timeout fires on its backstop path.
+        The watchdog inside communicate() uses _kill_transport directly (with
+        the transport captured in its closure) to avoid a cross-turn race
+        where a stale watchdog could kill a later turn's subprocess.
+        """
+        self._kill_transport(self._active_transport)
+
+    @staticmethod
+    def _timed_out(timeout_hit: bool, deadline: float | None) -> bool:
+        """Return True if the turn has exceeded its deadline by either path.
+
+        Checks both the watchdog flag AND the wall clock. The flag-only check
+        races with the watchdog: if the handler was entered just before the
+        watchdog flipped the flag, we'd misreport a timeout as a generic
+        error. Checking wall-clock is the belt that catches that case.
+        """
+        if timeout_hit:
+            return True
+        return deadline is not None and time.monotonic() > deadline
+
+    @staticmethod
+    def _kill_transport(transport: SubprocessCLITransport | None) -> None:
+        """SIGKILL the subprocess behind `transport`, if any.
+
+        The SDK wraps the subprocess in anyio cancel scopes that suppress
+        asyncio.CancelledError, so cooperative cancellation doesn't reliably
+        stop a stuck CLI. Sending SIGKILL releases stdout/stdin, which
+        unblocks the anyio readers so the async generator unwinds cleanly.
+        """
+        if transport is None:
+            return
+        # _process is set by transport.connect(); may be None if the call failed
+        # before connect, or already cleared by the SDK's own cleanup.
+        proc = getattr(transport, "_process", None)
+        if proc is None or proc.returncode is not None:
+            return
+        logger.warning("Hard-killing Claude CLI subprocess (pid=%s)", getattr(proc, "pid", "?"))
+        with suppress(ProcessLookupError, Exception):
+            proc.kill()
 
     def get_state(self) -> AgentState:
         """Get the current state of the agent.

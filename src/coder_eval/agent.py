@@ -25,17 +25,30 @@ class Agent(ABC):
         pass
 
     @abstractmethod
-    async def communicate(self, user_input: str, *, stream_callback: StreamCallback | None = None) -> TurnRecord:
+    async def communicate(
+        self,
+        user_input: str,
+        *,
+        stream_callback: StreamCallback | None = None,
+        timeout: float | None = None,
+    ) -> TurnRecord:
         """Send a message to the agent and receive its response.
 
         Args:
             user_input: The message/prompt to send to the agent
+            stream_callback: Optional callback for real-time event streaming
+            timeout: Hard wall-clock deadline in seconds. When exceeded the
+                agent must force-terminate any in-flight subprocess and raise
+                TurnTimeoutError. Implementations should not rely solely on
+                asyncio cancellation (the Claude Agent SDK uses anyio task
+                groups that swallow cooperative cancellation).
 
         Returns:
             TurnRecord containing the complete interaction
 
         Raises:
             RuntimeError: If agent is not started or communication fails
+            TurnTimeoutError: If timeout elapsed before the turn completed
         """
         pass
 
@@ -43,6 +56,15 @@ class Agent(ABC):
     async def stop(self) -> None:
         """Stop the agent and clean up resources."""
         pass
+
+    async def kill(self) -> None:
+        """Force-terminate any in-flight subprocess started by this agent.
+
+        Safe to call at any time, including when no subprocess is active.
+        Used by the orchestrator to escape SDKs that ignore cooperative
+        cancellation. Default implementation is a no-op.
+        """
+        return None
 
     @abstractmethod
     def get_state(self) -> AgentState:

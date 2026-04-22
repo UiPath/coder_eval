@@ -222,6 +222,74 @@ async def test_no_timeout_when_none(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_task_timeout_hard_kills_agent(tmp_path):
+    """When the task timeout fires, the orchestrator must call agent.kill()."""
+    task = _make_task(task_timeout=0.1, max_iterations=10)
+    run_dir = tmp_path / "run" / "timeout_test"
+    run_dir.mkdir(parents=True)
+
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator._setup = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._cleanup = AsyncMock()  # type: ignore[method-assign]
+
+    mock_agent = AsyncMock()
+    mock_agent.kill = AsyncMock()
+    mock_agent.get_sdk_options = MagicMock(return_value=None)
+    orchestrator.agent = mock_agent
+
+    async def slow_loop():
+        await asyncio.sleep(10)
+        return False
+
+    orchestrator._evaluation_loop = slow_loop  # type: ignore[method-assign]
+
+    result = await orchestrator.run()
+    assert result.final_status == "TIMEOUT"
+    mock_agent.kill.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_turn_timeout_hard_kills_agent(tmp_path):
+    """When the turn-level wait_for backstop fires, the orchestrator must call agent.kill()."""
+    task = _make_task(turn_timeout=0.1)
+    run_dir = tmp_path / "run" / "timeout_test"
+    run_dir.mkdir(parents=True)
+
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator.result = EvaluationResult(
+        task_id="timeout_test",
+        task_description="Test",
+        variant_id="test-variant",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+
+    mock_agent = AsyncMock()
+    mock_agent.kill = AsyncMock()
+
+    async def slow_communicate(_prompt, **kwargs):
+        await asyncio.sleep(10)
+        return _make_turn_record()
+
+    mock_agent.communicate = slow_communicate
+    orchestrator.agent = mock_agent
+
+    mock_sandbox = MagicMock()
+    mock_sandbox.sandbox_dir = tmp_path / "sandbox"
+    mock_sandbox.sandbox_dir.mkdir()
+    orchestrator.sandbox = mock_sandbox
+    orchestrator.success_checker = MagicMock()
+
+    with pytest.raises(TurnTimeoutError):
+        await orchestrator._evaluation_loop()
+
+    mock_agent.kill.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_turn_timeout_fires_before_task_timeout(tmp_path):
     """Turn timeout (inner) fires before task timeout (outer) when a single turn is slow."""
     task = _make_task(turn_timeout=0.1, task_timeout=60)  # Turn: 100ms, Task: 60s
