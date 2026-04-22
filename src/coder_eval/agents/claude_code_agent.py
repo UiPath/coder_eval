@@ -15,12 +15,14 @@ from typing import Any
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, Message, ProcessError, query
 
 # Private SDK import — the public `query()` API doesn't expose the subprocess
-# handle, but we need it to hard-kill on timeout (the SDK's anyio task groups
-# swallow asyncio cancellation, so wait_for alone doesn't preempt a stuck CLI).
-# If this import breaks on an SDK upgrade, fall back to the wait_for-only path.
+# handle, but we need it to SIGKILL on timeout (the SDK's anyio task groups
+# swallow asyncio cancellation, so cooperative cancel doesn't preempt a stuck
+# CLI). If this import breaks on an SDK upgrade, the threaded watchdog loses
+# its kill target and timeouts will no longer be enforced at the agent layer.
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
 from coder_eval.agent import Agent, AgentState
+from coder_eval.agents.watchdog import ThreadedWatchdog
 from coder_eval.errors.timeout import TurnTimeoutError
 from coder_eval.formatting import format_payload
 from coder_eval.models import (
@@ -280,6 +282,9 @@ class ClaudeCodeAgent(Agent):
         self._iteration += 1
         turn_start_time = time.monotonic()
         deadline = turn_start_time + timeout if timeout is not None else None
+        # timeout_hit is set by _on_turn_timeout (timer thread) and read by
+        # the asyncio thread via _timed_out(). Python bool assignment is
+        # atomic under the GIL; no explicit lock needed here.
         timeout_hit = False
 
         # Capture file state before the turn
@@ -311,10 +316,6 @@ class ClaudeCodeAgent(Agent):
 
         def capture_stderr(line: str) -> None:
             stderr_lines.append(line)
-
-        # Hoisted out of the try so the finally can reference them on any
-        # exit path (including an exception raised before the loop starts).
-        watchdog_task: asyncio.Task[None] | None = None
 
         try:
             # Process plugins: copy from config and replace env vars in paths
@@ -358,25 +359,15 @@ class ClaudeCodeAgent(Agent):
                 transport = SubprocessCLITransport(prompt=user_input, options=options)
                 self._active_transport = transport
 
-                # Watchdog: the only reliable way to preempt a stuck SDK call.
-                # Runs independently of the message loop, so even if the CLI
-                # stops streaming (no messages to check against the deadline)
-                # the kill still fires after `timeout` seconds.
-                # IMPORTANT: the transport is captured in the closure (not
-                # read from self._active_transport) so a stale watchdog from
-                # an earlier turn cannot kill a subsequent turn's subprocess.
-                watchdog_target = transport
+            # IMPORTANT: the transport is captured in the closure (not read
+            # from self._active_transport) so a stale watchdog from an
+            # earlier turn cannot kill a subsequent turn's subprocess.
+            watchdog_target = transport
 
-                async def _watchdog(duration_s: float) -> None:
-                    nonlocal timeout_hit
-                    await asyncio.sleep(duration_s)
-                    timeout_hit = True
-                    self._log.warning(
-                        "Turn timeout (%.0fs) watchdog firing — hard-killing Claude CLI subprocess", duration_s
-                    )
-                    self._kill_transport(watchdog_target)
-
-                watchdog_task = asyncio.create_task(_watchdog(timeout))
+            def _on_turn_timeout() -> None:
+                nonlocal timeout_hit
+                timeout_hit = True
+                self._kill_transport(watchdog_target)
 
             # Use the query function for one-shot interaction. Only forward
             # the transport kwarg when we actually built one — otherwise keep
@@ -386,119 +377,141 @@ class ClaudeCodeAgent(Agent):
             if transport is not None:
                 query_kwargs["transport"] = transport
             self._log.debug("Starting agent query stream...")
-            async for message in query(**query_kwargs):
-                # Wall-clock guard inside the loop. Triggers the cooperative
-                # exit path when messages are still flowing; the watchdog is
-                # the fallback when they aren't.
-                if deadline is not None and time.monotonic() > deadline:
-                    timeout_hit = True
-                    self._log.warning("Turn timeout reached mid-stream; breaking out of message loop")
-                    break
+            # OS-thread watchdog: fires at `timeout` seconds regardless of
+            # event-loop liveness. Immune to anyio cancel-scope suppression,
+            # which is why an asyncio.sleep-based watchdog was unreliable.
+            with ThreadedWatchdog(
+                timeout_seconds=timeout,
+                on_timeout=_on_turn_timeout,
+                asyncio_task_to_cancel=asyncio.current_task(),
+                label=f"Turn timeout ({timeout:g}s)" if timeout else "turn_timeout",
+            ):
+                async for message in query(**query_kwargs):
+                    # Wall-clock guard inside the loop. Triggers the cooperative
+                    # exit path when messages are still flowing; the watchdog is
+                    # the fallback when they aren't.
+                    if deadline is not None and time.monotonic() > deadline:
+                        timeout_hit = True
+                        self._log.warning("Turn timeout reached mid-stream; breaking out of message loop")
+                        break
 
-                messages.append(message)
-                msg_type = type(message).__name__
+                    messages.append(message)
+                    msg_type = type(message).__name__
 
-                # Stream debug logging for real-time visibility
-                self._log_message_debug(message, msg_type)
+                    # Stream debug logging for real-time visibility
+                    self._log_message_debug(message, msg_type)
 
-                # Two-phase command telemetry capture using type guards
+                    # Two-phase command telemetry capture using type guards
 
-                # PHASE 1: Capture ToolUseBlock and create pending command
-                if _is_assistant_message(message):
-                    assistant_turn_count += 1
-                    model_attr = getattr(message, "model", None)
-                    if isinstance(model_attr, str):
-                        sdk_model_used = model_attr
-                    content = getattr(message, "content", None)
-                    # Content can be a list of blocks (text, tool_use, etc.)
-                    if content and isinstance(content, list):
-                        for block in content:
-                            if _is_tool_use_block(block):
-                                command_start_time = time.monotonic()  # Precise command start time
+                    # PHASE 1: Capture ToolUseBlock and create pending command
+                    if _is_assistant_message(message):
+                        assistant_turn_count += 1
+                        model_attr = getattr(message, "model", None)
+                        if isinstance(model_attr, str):
+                            sdk_model_used = model_attr
+                        content = getattr(message, "content", None)
+                        # Content can be a list of blocks (text, tool_use, etc.)
+                        if content and isinstance(content, list):
+                            for block in content:
+                                if _is_tool_use_block(block):
+                                    command_start_time = time.monotonic()  # Precise command start time
 
-                                telemetry = CommandTelemetry(
-                                    tool_name=block.name,
-                                    tool_id=block.id,
-                                    timestamp=datetime.now(),
-                                    parameters=block.input if isinstance(block.input, dict) else {"raw": block.input},
-                                    sequence_number=sequence_number,
-                                    result_status=None,  # Pending result
-                                    duration_ms=None,  # Not complete yet
-                                )
-
-                                # Store command with start time for duration calculation
-                                pending_commands[block.id] = {
-                                    "telemetry": telemetry,
-                                    "command_start_time": command_start_time,
-                                }
-                                sequence_number += 1
-
-                                safe_emit(
-                                    stream_callback,
-                                    ToolCallEvent(
-                                        task_id=self.config.type.value,
+                                    telemetry = CommandTelemetry(
                                         tool_name=block.name,
                                         tool_id=block.id,
+                                        timestamp=datetime.now(),
                                         parameters=block.input
                                         if isinstance(block.input, dict)
                                         else {"raw": block.input},
-                                        sequence_number=sequence_number - 1,
-                                    ),
-                                )
-                            elif hasattr(block, "text"):
-                                safe_emit(
-                                    stream_callback,
-                                    TextChunkEvent(
-                                        task_id=self.config.type.value,
-                                        text=str(block.text),
-                                    ),
-                                )
+                                        sequence_number=sequence_number,
+                                        result_status=None,  # Pending result
+                                        duration_ms=None,  # Not complete yet
+                                    )
 
-                # Capture SDK ResultMessage with token usage (check BEFORE tool results
-                # to avoid misclassification if SDK message also has tool_use_id/is_error)
-                elif _is_sdk_result_message(message):
-                    sdk_result_usage = getattr(message, "usage", None)
-                    sdk_result_cost = getattr(message, "total_cost_usd", None)
-                    sdk_num_turns = getattr(message, "num_turns", None)
-                    # Capture session_id so subsequent communicate() calls resume this conversation
-                    new_session_id = getattr(message, "session_id", None)
-                    if new_session_id != self._session_id:
-                        self._log.debug("session_id changed: %s -> %s", self._session_id, new_session_id)
-                    self._session_id = new_session_id
+                                    # Store command with start time for duration calculation
+                                    pending_commands[block.id] = {
+                                        "telemetry": telemetry,
+                                        "command_start_time": command_start_time,
+                                    }
+                                    sequence_number += 1
 
-                # PHASE 2: Process tool results from UserMessage content blocks.
-                # The SDK delivers tool results as UserMessage objects containing
-                # ToolResultBlock in their content list (not as standalone messages).
-                elif _is_user_message(message):
-                    content = getattr(message, "content", None)
-                    if content and isinstance(content, list):
-                        for block in content:
-                            if _is_tool_result_block(block):
-                                # Extract tool_name before resolve (defensive: resolve could remove entries)
-                                tool_name = ""
-                                if block.tool_use_id in pending_commands:
-                                    tool_name = pending_commands[block.tool_use_id]["telemetry"].tool_name
-                                self._resolve_pending_command(
-                                    block.tool_use_id,
-                                    getattr(block, "is_error", False) or False,
-                                    block.content,
-                                    pending_commands,
-                                    processed_results,
-                                )
-                                is_error_flag = getattr(block, "is_error", False) or False
-                                safe_emit(
-                                    stream_callback,
-                                    ToolResultEvent(
-                                        task_id=self.config.type.value,
-                                        tool_id=block.tool_use_id,
-                                        tool_name=tool_name,
-                                        success=not is_error_flag,
-                                        result_preview=format_payload(block.content),
-                                    ),
-                                )
+                                    safe_emit(
+                                        stream_callback,
+                                        ToolCallEvent(
+                                            task_id=self.config.type.value,
+                                            tool_name=block.name,
+                                            tool_id=block.id,
+                                            parameters=block.input
+                                            if isinstance(block.input, dict)
+                                            else {"raw": block.input},
+                                            sequence_number=sequence_number - 1,
+                                        ),
+                                    )
+                                elif hasattr(block, "text"):
+                                    safe_emit(
+                                        stream_callback,
+                                        TextChunkEvent(
+                                            task_id=self.config.type.value,
+                                            text=str(block.text),
+                                        ),
+                                    )
+
+                    # Capture SDK ResultMessage with token usage (check BEFORE tool results
+                    # to avoid misclassification if SDK message also has tool_use_id/is_error)
+                    elif _is_sdk_result_message(message):
+                        sdk_result_usage = getattr(message, "usage", None)
+                        sdk_result_cost = getattr(message, "total_cost_usd", None)
+                        sdk_num_turns = getattr(message, "num_turns", None)
+                        # Capture session_id so subsequent communicate() calls resume this conversation
+                        new_session_id = getattr(message, "session_id", None)
+                        if new_session_id != self._session_id:
+                            self._log.debug("session_id changed: %s -> %s", self._session_id, new_session_id)
+                        self._session_id = new_session_id
+
+                    # PHASE 2: Process tool results from UserMessage content blocks.
+                    # The SDK delivers tool results as UserMessage objects containing
+                    # ToolResultBlock in their content list (not as standalone messages).
+                    elif _is_user_message(message):
+                        content = getattr(message, "content", None)
+                        if content and isinstance(content, list):
+                            for block in content:
+                                if _is_tool_result_block(block):
+                                    # Extract tool_name before resolve (defensive: resolve could remove entries)
+                                    tool_name = ""
+                                    if block.tool_use_id in pending_commands:
+                                        tool_name = pending_commands[block.tool_use_id]["telemetry"].tool_name
+                                    self._resolve_pending_command(
+                                        block.tool_use_id,
+                                        getattr(block, "is_error", False) or False,
+                                        block.content,
+                                        pending_commands,
+                                        processed_results,
+                                    )
+                                    is_error_flag = getattr(block, "is_error", False) or False
+                                    safe_emit(
+                                        stream_callback,
+                                        ToolResultEvent(
+                                            task_id=self.config.type.value,
+                                            tool_id=block.tool_use_id,
+                                            tool_name=tool_name,
+                                            success=not is_error_flag,
+                                            result_preview=format_payload(block.content),
+                                        ),
+                                    )
 
             self._log.debug("Agent query stream ended")
 
+        except asyncio.CancelledError:
+            # The threaded watchdog cancels the running task via
+            # loop.call_soon_threadsafe(task.cancel) when it fires. If that
+            # cancel landed *because* of the timeout, re-raise as
+            # TurnTimeoutError so the retry system sees a terminal timeout
+            # (not a transient cancel). External cancels (not our watchdog)
+            # propagate unchanged.
+            if self._timed_out(timeout_hit, deadline):
+                self._state = AgentState.ERROR
+                raise TurnTimeoutError(timeout if timeout is not None else 0.0, iteration=self._iteration) from None
+            raise
         except ProcessError as e:
             # When the watchdog SIGKILLs the subprocess, the SDK surfaces it
             # as a ProcessError (exit code -9). Classify as a timeout so the
@@ -532,10 +545,6 @@ class ClaudeCodeAgent(Agent):
                 error_details += f"\nStderr output:\n{stderr}"
             raise RuntimeError(f"Communication with agent failed: {error_details}") from e
         finally:
-            if watchdog_task is not None and not watchdog_task.done():
-                watchdog_task.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await watchdog_task
             self._active_transport = None
 
         # Only trust `timeout_hit` in the happy path: if the loop completed
@@ -593,10 +602,20 @@ class ClaudeCodeAgent(Agent):
     async def kill(self) -> None:
         """Force-terminate the in-flight Claude CLI subprocess, if any.
 
-        Called by the orchestrator when a timeout fires on its backstop path.
-        The watchdog inside communicate() uses _kill_transport directly (with
-        the transport captured in its closure) to avoid a cross-turn race
-        where a stale watchdog could kill a later turn's subprocess.
+        Async wrapper around ``kill_sync`` for callers that prefer async.
+        The threaded watchdog inside communicate() uses ``_kill_transport``
+        directly on a captured transport (not via ``self._active_transport``)
+        to avoid a cross-turn race where a stale watchdog could kill a later
+        turn's subprocess.
+        """
+        self.kill_sync()
+
+    def kill_sync(self) -> None:
+        """Synchronously SIGKILL the in-flight Claude CLI subprocess, if any.
+
+        Safe to call from a non-asyncio thread (e.g. a ``threading.Timer``
+        callback). Reads ``self._active_transport`` once; if a later turn
+        has already cleared it, this is a no-op.
         """
         self._kill_transport(self._active_transport)
 
@@ -630,7 +649,9 @@ class ClaudeCodeAgent(Agent):
         if proc is None or proc.returncode is not None:
             return
         logger.warning("Hard-killing Claude CLI subprocess (pid=%s)", getattr(proc, "pid", "?"))
-        with suppress(ProcessLookupError, Exception):
+        # OSError covers ProcessLookupError (already exited) and permission /
+        # ESRCH races; any other exception would be a real bug worth raising.
+        with suppress(OSError):
             proc.kill()
 
     def get_state(self) -> AgentState:

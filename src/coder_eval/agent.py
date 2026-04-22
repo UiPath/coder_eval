@@ -66,6 +66,16 @@ class Agent(ABC):
         """
         return None
 
+    def kill_sync(self) -> None:
+        """Synchronous variant of ``kill`` for callers on non-asyncio threads.
+
+        Invoked by ``ThreadedWatchdog`` from its timer thread, which cannot
+        await coroutines. Safe to call at any time. Default implementation
+        is a no-op; concrete agents override to SIGKILL any in-flight
+        subprocess by PID.
+        """
+        return None
+
     @abstractmethod
     def get_state(self) -> AgentState:
         """Get the current state of the agent.

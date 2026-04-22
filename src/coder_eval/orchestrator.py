@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from .proxy.server import LLMGatewayProxy
 
 from .agent import Agent
+from .agents.watchdog import ThreadedWatchdog
 from .analysis import calculate_command_statistics
 from .config import settings
 from .criteria.commands_efficiency import compute_commands_efficiency
@@ -239,25 +240,45 @@ class Orchestrator:
                 # Setup components
                 await self._setup()
 
-                # Wrap evaluation loop with task-level timeout (if configured)
+                # Enforce task-level timeout via an OS-thread watchdog that
+                # SIGKILLs the in-flight CLI subprocess AND cancels this
+                # task. The threaded approach is immune to anyio cancel
+                # scopes that were silently swallowing asyncio.wait_for
+                # cancellations during long rate-limited API calls.
                 task_timeout = self.task.task_timeout
-                if task_timeout is not None:
+
+                def _kill_agent_subprocess_sync() -> None:
+                    if self.agent is not None:
+                        # kill_sync is a synchronous SIGKILL-by-PID, safe to
+                        # call from a non-asyncio thread.
+                        with suppress(Exception):
+                            self.agent.kill_sync()
+
+                with ThreadedWatchdog(
+                    timeout_seconds=task_timeout,
+                    on_timeout=_kill_agent_subprocess_sync,
+                    asyncio_task_to_cancel=asyncio.current_task(),
+                    label=f"task_timeout ({self.task.task_id})",
+                ) as wd:
                     try:
-                        success = await asyncio.wait_for(self._evaluation_loop(), timeout=task_timeout)
-                    except TimeoutError:
-                        # Task-level wait_for fired; force-kill any in-flight
-                        # CLI subprocess so the SDK doesn't keep running past
-                        # the deadline (anyio cancellation alone won't stop it).
-                        if self.agent is not None:
-                            with suppress(Exception):
-                                await self.agent.kill()
-                        raise TaskTimeoutError(
-                            task_timeout,
-                            task_id=self.task.task_id,
-                            elapsed_seconds=time.time() - start_time,
-                        ) from None
-                else:
-                    success = await self._evaluation_loop()
+                        success = await self._evaluation_loop()
+                    except asyncio.CancelledError:
+                        if wd.fired:
+                            raise TaskTimeoutError(
+                                task_timeout or 0,
+                                task_id=self.task.task_id,
+                                elapsed_seconds=time.time() - start_time,
+                            ) from None
+                        raise
+                # Belt-and-suspenders: if the loop returned normally but the
+                # watchdog fired during post-loop work or the inner coro
+                # swallowed the cancel, still classify as TIMEOUT.
+                if wd.fired and task_timeout is not None:
+                    raise TaskTimeoutError(
+                        task_timeout,
+                        task_id=self.task.task_id,
+                        elapsed_seconds=time.time() - start_time,
+                    )
 
                 # Update final status
                 if success:
@@ -606,12 +627,12 @@ class Orchestrator:
             if self.stream_callback is not None:
                 agent_callback = TaskScopedCallback(self.stream_callback, self._log_task_id)
 
-            # Pass the timeout into the agent so it can enforce it via
-            # subprocess kill (the SDK's anyio task groups swallow asyncio
-            # cancellation, so wait_for alone is not sufficient). The outer
-            # wait_for stays as a backstop and lets mock-based tests exercise
-            # the timeout path without spawning a real subprocess.
-            communicate_coro = execute_with_retry(
+            # Pass turn_timeout into the agent so it can enforce it via
+            # the ThreadedWatchdog that SIGKILLs the CLI subprocess. The
+            # agent is the single authoritative enforcer — no orchestrator
+            # backstop because the SDK's anyio cancel scopes made
+            # cooperative asyncio.wait_for cancellation unreliable.
+            turn_record = await execute_with_retry(
                 operation=functools.partial(
                     agent.communicate,
                     prompt_with_cwd,
@@ -625,22 +646,6 @@ class Orchestrator:
                     "agent_name": self.task.agent.type.value,
                 },
             )
-
-            if turn_timeout is not None:
-                try:
-                    turn_record = await asyncio.wait_for(communicate_coro, timeout=turn_timeout)
-                except TimeoutError:
-                    # wait_for fired before the agent's own watchdog; force-kill
-                    # any in-flight subprocess so the SDK can't keep running.
-                    with suppress(Exception):
-                        await agent.kill()
-                    raise TurnTimeoutError(
-                        turn_timeout,
-                        task_id=self.task.task_id,
-                        iteration=iteration,
-                    ) from None
-            else:
-                turn_record = await communicate_coro
             self.result.turns.append(turn_record)
 
             safe_emit(
