@@ -44,6 +44,19 @@ from coder_eval.streaming.events import TextChunkEvent, ToolCallEvent, ToolResul
 logger = logging.getLogger(__name__)
 
 
+class _PrefixedAdapter(logging.LoggerAdapter):  # type: ignore[type-arg]
+    """LoggerAdapter that prefixes every record with an ``[instance]`` tag.
+
+    Used to distinguish simultaneous Claude Code agents in the same run —
+    e.g. ``[coder]`` for the coding agent and ``[simulator]`` for the
+    tools-disabled user-simulator agent — without spinning up a separate
+    logger hierarchy per instance.
+    """
+
+    def process(self, msg, kwargs):  # type: ignore[override]
+        return f"[{self.extra['prefix']}] {msg}", kwargs  # type: ignore[index]
+
+
 # Type guards for SDK message types (using duck typing for robustness)
 def _is_assistant_message(message: Any) -> bool:
     """Check if message is an AssistantMessage using duck typing."""
@@ -155,12 +168,23 @@ def _dump_sdk_options(opts: ClaudeAgentOptions) -> dict[str, Any]:
 class ClaudeCodeAgent(Agent):
     """Implementation of the Agent interface for Claude Code using the SDK."""
 
-    def __init__(self, config: AgentConfig, route: ApiRoute | None = None):
+    def __init__(
+        self,
+        config: AgentConfig,
+        route: ApiRoute | None = None,
+        *,
+        instance_name: str = "coder",
+    ):
         """Initialize the Claude Code agent.
 
         Args:
             config: Agent configuration
             route: API routing configuration. If None, uses DirectRoute.
+            instance_name: Short label used to prefix this instance's log
+                records (e.g. ``"coder"`` for the coding agent,
+                ``"simulator"`` for the tools-disabled user-simulator agent).
+                Lets you tell them apart in ``task.log`` when both run in
+                the same process.
         """
         self.config = config
         self.route = route or DirectRoute()
@@ -174,6 +198,7 @@ class ClaudeCodeAgent(Agent):
         # so kill() can reach into the CLI subprocess when the SDK swallows
         # asyncio cancellation.
         self._active_transport: SubprocessCLITransport | None = None
+        self._log = _PrefixedAdapter(logger, {"prefix": instance_name})
 
     async def start(self, working_directory: str) -> None:
         """Initialize and start the Claude Code agent.
@@ -346,7 +371,7 @@ class ClaudeCodeAgent(Agent):
                     nonlocal timeout_hit
                     await asyncio.sleep(duration_s)
                     timeout_hit = True
-                    logger.warning(
+                    self._log.warning(
                         "Turn timeout (%.0fs) watchdog firing — hard-killing Claude CLI subprocess", duration_s
                     )
                     self._kill_transport(watchdog_target)
@@ -360,14 +385,14 @@ class ClaudeCodeAgent(Agent):
             query_kwargs: dict[str, Any] = {"prompt": user_input, "options": options}
             if transport is not None:
                 query_kwargs["transport"] = transport
-            logger.debug("Starting agent query stream...")
+            self._log.debug("Starting agent query stream...")
             async for message in query(**query_kwargs):
                 # Wall-clock guard inside the loop. Triggers the cooperative
                 # exit path when messages are still flowing; the watchdog is
                 # the fallback when they aren't.
                 if deadline is not None and time.monotonic() > deadline:
                     timeout_hit = True
-                    logger.warning("Turn timeout reached mid-stream; breaking out of message loop")
+                    self._log.warning("Turn timeout reached mid-stream; breaking out of message loop")
                     break
 
                 messages.append(message)
@@ -438,7 +463,7 @@ class ClaudeCodeAgent(Agent):
                     # Capture session_id so subsequent communicate() calls resume this conversation
                     new_session_id = getattr(message, "session_id", None)
                     if new_session_id != self._session_id:
-                        logger.debug("session_id changed: %s -> %s", self._session_id, new_session_id)
+                        self._log.debug("session_id changed: %s -> %s", self._session_id, new_session_id)
                     self._session_id = new_session_id
 
                 # PHASE 2: Process tool results from UserMessage content blocks.
@@ -472,7 +497,7 @@ class ClaudeCodeAgent(Agent):
                                     ),
                                 )
 
-            logger.debug("Agent query stream ended")
+            self._log.debug("Agent query stream ended")
 
         except ProcessError as e:
             # When the watchdog SIGKILLs the subprocess, the SDK surfaces it
@@ -536,7 +561,7 @@ class ClaudeCodeAgent(Agent):
             self.config.max_turns is not None and sdk_num_turns is not None and sdk_num_turns > self.config.max_turns
         )
         if max_turns_exhausted:
-            logger.warning(
+            self._log.warning(
                 "Agent exhausted max_turns (%d/%d) — the SDK hit the turn limit before the agent completed.",
                 sdk_num_turns,
                 self.config.max_turns,
@@ -616,9 +641,8 @@ class ClaudeCodeAgent(Agent):
         """
         return self._state
 
-    @staticmethod
     def _finalize_commands(
-        pending_commands: dict[str, dict[str, Any]], messages: list[Message]
+        self, pending_commands: dict[str, dict[str, Any]], messages: list[Message]
     ) -> list[CommandTelemetry]:
         """Convert pending commands to a finalized list, marking unresolved ones as unknown."""
         commands: list[CommandTelemetry] = []
@@ -629,7 +653,7 @@ class ClaudeCodeAgent(Agent):
             if cmd.result_status is None:
                 cmd.result_status = "unknown"
                 unknown_status_count += 1
-                logger.warning(
+                self._log.warning(
                     f"Command {cmd.tool_name}:{tool_id} completed without tool result. "
                     + "Status set to 'unknown'. This may indicate agent interruption or SDK issue."
                 )
@@ -643,7 +667,7 @@ class ClaudeCodeAgent(Agent):
                 type_name = type(msg).__name__
                 msg_type_counts[type_name] = msg_type_counts.get(type_name, 0) + 1
             type_summary = ", ".join(f"{k}={v}" for k, v in sorted(msg_type_counts.items()))
-            logger.warning(
+            self._log.warning(
                 f"Turn completed with {unknown_status_count} command(s) in 'unknown' status. "
                 + f"Messages received: [{type_summary}]. "
                 + "This may indicate an SDK message type mismatch or agent interruption."
@@ -672,8 +696,7 @@ class ClaudeCodeAgent(Agent):
         """
         return self._sdk_options_dump
 
-    @staticmethod
-    def _process_plugins(plugins: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _process_plugins(self, plugins: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Process plugins by expanding environment variable placeholders in paths.
 
         Expands any $VAR or ${VAR} patterns in plugin paths using environment variables.
@@ -704,7 +727,7 @@ class ClaudeCodeAgent(Agent):
                     # group(1) is ${VAR}, group(2) is $VAR
                     var_name = match.group(1) or match.group(2)
                     if var_name not in os.environ:
-                        logger.warning(f"Plugin path contains undefined environment variable ${var_name}: {path}")
+                        self._log.warning(f"Plugin path contains undefined environment variable ${var_name}: {path}")
 
                 # Expand all env vars in the path, then resolve relative paths
                 # against the process cwd (not the sandbox cwd) so plugins are found
@@ -715,8 +738,7 @@ class ClaudeCodeAgent(Agent):
 
         return processed
 
-    @staticmethod
-    def _log_message_debug(message: Any, msg_type: str) -> None:
+    def _log_message_debug(self, message: Any, msg_type: str) -> None:
         """Log agent message details at DEBUG level for real-time streaming visibility.
 
         Args:
@@ -732,15 +754,15 @@ class ClaudeCodeAgent(Agent):
                 for block in content:
                     if _is_tool_use_block(block):
                         params_str = format_payload(block.input, max_chars=800)
-                        logger.debug(f">>> TOOL CALL: {block.name} | id={block.id} | params={params_str}")
+                        self._log.debug(f">>> TOOL CALL: {block.name} | id={block.id} | params={params_str}")
                     elif hasattr(block, "text"):
                         text = str(block.text)[:500]
-                        logger.debug(f">>> ASSISTANT: {text}")
+                        self._log.debug(f">>> ASSISTANT: {text}")
                     else:
                         block_type = type(block).__name__
-                        logger.debug(f">>> ASSISTANT BLOCK ({block_type}): {str(block)[:200]}")
+                        self._log.debug(f">>> ASSISTANT BLOCK ({block_type}): {str(block)[:200]}")
             elif content and isinstance(content, str):
-                logger.debug(f">>> ASSISTANT: {content[:500]}")
+                self._log.debug(f">>> ASSISTANT: {content[:500]}")
 
         elif msg_type == "UserMessage":
             content = getattr(message, "content", None)
@@ -752,7 +774,7 @@ class ClaudeCodeAgent(Agent):
                         result_preview = (
                             format_payload(block.content, max_chars=800) if block.content is not None else "(empty)"
                         )
-                        logger.debug(f"<<< TOOL RESULT [{status}]: id={block.tool_use_id} | {result_preview}")
+                        self._log.debug(f"<<< TOOL RESULT [{status}]: id={block.tool_use_id} | {result_preview}")
 
         elif msg_type == "ResultMessage":
             usage = getattr(message, "usage", None)
@@ -760,19 +782,19 @@ class ClaudeCodeAgent(Agent):
             is_error = getattr(message, "is_error", False)
             result = getattr(message, "result", None)
             if is_error:
-                logger.debug(f"<<< RESULT [ERROR]: {str(result)[:300]}")
+                self._log.debug(f"<<< RESULT [ERROR]: {str(result)[:300]}")
             else:
                 usage_str = str(usage)[:200] if usage else "n/a"
                 cost_str = f"${cost}" if cost is not None else "n/a"
-                logger.debug(f"<<< RESULT: cost={cost_str}, usage={usage_str}")
+                self._log.debug(f"<<< RESULT: cost={cost_str}, usage={usage_str}")
 
         elif msg_type == "SystemMessage":
             subtype = getattr(message, "subtype", None)
             data = getattr(message, "data", None)
-            logger.debug(f"--- SYSTEM ({subtype}): {str(data)[:200]}")
+            self._log.debug(f"--- SYSTEM ({subtype}): {str(data)[:200]}")
 
         else:
-            logger.debug(f"--- {msg_type}: {str(message)[:200]}")
+            self._log.debug(f"--- {msg_type}: {str(message)[:200]}")
 
     @staticmethod
     def _try_parse_json_value(content: Any) -> dict[str, Any] | list[Any] | None:
@@ -830,8 +852,8 @@ class ClaudeCodeAgent(Agent):
             return parsed
         return None
 
-    @staticmethod
     def _resolve_pending_command(
+        self,
         tool_use_id: str,
         is_error: bool,
         content: Any,
@@ -875,16 +897,16 @@ class ClaudeCodeAgent(Agent):
                     phrase in content_lower
                     for phrase in ("permission", "not allowed", "requires approval", "denied", "blocked")
                 ):
-                    logger.warning(
+                    self._log.warning(
                         f"Tool use blocked: {cmd.tool_name} (id={tool_use_id}) "
                         + f"- permission denied. Error: {content_str[:200]}"
                     )
 
             if tool_use_id in processed_results:
-                logger.debug(f"Multiple results for tool_id={tool_use_id}. Last result wins.")
+                self._log.debug(f"Multiple results for tool_id={tool_use_id}. Last result wins.")
             processed_results.add(tool_use_id)
         else:
-            logger.warning(
+            self._log.warning(
                 f"Tool result received for unknown tool_use_id={tool_use_id}. No matching ToolUseBlock found."
             )
 

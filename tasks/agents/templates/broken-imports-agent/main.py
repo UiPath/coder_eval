@@ -1,8 +1,5 @@
 from pydantic import BaseModel, Field
 from uipath.tracing import traced
-import re
-from email.parser import HeaderParser  # BROKEN: wrong import (unused anyway)
-from typing import Optionol  # BROKEN: typo — should be Optional
 
 
 class Input(BaseModel):

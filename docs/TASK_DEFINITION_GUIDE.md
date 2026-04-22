@@ -26,6 +26,7 @@ Complete reference for defining evaluation tasks in coder_eval.
 - [LLM Reviewer](#llm-reviewer)
 - [Reference Solutions](#reference-solutions)
 - [Post-Run Commands](#post-run-commands)
+- [Simulation (Multi-Turn User Dialog)](#simulation-multi-turn-user-dialog)
 - [Command Telemetry](#command-telemetry)
 - [Complete Example](#complete-example)
 
@@ -623,6 +624,70 @@ post_run:
 | `timeout` | 30 | Maximum seconds to wait (1–300) |
 
 Commands run sequentially with `cwd` set to the sandbox directory. stdout and stderr are captured on the `post_run_results` field of the evaluation result (truncated to 100KB each).
+
+## Simulation (Multi-Turn User Dialog)
+
+Optional `simulation` block. When present and enabled, the orchestrator replaces the single-shot iteration loop with a multi-turn dialog between the coding agent and a simulated user (a second LLM with a persona and goal). Use this for tasks where the real usage pattern is conversational — clarifying questions, incremental requirements, mid-task corrections — rather than a single fire-and-forget prompt.
+
+```yaml
+simulation:
+  enabled: true                        # Master switch; when false, simulation is skipped entirely.
+
+  # Persona and goal (required).
+  persona: |
+    A non-technical business analyst who knows the outcome they want
+    but not how automation works. Mildly impatient.
+  goal: |
+    Build a flow that reads invoice PDFs from an Outlook folder,
+    extracts vendor/amount/date, and posts to Google Sheets.
+    Do NOT volunteer the Google Sheets requirement unless asked.
+  constraints:                         # Optional behavioral rules.
+    - "Do not paste code — you cannot read code."
+    - "If the agent goes silent for two turns, ask 'are you still there?'."
+
+  # Termination.
+  max_turns: 12                        # Hard cap on user↔agent exchanges.
+  stop_token: "<<<END>>>"              # Simulator emits this when it judges the task complete.
+  stop_on_criteria_pass: true          # End early when all success criteria pass.
+  max_total_tokens: 150000             # Optional budget across the whole dialog.
+
+  # Sampling (variance analysis).
+  n_trials: 3                          # Run N independent dialogs per (task, variant).
+  parallel_trials: true                # Trials run concurrently (subject to batch max_parallel).
+
+  # Criteria timing.
+  check_criteria: every_turn           # One of: end_of_dialog | every_turn | both.
+                                       # Required to be 'every_turn' or 'both' when
+                                       # stop_on_criteria_pass is True.
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | When false, simulation is skipped; task runs in single-shot mode. |
+| `persona` | *required* | Who the simulator is roleplaying. |
+| `goal` | *required* | What the simulated user wants. |
+| `constraints` | `[]` | Behavioral rules the simulator must follow. |
+| `max_turns` | `8` | Hard cap on user↔agent exchanges (1–100). |
+| `stop_token` | `"<<<END>>>"` | Sentinel the simulator emits to end the dialog. |
+| `stop_on_criteria_pass` | `false` | End when all criteria pass (requires per-turn checking). |
+| `max_total_tokens` | *unset* | Optional dialog-wide token budget. |
+| `n_trials` | `1` | Independent dialog trajectories per (task, variant). |
+| `parallel_trials` | `true` | Run trials concurrently within the batch. |
+| `check_criteria` | `end_of_dialog` | `end_of_dialog`, `every_turn`, or `both`. |
+
+The simulator runs as a tools-disabled Claude Code agent sharing the coding agent's `ApiRoute` — model/temperature/sampling are resolved at the route level (same `-b` flag as the coding agent), so they are not configured on this block.
+
+**Semantics:**
+
+- The task's `initial_prompt` is the user's *opening* message; the simulator picks up from turn 2.
+- `max_iterations` keeps its existing meaning (task attempts). In simulation mode, leave it at `1` unless you have a specific reason — retrying a stochastic dialog rarely adds signal. Use `n_trials` for variance sampling.
+- `max_turns` is the intra-dialog cap. `max_iterations × max_turns` is the worst-case agent call budget per trial.
+- The `reference` solution, if present, is hidden from the simulator (same security posture as for the coding agent).
+- When `n_trials > 1`, each trial becomes its own `ResolvedTask` with `task_id` suffix `/trial-N` (0-indexed), its own run directory, and its own `task.json`. Trial-level metadata appears under `simulation.trial_id` / `simulation.n_trials` on the `EvaluationResult`.
+
+**Termination precedence:** `stop_on_criteria_pass` → `stop_token` → `max_turns` → `max_total_tokens`.
+
+**Experiment variants** can override any simulation field (persona, goal, constraints, n_trials, etc.) by setting a partial `simulation:` block on a variant — it is shallow-merged onto the task's simulation block. Useful experiment axes: simulator persona (terse vs. chatty), goal withholding, and n_trials for budget/quality tradeoffs.
 
 ## Command Telemetry
 

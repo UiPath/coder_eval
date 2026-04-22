@@ -25,6 +25,7 @@ from ..models import (
     ExperimentVariant,
     PromptRephrase,
     ResolvedTask,
+    SimulationConfig,
     SnapshotMode,
     TaskDefinition,
     TaskExperimentSummary,
@@ -144,6 +145,67 @@ def _merge_agent_dicts(*layers: dict[str, Any] | None) -> dict[str, Any]:
 
 
 type ConfigSource = Literal["default", "task", "experiment-defaults", "variant", "cli"]
+
+
+def _resolve_simulation(
+    default_experiment: ExperimentDefinition,
+    experiment: ExperimentDefinition,
+    task: TaskDefinition,
+    variant: ExperimentVariant,
+    lineage: dict[str, ConfigLineageEntry],
+) -> SimulationConfig | None:
+    """Merge simulation config across the 4-layer precedence chain.
+
+    Precedence (lowest to highest):
+      1. default_experiment.defaults.simulation
+      2. experiment.defaults.simulation
+      3. task.simulation
+      4. variant.simulation
+
+    Any layer can be None (absent). When every layer is absent, the
+    resolved value is None — single-shot mode is preserved.
+
+    The merge is a shallow dict merge (same semantics as agent merge):
+    each layer's keys overwrite earlier ones, lists are replaced not
+    appended. After merging, the final dict is validated by constructing
+    a SimulationConfig.
+    """
+    default_sim = default_experiment.defaults.simulation if default_experiment.defaults else None
+    exp_sim = experiment.defaults.simulation if experiment.defaults else None
+    task_sim_dict = task.simulation.model_dump(exclude_unset=True) if task.simulation else None
+    variant_sim = variant.simulation
+
+    layers = [default_sim, exp_sim, task_sim_dict, variant_sim]
+    if all(layer is None for layer in layers):
+        return None
+
+    merged: dict[str, Any] = {}
+    for layer in layers:
+        if layer is not None:
+            merged.update(layer)
+
+    # Persona and goal are required by the model. If no layer provided them
+    # (e.g. an experiment enables simulation defaults without a persona), the
+    # resulting SimulationConfig construction will raise with a helpful error.
+    resolved = SimulationConfig(**merged)
+
+    # Track lineage — record the most-specific (highest-precedence) non-None
+    # source explicitly via reversed iteration, so the recorded source is
+    # correct regardless of the order ``sim_layers`` is declared in.
+    sim_layers: list[tuple[ConfigSource, dict[str, Any] | None]] = [
+        ("default", default_sim),
+        ("experiment-defaults", exp_sim),
+        ("task", task_sim_dict),
+        ("variant", variant_sim),
+    ]
+    most_specific: ConfigSource | None = next(
+        (source_name for source_name, layer in reversed(sim_layers) if layer),
+        None,
+    )
+    if most_specific is not None:
+        lineage["simulation"] = ConfigLineageEntry(value=merged, source=most_specific)
+
+    return resolved
 
 
 def _build_agent_lineage(
@@ -389,6 +451,11 @@ def resolve_task_for_variant(
             resolved_llm_reviewer = LLMReviewerConfig(**chosen)
             lineage["llm_reviewer"] = ConfigLineageEntry(value=chosen, source=source)
 
+    # Resolve simulation: shallow-merge across default → experiment-defaults → task → variant.
+    # Mirrors agent merge semantics — a later layer's keys overwrite earlier ones, and
+    # the final dict is validated by building a SimulationConfig from it.
+    resolved_simulation = _resolve_simulation(default_experiment, experiment, task, variant, lineage)
+
     # Build resolved task (copy with overrides)
     resolved_task = task.model_copy(
         update={
@@ -398,6 +465,7 @@ def resolve_task_for_variant(
             "sandbox": resolved_sandbox,
             "post_run": resolved_post_run,
             "llm_reviewer": resolved_llm_reviewer,
+            "simulation": resolved_simulation,
         }
     )
     return resolved_task, lineage
@@ -514,6 +582,51 @@ def resolve_task_files(
         resolve_template_source_paths(task.sandbox.template_sources, exp_dir)
 
 
+def _expand_trials(
+    resolved_task: TaskDefinition,
+    task_file: Path,
+    variant_id: str,
+    source_yaml: str,
+    lineage: dict[str, ConfigLineageEntry],
+    base_run_dir: Path,
+) -> list[ResolvedTask]:
+    """Expand a single resolved (task, variant) into one ResolvedTask per replicate.
+
+    When the task has ``simulation.enabled`` and ``simulation.n_trials > 1``,
+    each trial becomes an independent ResolvedTask whose ``replicate_index``
+    runs 0..n_trials-1. The run_dir for each replicate is built via
+    ``build_task_run_dir``, so the layout matches the single-shot path shape
+    (``<base>/<variant>/<task>/NN``) uniformly — no asymmetry between n=1 and
+    n>1 cases.
+
+    For single-trial tasks (including all single-shot tasks), this returns
+    exactly one ResolvedTask with ``replicate_index=0``.
+    """
+    sim = resolved_task.simulation
+    n_trials = sim.n_trials if (sim is not None and sim.enabled) else 1
+
+    expanded: list[ResolvedTask] = []
+    for replicate_index in range(n_trials):
+        expanded.append(
+            ResolvedTask(
+                task=resolved_task,
+                task_file=task_file,
+                run_dir=build_task_run_dir(
+                    base_run_dir,
+                    variant_id,
+                    resolved_task.task_id,
+                    replicate_index=replicate_index,
+                ),
+                variant_id=variant_id,
+                source_yaml=source_yaml,
+                # Shallow-copy lineage so sibling replicates don't share a mutable dict
+                config_lineage=dict(lineage) if n_trials > 1 else lineage,
+                replicate_index=replicate_index,
+            )
+        )
+    return expanded
+
+
 def resolve_all_tasks(
     task_files: list[Path],
     experiment: ExperimentDefinition,
@@ -584,21 +697,8 @@ def resolve_all_tasks(
                 # Apply layer 5 (CLI / .env overrides)
                 _apply_cli_overrides(resolved_task, config, lineage)
 
-                resolved.append(
-                    ResolvedTask(
-                        task=resolved_task,
-                        task_file=task_file,
-                        run_dir=build_task_run_dir(
-                            config.run_dir,
-                            variant.variant_id,
-                            resolved_task.task_id,
-                            replicate_index=0,
-                        ),
-                        variant_id=variant.variant_id,
-                        replicate_index=0,
-                        source_yaml=source_yaml,
-                        config_lineage=lineage,
-                    )
+                resolved.extend(
+                    _expand_trials(resolved_task, task_file, variant.variant_id, source_yaml, lineage, config.run_dir)
                 )
 
     # Filter by tags
@@ -610,16 +710,18 @@ def resolve_all_tasks(
         filtered_ids = {t.task_id for _, t in filtered}
         resolved = [rt for rt in resolved if rt.task.task_id in filtered_ids]
 
-    # Validate no duplicate (task_id, variant_id) combinations
-    seen: dict[tuple[str, str], list[Path]] = {}
+    # Validate no duplicate (task_id, variant_id, replicate_index) combinations.
+    # Simulation replicates legitimately share (task_id, variant_id); the tuple
+    # is only a duplicate when the replicate_index also matches.
+    seen: dict[tuple[str, str, int], list[Path]] = {}
     for rt in resolved:
-        key = (rt.task.task_id, rt.variant_id)
+        key = (rt.task.task_id, rt.variant_id, rt.replicate_index)
         seen.setdefault(key, []).append(rt.task_file)
     duplicates = {k: files for k, files in seen.items() if len(files) > 1}
     if duplicates:
         lines = [
-            f"  - '{tid}' (variant '{vid}'): {', '.join(str(f) for f in files)}"
-            for (tid, vid), files in duplicates.items()
+            f"  - '{tid}' (variant '{vid}', replicate {rep}): {', '.join(str(f) for f in files)}"
+            for (tid, vid, rep), files in duplicates.items()
         ]
         raise ValueError("Duplicate task IDs found:\n" + "\n".join(lines))
 

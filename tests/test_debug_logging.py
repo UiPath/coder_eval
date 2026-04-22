@@ -1,4 +1,4 @@
-"""Tests for debug logging in ClaudeCodeAgent._log_message_debug and _format_messages block handling."""
+"""Tests for debug logging in agent._log_message_debug and _format_messages block handling."""
 
 import logging
 
@@ -34,25 +34,25 @@ class _UserMessage:
         self.tool_use_result = True  # marks as UserMessage for duck typing
 
 
-def test_log_debug_tool_result_empty_string(caplog):
+def test_log_debug_tool_result_empty_string(agent, caplog):
     """Empty-string tool result content should NOT be logged as '(empty)'."""
     block = _ToolResultBlock(tool_use_id="t1", content="", is_error=False)
     msg = _UserMessage(content=[block])
 
     with caplog.at_level(logging.DEBUG, logger="coder_eval.agents.claude_code_agent"):
-        ClaudeCodeAgent._log_message_debug(msg, "UserMessage")
+        agent._log_message_debug(msg, "UserMessage")
 
     assert len(caplog.records) == 1
     assert "(empty)" not in caplog.records[0].message
 
 
-def test_log_debug_tool_result_none_content(caplog):
+def test_log_debug_tool_result_none_content(agent, caplog):
     """None tool result content should be logged as '(empty)'."""
     block = _ToolResultBlock(tool_use_id="t1", content=None, is_error=False)
     msg = _UserMessage(content=[block])
 
     with caplog.at_level(logging.DEBUG, logger="coder_eval.agents.claude_code_agent"):
-        ClaudeCodeAgent._log_message_debug(msg, "UserMessage")
+        agent._log_message_debug(msg, "UserMessage")
 
     assert len(caplog.records) == 1
     assert "(empty)" in caplog.records[0].message
@@ -72,23 +72,23 @@ class _ResultMessage:
         self.result = result
 
 
-def test_log_debug_result_cost_none(caplog):
+def test_log_debug_result_cost_none(agent, caplog):
     """When cost is None, debug log should NOT contain '$None'."""
     msg = _ResultMessage(usage={"input_tokens": 100}, total_cost_usd=None)
 
     with caplog.at_level(logging.DEBUG, logger="coder_eval.agents.claude_code_agent"):
-        ClaudeCodeAgent._log_message_debug(msg, "ResultMessage")
+        agent._log_message_debug(msg, "ResultMessage")
 
     assert len(caplog.records) == 1
     assert "$None" not in caplog.records[0].message
 
 
-def test_log_debug_result_cost_present(caplog):
+def test_log_debug_result_cost_present(agent, caplog):
     """When cost is present, debug log should show the dollar amount."""
     msg = _ResultMessage(usage={"input_tokens": 100}, total_cost_usd=0.05)
 
     with caplog.at_level(logging.DEBUG, logger="coder_eval.agents.claude_code_agent"):
-        ClaudeCodeAgent._log_message_debug(msg, "ResultMessage")
+        agent._log_message_debug(msg, "ResultMessage")
 
     assert len(caplog.records) == 1
     assert "$0.05" in caplog.records[0].message

@@ -23,6 +23,14 @@ class ExperimentVariant(BaseModel):
     max_iterations: int | None = Field(default=None, description="Override max iterations for this variant")
     task_timeout: int | None = Field(default=None, ge=30, description="Override task timeout (seconds)")
     turn_timeout: int | None = Field(default=None, ge=10, description="Override turn timeout (seconds)")
+    simulation: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Partial SimulationConfig overrides for this variant. Shallow-merged onto the task's "
+            "simulation block (and/or experiment defaults) — common use cases are overriding the "
+            "simulator persona/model/temperature per variant."
+        ),
+    )
     template_sources: list[TemplateSource] | None = Field(
         default=None, description="Additional template sources appended after task's base templates"
     )
@@ -68,6 +76,13 @@ class ExperimentDefaults(BaseModel):
         description=(
             "Default LLM reviewer config applied to tasks that do not set one explicitly. "
             "Fields (enabled, model, temperature, max_tokens, prompt) map to LLMReviewerConfig."
+        ),
+    )
+    simulation: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Default simulation config applied to tasks that do not set one explicitly. "
+            "Fields map to SimulationConfig (enabled, persona, goal, model, max_turns, n_trials, ...)."
         ),
     )
     template_sources: list[TemplateSource] | None = Field(
@@ -179,7 +194,11 @@ class ResolvedTask(BaseModel):
     replicate_index: int = Field(
         default=0,
         ge=0,
-        description="0-based replicate index. Always 0 until repeats are introduced.",
+        description=(
+            "0-based replicate index. Always 0 for single-shot tasks and for "
+            "simulation tasks with n_trials=1. Simulation tasks with n_trials > 1 "
+            "are expanded by the resolver into replicate_index=0..n_trials-1."
+        ),
     )
 
 

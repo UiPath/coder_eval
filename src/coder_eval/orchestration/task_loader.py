@@ -88,7 +88,11 @@ def resolve_template_paths(task: TaskDefinition, base_dir: Path) -> TaskDefiniti
 
 
 def resolve_initial_prompt_file(task: TaskDefinition, base_dir: Path) -> TaskDefinition:
-    """Resolve initial_prompt_file to inline initial_prompt."""
+    """Resolve initial_prompt_file to inline initial_prompt.
+
+    In simulation mode, both ``initial_prompt`` and ``initial_prompt_file`` may
+    be absent — the simulator generates the opening user utterance itself.
+    """
     if task.initial_prompt_file is not None:
         prompt_path = Path(task.initial_prompt_file)
         if not prompt_path.is_absolute():
@@ -100,7 +104,12 @@ def resolve_initial_prompt_file(task: TaskDefinition, base_dir: Path) -> TaskDef
         task.initial_prompt_file = None
         task.initial_prompt = content
     if task.initial_prompt is None:
-        raise ValueError("Either 'initial_prompt' or 'initial_prompt_file' must be set")
+        in_simulation = task.simulation is not None and task.simulation.enabled
+        if not in_simulation:
+            raise ValueError(
+                "Either 'initial_prompt' or 'initial_prompt_file' must be set "
+                + "(unless 'simulation.enabled' is true, in which case the simulator generates the opener)"
+            )
     return task
 
 

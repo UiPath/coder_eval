@@ -82,6 +82,7 @@ from coder_eval.models.results import (
     LLMDecision,
     PostRunResult,
     RunSummary,
+    SimulationTelemetry,
     SuiteRollup,
     TaskConfigRecord,
     ThresholdCheck,
@@ -112,11 +113,14 @@ from coder_eval.models.sandbox import (
 
 # Tasks
 from coder_eval.models.tasks import (
+    DEFAULT_SIMULATION_STOP_TOKEN,
     AgentConfig,
+    CriteriaCheckTiming,
     Dataset,
     LLMReviewerConfig,
     PostRunCommand,
     ReferenceSource,
+    SimulationConfig,
     TaskDefinition,
 )
 
@@ -212,6 +216,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "PostRunResult",
     "TurnRecord",
     "EvaluationResult",
+    "SimulationTelemetry",
     "SuiteRollup",
     "TaskConfigRecord",
     "RunSummary",
@@ -219,11 +224,14 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "DEFAULT_GATEWAY_MODEL",
     # Tasks
     "TaskDefinition",
+    "DEFAULT_SIMULATION_STOP_TOKEN",
     "AgentConfig",
+    "CriteriaCheckTiming",
     "Dataset",
     "LLMReviewerConfig",
     "PostRunCommand",
     "ReferenceSource",
+    "SimulationConfig",
     # Mutations
     "PromptPrefix",
     "PromptSuffix",

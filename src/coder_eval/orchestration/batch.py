@@ -74,6 +74,7 @@ async def run_batch(
                     variant_id=rt.variant_id,
                     source_yaml=rt.source_yaml,
                     config_lineage=rt.config_lineage,
+                    replicate_index=rt.replicate_index,
                 )
                 result = await orchestrator.run()
                 tr = TaskResult(

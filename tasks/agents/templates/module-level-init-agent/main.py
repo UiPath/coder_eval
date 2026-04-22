@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
-from uipath.tracing import traced
 from uipath.platform import UiPath
+from uipath.tracing import traced
+
 
 # ANTI-PATTERN: module-level instantiation fails during `uipath init`
 # because auth hasn't been set up when the module is imported for introspection.

@@ -39,6 +39,7 @@ from .models import (
     ProxyRoute,
     ResolvedTask,
     RunSummary,
+    SimulationTelemetry,
     SnapshotMode,
     TaskConfigRecord,
     TaskDefinition,
@@ -51,6 +52,7 @@ from .orchestration.batch import run_batch as run_batch_impl
 from .orchestration.config import BatchRunConfig
 from .orchestration.evaluation import create_iteration_snapshot, generate_next_prompt, load_reference_code
 from .sandbox import Sandbox
+from .simulation import DialogStopReason, UserSimulator, evaluate_stop
 from .streaming.callbacks import StreamCallback, TaskScopedCallback, safe_emit
 from .streaming.events import CriteriaCheckEvent, CriterionSummary, TurnCompleteEvent, TurnStartEvent
 from .utils import get_version_info
@@ -140,6 +142,7 @@ class Orchestrator:
         variant_id: str,
         source_yaml: str = "",
         config_lineage: dict[str, ConfigLineageEntry] | None = None,
+        replicate_index: int = 0,
     ):
         """Initialize the orchestrator.
 
@@ -153,6 +156,8 @@ class Orchestrator:
             variant_id: Experiment variant identifier for this task
             source_yaml: Raw YAML text from the task file
             config_lineage: Config lineage dict (dotted-path -> ConfigLineageEntry)
+            replicate_index: Zero-indexed trial number (for simulation tasks with n_trials > 1).
+                Defaults to 0, which covers single-shot tasks and single-trial simulations.
         """
         self.task = task
         self.run_dir = run_dir
@@ -163,6 +168,7 @@ class Orchestrator:
         self.variant_id = variant_id
         self.source_yaml = source_yaml
         self.config_lineage = config_lineage or {}
+        self.replicate_index = replicate_index
 
         # Derived paths
         self.report_path = self.run_dir / "task.json"
@@ -552,12 +558,23 @@ class Orchestrator:
             )
             return all_passed
 
-        assert self.task.initial_prompt is not None, "initial_prompt must be resolved before orchestration"
-        current_prompt = self.task.initial_prompt
         # Working directory context prepended to every prompt (including feedback).
         # The agent resumes its session between iterations via session_id.
         assert self.sandbox is not None and self.sandbox.sandbox_dir is not None
         sandbox_dir = self.sandbox.sandbox_dir
+
+        # When a SimulationConfig is present and enabled, replace the
+        # criteria-feedback iteration loop with a multi-turn dialog between
+        # the agent and an LLM-simulated user. The single-shot loop below is
+        # skipped entirely — simulated tasks run exactly one dialog per call.
+        if self.task.simulation is not None and self.task.simulation.enabled:
+            # initial_prompt is optional in simulation mode — when unset, the
+            # simulator produces the opening utterance itself.
+            return await self._simulation_dialog_loop(self.task.initial_prompt, sandbox_dir)
+
+        assert self.task.initial_prompt is not None, "initial_prompt must be resolved before orchestration"
+        current_prompt = self.task.initial_prompt
+
         iteration = 0
         success = False
 
@@ -676,32 +693,7 @@ class Orchestrator:
 
             logger.info(f"Success criteria: {passed_count}/{total_count} passed, weighted score: {current_score:.3f}")
 
-            criteria_details = [
-                f"{criterion.type}: {'PASS' if result.score >= criterion.pass_threshold else 'FAIL'}"
-                + f" ({result.score:.2f})"
-                for result, criterion in zip(criteria_results, self.task.success_criteria, strict=True)
-            ]
-            criteria_summaries = [
-                CriterionSummary(
-                    criterion_type=criterion.type,
-                    description=result.description or criterion.description,
-                    score=result.score,
-                    passed=result.score >= criterion.pass_threshold,
-                    failure_reason=_extract_failure_reason(result) if result.score < criterion.pass_threshold else None,
-                )
-                for result, criterion in zip(criteria_results, self.task.success_criteria, strict=True)
-            ]
-            safe_emit(
-                self.stream_callback,
-                CriteriaCheckEvent(
-                    task_id=self._log_task_id,
-                    passed=passed_count,
-                    total=total_count,
-                    weighted_score=current_score,
-                    details=criteria_details,
-                    criteria=criteria_summaries,
-                ),
-            )
+            self._emit_criteria_event(criteria_results)
 
             if all_passed:
                 logger.info("All success criteria passed!")
@@ -737,6 +729,351 @@ class Orchestrator:
                 )
 
         return success
+
+    async def _simulation_dialog_loop(self, initial_prompt: str | None, sandbox_dir: Path) -> bool:
+        """Run the task as a multi-turn dialog driven by an LLM user simulator.
+
+        This replaces the criteria-feedback iteration loop for tasks that
+        define a ``simulation`` block. One invocation runs exactly one
+        dialog trajectory (trial). Parallel trials are handled upstream by
+        the batch expander — this method is per-trial.
+
+        Lifecycle:
+          1. Obtain the opening user utterance. If the task pinned one via
+             ``initial_prompt``, use it verbatim; otherwise ask the simulator
+             to produce it from persona + goal (pure-simulation mode).
+          2. Send the opening utterance to the agent as turn 1.
+          3. After each agent reply, optionally check success criteria.
+             Break with ``criteria_passed`` if they pass and
+             ``stop_on_criteria_pass`` is set.
+          4. Evaluate stop conditions (turn cap, token budget).
+          5. Ask the simulator for the next user message. If the simulator
+             emits the stop token, break with ``stop_token``.
+          6. Loop. On any simulator exception, terminate with ``error``.
+          7. After the dialog ends, run a final criteria check unless one
+             just happened, and return pass/fail.
+
+        Emits the same streaming events as the single-shot loop
+        (``TurnStartEvent``, ``TurnCompleteEvent``, ``CriteriaCheckEvent``)
+        so downstream UI renderers work unchanged. Simulator telemetry is
+        recorded on ``self.result.simulation``.
+        """
+        assert self.result is not None
+        assert self.task.simulation is not None
+        assert self.agent is not None
+        assert self.success_checker is not None
+        assert self.task.agent is not None
+        sim_config = self.task.simulation
+
+        simulator = UserSimulator(
+            config=sim_config,
+            task_description=self.task.description,
+            initial_prompt=initial_prompt,
+            route=self.route,
+        )
+        await simulator.start()
+
+        # stop_reason is left unset until the loop picks a concrete reason;
+        # the final assertion before telemetry-write catches any exit path
+        # that forgot to set it, instead of silently defaulting.
+        stop_reason: DialogStopReason | None = None
+        simulator_input_tokens = 0
+        simulator_output_tokens = 0
+        simulator_failures = 0
+        total_tokens_used = 0
+        criteria_results: list[CriterionResult] = []
+        criteria_checked_this_turn = False
+        all_passed = False
+        turns_completed = 0
+
+        try:
+            # Pure-simulation mode: no pinned opener — ask the simulator to
+            # generate turn 1 from empty history before the agent sees anything.
+            if initial_prompt is None:
+                try:
+                    opener = await simulator.next_user_message([])
+                except Exception:
+                    simulator_failures += 1
+                    logger.exception("User simulator failed to generate opening message — aborting dialog")
+                    self.result.simulation = SimulationTelemetry(
+                        n_trials=sim_config.n_trials,
+                        replicate_index=self.replicate_index,
+                        stop_reason=DialogStopReason.ERROR.value,
+                        simulator_input_tokens=simulator_input_tokens,
+                        simulator_output_tokens=simulator_output_tokens,
+                        simulator_failures=simulator_failures,
+                        total_turns=0,
+                    )
+                    return False
+                simulator_input_tokens += opener.input_tokens or 0
+                simulator_output_tokens += opener.output_tokens or 0
+                total_tokens_used += (opener.input_tokens or 0) + (opener.output_tokens or 0)
+                current_prompt = opener.text
+
+                # Opener carrying the stop token means the simulator judged the
+                # task done before any agent turn ran. Record the telemetry and
+                # short-circuit — running an agent turn just to learn this after
+                # the fact wastes a turn budget.
+                if opener.stop_requested:
+                    assert stop_reason is None
+                    stop_reason = DialogStopReason.STOP_TOKEN
+                    self.result.simulation = SimulationTelemetry(
+                        n_trials=sim_config.n_trials,
+                        replicate_index=self.replicate_index,
+                        stop_reason=stop_reason.value,
+                        simulator_input_tokens=simulator_input_tokens,
+                        simulator_output_tokens=simulator_output_tokens,
+                        simulator_failures=simulator_failures,
+                        total_turns=0,
+                    )
+                    return False
+            else:
+                current_prompt = initial_prompt
+            # Parallel history of clean (user, agent) pairs for the simulator.
+            # This intentionally excludes the working-directory prefix that gets
+            # prepended to agent prompts — the simulator should see the user's
+            # actual utterances, not framework wrapping.
+            dialog_pairs: list[tuple[str, str]] = []
+
+            check_every_turn = sim_config.check_criteria in ("every_turn", "both")
+            turn_timeout = self.task.agent.turn_timeout
+
+            while True:
+                turns_completed += 1
+                self.result.iteration_count = turns_completed
+                logger.info("Simulation turn %s/%s", turns_completed, sim_config.max_turns)
+
+                prompt_with_cwd = f"Your working directory is: {sandbox_dir.resolve()}\n\n{current_prompt}"
+                safe_emit(
+                    self.stream_callback,
+                    TurnStartEvent(
+                        task_id=self._log_task_id,
+                        iteration=turns_completed,
+                        max_iterations=sim_config.max_turns,
+                        prompt_preview=current_prompt[:100],
+                    ),
+                )
+
+                agent = self.agent
+                agent_callback: StreamCallback | None = None
+                if self.stream_callback is not None:
+                    agent_callback = TaskScopedCallback(self.stream_callback, self._log_task_id)
+
+                communicate_coro = execute_with_retry(
+                    operation=functools.partial(
+                        agent.communicate,
+                        prompt_with_cwd,
+                        stream_callback=agent_callback,
+                        timeout=turn_timeout,
+                    ),
+                    operation_name=f"Agent communication (sim turn {turns_completed})",
+                    context={
+                        "task_id": self.task.task_id,
+                        "component": "agent",
+                        "agent_name": self.task.agent.type.value,
+                    },
+                )
+                if turn_timeout is not None:
+                    try:
+                        turn_record = await asyncio.wait_for(communicate_coro, timeout=turn_timeout)
+                    except TimeoutError:
+                        # wait_for fired before the agent's own watchdog; force-kill
+                        # any in-flight subprocess so the SDK can't keep running.
+                        with suppress(Exception):
+                            await agent.kill()
+                        raise TurnTimeoutError(
+                            turn_timeout,
+                            task_id=self.task.task_id,
+                            iteration=turns_completed,
+                        ) from None
+                else:
+                    turn_record = await communicate_coro
+                self.result.turns.append(turn_record)
+                dialog_pairs.append((current_prompt, turn_record.agent_output or ""))
+
+                safe_emit(
+                    self.stream_callback,
+                    TurnCompleteEvent(
+                        task_id=self._log_task_id,
+                        iteration=turns_completed,
+                        duration_s=turn_record.duration_seconds or 0.0,
+                        command_count=len(turn_record.commands),
+                        token_usage_str=str(turn_record.token_usage) if turn_record.token_usage else "",
+                    ),
+                )
+                if turn_record.token_usage is not None:
+                    usage = turn_record.token_usage
+                    total_tokens_used += (usage.input_tokens or 0) + (usage.output_tokens or 0)
+
+                if self.snapshot_base_dir and self.sandbox:
+                    await create_iteration_snapshot(
+                        sandbox=self.sandbox,
+                        snapshot_base_dir=self.snapshot_base_dir,
+                        task=self.task,
+                        iteration=turns_completed,
+                        turn_record=turn_record,
+                    )
+
+                criteria_checked_this_turn = False
+                if check_every_turn:
+                    reference_code, self._reference_code = load_reference_code(
+                        task=self.task,
+                        task_file=self.task_file,
+                        cached_reference=self._reference_code,
+                    )
+                    criteria_results = await asyncio.to_thread(
+                        self.success_checker.check_all,
+                        self.task.success_criteria,
+                        reference_code=reference_code,
+                        turn_records=self.result.turns,
+                    )
+                    self.result.success_criteria_results = criteria_results
+                    self.result.calculate_weighted_score(self.task.success_criteria)
+                    criteria_checked_this_turn = True
+                    all_passed = all(
+                        r.score >= c.pass_threshold
+                        for r, c in zip(criteria_results, self.task.success_criteria, strict=True)
+                    )
+                    self._emit_criteria_event(criteria_results)
+
+                stop_decision = evaluate_stop(
+                    config=sim_config,
+                    turns_completed=turns_completed,
+                    total_tokens_used=total_tokens_used,
+                    criteria_all_passed=all_passed,
+                )
+                if stop_decision.stop:
+                    assert stop_decision.reason is not None
+                    stop_reason = stop_decision.reason
+                    break
+
+                if turn_record.max_turns_exhausted:
+                    self.result.max_turns_exhausted = True
+                    stop_reason = DialogStopReason.MAX_TURNS
+                    logger.warning(
+                        "Agent exhausted its inner max_turns during simulation turn %s; ending dialog.",
+                        turns_completed,
+                    )
+                    break
+
+                try:
+                    sim_result = await simulator.next_user_message(dialog_pairs)
+                except Exception:
+                    simulator_failures += 1
+                    logger.exception("User simulator failed — ending dialog")
+                    stop_reason = DialogStopReason.ERROR
+                    break
+
+                simulator_input_tokens += sim_result.input_tokens or 0
+                simulator_output_tokens += sim_result.output_tokens or 0
+                total_tokens_used += (sim_result.input_tokens or 0) + (sim_result.output_tokens or 0)
+
+                if sim_result.stop_requested:
+                    stop_reason = DialogStopReason.STOP_TOKEN
+                    break
+
+                current_prompt = sim_result.text
+
+            # Final criteria check for end_of_dialog (or both) modes, or when
+            # every_turn mode did not run a check for the final turn.
+            end_of_dialog_needed = (
+                sim_config.check_criteria in ("end_of_dialog", "both") or not criteria_checked_this_turn
+            )
+            if end_of_dialog_needed:
+                reference_code, self._reference_code = load_reference_code(
+                    task=self.task,
+                    task_file=self.task_file,
+                    cached_reference=self._reference_code,
+                )
+                criteria_results = await asyncio.to_thread(
+                    self.success_checker.check_all,
+                    self.task.success_criteria,
+                    reference_code=reference_code,
+                    turn_records=self.result.turns,
+                )
+                self.result.success_criteria_results = criteria_results
+                self.result.calculate_weighted_score(self.task.success_criteria)
+                all_passed = all(
+                    r.score >= c.pass_threshold
+                    for r, c in zip(criteria_results, self.task.success_criteria, strict=True)
+                )
+                self._emit_criteria_event(criteria_results)
+
+            assert stop_reason is not None, "dialog loop exited without picking a stop_reason"
+            self.result.simulation = SimulationTelemetry(
+                n_trials=sim_config.n_trials,
+                replicate_index=self.replicate_index,
+                stop_reason=stop_reason.value,
+                simulator_input_tokens=simulator_input_tokens,
+                simulator_output_tokens=simulator_output_tokens,
+                simulator_failures=simulator_failures,
+                total_turns=turns_completed,
+            )
+            logger.info(
+                "Simulation dialog ended: stop_reason=%s turns=%s criteria_passed=%s",
+                stop_reason.value,
+                turns_completed,
+                all_passed,
+            )
+            return all_passed
+        finally:
+            # When the dialog bails out via exception (TurnTimeoutError,
+            # TaskTimeoutError, etc.) before reaching the explicit telemetry
+            # write above, the happy-path write never happens — record partial
+            # telemetry here so analytics still see the run. ``stop_reason``
+            # being None at this point means "exit was not an in-band stop
+            # decision" (i.e., exception-driven), which we classify as ERROR.
+            if self.result is not None and self.result.simulation is None:
+                self.result.simulation = SimulationTelemetry(
+                    n_trials=sim_config.n_trials,
+                    replicate_index=self.replicate_index,
+                    stop_reason=(stop_reason or DialogStopReason.ERROR).value,
+                    simulator_input_tokens=simulator_input_tokens,
+                    simulator_output_tokens=simulator_output_tokens,
+                    simulator_failures=simulator_failures,
+                    total_turns=turns_completed,
+                )
+            # Always tear down the simulator agent (and its scratch dir) even
+            # when the dialog bails out via exception.
+            await simulator.stop()
+
+    def _emit_criteria_event(self, criteria_results: list[CriterionResult]) -> None:
+        """Emit a CriteriaCheckEvent for the current success-criteria state.
+
+        Extracted so the single-shot loop and the simulation dialog loop
+        produce identical streaming output.
+        """
+        assert self.result is not None
+        pairs = list(zip(criteria_results, self.task.success_criteria, strict=True))
+        passed_count = sum(1 for r, c in pairs if r.score >= c.pass_threshold)
+        total_count = len(pairs)
+        current_score = self.result.weighted_score or 0.0
+        criteria_details = [
+            f"{criterion.type}: {'PASS' if result.score >= criterion.pass_threshold else 'FAIL'}"
+            + f" ({result.score:.2f})"
+            for result, criterion in pairs
+        ]
+        criteria_summaries = [
+            CriterionSummary(
+                criterion_type=criterion.type,
+                description=result.description or criterion.description,
+                score=result.score,
+                passed=result.score >= criterion.pass_threshold,
+                failure_reason=_extract_failure_reason(result) if result.score < criterion.pass_threshold else None,
+            )
+            for result, criterion in pairs
+        ]
+        safe_emit(
+            self.stream_callback,
+            CriteriaCheckEvent(
+                task_id=self._log_task_id,
+                passed=passed_count,
+                total=total_count,
+                weighted_score=current_score,
+                details=criteria_details,
+                criteria=criteria_summaries,
+            ),
+        )
 
     async def _review_iteration(
         self,

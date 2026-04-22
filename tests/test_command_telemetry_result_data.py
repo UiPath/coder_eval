@@ -7,7 +7,12 @@ from datetime import datetime
 from typing import Any
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
-from coder_eval.models import CommandTelemetry
+from coder_eval.models import AgentConfig, AgentKind, CommandTelemetry
+
+
+def _agent() -> ClaudeCodeAgent:
+    """Build a minimal ClaudeCodeAgent instance just to reach _resolve_pending_command."""
+    return ClaudeCodeAgent(AgentConfig(type=AgentKind.CLAUDE_CODE))
 
 
 def _make_pending(tool_id: str, tool_name: str = "Bash") -> dict[str, dict[str, Any]]:
@@ -83,7 +88,7 @@ def test_resolve_pending_command_populates_result_data_for_json_object() -> None
     pending = _make_pending(tool_id)
     content = '{"a":1,"b":"x"}'
 
-    ClaudeCodeAgent._resolve_pending_command(
+    _agent()._resolve_pending_command(
         tool_id,
         False,
         content,
@@ -101,7 +106,7 @@ def test_resolve_pending_command_populates_result_data_for_json_array() -> None:
     pending = _make_pending(tool_id)
     content = '[{"a":1}]'
 
-    ClaudeCodeAgent._resolve_pending_command(
+    _agent()._resolve_pending_command(
         tool_id,
         False,
         content,
@@ -118,7 +123,7 @@ def test_resolve_pending_command_leaves_result_data_none_for_plain_text() -> Non
     pending = _make_pending(tool_id)
     content = "hello world"
 
-    ClaudeCodeAgent._resolve_pending_command(
+    _agent()._resolve_pending_command(
         tool_id,
         False,
         content,
@@ -139,7 +144,7 @@ def test_resolve_pending_command_populates_result_data_for_flow_debug_fixture() 
         '"elementExecutions":[{"elementId":"e1","status":"Completed"}]}}'
     )
 
-    ClaudeCodeAgent._resolve_pending_command(
+    _agent()._resolve_pending_command(
         tool_id,
         False,
         content,
@@ -162,7 +167,7 @@ def test_resolve_pending_command_handles_sdk_list_content_shape() -> None:
         {"type": "text", "text": '{"Code":"FlowDebug","Data":{"finalStatus":"Completed"}}'},
     ]
 
-    ClaudeCodeAgent._resolve_pending_command(
+    _agent()._resolve_pending_command(
         tool_id,
         False,
         content,
@@ -182,7 +187,7 @@ def test_resolve_pending_command_concatenates_multiple_text_blocks() -> None:
         {"type": "text", "text": '1,"b":2}'},
     ]
 
-    ClaudeCodeAgent._resolve_pending_command(
+    _agent()._resolve_pending_command(
         tool_id,
         False,
         content,
@@ -200,7 +205,7 @@ def test_resolve_pending_command_list_without_text_blocks_yields_none() -> None:
     pending = _make_pending(tool_id)
     content = [{"type": "image", "source": {"data": "..."}}]
 
-    ClaudeCodeAgent._resolve_pending_command(
+    _agent()._resolve_pending_command(
         tool_id,
         False,
         content,
@@ -215,7 +220,7 @@ def test_resolve_pending_command_none_content_yields_none() -> None:
     tool_id = "toolu_none"
     pending = _make_pending(tool_id)
 
-    ClaudeCodeAgent._resolve_pending_command(
+    _agent()._resolve_pending_command(
         tool_id,
         False,
         None,

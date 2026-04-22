@@ -1,6 +1,5 @@
 from pydantic import BaseModel, Field
 from uipath.tracing import traced
-from uipath import UiPath  # WRONG: should be `from uipath.platform import UiPath`
 
 
 class Input(BaseModel):

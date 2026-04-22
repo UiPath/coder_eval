@@ -121,6 +121,11 @@ coder_eval/
 │   ├── events.py                  # StreamEvent types (TurnStart, ToolCall, ToolResult, etc.)
 │   └── renderers.py               # RichStreamRenderer (full/minimal verbosity, batch mode)
 │
+├── simulation/                    # Multi-turn user simulation (dialog-mode evaluation)
+│   ├── __init__.py                # Unified exports (UserSimulator, DialogStopReason, evaluate_stop)
+│   ├── user_simulator.py          # LLM-driven user simulator (Anthropic + LLMGW backends)
+│   └── termination.py             # Dialog-termination predicate + stop-token handling
+│
 └── resources/                     # Package resources
 
 experiments/                        # Experiment definition YAML files

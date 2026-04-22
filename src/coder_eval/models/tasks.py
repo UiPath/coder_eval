@@ -99,6 +99,129 @@ class LLMReviewerConfig(BaseModel):
     )
 
 
+DEFAULT_SIMULATION_STOP_TOKEN = "<<<END>>>"
+"""Sentinel token the user simulator emits when it considers the task complete."""
+
+
+CriteriaCheckTiming = Literal["end_of_dialog", "every_turn", "both"]
+"""When success criteria are evaluated inside a simulated dialog."""
+
+
+class SimulationConfig(BaseModel):
+    """Configuration for multi-turn user simulation.
+
+    When present on a TaskDefinition, the orchestrator replaces its single-shot
+    iteration loop with a dialog between the coding agent and a simulated user
+    (a second LLM). The simulator is configured with a persona, a goal, and
+    optional behavioral constraints; it generates each subsequent user prompt
+    after the first (which is still the task's ``initial_prompt``).
+
+    Semantics relative to the existing task fields:
+      - ``max_iterations`` keeps its meaning (number of task *attempts*).
+        In simulation mode it typically stays at 1: retrying a stochastic
+        dialog rarely adds signal. Use ``n_trials`` for variance sampling.
+      - ``max_turns`` (below) bounds the intra-dialog agent<->user exchanges.
+
+    Security: ``persona``, ``goal``, and ``constraints`` are passed to the
+    simulator only. The task's ``reference`` is NEVER passed to the simulator,
+    mirroring the guarantee already in place for the coding agent.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(default=False, description="Master switch — when false, simulation is skipped entirely.")
+
+    # The simulator runs as a tools-disabled Claude Code agent sharing the
+    # coding agent's ApiRoute, so model/temperature/max_tokens are resolved at
+    # the route level and are not configured here.
+
+    # Persona / goal.
+    persona: str = Field(
+        description=(
+            "Who the simulator is roleplaying — background, tone, level of domain knowledge. "
+            "Passed verbatim into the simulator system prompt."
+        ),
+    )
+    goal: str = Field(
+        description=(
+            "What the simulated user wants to achieve. This drives the conversation. "
+            "You can optionally withhold information (see ``constraints``) to force clarification behavior."
+        ),
+    )
+    constraints: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional behavioral rules the simulator must follow "
+            "(e.g., 'do not paste code', 'reveal requirement X only if asked')."
+        ),
+    )
+
+    # Termination.
+    max_turns: int = Field(
+        default=8,
+        ge=1,
+        le=100,
+        description="Hard cap on simulated user<->agent exchanges within a single dialog.",
+    )
+    stop_token: str = Field(
+        default=DEFAULT_SIMULATION_STOP_TOKEN,
+        min_length=1,
+        description="If the simulator emits a message containing this token, the dialog ends.",
+    )
+    stop_on_criteria_pass: bool = Field(
+        default=False,
+        description=(
+            "When True, end the dialog as soon as all success criteria pass. "
+            "Requires ``check_criteria: every_turn`` or ``both``."
+        ),
+    )
+    max_total_tokens: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Optional budget across the whole dialog (sum of simulator + agent tokens). "
+            "When exceeded, the dialog terminates with stop_reason='budget'."
+        ),
+    )
+
+    # Sampling.
+    n_trials: int = Field(
+        default=1,
+        ge=1,
+        le=100,
+        description="Number of independent dialog trajectories to run per (task, variant).",
+    )
+    parallel_trials: bool = Field(
+        default=True,
+        description="When True, trials run concurrently (subject to batch max_parallel).",
+    )
+
+    # Criteria timing.
+    check_criteria: CriteriaCheckTiming = Field(
+        default="end_of_dialog",
+        description=(
+            "When to evaluate success criteria: end_of_dialog (cheapest), "
+            "every_turn (enables early stop), or both (record every turn AND at end)."
+        ),
+    )
+
+    @field_validator("persona", "goal")
+    @classmethod
+    def _non_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must be a non-empty string")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_timing(self) -> Self:
+        if self.stop_on_criteria_pass and self.check_criteria == "end_of_dialog":
+            raise ValueError(
+                "simulation.stop_on_criteria_pass=True requires check_criteria='every_turn' or 'both' — "
+                + "set check_criteria accordingly, or disable stop_on_criteria_pass."
+            )
+        return self
+
+
 class ReferenceSource(BaseModel):
     """Defines the source for reference solution code.
 
@@ -248,14 +371,33 @@ class TaskDefinition(BaseModel):
         default=None,
         description="Set by the dataset expander on expanded row-tasks to the value from Dataset.id_field.",
     )
+    simulation: SimulationConfig | None = Field(
+        default=None,
+        description=(
+            "Optional multi-turn user-simulation config. When present and enabled, the orchestrator runs "
+            "the task as a dialog between the coding agent and a simulated user LLM instead of "
+            "the default single-shot iteration loop."
+        ),
+    )
 
     @model_validator(mode="after")
     def check_prompt_fields(self) -> Self:
-        """Ensure exactly one of initial_prompt or initial_prompt_file is provided."""
+        """Validate initial_prompt / initial_prompt_file combination.
+
+        - initial_prompt and initial_prompt_file are always mutually exclusive.
+        - Exactly one is required for single-shot tasks.
+        - In simulation mode (``simulation.enabled=True``) both may be omitted;
+          the simulator then generates the opening user utterance from its
+          persona and goal.
+        """
         if self.initial_prompt is not None and self.initial_prompt_file is not None:
             raise ValueError("Only one of 'initial_prompt' or 'initial_prompt_file' can be provided, not both")
-        if self.initial_prompt is None and self.initial_prompt_file is None:
-            raise ValueError("Either 'initial_prompt' or 'initial_prompt_file' must be provided")
+        in_simulation = self.simulation is not None and self.simulation.enabled
+        if self.initial_prompt is None and self.initial_prompt_file is None and not in_simulation:
+            raise ValueError(
+                "Either 'initial_prompt' or 'initial_prompt_file' must be provided "
+                + "(unless 'simulation.enabled' is true, in which case the simulator generates the opener)"
+            )
         return self
 
     @model_validator(mode="after")

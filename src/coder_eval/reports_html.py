@@ -487,6 +487,7 @@ def _render_command(cmd: CommandTelemetry) -> str:
 
 def _render_turn(turn: TurnRecord) -> str:
     prompt_trunc, _ = _truncate(turn.user_input or "", 2000)
+    response_trunc, _ = _truncate(turn.agent_output or "", 4000)
     cmds_html = "".join(_render_command(c) for c in (turn.commands or []))
     if not cmds_html:
         cmds_html = '<p class="muted">No tool calls recorded for this turn.</p>'
@@ -501,6 +502,15 @@ def _render_turn(turn: TurnRecord) -> str:
         )
     duration_label = f'<span class="badge neutral">{_esc(_format_duration(turn.duration_seconds))}</span>'
     exhausted = '<span class="badge failure">max_turns exhausted</span>' if turn.max_turns_exhausted else ""
+    response_block = (
+        f"""
+  <details>
+    <summary>Agent response</summary>
+    <div class="details-body"><pre>{_esc(response_trunc)}</pre></div>
+  </details>"""
+        if turn.agent_output
+        else ""
+    )
     return f"""
 <div class="card">
   <div class="turn-header">
@@ -515,7 +525,7 @@ def _render_turn(turn: TurnRecord) -> str:
   <details>
     <summary>Prompt to agent</summary>
     <div class="details-body"><pre>{_esc(prompt_trunc)}</pre></div>
-  </details>
+  </details>{response_block}
   <h4 style="margin-top:12px">Tool Calls ({len(turn.commands or [])})</h4>
   {cmds_html}
 </div>
@@ -724,6 +734,50 @@ def _render_installed_tools(result: EvaluationResult) -> str:
   <table>
     <thead><tr><th>Tool</th><th>Version</th></tr></thead>
     <tbody>{rows}</tbody>
+  </table>
+</div>
+"""
+
+
+_SIMULATION_STOP_REASON_LABELS = {
+    "criteria_passed": ("success", "criteria passed"),
+    "stop_token": ("neutral", "simulator ended dialog"),
+    "max_turns": ("failure", "turn cap reached"),
+    "budget": ("failure", "token budget exhausted"),
+    "error": ("failure", "simulator error"),
+}
+
+
+def _render_simulation(result: EvaluationResult) -> str:
+    """Render the Simulation section (only when simulation telemetry is present)."""
+    sim = result.simulation
+    if sim is None:
+        return ""
+    badge_class, label = _SIMULATION_STOP_REASON_LABELS.get(sim.stop_reason, ("neutral", sim.stop_reason))
+    trial_line = (
+        f"<tr><td class='mono dim'>Trial</td><td>{sim.replicate_index + 1} of {sim.n_trials}</td></tr>"
+        if sim.n_trials > 1
+        else ""
+    )
+    failure_line = (
+        f"<tr><td class='mono dim'>Simulator failures</td><td>{sim.simulator_failures}</td></tr>"
+        if sim.simulator_failures > 0
+        else ""
+    )
+    return f"""
+<h2>Simulation</h2>
+<div class="card" style="padding:0">
+  <table>
+    <tbody>
+      <tr><td class='mono dim'>Stop reason</td>
+          <td><span class="badge {badge_class}">{_esc(label)}</span>
+              <span class="mono dim"> ({_esc(sim.stop_reason)})</span></td></tr>
+      <tr><td class='mono dim'>Total turns</td><td>{sim.total_turns}</td></tr>
+      {trial_line}
+      <tr><td class='mono dim'>Simulator tokens</td>
+          <td>in {sim.simulator_input_tokens} · out {sim.simulator_output_tokens}</td></tr>
+      {failure_line}
+    </tbody>
   </table>
 </div>
 """
@@ -1160,6 +1214,7 @@ class HTMLReportGenerator:
 
         body = (
             _render_header(result)
+            + _render_simulation(result)
             + _render_llm_review(result.llm_review)
             + _render_criteria(result.success_criteria_results or [])
             + _render_error_details(result)

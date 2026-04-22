@@ -143,6 +143,31 @@ class PostRunResult(BaseModel):
     error: str | None = Field(default=None, description="Error message if the command failed to execute")
 
 
+class SimulationTelemetry(BaseModel):
+    """Per-trial simulation telemetry.
+
+    Populated only when ``TaskDefinition.simulation.enabled`` is True. One
+    ``EvaluationResult`` corresponds to one dialog trajectory, so this record
+    is also per-dialog.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    n_trials: int = Field(description="Total number of trials the task was expanded into", ge=1)
+    replicate_index: int = Field(description="Zero-indexed trial number within this (task, variant)", ge=0)
+    stop_reason: Literal[
+        "criteria_passed",
+        "stop_token",
+        "max_turns",
+        "budget",
+        "error",
+    ] = Field(description="Why the dialog terminated")
+    simulator_input_tokens: int = Field(default=0, ge=0, description="Sum of simulator prompt tokens across turns")
+    simulator_output_tokens: int = Field(default=0, ge=0, description="Sum of simulator completion tokens across turns")
+    simulator_failures: int = Field(default=0, ge=0, description="Number of simulator LLM calls that raised")
+    total_turns: int = Field(description="Number of user↔agent exchanges completed in this dialog", ge=0)
+
+
 class EvaluationResult(BaseModel):
     """Complete result of a task evaluation."""
 
@@ -228,6 +253,14 @@ class EvaluationResult(BaseModel):
     # Post-run script results
     post_run_results: list[PostRunResult] = Field(
         default_factory=list, description="Results of post-run scripts (informational, do not affect pass/fail)"
+    )
+
+    # Simulation telemetry (only populated when task.simulation.enabled is True)
+    simulation: SimulationTelemetry | None = Field(
+        default=None,
+        description=(
+            "Dialog-simulation telemetry: trial index, stop reason, simulator token usage. None in single-shot mode."
+        ),
     )
 
     def calculate_weighted_score(self, criteria: list[SuccessCriterion]) -> None:
