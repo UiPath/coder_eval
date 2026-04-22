@@ -286,7 +286,9 @@ class FailedRowSummary(BaseModel):
         description="Short descriptions of failed criteria (up to a few, truncated per row).",
     )
     error_message: str | None = Field(default=None, description="Top-level error message if the row errored out.")
-    task_json_relpath: str = Field(description="Path to the row's task.json, relative to run_dir.")
+    task_json_relpath: str = Field(
+        description="Path to the row's task.json, relative to run_dir (<variant>/<task_id>/<NN>/task.json)."
+    )
 
 
 class ClassLabelStats(BaseModel):

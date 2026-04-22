@@ -10,19 +10,23 @@ def generate_run_id() -> str:
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
-def get_task_run_dir(run_dir: Path, task_id: str) -> Path:
-    """Get directory for task within run: {run_dir}/{task_id}/."""
-    return run_dir / task_id
+def replicate_subdir_name(replicate_index: int) -> str:
+    """Two-digit, zero-padded directory name for a replicate (``'00'``, ``'01'``, ...).
+
+    Two-digit padding caps unique replicate names at 100 (indices 0-99); if a
+    follow-up PR ever needs >=100 replicates, widen the padding here.
+    """
+    return f"{replicate_index:02d}"
 
 
-def get_task_report_path(run_dir: Path, task_id: str) -> Path:
-    """Get report path: {run_dir}/{task_id}/task.json."""
-    return get_task_run_dir(run_dir, task_id) / "task.json"
-
-
-def get_task_artifact_dir(run_dir: Path, task_id: str) -> Path:
-    """Get artifact dir: {run_dir}/{task_id}/artifacts/."""
-    return get_task_run_dir(run_dir, task_id) / "artifacts"
+def build_task_run_dir(
+    run_dir: Path,
+    variant_id: str,
+    task_id: str,
+    replicate_index: int = 0,
+) -> Path:
+    """Build the per-task run dir: ``<run_dir>/<variant_id>/<task_id>/<NN>/``."""
+    return run_dir / variant_id / task_id / replicate_subdir_name(replicate_index)
 
 
 def create_latest_symlink(runs_base: Path, run_id: str) -> None:
@@ -50,13 +54,3 @@ def create_latest_symlink(runs_base: Path, run_id: str) -> None:
         # Windows may not support symlinks, skip gracefully
         if platform.system() != "Windows":
             raise
-
-
-def ensure_run_structure(run_dir: Path, task_id: str) -> None:
-    """Create necessary directories for a task run.
-
-    Args:
-        run_dir: Run directory (e.g., "runs/2025-10-09_15-30-45/")
-        task_id: Task identifier (e.g., "hello_date")
-    """
-    get_task_run_dir(run_dir, task_id).mkdir(parents=True, exist_ok=True)

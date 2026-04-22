@@ -12,6 +12,7 @@ import math
 from pathlib import Path
 
 from coder_eval.models import EvaluationResult, ExperimentVariant, TaskExperimentSummary
+from coder_eval.path_utils import build_task_run_dir
 
 
 logger = logging.getLogger(__name__)
@@ -158,7 +159,7 @@ def load_variant_eval_results(
 ) -> list[EvaluationResult]:
     """Load EvaluationResult objects for a variant from disk.
 
-    Scans ``<run_dir>/<variant_id>/<task_id>/task.json`` for each task in
+    Scans ``<run_dir>/<variant_id>/<task_id>/<NN>/task.json`` for each task in
     ``task_summaries`` and returns every result that loads successfully.
     """
     variant_dir = run_dir / variant_id
@@ -168,7 +169,8 @@ def load_variant_eval_results(
         return results
 
     for ts in task_summaries:
-        task_json = variant_dir / ts.task_id / "task.json"
+        # TODO: plumb replicate_index through TaskExperimentSummary when repeats land.
+        task_json = build_task_run_dir(run_dir, variant_id, ts.task_id, replicate_index=0) / "task.json"
         if task_json.exists():
             try:
                 results.append(EvaluationResult.model_validate_json(task_json.read_text()))

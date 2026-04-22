@@ -407,8 +407,8 @@ def test_variant_html_loads_rich_sections_from_run_dir(tmp_path: Path):
     """When run_dir is provided, rich sections load from per-task JSON."""
     result = _result_with_summaries(["v1"], [{"v1": [0.8]}])
 
-    # Write a realistic task.json to disk
-    task_json_dir = tmp_path / "v1" / "t1"
+    # Write a realistic task.json to disk under <variant>/<task>/<NN>/
+    task_json_dir = tmp_path / "v1" / "t1" / "00"
     task_json_dir.mkdir(parents=True)
     eval_result = _make_result()
     eval_result.task_id = "t1"

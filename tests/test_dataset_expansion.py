@@ -325,9 +325,10 @@ class TestResolveAllTasksIntegration:
         variant_ids = sorted({rt.variant_id for rt in resolved})
         assert variant_ids == ["v1", "v2"]
 
-        # run_dir reflects /variant/suite/row nesting
+        # run_dir reflects /variant/suite/row/NN nesting (NN = replicate index)
         for rt in resolved:
-            assert rt.run_dir == config.run_dir / rt.variant_id / rt.task.task_id
+            assert rt.run_dir == config.run_dir / rt.variant_id / rt.task.task_id / "00"
+            assert rt.replicate_index == 0
 
     def test_max_rows_applies(self, tmp_path: Path) -> None:
         task_file = self._write_task_yaml(tmp_path, "suite", with_dataset=True)

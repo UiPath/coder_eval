@@ -530,6 +530,20 @@ class TestReportFileWriting:
         assert "## Summary" in content
         assert "Success Rate" in content
 
+    def test_variant_html_task_links_include_replicate_segment(self, tmp_path, sample_result):
+        """variant.html task links must include the /00/ replicate segment so they
+        resolve to task.html under the new `<task_id>/<NN>/` layout."""
+        run_dir = tmp_path / "runs" / "test"
+        ExperimentReportGenerator.write_reports(sample_result, run_dir)
+
+        html = (run_dir / "sonnet" / "variant.html").read_text()
+        # Every per-task link in the variant HTML must traverse the replicate dir.
+        assert 'href="task-a/00/task.html"' in html
+        assert 'href="task-b/00/task.html"' in html
+        # Guard against the pre-fix flat shape slipping back in.
+        assert 'href="task-a/task.html"' not in html
+        assert 'href="task-b/task.html"' not in html
+
 
 class TestAggregateMetrics:
     """Tests for the new Aggregate Metrics section in experiment reports."""
@@ -761,9 +775,9 @@ class TestComprehensiveVariantReport:
 
         from coder_eval.models import AgentKind, CriterionResult, EvaluationResult, TurnRecord
 
-        # Set up run_dir with task.json files
+        # Set up run_dir with task.json files under <variant>/<task>/<NN>/
         variant_dir = tmp_path / "my-variant"
-        task_dir = variant_dir / "task-a"
+        task_dir = variant_dir / "task-a" / "00"
         task_dir.mkdir(parents=True)
 
         eval_result = EvaluationResult(

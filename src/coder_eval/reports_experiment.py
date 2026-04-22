@@ -12,6 +12,7 @@ from coder_eval.models import (
     ExperimentResult,
     TaskExperimentSummary,
 )
+from coder_eval.path_utils import replicate_subdir_name
 from coder_eval.reports import resolve_agent_settings
 from coder_eval.reports_stats import (
     describe_prompt_config,
@@ -516,7 +517,8 @@ class ExperimentReportGenerator:
         }
         for summary in result.task_summaries:
             for vr in summary.variant_results:
-                rel_link = f"{vr.task_id}/task.html"
+                # TODO: plumb replicate_index through VariantResult when repeats land.
+                rel_link = f"{vr.task_id}/{replicate_subdir_name(0)}/task.html"
                 task_links_by_variant[vr.variant_id].append(
                     (vr.task_id, rel_link, vr.weighted_score, vr.final_status.value)
                 )

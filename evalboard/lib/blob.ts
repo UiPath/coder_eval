@@ -129,6 +129,11 @@ export async function ensureTaskDir(
         await ensureRunSummary(runId, destRoot);
         const c = getContainer();
         const ops: Promise<void>[] = [];
+        // `listBlobsFlat` recurses, so both the flat legacy layout
+        // (`default/<task>/task.json`) and the nested replicate layout
+        // (`default/<task>/00/task.json`) download unchanged — the prefix
+        // scope is the task subtree either way. `resolveTaskContentDir` in
+        // runs.ts then picks the right shape at render time.
         const prefix = `${runId}/default/${taskId}/`;
         for await (const blob of c.listBlobsFlat({ prefix })) {
             ops.push(downloadBlob(blob.name, destRoot));

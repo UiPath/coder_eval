@@ -421,11 +421,12 @@ runs/
 │   ├── <variant_id>/                  # Per-variant directory
 │   │   ├── variant.md                 # Variant aggregate report
 │   │   ├── variant.json               # Variant aggregate data
-│   │   └── task-<task_id>/            # Per-task directory
-│   │       ├── task.json              # Evaluation result
-│   │       ├── task.log               # Execution log
-│   │       ├── snapshots/             # Iteration snapshots (if enabled)
-│   │       └── artifacts/             # Preserved sandbox (if --preserve)
+│   │   └── <task_id>/                 # Per-task directory
+│   │       └── 00/                    # Replicate index (00, 01, ...)
+│   │           ├── task.json          # Evaluation result
+│   │           ├── task.log           # Execution log
+│   │           ├── snapshots/         # Iteration snapshots (if enabled)
+│   │           └── artifacts/         # Preserved sandbox (if --preserve)
 │   └── ...
 └── latest -> 2026-02-26_14-30-00/     # Symlink to most recent run
 ```

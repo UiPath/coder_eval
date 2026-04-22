@@ -35,6 +35,7 @@ from ..models import (
     apply_prompt_mutations,
     validate_template_sources_list,
 )
+from ..path_utils import build_task_run_dir
 from .config import BatchRunConfig
 from .task_loader import (
     expand_dataset,
@@ -587,8 +588,14 @@ def resolve_all_tasks(
                     ResolvedTask(
                         task=resolved_task,
                         task_file=task_file,
-                        run_dir=config.run_dir / variant.variant_id / resolved_task.task_id,
+                        run_dir=build_task_run_dir(
+                            config.run_dir,
+                            variant.variant_id,
+                            resolved_task.task_id,
+                            replicate_index=0,
+                        ),
                         variant_id=variant.variant_id,
+                        replicate_index=0,
                         source_yaml=source_yaml,
                         config_lineage=lineage,
                     )

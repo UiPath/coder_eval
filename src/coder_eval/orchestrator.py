@@ -145,7 +145,7 @@ class Orchestrator:
 
         Args:
             task: Task definition to evaluate
-            run_dir: Per-task directory within a run (e.g., runs/2025-10-09_15-30-45/hello_date/)
+            run_dir: Per-task directory within a run (e.g., runs/2025-10-09_15-30-45/default/hello_date/00/)
             preserve_sandbox: Whether to preserve sandbox after completion
             task_file: Path to task YAML file (for resolving reference file paths)
             stream_callback: Optional callback for real-time event streaming

@@ -126,7 +126,10 @@ def build_analysis_row(run_id: str, experiment_id: str, analysis_path: Path) -> 
 
 
 def find_task_jsons(run_path: Path) -> list[Path]:
-    return sorted(run_path.glob("*/*/task.json"))
+    # <variant_id>/<task_id>/<replicate_index>/task.json — new layout only;
+    # flat-layout runs uploaded before the replicate-index change are
+    # intentionally skipped.
+    return sorted(run_path.glob("*/*/*/task.json"))
 
 
 def _read_experiment_id(run_path: Path) -> str:

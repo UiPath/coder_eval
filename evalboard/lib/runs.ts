@@ -390,6 +390,20 @@ export function parseToolCalls(turns: TurnEntry[], max = 200): ToolCall[] {
 
 // ---------- Task detail ----------
 
+// Runs uploaded before the replicate-index layout (<taskDir>/task.json) and
+// after (<taskDir>/00/task.json) coexist in the blob store. Prefer the
+// nested shape; fall back to flat when probing nested task.json fails so
+// legacy runs keep rendering.
+async function resolveTaskContentDir(taskDir: string): Promise<string> {
+    const nested = path.join(taskDir, "00");
+    try {
+        await fs.access(path.join(nested, "task.json"));
+        return nested;
+    } catch {
+        return taskDir;
+    }
+}
+
 export async function readTaskDetail(
     runId: string,
     taskId: string,
@@ -402,6 +416,7 @@ export async function readTaskDetail(
     const row = toTaskRow(rawTask);
 
     const taskDir = path.join(RUNS_DIR, runId, "default", taskId);
+    const contentDir = await resolveTaskContentDir(taskDir);
     const task = await readJson<{
         final_status?: string;
         error_message?: string;
@@ -420,7 +435,7 @@ export async function readTaskDetail(
             error?: string | null;
         }>;
         turns?: TurnEntry[];
-    }>(path.join(taskDir, "task.json"));
+    }>(path.join(contentDir, "task.json"));
 
     const criteria: CriterionResult[] = (
         task?.success_criteria_results ?? []
@@ -432,10 +447,12 @@ export async function readTaskDetail(
         error: c.error ?? null,
     }));
 
-    const artifactRoot = path.join(taskDir, "artifacts");
+    const artifactRoot = path.join(contentDir, "artifacts");
     // relPath is stored relative to the run root so the /api/file route can
     // resolve it against RUNS_DIR/<runId> without needing to know the task
-    // subdir.
+    // subdir. New layout yields `default/<task_id>/00/artifacts/...`; flat
+    // layout yields `default/<task_id>/artifacts/...`. `resolveSafePath`
+    // validates parts[0] and parts[1], so both shapes pass the check.
     const artifactPrefix = path.relative(
         path.join(RUNS_DIR, runId),
         artifactRoot,
@@ -470,7 +487,9 @@ export async function readLogTail(
     maxBytes = 200_000,
 ): Promise<string> {
     await ensureTaskDir(runId, taskId, RUNS_DIR);
-    const logPath = path.join(RUNS_DIR, runId, "default", taskId, "task.log");
+    const taskDir = path.join(RUNS_DIR, runId, "default", taskId);
+    const contentDir = await resolveTaskContentDir(taskDir);
+    const logPath = path.join(contentDir, "task.log");
     const raw = await fs.readFile(logPath, "utf-8").catch(() => "");
     if (raw.length <= maxBytes) return raw;
     return `… (truncated, showing last ${maxBytes} bytes)\n\n${raw.slice(-maxBytes)}`;

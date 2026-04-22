@@ -33,7 +33,13 @@ async def test_run_batch_reraises_keyboard_interrupt_from_gather(tmp_path: Path)
         success_criteria=[{"type": "file_exists", "path": "out.txt", "description": "File exists"}],
     )
     resolved = [
-        ResolvedTask(task=task, task_file=tmp_path / "task.yaml", run_dir=tmp_path / "run", variant_id="v1"),
+        ResolvedTask(
+            task=task,
+            task_file=tmp_path / "task.yaml",
+            run_dir=tmp_path / "run" / "v1" / "test-task" / "00",
+            variant_id="v1",
+            replicate_index=0,
+        ),
     ]
     config = BatchRunConfig(run_dir=tmp_path / "run", max_parallel=1)
 

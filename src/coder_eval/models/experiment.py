@@ -176,6 +176,11 @@ class ResolvedTask(BaseModel):
     variant_id: str
     source_yaml: str = ""
     config_lineage: dict[str, ConfigLineageEntry] = Field(default_factory=dict)
+    replicate_index: int = Field(
+        default=0,
+        ge=0,
+        description="0-based replicate index. Always 0 until repeats are introduced.",
+    )
 
 
 class TaskResult(BaseModel):

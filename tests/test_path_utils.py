@@ -4,13 +4,15 @@ import platform
 import re
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
+from coder_eval.models import ResolvedTask, TaskDefinition
 from coder_eval.path_utils import (
+    build_task_run_dir,
     create_latest_symlink,
-    ensure_run_structure,
     generate_run_id,
-    get_task_artifact_dir,
-    get_task_report_path,
-    get_task_run_dir,
+    replicate_subdir_name,
 )
 
 
@@ -21,25 +23,46 @@ def test_generate_run_id():
     assert re.match(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", run_id)
 
 
-def test_get_task_run_dir():
-    """Test task directory path construction."""
+def test_replicate_subdir_name_zero_pads():
+    assert replicate_subdir_name(0) == "00"
+    assert replicate_subdir_name(5) == "05"
+    assert replicate_subdir_name(99) == "99"
+
+
+def test_build_task_run_dir_default_replicate():
     run_dir = Path("/tmp/runs/2025-01-01_12-00-00")
-    task_dir = get_task_run_dir(run_dir, "hello_world")
-    assert task_dir == run_dir / "hello_world"
+    result = build_task_run_dir(run_dir, "default", "hello_world")
+    assert result == run_dir / "default" / "hello_world" / "00"
 
 
-def test_get_task_report_path():
-    """Test report path construction."""
+def test_build_task_run_dir_dataset_row_task_id():
     run_dir = Path("/tmp/runs/2025-01-01_12-00-00")
-    report_path = get_task_report_path(run_dir, "hello_world")
-    assert report_path == run_dir / "hello_world" / "task.json"
+    result = build_task_run_dir(run_dir, "sonnet", "classify/row-001")
+    assert result == run_dir / "sonnet" / "classify" / "row-001" / "00"
 
 
-def test_get_task_artifact_dir():
-    """Test artifact directory path construction."""
+def test_build_task_run_dir_custom_replicate_index():
     run_dir = Path("/tmp/runs/2025-01-01_12-00-00")
-    artifact_dir = get_task_artifact_dir(run_dir, "hello_world")
-    assert artifact_dir == run_dir / "hello_world" / "artifacts"
+    result = build_task_run_dir(run_dir, "v1", "task_a", replicate_index=3)
+    assert result == run_dir / "v1" / "task_a" / "03"
+
+
+def test_resolved_task_rejects_negative_replicate_index(tmp_path: Path):
+    task = TaskDefinition(
+        task_id="t",
+        description="d",
+        initial_prompt="p",
+        sandbox={"driver": "tempdir"},
+        success_criteria=[{"type": "file_exists", "path": "out.txt", "description": "f"}],
+    )
+    with pytest.raises(ValidationError):
+        ResolvedTask(
+            task=task,
+            task_file=tmp_path / "t.yaml",
+            run_dir=tmp_path / "run",
+            variant_id="v1",
+            replicate_index=-1,
+        )
 
 
 def test_create_latest_symlink(tmp_path):
@@ -76,26 +99,3 @@ def test_create_latest_symlink_updates_existing(tmp_path):
     if platform.system() != "Windows":
         assert latest.is_symlink()
         assert latest.resolve() == run_dir2  # Should point to newer run
-
-
-def test_ensure_run_structure(tmp_path):
-    """Test directory creation."""
-    run_dir = tmp_path / "runs" / "2025-01-01_12-00-00"
-    ensure_run_structure(run_dir, "hello_world")
-
-    task_dir = run_dir / "hello_world"
-    assert task_dir.exists()
-    assert task_dir.is_dir()
-
-
-def test_ensure_run_structure_idempotent(tmp_path):
-    """Test that ensure_run_structure can be called multiple times."""
-    run_dir = tmp_path / "runs" / "2025-01-01_12-00-00"
-
-    # Call twice
-    ensure_run_structure(run_dir, "hello_world")
-    ensure_run_structure(run_dir, "hello_world")
-
-    task_dir = run_dir / "hello_world"
-    assert task_dir.exists()
-    assert task_dir.is_dir()

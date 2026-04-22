@@ -15,15 +15,17 @@ This skill works for both **failed runs** (diagnose what went wrong) and **passi
 
 ## Step 1: Determine Scope
 
-Examine the target path to determine scope. Use `ls` and check for key files:
+The run layout is `runs/<run_id>/<variant_id>/<task_id>/<NN>/{task.json,task.log,artifacts/}`, where `<NN>` is a zero-padded replicate index (`00`, `01`, ...). Detect scope by inspecting the target path:
 
-- **Task scope**: Path contains `task.json` → single-task deep analysis
-- **Variant scope**: Path contains `variant.json` + task subdirectories → cross-task analysis
-- **Run scope**: Path contains `run.json` → full run analysis. If `experiment.json` also exists, this is an experiment comparison run.
+- **Single-replicate task scope**: path contains `task.json` directly (e.g., `.../hello_date/00/`) → analyze just this replicate.
+- **Aggregate task scope**: path contains one or more replicate subdirs matching `??/task.json` (e.g., `.../hello_date/`) → analyze every replicate together in aggregate.
+- **Variant scope**: path contains `variant.json` plus task subdirectories → cross-task analysis.
+- **Run scope**: path contains `run.json` → full run analysis. If `experiment.json` also exists, this is an experiment comparison run.
 
 Read the appropriate files:
-- **Task scope**: Read `task.json`
-- **Variant scope**: Read `variant.json`, then read each `*/task.json`
+- **Single-replicate task scope**: Read `task.json`.
+- **Aggregate task scope**: Read every `??/task.json` under the target dir. Build an aggregated view (see Step 2 below).
+- **Variant scope**: Read `variant.json`, then read each `*/*/task.json` (the `*/*/` glob traverses `<task_id>/<NN>/`). For each `task_id` subtree, apply the aggregate-task-scope logic below.
 - **Run scope**: Read `run.json` + `experiment.json` (if exists) + `experiment.md` (if exists). Then count the total number of task.json files across all variants (use `ls` or `Glob`).
 
 **Small experiment shortcut** (total tasks across all variants <= 20): Read ALL `task.json` files directly. Skip the map-reduce approach — you have enough context to analyze everything in full. Pass full task data to sub-agents.
@@ -34,7 +36,11 @@ Read the appropriate files:
 
 ### Task Scope — Launch 3 Sub-Agents in Parallel
 
-After reading `task.json`, determine whether the task **passed** (weighted_score >= 0.9 and final_status == SUCCESS) or **failed**. Then launch 3 agents in parallel, passing each agent the relevant slice of task.json data.
+For **single-replicate task scope**, read that replicate's `task.json` and use it directly.
+
+For **aggregate task scope**, collect every replicate's `task.json` under the target dir and merge into an aggregated view: per-replicate arrays for `final_status`, `weighted_score`, `iteration_count`, `duration_seconds`, `total_cost_usd`, and any other per-run field, plus a union of `success_criteria_results` keyed by criterion `description`. When a field varies across replicates, include all values; when it's constant, include it once. If only one replicate exists, the arrays collapse to a single element — behavior matches the single-replicate case. Drive recommendations from the aggregate signal ("3/5 replicates failed criterion X"), not cherry-picked replicates.
+
+After reading or aggregating `task.json`, determine whether the task **passed** (every replicate's weighted_score >= 0.9 AND every replicate's final_status == SUCCESS) or **failed** (any replicate violates either condition). Then launch 3 agents in parallel, passing each agent the relevant slice of the (possibly aggregated) task.json data.
 
 **Agent 1 — Task Design (Axes 1, 2, 4)**
 
@@ -99,9 +105,9 @@ The agent must produce: lineage conflict table (setting, value, source, task YAM
 
 ### Variant Scope
 
-Count the number of task directories. If **<= 20 tasks**, read all `task.json` files directly and pass full data to sub-agents (no map-reduce needed). If **> 20 tasks**, use map-reduce:
+Count the number of **task directories** (immediate children of the variant dir, one per `task_id`). Do NOT count replicate dirs (`00/`, `01/`, ...) — they sit one level deeper. If **<= 20 tasks**, read all `??/task.json` files directly and apply aggregate-task-scope merging per task_id, then pass the full (aggregated) data to sub-agents (no map-reduce needed). If **> 20 tasks**, use map-reduce:
 
-**Map phase**: For each task directory, read `task.json` and extract a compact summary. Try `jq` first (concise and fast); if `jq` is not installed, fall back to `python3`:
+**Map phase**: For each task directory, aggregate every replicate's `task.json` (as described in the task-scope aggregation rules above) and extract a compact summary. Try `jq` first (concise and fast); if `jq` is not installed, fall back to `python3`:
 ```
 {task_id, final_status, weighted_score, duration_seconds, total_cost_usd,
  total_tokens, assistant_turn_count, max_turns, iteration_count,
@@ -160,7 +166,8 @@ After all sub-agents complete, combine their findings:
 
 Write the report as `analysis.md` **in the target directory** (the same path that was passed as the argument):
 
-- Task scope: `<target_path>/analysis.md` (e.g., `runs/2026-03-16_07-24-50/default/uipath-is-connections-simple/analysis.md`)
+- Aggregate task scope (pointed at the task_id dir): `<target_path>/analysis.md` (e.g., `runs/2026-03-16_07-24-50/default/uipath-is-connections-simple/analysis.md`) — one analysis covering all replicates.
+- Single-replicate task scope (pointed at a specific replicate dir like `.../hello_date/00/`): `<target_path>/analysis.md` inside the replicate dir.
 - Variant scope: `<target_path>/analysis.md` (e.g., `runs/2026-03-16_10-10-29/sonnet/analysis.md`)
 - Run scope: `<target_path>/analysis.md` (e.g., `runs/2026-03-16_10-10-29/analysis.md`)
 

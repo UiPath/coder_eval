@@ -15,6 +15,7 @@ from .models import (
     TaskResult,
     ThresholdCheck,
 )
+from .path_utils import build_task_run_dir
 
 
 if TYPE_CHECKING:
@@ -647,7 +648,8 @@ def _compute_suite_rollup(
                 reasons.append(reason[:_FAILURE_REASON_MAX_LEN])
             if len(reasons) >= _FAILURE_REASONS_PER_ROW:
                 break
-        task_json_path = run_dir / variant_id / row.task_id / "task.json"
+        # TODO: plumb replicate_index through TaskResult when repeats land.
+        task_json_path = build_task_run_dir(run_dir, variant_id, row.task_id, replicate_index=0) / "task.json"
         try:
             # Persist as POSIX — this value lands in suite.json and in
             # suite.md markdown links, both of which must be platform-agnostic.
@@ -738,8 +740,13 @@ def _render_suite_markdown(rollup: SuiteRollup) -> str:
                 lines.append(f"- {r}")
             # Strip the leading variant segment so the link resolves from the
             # suite dir where suite.md lives. PurePosixPath keeps the separator
-            # POSIX on Windows too.
-            suite_rel = PurePosixPath(s.task_json_relpath).relative_to(rollup.variant_id)
+            # POSIX on Windows too. Fall back to the raw relpath if it isn't
+            # prefixed with the variant (e.g. serialized from a legacy shape).
+            rel_path = PurePosixPath(s.task_json_relpath)
+            try:
+                suite_rel: PurePosixPath = rel_path.relative_to(rollup.variant_id)
+            except ValueError:
+                suite_rel = rel_path
             lines.append(f"- [task.json](./{suite_rel})")
             lines.append("")
 

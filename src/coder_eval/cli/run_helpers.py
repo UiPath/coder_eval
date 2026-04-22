@@ -128,7 +128,7 @@ def print_execution_summary(run_dir: Path, summary: RunSummary) -> None:
 
     # Print task logs (find all task.log files under variant directories)
     for task_log in sorted(run_dir.glob("**/task.log")):
-        # Directory structure: run_dir / variant_id / task_id / task.log
-        task_name = task_log.parent.name
-        variant_name = task_log.parent.parent.name
-        console.print(f"  Task log ({variant_name}/{task_name}): {task_log}")
+        # Dataset fan-out task_ids contain slashes, so render the full
+        # relative path rather than indexing fixed parent segments.
+        rel = task_log.parent.relative_to(run_dir).as_posix()
+        console.print(f"  Task log ({rel}): {task_log}")

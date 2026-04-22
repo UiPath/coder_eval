@@ -40,7 +40,7 @@ def test_build_smoke_runs_row():
 
 
 def test_build_task_result_row():
-    with open(FIXTURES / "default" / "task_001" / "task.json") as f:
+    with open(FIXTURES / "default" / "task_001" / "00" / "task.json") as f:
         task = json.load(f)
 
     row = build_task_result_row("run-001", task)
@@ -50,7 +50,7 @@ def test_build_task_result_row():
 
 
 def test_build_criteria_rows():
-    with open(FIXTURES / "default" / "task_001" / "task.json") as f:
+    with open(FIXTURES / "default" / "task_001" / "00" / "task.json") as f:
         task = json.load(f)
 
     rows = build_criteria_rows("run-001", task)
@@ -68,6 +68,15 @@ def test_find_task_jsons():
     found = find_task_jsons(FIXTURES)
     assert len(found) == 1
     assert found[0].name == "task.json"
+
+
+def test_find_task_jsons_ignores_flat_layout(tmp_path):
+    """Old flat-layout task.json (variant/task_id/task.json) must NOT be picked up."""
+    flat = tmp_path / "default" / "task_legacy"
+    flat.mkdir(parents=True)
+    (flat / "task.json").write_text("{}")
+
+    assert find_task_jsons(tmp_path) == []
 
 
 def test_parse_run():

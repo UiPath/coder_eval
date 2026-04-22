@@ -923,8 +923,8 @@ def test_aggregate_command_statistics_nested_layout(tmp_path):
     """_aggregate_command_statistics should find task.json in nested experiment layout."""
     import json
 
-    # Create nested experiment layout: run_dir/variant_id/task_id/task.json
-    task_dir = tmp_path / "opus" / "my-task"
+    # Create nested experiment layout: run_dir/variant_id/task_id/NN/task.json
+    task_dir = tmp_path / "opus" / "my-task" / "00"
     task_dir.mkdir(parents=True)
 
     eval_result = {

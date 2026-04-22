@@ -295,7 +295,7 @@ class TestWriteSuiteRollups:
         ]
         write_suite_rollups(tmp_path, rows)
         data = json.loads((tmp_path / "v1" / "suite" / "suite.json").read_text())
-        assert data["failed_samples"][0]["task_json_relpath"] == "v1/suite/r1/task.json"
+        assert data["failed_samples"][0]["task_json_relpath"] == "v1/suite/r1/00/task.json"
 
 
 class TestRenderSuiteMarkdown:
@@ -364,7 +364,7 @@ class TestRenderSuiteMarkdown:
         assert "### `s/r2` — ERROR" in md
         assert "the sandbox exploded" in md
         # Row-level task.json link, relative to the suite dir (strips the variant prefix)
-        assert "[task.json](./s/r1/task.json)" in md
+        assert "[task.json](./s/r1/00/task.json)" in md
 
     def test_no_failed_section_when_all_pass(self, tmp_path: Path) -> None:
         rows = [
@@ -380,6 +380,45 @@ class TestRenderSuiteMarkdown:
         rollup = _compute_suite_rollup("s", "v1", rows, tmp_path)
         md = _render_suite_markdown(rollup)
         assert "Failed/errored samples" not in md
+
+    def test_renders_when_relpath_not_under_variant(self, tmp_path: Path) -> None:
+        """Guard against crash when a FailedRowSummary carries a relpath that
+        doesn't start with variant_id (e.g. an absolute fallback path).
+
+        The field is typed as `str`, so a caller can legitimately hand us a
+        value that `PurePosixPath.relative_to(variant_id)` cannot strip.
+        The renderer must degrade to a best-effort link rather than raising.
+        """
+        from coder_eval.models import FailedRowSummary, SuiteRollup
+
+        rollup = SuiteRollup(
+            suite_id="s",
+            variant_id="v1",
+            rows_total=1,
+            rows_passed=0,
+            rows_failed=1,
+            rows_error=0,
+            pass_rate=0.0,
+            average_weighted_score=0.0,
+            criterion_stats=[],
+            failed_samples=[
+                FailedRowSummary(
+                    row_id="r1",
+                    task_id="s/r1",
+                    final_status=FinalStatus.FAILURE,
+                    weighted_score=0.0,
+                    failure_reasons=["file_exists: score=0.00"],
+                    error_message=None,
+                    task_json_relpath="/abs/path/s/r1/00/task.json",
+                ),
+            ],
+            criterion_aggregates=[],
+            passed=False,
+        )
+        md = _render_suite_markdown(rollup)
+        # Rendering must succeed; link should be best-effort (full relpath).
+        assert "[task.json]" in md
+        assert "/abs/path/s/r1/00/task.json" in md
 
     def test_omits_avg_score_when_none(self, tmp_path: Path) -> None:
         rows = [

@@ -190,8 +190,8 @@ def test_cli_run_simple_success(tmp_path, simple_success_task, mock_agent_succes
 
     # Verify task-specific directory and results
     # With experiment layer (default experiment), structure is:
-    # run_dir / variant_id / {task_id}
-    task_dir = run_dir / "default" / "integration_test_success"
+    # run_dir / variant_id / {task_id} / NN (replicate index)
+    task_dir = run_dir / "default" / "integration_test_success" / "00"
     assert task_dir.exists(), "Task directory not created"
 
     # Task results are saved as task.json
@@ -256,8 +256,8 @@ def test_cli_run_simple_failure(tmp_path, simple_failure_task, mock_agent_failur
 
     # Verify task status marked as FAILURE in the task's task.json
     # With experiment layer (default experiment), structure is:
-    # run_dir / variant_id / {task_id}
-    task_dir = run_dir / "default" / "integration_test_failure"
+    # run_dir / variant_id / {task_id} / NN (replicate index)
+    task_dir = run_dir / "default" / "integration_test_failure" / "00"
     assert task_dir.exists(), "Task directory not created"
 
     report_json_file = task_dir / "task.json"

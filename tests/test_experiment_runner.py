@@ -102,10 +102,10 @@ class TestResolveAllTasks:
             config=config,
         )
 
-        # Check directory structure: run_dir/variant_id/{task_id}
+        # Check directory structure: run_dir/variant_id/{task_id}/NN
         paths = [r.run_dir for r in resolved]
-        assert run_dir / "variant-one" / "task-a" in paths
-        assert run_dir / "variant-two" / "task-a" in paths
+        assert run_dir / "variant-one" / "task-a" / "00" in paths
+        assert run_dir / "variant-two" / "task-a" / "00" in paths
 
     def test_unique_task_variant_pairs(self, tmp_path, run_dir, default_experiment):
         """Each resolved task should have a unique (task_id, variant_id) pair."""
