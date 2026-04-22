@@ -2,11 +2,11 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
-import type { RunSummary } from "@/lib/runs";
-import { fmtRunTime, humanizeTaskId } from "@/lib/format";
+import type { TaskResultSummary } from "@/lib/runs";
+import { humanizeTaskId } from "@/lib/format";
 import { StatusPill } from "@/lib/pills";
 
-type SortKey = "task" | "duration" | "cost" | "tools" | "status";
+type SortKey = "task" | "status" | "score" | "duration" | "cost" | "tools";
 
 function fmtDuration(s: number | null): string {
     if (s == null) return "—";
@@ -22,23 +22,35 @@ function fmtCost(c: number | null): string {
 }
 
 function statusRank(s: string | null): number {
-    if (s === "FAILURE" || s === "ERROR") return 0;
+    if (s === "FAILURE" || s === "ERROR" || s === "TIMEOUT") return 0;
     if (s === "SUCCESS") return 2;
     return 1;
 }
 
 const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
     task: "asc",
+    status: "asc",
+    score: "desc",
     duration: "desc",
     cost: "desc",
     tools: "desc",
-    status: "asc",
 };
 
-function compare(a: RunSummary, b: RunSummary, key: SortKey): number {
+function compare(
+    a: TaskResultSummary,
+    b: TaskResultSummary,
+    key: SortKey,
+): number {
     switch (key) {
         case "task":
-            return (a.taskId ?? "").localeCompare(b.taskId ?? "");
+            return a.taskId.localeCompare(b.taskId);
+        case "status":
+            return statusRank(a.status) - statusRank(b.status);
+        case "score":
+            return (
+                (a.weightedScore ?? -Infinity) -
+                (b.weightedScore ?? -Infinity)
+            );
         case "duration":
             return (
                 (a.durationSeconds ?? -Infinity) -
@@ -53,8 +65,6 @@ function compare(a: RunSummary, b: RunSummary, key: SortKey): number {
                 (a.actualCommands ?? -Infinity) -
                 (b.actualCommands ?? -Infinity)
             );
-        case "status":
-            return statusRank(a.status) - statusRank(b.status);
     }
 }
 
@@ -64,35 +74,43 @@ const COLUMNS: Array<{
     align?: "right";
 }> = [
     { key: "task", header: "Task" },
+    { key: "status", header: "Status" },
+    { key: "score", header: "Score", align: "right" },
     { key: "duration", header: "Duration", align: "right" },
     { key: "cost", header: "Cost", align: "right" },
     { key: "tools", header: "Tools", align: "right" },
-    { key: "status", header: "Status" },
 ];
 
-export function RunsTable({ runs }: { runs: RunSummary[] }) {
+export function TaskGrid({
+    runId,
+    tasks,
+}: {
+    runId: string;
+    tasks: TaskResultSummary[];
+}) {
     const [sort, setSort] = useState<{
         key: SortKey;
         dir: "asc" | "desc";
     } | null>(null);
 
     const sorted = useMemo(() => {
-        const arr = [...runs];
+        const arr = [...tasks];
         if (sort) {
             arr.sort((a, b) => {
                 const c = compare(a, b, sort.key);
                 if (c !== 0) return sort.dir === "asc" ? c : -c;
-                return b.id.localeCompare(a.id);
+                return a.taskId.localeCompare(b.taskId);
             });
         } else {
+            // Default: failures first, then by task id.
             arr.sort(
                 (a, b) =>
                     statusRank(a.status) - statusRank(b.status) ||
-                    b.id.localeCompare(a.id),
+                    a.taskId.localeCompare(b.taskId),
             );
         }
         return arr;
-    }, [runs, sort]);
+    }, [tasks, sort]);
 
     const onSort = (key: SortKey) => {
         setSort((cur) =>
@@ -139,58 +157,53 @@ export function RunsTable({ runs }: { runs: RunSummary[] }) {
                     </tr>
                 </thead>
                 <tbody>
-                    {sorted.map((r) => {
-                        const tags = r.tags.filter(
-                            (t) => t !== "uipath-maestro-flow",
-                        );
-                        return (
-                            <tr
-                                key={r.id}
-                                className="border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors"
+                    {sorted.map((t) => (
+                        <tr
+                            key={t.taskId}
+                            className="border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors"
+                        >
+                            <td className="py-3 px-4 text-gray-700">
+                                <div className="flex flex-col min-w-0">
+                                    <Link
+                                        href={`/runs/${runId}/${t.taskId}`}
+                                        className="text-gray-900 hover:text-studio-blue font-semibold"
+                                    >
+                                        {humanizeTaskId(t.taskId)}
+                                    </Link>
+                                    <span className="text-xs text-gray-400 font-mono tabular-nums">
+                                        {t.taskId}
+                                    </span>
+                                </div>
+                            </td>
+                            <td className="py-3 px-4">
+                                <StatusPill status={t.status} relabel />
+                            </td>
+                            <td className="py-3 px-4 text-right tabular-nums text-gray-700">
+                                {t.weightedScore != null
+                                    ? t.weightedScore.toFixed(2)
+                                    : "—"}
+                            </td>
+                            <td className="py-3 px-4 text-right tabular-nums text-gray-700">
+                                {fmtDuration(t.durationSeconds)}
+                            </td>
+                            <td className="py-3 px-4 text-right tabular-nums text-gray-700">
+                                {fmtCost(t.totalCostUsd)}
+                            </td>
+                            <td className="py-3 px-4 text-right tabular-nums text-gray-700">
+                                {t.actualCommands ?? "—"}
+                            </td>
+                        </tr>
+                    ))}
+                    {sorted.length === 0 && (
+                        <tr>
+                            <td
+                                colSpan={COLUMNS.length}
+                                className="py-6 px-4 text-center text-sm text-gray-500"
                             >
-                                <td className="py-3 px-4 text-gray-700">
-                                    <div className="flex items-center gap-3">
-                                        <span className="inline-flex items-center justify-center w-8 h-8 rounded bg-gray-100 text-gray-500 text-xs font-semibold border border-gray-200 shrink-0">
-                                            T
-                                        </span>
-                                        <div className="flex flex-col min-w-0">
-                                            <div className="flex items-center gap-2 flex-wrap">
-                                                <Link
-                                                    href={`/runs/${r.id}`}
-                                                    className="text-gray-900 hover:text-studio-blue font-semibold"
-                                                >
-                                                    {humanizeTaskId(r.taskId)}
-                                                </Link>
-                                                {tags.map((t) => (
-                                                    <span
-                                                        key={t}
-                                                        className="text-[9px] uppercase tracking-wide text-gray-500 bg-gray-100 px-1 py-[1px] rounded"
-                                                    >
-                                                        {t}
-                                                    </span>
-                                                ))}
-                                            </div>
-                                            <span className="text-xs text-gray-500 tabular-nums">
-                                                {fmtRunTime(r.id)}
-                                            </span>
-                                        </div>
-                                    </div>
-                                </td>
-                                <td className="py-3 px-4 text-right tabular-nums text-gray-700">
-                                    {fmtDuration(r.durationSeconds)}
-                                </td>
-                                <td className="py-3 px-4 text-right tabular-nums text-gray-700">
-                                    {fmtCost(r.totalCostUsd)}
-                                </td>
-                                <td className="py-3 px-4 text-right tabular-nums text-gray-700">
-                                    {r.actualCommands ?? "—"}
-                                </td>
-                                <td className="py-3 px-4 text-gray-700">
-                                    <StatusPill status={r.status} relabel />
-                                </td>
-                            </tr>
-                        );
-                    })}
+                                no tasks in this run
+                            </td>
+                        </tr>
+                    )}
                 </tbody>
             </table>
         </div>

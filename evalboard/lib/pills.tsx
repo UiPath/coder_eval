@@ -9,6 +9,7 @@ export function StatusPill({
     const fail =
         status === "FAILURE" ||
         status === "ERROR" ||
+        status === "TIMEOUT" ||
         status === "Faulted" ||
         status === "Failed";
     const cls = ok
@@ -17,10 +18,17 @@ export function StatusPill({
           ? "bg-red-50 text-red-700 border-red-200"
           : "bg-gray-50 text-gray-600 border-gray-200";
     const raw = status ?? "—";
-    const label = relabel && ok ? "Passed" : relabel && fail ? "Failed" : raw;
+    const label =
+        relabel && ok
+            ? "Passed"
+            : relabel && status === "TIMEOUT"
+              ? "Timed out"
+              : relabel && fail
+                ? "Failed"
+                : raw;
     return (
         <span
-            className={`inline-block px-2.5 py-0.5 text-xs rounded-full border ${cls}`}
+            className={`inline-flex items-center whitespace-nowrap px-3 py-1 text-xs rounded-full border ${cls}`}
         >
             {label}
         </span>

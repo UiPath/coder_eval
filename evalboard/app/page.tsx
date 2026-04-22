@@ -1,94 +1,124 @@
-import { listAllRuns } from "@/lib/runs";
-import { RunsTable } from "./runs-table";
+import Link from "next/link";
+import { recentRunSummaries } from "@/lib/runs";
+import { fmtDuration, fmtRunTime } from "@/lib/format";
+import { ADX_URL } from "@/lib/config";
 
 export const dynamic = "force-dynamic";
 
-function fmtDurTotal(s: number): string {
-    if (s < 60) return `${s.toFixed(0)}s`;
-    const m = Math.floor(s / 60);
-    const rem = Math.round(s - m * 60);
-    if (m < 60) return `${m}m ${rem}s`;
-    const h = Math.floor(m / 60);
-    const mRem = m - h * 60;
-    return `${h}h ${mRem}m`;
+function fmtCost(c: number | null): string {
+    if (c == null) return "—";
+    return `$${c.toFixed(2)}`;
+}
+
+function passClass(pct: number | null, hasTasks: boolean): string {
+    if (!hasTasks || pct == null) return "text-gray-500";
+    if (pct >= 80) return "text-green-700";
+    if (pct >= 50) return "text-gray-700";
+    return "text-red-700";
 }
 
 export default async function Page() {
-    const runs = await listAllRuns();
-    const passed = runs.filter((r) => r.status === "SUCCESS").length;
-    const failed = runs.filter(
-        (r) => r.status === "FAILURE" || r.status === "ERROR",
-    ).length;
-    const pct = runs.length ? (passed / runs.length) * 100 : 0;
-    const totalCost = runs.reduce((a, r) => a + (r.totalCostUsd ?? 0), 0);
-    const totalDur = runs.reduce((a, r) => a + (r.durationSeconds ?? 0), 0);
-    const avgDur = runs.length ? totalDur / runs.length : 0;
+    const runs = await recentRunSummaries(20);
+
     return (
         <div className="space-y-5">
-            <div className="flex items-baseline gap-3">
-                <h1 className="text-xl font-semibold text-gray-900">Runs</h1>
-                <span className="text-sm text-gray-500">
-                    {runs.length} total
-                </span>
+            <div className="space-y-1">
+                <h1 className="text-xl font-semibold text-gray-900">
+                    Recent runs
+                </h1>
+                <p className="text-sm text-gray-500">
+                    Click a run to drill into tasks, criteria, artifacts,
+                    and logs. For trends, heatmaps, and time-range filtering,{" "}
+                    <a
+                        href={ADX_URL}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-studio-blue hover:underline inline-flex items-center gap-0.5"
+                    >
+                        see the ADX dashboard
+                        <span className="text-xs">↗</span>
+                    </a>
+                    .
+                </p>
             </div>
 
-            <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-                <div className="col-span-2 md:col-span-2 bg-white border border-gray-200 rounded-lg p-4">
-                    <div className="text-xs text-gray-500 uppercase tracking-wide">
-                        Pass rate
-                    </div>
-                    <div className="flex items-baseline gap-2 mt-1">
-                        <span className="text-2xl font-semibold text-gray-900 tabular-nums">
-                            {pct.toFixed(0)}%
-                        </span>
-                        <span className="text-sm text-gray-500 tabular-nums">
-                            {passed} / {runs.length}
-                        </span>
-                    </div>
-                    <div className="mt-3 h-2 bg-gray-100 rounded-full overflow-hidden">
-                        <div
-                            className="h-full bg-green-500"
-                            style={{ width: `${pct}%` }}
-                        />
-                    </div>
-                </div>
-                <Metric
-                    label="Failed"
-                    value={String(failed)}
-                    valueClass="text-red-700"
-                />
-                <Metric
-                    label="Total cost"
-                    value={`$${totalCost.toFixed(2)}`}
-                />
-                <Metric
-                    label="Total duration"
-                    value={fmtDurTotal(totalDur)}
-                />
-                <Metric label="Avg duration" value={fmtDurTotal(avgDur)} />
-            </div>
-
-            <RunsTable runs={runs} />
-        </div>
-    );
-}
-
-function Metric({
-    label,
-    value,
-    valueClass = "text-gray-900",
-}: {
-    label: string;
-    value: string;
-    valueClass?: string;
-}) {
-    return (
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
-            <div className="text-xs text-gray-500 uppercase tracking-wide">
-                {label}
-            </div>
-            <div className={`text-2xl font-semibold mt-1 tabular-nums ${valueClass}`}>
-                {value}
+            <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
+                <table className="w-full text-sm">
+                    <thead>
+                        <tr className="bg-gray-50 border-b border-gray-200 text-left text-gray-600">
+                            <th className="py-3 px-4 font-medium">Run</th>
+                            <th className="py-3 px-4 font-medium">
+                                Pass rate
+                            </th>
+                            <th className="py-3 px-4 font-medium text-right">
+                                Tasks
+                            </th>
+                            <th className="py-3 px-4 font-medium text-right">
+                                Cost
+                            </th>
+                            <th className="py-3 px-4 font-medium text-right">
+                                Duration
+                            </th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {runs.map((r) => {
+                            const total = r.tasksRun;
+                            const pct = total
+                                ? (r.tasksSucceeded / total) * 100
+                                : null;
+                            return (
+                                <tr
+                                    key={r.id}
+                                    className="border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors"
+                                >
+                                    <td className="py-3 px-4">
+                                        <Link
+                                            href={`/runs/${r.id}`}
+                                            className="font-mono text-xs text-gray-900 hover:text-studio-blue font-semibold tabular-nums"
+                                        >
+                                            {fmtRunTime(r.id)}
+                                        </Link>
+                                    </td>
+                                    <td className="py-3 px-4 tabular-nums">
+                                        <span
+                                            className={`font-medium ${passClass(
+                                                pct,
+                                                total > 0,
+                                            )}`}
+                                        >
+                                            {pct != null
+                                                ? `${pct.toFixed(0)}%`
+                                                : "—"}
+                                        </span>
+                                        <span className="text-xs text-gray-500 ml-2 tabular-nums">
+                                            {r.tasksSucceeded}/{total}
+                                        </span>
+                                    </td>
+                                    <td className="py-3 px-4 text-right tabular-nums text-gray-700">
+                                        {total}
+                                    </td>
+                                    <td className="py-3 px-4 text-right tabular-nums text-gray-700">
+                                        {fmtCost(r.totalCostUsd)}
+                                    </td>
+                                    <td className="py-3 px-4 text-right tabular-nums text-gray-700">
+                                        {fmtDuration(r.durationSeconds)}
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                        {runs.length === 0 && (
+                            <tr>
+                                <td
+                                    colSpan={5}
+                                    className="py-6 px-4 text-center text-sm text-gray-500"
+                                >
+                                    no runs yet
+                                </td>
+                            </tr>
+                        )}
+                    </tbody>
+                </table>
             </div>
         </div>
     );

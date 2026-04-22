@@ -1,20 +1,37 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import {
+    ensureRunSummary,
+    ensureTaskDir,
+    isValidId,
+    listRunIdsRemote,
+} from "./blob";
 
-export const RUNS_DIR = process.env.EVALBOARD_RUNS_DIR
-    ? path.resolve(process.env.EVALBOARD_RUNS_DIR)
-    : path.resolve(process.cwd(), "..", "runs");
+export const RUNS_DIR = path.resolve(process.cwd(), "runs-remote");
 
+// ---------- Types ----------
+
+// A run is one `coder-eval run` invocation. It contains N task results.
 export interface RunSummary {
     id: string;
-    taskId: string | null;
+    startTime: string | null;
+    endTime: string | null;
+    durationSeconds: number | null;
+    tasksRun: number;
+    tasksSucceeded: number;
+    tasksFailed: number;
+    tasksError: number;
+    totalCostUsd: number | null;
+}
+
+export interface TaskResultSummary {
+    taskId: string;
     status: string | null;
     weightedScore: number | null;
     durationSeconds: number | null;
     totalCostUsd: number | null;
     actualCommands: number | null;
     tags: string[];
-    startTime: string | null;
 }
 
 export interface CriterionResult {
@@ -48,32 +65,56 @@ export interface ToolCall {
     summary: string;
 }
 
-export interface RunDetail extends RunSummary {
-    finalStatus: string | null;
-    errorMessage: string | null;
-    taskDescription: string | null;
-    criteria: CriterionResult[];
-    artifacts: ArtifactRef[];
-    logPath: string | null;
-    taskJsonPath: string | null;
-    taskSubdir: string | null;
-    flowDebug: FlowDebugResult | null;
-    toolCalls: ToolCall[];
-}
-
 export interface ArtifactRef {
     relPath: string;
     kind: "flow" | "uipx" | "uiproj" | "other";
     sizeBytes: number;
 }
 
+export interface TaskDetail extends TaskResultSummary {
+    runId: string;
+    finalStatus: string | null;
+    errorMessage: string | null;
+    taskDescription: string | null;
+    criteria: CriterionResult[];
+    artifacts: ArtifactRef[];
+    flowDebug: FlowDebugResult | null;
+    toolCalls: ToolCall[];
+}
+
+// ---------- run.json schema ----------
+
+interface RawTaskResult {
+    task_id?: string;
+    status?: string;
+    weighted_score?: number;
+    duration?: number;
+    total_cost_usd?: number;
+    actual_commands?: number;
+    tags?: string[];
+}
+
+interface RawRunJson {
+    run_id?: string;
+    start_time?: string;
+    end_time?: string;
+    total_duration_seconds?: number;
+    tasks_run?: number;
+    tasks_succeeded?: number;
+    tasks_failed?: number;
+    tasks_error?: number;
+    task_results?: RawTaskResult[];
+}
+
+// ---------- Readers ----------
+
 export async function listRunIds(): Promise<string[]> {
-    const entries = await fs.readdir(RUNS_DIR, { withFileTypes: true });
-    return entries
-        .filter((e) => e.isDirectory() && e.name !== "latest")
-        .map((e) => e.name)
-        .sort()
-        .reverse();
+    return listRunIdsRemote();
+}
+
+export async function latestRunId(): Promise<string | null> {
+    const ids = await listRunIds();
+    return ids[0] ?? null;
 }
 
 async function readJson<T>(p: string): Promise<T | null> {
@@ -85,50 +126,58 @@ async function readJson<T>(p: string): Promise<T | null> {
     }
 }
 
-export async function readRunSummary(id: string): Promise<RunSummary | null> {
-    const runJsonPath = path.join(RUNS_DIR, id, "run.json");
-    const data = await readJson<{
-        start_time?: string;
-        task_results?: Array<{
-            task_id?: string;
-            status?: string;
-            weighted_score?: number;
-            duration?: number;
-            total_cost_usd?: number;
-            actual_commands?: number;
-            tags?: string[];
-        }>;
-    }>(runJsonPath);
-    if (!data) return null;
-    const first = data.task_results?.[0] ?? {};
+async function readRunJson(id: string): Promise<RawRunJson | null> {
+    await ensureRunSummary(id, RUNS_DIR);
+    return readJson<RawRunJson>(path.join(RUNS_DIR, id, "run.json"));
+}
+
+function toTaskRow(t: RawTaskResult): TaskResultSummary {
     return {
-        id,
-        taskId: first.task_id ?? null,
-        status: first.status ?? null,
-        weightedScore: first.weighted_score ?? null,
-        durationSeconds: first.duration ?? null,
-        totalCostUsd: first.total_cost_usd ?? null,
-        actualCommands: first.actual_commands ?? null,
-        tags: first.tags ?? [],
-        startTime: data.start_time ?? null,
+        taskId: t.task_id ?? "",
+        status: t.status ?? null,
+        weightedScore: t.weighted_score ?? null,
+        durationSeconds: t.duration ?? null,
+        totalCostUsd: t.total_cost_usd ?? null,
+        actualCommands: t.actual_commands ?? null,
+        tags: t.tags ?? [],
     };
 }
 
-export async function listAllRuns(): Promise<RunSummary[]> {
-    const ids = await listRunIds();
-    const results = await Promise.all(ids.map((id) => readRunSummary(id)));
-    return results.filter((r): r is RunSummary => r !== null);
+export async function readRunSummary(id: string): Promise<RunSummary | null> {
+    const data = await readRunJson(id);
+    if (!data) return null;
+    const taskResults = data.task_results ?? [];
+    const totalCost = taskResults.reduce(
+        (a, t) => a + (t.total_cost_usd ?? 0),
+        0,
+    );
+    return {
+        id,
+        startTime: data.start_time ?? null,
+        endTime: data.end_time ?? null,
+        durationSeconds: data.total_duration_seconds ?? null,
+        tasksRun: data.tasks_run ?? taskResults.length,
+        tasksSucceeded: data.tasks_succeeded ?? 0,
+        tasksFailed: data.tasks_failed ?? 0,
+        tasksError: data.tasks_error ?? 0,
+        totalCostUsd: taskResults.length ? totalCost : null,
+    };
 }
 
-async function findTaskSubdir(runId: string): Promise<string | null> {
-    const defaultDir = path.join(RUNS_DIR, runId, "default");
-    const entries = await fs
-        .readdir(defaultDir, { withFileTypes: true })
-        .catch(() => []);
-    const taskDir = entries.find(
-        (e) => e.isDirectory() && e.name.startsWith("skill-"),
-    );
-    return taskDir ? taskDir.name : null;
+export async function readRunTasks(
+    id: string,
+): Promise<TaskResultSummary[] | null> {
+    const data = await readRunJson(id);
+    if (!data) return null;
+    return (data.task_results ?? [])
+        .filter((t) => t.task_id)
+        .map(toTaskRow);
+}
+
+export async function recentRunSummaries(limit = 20): Promise<RunSummary[]> {
+    const ids = (await listRunIds()).slice(0, limit);
+    const results = await Promise.all(ids.map((id) => readRunSummary(id)));
+    return results.filter((r): r is RunSummary => r !== null);
 }
 
 async function walkArtifacts(
@@ -339,33 +388,20 @@ export function parseToolCalls(turns: TurnEntry[], max = 200): ToolCall[] {
     return out;
 }
 
-// ---------- Readers ----------
+// ---------- Task detail ----------
 
-export async function readRunDetail(id: string): Promise<RunDetail | null> {
-    const summary = await readRunSummary(id);
-    if (!summary) return null;
+export async function readTaskDetail(
+    runId: string,
+    taskId: string,
+): Promise<TaskDetail | null> {
+    await ensureTaskDir(runId, taskId, RUNS_DIR);
 
-    const taskSubdir = await findTaskSubdir(id);
-    if (!taskSubdir) {
-        return {
-            ...summary,
-            finalStatus: null,
-            errorMessage: null,
-            taskDescription: null,
-            criteria: [],
-            artifacts: [],
-            logPath: null,
-            taskJsonPath: null,
-            taskSubdir: null,
-            flowDebug: null,
-            toolCalls: [],
-        };
-    }
+    const data = await readRunJson(runId);
+    const rawTask = data?.task_results?.find((t) => t.task_id === taskId);
+    if (!rawTask) return null;
+    const row = toTaskRow(rawTask);
 
-    const taskDir = path.join(RUNS_DIR, id, "default", taskSubdir);
-    const taskJsonPath = path.join(taskDir, "task.json");
-    const logPath = path.join(taskDir, "task.log");
-
+    const taskDir = path.join(RUNS_DIR, runId, "default", taskId);
     const task = await readJson<{
         final_status?: string;
         error_message?: string;
@@ -384,7 +420,7 @@ export async function readRunDetail(id: string): Promise<RunDetail | null> {
             error?: string | null;
         }>;
         turns?: TurnEntry[];
-    }>(taskJsonPath);
+    }>(path.join(taskDir, "task.json"));
 
     const criteria: CriterionResult[] = (
         task?.success_criteria_results ?? []
@@ -401,7 +437,7 @@ export async function readRunDetail(id: string): Promise<RunDetail | null> {
     // resolve it against RUNS_DIR/<runId> without needing to know the task
     // subdir.
     const artifactPrefix = path.relative(
-        path.join(RUNS_DIR, id),
+        path.join(RUNS_DIR, runId),
         artifactRoot,
     );
     const artifacts = await walkArtifacts(artifactRoot, artifactPrefix);
@@ -416,15 +452,13 @@ export async function readRunDetail(id: string): Promise<RunDetail | null> {
         null;
 
     return {
-        ...summary,
+        ...row,
+        runId,
         finalStatus: task?.final_status ?? null,
         errorMessage: task?.error_message ?? null,
         taskDescription,
         criteria,
         artifacts,
-        logPath,
-        taskJsonPath,
-        taskSubdir,
         flowDebug,
         toolCalls,
     };
@@ -432,10 +466,11 @@ export async function readRunDetail(id: string): Promise<RunDetail | null> {
 
 export async function readLogTail(
     runId: string,
-    taskSubdir: string,
+    taskId: string,
     maxBytes = 200_000,
 ): Promise<string> {
-    const logPath = path.join(RUNS_DIR, runId, "default", taskSubdir, "task.log");
+    await ensureTaskDir(runId, taskId, RUNS_DIR);
+    const logPath = path.join(RUNS_DIR, runId, "default", taskId, "task.log");
     const raw = await fs.readFile(logPath, "utf-8").catch(() => "");
     if (raw.length <= maxBytes) return raw;
     return `… (truncated, showing last ${maxBytes} bytes)\n\n${raw.slice(-maxBytes)}`;
@@ -445,6 +480,17 @@ export async function resolveSafePath(
     runId: string,
     relPath: string,
 ): Promise<string | null> {
+    if (!isValidId(runId)) return null;
+    // Artifact URLs embed the task subdir in relPath
+    // (`default/<task-id>/artifacts/...`) — extract it so the narrow fetch
+    // hits the right blobs without pulling the whole run.
+    const parts = relPath.split("/");
+    if (parts[0] === "default" && parts[1]) {
+        if (!isValidId(parts[1])) return null;
+        await ensureTaskDir(runId, parts[1], RUNS_DIR);
+    } else {
+        await ensureRunSummary(runId, RUNS_DIR);
+    }
     const base = path.join(RUNS_DIR, runId);
     const baseReal = await fs.realpath(base).catch(() => null);
     if (!baseReal) return null;

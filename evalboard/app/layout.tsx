@@ -1,4 +1,6 @@
 import type { ReactNode } from "react";
+import Image from "next/image";
+import { ADX_URL } from "@/lib/config";
 import "./globals.css";
 
 export const metadata = {
@@ -12,16 +14,28 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                 <header className="border-b border-gray-200 px-8 py-3 flex items-center justify-between bg-white">
                     <a
                         href="/"
-                        className="flex items-baseline gap-1.5 text-gray-900 font-semibold"
+                        className="flex items-center gap-2 text-gray-900 font-semibold"
                     >
-                        <span className="text-uipath-orange font-bold">
-                            Ui
-                        </span>
+                        <Image
+                            src="/uipath.png"
+                            alt="UiPath"
+                            width={28}
+                            height={28}
+                            priority
+                        />
                         <span className="text-lg">Flow Evalboard</span>
                     </a>
-                    <span className="text-gray-500 text-sm">
-                        local dashboard
-                    </span>
+                    <div className="flex items-center gap-4 text-sm">
+                        <a
+                            href={ADX_URL}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 text-gray-700 hover:text-studio-blue"
+                        >
+                            ADX dashboard
+                            <span className="text-xs">↗</span>
+                        </a>
+                    </div>
                 </header>
                 <main className="px-8 py-6 max-w-[1400px] mx-auto">
                     {children}

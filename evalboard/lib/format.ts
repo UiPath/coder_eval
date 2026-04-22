@@ -10,3 +10,14 @@ export function fmtRunTime(id: string): string {
     if (!d || !t) return id;
     return `${d} · ${t.replace(/-/g, ":")}`;
 }
+
+export function fmtDuration(s: number | null): string {
+    if (s == null) return "—";
+    if (s < 60) return `${s.toFixed(0)}s`;
+    const m = Math.floor(s / 60);
+    const rem = Math.round(s - m * 60);
+    if (m < 60) return `${m}m ${rem}s`;
+    const h = Math.floor(m / 60);
+    const mRem = m - h * 60;
+    return `${h}h ${mRem}m`;
+}
