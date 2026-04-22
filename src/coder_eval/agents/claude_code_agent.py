@@ -299,11 +299,16 @@ class ClaudeCodeAgent(Agent):
             env, route_model = self._build_sdk_env(self.route)
             effective_model = route_model or self.config.model
 
+            disallowed_tools = list(self.config.disallowed_tools or [])
+            # Do not allow ToolSearch. This is required to keep Bedrock backend in sync with the other backends.
+            if "ToolSearch" not in disallowed_tools:
+                disallowed_tools.append("ToolSearch")
+
             options = ClaudeAgentOptions(
                 cwd=str(self.working_directory),
                 permission_mode=self.config.permission_mode,
                 allowed_tools=self.config.allowed_tools or [],
-                disallowed_tools=self.config.disallowed_tools or [],
+                disallowed_tools=disallowed_tools,
                 model=effective_model,
                 max_turns=self.config.max_turns,
                 plugins=plugins,  # type: ignore[arg-type]

@@ -75,6 +75,87 @@ def test_claude_agent_disallowed_tools_defaults_to_none():
     assert agent.config.disallowed_tools is None
 
 
+async def _capture_sdk_options(agent: ClaudeCodeAgent) -> "list":
+    """Run one communicate() turn with a mocked query() and return captured options list."""
+    import tempfile
+
+    captured_options: list = []
+
+    class ResultMessage:
+        def __init__(self, session_id: str = "s-1") -> None:
+            self.session_id = session_id
+            self.usage = {"input_tokens": 1, "output_tokens": 1}
+            self.total_cost_usd = 0.0
+            self.num_turns = 1
+            self.is_error = False
+            self.result = "Done"
+
+    class AssistantMessage:
+        def __init__(self) -> None:
+            self.content = "ok"
+            self.model = "mock-model"
+
+    async def mock_query(prompt, options):
+        captured_options.append(options)
+        yield AssistantMessage()
+        yield ResultMessage()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            await agent.communicate("hello")
+
+    return captured_options
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_tool_search_always_disallowed_when_config_empty():
+    """ToolSearch is always injected into disallowed_tools even when config specifies none."""
+    config = AgentConfig(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+    )
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    assert captured_options[0].disallowed_tools == ["ToolSearch"]
+    # Config itself must not be mutated.
+    assert agent.config.disallowed_tools is None
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_tool_search_appended_to_user_disallowed_tools():
+    """User-specified disallowed_tools are preserved and ToolSearch is appended."""
+    config = AgentConfig(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+        disallowed_tools=["TodoWrite", "Agent"],
+    )
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    assert captured_options[0].disallowed_tools == ["TodoWrite", "Agent", "ToolSearch"]
+    # Config itself must not be mutated.
+    assert agent.config.disallowed_tools == ["TodoWrite", "Agent"]
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_tool_search_not_duplicated():
+    """If user already lists ToolSearch, it is not duplicated."""
+    config = AgentConfig(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+        disallowed_tools=["ToolSearch", "Agent"],
+    )
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    assert captured_options[0].disallowed_tools == ["ToolSearch", "Agent"]
+
+
 def test_claude_agent_file_change_detection():
     """Test file change detection logic."""
     config = AgentConfig(
