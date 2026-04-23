@@ -11,6 +11,7 @@ from coder_eval.models import ResolvedTask, TaskDefinition
 from coder_eval.path_utils import (
     build_task_run_dir,
     create_latest_symlink,
+    format_task_log_id,
     generate_run_id,
     replicate_subdir_name,
 )
@@ -45,6 +46,24 @@ def test_build_task_run_dir_custom_replicate_index():
     run_dir = Path("/tmp/runs/2025-01-01_12-00-00")
     result = build_task_run_dir(run_dir, "v1", "task_a", replicate_index=3)
     assert result == run_dir / "v1" / "task_a" / "03"
+
+
+def test_format_task_log_id_basic():
+    assert format_task_log_id("default", "hello_date", 0) == "default/hello_date/00"
+
+
+def test_format_task_log_id_nonzero_replicate():
+    assert format_task_log_id("v1", "task", 7) == "v1/task/07"
+
+
+def test_format_task_log_id_large_replicate_no_truncation():
+    assert format_task_log_id("v", "t", 100) == "v/t/100"
+
+
+def test_format_task_log_id_matches_build_task_run_dir_relative_path():
+    run_dir = Path("/tmp/runs/X")
+    task_dir = build_task_run_dir(run_dir, "v", "t", 3)
+    assert format_task_log_id("v", "t", 3) == task_dir.relative_to(run_dir).as_posix()
 
 
 def test_resolved_task_rejects_negative_replicate_index(tmp_path: Path):

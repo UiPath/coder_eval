@@ -63,7 +63,7 @@ def test_orchestrator_stream_callback_uses_variant_prefixed_task_id():
     orch = Orchestrator(task=task, run_dir=Path("/tmp/test-run"), stream_callback=cb, variant_id="fast-variant")
 
     # The _log_task_id should include the variant prefix
-    assert orch._log_task_id == "fast-variant/stream-test"
+    assert orch._log_task_id == "fast-variant/stream-test/00"
 
     # When the orchestrator creates a TaskScopedCallback internally, it should
     # use _log_task_id (variant/task_id), not task.task_id (bare task_id).
@@ -76,4 +76,4 @@ def test_orchestrator_stream_callback_uses_variant_prefixed_task_id():
     scoped.on_event(event)
 
     assert len(cb.events) == 1
-    assert cb.events[0].task_id == "fast-variant/stream-test"
+    assert cb.events[0].task_id == "fast-variant/stream-test/00"

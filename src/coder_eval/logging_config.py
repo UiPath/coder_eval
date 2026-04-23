@@ -14,9 +14,12 @@ import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+
+APP_LOGGER_NAME = "coder_eval"
 
 # ContextVar that tracks the current task_id for the running async context.
 # Each asyncio task gets its own copy, so parallel tasks are isolated.
@@ -35,33 +38,67 @@ COLORS = {
 
 
 class TaskContextFormatter(logging.Formatter):
-    """Formatter that includes task_id if present in LogRecord extra."""
+    """Formatter for console output.
+
+    Renders ``HH:MM:SS [LEVEL  ] [task_id] <logger>: <msg>`` where:
+    - ``LEVEL`` is left-padded to 7 chars for column alignment. CRITICAL (8)
+      overflows by one — acceptable because it's not used in this codebase.
+    - ``<logger>`` has the ``coder_eval.`` prefix stripped for readability.
+      Non-coder_eval loggers (e.g. ``aiohttp.*``) pass through unchanged.
+    - ``[task_id]`` is only rendered when the record carries one.
+    """
+
+    _LEVEL_PAD = 7
 
     def format(self, record: logging.LogRecord) -> str:
-        """Format log record with optional task_id context.
-
-        Args:
-            record: Log record to format
-
-        Returns:
-            Formatted log string
-        """
-        # Apply color codes if outputting to terminal
+        padded_level = record.levelname.ljust(self._LEVEL_PAD)
         if sys.stderr.isatty():
-            levelname = record.levelname
-            color = COLORS.get(levelname, COLORS["RESET"])
-            colored_levelname = f"{color}{levelname}{COLORS['RESET']}"
+            color = COLORS.get(record.levelname, COLORS["RESET"])
+            level_field = f"{color}{padded_level}{COLORS['RESET']}"
         else:
-            colored_levelname = record.levelname
+            level_field = padded_level
 
-        # Include task_id if present in extra context
+        name = getattr(record, "name", "") or ""
+        display_name = name.removeprefix(f"{APP_LOGGER_NAME}.") if isinstance(name, str) else str(name)
+
         timestamp = self.formatTime(record, self.datefmt)
         task_id = getattr(record, "task_id", None)
         if task_id:
-            return f"{timestamp} [{colored_levelname}] [{task_id}] {record.name}: {record.getMessage()}"
-        else:
-            # Standard format without task_id
-            return f"{timestamp} [{colored_levelname}] {record.name}: {record.getMessage()}"
+            return f"{timestamp} [{level_field}] [{task_id}] {display_name}: {record.getMessage()}"
+        return f"{timestamp} [{level_field}] {display_name}: {record.getMessage()}"
+
+
+def _inject_task_id_from_contextvar(record: logging.LogRecord) -> str | None:
+    """If ``record`` has no ``task_id`` attribute, copy the value from
+    ``_current_task_id`` onto it (when set) and return the final value.
+
+    ``None`` is returned when neither the record nor the ContextVar
+    carries a task_id, matching the prior behaviour of both filters.
+
+    Idempotent: an existing ``task_id`` on the record (including empty
+    string, which callers may set explicitly to mean "no task_id") is
+    preserved and returned as-is.
+    """
+    record_task_id: str | None = getattr(record, "task_id", None)
+    if record_task_id is None:
+        cv_task_id = _current_task_id.get()
+        if cv_task_id is not None:
+            record.task_id = cv_task_id
+            return cv_task_id
+    return record_task_id
+
+
+class _ConsoleTaskIdInjector(logging.Filter):
+    """Copy ``_current_task_id`` ContextVar onto records via
+    ``_inject_task_id_from_contextvar`` so the console formatter can render
+    ``[task_id]``. Idempotent: if ``task_id`` is already set (e.g. via
+    ``LoggerAdapter`` extra or another filter), it is preserved.
+    Always returns True so no records are dropped.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        _inject_task_id_from_contextvar(record)
+        return True
 
 
 def setup_logging(level: str = "INFO", log_file: Path | None = None, verbose: bool = False) -> None:
@@ -83,7 +120,7 @@ def setup_logging(level: str = "INFO", log_file: Path | None = None, verbose: bo
     log_level = logging.DEBUG if verbose else getattr(logging, level.upper(), logging.INFO)
 
     # Get the top-level coder_eval logger (all module loggers will inherit from this)
-    app_logger = logging.getLogger("coder_eval")
+    app_logger = logging.getLogger(APP_LOGGER_NAME)
     app_logger.setLevel(log_level)
     for h in list(app_logger.handlers):
         app_logger.removeHandler(h)
@@ -96,6 +133,7 @@ def setup_logging(level: str = "INFO", log_file: Path | None = None, verbose: bo
         fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"
     )
     console_handler.setFormatter(console_formatter)
+    console_handler.addFilter(_ConsoleTaskIdInjector())
     app_logger.addHandler(console_handler)
 
     # File handler (optional)
@@ -130,17 +168,29 @@ class _TaskIdFilter(logging.Filter):
         self.task_id = task_id
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record_task_id = getattr(record, "task_id", None)
-        if record_task_id is None:
-            cv_task_id = _current_task_id.get()
-            if cv_task_id is not None:
-                record.task_id = cv_task_id  # type: ignore[attr-defined]
-                record_task_id = cv_task_id
-        return record_task_id == self.task_id
+        return _inject_task_id_from_contextvar(record) == self.task_id
 
 
 # Lock for thread-safe handler add/remove and level restoration in parallel batch runs
 _task_handler_lock = threading.Lock()
+
+
+@dataclass
+class _TaskHandlerRefState:
+    """Mutable module-level state for ``task_log_handler`` ref counting.
+
+    Replaces the previous monkey-patched attributes on the app logger
+    (``_task_handler_count``, ``_task_handler_original_level``). There
+    is exactly one app logger (``APP_LOGGER_NAME``), so a single module-
+    level instance suffices — no keying needed. All reads and writes
+    are guarded by ``_task_handler_lock``.
+    """
+
+    count: int = 0
+    original_level: int | None = None
+
+
+_task_handler_state: _TaskHandlerRefState = _TaskHandlerRefState()
 
 
 @contextmanager
@@ -185,13 +235,11 @@ def task_log_handler(task_log_path: Path, level: int = logging.DEBUG, task_id: s
         handler.addFilter(task_filter)
 
     # Thread-safe handler registration with reference-counted level management
-    app_logger = logging.getLogger("coder_eval")
+    app_logger = logging.getLogger(APP_LOGGER_NAME)
     with _task_handler_lock:
-        handler_count: int = getattr(app_logger, "_task_handler_count", 0)
-        if handler_count == 0:
-            # First handler: save the true original level
-            app_logger._task_handler_original_level = app_logger.level  # type: ignore[attr-defined]
-        app_logger._task_handler_count = handler_count + 1  # type: ignore[attr-defined]
+        if _task_handler_state.count == 0:
+            _task_handler_state.original_level = app_logger.level
+        _task_handler_state.count += 1
         app_logger.addHandler(handler)
         if app_logger.level > level:
             app_logger.setLevel(level)
@@ -207,14 +255,12 @@ def task_log_handler(task_log_path: Path, level: int = logging.DEBUG, task_id: s
         # Guaranteed cleanup with thread-safe level restoration
         with _task_handler_lock:
             app_logger.removeHandler(handler)
-            remaining: int = getattr(app_logger, "_task_handler_count", 1) - 1
-            app_logger._task_handler_count = max(remaining, 0)  # type: ignore[attr-defined]
-            if remaining <= 0:
-                # Last handler: restore the true original level
-                original = getattr(app_logger, "_task_handler_original_level", app_logger.level)
-                app_logger.setLevel(original)
-                if hasattr(app_logger, "_task_handler_original_level"):
-                    del app_logger._task_handler_original_level  # pyright: ignore[reportAttributeAccessIssue]
+            _task_handler_state.count = max(_task_handler_state.count - 1, 0)
+            if _task_handler_state.count == 0:
+                restored = _task_handler_state.original_level
+                if restored is not None:
+                    app_logger.setLevel(restored)
+                _task_handler_state.original_level = None
         # Reset ContextVar (token-based reset restores previous value in nested contexts)
         if token is not None:
             _current_task_id.reset(token)

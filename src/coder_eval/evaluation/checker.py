@@ -17,6 +17,42 @@ from ..sandbox import Sandbox
 logger = logging.getLogger(__name__)
 
 
+def _short_failure_reason(result: CriterionResult, max_len: int = 200) -> str:
+    """Return a one-line, length-capped failure reason for a criterion result.
+
+    Prefers ``result.error``; then falls back to the first ``stderr:`` line in
+    ``result.details``; then the first non-empty details line. Multi-line text
+    is collapsed with ``" | "`` separators before truncation. Returns
+    ``"no details"`` when nothing usable is available.
+
+    Shared by ``SuccessChecker`` (console fail log) and
+    ``orchestrator._emit_criteria_event`` (streamed ``failure_reason`` field)
+    so both surfaces show identical text.
+    """
+
+    def _collapse(text: str) -> str:
+        lines = [line.strip() for line in text.splitlines()]
+        collapsed = " | ".join(line for line in lines if line)
+        if len(collapsed) > max_len:
+            return collapsed[: max_len - 1] + "…"
+        return collapsed
+
+    if result.error:
+        return _collapse(result.error) or "no details"
+    if result.details:
+        for line in result.details.splitlines():
+            stripped = line.strip()
+            if stripped.lower().startswith("stderr:"):
+                reason = stripped[len("stderr:") :].strip()
+                if reason:
+                    return _collapse(reason)
+        for line in result.details.splitlines():
+            stripped = line.strip()
+            if stripped:
+                return _collapse(stripped)
+    return "no details"
+
+
 class SuccessChecker:
     """Orchestrates criterion checking using registered checkers."""
 
@@ -139,11 +175,20 @@ class SuccessChecker:
             result = checker.check(criterion, self.sandbox, reference_code, turn_records=turn_records)
             result.pass_threshold = criterion.pass_threshold
 
-            logger.info(f"Criterion '{criterion_type}' score: {result.score:.2f}")
+            logger.debug(f"Criterion '{criterion_type}' score: {result.score:.2f}")
+            if result.score < criterion.pass_threshold:
+                logger.info(
+                    "Criterion '%s' FAILED (score=%.2f, threshold=%.2f): %s",
+                    criterion_type,
+                    result.score,
+                    criterion.pass_threshold,
+                    _short_failure_reason(result),
+                )
             return result
 
         except KeyError:
-            # No checker registered for this type - return failed result for consistency
+            # No checker registered for this type - return failed result for consistency.
+            # ERROR record carries enough context — skip the companion FAILED line.
             logger.error(f"No checker found for criterion type '{criterion_type}'")
             return CriterionResult(
                 criterion_type=criterion_type,
@@ -156,7 +201,7 @@ class SuccessChecker:
         except Exception as e:
             # V3: Catch ALL exceptions, including checker __init__ failures
             logger.exception(f"Checker failure for criterion '{criterion_type}': {e}")
-            return CriterionResult(
+            failed = CriterionResult(
                 criterion_type=criterion_type,
                 description=criterion.description,
                 score=0.0,
@@ -164,3 +209,10 @@ class SuccessChecker:
                 error=str(e),
                 pass_threshold=criterion.pass_threshold,
             )
+            logger.info(
+                "Criterion '%s' FAILED (score=0.00, threshold=%.2f): %s",
+                criterion_type,
+                criterion.pass_threshold,
+                _short_failure_reason(failed),
+            )
+            return failed

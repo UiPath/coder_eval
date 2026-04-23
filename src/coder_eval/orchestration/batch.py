@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..models import AgentKind, EvaluationResult, FinalStatus, ResolvedTask, RunSummary, TaskDefinition, TaskResult
+from ..path_utils import format_task_log_id
 from ..reports_experiment import eval_result_to_task_dict
 from ..streaming.callbacks import StreamCallback
 from ..utils import get_version_info
@@ -60,7 +61,7 @@ async def run_batch(
 
     async def run_single(rt: ResolvedTask) -> TaskResult:
         """Run a single resolved task with semaphore for concurrency control."""
-        stream_label = f"{rt.variant_id}/{rt.task.task_id}/{rt.replicate_index:02d}"
+        stream_label = format_task_log_id(rt.variant_id, rt.task.task_id, rt.replicate_index)
         task_callback = stream_callback_factory(stream_label) if stream_callback_factory else None
         async with semaphore:
             try:

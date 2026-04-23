@@ -63,14 +63,14 @@ Issues:
 Please address these issues and continue working on the task."""
 
     # Fallback to deterministic feedback from criteria
-    logger.info("Using deterministic feedback from failed criteria")
-
     # Check which criteria failed their pass_threshold
     failed_criteria = [
         (result, criterion)
         for result, criterion in zip(criteria_results, task.success_criteria, strict=True)
         if result.score < criterion.pass_threshold
     ]
+    failed_types = ", ".join(criterion.type for _, criterion in failed_criteria) or "<none>"
+    logger.info("Using deterministic feedback from failed criteria: %s", failed_types)
 
     if failed_criteria:
         feedback_parts = ["The following checks failed:\n"]

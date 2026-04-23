@@ -196,6 +196,45 @@ class TestLogFileIsolation:
 
         assert app.level == original
 
+    def test_task_log_handler_refcount_roundtrip(self, tmp_path):
+        setup_logging(level="WARNING")
+        app = logging.getLogger("coder_eval")
+        app.setLevel(logging.WARNING)
+
+        with task_log_handler(tmp_path / "a.log", level=logging.DEBUG):
+            assert app.level == logging.DEBUG
+
+        assert app.level == logging.WARNING
+
+    def test_task_log_handler_nested_refcount(self, tmp_path):
+        setup_logging(level="WARNING")
+        app = logging.getLogger("coder_eval")
+        app.setLevel(logging.WARNING)
+
+        with task_log_handler(tmp_path / "outer.log", level=logging.DEBUG):
+            assert app.level == logging.DEBUG
+            with task_log_handler(tmp_path / "inner.log", level=logging.DEBUG):
+                assert app.level == logging.DEBUG
+            assert app.level == logging.DEBUG
+
+        assert app.level == logging.WARNING
+
+    def test_task_log_handler_parallel_refcount(self, tmp_path):
+        setup_logging(level="WARNING")
+        app = logging.getLogger("coder_eval")
+        app.setLevel(logging.WARNING)
+        original = app.level
+
+        async def run_task(name: str):
+            with task_log_handler(tmp_path / f"{name}.log", level=logging.DEBUG, task_id=name):
+                await asyncio.sleep(0.01)
+
+        async def main():
+            await asyncio.gather(run_task("a"), run_task("b"))
+
+        asyncio.run(main())
+        assert app.level == original
+
 
 # ===========================================================================
 # E2E: Async parallel isolation (primary regression test)

@@ -5,7 +5,20 @@ from io import StringIO
 
 import pytest
 
-from coder_eval.logging_config import TaskContextFormatter, setup_logging
+from coder_eval.logging_config import (
+    APP_LOGGER_NAME,
+    TaskContextFormatter,
+    _ConsoleTaskIdInjector,
+    _current_task_id,
+    _inject_task_id_from_contextvar,
+    setup_logging,
+)
+
+
+def test_app_logger_name_constant():
+    """APP_LOGGER_NAME is the single source of truth for the app logger name."""
+    assert APP_LOGGER_NAME == "coder_eval"
+    assert logging.getLogger(APP_LOGGER_NAME) is logging.getLogger("coder_eval")
 
 
 def test_setup_logging_basic(tmp_path):
@@ -201,6 +214,128 @@ async def test_logging_in_async_context():
     task_logger.info("Async log message")
     task_logger.debug("Async debug message")
     task_logger.error("Async error message")
+
+
+def _make_record(name: str = "coder_eval.test", level: int = logging.INFO, msg: str = "hi") -> logging.LogRecord:
+    return logging.LogRecord(name=name, level=level, pathname="", lineno=0, msg=msg, args=(), exc_info=None)
+
+
+class TestInjectTaskIdHelper:
+    def test_preserves_existing(self):
+        token = _current_task_id.set("ignored")
+        try:
+            record = _make_record()
+            record.task_id = "explicit"  # type: ignore[attr-defined]
+            assert _inject_task_id_from_contextvar(record) == "explicit"
+            assert record.task_id == "explicit"  # type: ignore[attr-defined]
+        finally:
+            _current_task_id.reset(token)
+
+    def test_copies_from_contextvar_when_missing(self):
+        token = _current_task_id.set("v/t/00")
+        try:
+            record = _make_record()
+            assert _inject_task_id_from_contextvar(record) == "v/t/00"
+            assert record.task_id == "v/t/00"  # type: ignore[attr-defined]
+        finally:
+            _current_task_id.reset(token)
+
+    def test_returns_none_when_both_missing(self):
+        record = _make_record()
+        assert _inject_task_id_from_contextvar(record) is None
+        assert getattr(record, "task_id", None) is None
+
+    def test_preserves_explicit_empty_string(self):
+        token = _current_task_id.set("from_contextvar")
+        try:
+            record = _make_record()
+            record.task_id = ""  # type: ignore[attr-defined]
+            assert _inject_task_id_from_contextvar(record) == ""
+            assert record.task_id == ""  # type: ignore[attr-defined]
+        finally:
+            _current_task_id.reset(token)
+
+
+class TestConsoleTaskIdInjector:
+    def test_fills_from_contextvar(self):
+        token = _current_task_id.set("v1/task-a")
+        try:
+            record = _make_record()
+            assert _ConsoleTaskIdInjector().filter(record) is True
+            assert getattr(record, "task_id", None) == "v1/task-a"
+        finally:
+            _current_task_id.reset(token)
+
+    def test_preserves_existing_task_id(self):
+        token = _current_task_id.set("A")
+        try:
+            record = _make_record()
+            record.task_id = "B"  # type: ignore[attr-defined]
+            assert _ConsoleTaskIdInjector().filter(record) is True
+            assert record.task_id == "B"  # type: ignore[attr-defined]
+        finally:
+            _current_task_id.reset(token)
+
+    def test_no_contextvar_no_task_id(self):
+        # No task_id set; injector should return True and not attach a task_id.
+        record = _make_record()
+        assert _ConsoleTaskIdInjector().filter(record) is True
+        assert getattr(record, "task_id", None) is None
+
+
+class TestFormatterConsoleTweaks:
+    def test_strips_coder_eval_prefix(self, monkeypatch):
+        monkeypatch.setattr("sys.stderr.isatty", lambda: False)
+        formatter = TaskContextFormatter(datefmt="%H:%M:%S")
+        record = _make_record(name="coder_eval.orchestrator", msg="Starting")
+        out = formatter.format(record)
+        assert "orchestrator: Starting" in out
+        assert "coder_eval.orchestrator" not in out
+
+    def test_keeps_foreign_logger_name(self, monkeypatch):
+        monkeypatch.setattr("sys.stderr.isatty", lambda: False)
+        formatter = TaskContextFormatter(datefmt="%H:%M:%S")
+        record = _make_record(name="aiohttp.access", msg="GET /")
+        out = formatter.format(record)
+        assert "aiohttp.access: GET /" in out
+
+    def test_pads_level_name(self, monkeypatch):
+        monkeypatch.setattr("sys.stderr.isatty", lambda: False)
+        formatter = TaskContextFormatter(datefmt="%H:%M:%S")
+        info_out = formatter.format(_make_record(level=logging.INFO))
+        warn_out = formatter.format(_make_record(level=logging.WARNING))
+        # Bracketed level field width is identical across levels.
+        info_bracket = info_out[info_out.index("[") : info_out.index("]") + 1]
+        warn_bracket = warn_out[warn_out.index("[") : warn_out.index("]") + 1]
+        assert len(info_bracket) == len(warn_bracket)
+        # Visible pad present (INFO occupies 4 chars in a 7-char field).
+        assert "[INFO   ]" in info_out
+        assert "[WARNING]" in warn_out
+
+
+def test_setup_logging_attaches_console_injector():
+    setup_logging(level="INFO")
+    app_logger = logging.getLogger("coder_eval")
+    assert app_logger.handlers, "setup_logging should attach at least one handler"
+    console_handler = app_logger.handlers[0]
+    assert any(isinstance(f, _ConsoleTaskIdInjector) for f in console_handler.filters)
+
+
+def test_file_handler_unaffected_by_console_formatter(tmp_path):
+    # task_log_handler uses plain logging.Formatter, so file output keeps the
+    # full logger name and does not get the console-only level pad treatment.
+    from coder_eval.logging_config import task_log_handler
+
+    setup_logging(level="INFO")
+    log_file = tmp_path / "task.log"
+    logger = logging.getLogger("coder_eval.foo")
+
+    with task_log_handler(log_file):
+        logger.info("file-path")
+
+    content = log_file.read_text()
+    assert "coder_eval.foo: file-path" in content
+    assert "[INFO]" in content
 
 
 class TestLogPersistence:

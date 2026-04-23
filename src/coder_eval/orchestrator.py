@@ -22,7 +22,7 @@ from .criteria.commands_efficiency import compute_commands_efficiency
 from .errors.executor import execute_with_retry
 from .errors.retry import create_error_context
 from .errors.timeout import TaskTimeoutError, TurnTimeoutError
-from .evaluation.checker import SuccessChecker
+from .evaluation.checker import SuccessChecker, _short_failure_reason
 from .evaluation.reviewer import LLMReviewer
 from .evaluation.summaries import summarize_commands
 from .models import (
@@ -52,6 +52,7 @@ from .models import (
 from .orchestration.batch import run_batch as run_batch_impl
 from .orchestration.config import BatchRunConfig
 from .orchestration.evaluation import create_iteration_snapshot, generate_next_prompt, load_reference_code
+from .path_utils import format_task_log_id
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, UserSimulator, evaluate_stop
 from .streaming.callbacks import StreamCallback, TaskScopedCallback, safe_emit
@@ -100,28 +101,17 @@ async def _pump_stream(
 
 
 def _extract_failure_reason(result: CriterionResult) -> str | None:
-    """Extract the failure reason from a criterion result.
+    """Streaming-event wrapper around ``_short_failure_reason``.
 
-    Returns the stderr content (up to 500 chars) when available,
-    otherwise the first non-empty line from details.
+    Preserves the historical ``None``-for-no-content contract so
+    ``CriterionSummary.failure_reason`` stays ``None`` when there's nothing
+    to show. The actual reason text is produced by the shared helper so the
+    console FAILED log and the streamed event render identical strings.
     """
-    if result.error:
-        return result.error
-    if not result.details:
+    if not result.error and not result.details:
         return None
-    # Prefer stderr — that's where check scripts put the failure message
-    for line in result.details.splitlines():
-        stripped = line.strip()
-        if stripped.lower().startswith("stderr:"):
-            reason = stripped[len("stderr:") :].strip()
-            if reason:
-                return reason
-    # Fall back to first non-empty line
-    for line in result.details.splitlines():
-        stripped = line.strip()
-        if stripped:
-            return stripped
-    return None
+    reason = _short_failure_reason(result)
+    return reason if reason != "no details" else None
 
 
 class Orchestrator:
@@ -196,8 +186,8 @@ class Orchestrator:
         # Reference solution cache (loaded on-demand)
         self._reference_code: str | None = None
 
-        # Task identifier used for log handler context, streaming events, and proxy config
-        self._log_task_id = f"{variant_id}/{task.task_id}"
+        # Canonical id shared with run_dir layout, tqdm label, and streaming events.
+        self._log_task_id = format_task_log_id(variant_id, task.task_id, replicate_index)
 
     async def run(self) -> EvaluationResult:
         """Run the complete evaluation.
@@ -387,6 +377,16 @@ class Orchestrator:
             source_yaml=self.source_yaml,
             source_file=str(self.task_file) if self.task_file else None,
             lineage=self.config_lineage,
+        )
+
+        # Terminal per-task summary line. Emitted before report writes so a
+        # write failure cannot swallow the one-line outcome.
+        logger.info(
+            "Task finished: status=%s duration=%.1fs score=%.3f iterations=%d",
+            self.result.final_status.value,
+            self.result.duration_seconds or 0.0,
+            self.result.weighted_score or 0.0,
+            self.result.iteration_count,
         )
 
         # Persist
@@ -701,7 +701,10 @@ class Orchestrator:
             self._emit_criteria_event(criteria_results)
 
             if all_passed:
-                logger.info("All success criteria passed!")
+                # Outcome is already conveyed by the "Success criteria: X/Y
+                # passed" INFO above and the terminal "Task finished" summary;
+                # keep a DEBUG trace for post-mortem without doubling up.
+                logger.debug("All success criteria passed; exiting iteration loop")
                 success = True
                 break
 

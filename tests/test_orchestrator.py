@@ -2182,3 +2182,123 @@ async def test_review_failure_is_swallowed(tmp_path):
     # review is retried via execute_with_retry — only assert it was attempted at least once
     assert reviewer.review.call_count >= 1
     assert orchestrator.result.llm_review is None
+
+
+# --- Phase 3: terminal per-task summary line ---
+
+
+def _bootstrap_finalize_orchestrator(tmp_path, *, final_status, duration=None, score=None, iterations=1):
+    """Build an Orchestrator primed to run _finalize_result without running the loop."""
+    from datetime import datetime
+
+    from coder_eval.models import (
+        AgentConfig,
+        AgentKind,
+        EvaluationResult,
+        FileExistsCriterion,
+        SandboxConfig,
+        TaskDefinition,
+    )
+
+    task = TaskDefinition(
+        task_id="summary_task",
+        description="d",
+        initial_prompt="p",
+        agent=AgentConfig(type=AgentKind.CLAUDE_CODE),
+        sandbox=SandboxConfig(),
+        success_criteria=[FileExistsCriterion(description="x", path="x.py")],
+    )
+    run_dir = tmp_path / "summary_run"
+    run_dir.mkdir(parents=True)
+
+    orchestrator = Orchestrator(task, run_dir, preserve_sandbox=False, variant_id="v1")
+    orchestrator.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        variant_id="v1",
+        agent_type=task.agent.type,
+        started_at=datetime.now(),
+        final_status=final_status,
+        iteration_count=iterations,
+        environment_info={},
+    )
+    if duration is not None:
+        orchestrator.result.duration_seconds = duration
+    if score is not None:
+        orchestrator.result.weighted_score = score
+
+    # _finalize_result uses self.agent only for sdk_options; a None agent
+    # skips that branch. Patch HTML writer to a no-op so the summary-line
+    # test does not depend on the HTML report pipeline.
+    orchestrator.agent = None
+    return orchestrator
+
+
+def test_finalize_result_logs_summary_on_success(tmp_path, caplog):
+    import logging as _logging
+    import time
+    from unittest.mock import patch
+
+    from coder_eval.models import FinalStatus
+
+    orch = _bootstrap_finalize_orchestrator(tmp_path, final_status=FinalStatus.SUCCESS, iterations=2)
+
+    with (
+        caplog.at_level(_logging.INFO, logger="coder_eval.orchestrator"),
+        patch("coder_eval.reports_html.write_task_html", return_value=None),
+    ):
+        orch._finalize_result(start_time=time.time() - 1.5)
+
+    summary_records = [r for r in caplog.records if "Task finished:" in r.getMessage()]
+    assert len(summary_records) == 1
+    msg = summary_records[0].getMessage()
+    assert "status=SUCCESS" in msg
+    assert "iterations=2" in msg
+    # Duration is computed from start_time — just check it's non-negative.
+    assert "duration=" in msg
+    assert "score=" in msg
+
+
+def test_finalize_result_logs_summary_on_timeout(tmp_path, caplog):
+    import logging as _logging
+    import time
+    from unittest.mock import patch
+
+    from coder_eval.models import FinalStatus
+
+    orch = _bootstrap_finalize_orchestrator(tmp_path, final_status=FinalStatus.TIMEOUT, iterations=0)
+
+    with (
+        caplog.at_level(_logging.INFO, logger="coder_eval.orchestrator"),
+        patch("coder_eval.reports_html.write_task_html", return_value=None),
+    ):
+        orch._finalize_result(start_time=time.time())
+
+    summary_records = [r for r in caplog.records if "Task finished:" in r.getMessage()]
+    assert len(summary_records) == 1
+    assert "status=TIMEOUT" in summary_records[0].getMessage()
+    assert "iterations=0" in summary_records[0].getMessage()
+
+
+def test_finalize_result_logs_zero_score_when_no_criteria(tmp_path, caplog):
+    import logging as _logging
+    import time
+    from unittest.mock import patch
+
+    from coder_eval.models import FinalStatus
+
+    # ERROR + empty criteria: calculate_weighted_score writes 0.0 onto the
+    # result, so the summary line ends up with score=0.000 and duration
+    # computed from start_time. Exercises the ERROR status path end-to-end.
+    orch = _bootstrap_finalize_orchestrator(tmp_path, final_status=FinalStatus.ERROR, iterations=0)
+    with (
+        caplog.at_level(_logging.INFO, logger="coder_eval.orchestrator"),
+        patch("coder_eval.reports_html.write_task_html", return_value=None),
+    ):
+        orch._finalize_result(start_time=time.time())
+
+    summary_records = [r for r in caplog.records if "Task finished:" in r.getMessage()]
+    assert len(summary_records) == 1
+    msg = summary_records[0].getMessage()
+    assert "score=0.000" in msg
+    assert "duration=" in msg

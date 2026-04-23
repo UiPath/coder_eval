@@ -29,6 +29,21 @@ def build_task_run_dir(
     return run_dir / variant_id / task_id / replicate_subdir_name(replicate_index)
 
 
+def format_task_log_id(variant_id: str, task_id: str, replicate_index: int = 0) -> str:
+    """Canonical ``<variant_id>/<task_id>/<NN>`` identifier used by:
+    - Orchestrator ``_log_task_id`` (console/file log tag, streaming events, proxy)
+    - Batch ``stream_label``
+    - CLI tqdm progress-bar postfix
+
+    Shape mirrors ``build_task_run_dir`` (same three segments, same NN padding
+    via ``replicate_subdir_name``) so log tags and on-disk paths stay in
+    lockstep. Callers MUST use this helper rather than hand-rolling the
+    f-string so future format changes (e.g., NN → NNN) touch exactly one
+    place.
+    """
+    return f"{variant_id}/{task_id}/{replicate_subdir_name(replicate_index)}"
+
+
 def create_latest_symlink(runs_base: Path, run_id: str) -> None:
     """Create/update 'latest' symlink to current run.
 

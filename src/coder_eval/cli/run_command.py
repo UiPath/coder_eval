@@ -16,7 +16,7 @@ from ..config import settings
 from ..logging_config import setup_logging
 from ..models import RunSummary
 from ..orchestration.config import BatchRunConfig
-from ..path_utils import create_latest_symlink
+from ..path_utils import create_latest_symlink, format_task_log_id
 from ..streaming.renderers import RichStreamRenderer
 from .console import console
 from .run_helpers import (
@@ -459,7 +459,7 @@ async def _run_with_callbacks(
         if progress_bar is None:
             return
         status = result.result.final_status
-        label = f"{result.variant_id}/{result.task_id}"
+        label = format_task_log_id(result.variant_id, result.task_id, result.replicate_index)
         status_icon = status.icon
         progress_bar.set_postfix_str(f"{status_icon} {label}")
         progress_bar.update(1)
