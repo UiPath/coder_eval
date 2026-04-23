@@ -70,6 +70,14 @@ class AgentConfig(BaseModel):
             "None means use the framework default (['project'])."
         ),
     )
+    claude_settings: str | dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Claude Code settings passed via --settings. Accepts a JSON-serializable dict "
+            "(inlined) or a file path string. Use permissions.deny to block tool access to "
+            'specific paths: {"permissions": {"deny": ["Read(/some/path/**)"]}}.'
+        ),
+    )
 
     @model_validator(mode="after")
     def check_prompt_exclusivity(self) -> Self:

@@ -156,6 +156,42 @@ async def test_claude_agent_tool_search_not_duplicated():
     assert captured_options[0].disallowed_tools == ["ToolSearch", "Agent"]
 
 
+@pytest.mark.asyncio
+async def test_claude_settings_dict_serialized_to_json():
+    """Dict claude_settings is JSON-serialized before passing to ClaudeAgentOptions.settings."""
+    import json
+
+    settings = {"permissions": {"deny": ["Read(/some/path/**)"]}}
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, claude_settings=settings)
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    assert captured_options[0].settings == json.dumps(settings)
+
+
+@pytest.mark.asyncio
+async def test_claude_settings_string_passthrough():
+    """String claude_settings is passed through unchanged (treated as a file path by the SDK)."""
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, claude_settings="/path/to/settings.json")
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    assert captured_options[0].settings == "/path/to/settings.json"
+
+
+@pytest.mark.asyncio
+async def test_claude_settings_none_default():
+    """When claude_settings is None (default), ClaudeAgentOptions.settings is None."""
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    assert captured_options[0].settings is None
+
+
 def test_claude_agent_file_change_detection():
     """Test file change detection logic."""
     config = AgentConfig(

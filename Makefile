@@ -1,8 +1,8 @@
-.PHONY: help install format check typecheck test verify clean e2e run
+.PHONY: help install format check typecheck test test-live test-smoke verify clean run
 
 help:  ## Show this help message
 	@echo "Available commands:"
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
 install:  ## Install project with dev dependencies
 	uv pip install -e ".[dev]"
@@ -17,11 +17,14 @@ check:  ## Run linting checks
 typecheck:  ## Run type checking with pyright
 	uv run pyright
 
-test:  ## Run test suite
-	uv run pytest -n auto tests/
+test:  ## Run test suite (excludes live tests)
+	uv run pytest -n auto -m "not live" tests/
+
+test-live:  ## Run live-only tests (real Anthropic API + claude CLI; requires ANTHROPIC_API_KEY)
+	uv run pytest -m live tests/ -v
 
 test-cov:  ## Run tests with coverage report
-	uv run pytest tests/ -n auto --cov=coder_eval --cov-report=term-missing --cov-report=html
+	uv run pytest tests/ -n auto -m "not live" --cov=coder_eval --cov-report=term-missing --cov-report=html
 	@echo "📊 Coverage report: htmlcov/index.html"
 
 
@@ -31,7 +34,7 @@ verify:  ## Run all verification steps (CI equivalent)
 	uv run pyright
 	# uv run pip-audit --desc --skip-editable
 	# uv run bandit -r src/ -ll --format json -o bandit-report.json
-	uv run pytest tests/ -n auto --cov=coder_eval --cov-report=term-missing --cov-report=xml --cov-fail-under=80
+	uv run pytest tests/ -n auto -m "not live" --cov=coder_eval --cov-report=term-missing --cov-report=xml --cov-fail-under=80
 
 clean:  ## Clean build artifacts and cache
 	rm -rf build/ dist/ *.egg-info .pytest_cache .ruff_cache .coverage coverage.xml htmlcov/ bandit-report.json coverage.xml
@@ -41,7 +44,7 @@ clean:  ## Clean build artifacts and cache
 run:	## Run coder-eval on all tasks with 8 parallel jobs
 	uv run coder-eval run tasks/*.yaml -j 8
 
-e2e:  ## Run e2e smoke tests with real API
+test-smoke:  ## Run e2e smoke tests with real API (mirrors CI "E2E Smoke Tests" job)
 	uv run coder-eval run tasks/*.yaml --tags smoke --model claude-haiku-4-5-20251001 --max-iter 2
 
 .DEFAULT_GOAL := help

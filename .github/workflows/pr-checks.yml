@@ -83,10 +83,11 @@ jobs:
             bandit-report.json
           retention-days: 30
 
-      # PHASE 4: Test suite with coverage
+      # PHASE 4: Test suite with coverage (hermetic; live tests run in the E2E job)
       - name: Run test suite with coverage
         run: |
           .venv/bin/pytest tests/ -v \
+            -m "not live" \
             --cov=coder_eval \
             --cov-report=term-missing \
             --cov-report=xml \
@@ -160,7 +161,7 @@ jobs:
         run: .venv/Scripts/pyright
 
       - name: Run test suite
-        run: .venv/Scripts/pytest tests/ -v
+        run: .venv/Scripts/pytest tests/ -v -m "not live"
 
   e2e-smoke:
     name: E2E Smoke Tests (Real API)

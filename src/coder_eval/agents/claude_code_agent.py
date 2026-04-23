@@ -343,6 +343,9 @@ class ClaudeCodeAgent(Agent):
                 system_prompt=self.config.system_prompt,
                 setting_sources=self.config.setting_sources if self.config.setting_sources is not None else ["project"],
                 resume=self._session_id,
+                settings=json.dumps(self.config.claude_settings)
+                if isinstance(self.config.claude_settings, dict)
+                else self.config.claude_settings,
             )
 
             # Dump SDK options for later inspection (captures all 37+ fields including defaults)

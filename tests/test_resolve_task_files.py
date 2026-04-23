@@ -52,6 +52,19 @@ class TestAgentConfigValidation:
         c = AgentConfig(type=AgentKind.CLAUDE_CODE, setting_sources=["project", "user"])
         assert c.setting_sources == ["project", "user"]
 
+    def test_claude_settings_default_none(self):
+        c = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        assert c.claude_settings is None
+
+    def test_claude_settings_dict(self):
+        settings = {"permissions": {"deny": ["Read(/Users/religa/src/**)"]}}
+        c = AgentConfig(type=AgentKind.CLAUDE_CODE, claude_settings=settings)
+        assert c.claude_settings == settings
+
+    def test_claude_settings_string_path(self):
+        c = AgentConfig(type=AgentKind.CLAUDE_CODE, claude_settings="/path/to/settings.json")
+        assert c.claude_settings == "/path/to/settings.json"
+
 
 class TestTaskDefinitionPromptValidation:
     """Test TaskDefinition initial_prompt / initial_prompt_file validators."""
