@@ -101,7 +101,7 @@ echo "==> sleeping 25s so the old container steps down before we poll"
 sleep 25
 
 echo "==> waiting for HTTP 200 (container healthy)"
-URL="https://flow-evalboard-g7eqbwhweef4dbf6.westus2-01.azurewebsites.net/"
+URL="https://flow-evalboard.uipath-dev.com/"
 for i in $(seq 1 24); do
   code=$(curl -sI -o /dev/null -w "%{http_code}" --max-time 8 -H "User-Agent: Mozilla/5.0" -H "Accept: text/html" "$URL" 2>/dev/null || true)
   if [[ "$code" == "302" || "$code" == "200" ]]; then

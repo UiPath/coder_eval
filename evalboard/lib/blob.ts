@@ -136,6 +136,11 @@ export async function ensureTaskDir(
         // runs.ts then picks the right shape at render time.
         const prefix = `${runId}/default/${taskId}/`;
         for await (const blob of c.listBlobsFlat({ prefix })) {
+            // Agent sandboxes that run Python leave a `.venv/` tree (hundreds
+            // of files, tens of MB) under the task dir. No UI page reads it,
+            // so skipping it keeps task-detail loads from stalling on the
+            // initial prefetch.
+            if (blob.name.includes("/.venv/")) continue;
             ops.push(downloadBlob(blob.name, destRoot));
         }
         await Promise.all(ops);

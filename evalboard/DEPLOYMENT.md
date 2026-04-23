@@ -6,7 +6,7 @@ Production deployment of the Next.js evalboard at `flow-evalboard`. Operational 
 
 | | |
 |---|---|
-| **App URL** | `https://flow-evalboard-g7eqbwhweef4dbf6.westus2-01.azurewebsites.net` |
+| **App URL** | `https://flow-evalboard.uipath-dev.com` (default `*.azurewebsites.net` hostname still works as fallback) |
 | **Subscription** | `DevTest-ML-EA` (`5db48574-8a20-418f-b488-1fafd8d021df`) |
 | **Resource group** | `rg-coder-eval-tests` (West US 2) |
 | **Runtime** | Node 22 LTS on Linux, B1 SKU (~$9/mo) |
@@ -61,7 +61,6 @@ The Entra app registration (`flow-evalboard`, client ID `d96ec2c5-d6fb-4674-8392
 ## Open tickets
 
 - [**IT-184799**](https://uipath.atlassian.net/servicedesk/customer/portal/3/IT-184799) — Entra admin consent for `openid profile email`. Required to re-enable Easy Auth (see Auth section).
-- [**CLOPS-8532**](https://uipath.atlassian.net/browse/CLOPS-8532) — DNS CNAME under a UiPath-owned zone to replace the `*.azurewebsites.net` hostname. Fixes Chrome's Safe Browsing false-positive. When DNS resolves: Azure portal → Web App → Custom domains → Add, then bind a free App Service Managed Certificate.
 
 ## Reference IDs
 
