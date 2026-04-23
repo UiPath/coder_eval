@@ -46,3 +46,10 @@ class BatchRunConfig(BaseModel):
         ge=1,
         description="Cap rows per dataset-backed task to first N. Non-dataset tasks unaffected.",
     )
+
+    # Replicate count override
+    repeats: int | None = Field(
+        default=None,
+        ge=1,
+        description="CLI override for replicates per (task, variant). None = defer to experiment layers.",
+    )

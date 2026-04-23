@@ -19,10 +19,10 @@ import yaml
 from ..models import (
     AgentConfig,
     ConfigLineageEntry,
-    EvaluationResult,
     ExperimentDefinition,
     ExperimentResult,
     ExperimentVariant,
+    FinalStatus,
     PromptRephrase,
     ResolvedTask,
     SimulationConfig,
@@ -228,6 +228,44 @@ def _build_agent_lineage(
     return lineage
 
 
+def _resolve_repeats(
+    default_experiment: ExperimentDefinition,
+    experiment: ExperimentDefinition,
+    variant: ExperimentVariant,
+    config: BatchRunConfig,
+    lineage: dict[str, ConfigLineageEntry],
+) -> int:
+    """Resolve effective ``repeats`` for a (task, variant) via the 4-layer merge.
+
+    Skips task YAML (layer 3) — TaskDefinition has no repeats field.
+    Writes a ``"repeats"`` entry into ``lineage`` recording the winning source.
+    Raises ValueError when the resolved value exceeds 99 (2-digit subdir padding limit).
+    """
+    effective = 1
+    source: str = "default"
+
+    if default_experiment.defaults and default_experiment.defaults.repeats is not None:
+        effective = default_experiment.defaults.repeats
+        source = "default"
+    if experiment.defaults and experiment.defaults.repeats is not None:
+        effective = experiment.defaults.repeats
+        source = "experiment-defaults"
+    if variant.repeats is not None:
+        effective = variant.repeats
+        source = "variant"
+    if config.repeats is not None:
+        effective = config.repeats
+        source = "cli"
+
+    if effective > 99:
+        raise ValueError(
+            f"repeats must be <= 99 (got {effective}); widen replicate_subdir_name padding to support more"
+        )
+
+    lineage["repeats"] = ConfigLineageEntry(value=effective, source=source)
+    return effective
+
+
 def _apply_prompt_overrides(
     task: TaskDefinition,
     experiment: ExperimentDefinition,
@@ -300,7 +338,8 @@ def resolve_task_for_variant(
     task: TaskDefinition,
     experiment: ExperimentDefinition,
     variant: ExperimentVariant,
-) -> tuple[TaskDefinition, dict[str, ConfigLineageEntry]]:
+    config: BatchRunConfig | None = None,
+) -> tuple[TaskDefinition, dict[str, ConfigLineageEntry], int]:
     """Resolve a fully-configured TaskDefinition by merging the 4-layer precedence chain.
 
     Precedence (lowest to highest):
@@ -317,9 +356,10 @@ def resolve_task_for_variant(
         task: The original task definition (may have agent=None).
         experiment: The active experiment definition.
         variant: The specific variant to resolve for.
+        config: Optional batch run config; used to resolve ``repeats``.
 
     Returns:
-        Tuple of (resolved TaskDefinition, config lineage dict).
+        Tuple of (resolved TaskDefinition, config lineage dict, effective_repeats).
     """
     # Layer 1: default experiment defaults agent
     default_agent = default_experiment.defaults.agent if default_experiment.defaults else None
@@ -468,7 +508,12 @@ def resolve_task_for_variant(
             "simulation": resolved_simulation,
         }
     )
-    return resolved_task, lineage
+
+    # Resolve repeats (4-layer: default → experiment-defaults → variant → cli; skips task layer)
+    _config = config if config is not None else BatchRunConfig(run_dir=Path("."))
+    effective_repeats = _resolve_repeats(default_experiment, experiment, variant, _config, lineage)
+
+    return resolved_task, lineage, effective_repeats
 
 
 def _apply_cli_overrides(
@@ -683,9 +728,9 @@ def resolve_all_tasks(
 
         for expanded_task in expanded_tasks:
             for variant in experiment.variants:
-                # Apply layers 1-4 (default → experiment-defaults → task → variant)
-                resolved_task, lineage = resolve_task_for_variant(
-                    default_experiment, expanded_task, experiment, variant
+                # Apply layers 1-4 (default → experiment-defaults → task → variant) + resolve repeats
+                resolved_task, lineage, effective_repeats = resolve_task_for_variant(
+                    default_experiment, expanded_task, experiment, variant, config
                 )
 
                 # Resolve file paths injected by variant overrides
@@ -697,9 +742,28 @@ def resolve_all_tasks(
                 # Apply layer 5 (CLI / .env overrides)
                 _apply_cli_overrides(resolved_task, config, lineage)
 
-                resolved.extend(
-                    _expand_trials(resolved_task, task_file, variant.variant_id, source_yaml, lineage, config.run_dir)
-                )
+                # Fan-out: simulation n_trials takes precedence over experiment repeats
+                # when simulation is active; otherwise use experiment-level repeats.
+                sim = resolved_task.simulation
+                n_trials = sim.n_trials if (sim is not None and sim.enabled) else 1
+                fan_count = n_trials if n_trials > 1 else effective_repeats
+                for rep in range(fan_count):
+                    resolved.append(
+                        ResolvedTask(
+                            task=resolved_task,
+                            task_file=task_file,
+                            run_dir=build_task_run_dir(
+                                config.run_dir,
+                                variant.variant_id,
+                                resolved_task.task_id,
+                                replicate_index=rep,
+                            ),
+                            variant_id=variant.variant_id,
+                            replicate_index=rep,
+                            source_yaml=source_yaml,
+                            config_lineage=dict(lineage),
+                        )
+                    )
 
     # Filter by tags
     if config.include_tags or config.exclude_tags:
@@ -725,7 +789,35 @@ def resolve_all_tasks(
         ]
         raise ValueError("Duplicate task IDs found:\n" + "\n".join(lines))
 
+    # Sort so tasks run interleaved: replicate 0 of every (task, variant) first,
+    # then replicate 1, etc. Within the same replicate, preserve original
+    # task-file and variant declaration order.
+    task_order = {tf: i for i, tf in enumerate(dict.fromkeys(rt.task_file for rt in resolved))}
+    variant_order = {v.variant_id: i for i, v in enumerate(experiment.variants)}
+    resolved.sort(key=lambda rt: (rt.replicate_index, task_order[rt.task_file], variant_order[rt.variant_id]))
+
     return resolved
+
+
+def _pick_worst_status(statuses: list[FinalStatus]) -> FinalStatus:
+    """Pick the worst final_status across replicates (error > failed > succeeded).
+
+    Unknown categories fall back to priority -1 so they sort as worst-of-all
+    (fail-closed: a new unrecognised status becomes the most urgent).
+    """
+    priority = {"error": 0, "failed": 1, "succeeded": 2}
+    return min(statuses, key=lambda s: priority.get(s.category, -1))
+
+
+def _mean_reference_similarity(reps: list[TaskResult]) -> float | None:
+    """Return the mean reference_comparison score across replicates that have one."""
+    scores = [
+        cr.score
+        for r in reps
+        for cr in r.result.success_criteria_results
+        if cr.criterion_type == "reference_comparison"
+    ]
+    return sum(scores) / len(scores) if scores else None
 
 
 def aggregate_results(
@@ -737,6 +829,11 @@ def aggregate_results(
 ) -> ExperimentResult:
     """Aggregate typed task results into an ExperimentResult with cross-variant comparisons.
 
+    Replicates of the same (task_id, variant_id) are folded into a single
+    VariantResult whose weighted_score is the mean across replicates.
+    Per-replicate raw scores are preserved in ExperimentResult.per_replicate_scores
+    for statistical analysis.
+
     Args:
         experiment_id: Identifier for the experiment.
         description: Human-readable description.
@@ -747,30 +844,40 @@ def aggregate_results(
     Returns:
         ExperimentResult with task summaries and variant aggregates.
     """
-    # Group results by task_id using variant_id from TaskResult directly
-    task_variants: dict[str, list[VariantResult]] = {}
+    # Group by (task_id, variant_id) — replicates of the same (task, variant) fold into one VariantResult.
+    task_variant_reps: dict[tuple[str, str], list[TaskResult]] = {}
     for tr in task_results:
-        result: EvaluationResult = tr.result
-        task_id = tr.task_id
-        variant_id = tr.variant_id
+        task_variant_reps.setdefault((tr.task_id, tr.variant_id), []).append(tr)
 
-        # Extract reference_comparison score if present
-        ref_similarity: float | None = None
-        for cr in result.success_criteria_results:
-            if cr.criterion_type == "reference_comparison":
-                ref_similarity = cr.score
-                break
+    # Collect per-replicate scores keyed variant_id → task_id → [scores] for stats rendering.
+    per_replicate_scores: dict[str, dict[str, list[float]]] = {}
+    for (task_id, variant_id), reps in task_variant_reps.items():
+        per_replicate_scores.setdefault(variant_id, {})[task_id] = [r.result.weighted_score or 0.0 for r in reps]
+
+    task_variants: dict[str, list[VariantResult]] = {}
+    for (task_id, variant_id), reps in task_variant_reps.items():
+        scores = [r.result.weighted_score or 0.0 for r in reps]
+        non_errored = [r for r in reps if r.result.final_status.category != "error"]
+        durations = [r.result.duration_seconds for r in non_errored]
+        statuses = [r.result.final_status for r in reps]
+        iter_counts = [r.result.iteration_count for r in reps if r.result.iteration_count is not None]
+        asst_turns = [r.result.total_assistant_turns for r in reps if r.result.total_assistant_turns is not None]
+        token_vals = [r.result.total_token_usage.total_tokens for r in reps if r.result.total_token_usage is not None]
+        ref_similarity = _mean_reference_similarity(reps)
+        final_status = _pick_worst_status(statuses)
 
         variant_result = VariantResult(
             variant_id=variant_id,
             task_id=task_id,
-            weighted_score=result.weighted_score or 0.0,
-            final_status=result.final_status,
-            duration_seconds=result.duration_seconds,
-            total_tokens=result.total_token_usage.total_tokens if result.total_token_usage else None,
-            iteration_count=result.iteration_count,
-            total_assistant_turns=result.total_assistant_turns,
+            weighted_score=sum(scores) / len(scores),
+            final_status=final_status,
+            duration_seconds=sum(durations),
+            total_tokens=sum(token_vals) if token_vals else None,
+            iteration_count=round(sum(iter_counts) / len(iter_counts)) if iter_counts else None,
+            total_assistant_turns=round(sum(asst_turns) / len(asst_turns)) if asst_turns else None,
             reference_similarity=ref_similarity,
+            replicate_index=0,  # aggregate — points at first replicate for link rendering
+            replicate_count=len(reps),
         )
         task_variants.setdefault(task_id, []).append(variant_result)
 
@@ -780,6 +887,7 @@ def aggregate_results(
         best = max(variants, key=lambda v: (v.weighted_score, v.variant_id))
         scores = [v.weighted_score for v in variants]
         top_count = sum(1 for v in variants if v.weighted_score == best.weighted_score)
+        rep_counts = {v.replicate_count for v in variants}
         task_summaries.append(
             TaskExperimentSummary(
                 task_id=task_id,
@@ -787,6 +895,7 @@ def aggregate_results(
                 best_variant=best.variant_id,
                 is_tie=top_count > 1,
                 score_spread=max(scores) - min(scores),
+                replicate_count=min(rep_counts) if rep_counts else 1,
             )
         )
 
@@ -815,8 +924,9 @@ def aggregate_results(
             tasks_failed=sum(1 for v in vr_list if v.final_status.category == "failed"),
             tasks_error=sum(1 for v in vr_list if v.final_status.category == "error"),
             average_score=sum(v.weighted_score for v in vr_list) / len(vr_list),
-            average_duration=sum(v.duration_seconds for v in vr_list) / len(vr_list),
+            average_duration=sum(v.duration_seconds / v.replicate_count for v in vr_list) / len(vr_list),
             total_tokens=total_tokens,
+            replicate_count=vr_list[0].replicate_count if vr_list else 1,
         )
 
     return ExperimentResult(
@@ -826,4 +936,5 @@ def aggregate_results(
         task_summaries=task_summaries,
         variant_aggregates=variant_aggregates,
         total_duration_seconds=total_duration,
+        per_replicate_scores=per_replicate_scores,
     )

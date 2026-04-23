@@ -22,6 +22,8 @@ The run layout is `runs/<run_id>/<variant_id>/<task_id>/<NN>/{task.json,task.log
 - **Variant scope**: path contains `variant.json` plus task subdirectories → cross-task analysis.
 - **Run scope**: path contains `run.json` → full run analysis. If `experiment.json` also exists, this is an experiment comparison run.
 
+Replicate count reflects the variant's `repeats:` setting (or `--repeats N`). When `repeats > 1`, the "aggregate task scope" branch is the normal case — there will be multiple `NN/` replicate dirs per task. When `repeats == 1` (default), there's exactly one `00/` dir per task and aggregate/single-replicate scopes produce equivalent output.
+
 Read the appropriate files:
 - **Single-replicate task scope**: Read `task.json`.
 - **Aggregate task scope**: Read every `??/task.json` under the target dir. Build an aggregated view (see Step 2 below).

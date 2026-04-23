@@ -31,6 +31,11 @@ class ExperimentVariant(BaseModel):
             "simulator persona/model/temperature per variant."
         ),
     )
+    repeats: int | None = Field(
+        default=None,
+        ge=1,
+        description="Number of replicates for each task under this variant. None = inherit.",
+    )
     template_sources: list[TemplateSource] | None = Field(
         default=None, description="Additional template sources appended after task's base templates"
     )
@@ -70,6 +75,11 @@ class ExperimentDefaults(BaseModel):
     max_iterations: int | None = Field(default=None, description="Default max iterations")
     task_timeout: int | None = Field(default=None, ge=30, description="Default task timeout (seconds)")
     turn_timeout: int | None = Field(default=None, ge=10, description="Default turn timeout (seconds)")
+    repeats: int | None = Field(
+        default=None,
+        ge=1,
+        description="Default number of replicates across all variants. None = 1 (no repetition).",
+    )
     agent: dict[str, Any] | None = Field(default=None, description="Partial agent config defaults")
     llm_reviewer: dict[str, Any] | None = Field(
         default=None,
@@ -134,6 +144,16 @@ class VariantResult(BaseModel):
     iteration_count: int | None = None
     total_assistant_turns: int | None = None
     reference_similarity: float | None = None
+    replicate_index: int = Field(
+        default=0,
+        ge=0,
+        description="Replicate index for this per-task result (0 when no replicates).",
+    )
+    replicate_count: int = Field(
+        default=1,
+        ge=1,
+        description="Number of replicates aggregated into this VariantResult (1 when repeats disabled).",
+    )
 
 
 class VariantAggregate(BaseModel):
@@ -147,6 +167,11 @@ class VariantAggregate(BaseModel):
     average_score: float
     average_duration: float
     total_tokens: int | None = None
+    replicate_count: int = Field(
+        default=1,
+        ge=1,
+        description="Replicate multiplicity (modal value across tasks).",
+    )
 
     @model_validator(mode="after")
     def _check_task_count_invariant(self) -> VariantAggregate:
@@ -164,6 +189,11 @@ class TaskExperimentSummary(BaseModel):
     best_variant: str
     is_tie: bool = Field(default=False, description="True when multiple variants share the highest score")
     score_spread: float
+    replicate_count: int = Field(
+        default=1,
+        ge=1,
+        description="Replicate count per variant on this task. Drives Replicate Statistics rendering.",
+    )
 
 
 class ExperimentResult(BaseModel):
@@ -175,6 +205,14 @@ class ExperimentResult(BaseModel):
     task_summaries: list[TaskExperimentSummary]
     variant_aggregates: dict[str, VariantAggregate]
     total_duration_seconds: float
+    per_replicate_scores: dict[str, dict[str, list[float]]] = Field(
+        default_factory=dict,
+        description=(
+            "Raw weighted_score per replicate, keyed variant_id → task_id → [scores]. "
+            "Always populated by aggregate_results; list length equals the replicate count. "
+            "Empty dict only on deserialized results from before this field existed."
+        ),
+    )
 
 
 class ResolvedTask(BaseModel):
@@ -195,9 +233,9 @@ class ResolvedTask(BaseModel):
         default=0,
         ge=0,
         description=(
-            "0-based replicate index. Always 0 for single-shot tasks and for "
-            "simulation tasks with n_trials=1. Simulation tasks with n_trials > 1 "
-            "are expanded by the resolver into replicate_index=0..n_trials-1."
+            "0-based replicate index within the (task, variant) group. Set by resolve_all_tasks. "
+            "Always 0 for single-shot tasks and for simulation tasks with n_trials=1. "
+            "Simulation tasks with n_trials > 1 are expanded into replicate_index=0..n_trials-1."
         ),
     )
 
@@ -220,4 +258,9 @@ class TaskResult(BaseModel):
     row_id: str | None = Field(
         default=None,
         description="Row id within the suite (from Dataset.id_field) when this task came from dataset fan-out.",
+    )
+    replicate_index: int = Field(
+        default=0,
+        ge=0,
+        description="0-based replicate index from ResolvedTask. Populated by batch.py.",
     )

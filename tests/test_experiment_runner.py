@@ -12,6 +12,7 @@ from coder_eval.models import (
     ExperimentDefinition,
     ExperimentResult,
     ExperimentVariant,
+    FinalStatus,
     ResolvedTask,
     TaskResult,
 )
@@ -169,6 +170,22 @@ class TestResolveAllTasks:
         assert isinstance(rt, ResolvedTask)
         assert rt.variant_id == "default"
         assert rt.task.task_id == "task-a"
+
+    def test_repeats_100_raises_before_any_sandbox(self, tmp_path, run_dir, default_experiment):
+        """repeats=100 must raise ValueError at resolution time, not at execution time."""
+        task1 = _write_task_yaml(tmp_path, "task-a", agent={"type": "claude-code"})
+        experiment = ExperimentDefinition(
+            experiment_id="over-limit",
+            variants=[ExperimentVariant(variant_id="v")],
+        )
+        config = _make_config(run_dir, repeats=100)
+        with pytest.raises(ValueError, match="repeats must be <= 99"):
+            resolve_all_tasks(
+                task_files=[task1],
+                experiment=experiment,
+                default_experiment=default_experiment,
+                config=config,
+            )
 
 
 class TestAggregateResults:
@@ -342,3 +359,144 @@ class TestAggregateResults:
         ts = result.task_summaries[0]
         assert ts.is_tie is True
         assert ts.score_spread == 0.0
+
+
+class TestReplicateAggregation:
+    def _make_eval_result(
+        self,
+        task_id: str,
+        status: str = "SUCCESS",
+        score: float = 0.9,
+        duration: float = 30.0,
+        variant_id: str = "v",
+    ) -> EvaluationResult:
+        return EvaluationResult(
+            task_id=task_id,
+            task_description=f"Test {task_id}",
+            variant_id=variant_id,
+            agent_type="claude-code",
+            started_at=datetime.now(),
+            final_status=status,
+            weighted_score=score,
+            duration_seconds=duration,
+            iteration_count=1,
+            environment_info={},
+        )
+
+    def _make_tr(
+        self,
+        task_id: str,
+        variant_id: str,
+        score: float,
+        status: str = "SUCCESS",
+        replicate_index: int = 0,
+        duration: float = 10.0,
+    ) -> TaskResult:
+        return TaskResult(
+            task_id=task_id,
+            variant_id=variant_id,
+            result=self._make_eval_result(
+                task_id, status=status, score=score, duration=duration, variant_id=variant_id
+            ),
+            duration=duration,
+            replicate_index=replicate_index,
+        )
+
+    def test_three_replicates_collapse_to_single_variant_result(self):
+        reps = [
+            self._make_tr("t", "v", score=0.8, replicate_index=0),
+            self._make_tr("t", "v", score=0.9, replicate_index=1),
+            self._make_tr("t", "v", score=1.0, replicate_index=2),
+        ]
+        result = aggregate_results(
+            experiment_id="e", description="", variant_ids=["v"], task_results=reps, total_duration=30.0
+        )
+        assert len(result.task_summaries) == 1
+        vr = result.task_summaries[0].variant_results[0]
+        assert abs(vr.weighted_score - 0.9) < 1e-9
+        assert vr.replicate_count == 3
+        assert result.task_summaries[0].replicate_count == 3
+
+    def test_mixed_statuses_picks_worst(self):
+        reps = [
+            self._make_tr("t", "v", score=1.0, status="SUCCESS", replicate_index=0),
+            self._make_tr("t", "v", score=1.0, status="SUCCESS", replicate_index=1),
+            self._make_tr("t", "v", score=0.0, status="ERROR", replicate_index=2),
+        ]
+        result = aggregate_results(
+            experiment_id="e", description="", variant_ids=["v"], task_results=reps, total_duration=30.0
+        )
+        vr = result.task_summaries[0].variant_results[0]
+        assert vr.final_status.category == "error"
+
+    def test_variant_aggregate_task_count_matches_unique_tasks(self):
+        trs = [self._make_tr("t1", "v", score=0.8, replicate_index=r) for r in range(3)] + [
+            self._make_tr("t2", "v", score=0.9, replicate_index=r) for r in range(3)
+        ]
+        result = aggregate_results(
+            experiment_id="e", description="", variant_ids=["v"], task_results=trs, total_duration=30.0
+        )
+        agg = result.variant_aggregates["v"]
+        assert agg.tasks_run == 2  # 2 unique tasks, not 6
+        assert agg.replicate_count == 3
+
+    def test_replicate_count_degrades_on_mixed_lengths(self):
+        trs_a = [self._make_tr("t", "a", score=0.8, replicate_index=r) for r in range(3)]
+        trs_b = [self._make_tr("t", "b", score=0.9, replicate_index=r) for r in range(5)]
+        result = aggregate_results(
+            experiment_id="e",
+            description="",
+            variant_ids=["a", "b"],
+            task_results=trs_a + trs_b,
+            total_duration=30.0,
+        )
+        # TaskExperimentSummary uses min(rep_counts)
+        assert result.task_summaries[0].replicate_count == 3
+
+    def test_per_replicate_scores_populated(self):
+        reps = [self._make_tr("t", "v", score=s, replicate_index=i) for i, s in enumerate([0.5, 0.7, 0.9])]
+        result = aggregate_results(
+            experiment_id="e", description="", variant_ids=["v"], task_results=reps, total_duration=30.0
+        )
+        scores = result.per_replicate_scores["v"]["t"]
+        assert len(scores) == 3
+        assert abs(scores[0] - 0.5) < 1e-9
+        assert abs(scores[2] - 0.9) < 1e-9
+
+    def test_single_replicate_is_unchanged(self):
+        trs = [
+            self._make_tr("t1", "v", score=0.8),
+            self._make_tr("t2", "v", score=0.6),
+        ]
+        result = aggregate_results(
+            experiment_id="e", description="", variant_ids=["v"], task_results=trs, total_duration=20.0
+        )
+        agg = result.variant_aggregates["v"]
+        assert agg.tasks_run == 2
+        assert agg.replicate_count == 1
+        for ts in result.task_summaries:
+            assert ts.replicate_count == 1
+
+    def test_error_replicate_excluded_from_duration(self):
+        reps = [
+            self._make_tr("t", "v", score=1.0, status="SUCCESS", replicate_index=0, duration=10.0),
+            self._make_tr("t", "v", score=0.0, status="ERROR", replicate_index=1, duration=5.0),
+        ]
+        result = aggregate_results(
+            experiment_id="e", description="", variant_ids=["v"], task_results=reps, total_duration=15.0
+        )
+        vr = result.task_summaries[0].variant_results[0]
+        # Only non-errored replicate duration included
+        assert abs(vr.duration_seconds - 10.0) < 1e-9
+
+    def test_all_replicates_errored_gives_zero_duration(self):
+        reps = [
+            self._make_tr("t", "v", score=0.0, status="ERROR", replicate_index=0, duration=3.0),
+            self._make_tr("t", "v", score=0.0, status="ERROR", replicate_index=1, duration=4.0),
+        ]
+        result = aggregate_results(
+            experiment_id="e", description="", variant_ids=["v"], task_results=reps, total_duration=7.0
+        )
+        vr = result.task_summaries[0].variant_results[0]
+        assert abs(vr.duration_seconds - 0.0) < 1e-9
+        assert vr.final_status == FinalStatus.ERROR

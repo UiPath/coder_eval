@@ -8,6 +8,11 @@ experiment_id: default
 description: "Default experiment - provides baseline agent configuration"
 
 defaults:
+  # Number of replicates for each task (repeats the same task N times per variant).
+  # Useful for quantifying variance in non-deterministic agent behavior.
+  # Overridable per-variant or via --repeats on the CLI.
+  # repeats: 1
+
   # Default max iterations for the evaluation loop (task-level overrides this)
   max_iterations: 3
 

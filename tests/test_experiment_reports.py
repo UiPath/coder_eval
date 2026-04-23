@@ -637,7 +637,7 @@ class TestAggregateMetrics:
 
         # Metrics should appear as rows (vertical layout)
         assert "| Score |" in md
-        assert "| Duration (s) |" in md
+        assert "| Avg Duration (s) |" in md
         assert "| Iterations |" in md
         assert "| Tokens |" in md
         assert "| Tasks Run |" in md
@@ -984,3 +984,134 @@ class TestDescribePromptConfig:
         )
         md = ExperimentReportGenerator.generate_experiment_report(result)
         assert "## Prompt Configuration" not in md
+
+
+class TestReplicateStatistics:
+    """Tests for the '## Replicate Statistics' section in experiment reports."""
+
+    def _make_result(
+        self,
+        *,
+        replicate_count: int = 1,
+        per_replicate_scores: dict | None = None,
+        variant_ids: list[str] | None = None,
+    ):
+        vids = variant_ids or ["a", "b"]
+        task_summaries = [
+            TaskExperimentSummary(
+                task_id="task-1",
+                variant_results=[
+                    VariantResult(
+                        variant_id=vid,
+                        task_id="task-1",
+                        weighted_score=0.8,
+                        final_status="SUCCESS",
+                        duration_seconds=10.0,
+                        replicate_count=replicate_count,
+                    )
+                    for vid in vids
+                ],
+                best_variant=vids[0],
+                score_spread=0.0,
+                replicate_count=replicate_count,
+            ),
+        ]
+        aggs = {
+            vid: VariantAggregate(
+                variant_id=vid,
+                tasks_run=1,
+                tasks_succeeded=1,
+                tasks_failed=0,
+                tasks_error=0,
+                average_score=0.8,
+                average_duration=10.0,
+                replicate_count=replicate_count,
+            )
+            for vid in vids
+        }
+        return ExperimentResult(
+            experiment_id="rep-test",
+            description="Replicate test",
+            variant_ids=vids,
+            task_summaries=task_summaries,
+            variant_aggregates=aggs,
+            total_duration_seconds=20.0,
+            per_replicate_scores=per_replicate_scores or {},
+        )
+
+    def test_no_section_when_replicate_count_is_one(self):
+        result = self._make_result(replicate_count=1)
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "## Replicate Statistics" not in md
+
+    def test_section_renders_when_replicate_count_gt_one(self):
+        per_rep = {
+            "a": {"task-1": [0.7, 0.8, 0.9]},
+            "b": {"task-1": [0.6, 0.75, 0.85]},
+        }
+        result = self._make_result(replicate_count=3, per_replicate_scores=per_rep)
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "## Replicate Statistics" in md
+        assert "| Variant |" in md
+        assert "| a |" in md
+        assert "| b |" in md
+
+    def test_section_contains_per_variant_ci_columns(self):
+        per_rep = {
+            "a": {"task-1": [0.7, 0.8, 0.9]},
+            "b": {"task-1": [0.6, 0.75, 0.85]},
+        }
+        result = self._make_result(replicate_count=3, per_replicate_scores=per_rep)
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "95% CI" in md
+        assert "Pass-rate" in md
+
+    def test_paired_diff_line_for_two_variants_equal_counts(self):
+        per_rep = {
+            "a": {"task-1": [0.9, 0.85, 0.95]},
+            "b": {"task-1": [0.6, 0.65, 0.7]},
+        }
+        result = self._make_result(replicate_count=3, per_replicate_scores=per_rep)
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "Paired mean diff" in md
+        assert "Cohen's d" in md
+
+    def test_paired_diff_skipped_when_unequal_counts_across_tasks(self):
+        # Variant a has 3 replicates for task-1, variant b has 5 → paired skipped
+        per_rep = {
+            "a": {"task-1": [0.9, 0.85, 0.95]},
+            "b": {"task-1": [0.6, 0.65, 0.7, 0.75, 0.8]},
+        }
+        result = self._make_result(replicate_count=3, per_replicate_scores=per_rep)
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "Paired statistics skipped" in md
+        assert "unequal replicate counts" in md
+
+    def test_no_paired_diff_for_single_variant(self):
+        per_rep = {"only": {"task-1": [0.7, 0.8, 0.9]}}
+        result = self._make_result(
+            replicate_count=3,
+            per_replicate_scores=per_rep,
+            variant_ids=["only"],
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "## Replicate Statistics" in md
+        assert "Paired mean diff" not in md
+
+    def test_variant_report_shows_ci_when_replicate_count_gt_one(self):
+        per_rep = {
+            "a": {"task-1": [0.7, 0.8, 0.9]},
+        }
+        result = self._make_result(
+            replicate_count=3,
+            per_replicate_scores=per_rep,
+            variant_ids=["a"],
+        )
+        md = ExperimentReportGenerator.generate_variant_report("a", result)
+        assert "Score 95% CI" in md
+        assert "Replicates/task" in md
+
+    def test_variant_report_no_ci_when_replicate_count_is_one(self):
+        result = self._make_result(replicate_count=1, variant_ids=["a"])
+        md = ExperimentReportGenerator.generate_variant_report("a", result)
+        assert "Score 95% CI" not in md

@@ -102,7 +102,7 @@ class TestScalarLineage:
             experiment_id="test",
             variants=[ExperimentVariant(variant_id="v1")],
         )
-        _resolved, lineage = resolve_task_for_variant(
+        _resolved, lineage, _ = resolve_task_for_variant(
             self._no_scalars_default_experiment(), task, experiment, experiment.variants[0]
         )
         assert lineage["max_iterations"].source == "task"
@@ -124,7 +124,7 @@ class TestScalarLineage:
             defaults=ExperimentDefaults(max_iterations=5, task_timeout=300),
             variants=[ExperimentVariant(variant_id="v1", max_iterations=2)],
         )
-        _resolved, lineage = resolve_task_for_variant(
+        _resolved, lineage, _ = resolve_task_for_variant(
             self._no_scalars_default_experiment(), task, experiment, experiment.variants[0]
         )
         assert lineage["max_iterations"].source == "variant"
@@ -148,7 +148,7 @@ class TestScalarLineage:
             experiment_id="test",
             variants=[ExperimentVariant(variant_id="v1")],
         )
-        _resolved, lineage = resolve_task_for_variant(
+        _resolved, lineage, _ = resolve_task_for_variant(
             self._no_scalars_default_experiment(), task, experiment, experiment.variants[0]
         )
         assert "max_iterations" not in lineage
@@ -176,7 +176,7 @@ class TestScalarLineage:
             experiment_id="test",
             variants=[ExperimentVariant(variant_id="v1")],
         )
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.task_timeout is None
         assert lineage["task_timeout"].source == "task"
         assert lineage["task_timeout"].value is None
@@ -201,7 +201,7 @@ class TestScalarLineage:
             experiment_id="test",
             variants=[ExperimentVariant(variant_id="v1")],
         )
-        _resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        _resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert lineage["max_iterations"].source == "default"
         assert lineage["max_iterations"].value == 5
         assert lineage["turn_timeout"].source == "default"
@@ -228,7 +228,7 @@ class TestScalarLineage:
             experiment_id="test",
             variants=[ExperimentVariant(variant_id="v1")],
         )
-        _resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        _resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert lineage["max_iterations"].source == "task"
         assert lineage["max_iterations"].value == 10
 
@@ -250,7 +250,7 @@ class TestResolveTaskForVariantLineage:
             experiment_id="test",
             variants=[ExperimentVariant(variant_id="v1")],
         )
-        _resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        _resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert lineage["agent.type"].source == "default"
         assert lineage["agent.permission_mode"].source == "default"
 
@@ -272,7 +272,7 @@ class TestResolveTaskForVariantLineage:
             defaults=ExperimentDefaults(agent={"model": "base-model"}),
             variants=[ExperimentVariant(variant_id="v1", agent={"model": "variant-model"})],
         )
-        _resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        _resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert lineage["agent.type"].source == "task"
         assert lineage["agent.permission_mode"].source == "task"
         assert lineage["agent.model"].source == "variant"

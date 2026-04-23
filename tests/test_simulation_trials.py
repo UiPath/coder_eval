@@ -141,7 +141,7 @@ class TestSimulationMergeAcrossLayers:
             defaults=ExperimentDefaults(simulation={"enabled": True, "persona": "exp user", "goal": "exp goal"}),
             variants=[ExperimentVariant(variant_id="v1")],
         )
-        resolved, lineage = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
         assert resolved.simulation is not None
         assert resolved.simulation.enabled is True
         assert resolved.simulation.persona == "exp user"
@@ -158,7 +158,7 @@ class TestSimulationMergeAcrossLayers:
             experiment_id="test",
             variants=[ExperimentVariant(variant_id="terse", simulation={"persona": "terse user"})],
         )
-        resolved, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
+        resolved, *_ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
         assert resolved.simulation is not None
         # Variant overrode persona, everything else comes from task
         assert resolved.simulation.persona == "terse user"
@@ -170,7 +170,7 @@ class TestSimulationMergeAcrossLayers:
         task = TaskDefinition(**_base_task_kwargs())
         default_exp = self._default_exp()
         exp = ExperimentDefinition(experiment_id="test", variants=[ExperimentVariant(variant_id="v1")])
-        resolved, lineage = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
         assert resolved.simulation is None
         assert "simulation" not in lineage
 
@@ -187,7 +187,7 @@ class TestSimulationMergeAcrossLayers:
                 )
             ],
         )
-        resolved, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
+        resolved, *_ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
         assert resolved.simulation is not None
         assert resolved.simulation.enabled is True
 

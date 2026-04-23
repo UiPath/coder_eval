@@ -60,7 +60,7 @@ async def run_batch(
 
     async def run_single(rt: ResolvedTask) -> TaskResult:
         """Run a single resolved task with semaphore for concurrency control."""
-        stream_label = f"{rt.variant_id}/{rt.task.task_id}"
+        stream_label = f"{rt.variant_id}/{rt.task.task_id}/{rt.replicate_index:02d}"
         task_callback = stream_callback_factory(stream_label) if stream_callback_factory else None
         async with semaphore:
             try:
@@ -84,6 +84,7 @@ async def run_batch(
                     duration=result.duration_seconds,
                     suite_id=rt.task.suite_id,
                     row_id=rt.task.row_id,
+                    replicate_index=rt.replicate_index,
                 )
             except (KeyboardInterrupt, SystemExit):
                 raise
@@ -95,6 +96,7 @@ async def run_batch(
                     variant_id=rt.variant_id,
                     suite_id=rt.task.suite_id,
                     row_id=rt.task.row_id,
+                    replicate_index=rt.replicate_index,
                 )
             _safe_notify(on_task_complete, tr)
             return tr
@@ -119,6 +121,7 @@ async def run_batch(
                     variant_id=rt.variant_id,
                     suite_id=rt.task.suite_id,
                     row_id=rt.task.row_id,
+                    replicate_index=rt.replicate_index,
                 )
             )
         else:
@@ -147,6 +150,7 @@ def _create_error_task_result(
     variant_id: str,
     suite_id: str | None = None,
     row_id: str | None = None,
+    replicate_index: int = 0,
 ) -> TaskResult:
     """Create a TaskResult for a failed task.
 
@@ -157,6 +161,7 @@ def _create_error_task_result(
         variant_id: Experiment variant ID.
         suite_id: Parent suite id (dataset expansion).
         row_id: Row id within the suite.
+        replicate_index: Replicate index from ResolvedTask.
 
     Returns:
         TaskResult with error information.
@@ -180,6 +185,7 @@ def _create_error_task_result(
         duration=0.0,
         suite_id=suite_id,
         row_id=row_id,
+        replicate_index=replicate_index,
     )
 
 

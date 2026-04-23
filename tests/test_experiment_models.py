@@ -9,11 +9,14 @@ from coder_eval.models import (
     ExperimentDefaults,
     ExperimentDefinition,
     ExperimentVariant,
+    FailedRowSummary,
+    FinalStatus,
     PromptPrefix,
     PromptSuffix,
     ResolvedTask,
     TaskDefinition,
     TaskResult,
+    VariantResult,
 )
 
 
@@ -256,3 +259,83 @@ class TestTypedAnnotations:
 
         hints = typing.get_type_hints(TaskResult)
         assert hints["result"].__name__ == "EvaluationResult", f"Expected EvaluationResult, got {hints['result']}"
+
+
+class TestExperimentVariantRepeats:
+    def test_repeats_default_none(self):
+        variant = ExperimentVariant(variant_id="v")
+        assert variant.repeats is None
+
+    def test_repeats_accepts_positive(self):
+        assert ExperimentVariant(variant_id="v", repeats=3).repeats == 3
+
+    def test_repeats_rejects_zero(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ExperimentVariant(variant_id="v", repeats=0)
+
+    def test_repeats_rejects_negative(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ExperimentVariant(variant_id="v", repeats=-1)
+
+
+class TestExperimentDefaultsRepeats:
+    def test_repeats_default_none(self):
+        assert ExperimentDefaults().repeats is None
+
+    def test_repeats_accepts_positive(self):
+        assert ExperimentDefaults(repeats=5).repeats == 5
+
+    def test_repeats_rejects_zero(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ExperimentDefaults(repeats=0)
+
+    def test_repeats_rejects_negative(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ExperimentDefaults(repeats=-2)
+
+
+class TestReplicateIndexDefaults:
+    def _make_eval_result(self) -> EvaluationResult:
+        return EvaluationResult(
+            task_id="t",
+            task_description="d",
+            variant_id="v",
+            agent_type="claude-code",
+            started_at=datetime.now(),
+            final_status="SUCCESS",
+            iteration_count=1,
+            environment_info={},
+        )
+
+    def test_task_result_replicate_index_default(self):
+        er = self._make_eval_result()
+        tr = TaskResult(task_id="t", variant_id="v", result=er, duration=0.0)
+        assert tr.replicate_index == 0
+
+    def test_variant_result_replicate_fields_default(self):
+        vr = VariantResult(
+            variant_id="v",
+            task_id="t",
+            weighted_score=1.0,
+            final_status=FinalStatus.SUCCESS,
+            duration_seconds=0.0,
+        )
+        assert vr.replicate_index == 0
+        assert vr.replicate_count == 1
+
+    def test_failed_row_summary_replicate_index_default(self):
+        frs = FailedRowSummary(
+            row_id="r",
+            task_id="s/r",
+            final_status=FinalStatus.FAILURE,
+            task_json_relpath="v/s/r/00/task.json",
+        )
+        assert frs.replicate_index == 0

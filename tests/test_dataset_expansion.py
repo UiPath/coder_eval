@@ -406,3 +406,107 @@ class TestErrorPathPropagation:
         )
         assert tr.suite_id is None
         assert tr.row_id is None
+
+
+class TestDatasetRepeatsFanout:
+    def _make_experiment(self, repeats: int | None = None) -> ExperimentDefinition:
+        variant_kwargs = {}
+        if repeats is not None:
+            variant_kwargs["repeats"] = repeats
+        return ExperimentDefinition(
+            experiment_id="default",
+            defaults=ExperimentDefaults(agent={"type": "claude-code", "permission_mode": "acceptEdits"}),
+            variants=[
+                ExperimentVariant(variant_id="v1", **variant_kwargs),
+                ExperimentVariant(variant_id="v2", **variant_kwargs),
+            ],
+        )
+
+    def test_rows_fan_out_times_repeats(self, tmp_path: Path) -> None:
+        """2 rows x 2 variants x repeats=3 = 12 ResolvedTasks."""
+        from coder_eval.orchestration.config import BatchRunConfig
+        from coder_eval.orchestration.experiment import resolve_all_tasks
+
+        task = _make_task_with_dataset(
+            rows=[
+                {"id": "r1", "prompt": "p1", "expected": "e1"},
+                {"id": "r2", "prompt": "p2", "expected": "e2"},
+            ]
+        )
+        task_file = tmp_path / "task.yaml"
+        import yaml as _yaml
+
+        task_file.write_text(_yaml.dump(task.model_dump(mode="json")))
+
+        experiment = self._make_experiment(repeats=3)
+        default_exp = ExperimentDefinition(
+            experiment_id="default",
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+        config = BatchRunConfig(run_dir=tmp_path / "runs")
+
+        resolved = resolve_all_tasks([task_file], experiment, default_exp, config)
+        assert len(resolved) == 12
+
+        # Each (row, variant) pair has replicate_index 0, 1, 2
+        for vid in ("v1", "v2"):
+            for row_id in ("r1", "r2"):
+                task_id = f"suite/{row_id}"
+                indices = sorted(
+                    rt.replicate_index for rt in resolved if rt.variant_id == vid and rt.task.task_id == task_id
+                )
+                assert indices == [0, 1, 2]
+
+    def test_run_dir_reflects_replicate_index(self, tmp_path: Path) -> None:
+        from coder_eval.orchestration.config import BatchRunConfig
+        from coder_eval.orchestration.experiment import resolve_all_tasks
+
+        task = _make_task_with_dataset(rows=[{"id": "r1", "prompt": "p1", "expected": "e1"}])
+        task_file = tmp_path / "task.yaml"
+        import yaml as _yaml
+
+        task_file.write_text(_yaml.dump(task.model_dump(mode="json")))
+
+        experiment = self._make_experiment(repeats=3)
+        default_exp = ExperimentDefinition(
+            experiment_id="default",
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+        config = BatchRunConfig(run_dir=tmp_path / "runs")
+        resolved = resolve_all_tasks([task_file], experiment, default_exp, config)
+
+        subdirs = sorted(rt.run_dir.name for rt in resolved if rt.variant_id == "v1")
+        assert subdirs == ["00", "01", "02"]
+
+    def test_duplicate_detection_still_catches_true_dupes(self, tmp_path: Path) -> None:
+        """Same task YAML loaded twice still raises on duplicate task IDs."""
+        from coder_eval.orchestration.config import BatchRunConfig
+        from coder_eval.orchestration.experiment import resolve_all_tasks
+
+        data = {
+            "task_id": "plain-task",
+            "description": "d",
+            "initial_prompt": "p",
+            "sandbox": {"driver": "tempdir"},
+            "success_criteria": [{"type": "file_exists", "path": "f.py", "description": "d"}],
+        }
+        import yaml as _yaml
+
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text(_yaml.dump(data))
+        task_file2 = tmp_path / "task2.yaml"
+        task_file2.write_text(_yaml.dump(data))
+
+        experiment = ExperimentDefinition(
+            experiment_id="default",
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}),
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+        config = BatchRunConfig(run_dir=tmp_path / "runs")
+
+        import pytest
+
+        with pytest.raises(ValueError, match="Duplicate task IDs"):
+            resolve_all_tasks([task_file, task_file2], experiment, experiment, config)

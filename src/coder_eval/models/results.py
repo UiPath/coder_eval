@@ -322,6 +322,11 @@ class FailedRowSummary(BaseModel):
     task_json_relpath: str = Field(
         description="Path to the row's task.json, relative to run_dir (<variant>/<task_id>/<NN>/task.json)."
     )
+    replicate_index: int = Field(
+        default=0,
+        ge=0,
+        description="Replicate index of this failed row (0 when repeats disabled).",
+    )
 
 
 class ClassLabelStats(BaseModel):

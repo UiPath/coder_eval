@@ -422,7 +422,7 @@ runs/
 │   │   ├── variant.md                 # Variant aggregate report
 │   │   ├── variant.json               # Variant aggregate data
 │   │   └── <task_id>/                 # Per-task directory
-│   │       └── 00/                    # Replicate index (00, 01, ...)
+│   │       └── 00/                    # Replicate index — one dir per replicate (set via `repeats:` or --repeats)
 │   │           ├── task.json          # Evaluation result
 │   │           ├── task.log           # Execution log
 │   │           ├── snapshots/         # Iteration snapshots (if enabled)
@@ -430,6 +430,10 @@ runs/
 │   └── ...
 └── latest -> 2026-02-26_14-30-00/     # Symlink to most recent run
 ```
+
+### Replicates
+
+Run the same (task, variant) N times via `repeats:` in an experiment YAML or `--repeats N` on the CLI. Per-replicate results live in separate `NN/` directories; reports aggregate them with bootstrap confidence intervals and (for 2-variant experiments) a paired mean-difference test. Defaults to 1 (no repetition).
 
 ## Architecture
 

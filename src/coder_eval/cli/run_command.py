@@ -205,6 +205,12 @@ def run_command(
         help="For dataset-backed tasks, use only the first N rows. Lets you smoke-test datasets cheaply.",
         min=1,
     ),
+    repeats: int | None = typer.Option(
+        None,
+        "--repeats",
+        help="Run each (task, variant) N times. Overrides experiment/variant `repeats:`. Must be >=1.",
+        min=1,
+    ),
 ) -> None:
     """Run evaluation tasks (optionally in parallel).
 
@@ -307,6 +313,7 @@ def run_command(
                 ignore_patterns_list,
                 experiment_path=resolved_experiment,
                 max_rows=sample,
+                repeats=repeats,
             )
         )
     except KeyboardInterrupt:
@@ -336,6 +343,7 @@ async def _run_all_tasks(
     ignore_patterns: list[str] | None = None,
     experiment_path: Path | None = None,
     max_rows: int | None = None,
+    repeats: int | None = None,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -395,6 +403,7 @@ async def _run_all_tasks(
         task_timeout=task_timeout,
         turn_timeout=turn_timeout,
         max_rows=max_rows,
+        repeats=repeats,
     )
 
     # Always run through experiment layer (defaults to experiments/default.yaml)

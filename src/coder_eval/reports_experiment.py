@@ -15,17 +15,24 @@ from coder_eval.models import (
 from coder_eval.path_utils import replicate_subdir_name
 from coder_eval.reports import resolve_agent_settings
 from coder_eval.reports_stats import (
+    bootstrap_mean_ci,
+    cohens_d,
     describe_prompt_config,
     fmt_mean_sd,
     fmt_p,
     load_variant_eval_results,
     mean,
+    paired_bootstrap_diff_ci,
     stddev,
     welch_t_test,
+    wilson_interval,
 )
 
 
 logger = logging.getLogger(__name__)
+
+# Default pass_threshold from BaseSuccessCriterion — used for Wilson pass-rate in replicate stats.
+_REPLICATE_PASS_THRESHOLD = 0.9
 
 
 # ---------------------------------------------------------------------------
@@ -114,15 +121,15 @@ class ExperimentReportGenerator:
             "",
             "## Variant Comparison",
             "",
-            "| Variant | Score | Status | Duration | Tokens |",
-            "|---------|-------|--------|----------|--------|",
+            "| Variant | Score | Status | Avg Duration | Tokens |",
+            "|---------|-------|--------|--------------|--------|",
         ]
 
         for v in summary.variant_results:
             tokens_str = f"{v.total_tokens:,}" if v.total_tokens is not None else "N/A"
+            avg_dur = v.duration_seconds / v.replicate_count
             lines.append(
-                f"| {v.variant_id} | {v.weighted_score:.3f} | {v.final_status}"
-                + f" | {v.duration_seconds:.1f}s | {tokens_str} |"
+                f"| {v.variant_id} | {v.weighted_score:.3f} | {v.final_status}" + f" | {avg_dur:.1f}s | {tokens_str} |"
             )
 
         return "\n".join(lines)
@@ -176,7 +183,7 @@ class ExperimentReportGenerator:
         for ts in result.task_summaries:
             for vr in ts.variant_results:
                 variant_scores[vr.variant_id].append(vr.weighted_score)
-                variant_durations[vr.variant_id].append(vr.duration_seconds)
+                variant_durations[vr.variant_id].append(vr.duration_seconds / vr.replicate_count)
                 if vr.total_tokens is not None:
                     variant_tokens[vr.variant_id].append(float(vr.total_tokens))
                 if vr.iteration_count is not None:
@@ -255,7 +262,7 @@ class ExperimentReportGenerator:
         lines.append(row + " |")
 
         # Row: Duration
-        row = "| Duration (s)"
+        row = "| Avg Duration (s)"
         for vid in result.variant_ids:
             row += f" | {fmt_mean_sd(variant_durations[vid], '.1f')}"
         if show_p_values:
@@ -293,6 +300,16 @@ class ExperimentReportGenerator:
                 row += f" | {fmt_p(p)}"
             lines.append(row + " |")
 
+        # Row: Replicates/task (if any variant ran >1 replicate)
+        if any(result.variant_aggregates[vid].replicate_count > 1 for vid in result.variant_ids):
+            row = "| Replicates/task"
+            for vid in result.variant_ids:
+                agg = result.variant_aggregates[vid]
+                row += f" | {agg.replicate_count}"
+            if show_p_values:
+                row += " | —"
+            lines.append(row + " |")
+
         # ── Win/loss/tie analysis ──
         if result.task_summaries:
             lines.extend(["", "## Win Rates", ""])
@@ -311,9 +328,13 @@ class ExperimentReportGenerator:
                 lines.append(f"- **Ties**: {tie_count}/{total_tasks} tasks ({tie_count / total_tasks * 100:.0f}%)")
 
             # ── Per-task detailed comparison ──
+            show_reps = any(ts.replicate_count > 1 for ts in result.task_summaries)
             lines.extend(["", "## Per-Task Comparison", ""])
             header = "| Task | " + " | ".join(result.variant_ids) + " | Best | Spread |"
             sep = "|------|" + "|".join("------" for _ in result.variant_ids) + "|------|--------|"
+            if show_reps:
+                header += " Reps |"
+                sep += "------|"
             lines.append(header)
             lines.append(sep)
 
@@ -328,7 +349,10 @@ class ExperimentReportGenerator:
                     else:
                         cells.append("N/A")
                 best_str = f"{'TIE' if ts.is_tie else ts.best_variant}"
-                lines.append(f"| {ts.task_id} | " + " | ".join(cells) + f" | {best_str} | {ts.score_spread:.3f} |")
+                row = f"| {ts.task_id} | " + " | ".join(cells) + f" | {best_str} | {ts.score_spread:.3f} |"
+                if show_reps:
+                    row += f" {ts.replicate_count} |"
+                lines.append(row)
 
             # ── Highest divergence ──
             sorted_tasks = sorted(result.task_summaries, key=lambda t: t.score_spread, reverse=True)
@@ -336,6 +360,66 @@ class ExperimentReportGenerator:
                 lines.extend(["", "## Most Divergent Tasks", ""])
                 for ts in sorted_tasks[:5]:
                     lines.append(f"- **{ts.task_id}**: spread={ts.score_spread:.3f}, best={ts.best_variant}")
+
+        # ── Replicate Statistics (only when any variant ran >1 replicate) ──
+        if any(ts.replicate_count > 1 for ts in result.task_summaries):
+            lines.extend(["", "## Replicate Statistics", ""])
+
+            # Per-variant bootstrap CI + Wilson pass-rate table
+            lines.append("| Variant | Replicates/task | Mean score | 95% CI | Pass-rate (Wilson 95%) |")
+            lines.append("|---------|-----------------|------------|--------|------------------------|")
+            for vid in result.variant_ids:
+                per_rep = result.per_replicate_scores.get(vid, {})
+                all_scores: list[float] = [s for scores in per_rep.values() for s in scores]
+                passes = sum(1 for s in all_scores if s >= _REPLICATE_PASS_THRESHOLD)
+                m, lo, hi = bootstrap_mean_ci(all_scores)
+                wlo, whi = wilson_interval(passes, len(all_scores))
+                agg = result.variant_aggregates.get(vid)
+                rep_count = agg.replicate_count if agg else 1
+                lines.append(
+                    f"| {vid} | {rep_count} | {m:.3f} | [{lo:.3f}, {hi:.3f}]"
+                    f" | {passes}/{len(all_scores)} [{wlo:.2f}, {whi:.2f}] |"
+                )
+
+            # Paired comparison for 2-variant experiments
+            if len(result.variant_ids) == 2:
+                vid_a, vid_b = result.variant_ids[0], result.variant_ids[1]
+                per_rep_a = result.per_replicate_scores.get(vid_a, {})
+                per_rep_b = result.per_replicate_scores.get(vid_b, {})
+                common_tasks = sorted(set(per_rep_a) & set(per_rep_b))
+                a_scores: list[float] = []
+                b_scores: list[float] = []
+                skipped_tasks: list[str] = []
+                for task_id in common_tasks:
+                    rep_a = per_rep_a[task_id]
+                    rep_b = per_rep_b[task_id]
+                    if len(rep_a) == len(rep_b):
+                        a_scores.extend(rep_a)
+                        b_scores.extend(rep_b)
+                    else:
+                        skipped_tasks.append(task_id)
+                diff = paired_bootstrap_diff_ci(a_scores, b_scores)
+                if diff is not None:
+                    mean_diff, d_lo, d_hi = diff
+                    d_val = cohens_d(a_scores, b_scores)
+                    d_str = f"{d_val:.2f}" if d_val is not None else "n/a"
+                    suffix = (
+                        f" ({len(skipped_tasks)} task(s) excluded: unequal replicate counts)" if skipped_tasks else ""
+                    )
+                    lines.extend(
+                        [
+                            "",
+                            f"**Paired mean diff ({vid_a} - {vid_b})**: {mean_diff:+.3f}"
+                            f" [95% CI {d_lo:+.3f}, {d_hi:+.3f}], Cohen's d = {d_str}{suffix}",
+                        ]
+                    )
+                else:
+                    lines.extend(
+                        [
+                            "",
+                            f"*Paired statistics skipped — unequal replicate counts between {vid_a} and {vid_b}.*",
+                        ]
+                    )
 
         return "\n".join(lines)
 
@@ -385,7 +469,7 @@ class ExperimentReportGenerator:
             vr for ts in result.task_summaries for vr in ts.variant_results if vr.variant_id == variant_id
         ]
         scores = [vr.weighted_score for vr in variant_results]
-        durations = [vr.duration_seconds for vr in variant_results]
+        durations = [vr.duration_seconds / vr.replicate_count for vr in variant_results]
         iterations = [float(vr.iteration_count) for vr in variant_results if vr.iteration_count is not None]
 
         if scores and len(scores) >= 2:
@@ -394,12 +478,23 @@ class ExperimentReportGenerator:
             lines.append(f"- **Duration Stddev**: {stddev(durations):.1f}s")
         if iterations:
             lines.append(f"- **Avg Iterations**: {mean(iterations):.1f}")
+        if agg.replicate_count > 1:
+            per_rep = result.per_replicate_scores.get(variant_id, {})
+            all_rep_scores: list[float] = [s for rep_scores in per_rep.values() for s in rep_scores]
+            if all_rep_scores:
+                _, lo, hi = bootstrap_mean_ci(all_rep_scores)
+                lines.append(f"- **Replicates/task**: {agg.replicate_count}")
+                lines.append(f"- **Score 95% CI**: [{lo:.3f}, {hi:.3f}] (bootstrap over {len(all_rep_scores)} samples)")
 
         # Task Details table
         has_similarity = any(vr.reference_similarity is not None for vr in variant_results)
+        has_reps = any(vr.replicate_count > 1 for vr in variant_results)
 
-        header = "| Task | Score | Status | Duration | Iterations |"
-        separator = "|------|-------|--------|----------|------------|"
+        header = "| Task | Score | Status | Avg Duration | Iterations |"
+        separator = "|------|-------|--------|--------------|------------|"
+        if has_reps:
+            header += " Reps |"
+            separator += "------|"
         if has_similarity:
             header += " Similarity |"
             separator += "------------|"
@@ -410,10 +505,13 @@ class ExperimentReportGenerator:
             for vr in ts.variant_results:
                 if vr.variant_id == variant_id:
                     iters_str = str(vr.iteration_count) if vr.iteration_count is not None else "N/A"
+                    avg_duration = vr.duration_seconds / vr.replicate_count
                     row = (
                         f"| {ts.task_id} | {vr.weighted_score:.3f} | {vr.final_status}"
-                        f" | {vr.duration_seconds:.1f}s | {iters_str} |"
+                        f" | {avg_duration:.1f}s | {iters_str} |"
                     )
+                    if has_reps:
+                        row += f" {vr.replicate_count} |"
                     if has_similarity:
                         sim_str = f"{vr.reference_similarity:.3f}" if vr.reference_similarity is not None else "N/A"
                         row += f" {sim_str} |"
@@ -517,8 +615,7 @@ class ExperimentReportGenerator:
         }
         for summary in result.task_summaries:
             for vr in summary.variant_results:
-                # TODO: plumb replicate_index through VariantResult when repeats land.
-                rel_link = f"{vr.task_id}/{replicate_subdir_name(0)}/task.html"
+                rel_link = f"{vr.task_id}/{replicate_subdir_name(vr.replicate_index)}/task.html"
                 task_links_by_variant[vr.variant_id].append(
                     (vr.task_id, rel_link, vr.weighted_score, vr.final_status.value)
                 )

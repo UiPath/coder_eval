@@ -52,7 +52,7 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="variant1")],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent is not None
         assert resolved.agent.type == "claude-code"
         assert resolved.agent.permission_mode == "acceptEdits"
@@ -67,7 +67,7 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="variant1")],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.permission_mode == "bypassPermissions"
         assert lineage["agent.permission_mode"].source == "task"
 
@@ -76,7 +76,7 @@ class TestResolveTaskForVariant:
         default_exp = _make_default_experiment()
         task = _make_task(agent={"type": "claude-code", "model": "custom-model"})
         # When no --experiment is given, experiment == default_experiment
-        resolved, lineage = resolve_task_for_variant(default_exp, task, default_exp, default_exp.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, default_exp, default_exp.variants[0])
         assert resolved.agent.model == "custom-model"
         assert lineage["agent.model"].source == "task"
 
@@ -90,7 +90,7 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="variant1")],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.permission_mode == "acceptEdits"
         assert lineage["agent.permission_mode"].source == "task"
 
@@ -104,7 +104,7 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="variant1", agent={"model": "variant-model"})],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.model == "variant-model"
         assert lineage["agent.model"].source == "variant"
 
@@ -133,7 +133,7 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="opus", agent={"model": "claude-opus-4-20250514"})],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.type == "claude-code"
         assert resolved.agent.allowed_tools == ["Read", "Write", "Bash"]  # from task (layer 3)
         assert (
@@ -154,7 +154,7 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="limited", agent={"allowed_tools": ["Read", "Bash"]})],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.allowed_tools == ["Read", "Bash"]
 
     def test_disallowed_tools_from_experiment_defaults(self):
@@ -167,7 +167,7 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="variant1")],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.disallowed_tools == ["TodoWrite"]
         assert lineage["agent.disallowed_tools"].source == "experiment-defaults"
 
@@ -183,7 +183,7 @@ class TestResolveTaskForVariant:
             ],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.disallowed_tools == ["TodoWrite", "Agent"]
 
     def test_disallowed_tools_from_task_overrides_experiment(self):
@@ -196,7 +196,7 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="variant1")],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.disallowed_tools == ["Bash"]
         assert lineage["agent.disallowed_tools"].source == "task"
 
@@ -210,7 +210,7 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="fast", max_iterations=2, task_timeout=120)],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.max_iterations == 2  # variant wins
         assert resolved.task_timeout == 120  # variant wins
         assert lineage["max_iterations"].source == "variant"
@@ -225,7 +225,7 @@ class TestResolveTaskForVariant:
             variants=[ExperimentVariant(variant_id="variant1")],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.task_id == "my-task"
         assert resolved.description == "My test"
         assert len(resolved.success_criteria) == 1
@@ -248,7 +248,7 @@ class TestLLMReviewerFromExperimentDefaults:
             ),
             variants=[ExperimentVariant(variant_id="v1")],
         )
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.llm_reviewer.enabled is True
         assert resolved.llm_reviewer.prompt == "Review against skill Critical Rules."
         assert lineage["llm_reviewer"].source == "experiment-defaults"
@@ -264,7 +264,7 @@ class TestLLMReviewerFromExperimentDefaults:
             defaults=ExperimentDefaults(llm_reviewer={"enabled": True, "prompt": "experiment-level"}),
             variants=[ExperimentVariant(variant_id="v1")],
         )
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.llm_reviewer.prompt == "task-specific"
         # Task's explicit value wins — no experiment-defaults lineage entry.
         assert "llm_reviewer" not in lineage or lineage["llm_reviewer"].source != "experiment-defaults"
@@ -291,7 +291,7 @@ class TestDefaultExperimentScalarOverrides:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.max_iterations == 5
 
     def test_default_experiment_task_timeout_applied(self):
@@ -308,7 +308,7 @@ class TestDefaultExperimentScalarOverrides:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.task_timeout == 600
 
     def test_default_experiment_turn_timeout_applied(self):
@@ -325,7 +325,7 @@ class TestDefaultExperimentScalarOverrides:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.turn_timeout == 60
 
     def test_experiment_base_overrides_default_experiment_scalars(self):
@@ -343,7 +343,7 @@ class TestDefaultExperimentScalarOverrides:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.max_iterations == 10
 
     def test_explicit_task_scalar_not_overwritten_by_default_experiment(self):
@@ -361,7 +361,7 @@ class TestDefaultExperimentScalarOverrides:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.max_iterations == 7
 
     def test_explicit_task_timeout_not_overwritten_by_default_experiment(self):
@@ -378,7 +378,7 @@ class TestDefaultExperimentScalarOverrides:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.task_timeout == 900
 
     def test_variant_overrides_default_experiment_scalars(self):
@@ -395,7 +395,7 @@ class TestDefaultExperimentScalarOverrides:
             variants=[ExperimentVariant(variant_id="v1", max_iterations=2)],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.max_iterations == 2
 
 
@@ -420,7 +420,7 @@ class TestTurnTimeoutResolution:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.turn_timeout == 300, f"Expected 300, got {resolved.agent.turn_timeout}"
 
     def test_default_yaml_turn_timeout_preserved(self):
@@ -437,7 +437,7 @@ class TestTurnTimeoutResolution:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.turn_timeout == expected_timeout
 
     def test_scalar_turn_timeout_overrides_agent_dict(self):
@@ -456,7 +456,7 @@ class TestTurnTimeoutResolution:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.agent.turn_timeout == 400
 
 
@@ -484,7 +484,7 @@ class TestTemplateSourcesOverlay:
             ],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.sandbox.template_sources is not None
         paths = [s.path for s in resolved.sandbox.template_sources]
         assert paths == ["/task", "/base", "/variant"]
@@ -498,7 +498,7 @@ class TestTemplateSourcesOverlay:
             variants=[ExperimentVariant(variant_id="bare")],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.sandbox.template_sources is None
 
     def test_repo_source_in_variant_after_task_sources_rejected(self):
@@ -543,7 +543,7 @@ class TestPostRunMerge:
             variants=[ExperimentVariant(variant_id="default")],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert [p.command for p in resolved.post_run] == ["echo task-1", "echo task-2", "echo cleanup"]
 
     def test_experiment_defaults_only(self):
@@ -556,7 +556,7 @@ class TestPostRunMerge:
             variants=[ExperimentVariant(variant_id="default")],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert [p.command for p in resolved.post_run] == ["echo cleanup"]
 
     def test_no_post_run_anywhere(self):
@@ -568,7 +568,7 @@ class TestPostRunMerge:
             variants=[ExperimentVariant(variant_id="default")],
         )
 
-        resolved, _lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.post_run == []
 
 
@@ -588,7 +588,7 @@ class TestPromptMutations:
             ],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
         assert resolved.initial_prompt == "Think step by step.\n\nDo something"
 
@@ -605,7 +605,7 @@ class TestPromptMutations:
             ],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
         assert resolved.initial_prompt == "Do something\n\nInclude type hints."
 
@@ -622,7 +622,7 @@ class TestPromptMutations:
             ],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
         assert resolved.initial_prompt == "Write a minimal a Python file"
 
@@ -639,7 +639,7 @@ class TestPromptMutations:
             ],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
         assert resolved.initial_prompt == "Create a Rust file"
 
@@ -659,7 +659,7 @@ class TestPromptMutations:
             ],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
         # defaults prefix first, then variant suffix
         assert resolved.initial_prompt == "DEFAULT\n\nbase\n\nVARIANT"
@@ -672,7 +672,7 @@ class TestPromptMutations:
             variants=[ExperimentVariant(variant_id="override", initial_prompt="completely new prompt")],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
         assert resolved.initial_prompt == "completely new prompt"
 
@@ -687,7 +687,7 @@ class TestPromptMutations:
             variants=[ExperimentVariant(variant_id="override", initial_prompt="replacement")],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
         assert resolved.initial_prompt == "replacement"
         assert "THIS SHOULD NOT APPEAR" not in resolved.initial_prompt
@@ -700,7 +700,7 @@ class TestPromptMutations:
             variants=[ExperimentVariant(variant_id="baseline")],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
         assert resolved.initial_prompt == "unchanged prompt"
 
@@ -721,7 +721,7 @@ class TestPromptMutations:
             ],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
         # prefix -> "STEP1: Create a file" -> replace -> "STEP1: Create a script"
         # -> suffix -> "STEP1: Create a script. STEP3"
@@ -740,7 +740,7 @@ class TestPromptMutations:
             ],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
         assert "initial_prompt" in lineage
         assert lineage["initial_prompt"].source == "mutation"
@@ -754,7 +754,7 @@ class TestPromptMutations:
             variants=[ExperimentVariant(variant_id="override", initial_prompt="new")],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
         assert "initial_prompt" in lineage
         assert lineage["initial_prompt"].source == "variant"
@@ -772,6 +772,121 @@ class TestPromptMutations:
             ],
         )
 
-        resolved, lineage = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         _apply_prompt_overrides(resolved, experiment, experiment.variants[0], lineage)
         assert resolved.initial_prompt == "version N build N"
+
+
+class TestRepeatsPrecedence:
+    def _make_default_experiment(self) -> ExperimentDefinition:
+        return ExperimentDefinition(
+            experiment_id="default",
+            defaults=ExperimentDefaults(agent={"type": "claude-code", "permission_mode": "acceptEdits"}),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+
+    def _make_task(self) -> TaskDefinition:
+        return TaskDefinition(
+            task_id="t1",
+            description="Test",
+            initial_prompt="Do something",
+            sandbox={"driver": "tempdir"},
+            success_criteria=[{"type": "file_exists", "path": "f.py", "description": "d"}],
+        )
+
+    def test_default_when_nothing_set(self, tmp_path):
+        from coder_eval.orchestration.config import BatchRunConfig
+
+        default_exp = self._make_default_experiment()
+        task = self._make_task()
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+        config = BatchRunConfig(run_dir=tmp_path)
+        _resolved, lineage, effective_repeats = resolve_task_for_variant(
+            default_exp, task, experiment, experiment.variants[0], config
+        )
+        assert effective_repeats == 1
+        assert lineage["repeats"].source == "default"
+
+    def test_experiment_defaults_wins_over_default(self, tmp_path):
+        from coder_eval.orchestration.config import BatchRunConfig
+
+        default_exp = self._make_default_experiment()
+        task = self._make_task()
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            defaults=ExperimentDefaults(repeats=2),
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+        config = BatchRunConfig(run_dir=tmp_path)
+        _resolved, lineage, effective_repeats = resolve_task_for_variant(
+            default_exp, task, experiment, experiment.variants[0], config
+        )
+        assert effective_repeats == 2
+        assert lineage["repeats"].source == "experiment-defaults"
+
+    def test_variant_wins_over_experiment_defaults(self, tmp_path):
+        from coder_eval.orchestration.config import BatchRunConfig
+
+        default_exp = self._make_default_experiment()
+        task = self._make_task()
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            defaults=ExperimentDefaults(repeats=2),
+            variants=[ExperimentVariant(variant_id="v1", repeats=5)],
+        )
+        config = BatchRunConfig(run_dir=tmp_path)
+        _resolved, lineage, effective_repeats = resolve_task_for_variant(
+            default_exp, task, experiment, experiment.variants[0], config
+        )
+        assert effective_repeats == 5
+        assert lineage["repeats"].source == "variant"
+
+    def test_cli_wins_over_variant(self, tmp_path):
+        from coder_eval.orchestration.config import BatchRunConfig
+
+        default_exp = self._make_default_experiment()
+        task = self._make_task()
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="v1", repeats=5)],
+        )
+        config = BatchRunConfig(run_dir=tmp_path, repeats=1)
+        _resolved, lineage, effective_repeats = resolve_task_for_variant(
+            default_exp, task, experiment, experiment.variants[0], config
+        )
+        assert effective_repeats == 1
+        assert lineage["repeats"].source == "cli"
+
+    def test_lineage_records_source(self, tmp_path):
+        from coder_eval.orchestration.config import BatchRunConfig
+
+        default_exp = self._make_default_experiment()
+        task = self._make_task()
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            defaults=ExperimentDefaults(repeats=3),
+            variants=[ExperimentVariant(variant_id="v1", repeats=7)],
+        )
+        config = BatchRunConfig(run_dir=tmp_path, repeats=2)
+        _resolved, lineage, effective_repeats = resolve_task_for_variant(
+            default_exp, task, experiment, experiment.variants[0], config
+        )
+        assert lineage["repeats"].source == "cli"
+        assert lineage["repeats"].value == 2
+        assert effective_repeats == 2
+
+    def test_rejects_repeats_over_99(self, tmp_path):
+        from coder_eval.orchestration.config import BatchRunConfig
+
+        default_exp = self._make_default_experiment()
+        task = self._make_task()
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+        config = BatchRunConfig(run_dir=tmp_path, repeats=100)
+        with pytest.raises(ValueError, match="repeats must be <= 99"):
+            resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0], config)

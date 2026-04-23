@@ -50,6 +50,7 @@ def _make_row(
     criteria: list[tuple[str, float, str | None]],
     variant_id: str = "v1",
     error_message: str | None = None,
+    replicate_index: int = 0,
 ) -> TaskResult:
     task_id = f"{suite_id}/{row_id}"
     return TaskResult(
@@ -58,6 +59,7 @@ def _make_row(
         duration=1.0,
         suite_id=suite_id,
         row_id=row_id,
+        replicate_index=replicate_index,
         result=_make_result(
             task_id=task_id,
             final_status=final_status,
@@ -434,3 +436,43 @@ class TestRenderSuiteMarkdown:
         rollup = _compute_suite_rollup("s", "v1", rows, tmp_path)
         md = _render_suite_markdown(rollup)
         assert "Average weighted score" not in md
+
+
+class TestReplicateIndexInSuiteRollup:
+    def test_failed_row_summary_carries_replicate_index(self, tmp_path: Path) -> None:
+        rows = [
+            _make_row(
+                suite_id="s",
+                row_id="r1",
+                final_status=FinalStatus.FAILURE,
+                weighted_score=0.0,
+                criteria=[("file_exists", 0.0, None)],
+                replicate_index=2,
+            ),
+            _make_row(
+                suite_id="s",
+                row_id="r2",
+                final_status=FinalStatus.FAILURE,
+                weighted_score=0.0,
+                criteria=[("file_exists", 0.0, None)],
+                replicate_index=0,
+            ),
+        ]
+        rollup = _compute_suite_rollup("s", "v1", rows, tmp_path)
+        by_row = {s.row_id: s for s in rollup.failed_samples}
+        assert by_row["r1"].replicate_index == 2
+        assert by_row["r2"].replicate_index == 0
+
+    def test_task_json_relpath_uses_replicate_index(self, tmp_path: Path) -> None:
+        rows = [
+            _make_row(
+                suite_id="s",
+                row_id="r1",
+                final_status=FinalStatus.FAILURE,
+                weighted_score=0.0,
+                criteria=[("file_exists", 0.0, None)],
+                replicate_index=3,
+            ),
+        ]
+        rollup = _compute_suite_rollup("s", "v1", rows, tmp_path)
+        assert rollup.failed_samples[0].task_json_relpath == "v1/s/r1/03/task.json"

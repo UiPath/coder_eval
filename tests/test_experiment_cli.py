@@ -60,3 +60,23 @@ class TestExperimentCLI:
             assert result.name == "model-comparison.yaml"
         finally:
             os.chdir(original_cwd)
+
+
+class TestRepeatsFlag:
+    def test_repeats_flag_exists(self):
+        """--repeats flag should appear in run --help."""
+        result = runner.invoke(app, ["run", "--help"])
+        assert "--repeats" in _strip_ansi(result.output)
+
+    def test_repeats_flag_rejects_zero(self, tmp_path: Path):
+        """--repeats 0 should fail validation (min=1)."""
+        bad_task = tmp_path / "no.yaml"
+        result = runner.invoke(app, ["run", str(bad_task), "--repeats", "0"])
+        assert result.exit_code != 0
+        out = _strip_ansi(result.output)
+        assert "repeats" in out.lower() or "invalid" in out.lower()
+
+    def test_repeats_flag_in_help(self):
+        """--repeats flag description should mention replicates."""
+        result = runner.invoke(app, ["run", "--help"])
+        assert "--repeats" in _strip_ansi(result.output)

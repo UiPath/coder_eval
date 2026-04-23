@@ -648,8 +648,9 @@ def _compute_suite_rollup(
                 reasons.append(reason[:_FAILURE_REASON_MAX_LEN])
             if len(reasons) >= _FAILURE_REASONS_PER_ROW:
                 break
-        # TODO: plumb replicate_index through TaskResult when repeats land.
-        task_json_path = build_task_run_dir(run_dir, variant_id, row.task_id, replicate_index=0) / "task.json"
+        task_json_path = (
+            build_task_run_dir(run_dir, variant_id, row.task_id, replicate_index=row.replicate_index) / "task.json"
+        )
         try:
             # Persist as POSIX — this value lands in suite.json and in
             # suite.md markdown links, both of which must be platform-agnostic.
@@ -665,6 +666,7 @@ def _compute_suite_rollup(
                 failure_reasons=reasons,
                 error_message=row.result.error_message,
                 task_json_relpath=rel,
+                replicate_index=row.replicate_index,
             )
         )
 
