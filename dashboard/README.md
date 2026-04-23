@@ -99,6 +99,20 @@ uv run dashboard schema
 uv run dashboard schema --drop
 ```
 
+### Pull a run from Blob Storage
+
+`dashboard/scripts/pull-run.sh` downloads run blobs back to a local directory. Auth and config come from `dashboard/.env` exactly like the upload path — no extra credentials needed.
+
+```bash
+dashboard/scripts/pull-run.sh                       # latest run → runs/<run-id>
+dashboard/scripts/pull-run.sh list                  # list run ids in the container
+dashboard/scripts/pull-run.sh <run-id>              # specific run → runs/<run-id>
+dashboard/scripts/pull-run.sh <run-id> some/dir     # custom destination
+dashboard/scripts/pull-run.sh --container <name>    # override AZURE_BLOB_CONTAINER
+```
+
+If `runs/<run-id>` already exists locally, the script warns and writes to `tmp/runs/<run-id>` instead. Note: this pulls only blob artifacts — structured run data already in ADX is not re-fetched.
+
 ### Alternative: `python -m`
 
 All commands also work via:
@@ -150,6 +164,8 @@ dashboard/
 │   ├── blob.py                 # Azure Blob upload (az CLI)
 │   ├── ingest.py               # Parse run results → ADX ingestion
 │   └── schema.py               # ADX table DDL (create/drop)
+├── scripts/
+│   └── pull-run.sh             # Download a run from Azure Blob Storage (az CLI)
 └── tests/
     ├── test_ingest.py
     └── fixtures/               # Sample run.json, task.json for testing
