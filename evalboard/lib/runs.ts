@@ -7,7 +7,11 @@ import {
     listRunIdsRemote,
 } from "./blob";
 
-export const RUNS_DIR = path.resolve(process.cwd(), "runs-remote");
+// Override via EVALBOARD_RUNS_DIR when process.cwd() is read-only
+// (e.g., App Service Run From Package, where wwwroot is a mounted zip).
+export const RUNS_DIR =
+    process.env.EVALBOARD_RUNS_DIR ??
+    path.resolve(process.cwd(), "runs-remote");
 
 // ---------- Types ----------
 

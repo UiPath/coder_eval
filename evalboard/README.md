@@ -35,6 +35,10 @@ path into a specific run's artifacts, criteria, and logs.
 `task_results[].task_id` (e.g., `skill-flow-calculator`) and equals the
 subdir name under `<run-id>/default/`.
 
+## Deploy
+
+`./scripts/deploy.sh` from this directory. Builds, uploads to blob storage, and restarts the App Service. The script is the authoritative deploy flow — see [DEPLOYMENT.md](DEPLOYMENT.md) for architecture, auth wiring, and troubleshooting context.
+
 ## Caching
 
 Runs are lazy-downloaded from blob on first view and served from disk
