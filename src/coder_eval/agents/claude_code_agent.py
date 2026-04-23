@@ -35,6 +35,7 @@ from coder_eval.models import (
     FileChanges,
     FileTree,
     ProxyRoute,
+    ResultSummary,
     TokenUsage,
     TurnRecord,
 )
@@ -304,6 +305,12 @@ class ClaudeCodeAgent(Agent):
         sdk_result_usage: dict[str, Any] | None = None
         sdk_result_cost: float | None = None
         sdk_num_turns: int | None = None
+        # Diagnostic summary of the final ResultMessage (status + error fields).
+        # Populated on every ResultMessage (last one wins). Consumed by the
+        # session-id retention branch, the debug-log path, and the error-path
+        # formatter; persisted on TurnRecord only on the success path (the
+        # error paths raise before the TurnRecord constructor runs).
+        sdk_result_summary: ResultSummary | None = None
 
         # Model identifier from AssistantMessage (last one wins)
         sdk_model_used: str | None = None
@@ -465,11 +472,21 @@ class ClaudeCodeAgent(Agent):
                         sdk_result_usage = getattr(message, "usage", None)
                         sdk_result_cost = getattr(message, "total_cost_usd", None)
                         sdk_num_turns = getattr(message, "num_turns", None)
-                        # Capture session_id so subsequent communicate() calls resume this conversation
+                        sdk_result_summary = self._summarize_result(message)
+                        # Only advance session_id on clean turns. Resuming
+                        # via --resume from an errored ResultMessage often
+                        # reproduces the same crash (e.g. Windows PowerShell
+                        # binary stdout case), so we keep the prior good id.
                         new_session_id = getattr(message, "session_id", None)
-                        if new_session_id != self._session_id:
-                            self._log.debug("session_id changed: %s -> %s", self._session_id, new_session_id)
-                        self._session_id = new_session_id
+                        if sdk_result_summary is not None and sdk_result_summary.is_error:
+                            self._log.debug(
+                                "is_error ResultMessage; not advancing session_id (kept %s)",
+                                self._session_id,
+                            )
+                        else:
+                            if new_session_id != self._session_id:
+                                self._log.debug("session_id changed: %s -> %s", self._session_id, new_session_id)
+                            self._session_id = new_session_id
 
                     # PHASE 2: Process tool results from UserMessage content blocks.
                     # The SDK delivers tool results as UserMessage objects containing
@@ -524,7 +541,7 @@ class ClaudeCodeAgent(Agent):
                 raise TurnTimeoutError(timeout if timeout is not None else 0.0, iteration=self._iteration) from e
             self._state = AgentState.ERROR
             stderr = self._build_stderr_message(e.stderr, stderr_lines)
-            error_info = self._extract_error_from_messages(messages)
+            error_info = self._format_error_summary(sdk_result_summary)
             detail = error_info or stderr
             raise RuntimeError(f"CLI process failed (exit code {e.exit_code}): {detail}") from e
         except Exception as e:
@@ -537,8 +554,8 @@ class ClaudeCodeAgent(Agent):
                 raise TurnTimeoutError(timeout if timeout is not None else 0.0, iteration=self._iteration) from e
             self._state = AgentState.ERROR
             # The SDK wraps ProcessError as a generic Exception via the message stream.
-            # Extract useful info from collected messages and stderr.
-            error_info = self._extract_error_from_messages(messages)
+            # Read the captured ResultMessage summary (if any) for diagnostic context.
+            error_info = self._format_error_summary(sdk_result_summary)
             cause_stderr = self._extract_cause_stderr(e)
             stderr = self._build_stderr_message(cause_stderr, stderr_lines)
             error_details = self._clean_error_message(str(e))
@@ -593,6 +610,7 @@ class ClaudeCodeAgent(Agent):
             model_used=sdk_model_used,
             assistant_turn_count=assistant_turn_count,
             max_turns_exhausted=max_turns_exhausted,
+            result_summary=sdk_result_summary,
         )
 
     async def stop(self) -> None:
@@ -801,13 +819,14 @@ class ClaudeCodeAgent(Agent):
                         self._log.debug(f"<<< TOOL RESULT [{status}]: id={block.tool_use_id} | {result_preview}")
 
         elif msg_type == "ResultMessage":
-            usage = getattr(message, "usage", None)
-            cost = getattr(message, "total_cost_usd", None)
-            is_error = getattr(message, "is_error", False)
-            result = getattr(message, "result", None)
-            if is_error:
-                self._log.debug(f"<<< RESULT [ERROR]: {str(result)[:300]}")
+            summary = self._summarize_result(message)
+            if summary is not None and summary.is_error:
+                fields = {k: v for k, v in summary.model_dump().items() if v not in (None, False, "")}
+                rendered = ", ".join(f"{k}={str(v)[:200]}" for k, v in fields.items()) if fields else "(no detail)"
+                self._log.debug(f"<<< RESULT [ERROR]: {rendered}")
             else:
+                usage = getattr(message, "usage", None)
+                cost = getattr(message, "total_cost_usd", None)
                 usage_str = str(usage)[:200] if usage else "n/a"
                 cost_str = f"${cost}" if cost is not None else "n/a"
                 self._log.debug(f"<<< RESULT: cost={cost_str}, usage={usage_str}")
@@ -999,33 +1018,44 @@ class ClaudeCodeAgent(Agent):
         return cleaned.strip()
 
     @staticmethod
-    def _extract_error_from_messages(messages: list[Message]) -> str | None:
-        """Extract error details from messages received before a crash.
+    def _summarize_result(msg: Message) -> ResultSummary | None:
+        """Build a ``ResultSummary`` from an SDK ResultMessage, or None.
 
-        When the CLI process crashes, it may have sent a ResultMessage with
-        is_error=True and error details in the 'result' field before exiting.
-        This method scans collected messages for such error information.
-
-        Args:
-            messages: Messages collected during the turn before the error
-
-        Returns:
-            Error description if found, None otherwise
+        Returns None only when ``msg`` lacks the SDK ResultMessage shape
+        (``session_id`` + ``usage``). For real ResultMessages the SDK
+        always provides ``subtype`` (it's a required dataclass field), so
+        any missing/non-string value is treated as ``"unknown"`` rather
+        than silently disabling the summary downstream.
         """
-        for msg in reversed(messages):
-            # Check for ResultMessage with error info
-            if _is_sdk_result_message(msg) and getattr(msg, "is_error", False):
-                result = getattr(msg, "result", None)
-                if result:
-                    return str(result)[:500]
+        if not _is_sdk_result_message(msg):
+            return None
+        subtype = getattr(msg, "subtype", None)
+        stop_reason = getattr(msg, "stop_reason", None)
+        result = getattr(msg, "result", None)
+        return ResultSummary(
+            is_error=bool(getattr(msg, "is_error", False)),
+            subtype=subtype if isinstance(subtype, str) else "unknown",
+            stop_reason=stop_reason if isinstance(stop_reason, str) else None,
+            result=result if isinstance(result, str) else None,
+        )
 
-            # Check for SystemMessage with error subtype
-            if type(msg).__name__ == "SystemMessage":
-                subtype = getattr(msg, "subtype", None)
-                data = getattr(msg, "data", None)
-                if subtype == "error" and data:
-                    return str(data)[:500]
+    @staticmethod
+    def _format_error_summary(summary: ResultSummary | None) -> str | None:
+        """Format an errored ``ResultSummary`` for surfacing to the user.
 
+        Prefers free-form ``result`` text; falls back to the
+        ``subtype``/``stop_reason`` classification when ``result`` is
+        unset (which is the common shape on hard CLI crashes). Returns
+        None when there is nothing useful to surface, so callers can
+        decide whether to fall back to stderr.
+        """
+        if summary is None or not summary.is_error:
+            return None
+        if summary.result:
+            return summary.result[:200]
+        parts = [p for p in (summary.subtype, summary.stop_reason) if p]
+        if parts:
+            return f"Result[is_error=True]: {' / '.join(parts)}"
         return None
 
     def _capture_file_tree(self) -> FileTree:

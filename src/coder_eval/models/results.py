@@ -100,6 +100,27 @@ class FileChange(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now, description="When the change occurred")
 
 
+class ResultSummary(BaseModel):
+    """Diagnostic fields lifted from the SDK's final ResultMessage.
+
+    Powers the agent's debug log and the error-path formatter that
+    surfaces a useful detail string when the CLI crashes. Persisted on
+    ``TurnRecord`` for clean turns only — on a crash the agent raises
+    before the TurnRecord is constructed, so post-mortem persistence on
+    error turns is out of scope here.
+
+    Mirrors the diagnostic-bearing subset of
+    ``claude_agent_sdk.ResultMessage``; pure accounting fields
+    (``num_turns``, ``duration_ms``) live on ``TurnRecord`` /
+    ``TokenUsage``.
+    """
+
+    is_error: bool = Field(description="Whether the SDK reported the turn as errored")
+    subtype: str = Field(description="Coarse classification (e.g. 'success', 'error_during_execution')")
+    stop_reason: str | None = Field(default=None, description="Why the model stopped, if reported")
+    result: str | None = Field(default=None, description="Free-form result/error text from the SDK")
+
+
 class TurnRecord(BaseModel):
     """Record of a single agent turn (input + output)."""
 
@@ -129,6 +150,10 @@ class TurnRecord(BaseModel):
     max_turns_exhausted: bool = Field(
         default=False,
         description="Whether the agent hit the max_turns limit without voluntarily completing",
+    )
+    result_summary: ResultSummary | None = Field(
+        default=None,
+        description="SDK ResultMessage summary for clean turns; None on crash (TurnRecord isn't built on error paths)",
     )
 
 

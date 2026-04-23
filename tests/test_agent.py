@@ -511,6 +511,57 @@ async def test_claude_agent_session_resumption():
 
 
 @pytest.mark.asyncio
+async def test_claude_agent_errored_result_does_not_commit_session_id():
+    """When a ResultMessage arrives with is_error=True, the agent must NOT
+    commit the attached session_id. Otherwise a retry (e.g. after the CLI
+    crashes mid-turn) resumes from a broken transcript and often
+    reproduces the same crash — exactly the failure mode that made UIA
+    smoke runs permanently red."""
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        class ResultMessage:
+            def __init__(self, session_id: str, is_error: bool):
+                self.session_id = session_id
+                self.usage = {"input_tokens": 1, "output_tokens": 1}
+                self.total_cost_usd = 0.0
+                self.num_turns = 1
+                self.is_error = is_error
+                self.result = None
+
+        class AssistantMessage:
+            def __init__(self) -> None:
+                self.content = "..."
+                self.model = "mock-model"
+
+        # First: a clean turn commits session_id as usual.
+        async def mock_ok(prompt, options):
+            yield AssistantMessage()
+            yield ResultMessage(session_id="good-session", is_error=False)
+
+        with patch("coder_eval.agents.claude_code_agent.query", mock_ok):
+            await agent.communicate("clean turn")
+            assert agent._session_id == "good-session"
+
+        # Second: an errored turn arriving with a NEW session_id must NOT
+        # overwrite the previous good one, so the next retry resumes
+        # from the last-known-good state (or restarts clean if no prior
+        # good turn existed).
+        async def mock_err(prompt, options):
+            yield AssistantMessage()
+            yield ResultMessage(session_id="poisoned-session", is_error=True)
+
+        with patch("coder_eval.agents.claude_code_agent.query", mock_err):
+            await agent.communicate("errored turn")
+            assert agent._session_id == "good-session"
+
+
+@pytest.mark.asyncio
 async def test_claude_agent_session_resumption_none_degrades_gracefully():
     """When SDK returns session_id=None, agent should degrade to a fresh session."""
     config = AgentConfig(
@@ -656,3 +707,133 @@ async def test_claude_agent_session_retained_on_error():
 
         # session_id should still be the value from the successful call
         assert agent._session_id == "good-session"
+
+
+class TestResultSummaryAndFormatter:
+    """The agent now persists the SDK's final ResultMessage as a structured
+    ``ResultSummary`` on every TurnRecord (success and error), and the error
+    paths read from that single source instead of reverse-scanning messages.
+    These tests anchor the helpers against the real SDK dataclass — so a
+    rename of subtype / stop_reason / result trips them immediately."""
+
+    @staticmethod
+    def _make_result(**overrides):
+        from claude_agent_sdk.types import ResultMessage
+
+        defaults = {
+            "subtype": "success",
+            "duration_ms": 0,
+            "duration_api_ms": 0,
+            "is_error": False,
+            "num_turns": 1,
+            "session_id": "s1",
+            "stop_reason": None,
+            "total_cost_usd": None,
+            "usage": {},
+            "result": None,
+            "structured_output": None,
+        }
+        defaults.update(overrides)
+        return ResultMessage(**defaults)
+
+    def test_summarize_returns_none_for_non_result_message(self):
+        class NotAResult:
+            pass
+
+        assert ClaudeCodeAgent._summarize_result(NotAResult()) is None  # type: ignore[arg-type]
+
+    def test_summarize_defaults_subtype_to_unknown_when_missing(self):
+        """Test stand-ins (with session_id + usage but no subtype) must still
+        produce a usable summary so consumers like the session-id retention
+        branch can read summary.is_error uniformly."""
+        from types import SimpleNamespace
+
+        msg = SimpleNamespace(session_id="s1", usage={}, is_error=True, stop_reason=None, result=None)
+        summary = ClaudeCodeAgent._summarize_result(msg)  # type: ignore[arg-type]
+        assert summary is not None
+        assert summary.subtype == "unknown"
+        assert summary.is_error is True
+
+    def test_summarize_captures_diagnostic_fields(self):
+        msg = self._make_result(
+            is_error=True,
+            subtype="error_during_execution",
+            stop_reason="tool_error",
+            result="boom",
+        )
+        summary = ClaudeCodeAgent._summarize_result(msg)
+        assert summary is not None
+        assert summary.is_error is True
+        assert summary.subtype == "error_during_execution"
+        assert summary.stop_reason == "tool_error"
+        assert summary.result == "boom"
+
+    def test_format_returns_none_when_summary_is_none(self):
+        assert ClaudeCodeAgent._format_error_summary(None) is None
+
+    def test_format_returns_none_when_not_an_error(self):
+        summary = ClaudeCodeAgent._summarize_result(self._make_result(is_error=False, result="ignored"))
+        assert ClaudeCodeAgent._format_error_summary(summary) is None
+
+    def test_format_prefers_result_text(self):
+        summary = ClaudeCodeAgent._summarize_result(
+            self._make_result(is_error=True, result="Something exploded", subtype="error_during_execution")
+        )
+        assert ClaudeCodeAgent._format_error_summary(summary) == "Something exploded"
+
+    def test_format_falls_back_to_subtype_and_stop_reason(self):
+        summary = ClaudeCodeAgent._summarize_result(
+            self._make_result(is_error=True, subtype="error_during_execution", stop_reason="tool_error")
+        )
+        assert ClaudeCodeAgent._format_error_summary(summary) == (
+            "Result[is_error=True]: error_during_execution / tool_error"
+        )
+
+    def test_format_omits_stop_reason_when_unset(self):
+        summary = ClaudeCodeAgent._summarize_result(self._make_result(is_error=True, subtype="error_during_execution"))
+        assert ClaudeCodeAgent._format_error_summary(summary) == "Result[is_error=True]: error_during_execution"
+
+
+@pytest.mark.asyncio
+async def test_communicate_persists_result_summary_on_turn_record():
+    """End-to-end: a successful turn carries a ResultSummary on the TurnRecord,
+    so downstream analysis (dashboards, post-mortem) can read SDK status without
+    re-walking the message stream."""
+    from claude_agent_sdk.types import ResultMessage
+
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        class AssistantMessage:
+            content = "ok"
+            model = "mock-model"
+
+        async def mock_query(prompt, options):
+            yield AssistantMessage()
+            yield ResultMessage(
+                subtype="success",
+                duration_ms=0,
+                duration_api_ms=0,
+                is_error=False,
+                num_turns=1,
+                session_id="s1",
+                stop_reason="end_turn",
+                total_cost_usd=0.0,
+                usage={"input_tokens": 1, "output_tokens": 1},
+                result="all good",
+                structured_output=None,
+            )
+
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            turn = await agent.communicate("hello")
+
+        assert turn.result_summary is not None
+        assert turn.result_summary.is_error is False
+        assert turn.result_summary.subtype == "success"
+        assert turn.result_summary.stop_reason == "end_turn"
+        assert turn.result_summary.result == "all good"
