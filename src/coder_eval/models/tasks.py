@@ -331,7 +331,13 @@ class TaskDefinition(BaseModel):
         ),
     )
     max_iterations: int = Field(default=3, description="Maximum number of agent turns")
-    tags: list[str] = Field(default_factory=list, description="Tags for categorizing and filtering tasks (kebab-case)")
+    tags: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tags for categorizing and filtering tasks. Each tag is kebab-case, optionally namespaced "
+            "as 'key:value' where both key and value are kebab-case (e.g., 'smoke', 'lifecycle:generate')."
+        ),
+    )
     agent: AgentConfig | None = Field(
         default=None, description="Agent configuration (resolved from experiment if omitted)"
     )
@@ -427,11 +433,21 @@ class TaskDefinition(BaseModel):
     @field_validator("tags")
     @classmethod
     def validate_tags(cls, v: list[str]) -> list[str]:
-        """Validate tags are non-empty lowercase kebab-case strings."""
-        tag_pattern = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+        """Validate tags are kebab-case, optionally namespaced as 'key:value'.
+
+        Each side of an optional single colon must be lowercase kebab-case (a-z0-9, hyphens
+        between segments). Examples: 'smoke', 'uipath-python', 'lifecycle:generate',
+        'connector:google-tasks'. Rejected: leading/trailing colons, multiple colons,
+        underscores, uppercase, spaces.
+        """
+        tag_pattern = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*(:[a-z0-9]+(-[a-z0-9]+)*)?$")
         for tag in v:
             if not tag_pattern.match(tag):
-                raise ValueError(f"Tag '{tag}' must be lowercase kebab-case (e.g., 'smoke', 'uipath-python')")
+                msg = (
+                    f"Tag '{tag}' must be lowercase kebab-case, optionally namespaced as "
+                    "'key:value' (e.g., 'smoke', 'uipath-python', 'lifecycle:generate')"
+                )
+                raise ValueError(msg)
         return v
 
     @field_validator("success_criteria", mode="before")

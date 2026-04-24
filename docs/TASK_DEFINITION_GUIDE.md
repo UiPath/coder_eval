@@ -53,11 +53,16 @@ post_run: [ ... ]                     # Optional post-run commands
 
 ## Tags
 
-Tags categorize tasks for selective execution. Tags must be lowercase kebab-case strings.
+Tags categorize tasks for selective execution. Each tag is lowercase kebab-case and may
+optionally be namespaced as `key:value` where both sides are kebab-case.
 
 ```yaml
-tags: [smoke, golden, uipath-python]
+tags: [smoke, golden, uipath-python, lifecycle:generate, connector:google-tasks]
 ```
+
+Namespaced tags let downstream tools slice on a single dimension (e.g. ADX queries like
+`where tag startswith "connector:"`). Bare tags continue to work with existing
+`--tags` filters.
 
 **Well-known tags:**
 

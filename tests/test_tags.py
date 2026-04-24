@@ -34,20 +34,40 @@ class TestTagValidation:
         assert task.tags == []
 
     def test_invalid_tag_uppercase(self):
-        with pytest.raises(ValueError, match="lowercase kebab-case"):
+        with pytest.raises(ValueError, match="kebab-case"):
             _make_task("t1", ["Smoke"])
 
     def test_invalid_tag_spaces(self):
-        with pytest.raises(ValueError, match="lowercase kebab-case"):
+        with pytest.raises(ValueError, match="kebab-case"):
             _make_task("t1", ["my tag"])
 
     def test_invalid_tag_underscores(self):
-        with pytest.raises(ValueError, match="lowercase kebab-case"):
+        with pytest.raises(ValueError, match="kebab-case"):
             _make_task("t1", ["my_tag"])
 
     def test_valid_tag_with_numbers(self):
         task = _make_task("t1", ["python3", "v2-test"])
         assert task.tags == ["python3", "v2-test"]
+
+    def test_valid_namespaced_tag(self):
+        task = _make_task("t1", ["lifecycle:generate", "shape:multi-node", "connector:google-tasks"])
+        assert task.tags == ["lifecycle:generate", "shape:multi-node", "connector:google-tasks"]
+
+    def test_invalid_tag_leading_colon(self):
+        with pytest.raises(ValueError, match="kebab-case"):
+            _make_task("t1", [":generate"])
+
+    def test_invalid_tag_trailing_colon(self):
+        with pytest.raises(ValueError, match="kebab-case"):
+            _make_task("t1", ["lifecycle:"])
+
+    def test_invalid_tag_double_colon(self):
+        with pytest.raises(ValueError, match="kebab-case"):
+            _make_task("t1", ["a:b:c"])
+
+    def test_invalid_tag_uppercase_in_namespace(self):
+        with pytest.raises(ValueError, match="kebab-case"):
+            _make_task("t1", ["Lifecycle:generate"])
 
 
 class TestFilterTasksByTags:

@@ -41,7 +41,7 @@ task_id        (str, required)  -- unique kebab-case id, e.g. "build-langgraph-c
 description    (str, required)  -- what is being tested
 initial_prompt (str, required)  -- a SHORT, natural human request (see rules below)
 max_iterations (int, default 3) -- 1-5
-tags           (list[str])      -- lowercase kebab-case
+tags           (list[str])      -- lowercase kebab-case; may use 'key:value' namespacing (e.g. 'lifecycle:generate')
 
 agent:
   type: "claude-code"
