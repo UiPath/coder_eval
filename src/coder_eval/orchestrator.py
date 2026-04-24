@@ -278,6 +278,13 @@ class Orchestrator:
                 else:
                     self.result.final_status = FinalStatus.FAILURE
 
+                # Run a final LLM review so ``result.llm_review`` is populated
+                # on successful and single-iteration runs too. The mid-loop
+                # reviewer in ``_review_iteration`` only fires when criteria
+                # fail, which would leave the HTML report with an empty
+                # reviewer card on every green run.
+                await self._run_final_llm_review()
+
             except asyncio.CancelledError:
                 # Re-raise cancellation to allow proper task cancellation
                 raise
@@ -1126,6 +1133,41 @@ class Orchestrator:
             self.result.llm_review = decision
             logger.info("LLM review score: %s", decision.score)
         return decision
+
+    async def _run_final_llm_review(self) -> None:
+        """Run one last LLM review after the evaluation loop completes.
+
+        The mid-loop reviewer in ``_review_iteration`` only fires when
+        criteria fail — on successful or single-iteration runs nothing is
+        stored in ``self.result.llm_review``. This post-loop pass
+        guarantees the reviewer verdict is attached whenever a reviewer is
+        configured, so the HTML report can always render qualitative
+        feedback.
+
+        If the mid-loop reviewer already persisted a decision this run,
+        skip — that decision reflects the last failing iteration and is
+        more informative than re-reviewing the same agent output.
+
+        Failures here are logged and swallowed so they never mask the run.
+        """
+        if self.llm_reviewer is None or self.result is None:
+            return
+        if not self.result.turns:
+            return
+        if self.result.llm_review is not None:
+            return
+
+        last_turn = self.result.turns[-1]
+        tool_calls_summary = summarize_commands(last_turn.commands)
+        reference_code, self._reference_code = load_reference_code(
+            task=self.task,
+            task_file=self.task_file,
+            cached_reference=self._reference_code,
+        )
+        try:
+            await self._review_iteration(last_turn, reference_code, tool_calls_summary)
+        except Exception:
+            logger.exception("Final LLM review failed — continuing without review")
 
     _POST_RUN_MAX_OUTPUT = 100_000  # Truncate stdout/stderr to 100KB
     _POST_RUN_STREAM_LIMIT = 262_144  # StreamReader per-line buffer (256KB)
