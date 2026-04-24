@@ -358,6 +358,52 @@ class TestResolveAllTasksIntegration:
         assert len(resolved) == 1
         assert resolved[0].task.task_id == "plain"
 
+    def test_experiment_agent_defaults_survive_dataset_expansion(self, tmp_path: Path) -> None:
+        # Regression: expand_dataset used model_dump() (full) which inflated model_fields_set
+        # on the expanded TaskDefinitions. The merge layer then saw allowed_tools=None as an
+        # explicit task-level override and discarded the experiment default.
+        #
+        # Concrete example: experiment sets allowed_tools=["Skill"]; task sets agent.type only.
+        # Before the fix, expanded rows got allowed_tools=None, so the agent couldn't invoke
+        # the Skill tool and fell back to unrelated slash commands.
+        task_data = {
+            "task_id": "suite",
+            "description": "Suite",
+            "initial_prompt": "${row.prompt}",
+            "sandbox": {"driver": "tempdir"},
+            "agent": {"type": "claude-code"},
+            "success_criteria": [{"type": "file_exists", "path": "out.txt", "description": "exists"}],
+            "dataset": {"rows": [{"id": "r1", "prompt": "hello"}, {"id": "r2", "prompt": "world"}]},
+        }
+        task_file = tmp_path / "suite.yaml"
+        task_file.write_text(yaml.safe_dump(task_data))
+
+        default_exp = ExperimentDefinition(
+            experiment_id="default",
+            defaults=ExperimentDefaults(agent={"type": "claude-code", "permission_mode": "acceptEdits"}),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+        experiment = ExperimentDefinition(
+            experiment_id="exp",
+            defaults=ExperimentDefaults(agent={"type": "claude-code", "allowed_tools": ["Skill"]}),
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+        config = BatchRunConfig(run_dir=tmp_path / "runs")
+
+        resolved = resolve_all_tasks(
+            task_files=[task_file],
+            experiment=experiment,
+            default_experiment=default_exp,
+            config=config,
+        )
+
+        assert len(resolved) == 2
+        for rt in resolved:
+            assert rt.task.agent is not None
+            assert rt.task.agent.allowed_tools == ["Skill"], (
+                f"experiment allowed_tools overridden for {rt.task.task_id}"
+            )
+
     def test_resolved_task_carries_suite_tags(self, tmp_path: Path) -> None:
         # After row expansion + variant resolution, suite_id/row_id should be
         # preserved on the ResolvedTask.task so run_batch can copy them onto TaskResult.

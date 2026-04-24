@@ -315,7 +315,7 @@ def expand_dataset(
             raise ValueError(f"Duplicate dataset row id for task '{task.task_id}': {row_id!r}")
         seen_ids.add(row_id)
 
-        data = task.model_dump()
+        data = task.model_dump(exclude_unset=True)
         if isinstance(data.get("initial_prompt"), str):
             data["initial_prompt"] = _substitute_row_in_str(data["initial_prompt"], row)
         if isinstance(data.get("success_criteria"), list):
