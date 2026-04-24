@@ -1,0 +1,332 @@
+task_id: pdd-interview-client-portfolio-reporting
+description: >
+  End-to-end test of the PDD (Product Design Document) interview product.
+  A simulated user is interviewed by the agent to gather requirements and
+  produce a PDD (.docx) for the "Client Portfolio Reporting" wealth-management
+  process. The persona and interview scenario are supplied per-variant by
+  experiments/pdd-interview-personas.yaml (5 personas x 3 scenarios = 15 variants).
+
+tags: [pdd, interview, simulation, wealth-management, docx]
+task_timeout: 2400
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"]
+  max_turns: 80
+  turn_timeout: 600
+
+sandbox:
+  driver: tempdir
+  python:
+    env_packages: ["python-docx"]
+  template_sources:
+    - type: template_dir
+      path: "$COMPOSER_SKILL"
+
+
+# Pinned opener — turn 1 is sent verbatim to the agent (invokes the Composer
+# skill baked into the agent). The simulator picks up from turn 2 in persona.
+initial_prompt: "Start a composer session."
+
+# Default simulation so this task runs standalone (without an experiment).
+# The experiment variants fully replace persona / goal / constraints via
+# shallow merge — see experiments/pdd-interview-personas.yaml.
+simulation:
+  enabled: true
+
+  persona: |
+    You are a senior operations director at a mid-size wealth-management
+    firm. You own the Client Portfolio Reporting process end-to-end and
+    know every stage, SLA, integration, and regulation by heart. You are
+    engaged, professional, and willing to answer the agent's questions
+    in whatever detail it asks for.
+
+  goal: |
+    You want a complete, accurate PDD (Product Design Document) for your
+    firm's "Client Portfolio Reporting" process.
+
+    FACTS YOU KNOW ABOUT THE PROCESS (reveal when the agent asks the
+    relevant question — do NOT dump this list unprompted):
+
+    Identity and cadence:
+      - Process name: "Client Portfolio Reporting". Internal code: CPR.
+        Internal case name in UiPath Case Designer: ClientPortfolioReporting.
+      - Volume: approximately 2,500 client reports per cycle across the
+        advisory book.
+      - Cadence: monthly and quarterly reporting cycles, plus ad-hoc
+        reports on advisor or client request.
+      - Clientele: full-service advisory relationships — including UHNW
+        private bank and trust households. In scope: recurring performance
+        reports. Out of scope: prospect marketing material, trade
+        execution reports, GIPS composites, regulatory filings like
+        Form ADV / Form CRS.
+
+    Current-state metrics (AS-IS):
+      - Cycle time: 4 days average.
+      - On-time delivery rate: 85%.
+      - Personalization coverage: 60% of reports have advisor-curated
+        insights.
+      - Compliance rework rate: 12% of reports returned for edits.
+      - Client acknowledgment within 7 days: 45%.
+
+    Target metrics (TO-BE):
+      - Cycle time: 2 days.
+      - On-time delivery: 98%.
+      - Personalization coverage: 95%.
+      - Compliance rework: under 3%.
+      - Client acknowledgment within 7 days: 80%.
+
+    Stages (linear, in order):
+      1. Market Data Aggregation — 4h SLA, owner Investment Operations
+         Analyst. Tasks: extract portfolio positions from the portfolio
+         accounting system; pull real-time market data; calculate
+         performance metrics (time-weighted returns, benchmark variance,
+         attribution); populate the unified reporting template.
+      2. Advisor Personalization — 2d SLA, owner Financial Advisor.
+         Tasks: review portfolio performance; draft personalized insights
+         (AI agent proposed: Insights Agent); formulate strategic
+         recommendations (rebalance, tax moves, contribution changes);
+         record client-specific notes.
+      3. Research Desk Commentary — 1d SLA, owner Research Desk
+         Strategist. Tasks: retrieve macro commentary package from the
+         research desk; select relevant commentary for the client's
+         holdings (AI agent proposed: Commentary Curation Agent);
+         integrate commentary into the report.
+      4. Compliance and Disclosure Review — 1d SLA, owner Compliance
+         Analyst with Supervisory Principal approval. Tasks: run
+         disclosure and SEC Marketing Rule checks (AI agent proposed:
+         Compliance Review Agent); resolve flagged items; supervisory
+         principal approval per FINRA Rule 2210.
+      5. Client Delivery — 4h SLA, owner Client Service Associate.
+         Tasks: finalize PDF package; deliver to client portal and email;
+         record delivery and acknowledgment events into CRM; archive to
+         the compliance WORM archive for SEC Rule 204-2 five-year
+         retention.
+
+    Integrations:
+      - Hard (process blocks without them): Portfolio Accounting System
+        (REST + OAuth2), Market Data Service (REST + API key), CRM,
+        Client Portal, Compliance Archive, and the internal Reporting
+        Engine.
+      - Soft: Research Desk Platform (internal API + OAuth2), Email
+        Gateway.
+
+    Key data objects:
+      - ClientPortfolio (source: Portfolio Accounting System; PII + NPI
+        sensitivity) — client_id, account_ids, holdings, allocations,
+        risk_tolerance, cost_basis.
+      - MarketData (source: Market Data Service; public) — security_id,
+        price, yield, benchmark_values, timestamp.
+      - PerformanceReport (source: Reporting Engine; confidential) —
+        report_id, client_id, period, performance_metrics, commentary.
+      - MacroCommentary (source: Research Desk Platform; internal).
+      - DeliveryRecord (source: CRM; confidential).
+
+    Roles / RACI highlights:
+      - Financial Advisor — A/R at Advisor Personalization stage.
+      - Investment Operations Analyst — A at Market Data Aggregation.
+      - Research Desk Strategist — A at Research Desk Commentary.
+      - Compliance Analyst — A/R at Compliance and Disclosure Review;
+        Supervisory Principal also R (principal approval).
+      - Client Service Associate — A at Client Delivery.
+
+    Regulations:
+      - SEC Marketing Rule (Rule 206(4)-1) — disclosures on every client
+        communication with performance or recommendations.
+      - SEC Books and Records (Rule 204-2) — retain client
+        communications and report copies for 5 years (first 2 in an
+        easily accessible location).
+      - FINRA Rule 2210 — supervisory principal review and approval for
+        retail communications from broker-dealer affiliates; fair and
+        balanced presentation.
+      - Reg S-P — encryption of PII in transit and at rest.
+
+    Pain points (AS-IS):
+      - Advisors manually copy positions and prices across multiple
+        systems.
+      - Personalization is inconsistent across the advisory book.
+      - Compliance review happens late in the cycle and frequently
+        returns rework, compressing the advisor's review window.
+      - No visibility into whether the client actually read the report
+        — delivery is email-only today.
+
+    Top risks:
+      - Market data outage — fallback to cached end-of-day data with a
+        delayed-data disclosure.
+      - AI agent drafts non-compliant commentary — Compliance Review
+        Agent plus a human compliance analyst plus supervisory principal
+        approval act as a three-layer backstop.
+      - Client delivery failure — automatic retry on the alternate
+        channel with Client Service Associate follow-up.
+
+    Acceptance criteria (for the TO-BE):
+      - Cycle time at or below 2 days.
+      - Personalization coverage at or above 95%.
+      - Compliance rework at or below 3%.
+      - Every report retained in the compliance archive per SEC 204-2.
+      - Advisor edits to AI-drafted insights logged with user,
+        timestamp, and prior text.
+
+    HOW TO BEHAVE:
+      - Reveal the facts above ONLY in response to the agent's questions.
+        The agent is supposed to be doing the interviewing — do not dump
+        everything in turn 1.
+      - When the agent asks a broad question ("tell me about the
+        process"), give a 2-3 sentence overview and wait to be probed.
+      - Answer specifically: if asked for cycle time, give the number
+        and the unit; if asked for a stage SLA, give the SLA.
+      - If the agent asks about something NOT in this facts bank (e.g.,
+        "what's your firm's AUM?"), say you do not have that detail to
+        hand and offer to follow up — do not invent numbers.
+
+    WHEN TO END:
+      Once the agent confirms a PDD .docx has been produced and asks for
+      your acceptance, spot-check the summary the agent gives you (you
+      cannot open files yourself). If the agent has touched on most of
+      the 13 sections, reply with exactly <<<END>>> on its own line.
+      If the agent has obviously skipped entire topics (e.g., never
+      asked about compliance or KPIs), push back once and give them a
+      chance to add — then <<<END>>>.
+
+  constraints:
+    - "Never dump the full facts list unprompted. Answer the agent's actual question, then stop."
+    - "Do not invent specifics beyond the facts bank (e.g., firm AUM, specific vendor names not listed). Say you do not have that detail to hand."
+    - "You cannot see files, terminals, or code. You can only react to what the agent writes in chat."
+    - "When the .docx has been produced and you have spot-checked it, reply with exactly <<<END>>> on its own line."
+
+  max_turns: 30
+  stop_token: "<<<END>>>"
+  stop_on_criteria_pass: false
+  check_criteria: end_of_dialog
+  n_trials: 1
+  parallel_trials: true
+
+success_criteria:
+  # 1. A pdd.md was rendered — stage it at the sandbox root as
+  #    pdd_extracted.txt for the downstream section / domain-anchor checks
+  #    and the LLM judge. Markdown preserves tables, headings, and lists,
+  #    all of which a docx text-extraction step flattens.
+  - type: run_command
+    description: "A pdd.md was rendered; stage it for downstream checks"
+    command: |
+      python3 - <<'PY'
+      import glob, shutil, sys
+      from pathlib import Path
+      mds = sorted(glob.glob('**/pdd.md', recursive=True))
+      if not mds:
+          print('FAIL: no pdd.md rendered')
+          sys.exit(1)
+      target = mds[0]
+      shutil.copy(target, 'pdd_extracted.txt')
+      print(f'OK: {target} -> pdd_extracted.txt ({Path(target).stat().st_size} bytes)')
+      PY
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  # 2. Structure: the 13 standard PDD sections are present.
+  - type: run_command
+    description: "PDD contains the 13 required section headings (at most 2 may be missing)"
+    command: |
+      python3 - <<'PY'
+      import sys
+      from pathlib import Path
+      p = Path('pdd_extracted.txt')
+      if not p.exists():
+          print('FAIL: pdd_extracted.txt missing (earlier extraction step failed)')
+          sys.exit(1)
+      text = p.read_text().lower()
+      required = [
+          'business case',
+          'process identification',
+          'current state',
+          'future state',
+          'business rules',
+          'data requirements',
+          'roles',
+          'exception handling',
+          'compliance',
+          'success criteria',
+          'assumptions',
+          'completeness',
+          'next steps',
+      ]
+      missing = [s for s in required if s not in text]
+      print('Missing anchors:', missing)
+      # Allow up to 2 misses (some personas withhold whole topics).
+      if len(missing) > 2:
+          sys.exit(1)
+      print('OK')
+      PY
+    timeout: 20
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+  # 3. Domain grounding: the PDD describes Client Portfolio Reporting, not
+  #    a generic or off-topic process.
+  - type: run_command
+    description: "PDD references Client Portfolio Reporting domain anchors"
+    command: |
+      python3 - <<'PY'
+      import sys
+      from pathlib import Path
+      p = Path('pdd_extracted.txt')
+      if not p.exists():
+          print('FAIL: pdd_extracted.txt missing (earlier extraction step failed)')
+          sys.exit(1)
+      text = p.read_text().lower()
+      anchors = [
+          'client portfolio', 'advisor', 'compliance', 'portfolio report',
+          'market data', 'research'
+      ]
+      hits = [a for a in anchors if a in text]
+      print(f'Hits: {hits}')
+      if len(hits) < 4:
+          print('FAIL: too few domain anchors')
+          sys.exit(1)
+      print('OK')
+      PY
+    timeout: 20
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  # 4. Quality: LLM judge grades the produced PDD.
+  - type: llm_judge
+    description: "PDD quality: completeness, specificity, professionalism, no hallucinations"
+    files: ["pdd_extracted.txt"]
+    prompt: |
+      You are grading a Process Definition Document (PDD) produced by an
+      agent after interviewing a simulated user about the "Client Portfolio
+      Reporting" process at a wealth-management firm. The document is
+      presented to you as markdown (tables are pipe-tables, headings use
+      `#`/`##`/`###`, lists use `-`/`1.`); grade based on the document's
+      actual content, not on its visual rendering.
+
+      Score 0.0 - 1.0 based on:
+        1. Completeness (0.3): Are all 13 standard PDD sections populated
+           with substantive content, not placeholders or TODOs? A section
+           that contains a populated table OR a populated list OR
+           populated prose counts as populated; penalize only sections
+           that are truly empty or contain only a TODO / placeholder.
+        2. Specificity (0.3): Are stages, roles (RACI), data objects,
+           integrations, KPIs, and regulations concrete and internally
+           consistent? Does the document reference plausible wealth-mgmt
+           realities (advisors, portfolio accounting, SEC / FINRA rules)?
+        3. Traceability (0.2): Do TO-BE stages flow from AS-IS pain points?
+           Do KPIs tie back to objectives? Do business rules reference the
+           stages?
+        4. Hallucination resistance (0.2): Penalize invented specifics the
+           user was never asked about (e.g., a made-up vendor name, an
+           invented SLA number, a fabricated regulation). Grade ONLY the
+           document's content — do NOT infer hallucination from the
+           absence of a visible interview transcript.
+
+      Return JSON: {"score": <0.0-1.0>, "rationale": "<1-2 sentences>"}.
+    weight: 2.0
+    pass_threshold: 0.6
+
+max_iterations: 1

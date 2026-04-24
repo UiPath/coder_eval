@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from ..models import AgentConfig, Dataset, ExperimentVariant, TaskDefinition, Te
 
 _ROW_VAR_PATTERN = re.compile(r"\$\{row\.([A-Za-z_][A-Za-z0-9_]*)\}")
 _ROW_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
+_ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def load_task(task_file: Path) -> tuple[TaskDefinition, str]:
@@ -54,18 +56,55 @@ def load_task(task_file: Path) -> tuple[TaskDefinition, str]:
 
 
 def resolve_template_source_paths(sources: list[TemplateSource], base_dir: Path) -> None:
-    """Resolve relative TemplateDirSource paths to absolute, in place.
+    """Resolve TemplateDirSource paths to absolute, in place.
 
-    Skips already-absolute paths and non-TemplateDirSource entries.
+    Expands $VAR / ${VAR} environment variables, then normalizes the path:
+    relative paths are resolved against ``base_dir``; absolute paths are
+    used as-is (but still go through ``Path(...)`` for string normalization).
+
+    Undefined env variables raise ``ValueError`` — a template directory is a
+    load-bearing config field and an unresolved variable would otherwise
+    surface as a cryptic "Template directory not found" error at sandbox
+    setup, far from the actual configuration mistake.
+
+    Scope: only environment variables (``$VAR`` / ``${VAR}``) are expanded
+    here. Dataset row substitution (``${row.field}`` in ``expand_dataset``)
+    runs over ``initial_prompt`` and ``success_criteria`` only — it does
+    NOT touch ``sandbox.template_sources``. The two regexes are disjoint
+    (env requires ``[A-Za-z_][A-Za-z0-9_]*``, row-var requires the dot)
+    but a ``${row.X}`` left inside a template path will not be substituted
+    and will fail at sandbox setup.
+
+    Skips non-TemplateDirSource entries.
 
     Args:
         sources: List of template sources (TemplateDirSource, RepoSource, etc.)
         base_dir: Base directory for resolving relative paths.
+
+    Raises:
+        ValueError: If a ``TemplateDirSource.path`` references an undefined
+            environment variable.
     """
     for source in sources:
         if isinstance(source, TemplateDirSource):
-            template_path = Path(source.path)
-            if not template_path.is_absolute():
+            raw = source.path
+            undefined: list[str] = []
+            for match in _ENV_VAR_PATTERN.finditer(raw):
+                var_name = match.group(1) or match.group(2)
+                if var_name not in os.environ:
+                    undefined.append(var_name)
+            if undefined:
+                names = ", ".join(f"${v}" for v in undefined)
+                msg = (
+                    f"Template path {raw!r} references undefined environment variable(s): {names}. "
+                    f"Set them before loading the task (e.g. in .env) so the template directory can be resolved."
+                )
+                raise ValueError(msg)
+            expanded = os.path.expandvars(raw)
+            template_path = Path(expanded)
+            if template_path.is_absolute():
+                source.path = str(template_path)
+            else:
                 source.path = str((base_dir / template_path).resolve())
 
 

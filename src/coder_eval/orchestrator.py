@@ -3,6 +3,7 @@
 import asyncio
 import functools
 import logging
+import re
 import time
 from collections.abc import Callable
 from contextlib import suppress
@@ -100,6 +101,85 @@ async def _pump_stream(
             log_fn("[%s] %s", label, line)
 
 
+# Exact set of tags emitted by ClaudeCodeAgent._format_messages. Unknown
+# bracketed words (e.g. "[NOTE]", "[TODO]", pylint error codes, markdown-style
+# footnotes) are intentionally NOT matched — they must pass through as content.
+_UTTERANCE_TAG_RE = re.compile(r"^\[(ASSISTANT|RESULT - SUCCESS|RESULT - ERROR|TOOL USE)\](?: (.*))?$")
+
+
+def _extract_utterance(raw: str) -> str:
+    """Collapse a ClaudeCodeAgent-formatted transcript to a clean utterance.
+
+    Input looks like:
+        [ASSISTANT] Sure, I'll do X.
+        [TOOL USE] Read
+        [ASSISTANT] Here is the answer...
+        [RESULT - SUCCESS] Here is the answer...
+
+    The SDK's ``ResultMessage`` duplicates the final assistant text, which
+    makes conversation.log read as if every message is repeated. Prefer the
+    ``[RESULT - ...]`` payload when it is non-empty (it is the canonical
+    final utterance); otherwise fall back to concatenated ``[ASSISTANT]``
+    blocks. ``[TOOL USE]`` lines are dropped. Input that does not look
+    tagged at all (plain user text like a pinned initial_prompt) is
+    returned unchanged.
+
+    Pre-tag content handling: any content appearing BEFORE the first
+    tagged line is collected into an implicit ``[ASSISTANT]`` block. It
+    survives in the output only on the ASSISTANT-fallback path (no
+    ``[RESULT - ...]`` in the transcript). When a ``[RESULT - SUCCESS]``
+    is present, it supersedes all ``[ASSISTANT]`` content — including
+    any pre-tag content — because the ResultMessage is the SDK's
+    canonical final utterance and ASSISTANT lines are chain-of-thought
+    that the RESULT already incorporates. ClaudeCodeAgent always begins
+    its output with a tag in practice, so this mostly matters for
+    defensive handling of upstream format drift.
+
+    Asymmetry note: ``[RESULT - SUCCESS]`` strips its label (it is the
+    canonical answer); ``[RESULT - ERROR]`` keeps a ``[RESULT - ERROR]``
+    prefix in the output so the error state remains visible in the log.
+    """
+    if not raw:
+        return ""
+    lines = raw.splitlines()
+    if not any(_UTTERANCE_TAG_RE.match(ln) for ln in lines):
+        return raw
+
+    assistant_parts: list[str] = []
+    result_parts: list[str] = []
+    # Pre-tag content becomes an implicit ASSISTANT block (not dropped).
+    current_tag: str = "ASSISTANT"
+    current_buf: list[str] = []
+
+    def _flush() -> None:
+        text = "\n".join(current_buf).strip()
+        if not text:
+            return
+        if current_tag == "ASSISTANT":
+            assistant_parts.append(text)
+        elif current_tag == "RESULT - SUCCESS":
+            result_parts.append(text)
+        elif current_tag == "RESULT - ERROR":
+            result_parts.append(f"[RESULT - ERROR] {text}")
+        # TOOL USE is dropped.
+
+    for ln in lines:
+        match = _UTTERANCE_TAG_RE.match(ln)
+        if match:
+            _flush()
+            current_tag = match.group(1)
+            current_buf = [match.group(2) or ""]
+        else:
+            current_buf.append(ln)
+    _flush()
+
+    if result_parts:
+        return "\n\n".join(result_parts)
+    if assistant_parts:
+        return "\n\n".join(assistant_parts)
+    return raw
+
+
 def _extract_failure_reason(result: CriterionResult) -> str | None:
     """Streaming-event wrapper around ``_short_failure_reason``.
 
@@ -164,6 +244,10 @@ class Orchestrator:
         # Derived paths
         self.report_path = self.run_dir / "task.json"
         self.html_report_path = self.run_dir / "task.html"
+        # Clean user<->agent transcript for simulation runs. Written alongside
+        # task.log so a human can follow the conversation without the
+        # orchestrator noise in between.
+        self.conversation_log_path = self.run_dir / "conversation.log"
         # Note: artifacts directory (run_dir/artifacts) is created on-demand during sandbox preservation
 
         # Snapshot directory (created on-demand if snapshots enabled)
@@ -824,6 +908,7 @@ class Orchestrator:
                 simulator_output_tokens += opener.output_tokens or 0
                 total_tokens_used += (opener.input_tokens or 0) + (opener.output_tokens or 0)
                 current_prompt = opener.text
+                self._log_conversation("USER", 1, current_prompt, metadata="simulator-generated opener")
 
                 # Opener carrying the stop token means the simulator judged the
                 # task done before any agent turn ran. Record the telemetry and
@@ -844,6 +929,7 @@ class Orchestrator:
                     return False
             else:
                 current_prompt = initial_prompt
+                self._log_conversation("USER", 1, current_prompt, metadata="pinned initial_prompt")
             # Parallel history of clean (user, agent) pairs for the simulator.
             # This intentionally excludes the working-directory prefix that gets
             # prepended to agent prompts — the simulator should see the user's
@@ -905,6 +991,25 @@ class Orchestrator:
                     turn_record = await communicate_coro
                 self.result.turns.append(turn_record)
                 dialog_pairs.append((current_prompt, turn_record.agent_output or ""))
+                agent_meta_parts = []
+                if turn_record.duration_seconds is not None:
+                    agent_meta_parts.append(f"{turn_record.duration_seconds:.1f}s")
+                if turn_record.token_usage is not None:
+                    usage_parts = []
+                    if turn_record.token_usage.input_tokens:
+                        usage_parts.append(f"in={turn_record.token_usage.input_tokens}")
+                    if turn_record.token_usage.output_tokens:
+                        usage_parts.append(f"out={turn_record.token_usage.output_tokens}")
+                    if usage_parts:
+                        agent_meta_parts.append(" ".join(usage_parts))
+                if turn_record.commands:
+                    agent_meta_parts.append(f"{len(turn_record.commands)} tool calls")
+                self._log_conversation(
+                    "AGENT",
+                    turns_completed,
+                    turn_record.agent_output or "",
+                    metadata=", ".join(agent_meta_parts),
+                )
 
                 safe_emit(
                     self.stream_callback,
@@ -984,10 +1089,17 @@ class Orchestrator:
                 total_tokens_used += (sim_result.input_tokens or 0) + (sim_result.output_tokens or 0)
 
                 if sim_result.stop_requested:
+                    self._log_conversation(
+                        "USER",
+                        turns_completed + 1,
+                        sim_result.text,
+                        metadata="stop token — dialog ending",
+                    )
                     stop_reason = DialogStopReason.STOP_TOKEN
                     break
 
                 current_prompt = sim_result.text
+                self._log_conversation("USER", turns_completed + 1, current_prompt)
 
             # Final criteria check for end_of_dialog (or both) modes, or when
             # every_turn mode did not run a check for the final turn.
@@ -1051,6 +1163,20 @@ class Orchestrator:
             # Always tear down the simulator agent (and its scratch dir) even
             # when the dialog bails out via exception.
             await simulator.stop()
+
+    def _log_conversation(self, role: str, turn: int, text: str, metadata: str = "") -> None:
+        """Append one utterance to conversation.log.
+
+        Role is "USER" (from the simulator, or the pinned initial_prompt) or
+        "AGENT". Called from the simulation dialog loop only — single-shot
+        runs do not produce a conversation.log. ``run_dir`` is guaranteed to
+        exist by the time this runs (``task_log_handler`` creates it before
+        the dialog loop starts).
+        """
+        header = f"=== {role} (turn {turn}){f' — {metadata}' if metadata else ''} ==="
+        body = _extract_utterance(text or "").rstrip()
+        with self.conversation_log_path.open("a", encoding="utf-8") as f:
+            f.write(f"{header}\n{body}\n\n")
 
     def _emit_criteria_event(self, criteria_results: list[CriterionResult]) -> None:
         """Emit a CriteriaCheckEvent for the current success-criteria state.
