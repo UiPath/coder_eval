@@ -10,6 +10,7 @@ from claude_agent_sdk import SdkPluginConfig
 # Enums
 # Criteria
 from coder_eval.models.criteria import (
+    AgentJudgeCriterion,
     BaseSuccessCriterion,
     ClassificationMatchCriterion,
     CommandExecutedCriterion,
@@ -54,6 +55,9 @@ from coder_eval.models.experiment import (
 
 # Gateway
 from coder_eval.models.gateway import DEFAULT_GATEWAY_MODEL
+
+# Judge
+from coder_eval.models.judge import JudgeVerdict
 
 # Mutations
 from coder_eval.models.mutations import (
@@ -172,6 +176,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "UiPathEvalCriterion",
     "ImportCheckCriterion",
     "LLMJudgeCriterion",
+    "AgentJudgeCriterion",
     "SkillTriggeredCriterion",
     "SuccessCriterion",
     # Routing
@@ -224,6 +229,8 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "RunSummary",
     # Gateway
     "DEFAULT_GATEWAY_MODEL",
+    # Judge
+    "JudgeVerdict",
     # Tasks
     "TaskDefinition",
     "DEFAULT_SIMULATION_STOP_TOKEN",

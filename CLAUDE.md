@@ -66,8 +66,11 @@ coder_eval/
 │
 ├── evaluation/                    # Evaluation orchestration
 │   ├── checker.py                 # SuccessChecker (dispatches to criteria/)
+│   ├── judge_context.py           # JudgeContextBuilder + shared scrub/truncate/format_details for both judges
+│   ├── judge_verdict.py           # parse_judge_verdict + span walker (shared verdict parser)
 │   ├── llmgw.py                   # Shared UiPath LLM Gateway client factory
 │   ├── reviewer.py                # LLM reviewer via UiPath LLM Gateway
+│   ├── sub_agent.py               # SubAgentRunner: sandbox-copy + ClaudeCodeAgent lifecycle for judge-style sub-agents
 │   └── summaries.py               # summarize_commands (shared by orchestrator + llm_judge)
 │
 ├── errors/                        # Error handling system
@@ -147,7 +150,7 @@ templates/                         # Sandbox template directories
 - **Dataset fan-out**: `TaskDefinition.dataset` (inline rows or JSONL path) expands a single task into N row-tasks with `${row.<field>}` substitution in `initial_prompt` and `success_criteria` string fields. Expansion runs in `task_loader.expand_dataset` **before** variant resolution, so variants cannot override the dataset. Row cap: CLI `--sample N` > task-level `dataset.sample`.
 - **Per-criterion aggregation**: Each `BaseCriterion` subclass exposes `aggregate(criterion, per_row_results) -> CriterionAggregate | None`. Default emits `count / mean / median / std / min / max` so every criterion is suite-thresholdable for free. Classification-style criteria return `ClassificationCriterionResult` (subclass of `CriterionResult`) and layer accuracy / P/R/F1 / confusion via the shared `overlay_classification_metrics` utility. `BaseSuccessCriterion.suite_thresholds` gates the suite on those metrics; CLI exits non-zero on any gate failure.
 
-## Success Criteria (16 types)
+## Success Criteria (17 types)
 
 | Type | Scoring | Description |
 |------|---------|-------------|
@@ -167,6 +170,7 @@ templates/                         # Sandbox template directories
 | `classification_match` | Binary | File-based label match (observed vs expected) with `(none)`/`(other)` sentinels; emits `ClassificationCriterionResult` for suite-level P/R/F1 |
 | `skill_triggered` | Binary | Did the agent invoke a `Skill` tool during the run? Emits `ClassificationCriterionResult` for suite-level P/R/F1 |
 | `llm_judge` | Continuous | LLM grades artifacts + optional trajectory + optional reference via UiPath LLM Gateway |
+| `agent_judge` | Continuous | Spawns a Claude Code SDK agent in an isolated sandbox copy; judge uses tools (Bash/Read/Grep/…) to investigate and returns a JSON verdict. Expensive; runs with evaluator credentials — see SECURITY note in the criterion docstring. Does not support the PROXY backend (follow-up). |
 
 All criteria support `weight` (default 1.0) and `pass_threshold` (default 0.9). On dataset-backed tasks, criteria may also set `suite_thresholds: {metric: min_value}` — the suite gate passes iff every listed metric (from the criterion's `aggregate()` output) meets its minimum.
 

@@ -22,6 +22,7 @@ Complete reference for defining evaluation tasks in coder_eval.
   - [command_executed](#command_executed)
   - [uipath_eval](#uipath_eval)
   - [llm_judge](#llm_judge)
+  - [agent_judge](#agent_judge)
 - [Sandbox Snapshots](#sandbox-snapshots)
 - [LLM Reviewer](#llm-reviewer)
 - [Reference Solutions](#reference-solutions)
@@ -219,7 +220,7 @@ All criteria share these fields:
 **Scoring types:**
 - **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`
 - **Fractional** (0.0–1.0): `file_contains`, `file_check`, `json_check`, `pytest`, `command_executed`, `uipath_eval`
-- **Continuous** (0.0–1.0): `pylint_score`, `reference_comparison`, `llm_judge`
+- **Continuous** (0.0–1.0): `pylint_score`, `reference_comparison`, `llm_judge`, `agent_judge`
 
 **Task success:** ALL criteria must score >= their `pass_threshold`.
 
@@ -528,6 +529,83 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
 - `score` key missing from the JSON verdict
 - `score` is not coercible to float
 - LLM Gateway unavailable / network error (handled by `@handle_criterion_errors`)
+
+### `agent_judge`
+
+Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LLM call against a rubric), the judge agent has **tool access** — Bash, Read, Write, Glob, Grep, Edit by default — and runs in an isolated copy of the task sandbox. Use it when functional validation requires executing something (`uip rpa get-errors`, `xmllint`, a test suite) rather than just inspecting file content.
+
+```yaml
+- type: "agent_judge"
+  description: "Judge validates the generated XAML via CLI"
+  prompt: |
+    Inspect Main.xaml and grade how well it matches the task requirements.
+
+    Do at least these checks using your tools:
+    1. Valid XML? (`xmllint --noout Main.xaml` or Python's xml.etree)
+    2. Contains the activities required by the task prompt?
+    3. Uses VisualBasic expressions (no CSharpValue)?
+    4. Variable declarations aligned with the reference?
+
+    Scoring:
+    - 1.0: all checks pass, structure aligned with reference
+    - 0.7: functional but minor structural deviations
+    - 0.4: partially correct — some critical checks fail
+    - 0.0: invalid XML or fundamentally wrong structure
+  files: ["Main.xaml"]
+  include_reference: true
+  include_agent_output: false
+  include_tool_calls: false
+  model: "claude-opus-4-6"
+  max_turns: 5
+  turn_timeout: 300
+  permission_mode: "bypassPermissions"
+  allowed_tools: ["Bash", "Read", "Grep", "Glob"]
+  weight: 5.0
+  pass_threshold: 0.7
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `prompt` | *required* | Evaluation instructions for the judge agent |
+| `files` | `[]` | Sandbox-relative paths pre-attached to the prompt (judge also has live access to these files) |
+| `include_reference` | `false` | Include the task's reference solution in the judge prompt |
+| `include_agent_output` | `false` | Include the latest agent turn's raw output (UNTRUSTED) |
+| `include_tool_calls` | `false` | Include summarized tool-call telemetry from the latest agent turn |
+| `max_file_chars` | `20000` | Per-file truncation for pre-attached files |
+| `model` | `claude-opus-4-6` | Claude Code SDK model ID (distinct ID space from `llm_judge.model`) |
+| `max_turns` | `10` | Judge's inner-loop turn limit |
+| `turn_timeout` | `300` | Wall-clock timeout (seconds) |
+| `permission_mode` | `bypassPermissions` | SDK permission mode — safe because the judge works on a throwaway copy |
+| `allowed_tools` | `[Bash, Read, Write, Glob, Grep, Edit]` | Tools available to the judge. Narrow this when Bash is not needed. |
+| `disallowed_tools` | `None` | Tools explicitly blocked |
+| `ignore_patterns` | `[.git, node_modules, __pycache__, .venv]` | Passed to `shutil.ignore_patterns` when copying the sandbox |
+
+**Security**
+
+The judge runs with the evaluator's API credentials and can execute arbitrary Bash by default. Four attack surfaces:
+
+1. **Malicious generation artifacts** — the coding agent could plant a file that exfiltrates credentials when the judge runs it (e.g. `python generated.py`). Use `llm_judge` for scenarios with adversarial generation.
+2. **Prompt injection** — the UNTRUSTED markers on `include_agent_output` / `include_tool_calls` are hints, not guarantees. A strong injection could cause the judge to `curl` secrets out before returning a verdict.
+3. **Credential exfiltration via Bash** — any network-capable tool can leak credentials. When the task doesn't need Bash (e.g. structural-only inspection), override `allowed_tools: [Read, Grep, Glob]`.
+4. **Hooks / MCP servers planted by the main agent** — a compromised generation could drop `.claude/settings.json` or `.mcp.json` into the sandbox. The judge sets `setting_sources=[]` on its SDK config and excludes both paths from the sandbox copy, so neither gets loaded. This closes a pre-LLM-turn hook/MCP surface that the `allowed_tools` gate can't see.
+
+**Reference handling**: The reference solution is shown to the judge verbatim (same as `llm_judge`) and is scrubbed from the persisted `CriterionResult.details` — a misbehaving judge that echoes the reference in its rationale won't leak it into run artifacts.
+
+**Backend support**: Works on `direct` and `bedrock` backends. The `proxy` backend fails fast with a clear error (needs threading the proxy port to the checker — tracked as a follow-up on issue #166).
+
+**Operational notes**:
+
+- Each invocation copies the sandbox into a `/tmp/sub_agent_*` directory and removes it when the check completes.
+- The judge's token usage and wall-clock duration appear in `CriterionResult.details`.
+- `agent_judge` is expensive relative to other criteria. Keep `max_turns` tight and consider running it alongside cheaper structural checks rather than as the sole gate.
+
+**Failure modes** — each sets `score=0.0` and populates `error`:
+
+- Non-JSON final message from the judge (parse failure)
+- `score` missing / non-numeric / non-finite
+- `TurnTimeoutError` (judge exceeded `turn_timeout`)
+- SDK subprocess failure (e.g. `claude` CLI missing)
+- `PROXY` backend (unsupported in MVP)
 
 ## Sandbox Snapshots
 

@@ -383,6 +383,23 @@ def test_judge_reference_not_in_details(sandbox: Sandbox) -> None:
         assert field_value is None or sentinel not in field_value
 
 
+def test_judge_parse_error_scrubs_reference_from_error_field(sandbox: Sandbox) -> None:
+    """Parse errors can echo the raw score value — must be scrubbed before persisting.
+
+    If the judge returns ``{"score": "<reference code>", ...}``, the parser's
+    diagnostic includes the raw score value. That diagnostic lands in ``error`` and
+    must be scrubbed the same way ``details`` is.
+    """
+    sentinel = "REFERENCE_LEAK_VIA_ERROR_456"
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", include_reference=True)
+    mock_llm = _make_mock_llm(f'{{"score": "{sentinel}", "rationale": "ok"}}')
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion, reference_code=sentinel)
+
+    for field_value in (result.details, result.error):
+        assert field_value is None or sentinel not in field_value
+
+
 def test_judge_reference_not_leaked_on_parse_failure(sandbox: Sandbox) -> None:
     """If the model echoes the reference in an unparseable response, details must not leak it."""
     sentinel = "REFERENCE_CANARY_ECHOED_789"

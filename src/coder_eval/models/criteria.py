@@ -592,6 +592,105 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
     )
 
 
+class AgentJudgeCriterion(BaseSuccessCriterion):
+    """Spawn a Claude Code SDK agent as the judge.
+
+    The judge runs in an isolated copy of the sandbox with tool access (Bash, Read,
+    Write, Glob, Grep, Edit by default) and returns a JSON verdict
+    ``{"score": <float 0..1>, "rationale": "<1-2 sentences>"}``.
+
+    SECURITY: The judge runs with the evaluator's API credentials and can execute
+    arbitrary Bash by default. Four attack surfaces:
+      1. Malicious generation artifacts the judge executes (e.g. via `python x.py`).
+      2. Prompt injection from included agent_output / tool-call summaries.
+      3. Credential exfiltration via any network-capable tool (primarily Bash).
+      4. Hooks / MCP servers planted by the main agent (e.g. `.claude/settings.json`
+         or `.mcp.json` dropped into the sandbox) that would run before any LLM turn
+         and before allowed_tools gating. The judge sets ``setting_sources=[]`` and
+         excludes both paths from the sandbox copy, so neither gets loaded.
+    Use ``llm_judge`` for scenarios with adversarial generation. Narrow
+    ``allowed_tools`` per task when Bash is not needed.
+
+    Continuous scoring. Parse/score errors -> 0.0. Score clamped to [0.0, 1.0].
+    """
+
+    type: Literal["agent_judge"] = "agent_judge"
+
+    # Prompt & context — mirrors LLMJudgeCriterion for author consistency
+    prompt: str = Field(description="Evaluation instructions for the judge agent")
+    files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Sandbox-relative paths pre-attached to the judge prompt. The judge also has "
+            "live access to these files via its working directory (a sandbox copy)."
+        ),
+    )
+    include_reference: bool = Field(
+        default=False,
+        description=(
+            "When true and task.reference is set, include the reference solution in the "
+            "judge prompt. Silently omitted if no reference is configured."
+        ),
+    )
+    include_agent_output: bool = Field(
+        default=False,
+        description="Include the latest agent turn's raw output in the judge prompt (UNTRUSTED).",
+    )
+    include_tool_calls: bool = Field(
+        default=False,
+        description="Include summarized tool-call telemetry from the latest agent turn.",
+    )
+    max_file_chars: int = Field(
+        default=20_000,
+        gt=0,
+        description="Per-file content truncation applied before building the prompt.",
+    )
+
+    # Judge agent config
+    model: str = Field(
+        default="claude-opus-4-6",
+        description=(
+            "Claude Code SDK model ID (e.g. 'claude-opus-4-6'). Distinct from "
+            "LLMJudgeCriterion.model, which uses gateway model IDs."
+        ),
+    )
+    max_turns: int = Field(default=10, gt=0, description="Inner-loop turn limit for the judge agent")
+    turn_timeout: int = Field(
+        default=300,
+        ge=10,  # Matches AgentConfig.turn_timeout so load-time errors are readable
+        description="Wall-clock timeout for the judge turn (seconds). Minimum 10.",
+    )
+    permission_mode: Literal["default", "acceptEdits", "plan", "bypassPermissions"] = Field(
+        default="bypassPermissions",
+        description="Judge works on a throwaway copy, so bypassing permission prompts is fine.",
+    )
+    allowed_tools: list[str] = Field(
+        default_factory=lambda: ["Bash", "Read", "Write", "Glob", "Grep", "Edit"],
+        description=(
+            "Default includes Bash for CLI validation (e.g. `uip rpa get-errors`, `xmllint`). "
+            "Narrow to ['Read', 'Grep', 'Glob'] when Bash is not needed — see SECURITY note."
+        ),
+    )
+    disallowed_tools: list[str] | None = Field(
+        default=None,
+        description="Tools to block even if in allowed_tools.",
+    )
+    ignore_patterns: list[str] = Field(
+        default_factory=lambda: [
+            ".git",
+            "node_modules",
+            "__pycache__",
+            ".venv",
+            # SECURITY: exclude files that would make the judge CLI load hooks /
+            # MCP servers planted by the main agent. The checker also sets
+            # setting_sources=[] on the judge's AgentConfig as defense-in-depth.
+            ".claude",
+            ".mcp.json",
+        ],
+        description="Patterns passed to shutil.ignore_patterns when copying the sandbox.",
+    )
+
+
 # Discriminated union of all success criteria
 SuccessCriterion = (
     FileExistsCriterion
@@ -610,4 +709,5 @@ SuccessCriterion = (
     | ClassificationMatchCriterion
     | SkillTriggeredCriterion
     | LLMJudgeCriterion
+    | AgentJudgeCriterion
 )
