@@ -57,8 +57,20 @@ def cli() -> None:
 @click.option("--skip-build", is_flag=True, help="Skip UiPath CLI build step.")
 @click.option("--skip-pull", is_flag=True, help="Skip git pull steps.")
 @click.option("--skip-analysis", is_flag=True, help="Skip AI analysis generation.")
+@click.option(
+    "--skip-login",
+    is_flag=True,
+    help="Skip UiPath CLI login. Use when already authenticated via 'uip login --interactive'.",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose (DEBUG) logging in coder-eval.")
 @click.option("--backend", "-b", default=None, type=click.Choice(["direct", "bedrock", "proxy"]), help="API backend.")
+@click.option(
+    "--concurrency",
+    "-j",
+    default=None,
+    type=click.IntRange(min=1),
+    help="Max tasks to run concurrently per suite. Overrides the suite's built-in default.",
+)
 def run(
     model: str,
     max_iter: int,
@@ -67,8 +79,10 @@ def run(
     skip_build: bool,
     skip_pull: bool,
     skip_analysis: bool,
+    skip_login: bool,
     verbose: bool,
     backend: str | None,
+    concurrency: int | None,
 ) -> None:
     """Full pipeline: pull repos, build CLI, run tests, upload, ingest."""
     from .blob import upload_run
@@ -105,11 +119,12 @@ def run(
 
     # 3b. Validate UiPath credentials and tenant eagerly (fail-fast before any suite runs)
     login_suites = [s for s in suites_to_run if s.uip_login]
-    if login_suites:
+    if login_suites and not skip_login:
         if not all([cfg.uip_authority, cfg.uip_client_id, cfg.uip_client_secret]):
             raise click.UsageError(
                 "UIP_AUTHORITY, UIP_CLIENT_ID, and UIP_CLIENT_SECRET must be set in .env"
                 " for suites that require uip login."
+                " Or run 'uip login --interactive' and pass --skip-login."
             )
         for s in login_suites:
             if not (s.uip_tenant or cfg.uip_tenant):
@@ -117,7 +132,9 @@ def run(
 
     # 4. Run each suite → login (if needed) → run → analyze → upload → ingest
     for s in suites_to_run:
-        if s.uip_login:
+        if s.uip_login and skip_login:
+            print("Skipping UiPath CLI login (--skip-login); assuming already authenticated")
+        elif s.uip_login:
             tenant = s.uip_tenant or cfg.uip_tenant
             print(f"Authenticating UiPath CLI (tenant={tenant})...")
             uip_login(
@@ -131,12 +148,13 @@ def run(
         suite_tags = tags if tags is not None else s.tags
         print(f"\n--- Suite: {s.name} (tags={suite_tags}) ---")
 
+        suite_concurrency = concurrency if concurrency is not None else s.concurrency
         latest_run = run_tests(
             model=model,
             max_iter=max_iter,
             tags=suite_tags,
             task_patterns=s.task_patterns,
-            concurrency=s.concurrency,
+            concurrency=suite_concurrency,
             experiment=s.experiment,
             extra_env=s.env,
             verbose=verbose,

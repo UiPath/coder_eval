@@ -68,8 +68,8 @@ This runs the complete pipeline:
 Options:
 
 ```bash
-# Run only the smoke suite
-uv run dashboard run --suite smoke
+# Run only the skills suite
+uv run dashboard run --suite skills
 
 # Use a different model
 uv run dashboard run --model claude-sonnet-4-6 --max-iter 3
@@ -79,9 +79,21 @@ uv run dashboard run --skip-build --skip-pull --skip-analysis
 
 # Override tag filter
 uv run dashboard run --tags smoke
+
+# Parallelize tasks within each suite (overrides the suite's built-in default)
+uv run dashboard run --suite skills -j 8
+
+# Pick an API backend for the agent
+uv run dashboard run --suite skills --backend bedrock
+
+# Use interactive UiPath auth (personal OAuth) instead of client-credentials from .env
+uip login --interactive
+uv run dashboard run --suite skills --skip-login
 ```
 
-Available suites: `smoke`, `flow-init`, `flow`.
+Available suites: `skills`, `smoke`, `flow-init`, `flow`.
+
+Full flag list: `uv run dashboard run --help`.
 
 ### Individual commands
 

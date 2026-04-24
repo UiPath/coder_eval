@@ -10,7 +10,7 @@ Production deployment of the Next.js evalboard at `flow-evalboard`. Operational 
 | **Subscription** | `DevTest-ML-EA` (`5db48574-8a20-418f-b488-1fafd8d021df`) |
 | **Resource group** | `rg-coder-eval-tests` (West US 2) |
 | **Runtime** | Node 22 LTS on Linux, B1 SKU (~$9/mo) |
-| **Auth** | Disabled — app serves anonymously (see below) |
+| **Auth** | Easy Auth via Entra ID (UiPath tenant) — sign-in required (see below) |
 | **Deploy model** | Run From Package (zip mounted from blob at container start) |
 
 ## Deploy
@@ -46,21 +46,9 @@ az role assignment create \
 
 ## Auth
 
-Easy Auth is **disabled**. The app serves anonymously.
+Easy Auth enabled via Entra app `flow-evalboard` (client ID `d96ec2c5-d6fb-4674-8392-771ef01729c3`). UiPath tenant only.
 
-```
-platform.enabled              = false
-globalValidation.requireAuth  = false
-globalValidation.unauthAction = AllowAnonymous
-```
-
-UiPath's tenant requires admin consent for all delegated scopes, including basic OIDC. Evalboard is internal tooling with a random hostname and no customer data, so we opted to go public instead of waiting on IT. Keep the URL in internal channels only.
-
-The Entra app registration (`flow-evalboard`, client ID `d96ec2c5-d6fb-4674-8392-771ef01729c3`) and related app settings (`MICROSOFT_PROVIDER_AUTHENTICATION_SECRET`, `WEBSITE_AUTH_AAD_ALLOWED_TENANTS`) are parked in place. To re-enable auth later, get admin consent via the open IT ticket: [IT-184799](https://uipath.atlassian.net/servicedesk/customer/portal/3/IT-184799).
-
-## Open tickets
-
-- [**IT-184799**](https://uipath.atlassian.net/servicedesk/customer/portal/3/IT-184799) — Entra admin consent for `openid profile email`. Required to re-enable Easy Auth (see Auth section).
+**Load-bearing:** `loginParameters` is pinned to `scope=openid profile email` — the exact set admin-consented via IT-184799. Don't broaden it without new admin consent, or every user will hit an approval-required screen.
 
 ## Reference IDs
 
