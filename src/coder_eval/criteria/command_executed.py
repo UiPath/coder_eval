@@ -69,11 +69,14 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
                 details="No commands found in turn records",
             )
 
-        # Compile regex patterns if provided
+        # Compile regex patterns if provided.
+        # re.DOTALL so `.` matches newlines — agents commonly write multi-line bash
+        # commands using backslash line-continuation (e.g. `uip ... \\\n  --body ...`),
+        # and patterns like `foo.*--body` must span those line breaks.
         pattern: re.Pattern[str] | None = None
         if criterion.command_pattern is not None:
             try:
-                pattern = re.compile(criterion.command_pattern)
+                pattern = re.compile(criterion.command_pattern, re.DOTALL)
             except re.error as e:
                 return CriterionResult(
                     criterion_type=criterion.type,
@@ -86,7 +89,7 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
         exclude_re: re.Pattern[str] | None = None
         if criterion.exclude_pattern is not None:
             try:
-                exclude_re = re.compile(criterion.exclude_pattern)
+                exclude_re = re.compile(criterion.exclude_pattern, re.DOTALL)
             except re.error as e:
                 return CriterionResult(
                     criterion_type=criterion.type,

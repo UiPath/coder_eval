@@ -221,6 +221,68 @@ class TestCommandExecutedCriterion:
         # 2 matches out of 3 required
         assert abs(result.score - 2.0 / 3.0) < 0.01
 
+    def test_match_multiline_command(self):
+        """`.` must span newlines so backslash-continued commands match."""
+        sandbox = MockSandbox()
+        multiline_cmd = (
+            'uip is resources execute create "salesforce" "Contact" \\\n'
+            '  --connection-id "abc-123" \\\n'
+            '  --body \'{"LastName": "Smith"}\' \\\n'
+            "  --output json"
+        )
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(
+                        tool_name="Bash",
+                        parameters={"command": multiline_cmd},
+                        result_status="success",
+                    ),
+                ]
+            )
+        ]
+
+        criterion = CommandExecutedCriterion(
+            description="Agent ran execute create with --body",
+            tool_name="Bash",
+            command_pattern=r"uip\s+is\s+resources\s+execute\s+create.*--body",
+            min_count=1,
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion, turn_records=turn_records)
+
+        assert result.score == 1.0
+        assert result.error is None
+
+    def test_exclude_pattern_multiline(self):
+        """`exclude_pattern` should also span newlines (DOTALL) for symmetry."""
+        sandbox = MockSandbox()
+        help_cmd = "uip foo \\\n  --help"
+        real_cmd = "uip foo \\\n  --bar"
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(tool_name="Bash", parameters={"command": help_cmd}, tool_id="t1"),
+                    _make_command(tool_name="Bash", parameters={"command": real_cmd}, tool_id="t2"),
+                ]
+            )
+        ]
+
+        criterion = CommandExecutedCriterion(
+            description="Agent ran uip foo (not --help)",
+            tool_name="Bash",
+            command_pattern=r"uip\s+foo",
+            exclude_pattern=r"foo.*--help",
+            min_count=1,
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion, turn_records=turn_records)
+
+        assert result.score == 1.0
+        assert "1/1" in result.details
+
     def test_invalid_regex(self):
         """Test that invalid regex pattern returns score=0.0 with error."""
         sandbox = MockSandbox()
