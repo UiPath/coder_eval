@@ -16,9 +16,14 @@ class TestTurnTimeoutError:
         assert err.elapsed_seconds is None
 
     def test_message(self):
-        """TurnTimeoutError produces expected message."""
+        """TurnTimeoutError produces expected message.
+
+        Uses the canonical ``format_timeout_reason`` (integer-second
+        formatting) so the exception message and the partial's crash_reason
+        share one source of truth.
+        """
         err = TurnTimeoutError(60.0, iteration=2)
-        assert "Agent turn timed out after 60.0s" in str(err)
+        assert "Agent turn timed out after 60s" in str(err)
         assert "iteration 2" in str(err)
 
     def test_inherits_from_evaluation_timeout(self):
@@ -81,3 +86,16 @@ class TestEvaluationTimeoutError:
         assert err.iteration == 5
         assert err.elapsed_seconds == 99.0
         assert str(err) == "test message"
+
+
+class TestTurnTimeoutErrorNoPartialField:
+    """TurnTimeoutError no longer carries partial_turn_record."""
+
+    def test_constructs_without_partial_kwarg(self):
+        err = TurnTimeoutError(30.0, iteration=1)
+        assert err.timeout_seconds == 30.0
+        assert err.iteration == 1
+
+    def test_has_no_partial_turn_record_attribute(self):
+        err = TurnTimeoutError(30.0, iteration=1)
+        assert not hasattr(err, "partial_turn_record")

@@ -74,11 +74,12 @@ coder_eval/
 │   └── summaries.py               # summarize_commands (shared by orchestrator + llm_judge)
 │
 ├── errors/                        # Error handling system
+│   ├── agent.py                   # AgentCrashError + format_timeout_reason / truncate_crash_message helpers
 │   ├── categories.py              # Error categorization
 │   ├── categorization.py          # Error classification logic
-│   ├── executor.py                # Execution with error context
+│   ├── executor.py                # Execution with error context (+ on_attempt_error hook)
 │   ├── retry.py                   # Retry logic with exponential backoff
-│   └── timeout.py                 # Timeout handling
+│   └── timeout.py                 # Timeout handling (TurnTimeoutError carries optional partial TurnRecord)
 │
 ├── orchestration/                 # Batch execution utilities
 │   ├── batch.py                   # Parallel task execution (run_batch + run_batch_resolved)
@@ -187,7 +188,11 @@ ExperimentRunner resolves configs via 5-layer merge:
   5. CLI flags                 (always wins)
 
 Per-task loop (up to max_iterations):
-  1. Agent.communicate(prompt) → TurnRecord
+  1. Orchestrator._communicate_with_retry(prompt, iteration) → TurnRecord
+       (shared by criteria-feedback + simulation loops; wraps
+        agent.communicate with execute_with_retry, per-attempt
+        turn_timeout, and on_attempt_error → preserves crashed=True
+        partial TurnRecords on AgentCrashError / TurnTimeoutError)
   2. Create snapshot (if enabled)
   3. SuccessChecker.check_all() → List[CriterionResult]
   4. All pass? → SUCCESS. Otherwise → generate feedback → next iteration
@@ -227,6 +232,15 @@ make verify      # All of the above + coverage check (CI equivalent)
 1. Implement `Agent` ABC in `agents/`
 2. Add to `AgentKind` enum in `models/enums.py`
 3. Register in `Orchestrator._create_agent()`
+4. Before raising on any mid-turn failure, set `self.pending_turn` to a
+   `crashed=True` `TurnRecord` built from captured telemetry, then raise
+   `AgentCrashError` or `TurnTimeoutError` (bare — no payload on the exception).
+   The orchestrator's `_on_attempt_failure` callback drains the slot into
+   `result.turns` and calls `discard_pending_turn()` to clear it.
+5. Override `discard_pending_turn()` to clear `self.pending_turn` and roll back
+   any per-turn bookkeeping (e.g. iteration counter). Must be idempotent.
+6. Clear `self.pending_turn = None` at the top of `communicate()` (defensive
+   reset) and in `stop()` (cleanup).
 
 ## Task Definition
 

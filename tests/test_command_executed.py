@@ -31,13 +31,14 @@ def _make_command(
     )
 
 
-def _make_turn(commands: list[CommandTelemetry], iteration: int = 1) -> TurnRecord:
+def _make_turn(commands: list[CommandTelemetry], iteration: int = 1, crashed: bool = False) -> TurnRecord:
     """Helper to create a TurnRecord with commands."""
     return TurnRecord(
         iteration=iteration,
         user_input="test prompt",
         agent_output="test output",
         commands=commands,
+        crashed=crashed,
     )
 
 
@@ -504,3 +505,91 @@ class TestCommandExecutedCriterion:
         result = checker.check(criterion, turn_records=turn_records)
 
         assert result.score == 1.0
+
+    def test_crashed_turn_commands_are_counted(self):
+        """Commands from crashed partial turns count toward min_count.
+
+        Scenario: a crash preserves 3 commands; the retry adds 2 more. The
+        retry continues from where the crash left off (session-resume + same
+        sandbox), so all 5 calls are real executed work and all 5 should
+        satisfy a min_count=4 requirement.
+        """
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(
+                        tool_name="Bash",
+                        parameters={"command": "curl http://a"},
+                        tool_id="t-crash-1",
+                    ),
+                    _make_command(
+                        tool_name="Bash",
+                        parameters={"command": "curl http://b"},
+                        tool_id="t-crash-2",
+                    ),
+                    _make_command(
+                        tool_name="Bash",
+                        parameters={"command": "curl http://c"},
+                        tool_id="t-crash-3",
+                    ),
+                ],
+                crashed=True,
+            ),
+            _make_turn(
+                [
+                    _make_command(
+                        tool_name="Bash",
+                        parameters={"command": "curl http://d"},
+                        tool_id="t-clean-1",
+                    ),
+                    _make_command(
+                        tool_name="Bash",
+                        parameters={"command": "curl http://e"},
+                        tool_id="t-clean-2",
+                    ),
+                ],
+            ),
+        ]
+
+        criterion = CommandExecutedCriterion(
+            description="Agent used curl at least 4 times",
+            tool_name="Bash",
+            command_pattern=r"curl",
+            min_count=4,
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion, turn_records=turn_records)
+
+        # All 5 calls (3 from partial + 2 from retry) count → 5/4 capped to 1.0.
+        assert result.score == 1.0
+        assert "5/4" in result.details
+
+    def test_all_turns_crashed_commands_still_counted(self):
+        """Commands from an all-crashed run are real work and must be counted."""
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(
+                        tool_name="Bash",
+                        parameters={"command": "curl http://a"},
+                        tool_id="t-crash-1",
+                    ),
+                ],
+                crashed=True,
+            ),
+        ]
+
+        criterion = CommandExecutedCriterion(
+            description="Agent used curl",
+            command_pattern=r"curl",
+            min_count=1,
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion, turn_records=turn_records)
+
+        assert result.score == 1.0
+        assert "1/1" in result.details

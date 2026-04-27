@@ -58,7 +58,6 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
                 error="turn_records not provided to checker",
             )
 
-        # Collect all commands from all turns
         all_commands = [cmd for turn in turn_records for cmd in turn.commands]
 
         if not all_commands:

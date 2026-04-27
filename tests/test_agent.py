@@ -1,5 +1,6 @@
 """Tests for the agent implementations."""
 
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,6 +9,7 @@ from claude_agent_sdk import ProcessError
 
 from coder_eval.agent import AgentState
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
+from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.models import AgentConfig, AgentKind
 
 
@@ -24,6 +26,77 @@ def test_claude_agent_initialization():
     assert agent.config == config
     assert agent.client is None
     assert agent.get_state() == AgentState.WORKING
+
+
+def test_pending_turn_defaults_to_none():
+    """Fresh agent has pending_turn = None (slot is empty at rest)."""
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+    assert agent.pending_turn is None
+
+
+@pytest.mark.asyncio
+async def test_discard_pending_turn_clears_slot_and_decrements():
+    """discard_pending_turn clears the slot and rolls back _iteration once."""
+    from coder_eval.models import TurnRecord
+
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    partial = TurnRecord(iteration=1, user_input="p", agent_output="<partial>", crashed=True)
+    agent._iteration = 1
+    agent.pending_turn = partial
+
+    await agent.discard_pending_turn()
+
+    assert agent.pending_turn is None
+    assert agent._iteration == 0
+
+
+@pytest.mark.asyncio
+async def test_discard_pending_turn_idempotent():
+    """discard_pending_turn is a no-op when pending_turn is already None."""
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    assert agent.pending_turn is None
+    assert agent._iteration == 0
+
+    # First call: nothing to discard — counter must not go negative.
+    await agent.discard_pending_turn()
+    assert agent.pending_turn is None
+    assert agent._iteration == 0
+
+    # Second call after a real discard: still a no-op.
+    from coder_eval.models import TurnRecord
+
+    partial = TurnRecord(iteration=2, user_input="p", agent_output="<partial>", crashed=True)
+    agent._iteration = 2
+    agent.pending_turn = partial
+    await agent.discard_pending_turn()  # real discard
+    await agent.discard_pending_turn()  # idempotent second call
+    assert agent.pending_turn is None
+    assert agent._iteration == 1  # decremented once, not twice
+
+
+@pytest.mark.asyncio
+async def test_stop_clears_pending_turn():
+    """stop() clears pending_turn so stale partials don't leak between runs."""
+    import tempfile
+
+    from coder_eval.models import TurnRecord
+
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+        partial = TurnRecord(iteration=1, user_input="p", agent_output="<partial>", crashed=True)
+        agent.pending_turn = partial
+
+        await agent.stop()
+
+    assert agent.pending_turn is None
 
 
 @pytest.mark.asyncio
@@ -710,7 +783,7 @@ async def test_claude_agent_session_retained_on_error():
 
 
 class TestResultSummaryAndFormatter:
-    """The agent now persists the SDK's final ResultMessage as a structured
+    """The agent persists the SDK's final ResultMessage as a structured
     ``ResultSummary`` on every TurnRecord (success and error), and the error
     paths read from that single source instead of reverse-scanning messages.
     These tests anchor the helpers against the real SDK dataclass — so a
@@ -804,8 +877,6 @@ async def test_communicate_persists_result_summary_on_turn_record():
     config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
-    import tempfile
-
     with tempfile.TemporaryDirectory() as tmpdir:
         await agent.start(tmpdir)
 
@@ -837,3 +908,347 @@ async def test_communicate_persists_result_summary_on_turn_record():
         assert turn.result_summary.subtype == "success"
         assert turn.result_summary.stop_reason == "end_turn"
         assert turn.result_summary.result == "all good"
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_crash_preserves_partial_turn_record():
+    """When communicate() fails mid-turn, agent.pending_turn carries a partial
+    TurnRecord populated with tool calls captured before the crash.
+
+    This is the whole point of the pending_turn slot + on_attempt_error
+    plumbing: typed criteria like skill_triggered must still be able to
+    observe a Skill invocation that happened before the crash.
+    """
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    class AssistantMessage:
+        def __init__(self, blocks):
+            self.content = blocks
+            self.model = "mock-model"
+
+    class ToolUseBlock:
+        def __init__(self, name, tool_id, input_):
+            self.name = name
+            self.id = tool_id
+            self.input = input_
+
+    async def mock_query(prompt, options, transport=None):
+        # Agent invokes a Skill, then the stream dies before completing.
+        yield AssistantMessage([ToolUseBlock("Skill", "tool-1", {"skill": "my_skill"})])
+        raise RuntimeError("subprocess exited unexpectedly")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        with (
+            patch("coder_eval.agents.claude_code_agent.query", mock_query),
+            pytest.raises(AgentCrashError),
+        ):
+            await agent.communicate("do the thing")
+
+        # Slot is populated before the raise; not yet cleared (caller must drain).
+        partial = agent.pending_turn
+        assert partial is not None
+        assert partial.crashed is True
+        assert partial.max_turns_exhausted is False
+        # The Skill invocation that happened before the crash is preserved.
+        assert len(partial.commands) == 1
+        assert partial.commands[0].tool_name == "Skill"
+        assert partial.commands[0].parameters == {"skill": "my_skill"}
+        # Iteration contract: partial carries the bumped iteration number; the
+        # counter is NOT rolled back until discard_pending_turn() is called.
+        assert partial.iteration == 1
+        assert agent._iteration == 1
+
+        await agent.discard_pending_turn()
+        assert agent.pending_turn is None
+        assert agent._iteration == 0
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_crash_partial_carries_crash_reason():
+    """The agent must stamp ``crash_reason`` on the partial at construction.
+
+    Stamping at the raise site means the model is finalised before any
+    downstream consumer touches it — keeps the partial-preservation flow
+    safe against a future ``frozen=True`` on TurnRecord, and removes the
+    orchestrator's post-construction mutation as the primary stamping point.
+    """
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    async def mock_query(prompt, options, transport=None):
+        raise RuntimeError("CLI process failed (exit code 137): killed")
+        yield  # pragma: no cover
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        with (
+            patch("coder_eval.agents.claude_code_agent.query", mock_query),
+            pytest.raises(AgentCrashError),
+        ):
+            await agent.communicate("go")
+
+        partial = agent.pending_turn
+        assert partial is not None
+        assert partial.crash_reason is not None
+        # The crash message is truncated at 200 chars, but a short message
+        # passes through verbatim.
+        assert "CLI process failed (exit code 137)" in partial.crash_reason
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_timeout_partial_carries_crash_reason():
+    """TurnTimeoutError partials must carry the normalised "timed out after Ns"
+    reason at construction (not via post-hoc mutation)."""
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    async def mock_query(prompt, options, transport=None):
+        raise RuntimeError("watchdog kill")
+        yield  # pragma: no cover
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        with (
+            patch("coder_eval.agents.claude_code_agent.query", mock_query),
+            patch.object(ClaudeCodeAgent, "_timed_out", staticmethod(lambda *a, **k: True)),
+            pytest.raises(TurnTimeoutError),
+        ):
+            await agent.communicate("go", timeout=42.0)
+
+        partial = agent.pending_turn
+        assert partial is not None
+        # Normalised reason: integer-second formatting matches the
+        # orchestrator's defensive fallback so report rendering is consistent.
+        assert partial.crash_reason == "Agent turn timed out after 42s"
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_repeated_crashes_keep_iteration_stable():
+    """Consecutive crashes in one orchestrator iteration all carry the same iteration number.
+
+    discard_pending_turn() rolls back _iteration after each crash (simulating
+    what the orchestrator does), so repeated failures in a single logical
+    orchestrator iteration all stamp the same iteration on their partial records.
+    A subsequent clean call then advances the counter by one. This is what the
+    orchestrator's multiple-partials-per-iteration contract relies on.
+    """
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    class AssistantMessage:
+        def __init__(self, blocks):
+            self.content = blocks
+            self.model = "mock-model"
+
+    class ToolUseBlock:
+        def __init__(self, name, tool_id, input_):
+            self.name = name
+            self.id = tool_id
+            self.input = input_
+
+    async def crashing_query(prompt, options, transport=None):
+        yield AssistantMessage([ToolUseBlock("Read", "tool-crash", {"file": "x"})])
+        raise RuntimeError("stream died")
+
+    clean_finished = False
+
+    async def clean_query(prompt, options, transport=None):
+        # Match the SDK shape minimally: yield one AssistantMessage then end.
+        nonlocal clean_finished
+        yield AssistantMessage([ToolUseBlock("Read", "tool-clean", {"file": "y"})])
+        clean_finished = True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        partials: list = []
+        for _ in range(3):
+            with (
+                patch("coder_eval.agents.claude_code_agent.query", crashing_query),
+                pytest.raises(AgentCrashError),
+            ):
+                await agent.communicate("go")
+            partials.append(agent.pending_turn)
+            # Simulate the orchestrator draining and discarding after a failed attempt.
+            await agent.discard_pending_turn()
+            assert agent._iteration == 0
+
+        assert all(p is not None and p.iteration == 1 and p.crashed for p in partials)
+
+        # The clean retry advances the counter and produces iteration=1 again,
+        # so all four records for this logical orchestrator iteration share 1.
+        with patch("coder_eval.agents.claude_code_agent.query", clean_query):
+            turn_record = await agent.communicate("go")
+
+        assert clean_finished
+        assert turn_record.iteration == 1
+        assert turn_record.crashed is False
+        assert agent._iteration == 1
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_timeout_preserves_partial_turn_record():
+    """agent.pending_turn carries a partial TurnRecord with pre-kill tool calls
+    after a TurnTimeoutError.
+
+    Watchdog-killed turns are exactly where observational telemetry is
+    most valuable (an agent that looped on tool calls and ran the wall
+    clock out). Mirrors the AgentCrashError partial-preservation path.
+    """
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    class AssistantMessage:
+        def __init__(self, blocks):
+            self.content = blocks
+            self.model = "mock-model"
+
+    class ToolUseBlock:
+        def __init__(self, name, tool_id, input_):
+            self.name = name
+            self.id = tool_id
+            self.input = input_
+
+    async def mock_query(prompt, options, transport=None):
+        # Agent invokes one tool, then the watchdog kills the subprocess,
+        # which the SDK surfaces as a generic Exception.
+        yield AssistantMessage([ToolUseBlock("Bash", "tool-t", {"command": "sleep 1000"})])
+        raise RuntimeError("process terminated by watchdog")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        # Force the agent's timeout-detection helper to return True so the
+        # raised RuntimeError is classified as a timeout. Avoids needing
+        # real wall-clock waits in the test.
+        with (
+            patch("coder_eval.agents.claude_code_agent.query", mock_query),
+            patch.object(ClaudeCodeAgent, "_timed_out", staticmethod(lambda *a, **k: True)),
+            pytest.raises(TurnTimeoutError),
+        ):
+            await agent.communicate("start", timeout=0.01)
+
+        partial = agent.pending_turn
+        assert partial is not None
+        assert partial.crashed is True
+        assert len(partial.commands) == 1
+        assert partial.commands[0].tool_name == "Bash"
+        # Slot carries the bumped iteration; counter rolls back after discard.
+        assert partial.iteration == 1
+        assert agent._iteration == 1
+        await agent.discard_pending_turn()
+        assert agent._iteration == 0
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_error_max_turns_is_clean_completion_not_crash():
+    """SDK ``error_max_turns`` (subtype + is_error + exit 1) must not raise AgentCrashError.
+
+    The CLI emits a ResultMessage with ``subtype="error_max_turns"`` and
+    ``is_error=True``, then exits 1 — which the SDK re-raises as
+    ``ProcessError``. That is a legitimate "agent ran out of turns"
+    outcome, not a crash. Treating it as AGENT_CRASH would make it
+    retryable (max_retries=2) and resume the same prompt that just
+    burned its turn budget — pure waste. Instead the agent falls
+    through to the success path so the orchestrator's existing
+    ``max_turns_exhausted`` handling can stop iterating.
+    """
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits", max_turns=10)
+    agent = ClaudeCodeAgent(config)
+
+    class AssistantMessage:
+        def __init__(self, blocks):
+            self.content = blocks
+            self.model = "mock-model"
+
+    class TextBlock:
+        def __init__(self, text):
+            self.text = text
+
+    class ResultMessage:
+        # Mirror the SDK shape that the agent's _is_sdk_result_message + _summarize_result expect.
+        def __init__(self):
+            self.session_id = "s-1"
+            self.usage = {"input_tokens": 100, "output_tokens": 50}
+            self.total_cost_usd = 0.01
+            self.num_turns = 11  # > max_turns=10
+            self.is_error = True
+            self.subtype = "error_max_turns"
+            self.stop_reason = "tool_use"
+            self.result = None
+
+    async def mock_query(prompt, options, transport=None):
+        yield AssistantMessage([TextBlock("working on it")])
+        yield ResultMessage()
+        raise ProcessError("Command failed with exit code 1", exit_code=1, stderr="")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            # Must NOT raise: error_max_turns is a clean completion path.
+            turn_record = await agent.communicate("solve something hard")
+
+        assert turn_record.crashed is False
+        assert turn_record.max_turns_exhausted is True
+        # Iteration counter advances normally on a clean turn (no rollback).
+        assert agent._iteration == 1
+        # The ResultMessage details are still captured for diagnostics.
+        assert turn_record.result_summary is not None
+        assert turn_record.result_summary.subtype == "error_max_turns"
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_error_max_turns_clean_completion_via_exception_path():
+    """Sibling of the ProcessError test: the SDK sometimes wraps the
+    underlying failure as a generic ``Exception`` rather than re-raising
+    ``ProcessError`` directly. ``_max_turns_short_circuit`` lives in both
+    ``except`` branches; this asserts the ``except Exception`` branch
+    short-circuits the same way (clean completion, no crash, no rollback).
+    """
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits", max_turns=10)
+    agent = ClaudeCodeAgent(config)
+
+    class AssistantMessage:
+        def __init__(self, blocks):
+            self.content = blocks
+            self.model = "mock-model"
+
+    class TextBlock:
+        def __init__(self, text):
+            self.text = text
+
+    class ResultMessage:
+        def __init__(self):
+            self.session_id = "s-1"
+            self.usage = {"input_tokens": 100, "output_tokens": 50}
+            self.total_cost_usd = 0.01
+            self.num_turns = 11
+            self.is_error = True
+            self.subtype = "error_max_turns"
+            self.stop_reason = "tool_use"
+            self.result = None
+
+    async def mock_query(prompt, options, transport=None):
+        yield AssistantMessage([TextBlock("working on it")])
+        yield ResultMessage()
+        # The SDK may wrap the underlying CLI failure as a bare Exception
+        # rather than ProcessError — exercise the except-Exception branch.
+        raise RuntimeError("SDK stream wrapped the CLI exit-1 as a bare Exception")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            turn_record = await agent.communicate("solve something hard")
+
+        assert turn_record.crashed is False
+        assert turn_record.max_turns_exhausted is True
+        assert agent._iteration == 1
+        assert turn_record.result_summary is not None
+        assert turn_record.result_summary.subtype == "error_max_turns"

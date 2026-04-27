@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -98,6 +99,65 @@ def collect_agent_settings_rows(settings_source: dict[str, Any], is_sdk: bool) -
     return rows
 
 
+def group_consecutive_by_iteration[T](
+    items: Iterable[T],
+    iteration_of: Callable[[T], int | None],
+) -> list[list[T]]:
+    """Group consecutive items sharing the same iteration value into runs (input order preserved)."""
+    groups: list[list[T]] = []
+    last_iter: int | None = None
+    for item in items:
+        it = iteration_of(item)
+        if groups and it == last_iter:
+            groups[-1].append(item)
+        else:
+            groups.append([item])
+            last_iter = it
+    return groups
+
+
+def count_partials_by_outcome[T](
+    groups: Iterable[Sequence[T]],
+    crashed_of: Callable[[T], bool],
+) -> tuple[int, int, int]:
+    """Return ``(total, recovered, terminal)`` partial counts; recovered = group has a non-crashed turn."""
+    total = recovered = terminal = 0
+    for group in groups:
+        partials = sum(1 for item in group if crashed_of(item))
+        if not partials:
+            continue
+        total += partials
+        if any(not crashed_of(item) for item in group):
+            recovered += partials
+        else:
+            terminal += partials
+    return total, recovered, terminal
+
+
+def _count_crashed_partials(task_results: list[dict[str, Any]]) -> tuple[int, int, int]:
+    """Run-wide ``(total, recovered, terminal)`` over the markdown rollup's dict shape."""
+
+    def _iteration_of(t: dict[str, Any]) -> int | None:
+        # Coerce to int so a serialized "1" doesn't fragment from a sibling int 1.
+        raw = t.get("iteration")
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    total = recovered = terminal = 0
+    for task in task_results:
+        turns = task.get("turns") or []
+        groups = group_consecutive_by_iteration(turns, _iteration_of)
+        t_count, r_count, term_count = count_partials_by_outcome(groups, lambda t: bool(t.get("crashed")))
+        total += t_count
+        recovered += r_count
+        terminal += term_count
+    return total, recovered, terminal
+
+
 class ReportGenerator:
     """Generates reports from evaluation results."""
 
@@ -186,7 +246,6 @@ class ReportGenerator:
             iteration_count = task.get("iteration_count") or 0
             self_corrections = max(0, iteration_count - 1)
 
-            # Sum assistant_turn_count across all turns for this task
             asst_turns = sum(t.get("assistant_turn_count", 0) for t in turns)
 
             if turns:
@@ -259,12 +318,18 @@ class ReportGenerator:
         if iterations:
             lines.append(f"- **Avg Self-Correction Iterations**: {sum(iterations) / len(iterations):.1f}")
 
-        # Total assistant turns across all tasks
         total_asst_turns = sum(
             sum(t.get("assistant_turn_count", 0) for t in task.get("turns", [])) for task in summary.task_results
         )
         if total_asst_turns > 0:
             lines.append(f"- **Total Assistant Turns**: {total_asst_turns}")
+
+        crashed_total, recovered_partials, terminal_partials = _count_crashed_partials(summary.task_results)
+        if crashed_total > 0:
+            lines.append(
+                f"- **Crashed Partials**: {crashed_total} "
+                + f"({recovered_partials} recovered, {terminal_partials} terminal)"
+            )
 
         if similarities:
             lines.append(f"- **Avg Ground Truth Similarity**: {sum(similarities) / len(similarities):.3f}")

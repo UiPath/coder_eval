@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from coder_eval.errors.categories import ErrorCategory
+from coder_eval.errors.categories import RETRY_CONFIG, ErrorCategory
 from coder_eval.errors.categorization import categorize_error
 from coder_eval.errors.executor import execute_with_retry
 from coder_eval.errors.retry import get_retry_delay, should_retry
@@ -234,6 +234,111 @@ async def test_execute_with_retry_eventually_succeeds():
 
     assert result == "success"
     assert attempts == 3  # Failed twice, succeeded third time
+
+
+@pytest.mark.asyncio
+async def test_on_attempt_error_fires_for_every_failure():
+    """Callback fires on every failed attempt, including retried and terminal ones.
+
+    The orchestrator uses this hook to drain partial telemetry from
+    AgentCrashError before the retry decision is made.
+    """
+    # Lock the assumption: AGENT_RATE_LIMIT must be retryable for this test to
+    # exercise the "fires across multiple retries" path. If the policy ever
+    # flips to non-retryable, the test would silently degenerate into the
+    # terminal-failure case.
+    assert RETRY_CONFIG[ErrorCategory.AGENT_RATE_LIMIT].max_retries >= 2
+
+    attempts = 0
+    calls: list[tuple[str, int]] = []
+
+    async def flaky_operation():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise Exception("Rate limit exceeded")  # Retryable (AGENT_RATE_LIMIT)
+        return "success"
+
+    async def callback(err: Exception, attempt: int) -> None:
+        calls.append((str(err), attempt))
+
+    context = {"task_id": "test-task", "component": "agent"}
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        result = await execute_with_retry(
+            flaky_operation, "test_op", context, max_attempts=5, on_attempt_error=callback
+        )
+
+    assert result == "success"
+    # Two failures before success → callback fires twice, with the
+    # zero-indexed attempt number.
+    assert calls == [("Rate limit exceeded", 0), ("Rate limit exceeded", 1)]
+
+
+@pytest.mark.asyncio
+async def test_on_attempt_error_fires_on_terminal_failure():
+    """Callback also fires on the final, non-retried attempt.
+
+    This is the hook's whole point on terminal failures: preserve
+    telemetry before the exception propagates up and the run is abandoned.
+    """
+    # Lock the assumption this test is built on: AGENT_AUTH_ERROR is
+    # non-retryable. If that policy ever flips, the "calls == [0]"
+    # assertion below would still pass for the wrong reason, so fail
+    # loudly here instead. The default RetryConfig has max_retries=0,
+    # and AGENT_AUTH_ERROR is not overridden in RETRY_CONFIG — so either
+    # a missing entry (treated as default) or an explicit max_retries=0
+    # passes.
+    from coder_eval.errors.categories import RetryConfig
+
+    assert RETRY_CONFIG.get(ErrorCategory.AGENT_AUTH_ERROR, RetryConfig()).max_retries == 0
+
+    calls: list[int] = []
+
+    async def always_fails():
+        raise Exception("Invalid API Key")  # Non-retryable
+
+    async def callback(err: Exception, attempt: int) -> None:
+        calls.append(attempt)
+
+    context = {"task_id": "test-task", "component": "agent"}
+
+    with pytest.raises(Exception, match="Invalid API Key"):
+        await execute_with_retry(always_fails, "test_op", context, max_attempts=5, on_attempt_error=callback)
+
+    assert calls == [0]  # Fired once, before the error propagates.
+
+
+@pytest.mark.asyncio
+async def test_on_attempt_error_exceptions_are_swallowed():
+    """A raising callback must not mask the original error.
+
+    The comment in executor.py explicitly calls this out as a contract:
+    telemetry-draining code should never take down the retry loop.
+    """
+    # Pin the categorization + retry policy this test relies on so a
+    # change to the categorizer's string patterns can't silently turn
+    # this into a no-retry scenario that passes for the wrong reason.
+    sentinel = Exception("Connection failed")
+    assert categorize_error(sentinel, {"component": "agent"}) == ErrorCategory.AGENT_API_ERROR
+    assert RETRY_CONFIG[ErrorCategory.AGENT_API_ERROR].max_retries >= 1
+
+    callback_called = False
+
+    async def flaky_operation():
+        raise Exception("Connection failed")  # Retryable (AGENT_API_ERROR)
+
+    async def bad_callback(err: Exception, attempt: int) -> None:
+        nonlocal callback_called
+        callback_called = True
+        raise RuntimeError("callback blew up")
+
+    context = {"task_id": "test-task", "component": "agent"}
+
+    with patch("asyncio.sleep", new_callable=AsyncMock), pytest.raises(Exception, match="Connection failed"):
+        await execute_with_retry(flaky_operation, "test_op", context, max_attempts=2, on_attempt_error=bad_callback)
+
+    assert callback_called  # Callback was invoked despite raising.
 
 
 def test_should_retry_respects_config():

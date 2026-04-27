@@ -177,6 +177,21 @@ details .details-body { padding: 0 12px 10px 12px; }
 .nav-toggle:hover { background: var(--bg-card); }
 .llm-next-steps { margin: 6px 0 0 20px; padding-left: 0; }
 .llm-next-steps li { margin: 3px 0; }
+.iteration-group { padding: 12px 16px 4px 16px; margin-bottom: 20px;
+                   border-radius: 0 6px 6px 0; border-left: 4px solid var(--status-neutral); }
+/* rgba fallback for browsers without color-mix (Chrome <111, Firefox <113, Safari <16.2). */
+.iteration-group--recovered { border-left-color: var(--status-success);
+                              background: rgba(34, 197, 94, 0.06);
+                              background: color-mix(in srgb, var(--status-success) 6%, transparent); }
+.iteration-group--terminal { border-left-color: var(--status-error);
+                             background: rgba(239, 68, 68, 0.06);
+                             background: color-mix(in srgb, var(--status-error) 6%, transparent); }
+.iteration-group__banner { margin: 0 0 12px 0; font-size: 14px; font-weight: 600; }
+.iteration-group--recovered .iteration-group__banner { color: var(--status-success); }
+.iteration-group--terminal .iteration-group__banner { color: var(--status-error); }
+.attempt-transition { display: flex; align-items: center; gap: 8px;
+                      margin: -6px 0 12px 8px; color: var(--status-error); font-size: 12.5px; }
+.attempt-transition__icon { font-weight: 700; }
 footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--border);
          color: var(--fg-dim); font-size: 12px; text-align: center; }
 """
@@ -485,7 +500,64 @@ def _render_command(cmd: CommandTelemetry) -> str:
 """
 
 
-def _render_turn(turn: TurnRecord) -> str:
+def _group_turns_by_iteration(
+    turns: list[TurnRecord],
+) -> list[tuple[int, list[TurnRecord]]]:
+    """Group consecutive TurnRecords by iteration as ``(iteration, group)`` tuples for the renderer."""
+    from .reports import group_consecutive_by_iteration
+
+    groups = group_consecutive_by_iteration(turns, lambda t: t.iteration)
+    return [(group[0].iteration, group) for group in groups]
+
+
+def _render_iteration_group(iteration: int, group: list[TurnRecord]) -> str:
+    """Render an iteration's turns; multi-attempt groups get a coloured wrapper + banner."""
+    if len(group) == 1:
+        return _render_turn(group[0])
+
+    n = len(group)
+    crashed_count = sum(1 for t in group if t.crashed)
+    recovered = any(not t.crashed for t in group)
+    if recovered:
+        plural = "s" if crashed_count != 1 else ""
+        banner = f"Iteration {iteration} — recovered after {crashed_count} crashed attempt{plural}"
+        modifier = "iteration-group--recovered"
+    else:
+        banner = f"Iteration {iteration} — terminal failure ({n} crashed attempts)"
+        modifier = "iteration-group--terminal"
+
+    parts: list[str] = []
+    for i, t in enumerate(group):
+        parts.append(_render_turn(t, attempt_index=i + 1, attempt_total=n, recovered=(not t.crashed and recovered)))
+        # Marker between a crashed attempt and the next; suppressed on terminal (no following card).
+        if t.crashed and i + 1 < len(group):
+            reason = t.crash_reason or "Agent crashed"
+            parts.append(_render_attempt_transition(reason))
+    return f"""
+<div class="iteration-group {modifier}">
+  <h3 class="iteration-group__banner">{_esc(banner)}</h3>
+  {"".join(parts)}
+</div>
+"""
+
+
+def _render_attempt_transition(reason: str) -> str:
+    """Render a small inline marker between two attempts of the same iteration."""
+    return f"""
+<div class="attempt-transition">
+  <span class="attempt-transition__icon">⚠</span>
+  <span><strong>{_esc(reason)}</strong> · resuming ↓</span>
+</div>
+"""
+
+
+def _render_turn(
+    turn: TurnRecord,
+    *,
+    attempt_index: int | None = None,
+    attempt_total: int | None = None,
+    recovered: bool = False,
+) -> str:
     prompt_trunc, _ = _truncate(turn.user_input or "", 2000)
     response_trunc, _ = _truncate(turn.agent_output or "", 4000)
     cmds_html = "".join(_render_command(c) for c in (turn.commands or []))
@@ -511,15 +583,24 @@ def _render_turn(turn: TurnRecord) -> str:
         if turn.agent_output
         else ""
     )
+    crashed = '<span class="badge error">crashed (partial)</span>' if turn.crashed else ""
+    recovered_badge = '<span class="badge success">recovered</span>' if recovered and not turn.crashed else ""
+    if attempt_total is not None and attempt_total > 1 and attempt_index is not None:
+        # Iteration number lives on the group banner; card heading is just the attempt.
+        heading = f"Attempt {attempt_index} of {attempt_total}"
+    else:
+        heading = f"Iteration {turn.iteration}"
     return f"""
 <div class="card">
   <div class="turn-header">
-    <h3>Iteration {turn.iteration}</h3>
+    <h3>{_esc(heading)}</h3>
     <div class="badges">
       <span class="badge neutral">{turn.assistant_turn_count} assistant turns</span>
       {tokens_label}
       {duration_label}
       {exhausted}
+      {crashed}
+      {recovered_badge}
     </div>
   </div>
   <details>
@@ -656,6 +737,8 @@ def _render_token_usage(result: EvaluationResult) -> str:
 
 def _render_generation_metrics(result: EvaluationResult) -> str:
     """Render Generation Metrics — latency, turns, self-corrections."""
+    from .reports import count_partials_by_outcome, group_consecutive_by_iteration
+
     turns = result.turns or []
     num_turns = len(turns)
     asst_turns = result.total_assistant_turns or 0
@@ -663,6 +746,15 @@ def _render_generation_metrics(result: EvaluationResult) -> str:
     avg_turn = (sum(t.duration_seconds for t in turns) / num_turns) if num_turns else 0.0
     total_latency = _esc(_format_duration(result.duration_seconds))
     avg_latency = _esc(_format_duration(avg_turn))
+    crashed_stat = ""
+    groups = group_consecutive_by_iteration(turns, lambda t: t.iteration)
+    total_partials, recovered_partials, terminal_partials = count_partials_by_outcome(groups, lambda t: t.crashed)
+    if total_partials:
+        breakdown = f"{total_partials} ({recovered_partials} recovered, {terminal_partials} terminal)"
+        crashed_stat = (
+            f'<div class="stat"><div class="label">Crashed Partials</div>'
+            f'<div class="value">{_esc(breakdown)}</div></div>'
+        )
     return f"""
 <h2>Generation Metrics</h2>
 <div class="card">
@@ -672,6 +764,7 @@ def _render_generation_metrics(result: EvaluationResult) -> str:
     <div class="stat"><div class="label">Assistant Turns</div><div class="value">{asst_turns}</div></div>
     <div class="stat"><div class="label">Avg Turn Latency</div><div class="value">{avg_latency}</div></div>
     <div class="stat"><div class="label">Self-Corrections</div><div class="value">{self_corr}</div></div>
+    {crashed_stat}
   </div>
 </div>
 """
@@ -1207,10 +1300,21 @@ class HTMLReportGenerator:
         table, per-turn conversation trace with tool calls, command telemetry
         stats, and error details (if any).
         """
-        turns_html = "".join(_render_turn(t) for t in (result.turns or []))
+        groups = _group_turns_by_iteration(result.turns or [])
+        turns_html = "".join(_render_iteration_group(it, group) for it, group in groups)
         if not turns_html:
             no_turn_msg = "No turn data (agent communication failed before producing any turns)."
             turns_html = f'<div class="card"><p class="muted">{no_turn_msg}</p></div>'
+
+        n_iterations = len(groups)
+        n_attempts = len(result.turns or [])
+        has_partials = any(t.crashed for t in (result.turns or []))
+        iter_label = f"{n_iterations} iteration" + ("s" if n_iterations != 1 else "")
+        if has_partials:
+            attempts_label = f", {n_attempts} attempt" + ("s" if n_attempts != 1 else "")
+            trace_count = f"{iter_label}{attempts_label}"
+        else:
+            trace_count = iter_label
 
         body = (
             _render_header(result)
@@ -1218,7 +1322,7 @@ class HTMLReportGenerator:
             + _render_llm_review(result.llm_review)
             + _render_criteria(result.success_criteria_results or [])
             + _render_error_details(result)
-            + f"<h2>Conversation Trace ({len(result.turns or [])} turns)</h2>"
+            + f"<h2>Conversation Trace ({trace_count})</h2>"
             + turns_html
             + _render_command_stats(result.command_stats)
             + _render_generation_metrics(result)

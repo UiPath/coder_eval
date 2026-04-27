@@ -23,7 +23,12 @@ from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITra
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents.watchdog import ThreadedWatchdog
-from coder_eval.errors.timeout import TurnTimeoutError
+from coder_eval.errors import (
+    AgentCrashError,
+    TurnTimeoutError,
+    format_timeout_reason,
+    truncate_crash_message,
+)
 from coder_eval.formatting import format_payload
 from coder_eval.models import (
     AgentConfig,
@@ -202,6 +207,7 @@ class ClaudeCodeAgent(Agent):
         # asyncio cancellation.
         self._active_transport: SubprocessCLITransport | None = None
         self._log = _PrefixedAdapter(logger, {"prefix": instance_name})
+        self.pending_turn: TurnRecord | None = None
 
     async def start(self, working_directory: str) -> None:
         """Initialize and start the Claude Code agent.
@@ -274,13 +280,16 @@ class ClaudeCodeAgent(Agent):
             TurnRecord containing the complete interaction
 
         Raises:
-            RuntimeError: If agent is not started
-            TurnTimeoutError: If timeout elapsed before the turn completed
+            RuntimeError: If agent is not started.
+            TurnTimeoutError: Watchdog/wall-clock fired; carries a partial TurnRecord.
+            AgentCrashError: SDK/CLI failed mid-turn; carries a partial TurnRecord.
         """
         if not self.working_directory:
             raise RuntimeError("Agent not started. Call start() first.")
 
-        self._iteration += 1
+        # Reset slot defensively in case the previous caller forgot to drain it.
+        self.pending_turn = None
+
         turn_start_time = time.monotonic()
         deadline = turn_start_time + timeout if timeout is not None else None
         # timeout_hit is set by _on_turn_timeout (timer thread) and read by
@@ -288,8 +297,9 @@ class ClaudeCodeAgent(Agent):
         # atomic under the GIL; no explicit lock needed here.
         timeout_hit = False
 
-        # Capture file state before the turn
+        # Bump after _capture_file_tree so an OSError leaves the counter unchanged.
         files_before = self._capture_file_tree()
+        self._iteration += 1
 
         # Collect all messages from the turn
         messages = []
@@ -323,6 +333,30 @@ class ClaudeCodeAgent(Agent):
 
         def capture_stderr(line: str) -> None:
             stderr_lines.append(line)
+
+        # Build a partial TurnRecord and store it in the slot. Partial-build
+        # failure is downgraded to None so the typed exception's category is
+        # preserved; rollback of _iteration happens exclusively in
+        # discard_pending_turn(), which the orchestrator calls after every
+        # failed communicate().
+        def _set_pending(crash_reason: str) -> None:
+            try:
+                self.pending_turn = self._build_partial_turn_record(
+                    user_input=user_input,
+                    messages=messages,
+                    pending_commands=pending_commands,
+                    assistant_turn_count=assistant_turn_count,
+                    sdk_result_usage=sdk_result_usage,
+                    sdk_result_cost=sdk_result_cost,
+                    sdk_model_used=sdk_model_used,
+                    sdk_result_summary=sdk_result_summary,
+                    files_before=files_before,
+                    turn_start_time=turn_start_time,
+                    crash_reason=crash_reason,
+                )
+            except Exception:
+                logger.exception("Failed to build partial turn record; continuing without partial")
+                self.pending_turn = None
 
         try:
             # Process plugins: copy from config and replace env vars in paths
@@ -530,7 +564,9 @@ class ClaudeCodeAgent(Agent):
             # propagate unchanged.
             if self._timed_out(timeout_hit, deadline):
                 self._state = AgentState.ERROR
-                raise TurnTimeoutError(timeout if timeout is not None else 0.0, iteration=self._iteration) from None
+                assert timeout is not None
+                _set_pending(format_timeout_reason(timeout))
+                raise TurnTimeoutError(timeout, iteration=self._iteration) from None
             raise
         except ProcessError as e:
             # When the watchdog SIGKILLs the subprocess, the SDK surfaces it
@@ -538,12 +574,17 @@ class ClaudeCodeAgent(Agent):
             # retry system doesn't treat it as a transient AGENT_CRASH.
             if self._timed_out(timeout_hit, deadline):
                 self._state = AgentState.ERROR
-                raise TurnTimeoutError(timeout if timeout is not None else 0.0, iteration=self._iteration) from e
-            self._state = AgentState.ERROR
-            stderr = self._build_stderr_message(e.stderr, stderr_lines)
-            error_info = self._format_error_summary(sdk_result_summary)
-            detail = error_info or stderr
-            raise RuntimeError(f"CLI process failed (exit code {e.exit_code}): {detail}") from e
+                assert timeout is not None
+                _set_pending(format_timeout_reason(timeout))
+                raise TurnTimeoutError(timeout, iteration=self._iteration) from e
+            if not self._max_turns_short_circuit(sdk_result_summary, f"ProcessError(exit={e.exit_code})"):
+                self._state = AgentState.ERROR
+                stderr = self._build_stderr_message(e.stderr, stderr_lines)
+                error_info = self._format_error_summary(sdk_result_summary)
+                detail = error_info or stderr
+                message = f"CLI process failed (exit code {e.exit_code}): {detail}"
+                _set_pending(truncate_crash_message(message))
+                raise AgentCrashError(message) from e
         except Exception as e:
             # Same race as above: the watchdog may have killed the subprocess
             # and the SDK may have re-raised as a generic Exception. Check
@@ -551,19 +592,24 @@ class ClaudeCodeAgent(Agent):
             # with our catch-entry.
             if self._timed_out(timeout_hit, deadline):
                 self._state = AgentState.ERROR
-                raise TurnTimeoutError(timeout if timeout is not None else 0.0, iteration=self._iteration) from e
-            self._state = AgentState.ERROR
-            # The SDK wraps ProcessError as a generic Exception via the message stream.
-            # Read the captured ResultMessage summary (if any) for diagnostic context.
-            error_info = self._format_error_summary(sdk_result_summary)
-            cause_stderr = self._extract_cause_stderr(e)
-            stderr = self._build_stderr_message(cause_stderr, stderr_lines)
-            error_details = self._clean_error_message(str(e))
-            if error_info:
-                error_details += f"\nDetails: {error_info}"
-            elif stderr:
-                error_details += f"\nStderr output:\n{stderr}"
-            raise RuntimeError(f"Communication with agent failed: {error_details}") from e
+                assert timeout is not None
+                _set_pending(format_timeout_reason(timeout))
+                raise TurnTimeoutError(timeout, iteration=self._iteration) from e
+            if not self._max_turns_short_circuit(sdk_result_summary, "Generic Exception"):
+                self._state = AgentState.ERROR
+                # The SDK wraps ProcessError as a generic Exception via the message stream.
+                # Read the captured ResultMessage summary (if any) for diagnostic context.
+                error_info = self._format_error_summary(sdk_result_summary)
+                cause_stderr = self._extract_cause_stderr(e)
+                stderr = self._build_stderr_message(cause_stderr, stderr_lines)
+                error_details = self._clean_error_message(str(e))
+                if error_info:
+                    error_details += f"\nDetails: {error_info}"
+                elif stderr:
+                    error_details += f"\nStderr output:\n{stderr}"
+                message = f"Communication with agent failed: {error_details}"
+                _set_pending(truncate_crash_message(message))
+                raise AgentCrashError(message) from e
         finally:
             self._active_transport = None
 
@@ -572,7 +618,9 @@ class ClaudeCodeAgent(Agent):
         # classify a successful turn as a timeout. The watchdog and in-loop
         # guard are the authoritative signals.
         if timeout_hit:
-            raise TurnTimeoutError(timeout if timeout is not None else 0.0, iteration=self._iteration)
+            assert timeout is not None
+            _set_pending(format_timeout_reason(timeout))
+            raise TurnTimeoutError(timeout, iteration=self._iteration)
 
         # PHASE 3: Finalize commands and build turn record
         commands = self._finalize_commands(pending_commands, messages)
@@ -582,11 +630,8 @@ class ClaudeCodeAgent(Agent):
         agent_output = self._format_messages(messages)
         self._update_state_from_messages(messages)
 
-        # Detect max_turns exhaustion: SDK used all available turns without the agent voluntarily completing.
-        # Use strict > because if the agent finishes voluntarily on exactly turn N (== max_turns),
-        # that is a normal completion, not exhaustion. The SDK reports num_turns > max_turns when
-        # it forcibly stops the agent.
-        max_turns_exhausted = (
+        # max_turns exhaustion: ResultMessage subtype OR num_turns > max_turns (strict; == is a normal completion).
+        max_turns_exhausted = self._is_max_turns_result(sdk_result_summary) or (
             self.config.max_turns is not None and sdk_num_turns is not None and sdk_num_turns > self.config.max_turns
         )
         if max_turns_exhausted:
@@ -615,9 +660,8 @@ class ClaudeCodeAgent(Agent):
 
     async def stop(self) -> None:
         """Stop the agent and clean up resources."""
-        # Clean up any resources
-        # Note: Client is created per-communication using async context manager
         self.client = None
+        self.pending_turn = None
         self._state = AgentState.FINISHED
 
     async def kill(self) -> None:
@@ -639,6 +683,17 @@ class ClaudeCodeAgent(Agent):
         has already cleared it, this is a no-op.
         """
         self._kill_transport(self._active_transport)
+
+    async def discard_pending_turn(self) -> None:
+        """Clear pending_turn and roll back the iteration counter.
+
+        Idempotent: a second call when the slot is already None is a no-op.
+        Call only after a failed ``communicate()``; never after a success.
+        """
+        rollback = self.pending_turn is not None
+        self.pending_turn = None
+        if rollback and self._iteration > 0:
+            self._iteration -= 1
 
     @staticmethod
     def _timed_out(timeout_hit: bool, deadline: float | None) -> bool:
@@ -682,6 +737,68 @@ class ClaudeCodeAgent(Agent):
             Current agent state
         """
         return self._state
+
+    def _build_partial_turn_record(
+        self,
+        *,
+        user_input: str,
+        messages: list[Message],
+        pending_commands: dict[str, dict[str, Any]],
+        assistant_turn_count: int,
+        sdk_result_usage: dict[str, Any] | None,
+        sdk_result_cost: float | None,
+        sdk_model_used: str | None,
+        sdk_result_summary: ResultSummary | None,
+        files_before: FileTree,
+        turn_start_time: float,
+        crash_reason: str | None = None,
+    ) -> TurnRecord:
+        """Build a crashed=True TurnRecord from pre-crash telemetry.
+
+        File-tree OSError is tolerated; message-formatting failure substitutes a
+        placeholder. Other exceptions propagate to the caller.
+        """
+        commands = self._finalize_commands(pending_commands, messages)
+        token_usage = self._build_token_usage(sdk_result_usage, sdk_result_cost)
+        duration = time.monotonic() - turn_start_time
+
+        # Narrow to OSError so programming errors (AttributeError etc.) still surface.
+        try:
+            files_after = self._capture_file_tree()
+            file_changes: FileChanges = self._detect_file_changes(files_before, files_after)
+        except OSError:
+            logger.warning(
+                "Failed to capture file tree for partial turn record; continuing with empty file_changes",
+                exc_info=True,
+            )
+            file_changes = []
+
+        # Broad handler: secondary failure here would defeat partial preservation.
+        try:
+            agent_output = self._format_messages(messages)
+        except Exception as fmt_err:
+            logger.warning(
+                "Failed to format messages for partial turn record; continuing with placeholder agent_output",
+                exc_info=True,
+            )
+            agent_output = f"<partial record: message formatting failed: {type(fmt_err).__name__}: {fmt_err}>"
+
+        return TurnRecord(
+            iteration=self._iteration,
+            user_input=user_input,
+            agent_output=agent_output,
+            commands=commands,
+            files_changed=file_changes,
+            timestamp=datetime.now(),
+            duration_seconds=duration,
+            token_usage=token_usage,
+            model_used=sdk_model_used,
+            assistant_turn_count=assistant_turn_count,
+            max_turns_exhausted=False,
+            result_summary=sdk_result_summary,
+            crashed=True,
+            crash_reason=crash_reason,
+        )
 
     def _finalize_commands(
         self, pending_commands: dict[str, dict[str, Any]], messages: list[Message]
@@ -1016,6 +1133,18 @@ class ClaudeCodeAgent(Agent):
         cleaned = message.replace("\nError output: Check stderr output for details", "")
         cleaned = cleaned.replace("Error output: Check stderr output for details", "")
         return cleaned.strip()
+
+    @staticmethod
+    def _is_max_turns_result(summary: ResultSummary | None) -> bool:
+        """True iff the captured ResultMessage indicates SDK-side max_turns exhaustion."""
+        return summary is not None and summary.subtype == "error_max_turns"
+
+    def _max_turns_short_circuit(self, summary: ResultSummary | None, branch_label: str) -> bool:
+        """Fall through error branches to the clean-completion path on error_max_turns."""
+        if not self._is_max_turns_result(summary):
+            return False
+        self._log.debug("%s is error_max_turns; treating as clean turn", branch_label)
+        return True
 
     @staticmethod
     def _summarize_result(msg: Message) -> ResultSummary | None:

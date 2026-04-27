@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from coder_eval.models import (
     AgentConfig,
     AgentKind,
@@ -763,3 +765,175 @@ def test_render_criteria_uses_per_criterion_pass_threshold():
     )
     html = HTMLReportGenerator.generate_task_html(result)
     assert "(1/2 passed)" in html
+
+
+@pytest.mark.parametrize(
+    "scenario, turns, expectations",
+    [
+        (
+            "clean",
+            [
+                TurnRecord(
+                    iteration=1,
+                    user_input="Create Main.cs",
+                    agent_output="done",
+                    commands=[_make_command("Write", 0)],
+                )
+            ],
+            {
+                "present": ["<h3>Iteration 1</h3>"],
+                "absent": ["Attempt", "recovered after", "terminal failure"],
+            },
+        ),
+        (
+            "recovered",
+            [
+                TurnRecord(
+                    iteration=1,
+                    user_input="Do the thing",
+                    agent_output="<partial>",
+                    commands=[_make_command("Skill", 0, parameters={"skill": "x"})],
+                    crashed=True,
+                ),
+                TurnRecord(
+                    iteration=1,
+                    user_input="Do the thing",
+                    agent_output="all done",
+                    commands=[_make_command("Write", 1)],
+                ),
+            ],
+            {
+                "present": [
+                    "Iteration 1 — recovered after 1 crashed attempt",
+                    ">Attempt 1 of 2<",
+                    ">Attempt 2 of 2<",
+                    "crashed (partial)",
+                    "recovered</span>",
+                    'class="iteration-group iteration-group--recovered"',
+                ],
+                "absent": ["iteration-group iteration-group--terminal", "terminal failure"],
+            },
+        ),
+        (
+            "terminal",
+            [
+                TurnRecord(
+                    iteration=1,
+                    user_input="Do the thing",
+                    agent_output="<partial>",
+                    commands=[_make_command("Bash", 0, parameters={"command": "x"})],
+                    crashed=True,
+                ),
+                TurnRecord(
+                    iteration=1,
+                    user_input="Do the thing",
+                    agent_output="<partial>",
+                    commands=[_make_command("Bash", 1, parameters={"command": "y"})],
+                    crashed=True,
+                ),
+            ],
+            {
+                "present": [
+                    "Iteration 1 — terminal failure (2 crashed attempts)",
+                    ">Attempt 1 of 2<",
+                    ">Attempt 2 of 2<",
+                    'class="iteration-group iteration-group--terminal"',
+                ],
+                "absent": [
+                    "iteration-group iteration-group--recovered",
+                    "recovered after",
+                    "recovered</span>",
+                ],
+            },
+        ),
+    ],
+)
+def test_iteration_group_rendering(scenario, turns, expectations):
+    """Single-attempt iterations keep the plain heading; multi-attempt iterations
+    render a coloured banner (recovered vs terminal) wrapping per-attempt cards."""
+    final_status = FinalStatus.ERROR if scenario == "terminal" else FinalStatus.SUCCESS
+    result = _make_result(final_status=final_status, turns=turns)
+    html = HTMLReportGenerator.generate_task_html(result)
+    for s in expectations["present"]:
+        assert s in html, f"[{scenario}] expected {s!r} in html"
+    for s in expectations["absent"]:
+        assert s not in html, f"[{scenario}] expected {s!r} NOT in html"
+
+
+def test_attempt_transition_marker_and_trace_count():
+    """The transition marker between attempts uses crash_reason (with a generic
+    fallback), the wording is "resuming" not "retrying", and the trailing
+    transition is suppressed on terminal failure. The Conversation Trace
+    heading counts iterations (and adds attempts when partials are present)."""
+    # Recovered with a stamped reason: marker carries the reason and "resuming".
+    res_reason = _make_result(
+        turns=[
+            TurnRecord(
+                iteration=1,
+                user_input="p",
+                agent_output="<partial>",
+                crashed=True,
+                crash_reason="CLI process failed (exit code 137)",
+            ),
+            TurnRecord(iteration=1, user_input="p", agent_output="ok"),
+        ],
+    )
+    html_reason = HTMLReportGenerator.generate_task_html(res_reason)
+    assert "CLI process failed (exit code 137)" in html_reason
+    assert "resuming" in html_reason
+    assert "retrying" not in html_reason
+    assert "Conversation Trace (1 iteration, 2 attempts)" in html_reason
+
+    # Backward-compat fallback: partial without crash_reason → "Agent crashed".
+    res_fallback = _make_result(
+        turns=[
+            TurnRecord(iteration=1, user_input="p", agent_output="<partial>", crashed=True),
+            TurnRecord(iteration=1, user_input="p", agent_output="ok"),
+        ],
+    )
+    html_fallback = HTMLReportGenerator.generate_task_html(res_fallback)
+    assert "Agent crashed" in html_fallback
+    assert "resuming" in html_fallback
+
+    # Terminal failure: divider belongs between attempts, so the last crash
+    # gets no trailing marker (and exactly one "resuming" appears overall).
+    res_terminal = _make_result(
+        final_status=FinalStatus.ERROR,
+        turns=[
+            TurnRecord(iteration=1, user_input="p", agent_output="<partial>", crashed=True, crash_reason="boom 1"),
+            TurnRecord(iteration=1, user_input="p", agent_output="<partial>", crashed=True, crash_reason="boom 2"),
+        ],
+    )
+    html_terminal = HTMLReportGenerator.generate_task_html(res_terminal)
+    assert "boom 1" in html_terminal
+    assert "boom 2" not in html_terminal
+    assert html_terminal.count("resuming") == 1
+
+    # Clean run: trace count uses iterations only (no "attempts" segment).
+    res_clean = _make_result(
+        turns=[
+            TurnRecord(iteration=1, user_input="p", agent_output="ok"),
+            TurnRecord(iteration=2, user_input="p", agent_output="ok"),
+        ],
+    )
+    html_clean = HTMLReportGenerator.generate_task_html(res_clean)
+    assert "Conversation Trace (2 iterations)" in html_clean
+    assert "attempts" not in html_clean.split("Conversation Trace")[1].split("</h2>")[0]
+
+
+def test_generation_metrics_breaks_down_crashed_partials():
+    """The "Crashed Partials" stat must split the count into recovered vs terminal
+    so a reader can tell at a glance whether the agent recovered or aborted."""
+    result = _make_result(
+        turns=[
+            # Iteration 1: 1 crash + recovery.
+            TurnRecord(iteration=1, user_input="p", agent_output="<partial>", crashed=True),
+            TurnRecord(iteration=1, user_input="p", agent_output="ok"),
+            # Iteration 2: 2 crashes, no recovery.
+            TurnRecord(iteration=2, user_input="p", agent_output="<partial>", crashed=True),
+            TurnRecord(iteration=2, user_input="p", agent_output="<partial>", crashed=True),
+        ],
+    )
+    html = HTMLReportGenerator.generate_task_html(result)
+    assert "Crashed Partials" in html
+    assert "3 (1 recovered, 2 terminal)" in html

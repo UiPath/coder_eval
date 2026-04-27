@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from coder_eval.errors import AgentCrashError
 from coder_eval.errors.categories import RETRY_CONFIG, ErrorCategory, RetryConfig
 from coder_eval.errors.categorization import categorize_error
 from coder_eval.errors.executor import execute_with_retry
@@ -135,6 +136,36 @@ class TestCategorizeError:
         error = RuntimeError("CLI process failed (exit code 1): some error output")
         result = categorize_error(error, {"component": "agent"})
         assert result == ErrorCategory.AGENT_CRASH
+
+    @pytest.mark.parametrize(
+        "message, expected",
+        [
+            # Typed-AgentCrashError fallback fires only when no message pattern matches.
+            ("Communication with agent failed: unexpected SDK error", ErrorCategory.AGENT_CRASH),
+            # Specific message patterns must win over the typed fallback so non-retryable
+            # categories (auth, billing, content-filter) don't burn the AGENT_CRASH retry budget.
+            (
+                "CLI process failed (exit code 1): authentication failed: invalid API key",
+                ErrorCategory.AGENT_AUTH_ERROR,
+            ),
+            (
+                "CLI process failed (exit code 1): Result[is_error=True]: rate limit exceeded",
+                ErrorCategory.AGENT_RATE_LIMIT,
+            ),
+            ("CLI process failed (exit code 1): insufficient credits on account", ErrorCategory.AGENT_BILLING_ERROR),
+            (
+                "Communication with agent failed: Bedrock guardrail intervened: content filtering policy",
+                ErrorCategory.AGENT_INVALID_OUTPUT,
+            ),
+            ("Communication with agent failed: invalid response format", ErrorCategory.AGENT_INVALID_OUTPUT),
+        ],
+    )
+    def test_categorize_agent_crash_routing(self, message, expected):
+        assert categorize_error(AgentCrashError(message), {"component": "agent"}) == expected
+
+    def test_categorize_agent_crash_without_component_hint(self):
+        """The typed-AgentCrashError fallback also fires when no component is provided."""
+        assert categorize_error(AgentCrashError("anything"), {}) == ErrorCategory.AGENT_CRASH
 
     def test_categorize_agent_generic_exit_code_not_crash(self):
         """Generic mention of 'exit code' should NOT match AGENT_CRASH."""
@@ -544,3 +575,19 @@ class TestTruncateLog:
         result = truncate_log(long_log, max_chars=500)
 
         assert len(result) <= 500
+
+
+class TestAgentCrashErrorNoPartialField:
+    """AgentCrashError no longer carries partial_turn_record."""
+
+    def test_constructs_without_kwargs(self):
+        err = AgentCrashError("boom")
+        assert str(err) == "boom"
+
+    def test_has_no_partial_turn_record_attribute(self):
+        err = AgentCrashError("boom")
+        assert not hasattr(err, "partial_turn_record")
+
+    def test_is_runtime_error(self):
+        err = AgentCrashError("boom")
+        assert isinstance(err, RuntimeError)

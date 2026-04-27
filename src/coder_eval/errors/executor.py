@@ -18,6 +18,7 @@ async def execute_with_retry(
     operation_name: str,
     context: dict[str, Any],
     max_attempts: int | None = None,
+    on_attempt_error: Callable[[Exception, int], Awaitable[None]] | None = None,
 ) -> Any:
     """Execute an operation with automatic retry on transient errors.
 
@@ -36,6 +37,10 @@ async def execute_with_retry(
             - component: Component name (optional but recommended)
             - agent_name: Agent name (optional)
         max_attempts: Override max attempts (defaults to 10 as safety limit)
+        on_attempt_error: Async ``(exception, zero_indexed_attempt) -> None`` callback
+            invoked after every failed attempt (including the final non-retryable one),
+            for draining ``agent.pending_turn`` and calling ``agent.discard_pending_turn()``.
+            Callback exceptions are logged and swallowed so they cannot mask the original.
 
     Returns:
         Result from operation
@@ -71,6 +76,19 @@ async def execute_with_retry(
 
         except Exception as e:
             last_error = e
+
+            # Fire callback before the retry decision so partial telemetry
+            # is captured even on the final non-retryable attempt.
+            if on_attempt_error is not None:
+                try:
+                    await on_attempt_error(e, attempt)
+                except Exception:
+                    logger.exception(
+                        "[%s] on_attempt_error callback raised for %s (attempt %d); ignoring",
+                        task_id,
+                        operation_name,
+                        attempt + 1,
+                    )
 
             # Categorize error
             category = categorize_error(e, context)

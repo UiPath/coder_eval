@@ -2184,6 +2184,325 @@ async def test_review_failure_is_swallowed(tmp_path):
     assert orchestrator.result.llm_review is None
 
 
+@pytest.mark.asyncio
+async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
+    """First agent.communicate raises AgentCrashError with a partial; retry succeeds.
+
+    Locks the orchestrator wiring between `execute_with_retry` and the
+    `_preserve_partial_on_failure` callback: the partial record reaches
+    `result.turns` before the successful retry's record, and both share the
+    same iteration number (per the agent-side rollback contract).
+    """
+    from datetime import datetime
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from coder_eval.errors import AgentCrashError
+    from coder_eval.models import (
+        AgentConfig,
+        AgentKind,
+        CommandTelemetry,
+        CriterionResult,
+        EvaluationResult,
+        FileExistsCriterion,
+        SandboxConfig,
+        TaskDefinition,
+        TurnRecord,
+    )
+
+    agent_cfg = AgentConfig.model_construct(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+        allowed_tools=None,
+        model=None,
+        max_turns=20,
+        turn_timeout=None,
+        ignore_patterns=[],
+    )
+    task = TaskDefinition.model_construct(
+        task_id="crash_retry_test",
+        description="Partial-preservation wiring",
+        initial_prompt="Do the thing",
+        max_iterations=3,
+        tags=[],
+        agent=agent_cfg,
+        sandbox=SandboxConfig(driver="tempdir"),
+        success_criteria=[FileExistsCriterion(type="file_exists", path="x.py", description="x.py must exist")],
+        task_timeout=None,
+        llm_reviewer=None,
+        reference=None,
+    )
+
+    run_dir = tmp_path / "run" / "crash_retry_test"
+    run_dir.mkdir(parents=True)
+
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        variant_id="test-variant",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+
+    partial_cmd = CommandTelemetry(
+        tool_name="Skill",
+        tool_id="skill-1",
+        timestamp=datetime.now(),
+        parameters={"skill": "my_skill"},
+    )
+    partial_record = TurnRecord(
+        iteration=1,
+        user_input="p",
+        agent_output="<partial>",
+        commands=[partial_cmd],
+        duration_seconds=0.1,
+        crashed=True,
+        crash_reason="mid-turn failure",
+    )
+    success_record = TurnRecord(
+        iteration=1,
+        user_input="p",
+        agent_output="all done",
+        duration_seconds=0.2,
+    )
+
+    mock_agent = AsyncMock()
+
+    call_index = [0]
+
+    async def crash_then_succeed_impl(_prompt, **kwargs):
+        call_index[0] += 1
+        if call_index[0] == 1:
+            mock_agent.pending_turn = partial_record
+            raise AgentCrashError("mid-turn failure")
+        return success_record
+
+    mock_agent.communicate.side_effect = crash_then_succeed_impl
+    orchestrator.agent = mock_agent
+
+    mock_sandbox = MagicMock()
+    mock_sandbox.sandbox_dir = tmp_path / "sandbox"
+    mock_sandbox.sandbox_dir.mkdir()
+    orchestrator.sandbox = mock_sandbox
+
+    mock_checker = MagicMock()
+    mock_checker.check_all = MagicMock(
+        return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
+    )
+    orchestrator.success_checker = mock_checker
+
+    with (
+        patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)),
+        patch("asyncio.sleep", new_callable=AsyncMock),
+    ):
+        success = await orchestrator._evaluation_loop()
+
+    assert success is True
+    # communicate called twice: once crashing, once clean.
+    assert mock_agent.communicate.call_count == 2
+    # Both records reach result.turns: partial first (via callback), then successful (via main flow).
+    assert len(orchestrator.result.turns) == 2
+    preserved, clean = orchestrator.result.turns
+    assert preserved.crashed is True
+    assert preserved.commands[0].tool_name == "Skill"
+    assert clean.crashed is False
+    # Orchestrator-visible iteration number matches across both records.
+    assert preserved.iteration == clean.iteration == 1
+    # The orchestrator stamps the cause of the crash on the partial so the
+    # report can show it between attempts. Crash messages are passed through;
+    # timeout messages get a normalised "Agent turn timed out after Ns" form.
+    assert preserved.crash_reason == "mid-turn failure"
+
+
+@pytest.mark.asyncio
+async def test_evaluation_loop_stamps_timeout_reason_on_partial(tmp_path):
+    """TurnTimeoutError partials get a normalised "timed out after Ns" reason
+    (regardless of the exception's message), so the report renders a
+    consistent transition label."""
+    from datetime import datetime
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from coder_eval.errors import TurnTimeoutError
+    from coder_eval.models import (
+        AgentConfig,
+        AgentKind,
+        CriterionResult,
+        EvaluationResult,
+        FileExistsCriterion,
+        SandboxConfig,
+        TaskDefinition,
+        TurnRecord,
+    )
+
+    agent_cfg = AgentConfig.model_construct(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+        allowed_tools=None,
+        model=None,
+        max_turns=20,
+        turn_timeout=None,
+        ignore_patterns=[],
+    )
+    task = TaskDefinition.model_construct(
+        task_id="timeout_reason_test",
+        description="timeout-stamping",
+        initial_prompt="Do the thing",
+        max_iterations=3,
+        tags=[],
+        agent=agent_cfg,
+        sandbox=SandboxConfig(driver="tempdir"),
+        success_criteria=[FileExistsCriterion(type="file_exists", path="x.py", description="x")],
+        task_timeout=None,
+        llm_reviewer=None,
+        reference=None,
+    )
+
+    run_dir = tmp_path / "run" / "timeout_reason_test"
+    run_dir.mkdir(parents=True)
+
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="v")
+    orchestrator.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        variant_id="v",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+
+    partial_record = TurnRecord(
+        iteration=1,
+        user_input="p",
+        agent_output="<partial>",
+        crashed=True,
+        crash_reason="Agent turn timed out after 600s",
+    )
+
+    mock_agent = AsyncMock()
+
+    async def timeout_impl(_prompt, **kwargs):
+        mock_agent.pending_turn = partial_record
+        raise TurnTimeoutError(600.0, iteration=1)
+
+    mock_agent.communicate.side_effect = timeout_impl
+    orchestrator.agent = mock_agent
+
+    mock_sandbox = MagicMock()
+    mock_sandbox.sandbox_dir = tmp_path / "sandbox"
+    mock_sandbox.sandbox_dir.mkdir()
+    orchestrator.sandbox = mock_sandbox
+
+    mock_checker = MagicMock()
+    mock_checker.check_all = MagicMock(
+        return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
+    )
+    orchestrator.success_checker = mock_checker
+
+    with (
+        patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)),
+        patch("asyncio.sleep", new_callable=AsyncMock),
+        # TurnTimeoutError is non-retryable, so the loop re-raises after the
+        # on_attempt_error callback has already stamped + appended the partial.
+        # We only care about the side-effect, so suppress the re-raise.
+        pytest.raises(TurnTimeoutError),
+    ):
+        await orchestrator._evaluation_loop()
+
+    # The preserved partial carries the normalised timeout reason. The
+    # render layer uses this to label the inter-attempt transition.
+    assert any(t.crashed and t.crash_reason == "Agent turn timed out after 600s" for t in orchestrator.result.turns)
+
+
+def test_aggregate_token_usage_includes_crashed_partials(tmp_path):
+    """Crashed partials carrying token_usage must contribute to the run total.
+
+    Each API call is independently billed: a partial that emitted a
+    ResultMessage before failing was charged for its input + output, and
+    the retry's call is charged separately. Filtering partials would
+    under-report actual API spend.
+    """
+    from datetime import datetime
+
+    from coder_eval.models import (
+        AgentConfig,
+        AgentKind,
+        EvaluationResult,
+        FileExistsCriterion,
+        SandboxConfig,
+        TaskDefinition,
+        TokenUsage,
+        TurnRecord,
+    )
+
+    agent_cfg = AgentConfig.model_construct(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+        allowed_tools=None,
+        model=None,
+        max_turns=20,
+        turn_timeout=None,
+        ignore_patterns=[],
+    )
+    task = TaskDefinition.model_construct(
+        task_id="token_agg_test",
+        description="token agg",
+        initial_prompt="p",
+        max_iterations=1,
+        tags=[],
+        agent=agent_cfg,
+        sandbox=SandboxConfig(driver="tempdir"),
+        success_criteria=[FileExistsCriterion(type="file_exists", path="x", description="x")],
+        task_timeout=None,
+        llm_reviewer=None,
+        reference=None,
+    )
+
+    run_dir = tmp_path / "run" / "token_agg_test"
+    run_dir.mkdir(parents=True)
+
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="v")
+    orchestrator.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        variant_id="v",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="SUCCESS",
+        iteration_count=1,
+        environment_info={},
+    )
+    # Edge case: ResultMessage arrived just before the crash, so the partial
+    # carries token_usage. The retry then makes a separate billed call.
+    orchestrator.result.turns = [
+        TurnRecord(
+            iteration=1,
+            user_input="p",
+            agent_output="<partial>",
+            crashed=True,
+            token_usage=TokenUsage(input_tokens=100, output_tokens=20, total_cost_usd=0.01),
+        ),
+        TurnRecord(
+            iteration=1,
+            user_input="p",
+            agent_output="ok",
+            token_usage=TokenUsage(input_tokens=300, output_tokens=50, total_cost_usd=0.05),
+        ),
+    ]
+
+    orchestrator._aggregate_token_usage()
+
+    assert orchestrator.result.total_token_usage is not None
+    # Both turns counted: partial (100/20/$0.01) + clean (300/50/$0.05).
+    assert orchestrator.result.total_token_usage.input_tokens == 400
+    assert orchestrator.result.total_token_usage.output_tokens == 70
+    assert orchestrator.result.total_token_usage.total_cost_usd == pytest.approx(0.06)
+
+
 # --- Phase 3: terminal per-task summary line ---
 
 

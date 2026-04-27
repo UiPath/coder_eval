@@ -7,6 +7,7 @@ and maps them to appropriate ErrorCategory values for retry logic.
 import logging
 from typing import Any
 
+from .agent import AgentCrashError
 from .categories import ErrorCategory
 from .timeout import EvaluationTimeoutError
 
@@ -55,6 +56,17 @@ def categorize_error(
     # 1. Check custom timeout exceptions first (before generic TimeoutError)
     if isinstance(error, EvaluationTimeoutError):
         return ErrorCategory.AGENT_TIMEOUT
+
+    # NB: the ``AgentCrashError`` typed check is intentionally placed at the
+    # END of this function (after string-pattern matching), not here. The
+    # SDK has no dedicated exception classes for auth / rate-limit / billing /
+    # content-filter — those all surface as ``ProcessError(exit_code=1)``
+    # with the categorical info in ``ResultMessage.subtype``/``result``,
+    # which the agent stamps into the ``AgentCrashError`` message. We want
+    # those to route to their real category (non-retryable for auth/billing,
+    # 60s-backoff for rate-limit, etc.), not to AGENT_CRASH's 2x retry. So
+    # AGENT_CRASH is reserved for "no specific pattern matched" — i.e.
+    # genuinely unexpected crashes.
 
     # 2. Check specific exception types (most reliable)
     if isinstance(error, TimeoutError):
@@ -145,6 +157,11 @@ def categorize_error(
         return ErrorCategory.SANDBOX_SETUP_ERROR
 
     if component == "agent":
+        # Substring heuristics for plain RuntimeErrors that mention a crash
+        # but aren't typed as AgentCrashError. The typed-AgentCrashError
+        # check below catches the agent's wrapped exceptions; this branch
+        # only fires for bare exceptions whose message happens to describe
+        # a crash.
         if (
             "crash" in error_str
             or "killed" in error_str
@@ -154,6 +171,15 @@ def categorize_error(
             return ErrorCategory.AGENT_CRASH
         if "invalid" in error_str or "malformed" in error_str:
             return ErrorCategory.AGENT_INVALID_OUTPUT
+
+        # Typed agent-crash exception is the LAST agent-side resort: by this
+        # point pattern matching has had a chance to recognise auth / rate-
+        # limit / billing / content-filter / api-network signatures stamped
+        # into the message, so anything still typed as AgentCrashError here
+        # is a genuinely unexpected failure that the user wants retried.
+        if isinstance(error, AgentCrashError):
+            return ErrorCategory.AGENT_CRASH
+
         # Default to API error for unknown agent failures (more likely to be retryable)
         return ErrorCategory.AGENT_API_ERROR
 
@@ -168,6 +194,11 @@ def categorize_error(
         if "invalid" in error_str or "malformed" in error_str or "validation" in error_str:
             return ErrorCategory.TASK_INVALID
         return ErrorCategory.TASK_NOT_FOUND
+
+    # Final typed-AgentCrashError fallback for callers without a component hint:
+    # nothing more specific matched, treat as a genuinely unexpected crash.
+    if isinstance(error, AgentCrashError):
+        return ErrorCategory.AGENT_CRASH
 
     # Default to unknown
     logger.warning(f"Could not categorize error: {error} (component={component})")

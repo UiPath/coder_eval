@@ -74,6 +74,8 @@ def eval_result_to_task_dict(
                 "duration_seconds": t.duration_seconds,
                 "command_count": len(t.commands),
                 "assistant_turn_count": t.assistant_turn_count,
+                "crashed": t.crashed,
+                "crash_reason": t.crash_reason,
             }
             for t in result.turns
         ],

@@ -124,7 +124,13 @@ class ResultSummary(BaseModel):
 class TurnRecord(BaseModel):
     """Record of a single agent turn (input + output)."""
 
-    iteration: int = Field(description="Turn number")
+    iteration: int = Field(
+        description=(
+            "Orchestrator iteration number. Multiple records may share this value when "
+            "crashed=True partials precede a retry; use the list index in "
+            "EvaluationResult.turns as the canonical unique key."
+        )
+    )
     user_input: str = Field(description="Input prompt to the agent")
     agent_output: str = Field(description="Agent's response (legacy format)")
     commands: list[CommandTelemetry] = Field(
@@ -153,7 +159,18 @@ class TurnRecord(BaseModel):
     )
     result_summary: ResultSummary | None = Field(
         default=None,
-        description="SDK ResultMessage summary for clean turns; None on crash (TurnRecord isn't built on error paths)",
+        description="SDK ResultMessage summary, when one was emitted (clean turns or partials that got one).",
+    )
+    crashed: bool = Field(
+        default=False,
+        description=(
+            "True if the agent failed mid-turn. Pre-failure commands/files/output are real work "
+            "and are counted by aggregators; the retry's API call is billed separately."
+        ),
+    )
+    crash_reason: str | None = Field(
+        default=None,
+        description="Short human-readable cause when crashed=True; None otherwise.",
     )
 
 

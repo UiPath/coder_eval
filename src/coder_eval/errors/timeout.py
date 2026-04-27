@@ -1,5 +1,7 @@
 """Timeout exceptions for evaluation lifecycle."""
 
+from .agent import format_timeout_reason
+
 
 class EvaluationTimeoutError(Exception):
     """Base timeout error for evaluation lifecycle.
@@ -29,9 +31,18 @@ class EvaluationTimeoutError(Exception):
 class TurnTimeoutError(EvaluationTimeoutError):
     """Agent turn (communicate) exceeded its time limit."""
 
-    def __init__(self, timeout_seconds: float, *, task_id: str | None = None, iteration: int | None = None):
+    def __init__(
+        self,
+        timeout_seconds: float,
+        *,
+        task_id: str | None = None,
+        iteration: int | None = None,
+    ):
+        message = format_timeout_reason(timeout_seconds)
+        if iteration is not None:
+            message = f"{message} (iteration {iteration})"
         super().__init__(
-            f"Agent turn timed out after {timeout_seconds}s (iteration {iteration})",
+            message,
             timeout_seconds=timeout_seconds,
             layer="turn",
             task_id=task_id,

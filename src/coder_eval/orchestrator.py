@@ -1,7 +1,6 @@
 """Main orchestrator for coordinating task evaluation."""
 
 import asyncio
-import functools
 import logging
 import re
 import time
@@ -20,9 +19,13 @@ from .agents.watchdog import ThreadedWatchdog
 from .analysis import calculate_command_statistics
 from .config import settings
 from .criteria.commands_efficiency import compute_commands_efficiency
+from .errors import (
+    AgentCrashError,
+    TaskTimeoutError,
+    TurnTimeoutError,
+)
 from .errors.executor import execute_with_retry
 from .errors.retry import create_error_context
-from .errors.timeout import TaskTimeoutError, TurnTimeoutError
 from .evaluation.checker import SuccessChecker, _short_failure_reason
 from .evaluation.reviewer import LLMReviewer
 from .evaluation.summaries import summarize_commands
@@ -63,6 +66,11 @@ from .utils import get_version_info
 
 # Get module logger
 logger = logging.getLogger(__name__)
+
+
+# Grace on outer wait_for so the agent's in-band watchdog (which preserves a partial)
+# wins the race against the asyncio cancel path (which doesn't).
+_WAIT_FOR_GRACE_SECONDS = 2.0
 
 
 async def _pump_stream(
@@ -446,17 +454,16 @@ class Orchestrator:
         # Aggregate token usage
         self._aggregate_token_usage()
 
-        # Aggregate assistant turns
         if self.result.turns:
             self.result.total_assistant_turns = sum(t.assistant_turn_count for t in self.result.turns)
 
-        # Commands efficiency
+        # command_stats counts crashed partials too — they're real executed work.
         if self.result.turns and self.result.command_stats:
-            total_cmds = self.result.command_stats.total_commands
-            self.result.actual_commands = total_cmds
+            actual_cmds = self.result.command_stats.total_commands
+            self.result.actual_commands = actual_cmds
             if self.task.expected_commands is not None:
                 self.result.expected_commands = self.task.expected_commands
-                self.result.commands_efficiency = compute_commands_efficiency(total_cmds, self.task.expected_commands)
+                self.result.commands_efficiency = compute_commands_efficiency(actual_cmds, self.task.expected_commands)
 
         # SDK options snapshot
         if self.agent:
@@ -496,6 +503,7 @@ class Orchestrator:
         assert self.result is not None
         from .models.telemetry import TokenUsage
 
+        # Include crashed=True partials: each API call is billed independently.
         if self.result.turns:
             usages = [t.token_usage for t in self.result.turns if t.token_usage is not None]
             if usages:
@@ -642,6 +650,114 @@ class Orchestrator:
         else:
             raise ValueError(f"Unsupported agent type: {self.task.agent.type}")
 
+    async def _communicate_with_retry(
+        self,
+        *,
+        prompt: str,
+        iteration: int,
+        operation_label: str,
+    ) -> TurnRecord:
+        """Run ``agent.communicate`` with retry, partial-preservation, and a per-attempt timeout.
+
+        Shared by the criteria-feedback and simulation loops. Crashed partials
+        from ``AgentCrashError`` / ``TurnTimeoutError`` are appended to
+        ``self.result.turns`` via the ``on_attempt_error`` hook (terminal
+        failures included) so observational criteria still see them. Each
+        attempt gets a fresh ``turn_timeout``; ``TurnTimeoutError`` is
+        ``AGENT_TIMEOUT`` (``max_retries=0``) so it still terminates after
+        one attempt.
+        """
+        assert self.agent is not None
+        assert self.task.agent is not None
+        assert self.result is not None
+
+        agent = self.agent
+        # Local rebind: pyright doesn't carry "is not None" narrowing into closures.
+        result = self.result
+        turn_timeout = self.task.agent.turn_timeout
+
+        agent_callback: StreamCallback | None = None
+        if self.stream_callback is not None:
+            agent_callback = TaskScopedCallback(self.stream_callback, self._log_task_id)
+
+        def _drain_pending_turn(*, attempt: int) -> None:
+            """Read agent.pending_turn and, if set, append it to result.turns."""
+            partial = agent.pending_turn
+            if partial is not None:
+                result.turns.append(partial)
+                logger.debug(
+                    "[%s] Drained partial turn record (attempt %d, iteration %d): %d commands",
+                    self.task.task_id,
+                    attempt + 1,
+                    iteration,
+                    len(partial.commands),
+                )
+            else:
+                logger.debug(
+                    "[%s] No pending_turn to drain on attempt %d (iteration %d)",
+                    self.task.task_id,
+                    attempt + 1,
+                    iteration,
+                )
+
+        async def _on_attempt_failure(
+            err: Exception,
+            attempt: int,
+        ) -> None:
+            if not isinstance(err, (AgentCrashError, TurnTimeoutError)):
+                return
+            _drain_pending_turn(attempt=attempt)
+            try:
+                await agent.discard_pending_turn()
+            except Exception:
+                logger.warning(
+                    "[%s] discard_pending_turn raised on attempt %d",
+                    self.task.task_id,
+                    attempt + 1,
+                    exc_info=True,
+                )
+
+        async def _communicate_attempt() -> TurnRecord:
+            coro = agent.communicate(
+                prompt,
+                stream_callback=agent_callback,
+                timeout=turn_timeout,
+            )
+            if turn_timeout is None:
+                return await coro
+            # Grace buffer: agent's in-band watchdog (sets pending_turn) must beat
+            # wait_for cancel so the slot is populated before we give up.
+            outer_timeout = turn_timeout + _WAIT_FOR_GRACE_SECONDS
+            try:
+                return await asyncio.wait_for(coro, timeout=outer_timeout)
+            except TimeoutError:
+                # Watchdog wedged or too slow. Kill only — drain + discard happen
+                # in _on_attempt_failure when this TurnTimeoutError propagates up.
+                try:
+                    await agent.kill()
+                except Exception:
+                    logger.warning(
+                        "[%s] agent.kill() raised on wait_for backstop path",
+                        self.task.task_id,
+                        exc_info=True,
+                    )
+                raise TurnTimeoutError(
+                    turn_timeout,
+                    task_id=self.task.task_id,
+                    iteration=iteration,
+                ) from None
+
+        return await execute_with_retry(
+            operation=_communicate_attempt,
+            operation_name=operation_label,
+            context={
+                "task_id": self.task.task_id,
+                "component": "agent",
+                "agent_name": self.task.agent.type.value,
+            },
+            on_attempt_error=_on_attempt_failure,
+        )
+
     async def _evaluation_loop(self) -> bool:
         """Run the main evaluation loop.
 
@@ -710,32 +826,10 @@ class Orchestrator:
                 ),
             )
 
-            agent = self.agent
-            turn_timeout = self.task.agent.turn_timeout
-
-            # Wrap callback to stamp correct task_id on agent-emitted events
-            agent_callback: StreamCallback | None = None
-            if self.stream_callback is not None:
-                agent_callback = TaskScopedCallback(self.stream_callback, self._log_task_id)
-
-            # Pass turn_timeout into the agent so it can enforce it via
-            # the ThreadedWatchdog that SIGKILLs the CLI subprocess. The
-            # agent is the single authoritative enforcer — no orchestrator
-            # backstop because the SDK's anyio cancel scopes made
-            # cooperative asyncio.wait_for cancellation unreliable.
-            turn_record = await execute_with_retry(
-                operation=functools.partial(
-                    agent.communicate,
-                    prompt_with_cwd,
-                    stream_callback=agent_callback,
-                    timeout=turn_timeout,
-                ),
-                operation_name=f"Agent communication (iteration {iteration})",
-                context={
-                    "task_id": self.task.task_id,
-                    "component": "agent",
-                    "agent_name": self.task.agent.type.value,
-                },
+            turn_record = await self._communicate_with_retry(
+                prompt=prompt_with_cwd,
+                iteration=iteration,
+                operation_label=f"Agent communication (iteration {iteration})",
             )
             self.result.turns.append(turn_record)
 
@@ -937,8 +1031,10 @@ class Orchestrator:
             dialog_pairs: list[tuple[str, str]] = []
 
             check_every_turn = sim_config.check_criteria in ("every_turn", "both")
-            turn_timeout = self.task.agent.turn_timeout
 
+            # turns_completed advances in lockstep with the agent's _iteration:
+            # one _communicate_with_retry call per sim turn keeps partials
+            # and the successful retry on the same iteration number.
             while True:
                 turns_completed += 1
                 self.result.iteration_count = turns_completed
@@ -955,40 +1051,11 @@ class Orchestrator:
                     ),
                 )
 
-                agent = self.agent
-                agent_callback: StreamCallback | None = None
-                if self.stream_callback is not None:
-                    agent_callback = TaskScopedCallback(self.stream_callback, self._log_task_id)
-
-                communicate_coro = execute_with_retry(
-                    operation=functools.partial(
-                        agent.communicate,
-                        prompt_with_cwd,
-                        stream_callback=agent_callback,
-                        timeout=turn_timeout,
-                    ),
-                    operation_name=f"Agent communication (sim turn {turns_completed})",
-                    context={
-                        "task_id": self.task.task_id,
-                        "component": "agent",
-                        "agent_name": self.task.agent.type.value,
-                    },
+                turn_record = await self._communicate_with_retry(
+                    prompt=prompt_with_cwd,
+                    iteration=turns_completed,
+                    operation_label=f"Agent communication (sim turn {turns_completed})",
                 )
-                if turn_timeout is not None:
-                    try:
-                        turn_record = await asyncio.wait_for(communicate_coro, timeout=turn_timeout)
-                    except TimeoutError:
-                        # wait_for fired before the agent's own watchdog; force-kill
-                        # any in-flight subprocess so the SDK can't keep running.
-                        with suppress(Exception):
-                            await agent.kill()
-                        raise TurnTimeoutError(
-                            turn_timeout,
-                            task_id=self.task.task_id,
-                            iteration=turns_completed,
-                        ) from None
-                else:
-                    turn_record = await communicate_coro
                 self.result.turns.append(turn_record)
                 dialog_pairs.append((current_prompt, turn_record.agent_output or ""))
                 agent_meta_parts = []

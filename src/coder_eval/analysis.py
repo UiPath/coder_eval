@@ -15,19 +15,10 @@ from .models import CommandStatistics, CommandTelemetry, SlowestCommandInfo, Tur
 
 
 def calculate_command_statistics(turns: list[TurnRecord]) -> CommandStatistics:
-    """Aggregate command telemetry across all turns.
+    """Aggregate command telemetry across all turns, including crashed partials.
 
-    Args:
-        turns: List of turn records from an evaluation
-
-    Returns:
-        CommandStatistics with aggregated metrics
-
-    Example:
-        >>> stats = calculate_command_statistics(evaluation.turns)
-        >>> print(f"Agent used {stats.commands_by_tool['Read']} Read commands")
+    Partial-record commands are real executed work (sandbox + SDK session persist on retry).
     """
-    # Collect all commands from all turns
     all_commands: list[CommandTelemetry] = []
     for turn in turns:
         all_commands.extend(turn.commands)

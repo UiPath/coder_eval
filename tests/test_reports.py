@@ -974,3 +974,53 @@ def test_report_generator_private_methods_used_by_experiment_reports():
     for method_name in required_methods:
         assert hasattr(ReportGenerator, method_name), f"ReportGenerator.{method_name} is missing"
         assert callable(getattr(ReportGenerator, method_name)), f"ReportGenerator.{method_name} is not callable"
+
+
+@pytest.mark.parametrize(
+    "task_turns, expected_line",
+    [
+        # Mixed: 1 recovered + 2 terminal partials → breakdown line present.
+        (
+            [
+                [
+                    {"iteration": 1, "duration_seconds": 5.0, "command_count": 1, "crashed": True},
+                    {"iteration": 1, "duration_seconds": 25.0, "command_count": 3, "crashed": False},
+                ],
+                [
+                    {"iteration": 1, "duration_seconds": 10.0, "command_count": 1, "crashed": True},
+                    {"iteration": 1, "duration_seconds": 10.0, "command_count": 1, "crashed": True},
+                ],
+            ],
+            "Crashed Partials**: 3 (1 recovered, 2 terminal)",
+        ),
+        # No crashed partials → no Crashed Partials line at all.
+        (
+            [[{"iteration": 1, "duration_seconds": 30.0, "command_count": 1, "crashed": False}]],
+            None,
+        ),
+    ],
+)
+def test_markdown_summary_crashed_partials_breakdown(task_turns, expected_line):
+    """Mixed runs render the breakdown; clean runs omit the line entirely."""
+    task_results = [
+        _make_task_result(f"task{i}", "SUCCESS", 1.0, 30.0, iteration_count=1, turns=turns)
+        for i, turns in enumerate(task_turns, start=1)
+    ]
+    summary = RunSummary(
+        run_id="r",
+        start_time=datetime(2026, 4, 25, 12, 0, 0),
+        end_time=datetime(2026, 4, 25, 12, 1, 0),
+        total_duration_seconds=60.0,
+        tasks_run=len(task_results),
+        tasks_succeeded=len(task_results),
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=task_results,
+        framework_version="0.1.0",
+        environment_info={"coder_eval": "0.1.0"},
+    )
+    report_md = ReportGenerator.generate_markdown(summary)
+    if expected_line is None:
+        assert "Crashed Partials" not in report_md
+    else:
+        assert expected_line in report_md

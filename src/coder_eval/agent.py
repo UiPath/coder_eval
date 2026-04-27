@@ -15,6 +15,16 @@ class Agent(ABC):
     interactions for different agents (Claude Code, Aider, etc.).
     """
 
+    pending_turn: TurnRecord | None = None
+    """Side-channel for partial turn records from failed ``communicate()`` calls.
+
+    Implementations must set this to a ``crashed=True`` TurnRecord before
+    raising any mid-turn exception that carries captured telemetry. Callers
+    must read this slot after every failed ``communicate()`` call, then call
+    ``discard_pending_turn()`` to clear it. Outside ``communicate()``, this
+    slot is always None.
+    """
+
     @abstractmethod
     async def start(self, working_directory: str) -> None:
         """Initialize and start the agent.
@@ -47,8 +57,17 @@ class Agent(ABC):
             TurnRecord containing the complete interaction
 
         Raises:
-            RuntimeError: If agent is not started or communication fails
-            TurnTimeoutError: If timeout elapsed before the turn completed
+            RuntimeError: If agent is not started or communication fails.
+            TurnTimeoutError: Timeout elapsed; implementations must set
+                ``self.pending_turn`` to a ``crashed=True`` partial TurnRecord
+                before raising if telemetry was captured.
+            AgentCrashError: Agent failed mid-turn; same ``pending_turn`` contract.
+
+        On success, ``pending_turn`` must be None and the completed TurnRecord
+        is returned directly. On failure, ``pending_turn`` is set (if telemetry
+        was available) before raising — rollback of per-turn bookkeeping happens
+        exclusively in ``discard_pending_turn``, which the caller invokes after
+        every failed ``communicate()``.
         """
         pass
 
@@ -63,6 +82,14 @@ class Agent(ABC):
         Safe to call at any time, including when no subprocess is active.
         Used by the orchestrator to escape SDKs that ignore cooperative
         cancellation. Default implementation is a no-op.
+        """
+        return None
+
+    async def discard_pending_turn(self) -> None:
+        """Clear ``pending_turn`` and roll back per-turn bookkeeping.
+
+        Idempotent: safe to call when ``pending_turn`` is already None.
+        Call only after a failed ``communicate()``; never after a success.
         """
         return None
 

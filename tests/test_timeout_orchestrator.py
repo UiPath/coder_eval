@@ -272,3 +272,163 @@ async def test_task_timeout_fires_when_inner_coro_swallows_cancel(tmp_path) -> N
     result = await orchestrator.run()
     assert result.final_status == "TIMEOUT"
     assert f"Task timed out after {task_timeout}s" in (result.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_turn_timeout_is_per_attempt_not_cycle(tmp_path):
+    """Each retry attempt gets a fresh turn_timeout, not a shared cycle budget.
+
+    Asserts the contract via call inspection: every attempt receives the
+    same ``timeout=turn_timeout`` kwarg. A shared retry-cycle budget would
+    decrement (or omit) the second-attempt timeout.
+    """
+    from coder_eval.errors import AgentCrashError
+
+    task = _make_task(turn_timeout=1.0)
+    run_dir = tmp_path / "run" / "per_attempt_budget"
+    run_dir.mkdir(parents=True)
+
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator.result = EvaluationResult(
+        task_id="per_attempt_budget",
+        task_description="per-attempt budget",
+        variant_id="test-variant",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+
+    partial_record = TurnRecord(iteration=1, user_input="p", agent_output="<partial>", crashed=True)
+    success_record = _make_turn_record()
+
+    timeouts_seen: list[float | None] = []
+
+    async def flaky_communicate(_prompt, **kwargs):
+        timeouts_seen.append(kwargs.get("timeout"))
+        if len(timeouts_seen) == 1:
+            mock_agent.pending_turn = partial_record
+            raise AgentCrashError("mid-turn failure")
+        return success_record
+
+    mock_agent = AsyncMock()
+    mock_agent.communicate = flaky_communicate
+    orchestrator.agent = mock_agent
+
+    mock_sandbox = MagicMock()
+    mock_sandbox.sandbox_dir = tmp_path / "sandbox"
+    mock_sandbox.sandbox_dir.mkdir()
+    orchestrator.sandbox = mock_sandbox
+
+    mock_checker = MagicMock()
+    mock_checker.check_all = MagicMock(
+        return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
+    )
+    orchestrator.success_checker = mock_checker
+
+    # Skip executor backoff sleeps so the test stays fast.
+    async def fast_retry_sleep(delay: float) -> None:
+        return None
+
+    with (
+        patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)),
+        patch("asyncio.sleep", side_effect=fast_retry_sleep),
+    ):
+        success = await orchestrator._evaluation_loop()
+
+    assert success is True
+    assert timeouts_seen == [1.0, 1.0], "every attempt must receive turn_timeout fresh"
+    # Result.turns: partial (from on_attempt_error) + success (from main flow).
+    assert len(orchestrator.result.turns) == 2
+    assert orchestrator.result.turns[0].crashed is True
+    assert orchestrator.result.turns[1].crashed is False
+
+
+@pytest.mark.asyncio
+async def test_wait_for_backstop_calls_discard_pending_turn(tmp_path):
+    """When the outer ``asyncio.wait_for`` fires, the orchestrator must call
+    ``agent.discard_pending_turn()`` after ``agent.kill()``.
+
+    The wait_for cancels ``communicate()`` via ``CancelledError``
+    (a ``BaseException``), which bypasses the agent's ``except Exception``
+    handlers — so the per-turn iteration counter that ``communicate()`` bumped
+    at entry never gets rolled back by the agent's normal failure path. The
+    orchestrator must invoke ``discard_pending_turn()`` so any future change
+    to the AGENT_TIMEOUT retry policy doesn't silently break the
+    "partials and the retry share an iteration number" contract.
+    """
+    task = _make_task(turn_timeout=0.05)
+    run_dir = tmp_path / "run" / "discard_pending"
+    run_dir.mkdir(parents=True)
+
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="v")
+    orchestrator.result = EvaluationResult(
+        task_id="discard_pending",
+        task_description="discard_pending",
+        variant_id="v",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+
+    # An Event().wait() coroutine never completes on its own — wait_for must
+    # cancel it. Plain asyncio.sleep would be vulnerable to a global sleep
+    # patch elsewhere; Event.wait isolates this test from that.
+    never_set = asyncio.Event()
+
+    async def hanging_communicate(_prompt, **kwargs):
+        await never_set.wait()
+        raise AssertionError("unreachable: wait_for should have cancelled this")
+
+    mock_agent = AsyncMock()
+    mock_agent.communicate = hanging_communicate
+    mock_agent.kill = AsyncMock()
+    mock_agent.discard_pending_turn = AsyncMock()
+    orchestrator.agent = mock_agent
+
+    mock_sandbox = MagicMock()
+    mock_sandbox.sandbox_dir = tmp_path / "sandbox"
+    mock_sandbox.sandbox_dir.mkdir()
+    orchestrator.sandbox = mock_sandbox
+
+    mock_checker = MagicMock()
+    orchestrator.success_checker = mock_checker
+
+    with (
+        patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)),
+        pytest.raises(TurnTimeoutError),
+    ):
+        await orchestrator._evaluation_loop()
+
+    # kill() and discard_pending_turn() must both have run.
+    assert mock_agent.kill.await_count == 1
+    assert mock_agent.discard_pending_turn.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_discard_pending_turn_rolls_back_iteration():
+    """ClaudeCodeAgent.discard_pending_turn is slot-gated: it decrements _iteration
+    only when pending_turn is set, and is idempotent when the slot is empty.
+    """
+    from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
+    from coder_eval.models import AgentConfig, AgentKind, TurnRecord
+
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    # Idle agent (no pending turn): discard is a no-op. Negative values would
+    # break the "partials and retry share an iteration" contract.
+    assert agent._iteration == 0
+    await agent.discard_pending_turn()
+    assert agent._iteration == 0
+
+    # With pending_turn set: discard clears the slot AND decrements _iteration.
+    partial = TurnRecord(iteration=3, user_input="p", agent_output="<partial>", crashed=True)
+    agent._iteration = 3
+    agent.pending_turn = partial
+    await agent.discard_pending_turn()
+    assert agent.pending_turn is None
+    assert agent._iteration == 2
