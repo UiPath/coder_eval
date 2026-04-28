@@ -2,7 +2,6 @@ task_id: "ca-create-ticket-router"
 description: Build an agent that routes support tickets to teams with SLA calculation.
 tags: [agents, create, simple-function, t3]
 initial_prompt_file: prompts/ticket_router.md
-max_iterations: 3
 
 agent:
   type: "claude-code"

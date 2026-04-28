@@ -81,15 +81,18 @@ success_criteria:
     weight: 1.5
     pass_threshold: 1.0
 
-max_iterations: 5
+  - type: llm_judge
+    description: "Qualitative LLM code review"
+    prompt: |
+      Evaluate if the flow modification is complete and correct:
 
-llm_reviewer:
-  enabled: true
-  prompt: |
-    Evaluate if the flow modification is complete and correct:
-
-    1. Was a Terminate node successfully added to the workflow?
-    2. Is the Terminate node connected to the HTTP Request step's error handling?
-    3. Did the agent use uip maestro flow commands to explore available nodes and metadata?
-    4. Is the resulting flow file valid and well-structured JSON?
-    5. Does the modification preserve the existing workflow structure?
+      1. Was a Terminate node successfully added to the workflow?
+      2. Is the Terminate node connected to the HTTP Request step's error handling?
+      3. Did the agent use uip maestro flow commands to explore available nodes and metadata?
+      4. Is the resulting flow file valid and well-structured JSON?
+      5. Does the modification preserve the existing workflow structure?
+    include_reference: true
+    include_agent_output: true
+    include_tool_calls: true
+    weight: 1.0
+    pass_threshold: 0.7

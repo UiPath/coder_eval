@@ -14,7 +14,6 @@ defaults:
   # repeats: 1
 
   # Default max iterations for the evaluation loop (task-level overrides this)
-  max_iterations: 3
 
   # Maximum total seconds for the entire task evaluation (all iterations combined)
   task_timeout: 600

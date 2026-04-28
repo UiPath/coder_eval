@@ -7,7 +7,6 @@ initial_prompt: |
   I want you to pull the project from studio web.
 
   If you ever need to re-authenticate, stop immediately.
-max_iterations: 2
 tags: [uipath, agents, file-sync]
 
 agent:

@@ -1,7 +1,6 @@
 """Evaluation support functions for orchestrator.
 
 This module provides helpers for:
-- Generating feedback prompts based on success criteria results
 - Creating iteration snapshots with hybrid mode support
 - Loading reference code for comparison
 
@@ -13,85 +12,11 @@ import asyncio
 import logging
 from pathlib import Path
 
-from ..models import CriteriaResults, LLMDecision, SnapshotMode, TaskDefinition, TurnRecord
+from ..models import SnapshotMode, TaskDefinition, TurnRecord
 from ..sandbox import Sandbox
 
 
 logger = logging.getLogger(__name__)
-
-
-def generate_next_prompt(
-    task: TaskDefinition,
-    criteria_results: CriteriaResults,
-    decision: LLMDecision | None,
-) -> str:
-    """Generate the next prompt based on results and the optional LLM review.
-
-    If ``decision`` is provided, use the LLM reviewer's issues/next_steps as
-    feedback. Otherwise fall through to a deterministic block listing failed
-    criteria.
-
-    Args:
-        task: Task definition with criteria and configuration.
-        criteria_results: Results of success criteria checks.
-        decision: Optional LLM reviewer decision for this iteration.
-
-    Returns:
-        Next prompt to send to the agent with actionable feedback.
-    """
-    if decision is not None:
-        logger.info(f"Issues:\n{decision.issues[:100]}...")
-        logger.info(f"LLM Score: {decision.score}")
-
-        if decision.next_steps:
-            steps_text = "\n".join(f"- {s}" for s in decision.next_steps)
-            return f"""The task is not yet complete. Here's the feedback:
-
-Issues:
-{decision.issues}
-
-Next steps:
-{steps_text}
-
-Please address these issues and continue working on the task."""
-        if decision.issues:
-            return f"""The task is not yet complete. Here's the feedback:
-
-Issues:
-{decision.issues}
-
-Please address these issues and continue working on the task."""
-
-    # Fallback to deterministic feedback from criteria
-    # Check which criteria failed their pass_threshold
-    failed_criteria = [
-        (result, criterion)
-        for result, criterion in zip(criteria_results, task.success_criteria, strict=True)
-        if result.score < criterion.pass_threshold
-    ]
-    failed_types = ", ".join(criterion.type for _, criterion in failed_criteria) or "<none>"
-    logger.info("Using deterministic feedback from failed criteria: %s", failed_types)
-
-    if failed_criteria:
-        feedback_parts = ["The following checks failed:\n"]
-        for result, criterion in failed_criteria:
-            feedback_parts.append(f"- {criterion.description}")
-            feedback_parts.append(f"  Score: {result.score:.2f} (threshold: {criterion.pass_threshold})")
-            if result.error:
-                feedback_parts.append(f"  Error: {result.error}")
-            elif result.details:
-                feedback_parts.append(f"  Details: {result.details}")
-
-        feedback_parts.append("\nPlease fix these issues and complete the task.")
-
-        return "\n".join(feedback_parts)
-
-    # Fallback message if no specific feedback (rare edge case)
-    logger.warning(
-        "No specific failures detected but task did not pass. "
-        + "This may indicate an issue with success criteria configuration."
-    )
-    return "The task is not yet complete. Please continue working on it."
 
 
 async def create_iteration_snapshot(
@@ -180,7 +105,7 @@ def load_reference_code(
         ValueError: If task_file not provided when needed
 
     Security: Reference code is NEVER shown to the agent.
-    It is only used by LLM reviewer and reference comparison criterion.
+    It is only used by llm_judge / agent_judge and reference_comparison criteria.
     """
     # Return cached if already loaded
     if cached_reference is not None:

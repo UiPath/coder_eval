@@ -26,8 +26,4 @@ success_criteria:
       - "def greet()"
     description: "greetings.py should have print, Hello World, and a greet function"
 
-llm_reviewer:
-  enabled: true
-
-max_iterations: 3
 initial_prompt: "Create a file called hello.py that prints 'Hi there!'"

@@ -46,8 +46,6 @@ def simple_success_task(tmp_path):
 task_id: "integration_test_success"
 description: "Simple integration test - success case"
 initial_prompt: "Create a file named 'test.txt'"
-max_iterations: 1
-
 agent:
   type: "claude-code"
   permission_mode: "acceptEdits"
@@ -83,8 +81,6 @@ def simple_failure_task(tmp_path):
 task_id: "integration_test_failure"
 description: "Simple integration test - failure case"
 initial_prompt: "Create a file named 'test.txt'"
-max_iterations: 1
-
 agent:
   type: "claude-code"
   permission_mode: "acceptEdits"

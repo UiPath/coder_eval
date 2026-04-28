@@ -96,18 +96,6 @@ Apply relevant tags from the project conventions:
 - **Content**: `pure-python`, `network`, `integration`
 - **Domain**: `flow`, `is`, `uipcli`, `uipath-python`, `uipath-langchain`
 
-### Max Iterations
-- `1` for smoke tests (should pass first try)
-- `2` for standard tasks (one retry with feedback)
-- `3` for complex tasks (multiple refinement rounds)
-
-### LLM Reviewer
-Enable for tasks where qualitative assessment adds value beyond criteria:
-```yaml
-llm_reviewer:
-  enabled: true
-```
-
 ## Step 4: Write the Task File(s)
 
 Write YAML file(s) to `tasks/` using the appropriate subdirectory. If creating multiple tasks, write them all:
@@ -125,7 +113,6 @@ task_id: "<kebab-case-id>"
 description: "<one-line description of what this task tests>"
 initial_prompt: |
   <natural language instruction for the agent>
-max_iterations: 2
 tags: [<tag1>, <tag2>]
 
 sandbox:
@@ -139,7 +126,7 @@ success_criteria:
     weight: 1.0
 ```
 
-**Note**: Do NOT include an `agent` block unless the task specifically needs non-default settings (e.g., restricted `allowed_tools`, specific `max_turns`). The agent config is resolved from the experiment's 5-layer merge — hardcoding it in every task defeats experiment-level control. Same for `llm_reviewer` — omit unless explicitly needed.
+**Note**: Do NOT include an `agent` block unless the task specifically needs non-default settings (e.g., restricted `allowed_tools`, specific `max_turns`). The agent config is resolved from the experiment's 5-layer merge — hardcoding it in every task defeats experiment-level control.
 
 ## Step 5: Validate
 

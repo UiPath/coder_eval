@@ -18,7 +18,6 @@ class TurnStartEvent(StreamEvent):
     """Emitted when an evaluation iteration begins."""
 
     iteration: int = 0
-    max_iterations: int = 0
     prompt_preview: str = ""
 
 

@@ -96,7 +96,6 @@ def plan_command(
             else:
                 console.print("  [dim]Agent: N/A (resolved from experiment)[/dim]")
 
-            console.print(f"  [dim]Max iterations: {task.max_iterations}[/dim]")
             console.print(f"  [dim]Success criteria: {len(task.success_criteria)}[/dim]")
 
             # Show resolved agent per variant

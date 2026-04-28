@@ -63,7 +63,7 @@ class RichStreamRenderer:
     def _format_event(self, event: StreamEvent) -> str | None:
         """Format a single event into a Rich markup string."""
         if isinstance(event, TurnStartEvent):
-            return f"[bold]--- Iteration {event.iteration}/{event.max_iterations} ---[/bold]"
+            return f"[bold]--- Iteration {event.iteration} ---[/bold]"
 
         if isinstance(event, ToolCallEvent):
             params_str = escape(format_payload(event.parameters, max_chars=_MAX_PARAMS_LEN))

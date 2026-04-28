@@ -15,7 +15,6 @@ Run the coder_eval dashboard pipeline: execute a test suite, upload results to A
 |----------|---------|-------------|
 | `suite=<name>` | *(all suites)* | Suite to run: `skills`, `smoke`, `flow-init`, `flow` |
 | `model=<model>` | `claude-sonnet-4-6` | Model to evaluate |
-| `max-iter=<n>` | `2` | Max iterations per task |
 | `tags=<tags>` | *(suite default)* | Tag filter for tasks |
 | `backend=<name>` | *(default)* | API backend: `direct`, `bedrock`, `proxy` |
 | `skip-build` | false | Skip UiPath CLI build step |
@@ -42,7 +41,6 @@ cd dashboard && uv run dashboard run [flags]
 Map arguments to flags:
 - `suite=X` → `--suite X`
 - `model=X` → `--model X`
-- `max-iter=N` → `--max-iter N`
 - `tags=X` → `--tags X`
 - `backend=X` → `--backend X`
 - `skip-build` → `--skip-build`

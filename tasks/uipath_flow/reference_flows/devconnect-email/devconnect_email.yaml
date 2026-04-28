@@ -127,18 +127,21 @@ success_criteria:
     weight: 2.0
     pass_threshold: 0.3
 
-max_iterations: 2
+  - type: llm_judge
+    description: "Qualitative LLM code review"
+    prompt: |
+      Evaluate the agent's EmailClassifier flow against the following requirements:
 
-llm_reviewer:
-  enabled: true
-  prompt: |
-    Evaluate the agent's EmailClassifier flow against the following requirements:
-
-    1. Does the flow read the latest Outlook email using a connector node?
-    2. Does the flow use an AI agent node to classify the email into categories
-       (needs response, take action, or other)?
-    3. Does the flow use a Switch node to route based on the classification?
-    4. Is a Slack message sent when the email needs attention?
-    5. Is the Outlook set-email-categories node used for "other" emails?
-    6. Is the flow valid JSON and does it pass uip validation?
-    7. Did the agent use the registry to discover connector node types?
+      1. Does the flow read the latest Outlook email using a connector node?
+      2. Does the flow use an AI agent node to classify the email into categories
+         (needs response, take action, or other)?
+      3. Does the flow use a Switch node to route based on the classification?
+      4. Is a Slack message sent when the email needs attention?
+      5. Is the Outlook set-email-categories node used for "other" emails?
+      6. Is the flow valid JSON and does it pass uip validation?
+      7. Did the agent use the registry to discover connector node types?
+    include_reference: true
+    include_agent_output: true
+    include_tool_calls: true
+    weight: 1.0
+    pass_threshold: 0.7

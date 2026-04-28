@@ -27,8 +27,6 @@ from .errors import (
 from .errors.executor import execute_with_retry
 from .errors.retry import create_error_context
 from .evaluation.checker import SuccessChecker, _short_failure_reason
-from .evaluation.reviewer import LLMReviewer
-from .evaluation.summaries import summarize_commands
 from .models import (
     ROUTE_NAMES,
     AgentKind,
@@ -39,7 +37,6 @@ from .models import (
     CriterionResult,
     EvaluationResult,
     FinalStatus,
-    LLMDecision,
     PostRunResult,
     ProxyRoute,
     ResolvedTask,
@@ -55,7 +52,7 @@ from .models import (
 )
 from .orchestration.batch import run_batch as run_batch_impl
 from .orchestration.config import BatchRunConfig
-from .orchestration.evaluation import create_iteration_snapshot, generate_next_prompt, load_reference_code
+from .orchestration.evaluation import create_iteration_snapshot, load_reference_code
 from .path_utils import format_task_log_id
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, UserSimulator, evaluate_stop
@@ -264,7 +261,6 @@ class Orchestrator:
         # Components (initialized in run())
         self.agent: Agent | None = None
         self.success_checker: SuccessChecker | None = None
-        self.llm_reviewer: LLMReviewer | None = None
 
         # Proxy (initialized in _setup if enabled)
         self.proxy: LLMGatewayProxy | None = None
@@ -369,13 +365,6 @@ class Orchestrator:
                     self.result.final_status = FinalStatus.MAX_TURNS_EXHAUSTED
                 else:
                     self.result.final_status = FinalStatus.FAILURE
-
-                # Run a final LLM review so ``result.llm_review`` is populated
-                # on successful and single-iteration runs too. The mid-loop
-                # reviewer in ``_review_iteration`` only fires when criteria
-                # fail, which would leave the HTML report with an empty
-                # reviewer card on every green run.
-                await self._run_final_llm_review()
 
             except asyncio.CancelledError:
                 # Re-raise cancellation to allow proper task cancellation
@@ -578,10 +567,6 @@ class Orchestrator:
 
         # Create success checker
         self.success_checker = SuccessChecker(self.sandbox)
-
-        # Create LLM reviewer if enabled
-        if self.task.llm_reviewer.enabled:
-            self.llm_reviewer = LLMReviewer(self.task.llm_reviewer)
 
         # Determine API routing from settings.api_backend enum
         proxy_port: int | None = None
@@ -803,125 +788,89 @@ class Orchestrator:
         assert self.task.initial_prompt is not None, "initial_prompt must be resolved before orchestration"
         current_prompt = self.task.initial_prompt
 
-        iteration = 0
-        success = False
+        iteration = 1
+        self.result.iteration_count = iteration
 
-        while iteration < self.task.max_iterations and not success:
-            iteration += 1
-            self.result.iteration_count = iteration
+        # Communicate with agent (with retry logic)
+        prompt_with_cwd = f"Your working directory is: {sandbox_dir.resolve()}\n\n{current_prompt}"
+        logger.debug(f"Sending prompt: {current_prompt[:100]}...")
 
-            logger.info(f"Starting iteration {iteration}/{self.task.max_iterations}")
-
-            # Communicate with agent (with retry logic)
-            prompt_with_cwd = f"Your working directory is: {sandbox_dir.resolve()}\n\n{current_prompt}"
-            logger.debug(f"Sending prompt: {current_prompt[:100]}...")
-
-            safe_emit(
-                self.stream_callback,
-                TurnStartEvent(
-                    task_id=self._log_task_id,
-                    iteration=iteration,
-                    max_iterations=self.task.max_iterations,
-                    prompt_preview=current_prompt[:100],
-                ),
-            )
-
-            turn_record = await self._communicate_with_retry(
-                prompt=prompt_with_cwd,
+        safe_emit(
+            self.stream_callback,
+            TurnStartEvent(
+                task_id=self._log_task_id,
                 iteration=iteration,
-                operation_label=f"Agent communication (iteration {iteration})",
-            )
-            self.result.turns.append(turn_record)
+                prompt_preview=current_prompt[:100],
+            ),
+        )
 
-            safe_emit(
-                self.stream_callback,
-                TurnCompleteEvent(
-                    task_id=self._log_task_id,
-                    iteration=iteration,
-                    duration_s=turn_record.duration_seconds or 0.0,
-                    command_count=len(turn_record.commands),
-                    token_usage_str=str(turn_record.token_usage) if turn_record.token_usage else "",
-                ),
-            )
+        turn_record = await self._communicate_with_retry(
+            prompt=prompt_with_cwd,
+            iteration=iteration,
+            operation_label="Agent communication",
+        )
+        self.result.turns.append(turn_record)
 
-            logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
+        safe_emit(
+            self.stream_callback,
+            TurnCompleteEvent(
+                task_id=self._log_task_id,
+                iteration=iteration,
+                duration_s=turn_record.duration_seconds or 0.0,
+                command_count=len(turn_record.commands),
+                token_usage_str=str(turn_record.token_usage) if turn_record.token_usage else "",
+            ),
+        )
 
-            # Create snapshot after this turn (if enabled)
-            if self.snapshot_base_dir and self.sandbox:
-                await create_iteration_snapshot(
-                    sandbox=self.sandbox,
-                    snapshot_base_dir=self.snapshot_base_dir,
-                    task=self.task,
-                    iteration=iteration,
-                    turn_record=turn_record,
-                )
+        logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
 
-            # Check success criteria (pass reference code for reference_comparison criterion)
-            logger.debug("Checking success criteria")
-            reference_code, self._reference_code = load_reference_code(
+        # Create snapshot after this turn (if enabled)
+        if self.snapshot_base_dir and self.sandbox:
+            await create_iteration_snapshot(
+                sandbox=self.sandbox,
+                snapshot_base_dir=self.snapshot_base_dir,
                 task=self.task,
-                task_file=self.task_file,
-                cached_reference=self._reference_code,
+                iteration=iteration,
+                turn_record=turn_record,
             )
-            criteria_results = await asyncio.to_thread(
-                self.success_checker.check_all,
-                self.task.success_criteria,
-                reference_code=reference_code,
-                turn_records=self.result.turns,
+
+        # Check success criteria (pass reference code for reference_comparison criterion)
+        logger.debug("Checking success criteria")
+        reference_code, self._reference_code = load_reference_code(
+            task=self.task,
+            task_file=self.task_file,
+            cached_reference=self._reference_code,
+        )
+        criteria_results = await asyncio.to_thread(
+            self.success_checker.check_all,
+            self.task.success_criteria,
+            reference_code=reference_code,
+            turn_records=self.result.turns,
+        )
+        self.result.success_criteria_results = criteria_results
+
+        # Determine if all criteria passed their thresholds
+        pairs = list(zip(criteria_results, self.task.success_criteria, strict=True))
+        passed_count = sum(1 for r, c in pairs if r.score >= c.pass_threshold)
+        total_count = len(pairs)
+        all_passed = passed_count == total_count
+
+        # Reuse the model method for weighted score (single source of truth)
+        self.result.calculate_weighted_score(self.task.success_criteria)
+        current_score = self.result.weighted_score or 0.0
+
+        logger.info(f"Success criteria: {passed_count}/{total_count} passed, weighted score: {current_score:.3f}")
+
+        self._emit_criteria_event(criteria_results)
+
+        if turn_record.max_turns_exhausted:
+            self.result.max_turns_exhausted = True
+            logger.warning(
+                "Agent exhausted max_turns (%s) without passing criteria.",
+                self.task.agent.max_turns,
             )
-            self.result.success_criteria_results = criteria_results
 
-            # Determine if all criteria passed their thresholds
-            pairs = list(zip(criteria_results, self.task.success_criteria, strict=True))
-            passed_count = sum(1 for r, c in pairs if r.score >= c.pass_threshold)
-            total_count = len(pairs)
-            all_passed = passed_count == total_count
-
-            # Reuse the model method for weighted score (single source of truth)
-            self.result.calculate_weighted_score(self.task.success_criteria)
-            current_score = self.result.weighted_score or 0.0
-
-            logger.info(f"Success criteria: {passed_count}/{total_count} passed, weighted score: {current_score:.3f}")
-
-            self._emit_criteria_event(criteria_results)
-
-            if all_passed:
-                # Outcome is already conveyed by the "Success criteria: X/Y
-                # passed" INFO above and the terminal "Task finished" summary;
-                # keep a DEBUG trace for post-mortem without doubling up.
-                logger.debug("All success criteria passed; exiting iteration loop")
-                success = True
-                break
-
-            # Summarize tool calls for reviewer context and logging
-            tool_calls_summary = summarize_commands(turn_record.commands)
-            if tool_calls_summary:
-                logger.debug("Tool calls for iteration %d:\n%s", iteration, tool_calls_summary)
-
-            # Criteria failed — run the LLM reviewer (if configured) and persist
-            # its decision for this iteration to self.result.llm_review.
-            decision = await self._review_iteration(turn_record, reference_code, tool_calls_summary)
-
-            # If the agent exhausted its max_turns without completing, stop early —
-            # further iterations are unlikely to succeed.
-            if turn_record.max_turns_exhausted:
-                self.result.max_turns_exhausted = True
-                logger.warning(
-                    "Agent exhausted max_turns (%s) without passing criteria."
-                    + " Stopping evaluation — further iterations unlikely to succeed.",
-                    self.task.agent.max_turns,
-                )
-                break
-
-            # If not at max iterations, build feedback for the next turn.
-            if iteration < self.task.max_iterations:
-                current_prompt = generate_next_prompt(
-                    task=self.task,
-                    criteria_results=criteria_results,
-                    decision=decision,
-                )
-
-        return success
+        return all_passed
 
     async def _simulation_dialog_loop(self, initial_prompt: str | None, sandbox_dir: Path) -> bool:
         """Run the task as a multi-turn dialog driven by an LLM user simulator.
@@ -1046,7 +995,6 @@ class Orchestrator:
                     TurnStartEvent(
                         task_id=self._log_task_id,
                         iteration=turns_completed,
-                        max_iterations=sim_config.max_turns,
                         prompt_preview=current_prompt[:100],
                     ),
                 )
@@ -1282,85 +1230,6 @@ class Orchestrator:
                 criteria=criteria_summaries,
             ),
         )
-
-    async def _review_iteration(
-        self,
-        turn_record: TurnRecord,
-        reference_code: str | None,
-        tool_calls_summary: str | None,
-    ) -> LLMDecision | None:
-        """Invoke the LLM reviewer for the current iteration.
-
-        Returns the decision (persisting it to ``self.result.llm_review``) or
-        None if no reviewer is configured or the call fails. Failures are
-        logged and swallowed so they never mask the run outcome.
-        """
-        if self.llm_reviewer is None or self.result is None:
-            return None
-
-        logger.info("Requesting LLM review")
-        reviewer = self.llm_reviewer
-
-        async def _review_operation() -> LLMDecision | None:
-            return await asyncio.to_thread(
-                reviewer.review,
-                task_description=self.task.description,
-                agent_output=turn_record.agent_output or "",
-                current_iteration=turn_record.iteration,
-                max_iterations=self.task.max_iterations,
-                reference_solution=reference_code,
-                tool_calls_summary=tool_calls_summary,
-            )
-
-        try:
-            decision = await execute_with_retry(
-                operation=_review_operation,
-                operation_name="LLM reviewer",
-                context={"task_id": self.task.task_id, "component": "evaluator"},
-            )
-        except Exception:
-            logger.exception("LLM review failed — continuing without review")
-            return None
-
-        if decision is not None:
-            self.result.llm_review = decision
-            logger.info("LLM review score: %s", decision.score)
-        return decision
-
-    async def _run_final_llm_review(self) -> None:
-        """Run one last LLM review after the evaluation loop completes.
-
-        The mid-loop reviewer in ``_review_iteration`` only fires when
-        criteria fail — on successful or single-iteration runs nothing is
-        stored in ``self.result.llm_review``. This post-loop pass
-        guarantees the reviewer verdict is attached whenever a reviewer is
-        configured, so the HTML report can always render qualitative
-        feedback.
-
-        If the mid-loop reviewer already persisted a decision this run,
-        skip — that decision reflects the last failing iteration and is
-        more informative than re-reviewing the same agent output.
-
-        Failures here are logged and swallowed so they never mask the run.
-        """
-        if self.llm_reviewer is None or self.result is None:
-            return
-        if not self.result.turns:
-            return
-        if self.result.llm_review is not None:
-            return
-
-        last_turn = self.result.turns[-1]
-        tool_calls_summary = summarize_commands(last_turn.commands)
-        reference_code, self._reference_code = load_reference_code(
-            task=self.task,
-            task_file=self.task_file,
-            cached_reference=self._reference_code,
-        )
-        try:
-            await self._review_iteration(last_turn, reference_code, tool_calls_summary)
-        except Exception:
-            logger.exception("Final LLM review failed — continuing without review")
 
     _POST_RUN_MAX_OUTPUT = 100_000  # Truncate stdout/stderr to 100KB
     _POST_RUN_STREAM_LIMIT = 262_144  # StreamReader per-line buffer (256KB)

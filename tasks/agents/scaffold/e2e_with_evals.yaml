@@ -26,7 +26,6 @@ initial_prompt: |
 
   5. Run the evaluations:
      `uv run uipath eval calculate_bmi evaluations/eval-sets/smoke-test.json --no-report`
-max_iterations: 5
 tags: [agents, scaffold, evaluate, e2e, t4]
 
 agent:

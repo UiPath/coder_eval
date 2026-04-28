@@ -89,7 +89,22 @@ success_criteria:
     weight: 2.0
     pass_threshold: 0.65
 
-max_iterations: 5
+  - type: llm_judge
+    description: "Qualitative LLM code review"
+    prompt: |
+      Evaluate if the queue items script is complete and correct:
+
+      1. Does it import QueueItem from uipath.models.queues?
+      2. Does it create QueueItem with 'name' (queue name) and 'specific_content' (data)?
+      3. Does it use sdk.queues.create_item() to add items?
+      4. Does it use sdk.queues.list_items() to retrieve items?
+      5. Does it filter the results by queue name?
+      6. Is the code structure clear and well-organized?
+    include_reference: true
+    include_agent_output: true
+    include_tool_calls: true
+    weight: 1.0
+    pass_threshold: 0.7
 
 reference:
   code: |
@@ -138,15 +153,3 @@ reference:
         print(f"  - ID: {item.get('Id')}")
         print(f"    Status: {item.get('Status')}")
         print(f"    Data: {item.get('SpecificContent')}")
-
-llm_reviewer:
-  enabled: true
-  prompt: |
-    Evaluate if the queue items script is complete and correct:
-
-    1. Does it import QueueItem from uipath.models.queues?
-    2. Does it create QueueItem with 'name' (queue name) and 'specific_content' (data)?
-    3. Does it use sdk.queues.create_item() to add items?
-    4. Does it use sdk.queues.list_items() to retrieve items?
-    5. Does it filter the results by queue name?
-    6. Is the code structure clear and well-organized?

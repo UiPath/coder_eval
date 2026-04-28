@@ -21,7 +21,6 @@ from coder_eval.reports_stats import (
     fmt_mean_sd,
     fmt_p,
     load_variant_eval_results,
-    mean,
     paired_bootstrap_diff_ci,
     stddev,
     welch_t_test,
@@ -179,7 +178,6 @@ class ExperimentReportGenerator:
         variant_scores: dict[str, list[float]] = {vid: [] for vid in result.variant_ids}
         variant_durations: dict[str, list[float]] = {vid: [] for vid in result.variant_ids}
         variant_tokens: dict[str, list[float]] = {vid: [] for vid in result.variant_ids}
-        variant_iterations: dict[str, list[float]] = {vid: [] for vid in result.variant_ids}
         variant_asst_turns: dict[str, list[float]] = {vid: [] for vid in result.variant_ids}
 
         for ts in result.task_summaries:
@@ -188,8 +186,6 @@ class ExperimentReportGenerator:
                 variant_durations[vr.variant_id].append(vr.duration_seconds / vr.replicate_count)
                 if vr.total_tokens is not None:
                     variant_tokens[vr.variant_id].append(float(vr.total_tokens))
-                if vr.iteration_count is not None:
-                    variant_iterations[vr.variant_id].append(float(vr.iteration_count))
                 if vr.total_assistant_turns is not None:
                     variant_asst_turns[vr.variant_id].append(float(vr.total_assistant_turns))
 
@@ -271,16 +267,6 @@ class ExperimentReportGenerator:
             p = welch_t_test(variant_durations[vid_a], variant_durations[vid_b])
             row += f" | {fmt_p(p)}"
         lines.append(row + " |")
-
-        # Row: Iterations (if data available)
-        if any(variant_iterations[vid] for vid in result.variant_ids):
-            row = "| Iterations"
-            for vid in result.variant_ids:
-                row += f" | {fmt_mean_sd(variant_iterations[vid], '.1f')}"
-            if show_p_values:
-                p = welch_t_test(variant_iterations[vid_a], variant_iterations[vid_b])
-                row += f" | {fmt_p(p)}"
-            lines.append(row + " |")
 
         # Row: Assistant Turns (if data available)
         if any(variant_asst_turns[vid] for vid in result.variant_ids):
@@ -472,14 +458,11 @@ class ExperimentReportGenerator:
         ]
         scores = [vr.weighted_score for vr in variant_results]
         durations = [vr.duration_seconds / vr.replicate_count for vr in variant_results]
-        iterations = [float(vr.iteration_count) for vr in variant_results if vr.iteration_count is not None]
 
         if scores and len(scores) >= 2:
             lines.append(f"- **Score Stddev**: {stddev(scores):.3f}")
         if durations and len(durations) >= 2:
             lines.append(f"- **Duration Stddev**: {stddev(durations):.1f}s")
-        if iterations:
-            lines.append(f"- **Avg Iterations**: {mean(iterations):.1f}")
         if agg.replicate_count > 1:
             per_rep = result.per_replicate_scores.get(variant_id, {})
             all_rep_scores: list[float] = [s for rep_scores in per_rep.values() for s in rep_scores]
@@ -492,8 +475,8 @@ class ExperimentReportGenerator:
         has_similarity = any(vr.reference_similarity is not None for vr in variant_results)
         has_reps = any(vr.replicate_count > 1 for vr in variant_results)
 
-        header = "| Task | Score | Status | Avg Duration | Iterations |"
-        separator = "|------|-------|--------|--------------|------------|"
+        header = "| Task | Score | Status | Avg Duration |"
+        separator = "|------|-------|--------|--------------|"
         if has_reps:
             header += " Reps |"
             separator += "------|"
@@ -506,12 +489,8 @@ class ExperimentReportGenerator:
         for ts in result.task_summaries:
             for vr in ts.variant_results:
                 if vr.variant_id == variant_id:
-                    iters_str = str(vr.iteration_count) if vr.iteration_count is not None else "N/A"
                     avg_duration = vr.duration_seconds / vr.replicate_count
-                    row = (
-                        f"| {ts.task_id} | {vr.weighted_score:.3f} | {vr.final_status}"
-                        f" | {avg_duration:.1f}s | {iters_str} |"
-                    )
+                    row = f"| {ts.task_id} | {vr.weighted_score:.3f} | {vr.final_status} | {avg_duration:.1f}s |"
                     if has_reps:
                         row += f" {vr.replicate_count} |"
                     if has_similarity:

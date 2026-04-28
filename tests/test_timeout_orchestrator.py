@@ -21,7 +21,7 @@ from coder_eval.models import (
 from coder_eval.orchestrator import Orchestrator
 
 
-def _make_task(*, turn_timeout: float | None = None, task_timeout: float | None = None, max_iterations: int = 3):
+def _make_task(*, turn_timeout: float | None = None, task_timeout: float | None = None):
     """Create a minimal TaskDefinition for testing.
 
     Uses model_construct() to bypass Pydantic's ge= validators when setting
@@ -40,13 +40,11 @@ def _make_task(*, turn_timeout: float | None = None, task_timeout: float | None 
         task_id="timeout_test",
         description="Test task",
         initial_prompt="Do something",
-        max_iterations=max_iterations,
         tags=[],
         agent=agent,
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(type="file_exists", path="test.py", description="test.py must exist")],
         task_timeout=task_timeout,
-        llm_reviewer=None,
         reference=None,
     )
     return task
@@ -126,7 +124,7 @@ async def test_task_timeout_fires(tmp_path) -> None:
     deadline; the outer orchestrator converts that into TaskTimeoutError.
     """
     task_timeout = 0.1
-    task = _make_task(task_timeout=task_timeout, max_iterations=10)
+    task = _make_task(task_timeout=task_timeout)
     run_dir = tmp_path / "run" / "timeout_test"
     run_dir.mkdir(parents=True)
 
@@ -149,7 +147,7 @@ async def test_task_timeout_fires(tmp_path) -> None:
 async def test_task_timeout_populates_elapsed_seconds(tmp_path) -> None:
     """TaskTimeoutError carries elapsed_seconds when raised by the orchestrator."""
     task_timeout = 0.1
-    task = _make_task(task_timeout=task_timeout, max_iterations=10)
+    task = _make_task(task_timeout=task_timeout)
     run_dir = tmp_path / "run" / "timeout_test"
     run_dir.mkdir(parents=True)
 
@@ -179,7 +177,7 @@ async def test_task_timeout_populates_elapsed_seconds(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_no_timeout_when_none(tmp_path) -> None:
     """With both timeouts None, the loop runs to completion with no interference."""
-    task = _make_task(max_iterations=1)
+    task = _make_task()
     orchestrator = _make_initialized_orchestrator(task, tmp_path)
 
     mock_agent = AsyncMock()
@@ -200,7 +198,7 @@ async def test_no_timeout_when_none(tmp_path) -> None:
 async def test_task_timeout_hard_kills_agent(tmp_path) -> None:
     """When the task timeout fires, the orchestrator must call ``agent.kill_sync``
     (the sync variant, invoked from the watchdog's timer thread)."""
-    task = _make_task(task_timeout=0.1, max_iterations=10)
+    task = _make_task(task_timeout=0.1)
     run_dir = tmp_path / "run" / "timeout_test"
     run_dir.mkdir(parents=True)
 
@@ -253,7 +251,7 @@ async def test_task_timeout_fires_when_inner_coro_swallows_cancel(tmp_path) -> N
     still triggers ``TaskTimeoutError``.
     """
     task_timeout = 0.1
-    task = _make_task(task_timeout=task_timeout, max_iterations=10)
+    task = _make_task(task_timeout=task_timeout)
     run_dir = tmp_path / "run" / "timeout_test"
     run_dir.mkdir(parents=True)
 

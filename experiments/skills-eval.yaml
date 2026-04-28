@@ -24,7 +24,6 @@ defaults:
   agent:
     type: claude-code
     permission_mode: bypassPermissions
-  max_iterations: 1
 
 variants:
   - variant_id: bare

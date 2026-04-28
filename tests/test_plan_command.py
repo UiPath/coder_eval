@@ -22,7 +22,6 @@ def _make_task(task_id: str = "test-task", agent: AgentConfig | None = None) -> 
         task_id=task_id,
         description="A test task",
         initial_prompt="Do something",
-        max_iterations=3,
         agent=agent,
         sandbox={"driver": "tempdir"},
         success_criteria=[{"type": "file_exists", "description": "check", "path": "out.txt"}],

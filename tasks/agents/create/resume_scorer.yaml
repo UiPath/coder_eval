@@ -2,7 +2,6 @@ task_id: "ca-create-resume-scorer"
 description: Build an agent that scores resumes against job requirements with skill matching.
 tags: [agents, create, simple-function, t2]
 initial_prompt_file: prompts/resume_scorer.md
-max_iterations: 3
 
 agent:
   type: "claude-code"

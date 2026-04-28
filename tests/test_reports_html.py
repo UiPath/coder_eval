@@ -18,7 +18,6 @@ from coder_eval.models import (
     ExperimentResult,
     ExperimentVariant,
     FinalStatus,
-    LLMDecision,
     PromptPrefix,
     SlowestCommandInfo,
     TaskExperimentSummary,
@@ -61,7 +60,6 @@ def _make_command(
 def _make_result(
     *,
     final_status: FinalStatus = FinalStatus.SUCCESS,
-    llm_review: LLMDecision | None = None,
     turns: list[TurnRecord] | None = None,
     criteria: list[CriterionResult] | None = None,
     error_message: str | None = None,
@@ -79,7 +77,6 @@ def _make_result(
         weighted_score=0.9 if final_status == FinalStatus.SUCCESS else 0.2,
         iteration_count=1,
         success_criteria_results=criteria or [],
-        llm_review=llm_review,
         turns=turns or [],
         error_message=error_message,
     )
@@ -121,25 +118,6 @@ def test_task_html_minimal_success():
     # Trace rendered
     assert "Conversation Trace" in html
     assert "Write" in html
-    # LLM review placeholder when disabled
-    assert "LLM reviewer not enabled" in html
-
-
-def test_task_html_with_llm_review():
-    review = LLMDecision(
-        issues="Missing unit test for happy path",
-        score=0.7,
-        next_steps=["Add pytest for success case", "Document return shape"],
-        should_continue=True,
-    )
-    result = _make_result(llm_review=review)
-    html = HTMLReportGenerator.generate_task_html(result)
-
-    assert "Missing unit test for happy path" in html
-    assert "Add pytest for success case" in html
-    assert "Document return shape" in html
-    assert "should continue" in html
-    assert "LLM reviewer not enabled" not in html
 
 
 def test_task_html_error_case_with_empty_turns():
@@ -671,21 +649,6 @@ def test_task_html_renders_cost_badge_in_header():
     # Header region ends at the </div> after ".header-bar"
     header = html[: html.index("<h2>") if "<h2>" in html else len(html)]
     assert "$0.5000" in header
-
-
-def test_task_html_self_corrections_badge():
-    result = _make_result()
-    result.iteration_count = 4
-    html = HTMLReportGenerator.generate_task_html(result)
-    assert "self-corr 3" in html
-
-
-def test_task_html_omits_self_corrections_badge_when_iteration_is_one():
-    """iteration_count == 1 means no self-correction — badge must be absent."""
-    result = _make_result()
-    result.iteration_count = 1
-    html = HTMLReportGenerator.generate_task_html(result)
-    assert "self-corr" not in html
 
 
 def test_task_html_omits_cost_badge_when_cost_is_none():

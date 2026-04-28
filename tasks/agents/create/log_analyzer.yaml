@@ -2,7 +2,6 @@ task_id: "ca-create-log-analyzer"
 description: Build an agent that analyzes structured application log entries.
 tags: [agents, create, simple-function, t2]
 initial_prompt_file: prompts/log_analyzer.md
-max_iterations: 3
 
 agent:
   type: "claude-code"

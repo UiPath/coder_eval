@@ -214,7 +214,7 @@ jobs:
           uv pip install --python .venv/bin/python -e ".[dev]"
 
       - name: Run e2e smoke tests
-        run: .venv/bin/coder-eval run tasks/*.yaml --tags smoke --model claude-haiku-4-5-20251001 --max-iter 2
+        run: .venv/bin/coder-eval run tasks/*.yaml --tags smoke --model claude-haiku-4-5-20251001
 
       - name: Verify results
         run: |

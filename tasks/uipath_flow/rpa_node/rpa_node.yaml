@@ -75,5 +75,3 @@ success_criteria:
     require_success: false
     weight: 2.0
     pass_threshold: 1.0
-
-max_iterations: 2

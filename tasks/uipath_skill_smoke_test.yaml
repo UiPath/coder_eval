@@ -20,7 +20,6 @@ initial_prompt: |
   Pull my uipath agent project in the current dir from the latest version on studio web
   Use your skills as much as possible.
 
-max_iterations: 1
 
 success_criteria:
   - type: command_executed

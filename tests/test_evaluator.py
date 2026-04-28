@@ -1,15 +1,12 @@
 """Tests for the evaluator implementations."""
 
-import json
 from unittest.mock import Mock
 
 from coder_eval.evaluation.checker import SuccessChecker
-from coder_eval.evaluation.reviewer import LLMReviewer
 from coder_eval.models import (
     FileContainsCriterion,
     FileExistsCriterion,
     FileMatchesRegexCriterion,
-    LLMReviewerConfig,
     PytestCriterion,
     RunCommandCriterion,
     SandboxConfig,
@@ -174,90 +171,6 @@ def test_success_checker_check_all():
         sandbox.cleanup()
 
 
-def test_llm_reviewer_parse_response():
-    """Test parsing LLM responses with new field names."""
-    config = LLMReviewerConfig(enabled=True, model="gpt-5-2025-08-07")
-
-    reviewer = LLMReviewer(config)
-
-    # Test valid JSON response with new field names
-    valid_response = """
-    Here is the code review:
-    {
-        "issues": "Script works but overcomplicated. Remove manual auth.",
-        "score": 0.8,
-        "next_steps": ["Add error handling", "Write tests"],
-        "should_continue": true
-    }
-    """
-
-    decision = reviewer._parse_response(valid_response)
-    assert decision is not None
-    assert decision.score == 0.8
-    assert decision.issues == "Script works but overcomplicated. Remove manual auth."
-    assert len(decision.next_steps) == 2
-    assert decision.should_continue is True
-
-    # Test response with only JSON
-    json_only = json.dumps({"issues": "Task complete", "score": 1.0, "next_steps": [], "should_continue": False})
-
-    decision = reviewer._parse_response(json_only)
-    assert decision is not None
-    assert decision.score == 1.0
-    assert decision.issues == "Task complete"
-    assert decision.should_continue is False
-
-    # Test invalid response
-    invalid_response = "This is not JSON at all"
-    decision = reviewer._parse_response(invalid_response)
-    assert decision is None
-
-
-def test_llm_reviewer_build_prompt():
-    """Test prompt building includes terse code review instructions."""
-    config = LLMReviewerConfig(enabled=True, model="gpt-5-2025-08-07", temperature=0.0)
-
-    reviewer = LLMReviewer(config)
-
-    prompt = reviewer._build_review_prompt(
-        task_description="Create a hello world script",
-        agent_output="Agent created app.py with print statement",
-        current_iteration=1,
-        max_iterations=3,
-    )
-
-    # Assert task context present
-    assert "Create a hello world script" in prompt
-    assert "Iteration 1/3" in prompt
-    assert "JSON" in prompt
-
-    # Assert new terse field names present
-    assert "issues" in prompt
-    assert "next_steps" in prompt
-    assert "score" in prompt
-
-    # Assert terse instructions present
-    assert "code reviewer" in prompt.lower()
-    assert "No praise, no fluff" in prompt or "direct" in prompt.lower()
-
-    # Assert examples present
-    assert "Examples of GOOD" in prompt
-    assert "Examples of BAD" in prompt
-
-
-def test_llm_reviewer_disabled():
-    """Test that reviewer returns None when disabled."""
-    config = LLMReviewerConfig(enabled=False, model="gpt-5-2025-08-07")
-
-    reviewer = LLMReviewer(config)
-
-    result = reviewer.review(
-        task_description="Test task", agent_output="Some output", current_iteration=1, max_iterations=3
-    )
-
-    assert result is None
-
-
 def test_success_checker_dispatch():
     """Test pattern matching dispatcher works for all criterion types."""
     mock_sandbox = Mock()
@@ -413,86 +326,6 @@ def test_handle_criterion_errors_decorator_file_contains():
     assert result.error is not None
     assert "Access denied" in result.error
     assert result.criterion_type == "file_contains"
-
-
-def test_llm_reviewer_parse_old_format_with_aliases():
-    """Test backward compatibility: old 'assessment'/'suggestions' fields still work via Pydantic aliases."""
-    config = LLMReviewerConfig(enabled=True, model="gpt-5-2025-08-07")
-
-    reviewer = LLMReviewer(config)
-
-    # Old format with deprecated field names (v0.1.0)
-    old_response = """
-    {
-        "assessment": "The agent has made progress...",
-        "score": 0.8,
-        "suggestions": ["Consider adding tests"],
-        "should_continue": true
-    }
-    """
-
-    decision = reviewer._parse_response(old_response)
-
-    # Should still parse via Pydantic aliases
-    assert decision is not None
-    assert decision.issues == "The agent has made progress..."  # Read via 'assessment' alias
-    assert decision.score == 0.8
-    assert decision.next_steps == ["Consider adding tests"]  # Read via 'suggestions' alias
-    assert decision.should_continue is True
-
-
-def test_llm_reviewer_build_prompt_with_task_prompt():
-    """Test that task-specific prompt is included in the review prompt."""
-    custom_prompt = (
-        "Evaluate if the calculator agent is complete:\n"
-        "1. Does it use LangGraph StateGraph?\n"
-        "2. Are input/output models defined with Pydantic?\n"
-    )
-    config = LLMReviewerConfig(enabled=True, model="gpt-5-2025-08-07", prompt=custom_prompt)
-
-    reviewer = LLMReviewer(config)
-
-    prompt = reviewer._build_review_prompt(
-        task_description="Build a calculator agent",
-        agent_output="Agent created calculator.py",
-        current_iteration=1,
-        max_iterations=3,
-    )
-
-    assert "TASK-SPECIFIC REVIEW CRITERIA" in prompt
-    assert "LangGraph StateGraph" in prompt
-    assert "Pydantic" in prompt
-    # Generic instructions should still be present
-    assert "No praise, no fluff" in prompt
-
-
-def test_llm_reviewer_build_prompt_without_task_prompt():
-    """Test that prompt works normally when no task-specific prompt is configured."""
-    config = LLMReviewerConfig(enabled=True, model="gpt-5-2025-08-07")
-
-    reviewer = LLMReviewer(config)
-
-    prompt = reviewer._build_review_prompt(
-        task_description="Build something",
-        agent_output="Agent output",
-        current_iteration=1,
-        max_iterations=3,
-    )
-
-    assert "TASK-SPECIFIC REVIEW CRITERIA" not in prompt
-    assert "No praise, no fluff" in prompt
-
-
-def test_llm_reviewer_config_accepts_prompt_field():
-    """Test that LLMReviewerConfig correctly stores the prompt field."""
-    config = LLMReviewerConfig(enabled=True, prompt="Check for edge cases")
-    assert config.prompt == "Check for edge cases"
-
-
-def test_llm_reviewer_config_prompt_defaults_to_none():
-    """Test that prompt defaults to None when not provided."""
-    config = LLMReviewerConfig(enabled=True)
-    assert config.prompt is None
 
 
 def test_success_checker_logs_carry_task_id_in_context(tmp_path):

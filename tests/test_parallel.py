@@ -24,7 +24,6 @@ agent:
 sandbox:
   driver: tempdir
   python: null
-max_iterations: 1
 success_criteria:
   - type: file_exists
     path: test.txt
@@ -40,7 +39,6 @@ success_criteria:
         initial_prompt="Test prompt",
         agent={"type": "claude-code"},
         sandbox={"driver": "tempdir"},
-        max_iterations=1,
         success_criteria=[{"type": "file_exists", "path": "test.txt", "description": "Check for test.txt"}],
     )
 
@@ -56,7 +54,6 @@ success_criteria:
         run_dir=run_dir,
         max_parallel=1,  # Sequential
         preserve_sandbox=False,
-        max_iterations=1,
     )
 
     resolved_task = ResolvedTask(

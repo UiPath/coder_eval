@@ -1,27 +1,12 @@
 """Shared UiPath LLM Gateway client factory.
 
-Centralizes the ``uipath_llmgw_client`` import so that LLMReviewer, prompt
-rephrasing, and the llm_judge criterion all build LangChain chat models the
-same way.
+Centralizes the ``uipath_llmgw_client`` import so that prompt rephrasing
+and the llm_judge criterion build LangChain chat models the same way.
 """
 
 from __future__ import annotations
 
 from typing import Any
-
-
-def llmgw_available() -> bool:
-    """Return ``True`` when the ``uipath_llmgw_client`` package is importable.
-
-    Used by callers (e.g. ``LLMReviewer.__init__``) that need to pick a backend
-    without eagerly constructing a chat model (which may trigger auth).
-    """
-    try:
-        import uipath_llmgw_client  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
 
 
 def get_llmgw_chat_model(model: str, temperature: float = 0.0, max_tokens: int = 1000) -> Any:

@@ -43,7 +43,6 @@ def test_cli_handles_empty_glob_results(tmp_path):
             asyncio.run(
                 _run_all_tasks(
                     task_files=[glob_pattern],
-                    max_iterations=None,
                     preserve=True,
                     run_dir=None,
                     max_parallel=1,
@@ -82,7 +81,6 @@ def test_cli_handles_invalid_glob_pattern(tmp_path):
             asyncio.run(
                 _run_all_tasks(
                     task_files=[pattern],
-                    max_iterations=None,
                     preserve=True,
                     run_dir=None,
                     max_parallel=1,
@@ -108,7 +106,6 @@ def test_cli_accepts_explicit_file_paths(tmp_path):
 task_id: test
 description: Test task
 initial_prompt: Test
-max_iterations: 1
 agent:
   type: claude-code
 sandbox:
@@ -148,7 +145,6 @@ success_criteria:
         asyncio.run(
             _run_all_tasks(
                 task_files=[task_file],
-                max_iterations=None,
                 preserve=True,
                 run_dir=tmp_path / "run",
                 max_parallel=1,
@@ -176,7 +172,6 @@ def test_cli_expands_valid_glob_patterns(tmp_path):
 task_id: task_{i}
 description: Test task {i}
 initial_prompt: Test
-max_iterations: 1
 agent:
   type: claude-code
 sandbox:
@@ -216,7 +211,6 @@ success_criteria:
         asyncio.run(
             _run_all_tasks(
                 task_files=[glob_pattern],
-                max_iterations=None,
                 preserve=True,
                 run_dir=tmp_path / "run",
                 max_parallel=1,

@@ -1,8 +1,7 @@
 """LLM-based prompt rephrasing via UiPath LLM Gateway.
 
 Provides `create_rephrase_fn()` which returns a callback compatible with
-`apply_prompt_mutations()`. Uses the same LangChain integration pattern
-as `LLMReviewer` in `evaluation/reviewer.py`.
+`apply_prompt_mutations()`.
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ logger = logging.getLogger(__name__)
 def create_rephrase_fn() -> RephraseFn:
     """Create a rephrase callback using UiPath LLM Gateway.
 
-    Follows the same LangChain integration pattern as LLMReviewer.
     The LLM Gateway client is cached per (model, temperature, max_tokens)
     to avoid re-creating clients for identical configs.
 

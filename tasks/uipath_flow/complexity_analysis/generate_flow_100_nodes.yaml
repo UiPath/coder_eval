@@ -8,7 +8,6 @@ description: >
   deeply nested logic, multiple parallel pipelines, and comprehensive error
   handling across all integration points.
 tags: [flow, uipcli, generate, complexity-analysis, 100-nodes]
-max_iterations: 2
 
 agent:
   type: claude-code
@@ -67,9 +66,14 @@ success_criteria:
     weight: 3.0
     pass_threshold: 1.0
 
-llm_reviewer:
-  enabled: true
-  prompt: |
-    Evaluate the generated 100-node flow:
-    1. Does it contain ~100 nodes?
-    2. Is the flow semantically correct?
+  - type: llm_judge
+    description: "Qualitative LLM code review"
+    prompt: |
+      Evaluate the generated 100-node flow:
+      1. Does it contain ~100 nodes?
+      2. Is the flow semantically correct?
+    include_reference: true
+    include_agent_output: true
+    include_tool_calls: true
+    weight: 1.0
+    pass_threshold: 0.7

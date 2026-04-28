@@ -10,7 +10,6 @@ initial_prompt: |
   3. Re-run `uv run uipath init` after the changes
   4. Verify it works: `uv run uipath run word_count '{"text": "the cat sat on the mat"}'`
      Expected: word_count=6, unique_words=5
-max_iterations: 3
 tags: [agents, fix, extend, t2]
 
 agent:

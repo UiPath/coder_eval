@@ -12,7 +12,6 @@ initial_prompt: |
 
   Put the evaluation set at `evaluations/eval-sets/smoke-test.json` and the evaluator definition
   at `evaluations/evaluators/exact-match.json`. The ID of the evaluator should be "ExactMatch".
-max_iterations: 3
 tags: [uipath, agents, evaluate]
 
 agent:

@@ -72,7 +72,7 @@ Options:
 uv run dashboard run --suite skills
 
 # Use a different model
-uv run dashboard run --model claude-sonnet-4-6 --max-iter 3
+uv run dashboard run --model claude-sonnet-4-6
 
 # Skip slow steps during development
 uv run dashboard run --skip-build --skip-pull --skip-analysis

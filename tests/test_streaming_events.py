@@ -18,13 +18,11 @@ def test_turn_start_event_creation():
     event = TurnStartEvent(
         task_id="test-task",
         iteration=1,
-        max_iterations=3,
         prompt_preview="Write a hello world...",
     )
     assert isinstance(event, StreamEvent)
     assert event.task_id == "test-task"
     assert event.iteration == 1
-    assert event.max_iterations == 3
     assert isinstance(event.timestamp, datetime)
 
 
@@ -91,7 +89,7 @@ def test_criteria_check_event_creation():
 def test_all_events_have_timestamp():
     """All events auto-generate a timestamp."""
     events = [
-        TurnStartEvent(task_id="t", iteration=1, max_iterations=1, prompt_preview=""),
+        TurnStartEvent(task_id="t", iteration=1, prompt_preview=""),
         ToolCallEvent(task_id="t", tool_name="X", tool_id="x", parameters={}, sequence_number=0),
         ToolResultEvent(task_id="t", tool_id="x", tool_name="X", success=True, result_preview=""),
         TextChunkEvent(task_id="t", text=""),

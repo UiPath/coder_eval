@@ -40,7 +40,6 @@ Tasks are YAML files. A task definition has these top-level fields:
 task_id        (str, required)  -- unique kebab-case id, e.g. "build-langgraph-calculator"
 description    (str, required)  -- what is being tested
 initial_prompt (str, required)  -- a SHORT, natural human request (see rules below)
-max_iterations (int, default 3) -- 1-5
 tags           (list[str])      -- lowercase kebab-case; may use 'key:value' namespacing (e.g. 'lifecycle:generate')
 
 agent:
@@ -87,7 +86,6 @@ _FEW_SHOT = """\
 task_id: fibonacci-cli-smoke
 description: Verify the agent produces a working Fibonacci CLI tool.
 initial_prompt: Write me a Fibonacci number generator I can run from the command line.
-max_iterations: 2
 tags: [smoke, golden, pure-python]
 
 agent:
@@ -123,7 +121,6 @@ success_criteria:
 task_id: uipath-calculator-langgraph
 description: Build a calculator agent using UiPath LangGraph StateGraph.
 initial_prompt: Build me a calculator agent using LangGraph.
-max_iterations: 2
 tags: [golden, uipath-langchain, network]
 
 agent:

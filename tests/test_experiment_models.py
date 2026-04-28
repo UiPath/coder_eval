@@ -25,7 +25,6 @@ class TestExperimentVariant:
         variant = ExperimentVariant(variant_id="sonnet")
         assert variant.variant_id == "sonnet"
         assert variant.agent is None
-        assert variant.max_iterations is None
 
     def test_variant_with_agent_overrides(self):
         variant = ExperimentVariant(variant_id="opus", agent={"model": "claude-opus-4-20250514"})
@@ -35,28 +34,24 @@ class TestExperimentVariant:
         variant = ExperimentVariant(
             variant_id="fast",
             agent={"model": "claude-sonnet-4-20250514", "max_turns": 5},
-            max_iterations=2,
             task_timeout=120,
             turn_timeout=30,
         )
-        assert variant.max_iterations == 2
         assert variant.task_timeout == 120
 
 
 class TestExperimentDefaults:
     def test_empty_base(self):
         base = ExperimentDefaults()
-        assert base.max_iterations is None
         assert base.agent is None
 
     def test_base_with_all_fields(self):
         base = ExperimentDefaults(
-            max_iterations=3,
             task_timeout=300,
             turn_timeout=120,
             agent={"permission_mode": "bypassPermissions"},
         )
-        assert base.max_iterations == 3
+        assert base.task_timeout == 300
         assert base.agent == {"permission_mode": "bypassPermissions"}
 
 
@@ -75,14 +70,14 @@ class TestExperimentDefinition:
         exp = ExperimentDefinition(
             experiment_id="model-comparison",
             description="Compare Sonnet vs Opus",
-            defaults=ExperimentDefaults(max_iterations=3, agent={"permission_mode": "bypassPermissions"}),
+            defaults=ExperimentDefaults(task_timeout=300, agent={"permission_mode": "bypassPermissions"}),
             variants=[
                 ExperimentVariant(variant_id="sonnet", agent={"model": "claude-sonnet-4-20250514"}),
                 ExperimentVariant(variant_id="opus", agent={"model": "claude-opus-4-20250514"}),
             ],
         )
         assert len(exp.variants) == 2
-        assert exp.defaults.max_iterations == 3
+        assert exp.defaults.task_timeout == 300
 
     def test_no_variants_raises(self):
         with pytest.raises(ValueError, match="at least 1"):

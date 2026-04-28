@@ -39,4 +39,4 @@ def check_api_keys() -> None:
     if settings.llmgw_url:
         console.print("  [green]✓[/green] LLM Gateway configured")
     else:
-        console.print("  [dim]  LLM Gateway not configured (optional for LLM reviewer)[/dim]")
+        console.print("  [dim]  LLM Gateway not configured (optional for llm_judge / proxy)[/dim]")

@@ -6,7 +6,6 @@ description: >
 initial_prompt: |
   My UiPath agent fails when I run `uv run uipath init`. Please diagnose and fix it,
   then successfully run `uv run uipath init`.
-max_iterations: 3
 tags: [agents, fix, anti-pattern, module-level-init, t2]
 
 agent:

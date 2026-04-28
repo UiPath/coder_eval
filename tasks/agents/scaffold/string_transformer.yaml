@@ -12,7 +12,6 @@ initial_prompt: |
   - Must use @traced() decorator
   - Register the function in uipath.json under "functions" key
   - Then run `uv run uipath init` to generate entry-points.json
-max_iterations: 3
 tags: [agents, scaffold, simple-function, t2]
 
 agent:

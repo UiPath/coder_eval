@@ -1,8 +1,8 @@
 """HTML report generation for coder_eval runs.
 
 Produces self-contained HTML files (inline CSS/JS, no external fonts or
-images) that visualize a single task's conversation trace, success criteria,
-and LLM reviewer output, plus cross-variant experiment summaries.
+images) that visualize a single task's conversation trace and success
+criteria, plus cross-variant experiment summaries.
 
 Designed for offline viewing and for upload as CI artifacts.
 """
@@ -25,7 +25,6 @@ if TYPE_CHECKING:
         EvaluationResult,
         ExperimentDefinition,
         ExperimentResult,
-        LLMDecision,
         TurnRecord,
         VariantAggregate,
     )
@@ -322,8 +321,6 @@ def _render_header(result: EvaluationResult) -> str:
     cost_badge = ""
     if result.total_token_usage and result.total_token_usage.total_cost_usd is not None:
         cost_badge = f'<span class="badge neutral">${result.total_token_usage.total_cost_usd:.4f}</span>'
-    self_corr = max(0, (result.iteration_count or 0) - 1)
-    self_corr_badge = f'<span class="badge neutral">self-corr {self_corr}</span>' if self_corr > 0 else ""
     return f"""
 <div class="header-bar">
   <div class="title-group">
@@ -335,8 +332,6 @@ def _render_header(result: EvaluationResult) -> str:
     {score_badge}
     <span class="badge neutral">{agent_type} · {model}</span>
     <span class="badge neutral">{_esc(duration)}</span>
-    <span class="badge neutral">iter {result.iteration_count}</span>
-    {self_corr_badge}
     {cost_badge}
     <span class="nav-toggle" onclick="toggleTheme()">Toggle theme</span>
   </div>
@@ -346,48 +341,9 @@ def _render_header(result: EvaluationResult) -> str:
     <div class="stat"><div class="label">Variant</div><div class="value">{_esc(result.variant_id)}</div></div>
     <div class="stat"><div class="label">Started</div><div class="value mono">{_esc(started)}</div></div>
     <div class="stat"><div class="label">Duration</div><div class="value">{_esc(duration)}</div></div>
-    <div class="stat"><div class="label">Iterations</div><div class="value">{result.iteration_count}</div></div>
     <div class="stat"><div class="label">Turns (SDK)</div><div class="value">{turns_count}</div></div>
     <div class="stat"><div class="label">Commands</div><div class="value">{result.actual_commands or 0}</div></div>
   </div>
-</div>
-"""
-
-
-def _render_llm_review(review: LLMDecision | None) -> str:
-    if review is None:
-        return """
-<div class="card">
-  <h2 style="margin-top:0;border:none;padding:0">LLM Reviewer</h2>
-  <p class="muted">LLM reviewer not enabled for this task.
-  Set <code>llm_reviewer.enabled: true</code> in the task or experiment
-  configuration to enable qualitative review.</p>
-</div>
-"""
-    next_steps_html = ""
-    if review.next_steps:
-        items = "".join(f"<li>{_esc(s)}</li>" for s in review.next_steps)
-        next_steps_html = f"""
-<h4 style="margin-top:12px">Next Steps</h4>
-<ul class="llm-next-steps">{items}</ul>
-"""
-    continue_badge = (
-        '<span class="badge failure">should continue</span>'
-        if review.should_continue
-        else '<span class="badge success">complete</span>'
-    )
-    return f"""
-<div class="card highlight">
-  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:8px">
-    <h2 style="margin:0;border:none;padding:0">LLM Reviewer</h2>
-    <div class="badges">
-      {_score_pill(review.score)}
-      {continue_badge}
-    </div>
-  </div>
-  <h4>Issues</h4>
-  <p>{_esc(review.issues)}</p>
-  {next_steps_html}
 </div>
 """
 
@@ -736,13 +692,12 @@ def _render_token_usage(result: EvaluationResult) -> str:
 
 
 def _render_generation_metrics(result: EvaluationResult) -> str:
-    """Render Generation Metrics — latency, turns, self-corrections."""
+    """Render Generation Metrics — latency, turns."""
     from .reports import count_partials_by_outcome, group_consecutive_by_iteration
 
     turns = result.turns or []
     num_turns = len(turns)
     asst_turns = result.total_assistant_turns or 0
-    self_corr = max(0, (result.iteration_count or 0) - 1)
     avg_turn = (sum(t.duration_seconds for t in turns) / num_turns) if num_turns else 0.0
     total_latency = _esc(_format_duration(result.duration_seconds))
     avg_latency = _esc(_format_duration(avg_turn))
@@ -763,7 +718,6 @@ def _render_generation_metrics(result: EvaluationResult) -> str:
     <div class="stat"><div class="label">Turns</div><div class="value">{num_turns}</div></div>
     <div class="stat"><div class="label">Assistant Turns</div><div class="value">{asst_turns}</div></div>
     <div class="stat"><div class="label">Avg Turn Latency</div><div class="value">{avg_latency}</div></div>
-    <div class="stat"><div class="label">Self-Corrections</div><div class="value">{self_corr}</div></div>
     {crashed_stat}
   </div>
 </div>
@@ -919,25 +873,22 @@ def _wrap_document(title: str, body: str) -> str:
 
 
 def _variant_stddev_lines(variant_id: str, result: ExperimentResult | None) -> str:
-    """Render Score/Duration stddev and avg-iterations stats inside the summary card.
+    """Render Score/Duration stddev stats inside the summary card.
 
     Returns an empty string when ``result`` is not provided or data is insufficient.
     """
     if result is None:
         return ""
-    from .reports_stats import mean, stddev
+    from .reports_stats import stddev
 
     vrs = [vr for ts in result.task_summaries for vr in ts.variant_results if vr.variant_id == variant_id]
     scores = [vr.weighted_score for vr in vrs]
     durations = [vr.duration_seconds for vr in vrs]
-    iterations = [float(vr.iteration_count) for vr in vrs if vr.iteration_count is not None]
     extras: list[str] = []
     if len(scores) >= 2:
         extras.append(f"<li><strong>Score Stddev:</strong> {stddev(scores):.3f}</li>")
     if len(durations) >= 2:
         extras.append(f"<li><strong>Duration Stddev:</strong> {stddev(durations):.1f}s</li>")
-    if iterations:
-        extras.append(f"<li><strong>Avg Iterations:</strong> {mean(iterations):.1f}</li>")
     if not extras:
         return ""
     return f'<ul style="margin-top:10px">{"".join(extras)}</ul>'
@@ -994,7 +945,6 @@ def _render_variant_generation_metrics(eval_results: list[EvaluationResult]) -> 
     total_duration = sum(r.duration_seconds for r in eval_results)
     total_turns = sum(len(r.turns) for r in eval_results)
     total_asst = sum(r.total_assistant_turns or 0 for r in eval_results)
-    total_self_corr = sum(max(0, (r.iteration_count or 0) - 1) for r in eval_results)
     per_turn_latencies = [t.duration_seconds for r in eval_results for t in r.turns]
     avg_turn = (sum(per_turn_latencies) / len(per_turn_latencies)) if per_turn_latencies else 0.0
     total_latency_fmt = _esc(_format_duration(total_duration))
@@ -1008,7 +958,6 @@ def _render_variant_generation_metrics(eval_results: list[EvaluationResult]) -> 
     <div class="stat"><div class="label">Turns</div><div class="value">{total_turns}</div></div>
     <div class="stat"><div class="label">Assistant Turns</div><div class="value">{total_asst}</div></div>
     <div class="stat"><div class="label">Avg Turn Latency</div><div class="value">{avg_turn_fmt}</div></div>
-    <div class="stat"><div class="label">Self-Corrections</div><div class="value">{total_self_corr}</div></div>
   </div>
 </div>
 """
@@ -1094,10 +1043,9 @@ def _experiment_prompt_config(experiment: ExperimentDefinition | None, variant_i
 
 
 def _collect_variant_series(result: ExperimentResult) -> dict[str, dict[str, list[float]]]:
-    """Group per-variant numeric series (scores, durations, iterations, etc.)."""
+    """Group per-variant numeric series (scores, durations, etc.)."""
     series: dict[str, dict[str, list[float]]] = {
-        vid: {"scores": [], "durations": [], "iterations": [], "asst_turns": [], "tokens": []}
-        for vid in result.variant_ids
+        vid: {"scores": [], "durations": [], "asst_turns": [], "tokens": []} for vid in result.variant_ids
     }
     for ts in result.task_summaries:
         for vr in ts.variant_results:
@@ -1108,8 +1056,6 @@ def _collect_variant_series(result: ExperimentResult) -> dict[str, dict[str, lis
             s["durations"].append(vr.duration_seconds)
             if vr.total_tokens is not None:
                 s["tokens"].append(float(vr.total_tokens))
-            if vr.iteration_count is not None:
-                s["iterations"].append(float(vr.iteration_count))
             if vr.total_assistant_turns is not None:
                 s["asst_turns"].append(float(vr.total_assistant_turns))
     return series
@@ -1169,14 +1115,6 @@ def _experiment_aggregate_metrics(result: ExperimentResult) -> str:
             fmt_p(welch_t_test(series[vid_a]["durations"], series[vid_b]["durations"])) if show_p else None,
         )
     )
-    if any(series[vid]["iterations"] for vid in result.variant_ids):
-        rows.append(
-            _row(
-                "Iterations",
-                [fmt_mean_sd(series[vid]["iterations"], ".1f") for vid in result.variant_ids],
-                fmt_p(welch_t_test(series[vid_a]["iterations"], series[vid_b]["iterations"])) if show_p else None,
-            )
-        )
     if any(series[vid]["asst_turns"] for vid in result.variant_ids):
         rows.append(
             _row(
@@ -1296,9 +1234,9 @@ class HTMLReportGenerator:
     def generate_task_html(result: EvaluationResult) -> str:
         """Render a single task's EvaluationResult as a standalone HTML page.
 
-        The page shows the run header, LLM reviewer verdict, success-criteria
-        table, per-turn conversation trace with tool calls, command telemetry
-        stats, and error details (if any).
+        The page shows the run header, success-criteria table, per-turn
+        conversation trace with tool calls, command telemetry stats, and
+        error details (if any).
         """
         groups = _group_turns_by_iteration(result.turns or [])
         turns_html = "".join(_render_iteration_group(it, group) for it, group in groups)
@@ -1319,7 +1257,6 @@ class HTMLReportGenerator:
         body = (
             _render_header(result)
             + _render_simulation(result)
-            + _render_llm_review(result.llm_review)
             + _render_criteria(result.success_criteria_results or [])
             + _render_error_details(result)
             + f"<h2>Conversation Trace ({trace_count})</h2>"

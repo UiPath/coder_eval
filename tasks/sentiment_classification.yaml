@@ -1,6 +1,6 @@
 task_id: "sentiment-classification"
 description: "Binary sentiment classification over a 3-row dataset with one intentionally mislabeled ground truth, to exercise non-trivial P/R/F1."
-tags: [classification, smoke]
+tags: [classification]
 
 agent:
   type: "claude-code"
@@ -11,7 +11,6 @@ sandbox:
   driver: "tempdir"
   python: null
 
-max_iterations: 1
 
 # Row 3 is intentionally mislabeled (text is clearly positive but expected=negative).
 # A correct model produces: accuracy 2/3, recall(positive)=1/2, recall(negative)=1/1,

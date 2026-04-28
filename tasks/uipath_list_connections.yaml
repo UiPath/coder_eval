@@ -86,8 +86,6 @@ success_criteria:
     weight: 2.0
     pass_threshold: 0.8
 
-max_iterations: 5
-
 reference:
   code: |
     #!/usr/bin/env python3
@@ -98,6 +96,3 @@ reference:
     sdk = UiPath()
     connections = sdk.connections.list()
     print(connections)
-
-llm_reviewer:
-  enabled: true

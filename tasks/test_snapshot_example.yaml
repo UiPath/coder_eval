@@ -23,8 +23,6 @@ sandbox:
 initial_prompt: |
   Create a simple Python script called hello.py that prints "Hello, World!".
 
-max_iterations: 3
-
 success_criteria:
   - type: "file_exists"
     path: "hello.py"
@@ -46,6 +44,3 @@ success_criteria:
     description: "Script should output 'Hello, World!'"
     weight: 2.0
     pass_threshold: 1.0
-
-llm_reviewer:
-  enabled: false

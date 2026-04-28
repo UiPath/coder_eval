@@ -7,7 +7,6 @@ initial_prompt: |
   My UiPath agent fails with an ImportError when I try to run it. Please fix it
   and verify it runs correctly with:
   `uv run uipath run greet '{"name": "World"}'`
-max_iterations: 2
 tags: [agents, fix, import-path, t1]
 
 agent:

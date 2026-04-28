@@ -72,7 +72,7 @@ def test_orchestrator_stream_callback_uses_variant_prefixed_task_id():
     # Emit a test event through the scoped callback
     from coder_eval.streaming.events import TurnStartEvent
 
-    event = TurnStartEvent(task_id="placeholder", iteration=1, max_iterations=3, prompt_preview="test")
+    event = TurnStartEvent(task_id="placeholder", iteration=1, prompt_preview="test")
     scoped.on_event(event)
 
     assert len(cb.events) == 1

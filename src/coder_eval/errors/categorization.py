@@ -72,8 +72,6 @@ def categorize_error(
     if isinstance(error, TimeoutError):
         if component == "agent":
             return ErrorCategory.AGENT_TIMEOUT
-        if component == "evaluator":
-            return ErrorCategory.LLM_REVIEWER_ERROR
         return ErrorCategory.UNKNOWN
 
     if isinstance(error, FileNotFoundError):
@@ -120,8 +118,6 @@ def categorize_error(
     if "timeout" in error_str:
         if component == "agent":
             return ErrorCategory.AGENT_TIMEOUT
-        if component == "evaluator":
-            return ErrorCategory.LLM_REVIEWER_ERROR
         return ErrorCategory.UNKNOWN
 
     # Content filtering (Bedrock guardrails) — NOT retryable, same output will be blocked again
@@ -132,8 +128,6 @@ def categorize_error(
     if any(pat in error_str for pat in ["api error", "connection", "network", "502", "503", "504"]):
         if component == "agent":
             return ErrorCategory.AGENT_API_ERROR
-        if component == "evaluator":
-            return ErrorCategory.LLM_REVIEWER_ERROR
         return ErrorCategory.UNKNOWN
 
     # Disk errors
@@ -184,11 +178,7 @@ def categorize_error(
         return ErrorCategory.AGENT_API_ERROR
 
     if component == "evaluator":
-        # Default to LLM_REVIEWER_ERROR for evaluator component
-        # (orchestrator uses this for LLM reviewer calls which are retryable)
-        if "criterion" in error_str or "check" in error_str:
-            return ErrorCategory.CRITERION_CHECK_ERROR
-        return ErrorCategory.LLM_REVIEWER_ERROR
+        return ErrorCategory.CRITERION_CHECK_ERROR
 
     if component == "task":
         if "invalid" in error_str or "malformed" in error_str or "validation" in error_str:

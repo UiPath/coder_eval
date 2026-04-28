@@ -108,12 +108,10 @@ def test_generate_markdown_basic():
     # Check P0 aggregate metrics
     assert "Avg Reliability Score**:" in report_md
     assert "Avg Generation Latency**:" in report_md
-    assert "Avg Self-Correction Iterations**:" in report_md
     assert "Avg Ground Truth Similarity**:" in report_md
 
     # Check task details table has new columns
     assert "Reliability Score" in report_md
-    assert "Iterations" in report_md
     assert "Similarity" in report_md  # Column header since task1/task2 have similarity
 
     # Check task rows
@@ -126,7 +124,6 @@ def test_generate_markdown_basic():
 
     # Check Generation Metrics section
     assert "## Generation Metrics" in report_md
-    assert "Self-Corrections" in report_md
 
     # Check environment section
     assert "coder_eval**: 0.1.0" in report_md
@@ -287,10 +284,10 @@ def test_generate_markdown_generation_metrics_section():
     report_md = ReportGenerator.generate_markdown(summary)
 
     assert "## Generation Metrics" in report_md
-    # task1: 1 iteration = 0 self-corrections, 0 asst turns (no assistant_turn_count in test data)
-    assert "| task1 | 50.0s | 1 | 0 | 50.0s | 0 |" in report_md
-    # task2: 3 iterations = 2 self-corrections, avg turn = (25+22+23)/3 = 23.3s
-    assert "| task2 | 70.0s | 3 | 0 | 23.3s | 2 |" in report_md
+    # task1: 1 turn, 0 asst turns (no assistant_turn_count in test data)
+    assert "| task1 | 50.0s | 1 | 0 | 50.0s |" in report_md
+    # task2: 3 turns, avg turn = (25+22+23)/3 = 23.3s
+    assert "| task2 | 70.0s | 3 | 0 | 23.3s |" in report_md
 
 
 def test_generate_markdown_no_generation_metrics_without_turns():
@@ -340,8 +337,6 @@ def test_generate_markdown_aggregate_metrics():
     assert "Avg Reliability Score**: 0.700" in report_md
     # Avg latency = (40 + 60) / 2 = 50.0s
     assert "Avg Generation Latency**: 50.0s" in report_md
-    # Avg iterations = (2 + 4) / 2 = 3.0
-    assert "Avg Self-Correction Iterations**: 3.0" in report_md
 
 
 def test_generate_markdown_backward_compatible_task_results():

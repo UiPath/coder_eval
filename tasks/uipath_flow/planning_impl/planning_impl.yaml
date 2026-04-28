@@ -72,5 +72,3 @@ success_criteria:
     includes: ["Edge"]
     weight: 1.0
     pass_threshold: 1.0
-
-max_iterations: 1

@@ -1,9 +1,7 @@
 """Tests for evaluator reference code support."""
 
 from coder_eval.evaluation.checker import SuccessChecker
-from coder_eval.evaluation.reviewer import LLMReviewer
 from coder_eval.models import (
-    LLMReviewerConfig,
     ReferenceComparisonCriterion,
     SandboxConfig,
 )
@@ -127,60 +125,3 @@ class TestSuccessCheckerReference:
         assert "ast" in result.details
 
         sandbox.cleanup(preserve=False)
-
-
-class TestLLMReviewerReference:
-    """Tests for LLMReviewer with reference solution."""
-
-    def test_review_accepts_reference_solution(self):
-        """review accepts reference_solution parameter."""
-        config = LLMReviewerConfig(enabled=False)
-        reviewer = LLMReviewer(config)
-
-        # Should not raise (disabled reviewer returns None)
-        result = reviewer.review(
-            task_description="Test task",
-            agent_output="Agent output",
-            current_iteration=1,
-            max_iterations=3,
-            reference_solution="def foo(): pass",
-        )
-
-        assert result is None
-
-    def test_build_prompt_without_reference(self):
-        """_build_review_prompt works without reference."""
-        config = LLMReviewerConfig(enabled=False)
-        reviewer = LLMReviewer(config)
-
-        prompt = reviewer._build_review_prompt(
-            task_description="Test task",
-            agent_output="Agent output",
-            current_iteration=1,
-            max_iterations=3,
-            reference_solution=None,
-        )
-
-        assert "Test task" in prompt
-        assert "Agent output" in prompt
-        assert "REFERENCE SOLUTION" not in prompt
-
-    def test_build_prompt_with_reference(self):
-        """_build_review_prompt includes reference when provided."""
-        config = LLMReviewerConfig(enabled=False)
-        reviewer = LLMReviewer(config)
-
-        reference_code = "def foo():\n    return 'bar'"
-        prompt = reviewer._build_review_prompt(
-            task_description="Test task",
-            agent_output="Agent output",
-            current_iteration=1,
-            max_iterations=3,
-            reference_solution=reference_code,
-        )
-
-        assert "Test task" in prompt
-        assert "Agent output" in prompt
-        assert "REFERENCE SOLUTION" in prompt
-        assert reference_code in prompt
-        assert "NOT visible to the agent" in prompt

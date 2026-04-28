@@ -2,7 +2,6 @@ task_id: "ca-create-meeting-scheduler"
 description: Build an agent that finds available meeting slots given a busy schedule.
 tags: [agents, create, simple-function, t3]
 initial_prompt_file: prompts/meeting_scheduler.md
-max_iterations: 4
 
 agent:
   type: "claude-code"

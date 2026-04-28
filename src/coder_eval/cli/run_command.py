@@ -70,12 +70,6 @@ def run_command(
         None,
         help="Path(s) to task YAML file(s). Defaults to all tasks/ recursively.",
     ),
-    max_iterations: int | None = typer.Option(
-        None,
-        "--max-iter",
-        "-i",
-        help="Override max iterations for all tasks",
-    ),
     preserve: bool = typer.Option(
         True,
         "--preserve/--no-preserve",
@@ -226,8 +220,6 @@ def run_command(
 
         coder-eval run tasks/*.yaml --no-preserve
 
-        coder-eval run tasks/task1.yaml tasks/task2.yaml --max-iter 5
-
         coder-eval run tasks/*.yaml --run-dir ./my-custom-run
 
         coder-eval run tasks/*.yaml --max-parallel 3
@@ -293,7 +285,6 @@ def run_command(
         asyncio.run(
             _run_all_tasks(
                 resolved_task_files,
-                max_iterations,
                 preserve,
                 run_dir,
                 max_parallel,
@@ -323,7 +314,6 @@ def run_command(
 
 async def _run_all_tasks(
     task_files: list[Path],
-    max_iterations: int | None,
     preserve: bool,
     run_dir: Path | None,
     max_parallel: int,
@@ -353,7 +343,6 @@ async def _run_all_tasks(
 
     Args:
         task_files: List of task file paths or glob patterns
-        max_iterations: Optional override for max iterations
         preserve: Whether to preserve sandbox
         run_dir: Custom run directory (or None for auto-generated)
         max_parallel: Maximum number of concurrent tasks
@@ -388,7 +377,6 @@ async def _run_all_tasks(
         run_dir=run_dir,
         max_parallel=max_parallel,
         preserve_sandbox=preserve,
-        max_iterations=max_iterations,
         snapshot_mode=snapshot_mode,
         snapshot_checkpoint_freq=snapshot_checkpoint_freq,
         include_tags=include_tags,

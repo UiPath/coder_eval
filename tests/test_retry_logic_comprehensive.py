@@ -130,22 +130,16 @@ def test_get_retry_delay_with_jitter_bounds():
 
 
 def test_categorize_error_timeout_component_specific():
-    """Test that TimeoutError maps to different categories by component.
+    """Test that TimeoutError maps to AGENT_TIMEOUT for the agent component.
 
     Hypothesis: Component context disambiguates timeout errors.
-    Expected: agent -> AGENT_TIMEOUT, evaluator -> LLM_REVIEWER_ERROR.
-
-    Context: Lines 281-286 in error_handling.py check component.
+    Expected: agent -> AGENT_TIMEOUT, anything else -> UNKNOWN.
     """
     timeout_error = TimeoutError("Operation timed out")
 
     # Agent timeout
     agent_category = categorize_error(timeout_error, {"component": "agent"})
     assert agent_category == ErrorCategory.AGENT_TIMEOUT
-
-    # Evaluator timeout
-    evaluator_category = categorize_error(timeout_error, {"component": "evaluator"})
-    assert evaluator_category == ErrorCategory.LLM_REVIEWER_ERROR
 
     # Unknown component falls back to UNKNOWN
     unknown_category = categorize_error(timeout_error, {"component": "unknown"})
@@ -160,7 +154,6 @@ def test_categorize_error_timeout_component_specific():
         (ValueError("test"), {}, ErrorCategory.AGENT_CRASH, ErrorCategory.AGENT_CRASH),
         # Exception types
         (TimeoutError(), {"component": "agent"}, None, ErrorCategory.AGENT_TIMEOUT),
-        (TimeoutError(), {"component": "evaluator"}, None, ErrorCategory.LLM_REVIEWER_ERROR),
         (FileNotFoundError("task.yaml"), {}, None, ErrorCategory.TASK_NOT_FOUND),
         (MemoryError(), {}, None, ErrorCategory.OUT_OF_MEMORY),
         # String matching - auth

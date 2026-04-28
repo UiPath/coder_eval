@@ -6,7 +6,6 @@ from coder_eval.models import (
     ExperimentDefaults,
     ExperimentDefinition,
     ExperimentVariant,
-    LLMReviewerConfig,
     PostRunCommand,
     PromptPrefix,
     PromptReplace,
@@ -201,20 +200,19 @@ class TestResolveTaskForVariant:
         assert lineage["agent.disallowed_tools"].source == "task"
 
     def test_scalar_overrides(self):
-        """Scalar fields (max_iterations, task_timeout) resolve through precedence."""
+        """Scalar fields (task_timeout, turn_timeout) resolve through precedence."""
         default_exp = _make_default_experiment()
-        task = _make_task(agent={"type": "claude-code"}, max_iterations=3)
+        task = _make_task(agent={"type": "claude-code"}, task_timeout=900)
         experiment = ExperimentDefinition(
             experiment_id="test",
-            defaults=ExperimentDefaults(max_iterations=5, task_timeout=300),
-            variants=[ExperimentVariant(variant_id="fast", max_iterations=2, task_timeout=120)],
+            defaults=ExperimentDefaults(task_timeout=300, turn_timeout=60),
+            variants=[ExperimentVariant(variant_id="fast", task_timeout=120, turn_timeout=30)],
         )
 
         resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.max_iterations == 2  # variant wins
         assert resolved.task_timeout == 120  # variant wins
-        assert lineage["max_iterations"].source == "variant"
         assert lineage["task_timeout"].source == "variant"
+        assert lineage["turn_timeout"].source == "variant"
 
     def test_resolved_task_preserves_non_agent_fields(self):
         """Resolution should not alter task_id, description, criteria, sandbox, etc."""
@@ -231,68 +229,8 @@ class TestResolveTaskForVariant:
         assert len(resolved.success_criteria) == 1
 
 
-class TestLLMReviewerFromExperimentDefaults:
-    """Tests for layer-2 experiment defaults llm_reviewer resolution."""
-
-    def test_experiment_defaults_llm_reviewer_applied(self):
-        """llm_reviewer in experiment defaults flows into a task that didn't set one."""
-        default_exp = _make_default_experiment()
-        task = _make_task()  # No explicit llm_reviewer
-        experiment = ExperimentDefinition(
-            experiment_id="with-review",
-            defaults=ExperimentDefaults(
-                llm_reviewer={
-                    "enabled": True,
-                    "prompt": "Review against skill Critical Rules.",
-                },
-            ),
-            variants=[ExperimentVariant(variant_id="v1")],
-        )
-        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.llm_reviewer.enabled is True
-        assert resolved.llm_reviewer.prompt == "Review against skill Critical Rules."
-        assert lineage["llm_reviewer"].source == "experiment-defaults"
-
-    def test_task_llm_reviewer_beats_experiment_defaults(self):
-        """Task-level llm_reviewer wins over experiment defaults."""
-        default_exp = _make_default_experiment()
-        task = _make_task(
-            llm_reviewer=LLMReviewerConfig(enabled=True, prompt="task-specific"),
-        )
-        experiment = ExperimentDefinition(
-            experiment_id="with-review",
-            defaults=ExperimentDefaults(llm_reviewer={"enabled": True, "prompt": "experiment-level"}),
-            variants=[ExperimentVariant(variant_id="v1")],
-        )
-        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.llm_reviewer.prompt == "task-specific"
-        # Task's explicit value wins — no experiment-defaults lineage entry.
-        assert "llm_reviewer" not in lineage or lineage["llm_reviewer"].source != "experiment-defaults"
-
-
 class TestDefaultExperimentScalarOverrides:
     """Tests for layer-1 default experiment scalar resolution."""
-
-    def test_default_experiment_max_iterations_applied(self):
-        """default.yaml base.max_iterations should override task's Pydantic default."""
-        default_exp = ExperimentDefinition(
-            experiment_id="default",
-            defaults=ExperimentDefaults(
-                agent={"type": "claude-code", "permission_mode": "acceptEdits"},
-                max_iterations=5,
-            ),
-            variants=[ExperimentVariant(variant_id="default")],
-        )
-        task = _make_task(agent=None)
-        assert task.max_iterations == 3  # Pydantic default
-
-        experiment = ExperimentDefinition(
-            experiment_id="test",
-            variants=[ExperimentVariant(variant_id="v1")],
-        )
-
-        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.max_iterations == 5
 
     def test_default_experiment_task_timeout_applied(self):
         """default.yaml base.task_timeout should be applied when task has no explicit timeout."""
@@ -332,37 +270,19 @@ class TestDefaultExperimentScalarOverrides:
         """experiment.defaults scalars (layer 2) should override default_experiment.defaults (layer 1)."""
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            defaults=ExperimentDefaults(agent={"type": "claude-code"}, max_iterations=5),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, task_timeout=300),
             variants=[ExperimentVariant(variant_id="default")],
         )
         task = _make_task(agent=None)
 
         experiment = ExperimentDefinition(
             experiment_id="test",
-            defaults=ExperimentDefaults(max_iterations=10),
+            defaults=ExperimentDefaults(task_timeout=600),
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
         resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.max_iterations == 10
-
-    def test_explicit_task_scalar_not_overwritten_by_default_experiment(self):
-        """Task that explicitly sets max_iterations should NOT be overwritten by default experiment."""
-        default_exp = ExperimentDefinition(
-            experiment_id="default",
-            defaults=ExperimentDefaults(agent={"type": "claude-code"}, max_iterations=5),
-            variants=[ExperimentVariant(variant_id="default")],
-        )
-        # Task explicitly sets max_iterations=7 (layer 3 > layers 1-2)
-        task = _make_task(agent=None, max_iterations=7)
-
-        experiment = ExperimentDefinition(
-            experiment_id="test",
-            variants=[ExperimentVariant(variant_id="v1")],
-        )
-
-        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.max_iterations == 7
+        assert resolved.task_timeout == 600
 
     def test_explicit_task_timeout_not_overwritten_by_default_experiment(self):
         """Task that explicitly sets task_timeout should NOT be overwritten by default experiment."""
@@ -385,18 +305,18 @@ class TestDefaultExperimentScalarOverrides:
         """variant scalars (layer 4) should override default_experiment.defaults (layer 1)."""
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            defaults=ExperimentDefaults(agent={"type": "claude-code"}, max_iterations=5),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, task_timeout=300),
             variants=[ExperimentVariant(variant_id="default")],
         )
         task = _make_task(agent=None)
 
         experiment = ExperimentDefinition(
             experiment_id="test",
-            variants=[ExperimentVariant(variant_id="v1", max_iterations=2)],
+            variants=[ExperimentVariant(variant_id="v1", task_timeout=120)],
         )
 
         resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.max_iterations == 2
+        assert resolved.task_timeout == 120
 
 
 class TestTurnTimeoutResolution:

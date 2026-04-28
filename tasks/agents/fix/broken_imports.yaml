@@ -6,7 +6,6 @@ initial_prompt: |
   The UiPath agent in this directory is broken. When I try to run it, I get import errors.
   Please diagnose and fix all issues so this command succeeds:
   `uv run uipath run parse '{"raw_email": "From: alice@example.com\nSubject: Hello\nBody: Hi there"}'`
-max_iterations: 3
 tags: [agents, fix, imports, t2]
 
 agent:

@@ -10,7 +10,6 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind
-from coder_eval.models.gateway import DEFAULT_GATEWAY_MODEL
 from coder_eval.models.sandbox import SandboxConfig
 
 
@@ -87,26 +86,6 @@ class AgentConfig(BaseModel):
         return self
 
 
-class LLMReviewerConfig(BaseModel):
-    """Configuration for the LLM-based qualitative reviewer.
-
-    All models are accessed through UiPath LLM Gateway using LangChain integration.
-    Use Gateway model naming convention (e.g., anthropic.claude-3-5-sonnet-20240620-v1:0, gpt-4o-2024-08-06).
-    """
-
-    enabled: bool = Field(default=False, description="Whether to enable LLM review")
-    model: str = Field(
-        default=DEFAULT_GATEWAY_MODEL,
-        description="Gateway model name (e.g., anthropic.claude-3-5-sonnet-20240620-v1:0, gpt-4o-2024-08-06)",
-    )
-    temperature: float = Field(default=0.0, ge=0.0, le=2.0, description="Temperature for LLM sampling")
-    max_tokens: int = Field(default=1000, gt=0, description="Maximum tokens in response")
-    prompt: str | None = Field(
-        default=None,
-        description="Task-specific review instructions appended to the review prompt",
-    )
-
-
 DEFAULT_SIMULATION_STOP_TOKEN = "<<<END>>>"
 """Sentinel token the user simulator emits when it considers the task complete."""
 
@@ -125,9 +104,6 @@ class SimulationConfig(BaseModel):
     after the first (which is still the task's ``initial_prompt``).
 
     Semantics relative to the existing task fields:
-      - ``max_iterations`` keeps its meaning (number of task *attempts*).
-        In simulation mode it typically stays at 1: retrying a stochastic
-        dialog rarely adds signal. Use ``n_trials`` for variance sampling.
       - ``max_turns`` (below) bounds the intra-dialog agent<->user exchanges.
 
     Security: ``persona``, ``goal``, and ``constraints`` are passed to the
@@ -235,7 +211,7 @@ class ReferenceSource(BaseModel):
 
     This code is NEVER shown to the agent being evaluated.
     It is used by:
-    - LLMReviewer: To provide expert feedback comparing agent output to reference
+    - LLMJudgeCriterion: To provide expert feedback comparing agent output to reference
     - ReferenceComparisonCriterion: For objective code similarity checks
 
     Security: Reference solutions must never leak into agent prompts or logs.
@@ -330,7 +306,6 @@ class TaskDefinition(BaseModel):
             "Mutually exclusive with initial_prompt."
         ),
     )
-    max_iterations: int = Field(default=3, description="Maximum number of agent turns")
     tags: list[str] = Field(
         default_factory=list,
         description=(
@@ -348,13 +323,11 @@ class TaskDefinition(BaseModel):
         ge=30,
         description="Maximum seconds for the entire evaluation loop (all iterations). None = no limit.",
     )
-    llm_reviewer: LLMReviewerConfig = Field(
-        default_factory=LLMReviewerConfig, description="Optional LLM reviewer configuration"
-    )
     reference: ReferenceSource | None = Field(
         default=None,
         description=(
-            "Reference solution for LLM review and code comparison. HIDDEN from the agent - never included in prompts."
+            "Reference solution for llm_judge / agent_judge and reference_comparison criteria. "
+            "HIDDEN from the agent - never included in prompts."
         ),
     )
     expected_commands: int | None = Field(

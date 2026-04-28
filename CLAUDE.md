@@ -69,7 +69,6 @@ coder_eval/
 │   ├── judge_context.py           # JudgeContextBuilder + shared scrub/truncate/format_details for both judges
 │   ├── judge_verdict.py           # parse_judge_verdict + span walker (shared verdict parser)
 │   ├── llmgw.py                   # Shared UiPath LLM Gateway client factory
-│   ├── reviewer.py                # LLM reviewer via UiPath LLM Gateway
 │   ├── sub_agent.py               # SubAgentRunner: sandbox-copy + ClaudeCodeAgent lifecycle for judge-style sub-agents
 │   └── summaries.py               # summarize_commands (shared by orchestrator + llm_judge)
 │
@@ -187,15 +186,14 @@ ExperimentRunner resolves configs via 5-layer merge:
   4. experiment variant        (variant-specific overrides)
   5. CLI flags                 (always wins)
 
-Per-task loop (up to max_iterations):
+Per-task (single iteration; simulation mode runs a multi-turn dialog):
   1. Orchestrator._communicate_with_retry(prompt, iteration) → TurnRecord
-       (shared by criteria-feedback + simulation loops; wraps
+       (shared by single-shot + simulation paths; wraps
         agent.communicate with execute_with_retry, per-attempt
         turn_timeout, and on_attempt_error → preserves crashed=True
         partial TurnRecords on AgentCrashError / TurnTimeoutError)
   2. Create snapshot (if enabled)
   3. SuccessChecker.check_all() → List[CriterionResult]
-  4. All pass? → SUCCESS. Otherwise → generate feedback → next iteration
 
 Cleanup: Stop agent, save EvaluationResult, generate reports
 ```

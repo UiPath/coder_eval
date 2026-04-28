@@ -26,14 +26,14 @@ class _ExplodingCallback:
 def test_collecting_callback_satisfies_protocol():
     """CollectingCallback implements StreamCallback."""
     cb: StreamCallback = _CollectingCallback()
-    event = TurnStartEvent(task_id="t", iteration=1, max_iterations=1, prompt_preview="")
+    event = TurnStartEvent(task_id="t", iteration=1, prompt_preview="")
     cb.on_event(event)
 
 
 def test_safe_emit_delivers_event():
     """safe_emit calls on_event when callback is provided."""
     cb = _CollectingCallback()
-    event = TurnStartEvent(task_id="t", iteration=1, max_iterations=1, prompt_preview="")
+    event = TurnStartEvent(task_id="t", iteration=1, prompt_preview="")
     safe_emit(cb, event)
     assert len(cb.events) == 1
     assert cb.events[0] is event
@@ -41,14 +41,14 @@ def test_safe_emit_delivers_event():
 
 def test_safe_emit_skips_none_callback():
     """safe_emit does nothing when callback is None."""
-    event = TurnStartEvent(task_id="t", iteration=1, max_iterations=1, prompt_preview="")
+    event = TurnStartEvent(task_id="t", iteration=1, prompt_preview="")
     safe_emit(None, event)  # Should not raise
 
 
 def test_safe_emit_catches_callback_exception(caplog):
     """safe_emit catches and logs exceptions from the callback."""
     cb = _ExplodingCallback()
-    event = TurnStartEvent(task_id="t", iteration=1, max_iterations=1, prompt_preview="")
+    event = TurnStartEvent(task_id="t", iteration=1, prompt_preview="")
     logger = logging.getLogger("coder_eval.streaming.callbacks")
     logger.addHandler(caplog.handler)
     logger.setLevel(logging.WARNING)

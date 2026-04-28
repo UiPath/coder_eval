@@ -27,9 +27,9 @@ def _make_renderer(verbosity: str = "full", batch_mode: bool = False) -> tuple[R
 def test_turn_start_renders():
     """TurnStartEvent renders iteration info."""
     renderer, buf = _make_renderer()
-    renderer.on_event(TurnStartEvent(task_id="t1", iteration=1, max_iterations=3, prompt_preview="hello"))
+    renderer.on_event(TurnStartEvent(task_id="t1", iteration=1, prompt_preview="hello"))
     output = buf.getvalue()
-    assert "Iteration 1/3" in output
+    assert "Iteration 1" in output
 
 
 def test_tool_call_renders():
@@ -132,17 +132,17 @@ def test_minimal_verbosity_skips_tool_events():
 def test_minimal_verbosity_shows_turn_events():
     """Minimal verbosity still shows turn start/complete and criteria."""
     renderer, buf = _make_renderer(verbosity="minimal")
-    renderer.on_event(TurnStartEvent(task_id="t1", iteration=1, max_iterations=3, prompt_preview=""))
+    renderer.on_event(TurnStartEvent(task_id="t1", iteration=1, prompt_preview=""))
     renderer.on_event(CriteriaCheckEvent(task_id="t1", passed=2, total=2, weighted_score=1.0, details=[]))
     output = buf.getvalue()
-    assert "Iteration 1/3" in output
+    assert "Iteration 1" in output
     assert "2/2" in output
 
 
 def test_batch_mode_prefixes_task_id():
     """Batch mode prepends [task_id] to output."""
     renderer, buf = _make_renderer(batch_mode=True)
-    renderer.on_event(TurnStartEvent(task_id="my-task", iteration=1, max_iterations=1, prompt_preview=""))
+    renderer.on_event(TurnStartEvent(task_id="my-task", iteration=1, prompt_preview=""))
     output = buf.getvalue()
     assert "my-task" in output
 

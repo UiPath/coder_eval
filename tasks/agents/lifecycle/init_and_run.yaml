@@ -6,7 +6,6 @@ initial_prompt: |
   I have a UiPath agent in this directory but I haven't run `uipath init` yet.
   Please initialize it and then run it with this input:
   `uv run uipath run sort_items '{"items": ["cherry", "apple", "banana"]}'`
-max_iterations: 3
 tags: [agents, lifecycle, init, run, t2]
 
 agent:

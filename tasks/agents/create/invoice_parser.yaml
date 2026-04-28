@@ -2,7 +2,6 @@ task_id: "ca-create-invoice-parser"
 description: Build an agent that parses structured invoice text into fields.
 tags: [agents, create, simple-function, t2]
 initial_prompt_file: prompts/invoice_parser.md
-max_iterations: 3
 
 agent:
   type: "claude-code"

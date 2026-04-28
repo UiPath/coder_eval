@@ -8,7 +8,6 @@ initial_prompt: |
   returns 'reversed'. Please fix the agent code so the evaluations pass.
   Do NOT modify the evaluation files.
   After fixing, re-run `uv run uipath init` and verify the evals pass.
-max_iterations: 3
 tags: [agents, fix, schema, t2]
 
 agent:

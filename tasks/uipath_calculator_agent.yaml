@@ -100,24 +100,36 @@ success_criteria:
     pass_threshold: 1.0
     timeout: 30
 
-max_iterations: 1
+  - type: llm_judge
+    description: "Qualitative LLM code review"
+    prompt: |
+      Evaluate if the calculator agent is complete and follows UiPath LangGraph patterns:
+
+      1. Does it use LangGraph StateGraph with proper configuration?
+      2. Are input/output models properly defined with Pydantic BaseModel?
+      3. Does it implement a calculate node function?
+      4. Does the graph flow from START -> calculate -> END?
+      5. Can it handle +, -, *, / operations?
+      6. Does it handle division by zero?
+    include_reference: true
+    include_agent_output: true
+    include_tool_calls: true
+    weight: 1.0
+    pass_threshold: 0.7
 
 reference:
   code: |
     from pydantic import BaseModel
     from langgraph.graph import StateGraph, START, END
 
-
     class CalculatorInput(BaseModel):
         a: float
         b: float
         operator: str
 
-
     class CalculatorOutput(BaseModel):
         result: float
         operation: str
-
 
     def calculate(state: CalculatorInput) -> CalculatorOutput:
         if state.operator == "+":
@@ -136,7 +148,6 @@ reference:
             operation=f"{state.a} {state.operator} {state.b} = {result}",
         )
 
-
     def main(input: CalculatorInput) -> CalculatorOutput:
         builder = StateGraph(
             state_schema=CalculatorInput,
@@ -150,15 +161,3 @@ reference:
         graph = builder.compile()
         result = graph.invoke(input)
         return CalculatorOutput(**result)
-
-llm_reviewer:
-  enabled: true
-  prompt: |
-    Evaluate if the calculator agent is complete and follows UiPath LangGraph patterns:
-
-    1. Does it use LangGraph StateGraph with proper configuration?
-    2. Are input/output models properly defined with Pydantic BaseModel?
-    3. Does it implement a calculate node function?
-    4. Does the graph flow from START -> calculate -> END?
-    5. Can it handle +, -, *, / operations?
-    6. Does it handle division by zero?

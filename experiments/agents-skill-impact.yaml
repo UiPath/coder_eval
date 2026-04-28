@@ -28,7 +28,6 @@ defaults:
     permission_mode: bypassPermissions
     model: claude-sonnet-4-6
     allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_iterations: 3
 
 variants:
   - variant_id: bare

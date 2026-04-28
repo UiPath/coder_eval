@@ -24,7 +24,7 @@ def test_run_tests_basic(mock_glob, mock_run, tmp_path):
     mock_glob.return_value = ["/fake/tasks/task1.yaml"]
 
     with patch.object(Path, "resolve", return_value=tmp_path), patch.object(Path, "exists", return_value=True):
-        run_tests(model="claude-sonnet-4-6", max_iter=2, tags="smoke")
+        run_tests(model="claude-sonnet-4-6", tags="smoke")
 
     mock_run.assert_called_once()
     cmd = mock_run.call_args[0][0]

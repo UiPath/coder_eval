@@ -2,7 +2,6 @@ task_id: "ca-create-expense-validator"
 description: Build an agent that validates expense reports against business rules.
 tags: [agents, create, simple-function, t3]
 initial_prompt_file: prompts/expense_validator.md
-max_iterations: 3
 
 agent:
   type: "claude-code"

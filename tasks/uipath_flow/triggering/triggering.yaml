@@ -24,7 +24,6 @@ sandbox:
 # One agent turn per row is enough for a triggering decision. The agent has
 # up to agent.max_turns inner turns to reason and call Skill within that one
 # outer iteration.
-max_iterations: 1
 
 dataset:
   path: "triggering.jsonl"

@@ -63,7 +63,7 @@ Review the codebase across these **8 critical axes**, producing a structured rep
 - **Task applicability**: Do the 10 success criteria cover real-world coding agent scenarios? Are there gaps (e.g., multi-file changes, refactoring quality, performance benchmarks)? Is the weighting/threshold system flexible enough?
 - **Reproducibility**: Can the same task produce consistent results across runs? Evaluate sandbox isolation, snapshot reliability, deterministic scoring, and seed/config pinning
 - **Agent extensibility**: How easy is it to add a new agent beyond Claude Code? Is the Agent ABC practical or over-constrained? Does the orchestrator make assumptions tied to a specific agent?
-- **Evaluation fairness**: Are criteria well-defined enough to avoid ambiguous pass/fail? Is the LLM reviewer prompt robust or susceptible to drift? Does the feedback loop (iterate until pass) introduce bias?
+- **Evaluation fairness**: Are criteria well-defined enough to avoid ambiguous pass/fail? Is the llm_judge prompt robust or susceptible to drift?
 - **Benchmarking utility**: Can results be meaningfully compared across agents, models, or runs? Are reports structured for aggregation and trend analysis?
 
 ## Procedure

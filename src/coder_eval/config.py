@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     # API Keys (for Claude Code agent only)
     anthropic_api_key: str | None = None
 
-    # LLM Gateway settings (required for LLM reviewer)
+    # LLM Gateway settings (required for llm_judge / agent_judge / proxy)
     llmgw_url: str | None = None
     llmgw_client_id: str | None = None
     llmgw_client_secret: str | None = None
@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     llmgw_semantic_tenant_id: str | None = None
     llmgw_semantic_user_id: str | None = None
     llmgw_requesting_product: str = "coder-eval"
-    llmgw_requesting_feature: str = "llm-reviewer"
+    llmgw_requesting_feature: str = "llm-judge"
     llmgw_timeout_seconds: int = 290
 
     # Paths

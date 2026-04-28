@@ -6,7 +6,6 @@ description: >
   This high-complexity tier tests parallel branch construction, nested loops,
   and multi-service orchestration.
 tags: [flow, uipcli, generate, complexity-analysis, 50-nodes]
-max_iterations: 2
 
 agent:
   type: claude-code
@@ -65,9 +64,14 @@ success_criteria:
     weight: 3.0
     pass_threshold: 1.0
 
-llm_reviewer:
-  enabled: true
-  prompt: |
-    Evaluate the generated 50-node flow:
-    1. Does it contain ~50 nodes?
-    2. Is the flow semantically correct?
+  - type: llm_judge
+    description: "Qualitative LLM code review"
+    prompt: |
+      Evaluate the generated 50-node flow:
+      1. Does it contain ~50 nodes?
+      2. Is the flow semantically correct?
+    include_reference: true
+    include_agent_output: true
+    include_tool_calls: true
+    weight: 1.0
+    pass_threshold: 0.7

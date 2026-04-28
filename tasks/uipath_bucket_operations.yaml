@@ -87,14 +87,26 @@ success_criteria:
     pass_threshold: 1.0
     timeout: 30
 
+  - type: llm_judge
+    description: "Qualitative LLM code review"
+    prompt: |
+      Evaluate if the bucket operations script is complete and correct:
 
-max_iterations: 1
+      1. Does it use sdk.buckets.upload() with keyword args name=, blob_file_path=, and source_path= or content=?
+      2. Does it use sdk.buckets.download() with keyword args name=, blob_file_path=, destination_path=?
+      3. Does it read the downloaded file from disk (download returns None, writes to file)?
+      4. Does it verify the content matches?
+      5. Is the output clear and shows success/failure?
+    include_reference: true
+    include_agent_output: true
+    include_tool_calls: true
+    weight: 1.0
+    pass_threshold: 0.7
 
 reference:
   code: |
     from dotenv import load_dotenv
     from uipath.platform import UiPath
-
 
     def main():
         load_dotenv()
@@ -131,17 +143,5 @@ reference:
         else:
             print("Content mismatch!")
 
-
     if __name__ == "__main__":
         main()
-
-llm_reviewer:
-  enabled: true
-  prompt: |
-    Evaluate if the bucket operations script is complete and correct:
-
-    1. Does it use sdk.buckets.upload() with keyword args name=, blob_file_path=, and source_path= or content=?
-    2. Does it use sdk.buckets.download() with keyword args name=, blob_file_path=, destination_path=?
-    3. Does it read the downloaded file from disk (download returns None, writes to file)?
-    4. Does it verify the content matches?
-    5. Is the output clear and shows success/failure?

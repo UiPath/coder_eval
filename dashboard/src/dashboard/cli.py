@@ -51,7 +51,6 @@ def cli() -> None:
 
 @cli.command()
 @click.option("--model", default="claude-sonnet-4-6", help="Model to evaluate.")
-@click.option("--max-iter", default=2, type=int, help="Max iterations per task.")
 @click.option("--tags", default=None, help="Task tag filter (overrides suite defaults).")
 @click.option("--suite", default=None, help="Run only the named suite (e.g. 'skills', 'smoke', 'flow-init', 'flow').")
 @click.option("--skip-build", is_flag=True, help="Skip UiPath CLI build step.")
@@ -73,7 +72,6 @@ def cli() -> None:
 )
 def run(
     model: str,
-    max_iter: int,
     tags: str | None,
     suite: str | None,
     skip_build: bool,
@@ -151,7 +149,6 @@ def run(
         suite_concurrency = concurrency if concurrency is not None else s.concurrency
         latest_run = run_tests(
             model=model,
-            max_iter=max_iter,
             tags=suite_tags,
             task_patterns=s.task_patterns,
             concurrency=suite_concurrency,

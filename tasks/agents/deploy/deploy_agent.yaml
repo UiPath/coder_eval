@@ -7,7 +7,6 @@ initial_prompt: |
 
   Please deploy this agent.
   If you need to authenticate, stop immediately.
-max_iterations: 3
 tags: [uipath, agents, deploy]
 
 agent:

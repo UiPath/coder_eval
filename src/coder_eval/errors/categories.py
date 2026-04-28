@@ -41,7 +41,6 @@ class ErrorCategory(Enum):
 
     # Criterion/Evaluator Errors
     CRITERION_CHECK_ERROR = "criterion_check_error"  # Error checking criterion (NOT retryable)
-    LLM_REVIEWER_ERROR = "llm_reviewer_error"  # LLM reviewer failed (retryable)
 
     # Task Errors - Task definition and loading
     TASK_NOT_FOUND = "task_not_found"  # Task file doesn't exist (NOT retryable)
@@ -139,12 +138,6 @@ RETRY_CONFIG: dict[ErrorCategory, RetryConfig] = {
         max_retries=3,
         backoff_multiplier=2.0,
         initial_delay=10.0,
-    ),
-    # LLM Reviewer errors
-    ErrorCategory.LLM_REVIEWER_ERROR: RetryConfig(
-        max_retries=2,
-        backoff_multiplier=2.0,
-        initial_delay=5.0,
     ),
     # All other errors are NOT retryable (max_retries=0 by default)
 }

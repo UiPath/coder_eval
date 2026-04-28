@@ -50,5 +50,3 @@ success_criteria:
     expected_exit_code: 0
     weight: 4.0
     pass_threshold: 1.0
-
-max_iterations: 1

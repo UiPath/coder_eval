@@ -21,10 +21,6 @@ on:
         description: "Model to evaluate"
         required: false
         default: "claude-sonnet-4-6"
-      max_iter:
-        description: "Max iterations per task"
-        required: false
-        default: "2"
       skip_analysis:
         description: "Skip AI analysis generation"
         required: false
@@ -156,7 +152,6 @@ jobs:
         run: |
           ARGS="--skip-pull"
           ARGS="$ARGS --model ${{ inputs.model || 'claude-sonnet-4-6' }}"
-          ARGS="$ARGS --max-iter ${{ inputs.max_iter || '2' }}"
 
           SUITE="${{ inputs.suite || 'skills' }}"
           ARGS="$ARGS --suite $SUITE"

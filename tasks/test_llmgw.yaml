@@ -30,8 +30,4 @@ success_criteria:
       - "Hello"
     description: "hello.py should contain a print statement with Hello"
 
-llm_reviewer:
-  enabled: true
-
-max_iterations: 2
 initial_prompt: "Create a file called hello.py that prints 'Hello, World!'"

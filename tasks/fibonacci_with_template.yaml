@@ -27,5 +27,3 @@ success_criteria:
     description: "All tests pass"
     path: "tests/"
     timeout: 60
-
-max_iterations: 3

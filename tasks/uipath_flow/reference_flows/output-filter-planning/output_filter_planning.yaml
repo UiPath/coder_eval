@@ -147,18 +147,21 @@ success_criteria:
     weight: 1.5
     pass_threshold: 1.0
 
-max_iterations: 2
+  - type: llm_judge
+    description: "Qualitative LLM code review"
+    prompt: |
+      Evaluate the agent's implementation plan document against these requirements:
 
-llm_reviewer:
-  enabled: true
-  prompt: |
-    Evaluate the agent's implementation plan document against these requirements:
-
-    1. Does the Summary section clearly describe the flow's purpose and what was validated?
-    2. Is the Flow Diagram present and does it show the correct flow (Salesforce → Transform → Sheets → Slack)?
-    3. Is the Resolved Node Table properly formatted with Node ID, Name, Type, Ports, Inputs, Outputs, Connection Key, and Notes columns?
-    4. Are all node types mentioned (Salesforce, Script/Transform, Google Sheets, Slack)?
-    5. Is the Global Variables section present and correctly named (not "Variables")?
-    6. Are there Open Questions with proper [REQUIRED] and [OPTIONAL] prefixes?
-    7. Does the plan mention using --output-filter to discover connector properties?
-    8. Are all major sections from the new maestro-flow template present (Summary, Diagram, Node Table, Edge Table, Global Variables, Open Questions)?
+      1. Does the Summary section clearly describe the flow's purpose and what was validated?
+      2. Is the Flow Diagram present and does it show the correct flow (Salesforce → Transform → Sheets → Slack)?
+      3. Is the Resolved Node Table properly formatted with Node ID, Name, Type, Ports, Inputs, Outputs, Connection Key, and Notes columns?
+      4. Are all node types mentioned (Salesforce, Script/Transform, Google Sheets, Slack)?
+      5. Is the Global Variables section present and correctly named (not "Variables")?
+      6. Are there Open Questions with proper [REQUIRED] and [OPTIONAL] prefixes?
+      7. Does the plan mention using --output-filter to discover connector properties?
+      8. Are all major sections from the new maestro-flow template present (Summary, Diagram, Node Table, Edge Table, Global Variables, Open Questions)?
+    include_reference: true
+    include_agent_output: true
+    include_tool_calls: true
+    weight: 1.0
+    pass_threshold: 0.7

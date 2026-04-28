@@ -189,8 +189,3 @@ success_criteria:
       - "job_traces"
     weight: 1.0
     pass_threshold: 1.0
-
-max_iterations: 3
-
-llm_reviewer:
-  enabled: true

@@ -328,5 +328,3 @@ success_criteria:
       Return JSON: {"score": <0.0-1.0>, "rationale": "<1-2 sentences>"}.
     weight: 2.0
     pass_threshold: 0.6
-
-max_iterations: 1

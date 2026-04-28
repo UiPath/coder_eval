@@ -22,11 +22,9 @@ def test_load_hello_date_task():
 
     # Basic assertions
     assert task.task_id == "hello_date_smoke_test"
-    assert task.max_iterations == 2
     assert task.agent.type == "claude-code"
     assert task.sandbox.driver == "tempdir"
     assert len(task.success_criteria) == 3
-    assert task.llm_reviewer.enabled is False
 
 
 def test_success_criterion_discriminated_union():

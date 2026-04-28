@@ -389,7 +389,6 @@ def resolve_task_for_variant(
 
     # Resolve scalar overrides and track lineage simultaneously (4-layer precedence)
     # Order: default → experiment-defaults → task → variant (task wins over experiment defaults)
-    resolved_max_iterations = task.max_iterations
     resolved_task_timeout = task.task_timeout
     resolved_turn_timeout = task.agent.turn_timeout if task.agent else None
 
@@ -399,9 +398,6 @@ def resolve_task_for_variant(
 
     # Layer 1: default experiment defaults scalars
     if default_experiment.defaults:
-        if default_experiment.defaults.max_iterations is not None and "max_iterations" not in task_explicit:
-            resolved_max_iterations = default_experiment.defaults.max_iterations
-            scalar_lineage["max_iterations"] = ConfigLineageEntry(value=resolved_max_iterations, source="default")
         if default_experiment.defaults.task_timeout is not None and "task_timeout" not in task_explicit:
             resolved_task_timeout = default_experiment.defaults.task_timeout
             scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="default")
@@ -411,11 +407,6 @@ def resolve_task_for_variant(
 
     # Layer 2: experiment defaults scalars (overrides default, but task can still override these)
     if experiment.defaults:
-        if experiment.defaults.max_iterations is not None and "max_iterations" not in task_explicit:
-            resolved_max_iterations = experiment.defaults.max_iterations
-            scalar_lineage["max_iterations"] = ConfigLineageEntry(
-                value=resolved_max_iterations, source="experiment-defaults"
-            )
         if experiment.defaults.task_timeout is not None and "task_timeout" not in task_explicit:
             resolved_task_timeout = experiment.defaults.task_timeout
             scalar_lineage["task_timeout"] = ConfigLineageEntry(
@@ -428,17 +419,12 @@ def resolve_task_for_variant(
             )
 
     # Layer 3: task-explicit scalars (override experiment defaults)
-    if "max_iterations" in task_explicit:
-        scalar_lineage["max_iterations"] = ConfigLineageEntry(value=task.max_iterations, source="task")
     if "task_timeout" in task_explicit:
         scalar_lineage["task_timeout"] = ConfigLineageEntry(value=task.task_timeout, source="task")
     if task.agent and "turn_timeout" in task_agent_explicit:
         scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=task.agent.turn_timeout, source="task")
 
     # Layer 4: variant scalars (highest precedence before CLI)
-    if variant.max_iterations is not None:
-        resolved_max_iterations = variant.max_iterations
-        scalar_lineage["max_iterations"] = ConfigLineageEntry(value=resolved_max_iterations, source="variant")
     if variant.task_timeout is not None:
         resolved_task_timeout = variant.task_timeout
         scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="variant")
@@ -477,20 +463,6 @@ def resolve_task_for_variant(
     # Combine lineage
     lineage = {**agent_lineage, **scalar_lineage}
 
-    # Resolve llm_reviewer: experiment defaults fill in only if the task did
-    # not explicitly set one. Task-level llm_reviewer always wins.
-    resolved_llm_reviewer = task.llm_reviewer
-    if "llm_reviewer" not in task_explicit:
-        from ..models import LLMReviewerConfig
-
-        exp_llm = experiment.defaults.llm_reviewer if experiment.defaults else None
-        default_llm = default_experiment.defaults.llm_reviewer if default_experiment.defaults else None
-        chosen = exp_llm if exp_llm is not None else default_llm
-        if chosen is not None:
-            source = "experiment-defaults" if exp_llm is not None else "default"
-            resolved_llm_reviewer = LLMReviewerConfig(**chosen)
-            lineage["llm_reviewer"] = ConfigLineageEntry(value=chosen, source=source)
-
     # Resolve simulation: shallow-merge across default → experiment-defaults → task → variant.
     # Mirrors agent merge semantics — a later layer's keys overwrite earlier ones, and
     # the final dict is validated by building a SimulationConfig from it.
@@ -500,11 +472,9 @@ def resolve_task_for_variant(
     resolved_task = task.model_copy(
         update={
             "agent": resolved_agent,
-            "max_iterations": resolved_max_iterations,
             "task_timeout": resolved_task_timeout,
             "sandbox": resolved_sandbox,
             "post_run": resolved_post_run,
-            "llm_reviewer": resolved_llm_reviewer,
             "simulation": resolved_simulation,
         }
     )
@@ -581,11 +551,6 @@ def _apply_cli_overrides(
     if config.ignore_patterns is not None:
         task.agent.ignore_patterns = config.ignore_patterns
         _record("agent.ignore_patterns", config.ignore_patterns, "--ignore-patterns")
-
-    # Max iterations override
-    if config.max_iterations is not None:
-        task.max_iterations = config.max_iterations
-        _record("max_iterations", config.max_iterations, "--max-iterations")
 
     # Snapshot overrides
     if config.snapshot_mode or config.snapshot_checkpoint_freq:

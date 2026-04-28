@@ -86,14 +86,28 @@ success_criteria:
     pass_threshold: 1.0
     timeout: 30
 
-max_iterations: 1
+  - type: llm_judge
+    description: "Qualitative LLM code review"
+    prompt: |
+      Evaluate if the process invocation script is complete and correct:
+
+      1. Does it use sdk.processes.invoke(name, input_arguments) (NOT invoke_process or ProcessStartInfo)?
+      2. Does invoke() return a Job object (NOT a raw response)?
+      3. Does it access Job attributes like .key, .state, .output_arguments (NOT response.json())?
+      4. Does it use sdk.jobs.retrieve(job_key) to monitor status?
+      5. Does it poll until job.state leaves Pending/Running?
+      6. Does it handle errors gracefully?
+    include_reference: true
+    include_agent_output: true
+    include_tool_calls: true
+    weight: 1.0
+    pass_threshold: 0.7
 
 reference:
   code: |
     import time
     from dotenv import load_dotenv
     from uipath.platform import UiPath
-
 
     def main():
         load_dotenv()
@@ -120,18 +134,5 @@ reference:
         except Exception as e:
             print(f"Error: {e}")
 
-
     if __name__ == "__main__":
         main()
-
-llm_reviewer:
-  enabled: true
-  prompt: |
-    Evaluate if the process invocation script is complete and correct:
-
-    1. Does it use sdk.processes.invoke(name, input_arguments) (NOT invoke_process or ProcessStartInfo)?
-    2. Does invoke() return a Job object (NOT a raw response)?
-    3. Does it access Job attributes like .key, .state, .output_arguments (NOT response.json())?
-    4. Does it use sdk.jobs.retrieve(job_key) to monitor status?
-    5. Does it poll until job.state leaves Pending/Running?
-    6. Does it handle errors gracefully?

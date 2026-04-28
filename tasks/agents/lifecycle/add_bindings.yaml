@@ -12,7 +12,6 @@ initial_prompt: |
   they can be overridden per environment when deployed to Orchestrator.
 
   The bindings.json file should follow the v2.0 format with entries for both resources.
-max_iterations: 2
 tags: [agents, lifecycle, bindings, t2]
 
 agent:

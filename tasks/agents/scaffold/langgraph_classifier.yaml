@@ -14,7 +14,6 @@ initial_prompt: |
   - Create langgraph.json pointing to the compiled graph
   - Run `uv run uipath init` after scaffolding
   - Do NOT add a [build-system] section to pyproject.toml
-max_iterations: 4
 tags: [agents, scaffold, langgraph, t3]
 
 agent:

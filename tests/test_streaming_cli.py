@@ -24,7 +24,7 @@ def test_stream_flag_creates_renderer():
 def test_stream_flag_factory_returns_renderer():
     """The callback factory creates a renderer that acts as StreamCallback."""
     renderer = RichStreamRenderer(verbosity="minimal", batch_mode=False)
-    event = TurnStartEvent(task_id="test", iteration=1, max_iterations=1, prompt_preview="")
+    event = TurnStartEvent(task_id="test", iteration=1, prompt_preview="")
     renderer.on_event(event)  # Should not raise
 
 

@@ -46,13 +46,13 @@ After reading or aggregating `task.json`, determine whether the task **passed** 
 
 **Agent 1 — Task Design (Axes 1, 2, 4)**
 
-Give this agent the following data from task.json: `final_status`, `weighted_score`, `iteration_count`, `max_turns_exhausted`, `success_criteria_results`, `task_config.resolved` (specifically `initial_prompt`, `success_criteria`, `tags`, `max_iterations`), and `task_config.source_yaml`.
+Give this agent the following data from task.json: `final_status`, `weighted_score`, `iteration_count`, `max_turns_exhausted`, `success_criteria_results`, `task_config.resolved` (specifically `initial_prompt`, `success_criteria`, `tags`), and `task_config.source_yaml`.
 
 Instruct it to analyze:
 
 Axis 1 — Outcome:
 - If failed: Classify root cause as one of: prompt_gap, environment_issue, agent_error, config_issue, impossible_task. Which criteria failed and with what margins?
-- If passed: Did all criteria score 1.0? If so, the task may not be discriminating enough. Could max_iterations or max_turns be lowered?
+- If passed: Did all criteria score 1.0? If so, the task may not be discriminating enough. Could max_turns be lowered?
 
 Axis 2 — Prompt Quality:
 - If failed: Is the prompt missing context the agent needed? Does the prompt mention all required flags, paths, or identifiers? Does it match what criteria actually check?
@@ -89,7 +89,7 @@ Instruct it to analyze:
 
 Axis 5 — Configuration:
 - Lineage conflicts: For each entry in `lineage`, check if the `source` is not "task" — surface overrides where experiment-base/variant/CLI changed a value the task YAML defined. Show before/after.
-- max_turns/max_iterations: Were they hit? Were they excessive?
+- max_turns: Was it hit? Was it excessive?
 - Model selection: Is the model appropriate for the task complexity? (Opus on a trivial task = wasted cost.)
 - allowed_tools: Were all allowed tools actually used? Were needed tools missing from the list?
 

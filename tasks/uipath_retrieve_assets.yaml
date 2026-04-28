@@ -88,7 +88,21 @@ success_criteria:
     weight: 2.0
     pass_threshold: 0.7
 
-max_iterations: 5
+  - type: llm_judge
+    description: "Qualitative LLM code review"
+    prompt: |
+      Evaluate if the asset retrieval script is complete and correct:
+
+      1. Does it properly load environment variables?
+      2. Does it initialize the UiPath SDK correctly?
+      3. Does it use sdk.assets.retrieve() to get asset values?
+      4. Does it handle errors for missing assets?
+      5. Is the output clear and informative?
+    include_reference: true
+    include_agent_output: true
+    include_tool_calls: true
+    weight: 1.0
+    pass_threshold: 0.7
 
 reference:
   code: |
@@ -111,14 +125,3 @@ reference:
             print(f"✓ {name}: {asset.value}")
         except Exception as e:
             print(f"✗ {name}: Not found or error - {e}")
-
-llm_reviewer:
-  enabled: true
-  prompt: |
-    Evaluate if the asset retrieval script is complete and correct:
-
-    1. Does it properly load environment variables?
-    2. Does it initialize the UiPath SDK correctly?
-    3. Does it use sdk.assets.retrieve() to get asset values?
-    4. Does it handle errors for missing assets?
-    5. Is the output clear and informative?

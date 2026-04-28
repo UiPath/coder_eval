@@ -109,7 +109,22 @@ success_criteria:
     weight: 2.5
     pass_threshold: 0.7
 
-max_iterations: 5
+  - type: llm_judge
+    description: "Qualitative LLM code review"
+    prompt: |
+      Evaluate if the translation agent is complete and follows modern UiPath patterns:
+
+      1. Does it use UiPath LangChain (uipath_langchain.chat) instead of legacy SDK?
+      2. Are input/output models properly defined with Pydantic BaseModel?
+      3. Does it load environment variables with dotenv?
+      4. Can it successfully translate text and return valid JSON?
+      5. Is the translation prompt clear and effective?
+      6. Is the code simple, clean, and production-ready?
+    include_reference: true
+    include_agent_output: true
+    include_tool_calls: true
+    weight: 1.0
+    pass_threshold: 0.7
 
 reference:
   code: |
@@ -120,18 +135,15 @@ reference:
     # Load environment variables
     load_dotenv()
 
-
     class TranslationInput(BaseModel):
         """Input for the translator."""
         text: str
         target_language: str
 
-
     class TranslationOutput(BaseModel):
         """Output from the translator."""
         translated_text: str
         source_language: str
-
 
     def main(input: TranslationInput) -> TranslationOutput:
         chat = UiPathChat(model="gpt-4o-mini-2024-07-18")
@@ -158,15 +170,3 @@ reference:
             translated_text=translated,
             source_language=source_language
         )
-
-llm_reviewer:
-  enabled: true
-  prompt: |
-    Evaluate if the translation agent is complete and follows modern UiPath patterns:
-
-    1. Does it use UiPath LangChain (uipath_langchain.chat) instead of legacy SDK?
-    2. Are input/output models properly defined with Pydantic BaseModel?
-    3. Does it load environment variables with dotenv?
-    4. Can it successfully translate text and return valid JSON?
-    5. Is the translation prompt clear and effective?
-    6. Is the code simple, clean, and production-ready?

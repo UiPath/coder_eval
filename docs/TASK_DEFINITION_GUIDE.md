@@ -24,7 +24,6 @@ Complete reference for defining evaluation tasks in coder_eval.
   - [llm_judge](#llm_judge)
   - [agent_judge](#agent_judge)
 - [Sandbox Snapshots](#sandbox-snapshots)
-- [LLM Reviewer](#llm-reviewer)
 - [Reference Solutions](#reference-solutions)
 - [Post-Run Commands](#post-run-commands)
 - [Simulation (Multi-Turn User Dialog)](#simulation-multi-turn-user-dialog)
@@ -39,14 +38,12 @@ Every task is a YAML file with this top-level structure:
 task_id: "my_task"                    # Unique identifier (required)
 description: "What this task tests"   # Human-readable description (required)
 initial_prompt: "Instructions..."     # Prompt sent to the agent (required)
-max_iterations: 3                     # Max agent iterations (required)
 tags: [smoke, golden, pure-python]    # Optional tags for filtering (kebab-case)
 
 agent: { ... }                        # Agent configuration (optional, resolved from experiment)
 sandbox: { ... }                      # Sandbox configuration (required)
 success_criteria: [ ... ]             # List of criteria (required, at least 1)
 
-llm_reviewer: { ... }                 # Optional LLM reviewer
 reference: { ... }                    # Optional reference solution
 post_run: [ ... ]                     # Optional post-run commands
 ```
@@ -76,7 +73,6 @@ Namespaced tags let downstream tools slice on a single dimension (e.g. ADX queri
 | `uipath-python` | Uses UiPath Python SDK |
 | `uipath-langchain` | Uses UiPath + LangChain integration |
 | `pure-python` | No external SDK dependencies |
-| `llm-review` | Includes LLM reviewer step |
 | `template` | Uses template sources |
 | `network` | Requires network access |
 
@@ -650,24 +646,6 @@ runs/{timestamp}/{task_id}/snapshots/
 │   └── ...
 ```
 
-## LLM Reviewer
-
-Optional qualitative feedback from an LLM (via UiPath LLM Gateway). Called when a task fails criteria to generate improvement suggestions.
-
-```yaml
-llm_reviewer:
-  enabled: true
-  model: "anthropic.claude-3-5-sonnet-20240620-v1:0"
-  temperature: 0.0
-  max_tokens: 1000
-  prompt: |                           # Optional: custom review prompt
-    Evaluate if the code is complete and follows best practices:
-    1. Is it well-structured?
-    2. Does it handle edge cases?
-```
-
-**Requires** UiPath LLM Gateway access (see `.env.example` for configuration).
-
 ## Reference Solutions
 
 Define a reference solution for `reference_comparison` criteria:
@@ -763,8 +741,7 @@ The simulator runs as a tools-disabled Claude Code agent sharing the coding agen
 **Semantics:**
 
 - The task's `initial_prompt` is the user's *opening* message; the simulator picks up from turn 2.
-- `max_iterations` keeps its existing meaning (task attempts). In simulation mode, leave it at `1` unless you have a specific reason — retrying a stochastic dialog rarely adds signal. Use `n_trials` for variance sampling.
-- `max_turns` is the intra-dialog cap. `max_iterations × max_turns` is the worst-case agent call budget per trial.
+- `max_turns` is the intra-dialog cap (the worst-case agent call budget per trial). Use `n_trials` for variance sampling.
 - The `reference` solution, if present, is hidden from the simulator (same security posture as for the coding agent).
 - When `n_trials > 1`, each trial becomes its own `ResolvedTask` with `task_id` suffix `/trial-N` (0-indexed), its own run directory, and its own `task.json`. Trial-level metadata appears under `simulation.trial_id` / `simulation.n_trials` on the `EvaluationResult`.
 
@@ -805,7 +782,6 @@ A full-featured task definition using most features:
 ```yaml
 task_id: "calculator_agent"
 description: "Create a calculator agent using LangGraph"
-max_iterations: 5
 
 initial_prompt: |
   Create a calculator agent using StateGraph that performs
@@ -897,13 +873,4 @@ reference:
     builder.add_edge(START, "calculate")
     builder.add_edge("calculate", END)
     graph = builder.compile()
-
-llm_reviewer:
-  enabled: true
-  model: "anthropic.claude-3-5-sonnet-20240620-v1:0"
-  prompt: |
-    Evaluate completeness and code quality:
-    1. Does it implement all 4 arithmetic operations?
-    2. Does it handle edge cases (division by zero)?
-    3. Is the code clean and well-structured?
 ```

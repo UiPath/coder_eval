@@ -12,8 +12,7 @@ if TYPE_CHECKING:
 def summarize_commands(commands: list[CommandTelemetry]) -> str | None:
     """Build a concise one-line-per-command summary of agent tool calls.
 
-    Used by the orchestrator (for LLMReviewer context) and by the llm_judge
-    criterion checker to give both sides identical formatting.
+    Used by the llm_judge criterion checker.
 
     Args:
         commands: Ordered list of ``CommandTelemetry`` entries (typically

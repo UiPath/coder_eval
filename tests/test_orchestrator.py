@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from coder_eval.models import DirectRoute
-from coder_eval.orchestration.evaluation import create_iteration_snapshot, generate_next_prompt
+from coder_eval.orchestration.evaluation import create_iteration_snapshot
 from coder_eval.orchestration.task_loader import load_task
 from coder_eval.orchestrator import Orchestrator
 from coder_eval.utils import get_version_info
@@ -18,7 +18,6 @@ def test_orchestrator_load_task():
     task, _ = load_task(task_file)
 
     assert task.task_id == "hello_date_smoke_test"
-    assert task.max_iterations == 2
     assert len(task.success_criteria) == 3
 
 
@@ -68,306 +67,6 @@ async def test_orchestrator_create_agent(tmp_path):
     assert agent.config.type == "claude-code"
 
 
-@pytest.mark.asyncio
-async def test_orchestrator_generate_feedback(tmp_path):
-    """Test that generate_next_prompt produces meaningful feedback from failed criteria."""
-    from coder_eval.models import CriterionResult
-    from coder_eval.orchestration.evaluation import generate_next_prompt
-
-    task_file = Path("tasks/hello_date.yaml")
-    task, _ = load_task(task_file)
-
-    # Build one failing CriterionResult per success criterion so lengths match
-    criteria_results = [
-        CriterionResult(
-            criterion_type=c.type,
-            description=getattr(c, "description", c.type),
-            score=0.0,
-            error=f"{c.type} failed",
-        )
-        for c in task.success_criteria
-    ]
-
-    feedback = generate_next_prompt(
-        task=task,
-        criteria_results=criteria_results,
-        decision=None,
-    )
-
-    # Feedback should mention at least one failing criterion type
-    feedback_lower = feedback.lower()
-    assert any(c.type in feedback_lower for c in task.success_criteria)
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_deterministic_feedback_with_failures(tmp_path):
-    """Test that orchestrator generates deterministic feedback when criteria fail."""
-    # Create a simple task with no LLM reviewer
-    from coder_eval.models import (
-        AgentConfig,
-        AgentKind,
-        CriterionResult,
-        EvaluationResult,
-        FileExistsCriterion,
-        LLMReviewerConfig,
-        RunCommandCriterion,
-        SandboxConfig,
-        TaskDefinition,
-    )
-
-    task = TaskDefinition(
-        task_id="test_feedback",
-        description="Test feedback generation",
-        initial_prompt="Create hello.py",
-        max_iterations=3,
-        agent=AgentConfig(type=AgentKind.CLAUDE_CODE),
-        sandbox=SandboxConfig(driver="tempdir"),
-        success_criteria=[
-            FileExistsCriterion(
-                type="file_exists",
-                path="hello.py",
-                description="Must create hello.py",
-                pass_threshold=1.0,
-                weight=1.0,
-            ),
-            RunCommandCriterion(
-                type="run_command",
-                command="python hello.py",
-                description="Must execute successfully",
-                pass_threshold=1.0,
-                weight=1.0,
-            ),
-        ],
-        llm_reviewer=LLMReviewerConfig(enabled=False),  # ← Disabled to force deterministic feedback
-    )
-
-    run_dir = tmp_path / "test_run" / "test_feedback"
-    run_dir.mkdir(parents=True)
-
-    orchestrator = Orchestrator(task, run_dir, preserve_sandbox=False, variant_id="test-variant")
-
-    # Initialize result (normally done in run())
-    from datetime import datetime
-
-    orchestrator.result = EvaluationResult(
-        task_id=task.task_id,
-        task_description=task.description,
-        variant_id="test-variant",
-        agent_type=task.agent.type,
-        started_at=datetime.now(),
-        final_status="FAILURE",
-        iteration_count=1,
-        environment_info={},
-    )
-
-    # Create criteria results with failures
-    criteria_results = [
-        CriterionResult(
-            criterion_type="file_exists",
-            description="Must create hello.py",
-            score=0.0,  # Failed
-            error="File not found",
-        ),
-        CriterionResult(
-            criterion_type="run_command",
-            description="Must execute successfully",
-            score=0.0,  # Failed
-            error="Command not found",
-        ),
-    ]
-
-    # Generate feedback
-    feedback = generate_next_prompt(
-        task=task,
-        criteria_results=criteria_results,
-        decision=None,
-    )
-
-    # Assertions
-    assert "failed" in feedback.lower()
-    assert "hello.py" in feedback
-    assert "Score: 0.00" in feedback
-    assert "threshold: 1.0" in feedback
-    assert "File not found" in feedback
-    assert "Command not found" in feedback
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_deterministic_feedback_with_partial_scores(tmp_path):
-    """Test feedback includes score information for partial success."""
-    from coder_eval.models import (
-        AgentConfig,
-        AgentKind,
-        CriterionResult,
-        EvaluationResult,
-        LLMReviewerConfig,
-        PytestCriterion,
-        SandboxConfig,
-        TaskDefinition,
-    )
-
-    task = TaskDefinition(
-        task_id="test_partial",
-        description="Test partial scores",
-        initial_prompt="Write tests",
-        max_iterations=3,
-        agent=AgentConfig(type=AgentKind.CLAUDE_CODE),
-        sandbox=SandboxConfig(driver="tempdir"),
-        success_criteria=[
-            PytestCriterion(
-                type="pytest",
-                path="tests/",
-                description="Most tests should pass",
-                pass_threshold=0.9,  # Requires 90%
-                weight=1.0,
-            ),
-        ],
-        llm_reviewer=LLMReviewerConfig(enabled=False),
-    )
-
-    run_dir = tmp_path / "test_run" / "test_partial"
-    run_dir.mkdir(parents=True)
-
-    orchestrator = Orchestrator(task, run_dir, preserve_sandbox=False, variant_id="test-variant")
-
-    from datetime import datetime
-
-    orchestrator.result = EvaluationResult(
-        task_id=task.task_id,
-        task_description=task.description,
-        variant_id="test-variant",
-        agent_type=task.agent.type,
-        started_at=datetime.now(),
-        final_status="FAILURE",
-        iteration_count=1,
-        environment_info={},
-    )
-
-    # Create criteria result with partial success (70% < 90% threshold)
-    criteria_results = [
-        CriterionResult(
-            criterion_type="pytest",
-            description="Most tests should pass",
-            score=0.7,  # 70% passed, but threshold is 90%
-            details="7 passed, 3 failed out of 10 tests",
-        ),
-    ]
-
-    feedback = generate_next_prompt(
-        task=task,
-        criteria_results=criteria_results,
-        decision=None,
-    )
-
-    # Verify feedback shows both score and threshold
-    assert "failed" in feedback.lower()
-    assert "Score: 0.70" in feedback
-    assert "threshold: 0.9" in feedback
-    assert "7 passed, 3 failed" in feedback
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_deterministic_feedback_mixed_results(tmp_path):
-    """Test that only failed criteria appear in feedback."""
-    from coder_eval.models import (
-        AgentConfig,
-        AgentKind,
-        CriterionResult,
-        EvaluationResult,
-        FileExistsCriterion,
-        LLMReviewerConfig,
-        RunCommandCriterion,
-        SandboxConfig,
-        TaskDefinition,
-    )
-
-    task = TaskDefinition(
-        task_id="test_mixed",
-        description="Test mixed results",
-        initial_prompt="Create and run script",
-        max_iterations=3,
-        agent=AgentConfig(type=AgentKind.CLAUDE_CODE),
-        sandbox=SandboxConfig(driver="tempdir"),
-        success_criteria=[
-            FileExistsCriterion(
-                type="file_exists",
-                path="script.py",
-                description="Script file must exist",
-                pass_threshold=1.0,
-                weight=1.0,
-            ),
-            RunCommandCriterion(
-                type="run_command",
-                command="python script.py",
-                description="Script must run without errors",
-                pass_threshold=1.0,
-                weight=1.0,
-            ),
-            FileExistsCriterion(
-                type="file_exists",
-                path="output.txt",
-                description="Output file should be created",
-                pass_threshold=1.0,
-                weight=0.5,
-            ),
-        ],
-        llm_reviewer=LLMReviewerConfig(enabled=False),
-    )
-
-    run_dir = tmp_path / "test_run" / "test_mixed"
-    run_dir.mkdir(parents=True)
-
-    orchestrator = Orchestrator(task, run_dir, preserve_sandbox=False, variant_id="test-variant")
-
-    from datetime import datetime
-
-    orchestrator.result = EvaluationResult(
-        task_id=task.task_id,
-        task_description=task.description,
-        variant_id="test-variant",
-        agent_type=task.agent.type,
-        started_at=datetime.now(),
-        final_status="FAILURE",
-        iteration_count=1,
-        environment_info={},
-    )
-
-    # 2 criteria pass, 1 fails
-    criteria_results = [
-        CriterionResult(
-            criterion_type="file_exists",
-            description="Script file must exist",
-            score=1.0,  # PASSED
-        ),
-        CriterionResult(
-            criterion_type="run_command",
-            description="Script must run without errors",
-            score=1.0,  # PASSED
-        ),
-        CriterionResult(
-            criterion_type="file_exists",
-            description="Output file should be created",
-            score=0.0,  # FAILED
-            error="File not found: output.txt",
-        ),
-    ]
-
-    feedback = generate_next_prompt(
-        task=task,
-        criteria_results=criteria_results,
-        decision=None,
-    )
-
-    # Only the failed criterion should appear
-    assert "failed" in feedback.lower()
-    assert "Output file should be created" in feedback
-    assert "File not found: output.txt" in feedback
-
-    # Passed criteria should NOT appear
-    assert "Script file must exist" not in feedback
-    assert "Script must run without errors" not in feedback
-
-
 # ============================================================================
 # Batch Orchestration Tests (Phase 1)
 # ============================================================================
@@ -379,7 +78,6 @@ def create_test_task_file(tmp_path: Path, task_id: str) -> Path:
 task_id: {task_id}
 description: Test task for batch execution
 initial_prompt: "Test prompt"
-max_iterations: 1
 agent:
   type: claude-code
 sandbox:
@@ -1000,14 +698,12 @@ def test_batch_run_config_with_snapshot_overrides():
         run_dir=Path("/tmp/test_run"),
         max_parallel=2,
         preserve_sandbox=True,
-        max_iterations=5,
         snapshot_mode="hybrid",
         snapshot_checkpoint_freq=3,
     )
 
     assert config.snapshot_mode == "hybrid"
     assert config.snapshot_checkpoint_freq == 3
-    assert config.max_iterations == 5
 
 
 def test_batch_run_config_snapshot_defaults():
@@ -1020,7 +716,6 @@ def test_batch_run_config_snapshot_defaults():
 
     assert config.snapshot_mode is None
     assert config.snapshot_checkpoint_freq is None
-    assert config.max_iterations is None
 
 
 @pytest.mark.asyncio
@@ -1838,13 +1533,11 @@ async def test_evaluation_loop_breaks_on_max_turns_exhausted(tmp_path):
         task_id="exhaustion_test",
         description="Test exhaustion",
         initial_prompt="Do something",
-        max_iterations=5,
         tags=[],
         agent=agent_cfg,
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(type="file_exists", path="test.py", description="test.py must exist")],
         task_timeout=None,
-        llm_reviewer=None,
         reference=None,
     )
 
@@ -1901,289 +1594,6 @@ async def test_evaluation_loop_breaks_on_max_turns_exhausted(tmp_path):
     assert orchestrator.result.max_turns_exhausted is True
 
 
-# --- LLM reviewer invocation counting (Phase 2) ---
-
-
-def _make_review_loop_task(max_iterations: int = 3):
-    """Build a TaskDefinition suitable for eval-loop tests."""
-    from coder_eval.models import (
-        AgentConfig,
-        AgentKind,
-        FileExistsCriterion,
-        SandboxConfig,
-        TaskDefinition,
-    )
-
-    agent_cfg = AgentConfig.model_construct(
-        type=AgentKind.CLAUDE_CODE,
-        permission_mode="acceptEdits",
-        allowed_tools=None,
-        model=None,
-        max_turns=20,
-        turn_timeout=None,
-        ignore_patterns=[],
-    )
-    return TaskDefinition.model_construct(
-        task_id="review_count_test",
-        description="Test review invocation count",
-        initial_prompt="Do something",
-        max_iterations=max_iterations,
-        tags=[],
-        agent=agent_cfg,
-        sandbox=SandboxConfig(driver="tempdir"),
-        success_criteria=[FileExistsCriterion(type="file_exists", path="x.py", description="x must exist")],
-        task_timeout=None,
-        llm_reviewer=None,
-        reference=None,
-    )
-
-
-def _make_orchestrator_for_review_test(task, tmp_path, scores: list[float], mock_review):
-    """Wire up an orchestrator whose success checker returns ``scores`` per call
-    and whose agent returns a benign TurnRecord each iteration."""
-    from datetime import datetime
-    from unittest.mock import AsyncMock, MagicMock
-
-    from coder_eval.models import (
-        AgentKind,
-        CriterionResult,
-        EvaluationResult,
-        TurnRecord,
-    )
-
-    run_dir = tmp_path / "run" / "review_count_test"
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
-    orchestrator.result = EvaluationResult(
-        task_id=task.task_id,
-        task_description=task.description,
-        variant_id="test-variant",
-        agent_type=AgentKind.CLAUDE_CODE,
-        started_at=datetime.now(),
-        final_status="FAILURE",
-        iteration_count=0,
-        environment_info={},
-    )
-
-    turn_counter = {"i": 0}
-
-    async def _fake_communicate(*args, **kwargs):
-        turn_counter["i"] += 1
-        return TurnRecord(
-            iteration=turn_counter["i"],
-            user_input="test",
-            agent_output="response",
-            duration_seconds=1.0,
-            max_turns_exhausted=False,
-        )
-
-    mock_agent = AsyncMock()
-    mock_agent.communicate = _fake_communicate
-    orchestrator.agent = mock_agent
-
-    mock_sandbox = MagicMock()
-    sandbox_dir = tmp_path / "sandbox"
-    sandbox_dir.mkdir(exist_ok=True)
-    mock_sandbox.sandbox_dir = sandbox_dir
-    orchestrator.sandbox = mock_sandbox
-
-    iteration_scores = iter(scores)
-    mock_checker = MagicMock()
-    mock_checker.check_all = MagicMock(
-        side_effect=lambda *a, **kw: [
-            CriterionResult(criterion_type="file_exists", description="x must exist", score=next(iteration_scores))
-        ]
-    )
-    orchestrator.success_checker = mock_checker
-
-    # Fake LLM reviewer
-    mock_reviewer = MagicMock()
-    mock_reviewer.review = mock_review
-    orchestrator.llm_reviewer = mock_reviewer
-
-    return orchestrator, mock_reviewer
-
-
-@pytest.mark.asyncio
-async def test_review_skipped_on_first_iteration_success(tmp_path):
-    """When criteria pass on iteration 1, the reviewer is NOT invoked."""
-    from unittest.mock import MagicMock, patch
-
-    mock_review = MagicMock(return_value=None)
-    task = _make_review_loop_task(max_iterations=3)
-    orchestrator, reviewer = _make_orchestrator_for_review_test(task, tmp_path, scores=[1.0], mock_review=mock_review)
-
-    with patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)):
-        success = await orchestrator._evaluation_loop()
-
-    assert success is True
-    assert reviewer.review.call_count == 0
-    assert orchestrator.result.llm_review is None
-
-
-@pytest.mark.asyncio
-async def test_review_runs_on_each_failing_iteration(tmp_path):
-    """A 3-iteration all-failing run calls the reviewer exactly 3 times and persists
-    the last decision on ``result.llm_review``."""
-    from unittest.mock import MagicMock, patch
-
-    from coder_eval.models import LLMDecision
-
-    decisions = [
-        LLMDecision(issues=f"iter {i}", score=0.1 * i, next_steps=[], should_continue=True) for i in range(1, 4)
-    ]
-    mock_review = MagicMock(side_effect=decisions)
-
-    task = _make_review_loop_task(max_iterations=3)
-    orchestrator, reviewer = _make_orchestrator_for_review_test(
-        task, tmp_path, scores=[0.0, 0.0, 0.0], mock_review=mock_review
-    )
-
-    with patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)):
-        success = await orchestrator._evaluation_loop()
-
-    assert success is False
-    assert reviewer.review.call_count == 3
-    assert orchestrator.result.llm_review is not None
-    assert orchestrator.result.llm_review.issues == "iter 3"
-
-
-@pytest.mark.asyncio
-async def test_review_runs_only_when_criteria_fail(tmp_path):
-    """When iter 1 fails and iter 2 succeeds, the reviewer is called exactly once."""
-    from unittest.mock import MagicMock, patch
-
-    from coder_eval.models import LLMDecision
-
-    decision = LLMDecision(issues="iter 1 fail", score=0.3, next_steps=["fix X"], should_continue=True)
-    mock_review = MagicMock(return_value=decision)
-
-    task = _make_review_loop_task(max_iterations=3)
-    orchestrator, reviewer = _make_orchestrator_for_review_test(
-        task, tmp_path, scores=[0.0, 1.0], mock_review=mock_review
-    )
-
-    with patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)):
-        success = await orchestrator._evaluation_loop()
-
-    assert success is True
-    assert reviewer.review.call_count == 1
-    assert orchestrator.result.llm_review is decision
-
-
-@pytest.mark.asyncio
-async def test_review_runs_before_max_turns_exhausted_break(tmp_path):
-    """When the agent exhausts max_turns on a failing iteration, the reviewer still
-    runs for that iteration before the loop exits early."""
-    from datetime import datetime
-    from unittest.mock import AsyncMock, MagicMock, patch
-
-    from coder_eval.models import (
-        AgentConfig,
-        AgentKind,
-        CriterionResult,
-        EvaluationResult,
-        FileExistsCriterion,
-        LLMDecision,
-        SandboxConfig,
-        TaskDefinition,
-        TurnRecord,
-    )
-
-    agent_cfg = AgentConfig.model_construct(
-        type=AgentKind.CLAUDE_CODE,
-        permission_mode="acceptEdits",
-        allowed_tools=None,
-        model=None,
-        max_turns=20,
-        turn_timeout=None,
-        ignore_patterns=[],
-    )
-    task = TaskDefinition.model_construct(
-        task_id="review_with_exhaustion",
-        description="test",
-        initial_prompt="p",
-        max_iterations=3,
-        tags=[],
-        agent=agent_cfg,
-        sandbox=SandboxConfig(driver="tempdir"),
-        success_criteria=[FileExistsCriterion(type="file_exists", path="x.py", description="x must exist")],
-        task_timeout=None,
-        # bypasses validation — _setup() is skipped in this test, so the config is unused.
-        llm_reviewer=None,
-        reference=None,
-    )
-
-    run_dir = tmp_path / "run" / "review_with_exhaustion"
-    run_dir.mkdir(parents=True)
-
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
-    orchestrator.result = EvaluationResult(
-        task_id=task.task_id,
-        task_description=task.description,
-        variant_id="test-variant",
-        agent_type=AgentKind.CLAUDE_CODE,
-        started_at=datetime.now(),
-        final_status="FAILURE",
-        iteration_count=0,
-        environment_info={},
-    )
-
-    exhausted_turn = TurnRecord(
-        iteration=1,
-        user_input="p",
-        agent_output="ran out",
-        duration_seconds=1.0,
-        max_turns_exhausted=True,
-    )
-    mock_agent = AsyncMock()
-    mock_agent.communicate = AsyncMock(return_value=exhausted_turn)
-    orchestrator.agent = mock_agent
-
-    mock_sandbox = MagicMock()
-    mock_sandbox.sandbox_dir = tmp_path / "sandbox"
-    mock_sandbox.sandbox_dir.mkdir()
-    orchestrator.sandbox = mock_sandbox
-
-    mock_checker = MagicMock()
-    mock_checker.check_all = MagicMock(
-        return_value=[CriterionResult(criterion_type="file_exists", description="x", score=0.0)]
-    )
-    orchestrator.success_checker = mock_checker
-
-    decision = LLMDecision(issues="ran out", score=0.2, next_steps=[], should_continue=False)
-    mock_reviewer = MagicMock()
-    mock_reviewer.review = MagicMock(return_value=decision)
-    orchestrator.llm_reviewer = mock_reviewer
-
-    with patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)):
-        success = await orchestrator._evaluation_loop()
-
-    assert success is False
-    assert orchestrator.result.max_turns_exhausted is True
-    assert mock_reviewer.review.call_count == 1
-    assert orchestrator.result.llm_review is decision
-
-
-@pytest.mark.asyncio
-async def test_review_failure_is_swallowed(tmp_path):
-    """Reviewer exceptions are logged and swallowed; the loop completes without raising."""
-    from unittest.mock import MagicMock, patch
-
-    mock_review = MagicMock(side_effect=RuntimeError("network dead"))
-    task = _make_review_loop_task(max_iterations=1)
-    orchestrator, reviewer = _make_orchestrator_for_review_test(task, tmp_path, scores=[0.0], mock_review=mock_review)
-
-    with patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)):
-        success = await orchestrator._evaluation_loop()
-
-    assert success is False
-    # review is retried via execute_with_retry — only assert it was attempted at least once
-    assert reviewer.review.call_count >= 1
-    assert orchestrator.result.llm_review is None
-
-
 @pytest.mark.asyncio
 async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
     """First agent.communicate raises AgentCrashError with a partial; retry succeeds.
@@ -2222,13 +1632,11 @@ async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
         task_id="crash_retry_test",
         description="Partial-preservation wiring",
         initial_prompt="Do the thing",
-        max_iterations=3,
         tags=[],
         agent=agent_cfg,
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(type="file_exists", path="x.py", description="x.py must exist")],
         task_timeout=None,
-        llm_reviewer=None,
         reference=None,
     )
 
@@ -2350,13 +1758,11 @@ async def test_evaluation_loop_stamps_timeout_reason_on_partial(tmp_path):
         task_id="timeout_reason_test",
         description="timeout-stamping",
         initial_prompt="Do the thing",
-        max_iterations=3,
         tags=[],
         agent=agent_cfg,
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(type="file_exists", path="x.py", description="x")],
         task_timeout=None,
-        llm_reviewer=None,
         reference=None,
     )
 
@@ -2452,13 +1858,11 @@ def test_aggregate_token_usage_includes_crashed_partials(tmp_path):
         task_id="token_agg_test",
         description="token agg",
         initial_prompt="p",
-        max_iterations=1,
         tags=[],
         agent=agent_cfg,
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(type="file_exists", path="x", description="x")],
         task_timeout=None,
-        llm_reviewer=None,
         reference=None,
     )
 

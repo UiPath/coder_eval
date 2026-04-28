@@ -6,14 +6,10 @@ import pytest
 
 from coder_eval.evaluation.checker import SuccessChecker, _short_failure_reason
 from coder_eval.models import (
-    AgentConfig,
-    AgentKind,
     CriterionResult,
     FileExistsCriterion,
     SandboxConfig,
-    TaskDefinition,
 )
-from coder_eval.orchestration.evaluation import generate_next_prompt
 from coder_eval.sandbox import Sandbox
 
 
@@ -115,44 +111,3 @@ class TestCheckerLogSplit:
         assert len(failed_infos) == 1
         assert len(exception_records) == 1
         assert "boom" in failed_infos[0].getMessage()
-
-
-class TestDeterministicFeedbackLog:
-    def _make_task(self):
-        return TaskDefinition(
-            task_id="t",
-            description="d",
-            initial_prompt="p",
-            agent=AgentConfig(type=AgentKind.CLAUDE_CODE),
-            sandbox=SandboxConfig(),
-            success_criteria=[
-                FileExistsCriterion(description="a", path="a.py"),
-                FileExistsCriterion(description="b", path="b.py"),
-            ],
-        )
-
-    def test_includes_failed_types(self, caplog):
-        task = self._make_task()
-        results = [
-            CriterionResult(criterion_type="file_exists", description="a", score=1.0, pass_threshold=0.9),
-            CriterionResult(criterion_type="file_exists", description="b", score=0.0, pass_threshold=0.9),
-        ]
-        with caplog.at_level(logging.INFO, logger="coder_eval.orchestration.evaluation"):
-            generate_next_prompt(task=task, criteria_results=results, decision=None)
-
-        feedback_infos = [r for r in caplog.records if "Using deterministic feedback" in r.getMessage()]
-        assert len(feedback_infos) == 1
-        assert "file_exists" in feedback_infos[0].getMessage()
-
-    def test_empty_failed_falls_back_to_sentinel(self, caplog):
-        task = self._make_task()
-        results = [
-            CriterionResult(criterion_type="file_exists", description="a", score=1.0, pass_threshold=0.9),
-            CriterionResult(criterion_type="file_exists", description="b", score=1.0, pass_threshold=0.9),
-        ]
-        with caplog.at_level(logging.INFO, logger="coder_eval.orchestration.evaluation"):
-            generate_next_prompt(task=task, criteria_results=results, decision=None)
-
-        feedback_infos = [r for r in caplog.records if "Using deterministic feedback" in r.getMessage()]
-        assert len(feedback_infos) == 1
-        assert "<none>" in feedback_infos[0].getMessage()

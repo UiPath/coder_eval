@@ -5,7 +5,6 @@ description: >
 initial_prompt: |
   My UiPath agent fails when I try to pack it with `uv run uipath pack`.
   Please diagnose and fix the issue.
-max_iterations: 2
 tags: [agents, fix, pyproject, t1]
 
 agent:

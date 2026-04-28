@@ -8,7 +8,6 @@ initial_prompt: |
   Please bump the patch version and deploy.
   My name is "Agent Developer", email "developer@uipath.com".
   Assume you are already authenticated.
-max_iterations: 3
 tags: [agents, lifecycle, deploy, version-bump, t3]
 
 agent:

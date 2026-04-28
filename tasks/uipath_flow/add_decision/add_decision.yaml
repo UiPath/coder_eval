@@ -48,5 +48,3 @@ success_criteria:
     score_from_stdout: true
     weight: 5.0
     pass_threshold: 0.7
-
-max_iterations: 2

@@ -88,14 +88,28 @@ success_criteria:
     pass_threshold: 1.0
     timeout: 30
 
-max_iterations: 1
+  - type: llm_judge
+    description: "Qualitative LLM code review"
+    prompt: |
+      Evaluate if the queue transactions script is complete and correct:
+
+      1. Does it import TransactionItem and TransactionItemResult from uipath.platform.orchestrator.queues?
+      2. Does it create TransactionItem with name= and specific_content=?
+      3. Does it use sdk.queues.create_transaction_item(item, no_robot=True) with positional args?
+      4. Does it complete with sdk.queues.complete_transaction_item(transaction_key, result)?
+      5. Does it handle both success (is_successful=True) and failure (is_successful=False)?
+      6. Is the code structure clear and well-organized?
+    include_reference: true
+    include_agent_output: true
+    include_tool_calls: true
+    weight: 1.0
+    pass_threshold: 0.7
 
 reference:
   code: |
     from dotenv import load_dotenv
     from uipath.platform import UiPath
     from uipath.platform.orchestrator.queues import TransactionItem, TransactionItemResult
-
 
     def main():
         load_dotenv()
@@ -136,20 +150,7 @@ reference:
                 except Exception:
                     pass
 
-
     if __name__ == "__main__":
         main()
 
     print("\nTransaction processing complete!")
-
-llm_reviewer:
-  enabled: true
-  prompt: |
-    Evaluate if the queue transactions script is complete and correct:
-
-    1. Does it import TransactionItem and TransactionItemResult from uipath.platform.orchestrator.queues?
-    2. Does it create TransactionItem with name= and specific_content=?
-    3. Does it use sdk.queues.create_transaction_item(item, no_robot=True) with positional args?
-    4. Does it complete with sdk.queues.complete_transaction_item(transaction_key, result)?
-    5. Does it handle both success (is_successful=True) and failure (is_successful=False)?
-    6. Is the code structure clear and well-organized?

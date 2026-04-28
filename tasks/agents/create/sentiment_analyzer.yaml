@@ -2,7 +2,6 @@ task_id: "ca-create-sentiment-analyzer"
 description: Build an agent that analyzes sentiment in customer feedback using keyword matching.
 tags: [agents, create, simple-function, t2]
 initial_prompt_file: prompts/sentiment_analyzer.md
-max_iterations: 3
 
 agent:
   type: "claude-code"

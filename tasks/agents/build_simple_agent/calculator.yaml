@@ -5,7 +5,6 @@ initial_prompt: |
   The input numbers should be named "a" and "b" and "operator" should be allowed to take values "+", "-", "*" or "/".
   The agent should be called "calculator" and it should be defined in "main.py". The entrypoint function should be called "calculator".
   It should not contain any evaluations.
-max_iterations: 3
 tags: [uipath, agents]
 
 agent:

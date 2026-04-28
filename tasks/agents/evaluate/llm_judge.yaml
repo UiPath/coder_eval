@@ -21,7 +21,6 @@ initial_prompt: |
      - A single-sentence input (edge case)
 
   Do NOT run the evals — just create the files.
-max_iterations: 3
 tags: [agents, evaluate, llm-judge, t3]
 
 agent:

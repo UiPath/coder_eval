@@ -7,4 +7,4 @@ introducing an import cycle (``tasks.py`` already imports from
 """
 
 DEFAULT_GATEWAY_MODEL = "anthropic.claude-sonnet-4-6"
-"""Default LLM Gateway model used by LLMReviewer, PromptRephrase, and LLMJudge."""
+"""Default LLM Gateway model used by PromptRephrase and LLMJudge."""

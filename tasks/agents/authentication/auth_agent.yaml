@@ -7,7 +7,6 @@ initial_prompt: |
   Instructions you MUST follow:
   1. Any commands that you run must timeout in 2 seconds. You must enforce this.
   2. At any point if you see a browser link for authentication, stop immediately.
-max_iterations: 2
 tags: [uipath, agents, authentication]
 
 agent:

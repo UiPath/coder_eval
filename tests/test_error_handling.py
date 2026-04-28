@@ -25,7 +25,6 @@ class TestErrorCategory:
             ErrorCategory.AGENT_API_ERROR,
             ErrorCategory.AGENT_RATE_LIMIT,
             ErrorCategory.AGENT_CRASH,
-            ErrorCategory.LLM_REVIEWER_ERROR,
             ErrorCategory.SANDBOX_SETUP_ERROR,
             ErrorCategory.SANDBOX_COMMAND_ERROR,
             ErrorCategory.VENV_CREATION_ERROR,
@@ -192,49 +191,12 @@ class TestCategorizeError:
             result = categorize_error(error, {"component": "agent"})
             assert result == ErrorCategory.AGENT_INVALID_OUTPUT, f"Failed for: {error}"
 
-    # Evaluator component errors (CRITICAL: LLM reviewer retry functionality)
-    def test_categorize_evaluator_timeout_exception(self):
-        """TimeoutError with evaluator component → LLM_REVIEWER_ERROR (retryable)."""
-        error = TimeoutError("LLM reviewer timeout")
-        result = categorize_error(error, {"component": "evaluator"})
-        assert result == ErrorCategory.LLM_REVIEWER_ERROR
-
-    def test_categorize_evaluator_timeout_string(self):
-        """Timeout string with evaluator component → LLM_REVIEWER_ERROR (retryable)."""
-        error = Exception("Request timeout")
-        result = categorize_error(error, {"component": "evaluator"})
-        assert result == ErrorCategory.LLM_REVIEWER_ERROR
-
-    def test_categorize_evaluator_network_error(self):
-        """Network errors with evaluator component → LLM_REVIEWER_ERROR (retryable)."""
-        test_cases = [
-            Exception("API error"),
-            Exception("Connection failed"),
-            Exception("Network unreachable"),
-            Exception("502 Bad Gateway"),
-            Exception("503 Service Unavailable"),
-        ]
-
-        for error in test_cases:
-            result = categorize_error(error, {"component": "evaluator"})
-            assert result == ErrorCategory.LLM_REVIEWER_ERROR, f"Failed for: {error}"
-
-    def test_categorize_evaluator_default_is_llm_reviewer_error(self):
-        """Evaluator component defaults to LLM_REVIEWER_ERROR (retryable)."""
+    # Evaluator component errors — non-retryable; criterion failures don't auto-retry
+    def test_categorize_evaluator_default_is_criterion_check_error(self):
+        """Evaluator component defaults to CRITERION_CHECK_ERROR."""
         error = Exception("Some unknown evaluator error")
         result = categorize_error(error, {"component": "evaluator"})
-        assert result == ErrorCategory.LLM_REVIEWER_ERROR
-
-    def test_categorize_evaluator_criterion_check_error(self):
-        """Criterion-specific errors → CRITERION_CHECK_ERROR."""
-        test_cases = [
-            Exception("Criterion check failed"),
-            Exception("Check validation error"),
-        ]
-
-        for error in test_cases:
-            result = categorize_error(error, {"component": "evaluator"})
-            assert result == ErrorCategory.CRITERION_CHECK_ERROR
+        assert result == ErrorCategory.CRITERION_CHECK_ERROR
 
     # Sandbox component errors
     def test_categorize_sandbox_venv_error(self):
@@ -422,32 +384,6 @@ class TestExecuteWithRetry:
                 )
 
             assert mock_operation.call_count == 2
-
-    @pytest.mark.asyncio
-    async def test_execute_with_retry_evaluator_timeout_is_retryable(self):
-        """CRITICAL: Evaluator TimeoutError must be retryable."""
-        mock_operation = AsyncMock(side_effect=[TimeoutError("LLM reviewer timeout"), "success"])
-
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            result = await execute_with_retry(
-                operation=mock_operation, operation_name="LLM reviewer", context={"component": "evaluator"}
-            )
-
-            assert result == "success"
-            assert mock_operation.call_count == 2, "Evaluator timeout should trigger retry"
-
-    @pytest.mark.asyncio
-    async def test_execute_with_retry_evaluator_network_error_is_retryable(self):
-        """CRITICAL: Evaluator network errors must be retryable."""
-        mock_operation = AsyncMock(side_effect=[Exception("Connection failed"), "success"])
-
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            result = await execute_with_retry(
-                operation=mock_operation, operation_name="LLM reviewer", context={"component": "evaluator"}
-            )
-
-            assert result == "success"
-            assert mock_operation.call_count == 2, "Evaluator network error should trigger retry"
 
     @pytest.mark.asyncio
     async def test_execute_with_retry_waits_between_retries(self):

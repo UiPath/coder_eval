@@ -279,7 +279,6 @@ class TestResolveAllTasksIntegration:
             "task_id": task_id,
             "description": "Test",
             "initial_prompt": "Prompt: ${row.prompt}" if with_dataset else "Static",
-            "max_iterations": 1,
             "sandbox": {"driver": "tempdir"},
             "success_criteria": [{"type": "file_exists", "path": "out.txt", "description": "File"}],
         }

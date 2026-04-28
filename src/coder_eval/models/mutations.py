@@ -54,8 +54,6 @@ class PromptRephrase(BaseModel):
     Sends the current prompt text to an LLM along with rewriting instructions.
     The LLM returns a rephrased version. This is inherently non-deterministic;
     use low temperature for more consistent results.
-
-    Uses the same LLM Gateway + LangChain integration as LLMReviewer.
     """
 
     type: Literal["rephrase"] = "rephrase"

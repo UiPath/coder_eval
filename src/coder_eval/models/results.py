@@ -67,31 +67,6 @@ class ClassificationCriterionResult(CriterionResult):
     expected_label: str = Field(description="Ground-truth label threaded through from the task / dataset row.")
 
 
-class LLMDecision(BaseModel):
-    """Decision from the LLM reviewer with direct, developer-style feedback.
-
-    Uses terse code review language focused on problems and actions,
-    not diplomatic assessments.
-
-    v0.2.0+: Field names changed from assessment/suggestions to issues/next_steps.
-    Pydantic aliases maintain backward compatibility with old JSON.
-    """
-
-    model_config = {"populate_by_name": True}  # Allow both new and old field names
-
-    issues: str = Field(
-        alias="assessment",  # Backward compatibility: old JSON with "assessment" still works
-        description="Direct critique in 1-2 sentences. Focus on problems, not praise.",
-    )
-    score: float = Field(ge=0.0, le=1.0, description="Score from 0.0 (broken) to 1.0 (perfect)")
-    next_steps: list[str] = Field(
-        default_factory=list,
-        alias="suggestions",  # Backward compatibility: old JSON with "suggestions" still works
-        description="Action-oriented imperatives (e.g., 'Fix X', 'Add Y')",
-    )
-    should_continue: bool = Field(description="Whether the agent should continue working")
-
-
 class FileChange(BaseModel):
     """Record of a file change during agent execution."""
 
@@ -239,7 +214,6 @@ class EvaluationResult(BaseModel):
     success_criteria_results: list[CriterionResult] = Field(
         default_factory=list, description="Results of all success criteria checks"
     )
-    llm_review: LLMDecision | None = Field(default=None, description="Optional LLM reviewer decision")
 
     # Detailed transcript
     turns: list[TurnRecord] = Field(default_factory=list, description="Complete transcript of agent interactions")

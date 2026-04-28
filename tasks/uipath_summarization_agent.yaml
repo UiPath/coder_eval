@@ -32,16 +32,13 @@ reference:
     # Load environment variables
     load_dotenv()
 
-
     class SummarizerInput(BaseModel):
         """Input for the summarizer."""
         text: str
 
-
     class SummarizerOutput(BaseModel):
         """Output from the summarizer."""
         summary: str
-
 
     def main(input: SummarizerInput) -> SummarizerOutput:
         chat = UiPathChat(model="gpt-4o-mini-2024-07-18")
@@ -133,15 +130,18 @@ success_criteria:
     weight: 2.5
     pass_threshold: 0.7
 
-max_iterations: 5
+  - type: llm_judge
+    description: "Qualitative LLM code review"
+    prompt: |
+      Evaluate if the text summarization agent is complete and follows modern UiPath patterns:
 
-llm_reviewer:
-  enabled: true
-  prompt: |
-    Evaluate if the text summarization agent is complete and follows modern UiPath patterns:
-
-    1. Does it use UiPath LangChain (uipath_langchain.chat) instead of legacy SDK?
-    2. Are input/output models properly defined with Pydantic BaseModel?
-    3. Does it load environment variables with dotenv?
-    4. Can it successfully summarize text and return valid JSON?
-    5. Is the code simple, clean, and production-ready?
+      1. Does it use UiPath LangChain (uipath_langchain.chat) instead of legacy SDK?
+      2. Are input/output models properly defined with Pydantic BaseModel?
+      3. Does it load environment variables with dotenv?
+      4. Can it successfully summarize text and return valid JSON?
+      5. Is the code simple, clean, and production-ready?
+    include_reference: true
+    include_agent_output: true
+    include_tool_calls: true
+    weight: 1.0
+    pass_threshold: 0.7

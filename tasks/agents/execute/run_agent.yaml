@@ -2,7 +2,6 @@ task_id: "uipath_execute_agent"
 description: "Execute a pre-built temperature converter UiPath agent with multiple test inputs and save results."
 initial_prompt: |
   I have a temperature converter UiPath agent in the current directory. Please run it to get temperature of 0C to F.
-max_iterations: 3
 tags: [uipath, agents, execute]
 
 agent:

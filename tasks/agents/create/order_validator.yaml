@@ -2,7 +2,6 @@ task_id: "ca-create-order-validator"
 description: Build an agent that validates e-commerce orders against business rules.
 tags: [agents, create, simple-function, t3]
 initial_prompt_file: prompts/order_validator.md
-max_iterations: 3
 
 agent:
   type: "claude-code"

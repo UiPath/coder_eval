@@ -22,7 +22,6 @@ class TestLoadExperiment:
             "experiment_id": "model-comparison",
             "description": "Compare models",
             "base": {
-                "max_iterations": 3,
                 "agent": {"permission_mode": "bypassPermissions"},
             },
             "variants": [

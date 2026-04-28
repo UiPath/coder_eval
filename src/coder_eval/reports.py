@@ -234,8 +234,8 @@ class ReportGenerator:
         lines = [
             "## Generation Metrics",
             "",
-            "| Task ID | Total Latency | Turns | Asst Turns | Avg Turn Latency | Self-Corrections |",
-            "|---------|---------------|-------|------------|------------------|------------------|",
+            "| Task ID | Total Latency | Turns | Asst Turns | Avg Turn Latency |",
+            "|---------|---------------|-------|------------|------------------|",
         ]
 
         for task in task_results:
@@ -243,8 +243,6 @@ class ReportGenerator:
             total_latency = f"{task['duration']:.1f}s"
             turns = task.get("turns", [])
             num_turns = len(turns)
-            iteration_count = task.get("iteration_count") or 0
-            self_corrections = max(0, iteration_count - 1)
 
             asst_turns = sum(t.get("assistant_turn_count", 0) for t in turns)
 
@@ -254,9 +252,7 @@ class ReportGenerator:
             else:
                 avg_turn_str = "N/A"
 
-            lines.append(
-                f"| {task_id} | {total_latency} | {num_turns} | {asst_turns} | {avg_turn_str} | {self_corrections} |"
-            )
+            lines.append(f"| {task_id} | {total_latency} | {num_turns} | {asst_turns} | {avg_turn_str} |")
 
         return lines
 
@@ -306,7 +302,6 @@ class ReportGenerator:
         # Aggregate P0 metrics
         scores = [t["weighted_score"] for t in summary.task_results if t.get("weighted_score") is not None]
         durations = [t["duration"] for t in summary.task_results if t["duration"] > 0]
-        iterations = [t["iteration_count"] for t in summary.task_results if t.get("iteration_count") is not None]
         similarities = [
             t["reference_similarity"] for t in summary.task_results if t.get("reference_similarity") is not None
         ]
@@ -315,8 +310,6 @@ class ReportGenerator:
             lines.append(f"- **Avg Reliability Score**: {sum(scores) / len(scores):.3f}")
         if durations:
             lines.append(f"- **Avg Generation Latency**: {sum(durations) / len(durations):.1f}s")
-        if iterations:
-            lines.append(f"- **Avg Self-Correction Iterations**: {sum(iterations) / len(iterations):.1f}")
 
         total_asst_turns = sum(
             sum(t.get("assistant_turn_count", 0) for t in task.get("turns", [])) for task in summary.task_results
@@ -340,8 +333,8 @@ class ReportGenerator:
         has_tags = any(t.get("tags") for t in summary.task_results)
         has_cmds_efficiency = any(t.get("commands_efficiency") is not None for t in summary.task_results)
 
-        header = "| Task ID | Status | Reliability Score | Iterations | Latency |"
-        separator = "|---------|--------|-------------------|------------|---------|"
+        header = "| Task ID | Status | Reliability Score | Latency |"
+        separator = "|---------|--------|-------------------|---------|"
         if has_model:
             header += " Model |"
             separator += "-------|"
@@ -360,10 +353,9 @@ class ReportGenerator:
         for task_result in summary.task_results:
             weighted_score = task_result.get("weighted_score")
             score_str = f"{weighted_score:.3f}" if weighted_score is not None else "N/A"
-            iters = task_result.get("iteration_count", "N/A")
             duration = f"{task_result['duration']:.1f}s"
 
-            row = f"| {task_result['task_id']} | {task_result['status']} | {score_str} | {iters} | {duration} |"
+            row = f"| {task_result['task_id']} | {task_result['status']} | {score_str} | {duration} |"
             if has_model:
                 model = task_result.get("model_used") or "N/A"
                 row += f" {model} |"

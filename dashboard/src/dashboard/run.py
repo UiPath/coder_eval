@@ -55,7 +55,6 @@ def pull_coder_eval() -> None:
 def run_tests(
     *,
     model: str = "claude-sonnet-4-6",
-    max_iter: int = 2,
     tags: str | None = "smoke",
     task_patterns: list[str] | None = None,
     concurrency: int | None = None,
@@ -83,8 +82,6 @@ def run_tests(
         *task_files,
         "--model",
         model,
-        "--max-iter",
-        str(max_iter),
     ]
     if tags:
         cmd.extend(["--tags", tags])

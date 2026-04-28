@@ -638,7 +638,6 @@ class TestAggregateMetrics:
         # Metrics should appear as rows (vertical layout)
         assert "| Score |" in md
         assert "| Avg Duration (s) |" in md
-        assert "| Iterations |" in md
         assert "| Tokens |" in md
         assert "| Tasks Run |" in md
         assert "| Success Rate |" in md

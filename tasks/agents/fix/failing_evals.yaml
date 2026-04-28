@@ -10,7 +10,6 @@ initial_prompt: |
   2. Diagnose the root cause
   3. Fix the agent code (do NOT modify the evaluation files)
   4. Re-run evaluations to confirm they pass
-max_iterations: 4
 tags: [agents, fix, evaluations, t3]
 
 agent:

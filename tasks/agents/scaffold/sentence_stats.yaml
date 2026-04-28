@@ -14,7 +14,6 @@ initial_prompt: |
   - After creating main.py, register it in uipath.json and run `uv run uipath init`
   - Do NOT add a [build-system] section to pyproject.toml
   - Do NOT instantiate UiPath() at module level
-max_iterations: 3
 tags: [agents, scaffold, simple-function, t2]
 
 agent:

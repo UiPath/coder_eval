@@ -2,7 +2,6 @@ task_id: "ca-create-email-classifier"
 description: Build an agent that classifies customer emails by category and priority using keyword matching.
 tags: [agents, create, simple-function, t2]
 initial_prompt_file: prompts/email_classifier.md
-max_iterations: 3
 
 agent:
   type: "claude-code"

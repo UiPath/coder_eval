@@ -23,7 +23,6 @@ initial_prompt: |
   which returns "Hello, <name>!". Then run it to verify it works:
     python -c "from greeter import greet; print(greet('World'))"
 
-max_iterations: 2
 
 success_criteria:
   # Iteration 1 should satisfy this

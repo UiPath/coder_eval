@@ -38,12 +38,6 @@ class TestTimeoutCategorization:
         result = categorize_error(err, {"component": "agent"})
         assert result == ErrorCategory.AGENT_TIMEOUT
 
-    def test_generic_timeout_error_evaluator_unchanged(self):
-        """Regular TimeoutError with evaluator component still works as before."""
-        err = TimeoutError("LLM timeout")
-        result = categorize_error(err, {"component": "evaluator"})
-        assert result == ErrorCategory.LLM_REVIEWER_ERROR
-
     def test_hint_overrides_custom_timeout(self):
         """Explicit hint overrides even custom timeout errors."""
         err = TurnTimeoutError(60.0)

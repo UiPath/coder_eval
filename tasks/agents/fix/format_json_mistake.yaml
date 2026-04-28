@@ -8,7 +8,6 @@ initial_prompt: |
   I have a deployment script (deploy.sh) that fails when it tries to run
   my UiPath agent commands. Please fix the script so it works correctly.
   The agent is already set up and authenticated.
-max_iterations: 2
 tags: [agents, fix, format-json, t1]
 
 agent:

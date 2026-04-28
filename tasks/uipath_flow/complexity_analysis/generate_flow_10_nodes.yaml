@@ -5,7 +5,6 @@ description: >
   terminate), and a delay node. This is the baseline complexity tier for
   benchmarking agent flow-generation capability.
 tags: [flow, uipcli, generate, complexity-analysis, 10-nodes]
-max_iterations: 2
 
 agent:
   type: claude-code
@@ -63,9 +62,14 @@ success_criteria:
     weight: 3.0
     pass_threshold: 1.0
 
-llm_reviewer:
-  enabled: true
-  prompt: |
-    Evaluate the generated 10-node flow:
-    1. Does it contain ~10 nodes?
-    2. Is the flow semantically correct?
+  - type: llm_judge
+    description: "Qualitative LLM code review"
+    prompt: |
+      Evaluate the generated 10-node flow:
+      1. Does it contain ~10 nodes?
+      2. Is the flow semantically correct?
+    include_reference: true
+    include_agent_output: true
+    include_tool_calls: true
+    weight: 1.0
+    pass_threshold: 0.7

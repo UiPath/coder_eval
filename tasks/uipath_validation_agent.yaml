@@ -100,7 +100,21 @@ success_criteria:
     weight: 2.5
     pass_threshold: 0.7
 
-max_iterations: 5
+  - type: llm_judge
+    description: "Qualitative LLM code review"
+    prompt: |
+      Evaluate if the validation agent is complete and correct:
+
+      1. Are input/output models properly defined with Pydantic BaseModel?
+      2. Does it validate email addresses (@ symbol, domain)?
+      3. Does it validate phone numbers (format, length)?
+      4. Does it return clear error messages for validation failures?
+      5. Is the code simple, clean, and production-ready?
+    include_reference: true
+    include_agent_output: true
+    include_tool_calls: true
+    weight: 1.0
+    pass_threshold: 0.7
 
 reference:
   code: |
@@ -111,18 +125,15 @@ reference:
     # Load environment variables
     load_dotenv()
 
-
     class ValidationInput(BaseModel):
         """Input for validation."""
         email: str
         phone: str
 
-
     class ValidationOutput(BaseModel):
         """Output from validation."""
         valid: bool
         errors: List[str]
-
 
     def validate_email(email: str) -> str | None:
         """Validate email format."""
@@ -137,7 +148,6 @@ reference:
             return "Email domain must contain a dot"
 
         return None
-
 
     def validate_phone(phone: str) -> str | None:
         """Validate phone number format."""
@@ -159,7 +169,6 @@ reference:
 
         return None
 
-
     def main(input: ValidationInput) -> ValidationOutput:
         errors = []
 
@@ -177,14 +186,3 @@ reference:
             valid=len(errors) == 0,
             errors=errors
         )
-
-llm_reviewer:
-  enabled: true
-  prompt: |
-    Evaluate if the validation agent is complete and correct:
-
-    1. Are input/output models properly defined with Pydantic BaseModel?
-    2. Does it validate email addresses (@ symbol, domain)?
-    3. Does it validate phone numbers (format, length)?
-    4. Does it return clear error messages for validation failures?
-    5. Is the code simple, clean, and production-ready?

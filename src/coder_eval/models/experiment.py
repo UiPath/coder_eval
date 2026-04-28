@@ -20,7 +20,6 @@ class ExperimentVariant(BaseModel):
 
     variant_id: str = Field(description="Unique identifier for this variant (e.g., 'sonnet', 'opus')")
     agent: dict[str, Any] | None = Field(default=None, description="Partial agent config overrides")
-    max_iterations: int | None = Field(default=None, description="Override max iterations for this variant")
     task_timeout: int | None = Field(default=None, ge=30, description="Override task timeout (seconds)")
     turn_timeout: int | None = Field(default=None, ge=10, description="Override turn timeout (seconds)")
     simulation: dict[str, Any] | None = Field(
@@ -72,7 +71,6 @@ class ExperimentVariant(BaseModel):
 class ExperimentDefaults(BaseModel):
     """Default settings applied to all variants (overridable per-variant and per-task)."""
 
-    max_iterations: int | None = Field(default=None, description="Default max iterations")
     task_timeout: int | None = Field(default=None, ge=30, description="Default task timeout (seconds)")
     turn_timeout: int | None = Field(default=None, ge=10, description="Default turn timeout (seconds)")
     repeats: int | None = Field(
@@ -81,13 +79,6 @@ class ExperimentDefaults(BaseModel):
         description="Default number of replicates across all variants. None = 1 (no repetition).",
     )
     agent: dict[str, Any] | None = Field(default=None, description="Partial agent config defaults")
-    llm_reviewer: dict[str, Any] | None = Field(
-        default=None,
-        description=(
-            "Default LLM reviewer config applied to tasks that do not set one explicitly. "
-            "Fields (enabled, model, temperature, max_tokens, prompt) map to LLMReviewerConfig."
-        ),
-    )
     simulation: dict[str, Any] | None = Field(
         default=None,
         description=(

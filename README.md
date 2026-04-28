@@ -112,7 +112,6 @@ coder-eval run tasks/hello_date.yaml --stream full
 | Flag                         | Description                                                                                   |
 | ---------------------------- | --------------------------------------------------------------------------------------------- |
 | **Execution**                |                                                                                               |
-| `--max-iter, -i`             | Override max iterations for all tasks                                                         |
 | `--max-parallel, -j`         | Concurrent tasks (default: 1)                                                                 |
 | `--preserve / --no-preserve` | Preserve sandbox after execution (default: preserve)                                          |
 | `--run-dir`                  | Custom run directory (default: timestamped in `runs/`)                                        |
@@ -274,7 +273,6 @@ Tasks are defined in YAML files. Here's a minimal example:
 task_id: "hello_world"
 description: "Create a Python script that prints Hello, World!"
 initial_prompt: "Create hello.py that prints 'Hello, World!'"
-max_iterations: 2
 
 agent:
   type: "claude-code"
@@ -299,7 +297,7 @@ success_criteria:
     description: "Script must execute successfully"
 ```
 
-For the full task definition reference — all 14 criterion types, scoring, templates, snapshots, LLM reviewer, and reference comparison — see **[docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_GUIDE.md)**.
+For the full task definition reference — all 17 criterion types, scoring, templates, snapshots, and reference comparison — see **[docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_GUIDE.md)**.
 
 > **Tip:** When creating new tasks with Claude Code, point it at the guide:
 > _"Read `docs/TASK_DEFINITION_GUIDE.md` and use it as a reference to create a new task definition for ..."_
@@ -338,7 +336,6 @@ experiment_id: default
 description: "Default experiment - provides baseline agent configuration"
 
 base:
-  max_iterations: 3
   agent:
     type: claude-code
     permission_mode: acceptEdits
@@ -440,8 +437,8 @@ Run the same (task, variant) N times via `repeats:` in an experiment YAML or `--
 ```
 coder_eval/
 ├── models/          # Pydantic data models (7 submodules)
-├── criteria/        # Criterion checker plugins (14 types, auto-discovered)
-├── evaluation/      # SuccessChecker + LLM reviewer
+├── criteria/        # Criterion checker plugins (17 types, auto-discovered)
+├── evaluation/      # SuccessChecker + llm_judge / agent_judge runners
 ├── errors/          # Error categorization + retry logic
 ├── orchestration/   # Batch execution + experiment resolution + task loading
 ├── cli/             # Typer CLI commands (run, plan, evaluate, report, proxy, tools)
@@ -462,11 +459,7 @@ coder_eval/
 ### Evaluation Flow
 
 1. **Setup**: Create sandbox, install packages, initialize agent
-2. **Loop** (up to `max_iterations`):
-   - Send prompt to agent → record actions and file changes
-   - Create snapshot (if enabled)
-   - Check all success criteria
-   - If all pass → SUCCESS; otherwise → generate feedback → next iteration
+2. **Run**: Send prompt to agent → record actions and file changes; create snapshot (if enabled); check all success criteria
 3. **Cleanup**: Stop agent, calculate scores, save results, generate reports
 
 ## Development
@@ -516,14 +509,14 @@ Installed automatically by `make install`. Includes ruff format/lint, trailing w
 | `ANTHROPIC_API_KEY`             | Yes (for Claude Code) | Anthropic API key                                                                                            |
 | `UV_INDEX_UIPATH_USERNAME`      | Yes (for install)     | UiPath package index username                                                                                |
 | `UV_INDEX_UIPATH_PASSWORD`      | Yes (for install)     | UiPath package index password (for installing LLMGW client from private index)                               |
-| `LLMGW_URL`                     | For LLM reviewer      | UiPath LLM Gateway URL                                                                                       |
-| `LLMGW_CLIENT_ID`               | For LLM reviewer      | Gateway client ID                                                                                            |
-| `LLMGW_CLIENT_SECRET`           | For LLM reviewer      | Gateway client secret                                                                                        |
-| `LLMGW_SEMANTIC_ORG_ID`         | For LLM reviewer      | Gateway semantic org ID                                                                                      |
-| `LLMGW_SEMANTIC_TENANT_ID`      | For LLM reviewer      | Gateway semantic tenant ID                                                                                   |
-| `LLMGW_SEMANTIC_USER_ID`        | For LLM reviewer      | Gateway semantic user ID                                                                                     |
+| `LLMGW_URL`                     | For llm_judge / proxy | UiPath LLM Gateway URL                                                                                       |
+| `LLMGW_CLIENT_ID`               | For llm_judge / proxy | Gateway client ID                                                                                            |
+| `LLMGW_CLIENT_SECRET`           | For llm_judge / proxy | Gateway client secret                                                                                        |
+| `LLMGW_SEMANTIC_ORG_ID`         | For llm_judge / proxy | Gateway semantic org ID                                                                                      |
+| `LLMGW_SEMANTIC_TENANT_ID`      | For llm_judge / proxy | Gateway semantic tenant ID                                                                                   |
+| `LLMGW_SEMANTIC_USER_ID`        | For llm_judge / proxy | Gateway semantic user ID                                                                                     |
 | `LLMGW_REQUESTING_PRODUCT`      | No                    | Requesting product name (default: `coder-eval`)                                                              |
-| `LLMGW_REQUESTING_FEATURE`      | No                    | Requesting feature name (default: `llm-reviewer`)                                                            |
+| `LLMGW_REQUESTING_FEATURE`      | No                    | Requesting feature name (default: `llm-judge`)                                                               |
 | `LLMGW_TIMEOUT_SECONDS`         | No                    | Gateway request timeout (default: 290)                                                                       |
 | `API_BACKEND`                   | No                    | API backend: `direct`, `bedrock`, or `proxy` (default: `direct`). Overridden by `--backend` CLI flag         |
 | `AWS_BEARER_TOKEN_BEDROCK`      | For Bedrock           | AWS Bedrock bearer token for authentication                                                                  |

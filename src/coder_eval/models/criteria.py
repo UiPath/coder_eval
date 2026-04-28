@@ -547,8 +547,7 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
     prompt: str = Field(
         description=(
             "Grading instructions shown to the judge. Describe what 'good' looks like "
-            "and how observations map to a 0.0-1.0 score. Field name matches "
-            "LLMReviewerConfig.prompt for consistency."
+            "and how observations map to a 0.0-1.0 score."
         )
     )
     files: list[str] = Field(

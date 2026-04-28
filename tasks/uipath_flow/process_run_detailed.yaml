@@ -165,8 +165,3 @@ success_criteria:
       - "steps_completed"
     weight: 1.5
     pass_threshold: 1.0
-
-max_iterations: 2
-
-llm_reviewer:
-  enabled: true

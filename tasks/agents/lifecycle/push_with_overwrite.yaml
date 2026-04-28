@@ -7,7 +7,6 @@ initial_prompt: |
   The previous push failed because my local version is behind the remote.
   Please push using --overwrite to force the upload.
   Assume you are already authenticated.
-max_iterations: 2
 tags: [agents, lifecycle, push, file-sync, t2]
 
 agent:

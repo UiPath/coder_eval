@@ -50,22 +50,3 @@ def test_helper_passes_args_through(monkeypatch):
         "temperature": 0.3,
         "max_tokens": 500,
     }
-
-
-def test_llmgw_available_returns_true_when_installed(monkeypatch):
-    """llmgw_available() returns True when the package import succeeds."""
-    fake_module = MagicMock()
-    monkeypatch.setitem(sys.modules, "uipath_llmgw_client", fake_module)
-
-    from coder_eval.evaluation.llmgw import llmgw_available
-
-    assert llmgw_available() is True
-
-
-def test_llmgw_available_returns_false_when_missing(monkeypatch):
-    """llmgw_available() returns False when the package import raises."""
-    monkeypatch.setitem(sys.modules, "uipath_llmgw_client", None)
-
-    from coder_eval.evaluation.llmgw import llmgw_available
-
-    assert llmgw_available() is False

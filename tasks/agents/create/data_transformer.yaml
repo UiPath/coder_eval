@@ -2,7 +2,6 @@ task_id: "ca-create-data-transformer"
 description: Build an agent that transforms JSON data records with filter, sort, and aggregate operations.
 tags: [agents, create, simple-function, t3]
 initial_prompt_file: prompts/data_transformer.md
-max_iterations: 3
 
 agent:
   type: "claude-code"

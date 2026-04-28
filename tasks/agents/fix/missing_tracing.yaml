@@ -7,7 +7,6 @@ initial_prompt: |
   Please add it so the agent is properly traced in UiPath Cloud.
   After adding it, verify the agent still runs correctly with:
   `uv run uipath run convert '{"amount": 100, "target_currency": "EUR"}'`
-max_iterations: 2
 tags: [agents, fix, tracing, t1]
 
 agent:
