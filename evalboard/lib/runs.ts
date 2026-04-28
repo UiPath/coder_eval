@@ -15,6 +15,12 @@ export const RUNS_DIR =
 
 // ---------- Types ----------
 
+export interface ComponentSha {
+    name: string; // "coder_eval" | "skills" | "cli"
+    sha: string;
+    url: string | null; // null when SHA is "unknown"
+}
+
 // A run is one `coder-eval run` invocation. It contains N task results.
 export interface RunSummary {
     id: string;
@@ -26,6 +32,7 @@ export interface RunSummary {
     tasksFailed: number;
     tasksError: number;
     totalCostUsd: number | null;
+    componentShas: ComponentSha[];
 }
 
 export interface TaskResultSummary {
@@ -108,6 +115,32 @@ interface RawRunJson {
     tasks_failed?: number;
     tasks_error?: number;
     task_results?: RawTaskResult[];
+    environment_info?: Record<string, string | number | null>;
+}
+
+// GitHub repos for the three components captured in env_info.
+// Keys match the `<name>_git_commit` fields written by coder_eval/utils.py.
+const COMPONENT_REPOS: Record<string, { display: string; repo: string }> = {
+    git_commit: { display: "coder_eval", repo: "UiPath/coder_eval" },
+    skills_git_commit: { display: "skills", repo: "UiPath/skills" },
+    cli_git_commit: { display: "cli", repo: "UiPath/cli" },
+};
+
+function extractComponentShas(
+    env: Record<string, string | number | null> | undefined,
+): ComponentSha[] {
+    if (!env) return [];
+    const out: ComponentSha[] = [];
+    for (const [key, meta] of Object.entries(COMPONENT_REPOS)) {
+        const sha = env[key];
+        if (typeof sha !== "string" || !sha) continue;
+        const url =
+            sha === "unknown"
+                ? null
+                : `https://github.com/${meta.repo}/tree/${sha}`;
+        out.push({ name: meta.display, sha, url });
+    }
+    return out;
 }
 
 // ---------- Readers ----------
@@ -165,6 +198,7 @@ export async function readRunSummary(id: string): Promise<RunSummary | null> {
         tasksFailed: data.tasks_failed ?? 0,
         tasksError: data.tasks_error ?? 0,
         totalCostUsd: taskResults.length ? totalCost : null,
+        componentShas: extractComponentShas(data.environment_info),
     };
 }
 
@@ -313,8 +347,8 @@ export function parseFlowDebug(
                     `${id}.output` in globals
                         ? `${id}.output`
                         : Object.keys(globals).find((k) =>
-                              k.startsWith(`${id}.`),
-                          );
+                            k.startsWith(`${id}.`),
+                        );
                 const outputVal = outputKey ? globals[outputKey] : null;
                 return {
                     elementId: id,

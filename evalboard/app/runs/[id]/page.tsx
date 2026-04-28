@@ -59,6 +59,29 @@ export default async function RunPage({
                 <div className="text-xs text-gray-500 tabular-nums font-mono">
                     {id} · {fmtRunTime(id)}
                 </div>
+                {summary.componentShas.length > 0 && (
+                    <div className="text-xs text-gray-500 font-mono pt-1 flex flex-wrap gap-x-3 gap-y-1">
+                        {summary.componentShas.map((c) => (
+                            <span key={c.name}>
+                                <span className="text-gray-400">{c.name}:</span>{" "}
+                                {c.url ? (
+                                    <a
+                                        href={c.url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="text-blue-600 hover:underline"
+                                    >
+                                        {c.sha}
+                                    </a>
+                                ) : (
+                                    <span className="text-gray-400">
+                                        {c.sha}
+                                    </span>
+                                )}
+                            </span>
+                        ))}
+                    </div>
+                )}
             </div>
 
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">

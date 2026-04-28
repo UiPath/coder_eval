@@ -147,13 +147,19 @@ def run(
         print(f"\n--- Suite: {s.name} (tags={suite_tags}) ---")
 
         suite_concurrency = concurrency if concurrency is not None else s.concurrency
+        # Tell coder_eval where the sibling repos actually live so it captures their SHAs in env_info.
+        component_env = {
+            "CODER_EVAL_SKILLS_DIR": str(cfg.skills_dir),
+            "CODER_EVAL_CLI_DIR": str(cfg.cli_dir),
+        }
+        suite_env = {**component_env, **(s.env or {})}
         latest_run = run_tests(
             model=model,
             tags=suite_tags,
             task_patterns=s.task_patterns,
             concurrency=suite_concurrency,
             experiment=s.experiment,
-            extra_env=s.env,
+            extra_env=suite_env,
             verbose=verbose,
             backend=backend,
         )
