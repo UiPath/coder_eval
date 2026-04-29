@@ -68,6 +68,77 @@ class TestTemplateDir:
         finally:
             sandbox.cleanup(preserve=False)
 
+    def test_template_dir_with_mount_point(self, tmp_path):
+        """Template contents land under the configured mount_point subdirectory."""
+        template_dir = tmp_path / "template"
+        template_dir.mkdir()
+        (template_dir / "main.py").write_text("print('mounted')")
+        (template_dir / "sub").mkdir()
+        (template_dir / "sub" / "data.txt").write_text("data")
+
+        config = SandboxConfig(
+            driver="tempdir",
+            python=None,
+            template_sources=[
+                TemplateDirSource(path=str(template_dir), mount_point="c"),
+            ],
+        )
+        sandbox = Sandbox(config, task_id="test-mount-point")
+
+        try:
+            sandbox_path = sandbox.setup()
+
+            assert not (sandbox_path / "main.py").exists()
+            assert (sandbox_path / "c" / "main.py").exists()
+            assert (sandbox_path / "c" / "main.py").read_text() == "print('mounted')"
+            assert (sandbox_path / "c" / "sub" / "data.txt").read_text() == "data"
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_template_dir_with_nested_mount_point(self, tmp_path):
+        """Nested mount_point like 'a/b/c' creates intermediate dirs."""
+        template_dir = tmp_path / "template"
+        template_dir.mkdir()
+        (template_dir / "main.py").write_text("nested")
+
+        config = SandboxConfig(
+            driver="tempdir",
+            python=None,
+            template_sources=[
+                TemplateDirSource(path=str(template_dir), mount_point="a/b/c"),
+            ],
+        )
+        sandbox = Sandbox(config, task_id="test-mount-nested")
+
+        try:
+            sandbox_path = sandbox.setup()
+            assert (sandbox_path / "a" / "b" / "c" / "main.py").read_text() == "nested"
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_template_dir_mount_point_escape_rejected(self, tmp_path):
+        """A mount_point that escapes the sandbox is rejected at runtime.
+
+        Uses model_construct to bypass the field_validator, verifying the
+        sandbox-layer check still works as defense-in-depth.
+        """
+        template_dir = tmp_path / "template"
+        template_dir.mkdir()
+        (template_dir / "main.py").write_text("x")
+
+        # Bypass model validation to exercise the sandbox-level escape check
+        bad_source = TemplateDirSource.model_construct(
+            type="template_dir", path=str(template_dir), mount_point="../escape"
+        )
+        config = SandboxConfig.model_construct(driver="tempdir", python=None, template_sources=[bad_source])
+        sandbox = Sandbox(config, task_id="test-mount-escape")
+
+        try:
+            with pytest.raises(RuntimeError, match="escapes sandbox"):
+                sandbox.setup()
+        finally:
+            sandbox.cleanup(preserve=False)
+
     def test_template_dir_not_found(self, tmp_path):
         """Test error handling when template directory doesn't exist."""
         config = SandboxConfig(

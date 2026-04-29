@@ -143,9 +143,12 @@ Copy a local directory into the sandbox:
 template_sources:
   - type: "template_dir"
     path: "../templates/python-starter"  # Relative to task YAML file
+    mount_point: "."                      # Optional: subdir inside sandbox to copy into (default ".")
 ```
 
 The framework automatically ignores `.venv`, `.git`, `__pycache__`, and `node_modules`.
+
+`mount_point` controls where inside the sandbox the template contents land. With `mount_point: "."` (default) files are copied to the sandbox root. With `mount_point: "c"` everything from the source directory ends up under `<sandbox>/c/`. The mount point must be a relative path that stays within the sandbox.
 
 ### Inline Starter Files
 

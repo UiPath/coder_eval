@@ -311,3 +311,27 @@ class TestSandboxConfigValidation:
                     RepoSource(url="https://github.com/user/repo.git"),
                 ],
             )
+
+
+class TestTemplateDirSourceMountPoint:
+    """Tests for TemplateDirSource.mount_point validation."""
+
+    def test_default_mount_point(self):
+        src = TemplateDirSource(path="/tmp/x")
+        assert src.mount_point == "."
+
+    def test_relative_mount_point_accepted(self):
+        src = TemplateDirSource(path="/tmp/x", mount_point="a/b")
+        assert src.mount_point == "a/b"
+
+    def test_absolute_mount_point_rejected(self):
+        with pytest.raises(ValueError, match="must be a relative path"):
+            TemplateDirSource(path="/tmp/x", mount_point="/abs/path")
+
+    def test_dotdot_mount_point_rejected(self):
+        with pytest.raises(ValueError, match=r"must not contain '\.\.'"):
+            TemplateDirSource(path="/tmp/x", mount_point="../escape")
+
+    def test_empty_mount_point_rejected(self):
+        with pytest.raises(ValueError, match="must not be empty"):
+            TemplateDirSource(path="/tmp/x", mount_point="")

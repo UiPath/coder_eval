@@ -201,6 +201,13 @@ class Sandbox:
         if not template_path.is_dir():
             raise RuntimeError(f"Template path is not a directory: {template_path}")
 
+        # Resolve mount point inside the sandbox and ensure it stays within bounds
+        mount_root = (self.sandbox_dir / source.mount_point).resolve()
+        sandbox_root = self.sandbox_dir.resolve()
+        if mount_root != sandbox_root and sandbox_root not in mount_root.parents:
+            raise RuntimeError(f"Template mount_point escapes sandbox: {source.mount_point!r} -> {mount_root}")
+        mount_root.mkdir(parents=True, exist_ok=True)
+
         # Track overwrites for logging
         overwrites: set[str] = set()
 
@@ -211,7 +218,7 @@ class Sandbox:
 
             # Calculate relative path
             rel_path = item.relative_to(template_path)
-            dest_path = self.sandbox_dir / rel_path
+            dest_path = mount_root / rel_path
 
             if item.is_dir():
                 dest_path.mkdir(parents=True, exist_ok=True)
