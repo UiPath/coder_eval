@@ -13,6 +13,53 @@ if TYPE_CHECKING:
     from coder_eval.proxy.config import ProxyConfig
 
 
+# Bedrock cross-region inference profile prefixes.
+_BEDROCK_KNOWN_PREFIXES: tuple[str, ...] = ("eu.", "us.", "apac.", "global.")
+
+
+def to_bedrock_inference_profile(model: str | None, region: str | None) -> str | None:
+    """Qualify a Claude alias into a Bedrock cross-region inference-profile id.
+
+    Two transforms are applied in order:
+
+    1. Vendor qualifier — a bare alias like ``claude-sonnet-4-6`` gets
+       ``anthropic.`` prepended (skipped if it's already qualified or carries a
+       region prefix).
+    2. Region qualifier — the AWS region's inference-profile prefix
+       (``eu.``/``us.``/``apac.``) is prepended so the same input works across
+       regions. Ids that already carry a known prefix pass through unchanged so
+       a user can pin a specific profile (e.g. ``global.anthropic.…``).
+
+    Examples (region=eu-north-1):
+        ``claude-sonnet-4-6`` → ``eu.anthropic.claude-sonnet-4-6``
+        ``anthropic.claude-sonnet-4-6`` → ``eu.anthropic.claude-sonnet-4-6``
+        ``us.anthropic.claude-sonnet-4-6`` → ``us.anthropic.claude-sonnet-4-6``
+    """
+    if not model or not region:
+        return model
+    model = model.strip()
+    if not model:
+        return None
+    # 1. Vendor qualifier.
+    if (
+        not model.startswith(_BEDROCK_KNOWN_PREFIXES)
+        and not model.startswith("anthropic.")
+        and model.startswith("claude-")
+    ):
+        model = f"anthropic.{model}"
+    # 2. Region qualifier.
+    if model.startswith(_BEDROCK_KNOWN_PREFIXES):
+        return model
+    region_lower = region.lower()
+    if region_lower.startswith("eu-"):
+        return f"eu.{model}"
+    if region_lower.startswith("us-"):
+        return f"us.{model}"
+    if region_lower.startswith("ap-"):
+        return f"apac.{model}"
+    return model
+
+
 @dataclass(frozen=True)
 class DirectRoute:
     """Route directly to Anthropic API (uses ANTHROPIC_API_KEY from environment)."""
@@ -59,11 +106,15 @@ def resolve_route(settings: Settings, *, proxy_port: int | None = None) -> ApiRo
         case ApiBackend.BEDROCK:
             assert settings.aws_bearer_token_bedrock is not None, "Bedrock requires aws_bearer_token_bedrock"
             assert settings.aws_region is not None, "Bedrock requires aws_region"
+            # BEDROCK_MODEL is the only route-level model source. DEFAULT_AGENT_MODEL
+            # and task-YAML agent.model are resolved later in the agent layer (via
+            # _apply_cli_overrides + _resolve_effective_model), which also handles
+            # the anthropic.* + region prefix qualification on bare aliases.
             return BedrockRoute(
                 bearer_token=settings.aws_bearer_token_bedrock,
                 region=settings.aws_region,
-                model=settings.bedrock_model,
-                small_model=settings.bedrock_small_model,
+                model=to_bedrock_inference_profile(settings.bedrock_model, settings.aws_region),
+                small_model=to_bedrock_inference_profile(settings.bedrock_small_model, settings.aws_region),
             )
         case ApiBackend.PROXY:
             assert proxy_port is not None, "Proxy backend requires proxy_port"

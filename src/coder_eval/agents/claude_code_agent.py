@@ -44,6 +44,7 @@ from coder_eval.models import (
     TokenUsage,
     TurnRecord,
 )
+from coder_eval.models.routing import to_bedrock_inference_profile
 from coder_eval.resources import get_ignore_patterns, should_ignore_path
 from coder_eval.streaming.callbacks import StreamCallback, safe_emit
 from coder_eval.streaming.events import TextChunkEvent, ToolCallEvent, ToolResultEvent
@@ -259,6 +260,27 @@ class ClaudeCodeAgent(Agent):
 
         raise AssertionError(f"Unhandled route type: {type(route).__name__}")
 
+    def _resolve_effective_model(
+        self, config_model: str | None, env: dict[str, str], route_model: str | None
+    ) -> str | None:
+        """Resolve the effective model and sync subprocess env on Bedrock.
+
+        Precedence: config_model (task YAML / --model / DEFAULT_AGENT_MODEL) wins
+        over the route default (BEDROCK_MODEL). On a Bedrock route, a bare alias
+        is auto-qualified with ``anthropic.`` and the region's inference-profile
+        prefix (``eu.``/``us.``/``apac.``) so the same value works across regions.
+        On Bedrock, the resolved value is always written to ``ANTHROPIC_MODEL``
+        so the subprocess sees the same model as ``ClaudeAgentOptions.model``.
+        """
+        if isinstance(self.route, BedrockRoute):
+            if config_model is not None:
+                config_model = to_bedrock_inference_profile(config_model, self.route.region)
+            effective = config_model or route_model
+            if effective:
+                env["ANTHROPIC_MODEL"] = effective
+            return effective
+        return config_model or route_model
+
     async def communicate(
         self,
         user_input: str,
@@ -362,9 +384,10 @@ class ClaudeCodeAgent(Agent):
             # Process plugins: copy from config and replace env vars in paths
             plugins = self._process_plugins(self.config.plugins or [])  # type: ignore[arg-type]
 
-            # Build env overrides and resolve model for the configured API route
+            # Build env overrides and resolve model for the configured API route.
+            # Precedence: task/CLI agent.model > route default (e.g. BEDROCK_MODEL).
             env, route_model = self._build_sdk_env(self.route)
-            effective_model = route_model or self.config.model
+            effective_model = self._resolve_effective_model(self.config.model, env, route_model)
 
             disallowed_tools = list(self.config.disallowed_tools or [])
             # Do not allow ToolSearch. This is required to keep Bedrock backend in sync with the other backends.

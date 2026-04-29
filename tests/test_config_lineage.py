@@ -346,6 +346,33 @@ class TestApplyCliOverridesLineage:
         assert lineage["agent.disallowed_tools"].source == "cli"
         assert lineage["agent.disallowed_tools"].source_detail == "--disallowed-tools"
 
+    def test_task_yaml_model_preserved_when_no_cli_or_env(self, monkeypatch):
+        """Regression: task YAML's agent.model survives when no --model and no DEFAULT_AGENT_MODEL.
+
+        Uses a real Settings instance (not a mock) so it catches the case where Settings'
+        class default would otherwise leak through as an override and clobber task YAML.
+        """
+        from coder_eval.config import Settings
+        from coder_eval.models import TaskDefinition
+
+        monkeypatch.delenv("DEFAULT_AGENT_MODEL", raising=False)
+        real_settings = Settings(_env_file=None)
+
+        task = TaskDefinition(
+            task_id="test",
+            description="test",
+            initial_prompt="do",
+            agent={"type": "claude-code", "model": "claude-opus-4-7"},
+            sandbox={"driver": "tempdir"},
+            success_criteria=[{"type": "file_exists", "path": "t.py", "description": "x"}],
+        )
+        lineage: dict[str, ConfigLineageEntry] = {}
+        config = BatchRunConfig(run_dir=Path("/tmp/run"), max_parallel=1)
+        with patch("coder_eval.config.settings", real_settings):
+            _apply_cli_overrides(task, config, lineage)
+        assert task.agent.model == "claude-opus-4-7"
+        assert "agent.model" not in lineage
+
     def test_env_model_override(self):
         from coder_eval.models import TaskDefinition
 

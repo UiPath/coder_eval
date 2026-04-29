@@ -52,7 +52,10 @@ class Settings(BaseSettings):
     # Paths
     runs_dir: Path = Path("runs")  # Base directory for timestamped runs
 
-    # Agent defaults (CLI > .env > task YAML)
+    # Agent defaults (CLI > .env > task YAML).
+    # Stays None unless the user sets DEFAULT_AGENT_MODEL — _apply_cli_overrides
+    # only writes onto task.agent.model when this is set, otherwise the task
+    # YAML's value is preserved.
     default_agent_model: str | None = None
     default_permission_mode: str | None = None
     default_max_turns: int | None = None

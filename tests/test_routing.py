@@ -3,7 +3,10 @@
 from claude_agent_sdk import ClaudeAgentOptions
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _dump_sdk_options
-from coder_eval.models import BedrockRoute, DirectRoute, ProxyRoute
+from coder_eval.config import Settings
+from coder_eval.models import AgentConfig, AgentKind, BedrockRoute, DirectRoute, ProxyRoute
+from coder_eval.models.enums import ApiBackend
+from coder_eval.models.routing import resolve_route, to_bedrock_inference_profile
 
 
 class TestBuildSdkEnv:
@@ -86,6 +89,173 @@ class TestBuildSdkEnv:
         route = BedrockRoute(bearer_token="t", region="r", small_model="eu.anthropic.claude-haiku-4-5")
         env, _ = ClaudeCodeAgent._build_sdk_env(route)
         assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "eu.anthropic.claude-haiku-4-5"
+
+
+class TestToBedrockInferenceProfile:
+    """Test to_bedrock_inference_profile() — vendor + region qualification."""
+
+    def test_bare_alias_in_eu_region(self):
+        """Claude alias gets both anthropic. and region. prefix."""
+        assert to_bedrock_inference_profile("claude-sonnet-4-6", "eu-north-1") == ("eu.anthropic.claude-sonnet-4-6")
+
+    def test_bare_alias_in_us_region(self):
+        assert to_bedrock_inference_profile("claude-sonnet-4-6", "us-east-2") == ("us.anthropic.claude-sonnet-4-6")
+
+    def test_anthropic_qualified_id_in_eu(self):
+        """Vendor-qualified id only needs region prefix."""
+        assert to_bedrock_inference_profile("anthropic.claude-sonnet-4-6", "eu-north-1") == (
+            "eu.anthropic.claude-sonnet-4-6"
+        )
+
+    def test_apac_region(self):
+        assert to_bedrock_inference_profile("claude-sonnet-4-6", "ap-southeast-1") == (
+            "apac.anthropic.claude-sonnet-4-6"
+        )
+
+    def test_existing_region_prefix_left_untouched(self):
+        """User-pinned eu./us./global. prefixes are not double-prefixed."""
+        assert to_bedrock_inference_profile("global.anthropic.claude-sonnet-4-6", "eu-north-1") == (
+            "global.anthropic.claude-sonnet-4-6"
+        )
+        assert to_bedrock_inference_profile("us.anthropic.claude-sonnet-4-6", "eu-north-1") == (
+            "us.anthropic.claude-sonnet-4-6"
+        )
+
+    def test_unknown_region_passthrough(self):
+        """Regions we don't know about still get the vendor qualifier but no region prefix."""
+        assert to_bedrock_inference_profile("claude-sonnet-4-6", "ca-central-1") == ("anthropic.claude-sonnet-4-6")
+
+    def test_none_inputs(self):
+        assert to_bedrock_inference_profile(None, "us-east-2") is None
+        assert to_bedrock_inference_profile("claude-sonnet-4-6", None) == "claude-sonnet-4-6"
+
+    def test_strips_surrounding_whitespace(self):
+        """Sloppy .env values like 'claude-sonnet-4-6 ' must not bypass the qualifier."""
+        assert to_bedrock_inference_profile("  claude-sonnet-4-6  ", "eu-north-1") == ("eu.anthropic.claude-sonnet-4-6")
+
+    def test_whitespace_only_input_returns_none(self):
+        """Whitespace-only input must not produce a malformed prefix-only id like 'eu.'."""
+        assert to_bedrock_inference_profile("   ", "eu-north-1") is None
+        assert to_bedrock_inference_profile("\t\n", "us-east-2") is None
+
+    def test_stale_region_prefix_passes_through_unchanged(self):
+        """A pinned id with a stale region prefix is left alone (documented passthrough).
+
+        It's the user's responsibility to keep BEDROCK_MODEL's region prefix in sync with
+        AWS_REGION when they pin an explicit profile. Returning unchanged here lets a user
+        intentionally pin a non-matching profile (e.g. global.* in an EU region).
+        """
+        assert to_bedrock_inference_profile("eu.anthropic.claude-sonnet-4-6", "us-east-2") == (
+            "eu.anthropic.claude-sonnet-4-6"
+        )
+
+
+def _make_agent(route, *, config_model: str | None = None) -> ClaudeCodeAgent:
+    return ClaudeCodeAgent(AgentConfig(type=AgentKind.CLAUDE_CODE, model=config_model), route=route)
+
+
+class TestResolveRouteBedrockModel:
+    """resolve_route() reads only BEDROCK_MODEL; DEFAULT_AGENT_MODEL is resolved at the agent layer."""
+
+    def test_unset_bedrock_model_leaves_route_model_none(self):
+        """No BEDROCK_MODEL → BedrockRoute.model is None; agent layer fills it from task/CLI."""
+        settings = Settings(
+            api_backend=ApiBackend.BEDROCK,
+            aws_bearer_token_bedrock="t",
+            aws_region="eu-north-1",
+            bedrock_model=None,
+            default_agent_model=None,
+        )
+        route = resolve_route(settings)
+        assert isinstance(route, BedrockRoute)
+        assert route.model is None
+
+    def test_default_agent_model_does_not_leak_into_route(self):
+        """DEFAULT_AGENT_MODEL must not appear at the route layer — _apply_cli_overrides handles it."""
+        settings = Settings(
+            api_backend=ApiBackend.BEDROCK,
+            aws_bearer_token_bedrock="t",
+            aws_region="us-east-2",
+            bedrock_model=None,
+            default_agent_model="claude-opus-4-7",
+        )
+        route = resolve_route(settings)
+        assert isinstance(route, BedrockRoute)
+        assert route.model is None
+
+    def test_bedrock_model_qualified(self):
+        settings = Settings(
+            api_backend=ApiBackend.BEDROCK,
+            aws_bearer_token_bedrock="t",
+            aws_region="us-east-2",
+            bedrock_model="anthropic.claude-opus-4-7",
+        )
+        route = resolve_route(settings)
+        assert isinstance(route, BedrockRoute)
+        assert route.model == "us.anthropic.claude-opus-4-7"
+
+
+class TestResolveEffectiveModel:
+    """Test ClaudeCodeAgent._resolve_effective_model() precedence + env sync + region prefix."""
+
+    def test_config_model_overrides_bedrock_route_model(self):
+        """Task/CLI model wins over BEDROCK_MODEL and is synced into env."""
+        route = BedrockRoute(bearer_token="t", region="us-east-2", model="us.anthropic.claude-sonnet-4-6")
+        env, route_model = ClaudeCodeAgent._build_sdk_env(route)
+        agent = _make_agent(route, config_model="global.anthropic.claude-sonnet-4-6")
+        effective = agent._resolve_effective_model("global.anthropic.claude-sonnet-4-6", env, route_model)
+        assert effective == "global.anthropic.claude-sonnet-4-6"
+        assert env["ANTHROPIC_MODEL"] == "global.anthropic.claude-sonnet-4-6"
+
+    def test_route_model_used_when_config_none(self):
+        """BEDROCK_MODEL is the fallback when no task/CLI model is set."""
+        route = BedrockRoute(bearer_token="t", region="us-east-2", model="us.anthropic.claude-sonnet-4-6")
+        env, route_model = ClaudeCodeAgent._build_sdk_env(route)
+        agent = _make_agent(route)
+        effective = agent._resolve_effective_model(None, env, route_model)
+        assert effective == "us.anthropic.claude-sonnet-4-6"
+        assert env["ANTHROPIC_MODEL"] == "us.anthropic.claude-sonnet-4-6"
+
+    def test_bare_config_model_auto_prefixes_for_bedrock(self):
+        """A bare --model on a Bedrock route gets the region's inference-profile prefix."""
+        route = BedrockRoute(bearer_token="t", region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
+        env, route_model = ClaudeCodeAgent._build_sdk_env(route)
+        agent = _make_agent(route, config_model="anthropic.claude-sonnet-4-6")
+        effective = agent._resolve_effective_model("anthropic.claude-sonnet-4-6", env, route_model)
+        assert effective == "eu.anthropic.claude-sonnet-4-6"
+        assert env["ANTHROPIC_MODEL"] == "eu.anthropic.claude-sonnet-4-6"
+
+    def test_both_none_returns_none(self):
+        """No model anywhere → None, no env mutation."""
+        route = BedrockRoute(bearer_token="t", region="us-east-2")
+        env, route_model = ClaudeCodeAgent._build_sdk_env(route)
+        agent = _make_agent(route)
+        effective = agent._resolve_effective_model(None, env, route_model)
+        assert effective is None
+        assert "ANTHROPIC_MODEL" not in env
+
+    def test_config_model_injects_anthropic_model_when_route_has_none(self):
+        """Bedrock route without BEDROCK_MODEL must still propagate config_model into env.
+
+        The subprocess relies on ANTHROPIC_MODEL when ClaudeAgentOptions.model isn't honored
+        by every Bedrock code path, so config_model must be injected into env on Bedrock even
+        when _build_sdk_env left ANTHROPIC_MODEL absent.
+        """
+        route = BedrockRoute(bearer_token="t", region="eu-north-1")  # no model
+        env, route_model = ClaudeCodeAgent._build_sdk_env(route)
+        assert "ANTHROPIC_MODEL" not in env  # precondition
+        agent = _make_agent(route, config_model="claude-sonnet-4-6")
+        effective = agent._resolve_effective_model("claude-sonnet-4-6", env, route_model)
+        assert effective == "eu.anthropic.claude-sonnet-4-6"
+        assert env["ANTHROPIC_MODEL"] == "eu.anthropic.claude-sonnet-4-6"
+
+    def test_direct_route_does_not_inject_or_prefix(self):
+        """DirectRoute: no ANTHROPIC_MODEL in env, no Bedrock prefix applied."""
+        env, route_model = ClaudeCodeAgent._build_sdk_env(DirectRoute())
+        agent = _make_agent(DirectRoute(), config_model="claude-opus-4-7")
+        effective = agent._resolve_effective_model("claude-opus-4-7", env, route_model)
+        assert effective == "claude-opus-4-7"
+        assert "ANTHROPIC_MODEL" not in env
 
 
 class TestSdkOptionsDumpRedaction:
