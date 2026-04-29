@@ -25,6 +25,7 @@ Complete reference for defining evaluation tasks in coder_eval.
   - [agent_judge](#agent_judge)
 - [Sandbox Snapshots](#sandbox-snapshots)
 - [Reference Solutions](#reference-solutions)
+- [Pre-Run Commands](#pre-run-commands)
 - [Post-Run Commands](#post-run-commands)
 - [Simulation (Multi-Turn User Dialog)](#simulation-multi-turn-user-dialog)
 - [Command Telemetry](#command-telemetry)
@@ -45,6 +46,7 @@ sandbox: { ... }                      # Sandbox configuration (required)
 success_criteria: [ ... ]             # List of criteria (required, at least 1)
 
 reference: { ... }                    # Optional reference solution
+pre_run: [ ... ]                      # Optional pre-run commands (before agent starts)
 post_run: [ ... ]                     # Optional post-run commands
 ```
 
@@ -671,6 +673,58 @@ reference:
         if n <= 1:
             return n
         return fibonacci(n - 1) + fibonacci(n - 2)
+```
+
+## Pre-Run Commands
+
+Run shell commands inside the sandbox **after setup completes but before the agent starts**.
+Use them to seed databases, start background services, or prepare the environment.
+
+By default (`fail_on_error: true`), a non-zero exit code, timeout, or exception **aborts
+the evaluation** with `FinalStatus.ERROR` — the agent should not run against a broken
+environment. Set `fail_on_error: false` per command for optional/informational steps.
+
+```yaml
+pre_run:
+  - command: "python seed_db.py"
+    timeout: 30
+    # fail_on_error defaults to true — if seeding fails, abort
+
+  - command: "start-mock-server.sh &"
+    # shell exits 0 immediately; background daemon keeps running
+
+  - command: "python check_connectivity.py"
+    fail_on_error: false    # warn but don't abort if connectivity check fails
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `command` | *required* | Shell command to execute (supports pipes, redirects, `&` for background) |
+| `timeout` | 30 | Maximum seconds to wait (1–300) |
+| `fail_on_error` | `true` | When true, failure aborts evaluation with `FinalStatus.ERROR` |
+
+Commands run sequentially with `cwd` set to the sandbox directory. stdout and stderr are
+captured in `pre_run_results` on the evaluation result (truncated to 100KB each). When a
+command fails with `fail_on_error: true`, remaining commands are skipped.
+
+**Execution order:**
+
+1. Sandbox setup (template sources applied, venv/node packages installed)
+2. **Pre-run commands** ← here
+3. Agent evaluation loop
+4. Success criteria checks
+5. Post-run commands (if configured)
+
+**Experiment-level defaults:**
+
+Set `defaults.pre_run` in an experiment YAML to seed the environment before every task.
+Experiment defaults are **prepended** before the task's own `pre_run` (baseline setup first):
+
+```yaml
+defaults:
+  pre_run:
+    - command: "docker-compose up -d"
+      timeout: 60
 ```
 
 ## Post-Run Commands

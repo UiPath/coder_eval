@@ -7,6 +7,7 @@ from coder_eval.models import (
     ExperimentDefinition,
     ExperimentVariant,
     PostRunCommand,
+    PreRunCommand,
     PromptPrefix,
     PromptReplace,
     PromptSuffix,
@@ -490,6 +491,66 @@ class TestPostRunMerge:
 
         resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.post_run == []
+
+
+class TestPreRunMerge:
+    """Tests for experiment-level pre_run defaults prepended before task pre_run."""
+
+    def test_experiment_defaults_prepended_before_task(self):
+        """Experiment defaults run first (baseline setup), then task commands."""
+        default_exp = _make_default_experiment()
+        task = _make_task(
+            agent={"type": "claude-code"},
+            pre_run=[PreRunCommand(command="echo seed")],
+        )
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            defaults=ExperimentDefaults(pre_run=[PreRunCommand(command="echo setup")]),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert [p.command for p in resolved.pre_run] == ["echo setup", "echo seed"]
+
+    def test_experiment_defaults_only(self):
+        """A task with no pre_run still picks up experiment-defaults pre_run."""
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"})
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            defaults=ExperimentDefaults(pre_run=[PreRunCommand(command="echo setup")]),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert [p.command for p in resolved.pre_run] == ["echo setup"]
+
+    def test_task_pre_run_only(self):
+        """When experiment has no defaults.pre_run, only task pre_run is used."""
+        default_exp = _make_default_experiment()
+        task = _make_task(
+            agent={"type": "claude-code"},
+            pre_run=[PreRunCommand(command="echo seed")],
+        )
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert [p.command for p in resolved.pre_run] == ["echo seed"]
+
+    def test_no_pre_run_anywhere(self):
+        """When neither task nor defaults declare pre_run, the resolved list is empty."""
+        default_exp = _make_default_experiment()
+        task = _make_task(agent={"type": "claude-code"})
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.pre_run == []
 
 
 class TestPromptMutations:

@@ -460,6 +460,13 @@ def resolve_task_for_variant(
     )
     resolved_post_run = list(task.post_run) + exp_defaults_post_run
 
+    # Resolve pre_run: experiment defaults run first (baseline environment setup),
+    # task commands appended after (task-specific augmentation).
+    exp_defaults_pre_run = (
+        list(experiment.defaults.pre_run) if experiment.defaults and experiment.defaults.pre_run else []
+    )
+    resolved_pre_run = exp_defaults_pre_run + list(task.pre_run)
+
     # Combine lineage
     lineage = {**agent_lineage, **scalar_lineage}
 
@@ -475,6 +482,7 @@ def resolve_task_for_variant(
             "task_timeout": resolved_task_timeout,
             "sandbox": resolved_sandbox,
             "post_run": resolved_post_run,
+            "pre_run": resolved_pre_run,
             "simulation": resolved_simulation,
         }
     )

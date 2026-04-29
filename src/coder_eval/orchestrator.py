@@ -37,7 +37,9 @@ from .models import (
     CriterionResult,
     EvaluationResult,
     FinalStatus,
+    PostRunCommand,
     PostRunResult,
+    PreRunCommand,
     ProxyRoute,
     ResolvedTask,
     RunSummary,
@@ -317,6 +319,13 @@ class Orchestrator:
             try:
                 # Setup components
                 await self._setup()
+
+                # Run pre-run commands inside the sandbox before the agent starts.
+                # A failing command with fail_on_error=True raises RuntimeError,
+                # which propagates to the outer except Exception below and lands
+                # the run as FinalStatus.ERROR; _run_post_run_commands and
+                # _cleanup still execute via the finally block.
+                await self._run_pre_run_commands()
 
                 # Enforce task-level timeout via an OS-thread watchdog that
                 # SIGKILLs the in-flight CLI subprocess AND cancels this
@@ -1245,29 +1254,40 @@ class Orchestrator:
     _POST_RUN_MAX_OUTPUT = 100_000  # Truncate stdout/stderr to 100KB
     _POST_RUN_STREAM_LIMIT = 262_144  # StreamReader per-line buffer (256KB)
 
-    async def _run_post_run_commands(self) -> None:
-        """Execute post-run commands inside the sandbox after evaluation.
+    async def _run_command_list(
+        self,
+        commands: list[PreRunCommand] | list[PostRunCommand],
+        results: list[PostRunResult],
+        label: str,
+    ) -> None:
+        """Run a list of shell commands inside the sandbox, capturing output.
 
-        stdout/stderr are streamed line-by-line to the orchestrator logger as
-        the command runs (so long-running cleanup scripts show progress in the
-        live log) AND captured in ``post_run_results`` for the report.
+        stdout/stderr are streamed line-by-line to the orchestrator logger and
+        accumulated into ``results`` for the report (truncated to
+        ``_POST_RUN_MAX_OUTPUT`` per stream). ``label`` is used in stream/log
+        labels (e.g. ``"pre_run"`` -> ``[pre_run stdout]``).
 
-        Results never affect pass/fail. Errors are logged as warnings and
-        captured in the result.
+        For commands carrying ``fail_on_error=True`` (PreRunCommand only), a
+        non-zero exit, timeout, or exception appends the failure result and then
+        raises ``RuntimeError``, aborting the loop. PostRunCommand never has
+        ``fail_on_error`` set, so failures are warning-logged and the loop
+        continues — preserving existing post-run "informational only" semantics.
         """
-        if not self.task.post_run or not self.sandbox or not self.sandbox.sandbox_dir or not self.result:
+        if not commands or not self.sandbox or not self.sandbox.sandbox_dir or not self.result:
             return
 
         sandbox_dir = self.sandbox.sandbox_dir
         max_out = self._POST_RUN_MAX_OUTPUT
+        human = label.replace("_", "-").capitalize()  # "pre_run" -> "Pre-run"
 
-        for post_run in self.task.post_run:
+        for cmd in commands:
+            fail_on_error = isinstance(cmd, PreRunCommand) and cmd.fail_on_error
             start = time.time()
-            logger.info("Running post-run command: %s", post_run.command)
+            logger.info("Running %s command: %s", human.lower(), cmd.command)
 
             try:
                 proc = await asyncio.create_subprocess_shell(
-                    post_run.command,
+                    cmd.command,
                     cwd=str(sandbox_dir),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -1280,32 +1300,34 @@ class Orchestrator:
                 try:
                     await asyncio.wait_for(
                         asyncio.gather(
-                            _pump_stream(proc.stdout, logger.info, "post_run stdout", stdout_chunks),
-                            _pump_stream(proc.stderr, logger.warning, "post_run stderr", stderr_chunks),
+                            _pump_stream(proc.stdout, logger.info, f"{label} stdout", stdout_chunks),
+                            _pump_stream(proc.stderr, logger.warning, f"{label} stderr", stderr_chunks),
                             proc.wait(),
                         ),
-                        timeout=post_run.timeout,
+                        timeout=cmd.timeout,
                     )
                 except TimeoutError:
                     proc.kill()
                     await proc.wait()
-                    self.result.post_run_results.append(
+                    results.append(
                         PostRunResult(
-                            command=post_run.command,
+                            command=cmd.command,
                             stdout="".join(stdout_chunks)[:max_out],
                             stderr="".join(stderr_chunks)[:max_out],
-                            error=f"Timed out after {post_run.timeout}s",
+                            error=f"Timed out after {cmd.timeout}s",
                             duration_seconds=time.time() - start,
                         )
                     )
-                    logger.warning("Post-run command '%s' timed out after %ds", post_run.command, post_run.timeout)
+                    if fail_on_error:
+                        raise RuntimeError(f"{human} command timed out after {cmd.timeout}s: {cmd.command!r}") from None
+                    logger.warning("%s command '%s' timed out after %ds", human, cmd.command, cmd.timeout)
                     continue
 
                 stdout_text = "".join(stdout_chunks)[:max_out]
                 stderr_text = "".join(stderr_chunks)[:max_out]
-                self.result.post_run_results.append(
+                results.append(
                     PostRunResult(
-                        command=post_run.command,
+                        command=cmd.command,
                         exit_code=proc.returncode,
                         stdout=stdout_text,
                         stderr=stderr_text,
@@ -1313,21 +1335,54 @@ class Orchestrator:
                     )
                 )
                 if proc.returncode != 0:
+                    if fail_on_error:
+                        raise RuntimeError(f"{human} command failed (exit {proc.returncode}): {cmd.command!r}")
                     logger.warning(
-                        "Post-run command '%s' exited with code %d: %s",
-                        post_run.command,
+                        "%s command '%s' exited with code %d: %s",
+                        human,
+                        cmd.command,
                         proc.returncode,
                         stderr_text[:200],
                     )
+            except RuntimeError:
+                # Propagate abort signal from fail_on_error=True branches unchanged;
+                # otherwise the catch-all below would re-wrap it as a new RuntimeError.
+                raise
             except Exception as e:
-                self.result.post_run_results.append(
+                results.append(
                     PostRunResult(
-                        command=post_run.command,
+                        command=cmd.command,
                         error=str(e),
                         duration_seconds=time.time() - start,
                     )
                 )
-                logger.warning("Post-run command '%s' failed: %s", post_run.command, e)
+                if fail_on_error:
+                    raise RuntimeError(f"{human} command failed: {cmd.command!r}") from e
+                logger.warning("%s command '%s' failed: %s", human, cmd.command, e)
+
+    async def _run_pre_run_commands(self) -> None:
+        """Execute pre-run commands inside the sandbox before evaluation.
+
+        See ``_run_command_list``. A failing command with ``fail_on_error=True``
+        (the default) raises ``RuntimeError``, which propagates to ``run()``'s
+        outer ``except Exception`` handler and lands the run as
+        ``FinalStatus.ERROR``. Post-run commands and cleanup still execute via
+        the ``finally`` block.
+        """
+        if self.result is None:
+            return
+        await self._run_command_list(self.task.pre_run, self.result.pre_run_results, "pre_run")
+
+    async def _run_post_run_commands(self) -> None:
+        """Execute post-run commands inside the sandbox after evaluation.
+
+        See ``_run_command_list``. Post-run commands are informational only —
+        ``fail_on_error`` is not part of ``PostRunCommand``, so failures are
+        warning-logged and never affect the evaluation verdict.
+        """
+        if self.result is None:
+            return
+        await self._run_command_list(self.task.post_run, self.result.post_run_results, "post_run")
 
     async def _cleanup(self) -> None:
         """Clean up all resources."""

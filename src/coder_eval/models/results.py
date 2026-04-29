@@ -273,6 +273,15 @@ class EvaluationResult(BaseModel):
         default=None, description="Commands efficiency score (0-1). expected/max(actual, expected)"
     )
 
+    # Pre-run script results
+    pre_run_results: list[PostRunResult] = Field(
+        default_factory=list,
+        description=(
+            "Results of pre-run scripts. "
+            "A failed command with fail_on_error=True aborts evaluation; the result is still captured here."
+        ),
+    )
+
     # Post-run script results
     post_run_results: list[PostRunResult] = Field(
         default_factory=list, description="Results of post-run scripts (informational, do not affect pass/fail)"

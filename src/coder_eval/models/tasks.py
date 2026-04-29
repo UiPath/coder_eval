@@ -290,6 +290,28 @@ class PostRunCommand(BaseModel):
     timeout: int = Field(default=30, ge=1, le=300, description="Maximum seconds to wait for the command to complete")
 
 
+class PreRunCommand(BaseModel):
+    """A command to execute before agent evaluation starts.
+
+    Pre-run commands run inside the sandbox after setup completes but before
+    the agent starts. By default (fail_on_error=True), a non-zero exit code,
+    timeout, or exception aborts the evaluation with FinalStatus.ERROR — the
+    agent should not run against a broken environment.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    command: str = Field(description="Shell command to execute (run via shell, supports pipes/redirects)")
+    timeout: int = Field(default=30, ge=1, le=300, description="Maximum seconds to wait for the command to complete")
+    fail_on_error: bool = Field(
+        default=True,
+        description=(
+            "When True (default), a non-zero exit code, timeout, or exception aborts the evaluation "
+            "with FinalStatus.ERROR. Set to False for optional/informational setup commands."
+        ),
+    )
+
+
 class TaskDefinition(BaseModel):
     """Complete definition of an evaluation task."""
 
@@ -334,6 +356,14 @@ class TaskDefinition(BaseModel):
         default=None,
         ge=1,
         description="Expected number of tool commands for orchestrator-level efficiency tracking",
+    )
+    pre_run: list[PreRunCommand] = Field(
+        default_factory=list,
+        description=(
+            "Commands to execute before agent evaluation starts. "
+            "By default a failing command aborts evaluation with FinalStatus.ERROR. "
+            "Set fail_on_error=False per command to make it informational."
+        ),
     )
     post_run: list[PostRunCommand] = Field(
         default_factory=list,

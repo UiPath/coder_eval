@@ -122,6 +122,7 @@ from coder_eval.models.tasks import (
     CriteriaCheckTiming,
     Dataset,
     PostRunCommand,
+    PreRunCommand,
     ReferenceSource,
     SimulationConfig,
     TaskDefinition,
@@ -235,6 +236,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "CriteriaCheckTiming",
     "Dataset",
     "PostRunCommand",
+    "PreRunCommand",
     "ReferenceSource",
     "SimulationConfig",
     # Mutations
