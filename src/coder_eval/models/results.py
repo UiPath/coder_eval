@@ -469,6 +469,10 @@ class RunSummary(BaseModel):
     tasks_failed: int = Field(description="Number of tasks that failed")
     tasks_error: int = Field(description="Number of tasks that encountered errors")
 
+    # Configured concurrency (BatchRunConfig.max_parallel). Defaulted so existing
+    # callers and fixtures don't have to set it.
+    max_parallel: int = Field(default=1, ge=1, description="Configured max concurrent tasks for this run")
+
     # Detailed results
     task_results: list[dict[str, Any]] = Field(description="List of task results with {task_id, status, duration}")
 

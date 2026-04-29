@@ -39,6 +39,7 @@ def _build_skills_suite(skills_dir: str) -> Suite:
         name="skills",
         task_patterns=[f"{skills_dir}/tests/tasks/**/*.yaml"],
         experiment=f"{skills_dir}/tests/experiments/e2e.yaml",
+        concurrency=10,
         uip_login=True,
         env={"SKILLS_REPO_PATH": skills_dir},
     )
@@ -181,10 +182,28 @@ def run(
                 traceback.print_exc()
                 print("WARNING: Analysis generation failed (see traceback above)")
 
-        upload_run(latest_run, run_id, cfg.azure_storage_account, cfg.azure_blob_container)
-        print("Blob upload complete")
+        try:
+            upload_run(
+                latest_run,
+                run_id,
+                cfg.azure_storage_account,
+                cfg.azure_blob_container,
+                account_key=cfg.azure_storage_key,
+            )
+            print("Blob upload complete")
+        except Exception:
+            import traceback
 
-        ingest_run(str(latest_run), cfg.adx_cluster_uri, cfg.adx_database)
+            traceback.print_exc()
+            print("WARNING: Blob upload failed — continuing without upload (see traceback above)")
+
+        try:
+            ingest_run(str(latest_run), cfg.adx_cluster_uri, cfg.adx_database)
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+            print("WARNING: ADX ingest failed — continuing without ingest (see traceback above)")
 
     print(f"\n=== Run completed at {datetime.now(UTC).isoformat()} ===")
 
@@ -210,7 +229,13 @@ def upload(run_dir: str) -> None:
     cfg = Config()
     run_path = Path(run_dir).resolve()
     run_id = run_path.name
-    upload_run(run_path, run_id, cfg.azure_storage_account, cfg.azure_blob_container)
+    upload_run(
+        run_path,
+        run_id,
+        cfg.azure_storage_account,
+        cfg.azure_blob_container,
+        account_key=cfg.azure_storage_key,
+    )
     print(f"Uploaded {run_id} to {cfg.azure_storage_account}/{cfg.azure_blob_container}")
 
 

@@ -9,24 +9,25 @@ def upload_run(
     run_id: str,
     storage_account: str,
     container: str,
+    account_key: str = "",
 ) -> None:
-    subprocess.run(
-        [
-            "az",
-            "storage",
-            "blob",
-            "upload-batch",
-            "--source",
-            str(run_path),
-            "--destination",
-            container,
-            "--destination-path",
-            run_id,
-            "--account-name",
-            storage_account,
-            "--auth-mode",
-            "login",
-            "--overwrite",
-        ],
-        check=True,
-    )
+    cmd = [
+        "az",
+        "storage",
+        "blob",
+        "upload-batch",
+        "--source",
+        str(run_path),
+        "--destination",
+        container,
+        "--destination-path",
+        run_id,
+        "--account-name",
+        storage_account,
+        "--overwrite",
+    ]
+    if account_key:
+        cmd.extend(["--auth-mode", "key", "--account-key", account_key])
+    else:
+        cmd.extend(["--auth-mode", "login"])
+    subprocess.run(cmd, check=True)

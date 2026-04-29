@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily coder-eval eval suite (Mon-Fri 06:00 UTC)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 06:00:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=coder-eval-daily.service
+
+[Install]
+WantedBy=timers.target

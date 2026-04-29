@@ -129,7 +129,9 @@ async def run_batch(
             processed.append(result)
 
     end_time = datetime.now()
-    summary = _generate_run_summary(config.run_dir, processed, start_time, end_time, task_tags)
+    summary = _generate_run_summary(
+        config.run_dir, processed, start_time, end_time, task_tags, max_parallel=config.max_parallel
+    )
     return summary, processed
 
 
@@ -196,6 +198,7 @@ def _generate_run_summary(
     start_time: datetime,
     end_time: datetime,
     task_tags: dict[str, list[str]] | None = None,
+    max_parallel: int = 1,
 ) -> RunSummary:
     """Generate run-level summary from batch results.
 
@@ -226,6 +229,7 @@ def _generate_run_summary(
         tasks_succeeded=sum(1 for s in statuses if s.category == "succeeded"),
         tasks_failed=sum(1 for s in statuses if s.category == "failed"),
         tasks_error=sum(1 for s in statuses if s.category == "error"),
+        max_parallel=max_parallel,
         task_results=[
             eval_result_to_task_dict(
                 r.result,

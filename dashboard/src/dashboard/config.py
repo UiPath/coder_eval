@@ -27,6 +27,10 @@ class Config(BaseSettings):
     azure_subscription_id: str = ""
     azure_storage_account: str
     azure_blob_container: str = "runs"
+    # Storage account access key. When set, blob upload + pull use
+    # `--auth-mode key`; when empty, fall back to `--auth-mode login`
+    # (active az login or Managed Identity).
+    azure_storage_key: str = ""
 
     # UiPath CLI repo path (sibling of coder_eval by default)
     cli_dir: Path = CODER_EVAL_DIR.parent / "cli"

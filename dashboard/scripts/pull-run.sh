@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Pull a run (or list runs) from Azure Blob Storage.
 #
-# Uses the same auth as dashboard/src/dashboard/blob.py (az --auth-mode login):
-# whatever identity is active for `az` (local `az login` or VM managed identity).
-# Storage account + container are read from dashboard/.env.
+# Uses the same auth as dashboard/src/dashboard/blob.py: when AZURE_STORAGE_KEY
+# is set in dashboard/.env, uses `--auth-mode key`; otherwise falls back to
+# `--auth-mode login` (whatever identity is active for `az` — local `az login`
+# or the VM's managed identity).
+# Storage account + container + (optional) key are read from dashboard/.env.
 #
 # Usage:
 #   dashboard/scripts/pull-run.sh list
@@ -65,15 +67,23 @@ get_env() {
 ACCOUNT="$(get_env AZURE_STORAGE_ACCOUNT)"
 CONTAINER_ENV="$(get_env AZURE_BLOB_CONTAINER)"
 CONTAINER="${CONTAINER_OVERRIDE:-${CONTAINER_ENV:-runs}}"
+ACCOUNT_KEY="$(get_env AZURE_STORAGE_KEY)"
 
 if [[ -z "$ACCOUNT" ]]; then
   echo "error: AZURE_STORAGE_ACCOUNT is not set in $ENV_FILE" >&2
   exit 1
 fi
 
-if ! az account show --query "user.name" -o tsv >/dev/null 2>&1; then
-  echo "error: az is not authenticated. Run 'az login' (or ensure managed identity is active)." >&2
-  exit 1
+# Build az auth flags once: prefer key when present, else fall back to login.
+if [[ -n "$ACCOUNT_KEY" ]]; then
+  AUTH_ARGS=(--auth-mode key --account-key "$ACCOUNT_KEY")
+else
+  AUTH_ARGS=(--auth-mode login)
+  if ! az account show --query "user.name" -o tsv >/dev/null 2>&1; then
+    echo "error: AZURE_STORAGE_KEY is unset and az is not authenticated." >&2
+    echo "       Either set AZURE_STORAGE_KEY in $ENV_FILE or run 'az login'." >&2
+    exit 1
+  fi
 fi
 
 # List blob names from the container, restricted to top-level prefixes that
@@ -84,7 +94,7 @@ list_run_ids() {
   az storage blob list \
     --container-name "$CONTAINER" \
     --account-name "$ACCOUNT" \
-    --auth-mode login \
+    "${AUTH_ARGS[@]}" \
     --num-results '*' \
     --query "[].name" -o tsv 2>/dev/null \
     | awk -F/ 'NF>1 && $1 ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}$/ {print $1}' \
@@ -138,7 +148,7 @@ az storage blob download-batch \
   --destination "$STAGE" \
   --pattern "$RUN_ID/*" \
   --account-name "$ACCOUNT" \
-  --auth-mode login
+  "${AUTH_ARGS[@]}"
 
 if [[ -d "$STAGE/$RUN_ID" ]]; then
   shopt -s dotglob nullglob
