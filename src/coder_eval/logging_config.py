@@ -9,8 +9,10 @@ This module provides centralized logging setup with:
 """
 
 import logging
+import re
 import sys
 import threading
+from collections import deque
 from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -18,8 +20,72 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from .path_utils import TASK_LOG_FILENAME
+
 
 APP_LOGGER_NAME = "coder_eval"
+
+# Bounded ring-buffer used by ``_LogTailBuffer`` to capture a sanitised tail of
+# task logs for the HTML report. Sized so a 200 KB tail comfortably covers the
+# last few hundred lines of a typical run without bloating ``task.json``.
+DEFAULT_LOG_TAIL_MAX_BYTES = 200_000
+
+# ANSI CSI escape sequences (e.g. ``\x1b[31m``). Stripped from the buffered tail
+# only — the on-disk task.log keeps raw bytes so ``tail -f`` renders colour.
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# C0 control bytes except ``\t`` (\x09) and ``\n`` (\x0a). DEL (\x7f) is left
+# alone — it is rare and harmless in HTML.
+_C0_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _sanitise_log_text(text: str) -> str:
+    """Strip ANSI CSI escapes and most C0 control bytes; keep ``\\t`` and ``\\n``."""
+    text = _ANSI_ESCAPE_RE.sub("", text)
+    text = _C0_CONTROL_RE.sub("", text)
+    return text
+
+
+class _LogTailBuffer(logging.Handler):
+    """Bounded in-memory ring buffer of formatted log records.
+
+    Eviction is byte-based (UTF-8) so non-ASCII content doesn't blow past the
+    cap. Used by ``task_log_handler`` as a sibling of the on-disk file handler;
+    ``get_text()`` returns the sanitised concatenation suitable for embedding
+    in an HTML report.
+    """
+
+    def __init__(self, max_bytes: int = DEFAULT_LOG_TAIL_MAX_BYTES) -> None:
+        super().__init__()
+        self._max_bytes = max_bytes
+        self._records: deque[str] = deque()
+        self._size: int = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+        except Exception:
+            self.handleError(record)
+            return
+        line = msg + "\n"
+        line_bytes = len(line.encode("utf-8"))
+        self._records.append(line)
+        self._size += line_bytes
+        while len(self._records) > 1 and self._size > self._max_bytes:
+            old = self._records.popleft()
+            self._size -= len(old.encode("utf-8"))
+
+    def get_text(self) -> str:
+        # Acquire the handler's lock so concurrent emit() calls (which also
+        # hold self.lock via Handler.handle()) cannot mutate _records while
+        # we iterate it for the join.  Without this, a watchdog/proxy thread
+        # logging during the finally-block tail capture would raise
+        # "RuntimeError: deque mutated during iteration".
+        self.acquire()
+        try:
+            return _sanitise_log_text("".join(self._records))
+        finally:
+            self.release()
+
 
 # ContextVar that tracks the current task_id for the running async context.
 # Each asyncio task gets its own copy, so parallel tasks are isolated.
@@ -194,11 +260,16 @@ _task_handler_state: _TaskHandlerRefState = _TaskHandlerRefState()
 
 
 @contextmanager
-def task_log_handler(task_log_path: Path, level: int = logging.DEBUG, task_id: str | None = None) -> Generator[None]:
+def task_log_handler(
+    task_log_file: Path, level: int = logging.DEBUG, task_id: str | None = None
+) -> Generator[_LogTailBuffer]:
     """Context manager for task-specific logging.
 
-    Automatically adds a FileHandler at the start and removes it at the end,
-    guaranteeing cleanup even if exceptions occur.
+    Attaches a ``FileHandler`` (raw bytes, uncapped) and a sibling
+    ``_LogTailBuffer`` (sanitised, bounded) to the app logger at the start and
+    removes both at the end, guaranteeing cleanup even if exceptions occur. The
+    buffer is yielded directly so callers can call ``get_text()`` to capture a
+    sanitised tail of the log alongside the on-disk file.
 
     When task_id is provided, a filter is applied so that in parallel batch runs
     each task's log file only contains its own messages. The ContextVar
@@ -206,41 +277,55 @@ def task_log_handler(task_log_path: Path, level: int = logging.DEBUG, task_id: s
     automatically get the correct task_id injected by ``_TaskIdFilter``.
 
     Thread-safe: uses a lock and reference counting so that concurrent handlers
-    correctly restore the original log level when the last handler exits.
+    correctly restore the original log level when the last handler exits. The
+    buffer is a passive sibling and does NOT participate in the refcount.
 
     Args:
-        task_log_path: Path to task log file
+        task_log_file: Path to task log file
         level: Logging level for file output (default: DEBUG)
         task_id: Optional task ID for filtering in parallel runs
 
     Yields:
-        None (handler is managed internally)
+        ``_LogTailBuffer`` exposing ``get_text()`` for the sanitised log tail.
 
     Example:
-        >>> with task_log_handler(Path("task.log"), task_id="my_task"):
+        >>> with task_log_handler(Path("task.log"), task_id="my_task") as log_tail:
         ...     logger.info("This goes to both console and task.log")
+        ...     tail_text = log_tail.get_text()
     """
     # Create handler
-    handler = logging.FileHandler(task_log_path, mode="w", encoding="utf-8")
+    handler = logging.FileHandler(task_log_file, mode="w", encoding="utf-8")
     handler.setLevel(level)
 
     # Format with full details for file output
     formatter = logging.Formatter(fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     handler.setFormatter(formatter)
 
-    # Add task_id filter to prevent cross-contamination in parallel runs
+    # Sibling in-memory buffer; same level + formatter so the tail mirrors the
+    # file content (modulo sanitisation done at get_text() time).
+    tail_buffer = _LogTailBuffer()
+    tail_buffer.setLevel(level)
+    tail_buffer.setFormatter(formatter)
+
+    # Add task_id filter to prevent cross-contamination in parallel runs.
+    # Both handlers share an equivalent filter so the buffer is isolated too.
     task_filter: _TaskIdFilter | None = None
+    buffer_filter: _TaskIdFilter | None = None
     if task_id:
         task_filter = _TaskIdFilter(task_id)
+        buffer_filter = _TaskIdFilter(task_id)
         handler.addFilter(task_filter)
+        tail_buffer.addFilter(buffer_filter)
 
-    # Thread-safe handler registration with reference-counted level management
+    # Thread-safe handler registration with reference-counted level management.
+    # Refcount tracks the file handler only; the buffer rides along.
     app_logger = logging.getLogger(APP_LOGGER_NAME)
     with _task_handler_lock:
         if _task_handler_state.count == 0:
             _task_handler_state.original_level = app_logger.level
         _task_handler_state.count += 1
         app_logger.addHandler(handler)
+        app_logger.addHandler(tail_buffer)
         if app_logger.level > level:
             app_logger.setLevel(level)
 
@@ -250,11 +335,12 @@ def task_log_handler(task_log_path: Path, level: int = logging.DEBUG, task_id: s
         token = _current_task_id.set(task_id)
 
     try:
-        yield
+        yield tail_buffer
     finally:
         # Guaranteed cleanup with thread-safe level restoration
         with _task_handler_lock:
             app_logger.removeHandler(handler)
+            app_logger.removeHandler(tail_buffer)
             _task_handler_state.count = max(_task_handler_state.count - 1, 0)
             if _task_handler_state.count == 0:
                 restored = _task_handler_state.original_level
@@ -264,9 +350,8 @@ def task_log_handler(task_log_path: Path, level: int = logging.DEBUG, task_id: s
         # Reset ContextVar (token-based reset restores previous value in nested contexts)
         if token is not None:
             _current_task_id.reset(token)
-        if task_filter:
-            handler.removeFilter(task_filter)
         handler.close()
+        tail_buffer.close()
 
 
 def aggregate_task_logs(run_dir: Path) -> None:
@@ -285,7 +370,7 @@ def aggregate_task_logs(run_dir: Path) -> None:
         >>> # Creates: runs/2025-10-16_14-25-18/experiment.log
     """
     run_log_path = run_dir / "experiment.log"
-    task_log_paths = sorted(run_dir.glob("**/task.log"))
+    task_log_paths = sorted(run_dir.glob(f"**/{TASK_LOG_FILENAME}"))
 
     if not task_log_paths:
         # No task logs found - create empty experiment.log
@@ -298,17 +383,17 @@ def aggregate_task_logs(run_dir: Path) -> None:
         outfile.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         outfile.write("\n" + "=" * 80 + "\n\n")
 
-        for task_log_path in task_log_paths:
+        for task_log_file in task_log_paths:
             # Use the path relative to run_dir so nested task ids from dataset
             # fan-out (variant/suite/row) render with full context, not just
             # the leaf directory name. as_posix() keeps the header consistent
             # across platforms (experiment.log is commonly shared / pasted).
-            task_id = task_log_path.parent.relative_to(run_dir).as_posix()
+            task_id = task_log_file.parent.relative_to(run_dir).as_posix()
             outfile.write(f"\n{'=' * 80}\n")
             outfile.write(f"TASK: {task_id}\n")
             outfile.write(f"{'=' * 80}\n\n")
 
-            with open(task_log_path, encoding="utf-8") as infile:
+            with open(task_log_file, encoding="utf-8") as infile:
                 outfile.write(infile.read())
 
             outfile.write("\n")

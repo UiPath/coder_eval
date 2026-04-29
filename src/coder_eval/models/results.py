@@ -223,6 +223,13 @@ class EvaluationResult(BaseModel):
     error_details: dict[str, Any] | None = Field(
         default=None, description="Detailed error context from error_handling module"
     )
+    error_log_tail: str | None = Field(
+        default=None,
+        description=(
+            "Sanitised tail of task.log captured during the run, populated when "
+            "final_status is ERROR, TIMEOUT, or FAILURE. Used by the HTML report's Logs disclosure."
+        ),
+    )
 
     # Environment information
     environment_info: dict[str, Any] = Field(

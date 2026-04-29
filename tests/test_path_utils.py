@@ -9,11 +9,13 @@ from pydantic import ValidationError
 
 from coder_eval.models import ResolvedTask, TaskDefinition
 from coder_eval.path_utils import (
+    TASK_LOG_FILENAME,
     build_task_run_dir,
     create_latest_symlink,
     format_task_log_id,
     generate_run_id,
     replicate_subdir_name,
+    task_log_path,
 )
 
 
@@ -46,6 +48,14 @@ def test_build_task_run_dir_custom_replicate_index():
     run_dir = Path("/tmp/runs/2025-01-01_12-00-00")
     result = build_task_run_dir(run_dir, "v1", "task_a", replicate_index=3)
     assert result == run_dir / "v1" / "task_a" / "03"
+
+
+def test_task_log_filename_constant():
+    assert TASK_LOG_FILENAME == "task.log"
+
+
+def test_task_log_path_helper(tmp_path: Path):
+    assert task_log_path(tmp_path) == tmp_path / TASK_LOG_FILENAME
 
 
 def test_format_task_log_id_basic():

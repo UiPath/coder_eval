@@ -635,8 +635,6 @@ def _render_error_details(result: EvaluationResult) -> str:
     if not result.error_message and not result.error_details:
         return ""
     details = result.error_details or {}
-    stack = details.get("stack_trace") if isinstance(details, dict) else None
-    stack_trunc, _ = _truncate(str(stack) if stack else "", 4000)
     category = details.get("error_category", "unknown") if isinstance(details, dict) else ""
     component = details.get("component", "") if isinstance(details, dict) else ""
     retryable = details.get("is_retryable") if isinstance(details, dict) else None
@@ -647,10 +645,18 @@ def _render_error_details(result: EvaluationResult) -> str:
             if retryable
             else '<span class="badge neutral">non-retryable</span>'
         )
-    stack_html = ""
-    if stack_trunc:
-        stack_body = f'<div class="details-body"><pre>{_esc(stack_trunc)}</pre></div>'
-        stack_html = f"<details><summary>Stack trace</summary>{stack_body}</details>"
+    # Prefer the in-result tail captured at run time (sanitised, bounded). Fall
+    # back to the legacy stack_trace from error_details so reports regenerated
+    # against archived runs (pre-error_log_tail) still surface diagnostics.
+    log_text = result.error_log_tail or ""
+    if not log_text and isinstance(details, dict):
+        stack = details.get("stack_trace")
+        if stack:
+            log_text = str(stack)
+    logs_html = ""
+    if log_text:
+        logs_body = f'<div class="details-body"><pre>{_esc(log_text)}</pre></div>'
+        logs_html = f"<details><summary>Logs</summary>{logs_body}</details>"
     component_html = f'<span class="badge neutral">{_esc(component)}</span>' if component else ""
     return f"""
 <h2>Error</h2>
@@ -662,7 +668,7 @@ def _render_error_details(result: EvaluationResult) -> str:
   </div>
   <h4>Message</h4>
   <pre>{_esc(result.error_message or "(no message)")}</pre>
-  {stack_html}
+  {logs_html}
 </div>
 """
 
@@ -1236,7 +1242,11 @@ class HTMLReportGenerator:
 
         The page shows the run header, success-criteria table, per-turn
         conversation trace with tool calls, command telemetry stats, and
-        error details (if any).
+        error details (if any). When ``result.error_log_tail`` is set, the
+        captured tail is embedded under a "Logs" disclosure in the error
+        section; otherwise the renderer falls back to the legacy
+        ``error_details["stack_trace"]`` so archived runs predating the tail
+        capture still surface diagnostics.
         """
         groups = _group_turns_by_iteration(result.turns or [])
         turns_html = "".join(_render_iteration_group(it, group) for it, group in groups)
@@ -1412,7 +1422,11 @@ def safe_write(generate: Callable[[], str], output_path: Path, *, label: str) ->
 
 
 def write_task_html(result: EvaluationResult, output_path: Path) -> Path | None:
-    """Render a per-task HTML report via ``safe_write``."""
+    """Render a per-task HTML report via ``safe_write``.
+
+    The renderer is a pure function of ``result``; the captured
+    ``error_log_tail`` (if any) drives the error section's "Logs" disclosure.
+    """
     return safe_write(
         lambda: HTMLReportGenerator.generate_task_html(result),
         output_path,

@@ -132,7 +132,6 @@ def test_task_html_error_case_with_empty_turns():
         "error_message": "Communication with agent failed",
         "component": "orchestrator.iteration_1",
         "is_retryable": False,
-        "stack_trace": "Traceback (most recent call last):\n  RuntimeError: boom",
     }
     html = HTMLReportGenerator.generate_task_html(result)
 
@@ -140,6 +139,85 @@ def test_task_html_error_case_with_empty_turns():
     assert "Communication with agent failed" in html
     assert "agent_communication" in html
     assert "No turn data" in html
+    # Without error_log_tail or stack_trace, the Logs disclosure is omitted.
+    assert "Stack trace" not in html
+    assert "<summary>Logs</summary>" not in html
+
+
+def test_task_html_error_renders_error_log_tail():
+    """``error_log_tail`` on the result drives the Logs disclosure."""
+    result = _make_result(
+        final_status=FinalStatus.ERROR,
+        error_message="Communication with agent failed",
+    )
+    result.error_log_tail = (
+        "2026-04-28 12:00:00 [INFO] coder_eval.orchestrator: starting task\n"
+        "2026-04-28 12:00:01 [ERROR] coder_eval.orchestrator: <crashed> & burned\n"
+    )
+
+    html = HTMLReportGenerator.generate_task_html(result)
+
+    assert "<summary>Logs</summary>" in html
+    # HTML metacharacters in the tail are escaped before injection.
+    assert "&lt;crashed&gt; &amp; burned" in html
+    assert "<crashed>" not in html
+    assert "Communication with agent failed" in html
+
+
+def test_task_html_error_falls_back_to_stack_trace():
+    """When error_log_tail is missing, the renderer falls back to the legacy
+    stack_trace stored in error_details so reports regenerated against
+    archived runs (pre-error_log_tail) still show diagnostics."""
+    result = _make_result(
+        final_status=FinalStatus.ERROR,
+        error_message="Communication with agent failed",
+    )
+    result.error_details = {
+        "error_category": "agent_communication",
+        "is_retryable": False,
+        "stack_trace": "Traceback (most recent call last):\n  RuntimeError: legacy boom",
+    }
+
+    html = HTMLReportGenerator.generate_task_html(result)
+
+    assert "<summary>Logs</summary>" in html
+    assert "RuntimeError: legacy boom" in html
+
+
+def test_task_html_error_log_tail_takes_precedence_over_stack_trace():
+    """When both are present, error_log_tail wins (richer, sanitised, bounded)."""
+    result = _make_result(
+        final_status=FinalStatus.ERROR,
+        error_message="boom",
+    )
+    result.error_log_tail = "agent crashed at iteration 3"
+    result.error_details = {
+        "error_category": "agent_communication",
+        "stack_trace": "Traceback: legacy stack frame",
+    }
+
+    html = HTMLReportGenerator.generate_task_html(result)
+
+    assert "<summary>Logs</summary>" in html
+    assert "agent crashed at iteration 3" in html
+    assert "legacy stack frame" not in html
+
+
+def test_task_html_error_no_logs_when_no_tail_and_no_stack_trace():
+    """No Logs disclosure when neither tail nor stack_trace is present."""
+    result = _make_result(
+        final_status=FinalStatus.ERROR,
+        error_message="Communication with agent failed",
+    )
+    result.error_details = {
+        "error_category": "agent_communication",
+        "is_retryable": True,
+    }
+
+    html = HTMLReportGenerator.generate_task_html(result)
+
+    assert "<summary>Logs</summary>" not in html
+    assert "Communication with agent failed" in html
 
 
 def test_task_html_truncates_long_parameters():

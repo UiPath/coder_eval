@@ -53,7 +53,7 @@ from .models import (
 from .orchestration.batch import run_batch as run_batch_impl
 from .orchestration.config import BatchRunConfig
 from .orchestration.evaluation import create_iteration_snapshot, load_reference_code
-from .path_utils import format_task_log_id
+from .path_utils import format_task_log_id, task_log_path
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, UserSimulator, evaluate_stop
 from .streaming.callbacks import StreamCallback, TaskScopedCallback, safe_emit
@@ -309,11 +309,11 @@ class Orchestrator:
         )
 
         # Calculate task log path
-        task_log_path = self.run_dir / "task.log"
-        task_log_path.parent.mkdir(parents=True, exist_ok=True)
+        task_log_file = task_log_path(self.run_dir)
+        task_log_file.parent.mkdir(parents=True, exist_ok=True)
 
         # Use context manager for automatic log handler management
-        with task_log_handler(task_log_path, task_id=self._log_task_id):
+        with task_log_handler(task_log_file, task_id=self._log_task_id) as log_tail:
             try:
                 # Setup components
                 await self._setup()
@@ -408,6 +408,17 @@ class Orchestrator:
             finally:
                 await self._run_post_run_commands()
                 await self._cleanup()
+                # Capture the sanitised log tail AFTER teardown so any errors
+                # logged during post-run / cleanup also land in the report,
+                # but BEFORE _finalize_result so task.json includes the field.
+                # Allowlist non-success terminal statuses; SUCCESS and
+                # MAX_TURNS_EXHAUSTED skip the tail to keep task.json compact.
+                if self.result.final_status in {
+                    FinalStatus.ERROR,
+                    FinalStatus.TIMEOUT,
+                    FinalStatus.FAILURE,
+                }:
+                    self.result.error_log_tail = log_tail.get_text() or None
                 self._finalize_result(start_time)
 
         return self.result

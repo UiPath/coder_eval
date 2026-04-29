@@ -6,7 +6,7 @@ import typer
 
 from ..config import settings
 from ..models import RunSummary
-from ..path_utils import generate_run_id
+from ..path_utils import TASK_LOG_FILENAME, generate_run_id
 from .console import console
 
 
@@ -127,7 +127,7 @@ def print_execution_summary(run_dir: Path, summary: RunSummary) -> None:
         console.print(f"  Experiment log: {run_log_path}")
 
     # Print task logs (find all task.log files under variant directories)
-    for task_log in sorted(run_dir.glob("**/task.log")):
+    for task_log in sorted(run_dir.glob(f"**/{TASK_LOG_FILENAME}")):
         # Dataset fan-out task_ids contain slashes, so render the full
         # relative path rather than indexing fixed parent segments.
         rel = task_log.parent.relative_to(run_dir).as_posix()

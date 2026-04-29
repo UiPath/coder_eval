@@ -5,6 +5,14 @@ from datetime import datetime
 from pathlib import Path
 
 
+TASK_LOG_FILENAME = "task.log"
+
+
+def task_log_path(run_dir: Path) -> Path:
+    """Per-task log file path inside a task run directory."""
+    return run_dir / TASK_LOG_FILENAME
+
+
 def generate_run_id() -> str:
     """Generate filesystem-safe timestamp: YYYY-MM-DD_HH-MM-SS."""
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
