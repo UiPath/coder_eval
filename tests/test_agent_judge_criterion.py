@@ -311,6 +311,48 @@ def test_agent_judge_include_agent_output_and_tool_calls(sandbox: Sandbox) -> No
     assert "uip rpa get-errors" in user_msg
 
 
+def test_agent_judge_include_dialog_renders_all_turns(sandbox: Sandbox) -> None:
+    turns = [
+        TurnRecord(iteration=1, user_input="add a button", agent_output="added"),
+        TurnRecord(iteration=2, user_input="make it red", agent_output="done"),
+    ]
+    criterion = AgentJudgeCriterion(description="x", prompt="grade", include_dialog=True)
+    mock_agent = _make_mock_agent('{"score": 0.8, "rationale": "ok"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        SuccessChecker(sandbox, init_registry=False).check(criterion, turn_records=turns)
+
+    user_msg: str = mock_agent.communicate.call_args.args[0]
+    assert "DIALOG" in user_msg
+    assert "simulated user" in user_msg
+    assert "[Turn 1] USER:\nadd a button" in user_msg
+    assert "[Turn 1] AGENT:\nadded" in user_msg
+    assert "[Turn 2] USER:\nmake it red" in user_msg
+    assert "[Turn 2] AGENT:\ndone" in user_msg
+
+
+def test_agent_judge_include_dialog_no_turns_records_degraded_note(sandbox: Sandbox) -> None:
+    criterion = AgentJudgeCriterion(description="x", prompt="grade", include_dialog=True)
+    mock_agent = _make_mock_agent('{"score": 0.5, "rationale": "ok"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+
+    user_msg: str = mock_agent.communicate.call_args.args[0]
+    assert "DIALOG" not in user_msg
+    assert "include_dialog requested but no turn records available" in (result.details or "")
+
+
+def test_agent_judge_include_dialog_omitted_when_false(sandbox: Sandbox) -> None:
+    turn = TurnRecord(iteration=1, user_input="add a button", agent_output="added")
+    criterion = AgentJudgeCriterion(description="x", prompt="grade")
+    mock_agent = _make_mock_agent('{"score": 0.8, "rationale": "ok"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        SuccessChecker(sandbox, init_registry=False).check(criterion, turn_records=[turn])
+
+    user_msg: str = mock_agent.communicate.call_args.args[0]
+    assert "DIALOG" not in user_msg
+    assert "add a button" not in user_msg
+
+
 def test_agent_judge_surfaces_degraded_notes_when_turn_records_missing(sandbox: Sandbox) -> None:
     criterion = AgentJudgeCriterion(
         description="x",

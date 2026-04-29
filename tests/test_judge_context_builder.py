@@ -33,19 +33,29 @@ def _make_builder(
     include_reference: bool = False,
     include_agent_output: bool = False,
     include_tool_calls: bool = False,
+    include_dialog: bool = False,
     max_file_chars: int = 20_000,
+    max_dialog_chars: int = 80_000,
 ) -> JudgeContextBuilder:
     return JudgeContextBuilder(
         files=files or [],
         include_reference=include_reference,
         include_agent_output=include_agent_output,
         include_tool_calls=include_tool_calls,
+        include_dialog=include_dialog,
         max_file_chars=max_file_chars,
+        max_dialog_chars=max_dialog_chars,
     )
 
 
-def _make_turn(agent_output: str = "", commands: list[CommandTelemetry] | None = None) -> TurnRecord:
-    return TurnRecord(iteration=1, user_input="x", agent_output=agent_output, commands=commands or [])
+def _make_turn(
+    agent_output: str = "",
+    commands: list[CommandTelemetry] | None = None,
+    *,
+    user_input: str = "x",
+    iteration: int = 1,
+) -> TurnRecord:
+    return TurnRecord(iteration=iteration, user_input=user_input, agent_output=agent_output, commands=commands or [])
 
 
 def _make_cmd(tool_name: str, params: dict[str, object], seq: int = 0) -> CommandTelemetry:
@@ -196,6 +206,75 @@ def test_builder_tool_calls_empty_commands(sandbox: Sandbox) -> None:
     assert ctx.tool_calls_summary is None
     # Silent omission — matches legacy behavior (zero-command turn isn't a degradation).
     assert all("include_tool_calls" not in n for n in ctx.degraded_notes)
+
+
+# --- dialog ---
+
+
+def test_builder_dialog_collects_all_turns(sandbox: Sandbox) -> None:
+    turns = [
+        _make_turn(user_input="hello", agent_output="hi", iteration=1),
+        _make_turn(user_input="add a button", agent_output="done", iteration=2),
+    ]
+    ctx = _make_builder(include_dialog=True).build(sandbox, None, turns)
+    assert ctx.dialog == [("hello", "hi"), ("add a button", "done")]
+
+
+def test_builder_dialog_no_turns(sandbox: Sandbox) -> None:
+    ctx = _make_builder(include_dialog=True).build(sandbox, None, None)
+    assert ctx.dialog == []
+    assert any("include_dialog" in n for n in ctx.degraded_notes)
+
+
+def test_builder_dialog_empty_turns_list(sandbox: Sandbox) -> None:
+    ctx = _make_builder(include_dialog=True).build(sandbox, None, [])
+    assert ctx.dialog == []
+    assert any("include_dialog" in n for n in ctx.degraded_notes)
+
+
+def test_builder_dialog_truncates_long_messages(sandbox: Sandbox) -> None:
+    turn = _make_turn(user_input="u" * 500, agent_output="a" * 500)
+    ctx = _make_builder(include_dialog=True, max_file_chars=100).build(sandbox, None, [turn])
+    assert len(ctx.dialog) == 1
+    user_text, agent_text = ctx.dialog[0]
+    assert "... (truncated" in user_text
+    assert "... (truncated" in agent_text
+
+
+def test_builder_dialog_handles_empty_strings(sandbox: Sandbox) -> None:
+    turn = _make_turn(user_input="", agent_output="")
+    ctx = _make_builder(include_dialog=True).build(sandbox, None, [turn])
+    assert ctx.dialog == [("", "")]
+
+
+def test_builder_dialog_aggregate_budget_drops_trailing_turns(sandbox: Sandbox) -> None:
+    # Each turn contributes ~200 chars; budget 500 fits 2 turns then trips on the 3rd.
+    turns = [_make_turn(user_input="u" * 100, agent_output="a" * 100, iteration=i) for i in range(1, 5)]
+    ctx = _make_builder(include_dialog=True, max_dialog_chars=500).build(sandbox, None, turns)
+    assert len(ctx.dialog) == 2
+    assert any("dropped 2 trailing turn" in n and "max_dialog_chars=500" in n for n in ctx.degraded_notes)
+
+
+def test_builder_dialog_first_turn_exceeds_budget_kept(sandbox: Sandbox) -> None:
+    # First turn always lands so the judge sees something — the cap kicks in only on additions.
+    turns = [_make_turn(user_input="u" * 1000, agent_output="a" * 1000)]
+    ctx = _make_builder(include_dialog=True, max_dialog_chars=10).build(sandbox, None, turns)
+    assert len(ctx.dialog) == 1
+    assert all("dropped" not in n for n in ctx.degraded_notes)
+
+
+def test_builder_dialog_within_budget_no_note(sandbox: Sandbox) -> None:
+    turns = [_make_turn(user_input="hi", agent_output="hello", iteration=i) for i in range(1, 4)]
+    ctx = _make_builder(include_dialog=True, max_dialog_chars=80_000).build(sandbox, None, turns)
+    assert len(ctx.dialog) == 3
+    assert all("dropped" not in n for n in ctx.degraded_notes)
+
+
+def test_builder_dialog_not_requested(sandbox: Sandbox) -> None:
+    turn = _make_turn(user_input="hi", agent_output="hello")
+    ctx = _make_builder(include_dialog=False).build(sandbox, None, [turn])
+    assert ctx.dialog == []
+    assert all("include_dialog" not in n for n in ctx.degraded_notes)
 
 
 # --- scrub_reference ---

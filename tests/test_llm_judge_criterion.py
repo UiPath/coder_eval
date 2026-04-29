@@ -253,6 +253,48 @@ def test_judge_include_tool_calls_true(sandbox: Sandbox) -> None:
     assert "ls" in user_msg
 
 
+def test_judge_include_dialog_renders_all_turns(sandbox: Sandbox) -> None:
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", include_dialog=True)
+    turns = [
+        TurnRecord(iteration=1, user_input="add a button", agent_output="added"),
+        TurnRecord(iteration=2, user_input="make it red", agent_output="done"),
+    ]
+    mock_llm = _make_mock_llm('{"score": 0.8, "rationale": "ok"}')
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
+        SuccessChecker(sandbox, init_registry=False).check(criterion, turn_records=turns)
+
+    user_msg = mock_llm.invoke.call_args.args[0][1]["content"]
+    assert "DIALOG" in user_msg
+    assert "simulated user" in user_msg  # rubric guard against false hallucination calls
+    assert "[Turn 1] USER:\nadd a button" in user_msg
+    assert "[Turn 1] AGENT:\nadded" in user_msg
+    assert "[Turn 2] USER:\nmake it red" in user_msg
+    assert "[Turn 2] AGENT:\ndone" in user_msg
+
+
+def test_judge_include_dialog_omitted_when_false(sandbox: Sandbox) -> None:
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    turn = TurnRecord(iteration=1, user_input="add a button", agent_output="added")
+    mock_llm = _make_mock_llm('{"score": 0.8, "rationale": "ok"}')
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
+        SuccessChecker(sandbox, init_registry=False).check(criterion, turn_records=[turn])
+
+    user_msg = mock_llm.invoke.call_args.args[0][1]["content"]
+    assert "DIALOG" not in user_msg
+    assert "add a button" not in user_msg
+
+
+def test_judge_include_dialog_no_turns_records_degraded_note(sandbox: Sandbox) -> None:
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", include_dialog=True)
+    mock_llm = _make_mock_llm('{"score": 0.5, "rationale": "ok"}')
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion, turn_records=None)
+
+    user_msg = mock_llm.invoke.call_args.args[0][1]["content"]
+    assert "DIALOG" not in user_msg
+    assert "include_dialog" in (result.details or "")
+
+
 def test_judge_trajectory_toggles_without_turn_records(sandbox: Sandbox) -> None:
     criterion = LLMJudgeCriterion(
         description="x",
