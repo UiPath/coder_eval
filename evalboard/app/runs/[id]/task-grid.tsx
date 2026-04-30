@@ -5,10 +5,11 @@ import { useMemo, useState } from "react";
 import type { TaskResultSummary } from "@/lib/runs";
 import { humanizeTaskId } from "@/lib/format";
 import { StatusPill } from "@/lib/pills";
+import { statusSortRank } from "@/lib/status";
 
 type SortKey = "task" | "status" | "score" | "duration" | "cost" | "tools";
 
-function fmtDuration(s: number | null): string {
+function fmtTableDuration(s: number | null): string {
     if (s == null) return "—";
     if (s < 60) return `${s.toFixed(1)}s`;
     const m = Math.floor(s / 60);
@@ -19,12 +20,6 @@ function fmtDuration(s: number | null): string {
 function fmtCost(c: number | null): string {
     if (c == null) return "—";
     return `$${c.toFixed(3)}`;
-}
-
-function statusRank(s: string | null): number {
-    if (s === "FAILURE" || s === "ERROR" || s === "TIMEOUT") return 0;
-    if (s === "SUCCESS") return 2;
-    return 1;
 }
 
 const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
@@ -45,7 +40,7 @@ function compare(
         case "task":
             return a.taskId.localeCompare(b.taskId);
         case "status":
-            return statusRank(a.status) - statusRank(b.status);
+            return statusSortRank(a.status) - statusSortRank(b.status);
         case "score":
             return (
                 (a.weightedScore ?? -Infinity) -
@@ -84,9 +79,15 @@ const COLUMNS: Array<{
 export function TaskGrid({
     runId,
     tasks,
+    selectedSet,
+    onToggleTag,
+    emptyHint = "no tasks in this run",
 }: {
     runId: string;
     tasks: TaskResultSummary[];
+    selectedSet?: Set<string>;
+    onToggleTag?: (tag: string) => void;
+    emptyHint?: string;
 }) {
     const [sort, setSort] = useState<{
         key: SortKey;
@@ -105,7 +106,7 @@ export function TaskGrid({
             // Default: failures first, then by task id.
             arr.sort(
                 (a, b) =>
-                    statusRank(a.status) - statusRank(b.status) ||
+                    statusSortRank(a.status) - statusSortRank(b.status) ||
                     a.taskId.localeCompare(b.taskId),
             );
         }
@@ -136,9 +137,16 @@ export function TaskGrid({
                                     ? "▲"
                                     : "▼"
                                 : "";
+                            const ariaSort: "ascending" | "descending" | "none" =
+                                active
+                                    ? sort.dir === "asc"
+                                        ? "ascending"
+                                        : "descending"
+                                    : "none";
                             return (
                                 <th
                                     key={col.key}
+                                    aria-sort={ariaSort}
                                     className={`py-3 px-4 font-medium ${alignCls}`}
                                 >
                                     <button
@@ -163,16 +171,46 @@ export function TaskGrid({
                             className="border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors"
                         >
                             <td className="py-3 px-4 text-gray-700">
-                                <div className="flex flex-col min-w-0">
+                                <div className="flex flex-col min-w-0 gap-0.5">
                                     <Link
                                         href={`/runs/${runId}/${t.taskId}`}
                                         className="text-gray-900 hover:text-studio-blue font-semibold"
                                     >
                                         {humanizeTaskId(t.taskId)}
                                     </Link>
-                                    <span className="text-xs text-gray-400 font-mono tabular-nums">
-                                        {t.taskId}
-                                    </span>
+                                    {t.tags.length > 0 && (
+                                        <div className="flex flex-wrap gap-1 mt-0.5">
+                                            {t.tags.map((tag) => {
+                                                const active =
+                                                    selectedSet?.has(tag) ??
+                                                    false;
+                                                const cls = active
+                                                    ? "bg-studio-blue/10 text-studio-blue border-studio-blue/30"
+                                                    : "bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100";
+                                                const baseCls = `text-[10px] leading-none px-1.5 py-0.5 rounded border transition-colors ${cls}`;
+                                                return onToggleTag ? (
+                                                    <button
+                                                        key={tag}
+                                                        type="button"
+                                                        onClick={() =>
+                                                            onToggleTag(tag)
+                                                        }
+                                                        aria-pressed={active}
+                                                        className={baseCls}
+                                                    >
+                                                        {tag}
+                                                    </button>
+                                                ) : (
+                                                    <span
+                                                        key={tag}
+                                                        className={baseCls}
+                                                    >
+                                                        {tag}
+                                                    </span>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
                                 </div>
                             </td>
                             <td className="py-3 px-4">
@@ -184,7 +222,7 @@ export function TaskGrid({
                                     : "—"}
                             </td>
                             <td className="py-3 px-4 text-right tabular-nums text-gray-700">
-                                {fmtDuration(t.durationSeconds)}
+                                {fmtTableDuration(t.durationSeconds)}
                             </td>
                             <td className="py-3 px-4 text-right tabular-nums text-gray-700">
                                 {fmtCost(t.totalCostUsd)}
@@ -200,7 +238,7 @@ export function TaskGrid({
                                 colSpan={COLUMNS.length}
                                 className="py-6 px-4 text-center text-sm text-gray-500"
                             >
-                                no tasks in this run
+                                {emptyHint}
                             </td>
                         </tr>
                     )}

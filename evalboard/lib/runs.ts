@@ -22,11 +22,14 @@ export interface ComponentSha {
 }
 
 // A run is one `coder-eval run` invocation. It contains N task results.
+// Run-level summary stats. Fields aggregate across all tasks in the run.
 export interface RunSummary {
     id: string;
     startTime: string | null;
     endTime: string | null;
-    durationSeconds: number | null;
+    // Sum of per-task durations (compute time). Falls back to wall-clock
+    // (run end - run start) when per-task durations are unavailable.
+    taskDurationSeconds: number | null;
     tasksRun: number;
     tasksSucceeded: number;
     tasksFailed: number;
@@ -188,11 +191,25 @@ export async function readRunSummary(id: string): Promise<RunSummary | null> {
         (a, t) => a + (t.total_cost_usd ?? 0),
         0,
     );
+    // Sum of per-task durations (compute time). Only use the sum when every
+    // task has a duration recorded; otherwise the partial sum would understate
+    // the run drastically (e.g. 1/50 tasks with a duration would render as that
+    // single task's time). Fall back to wall-clock in that case.
+    const taskDurationSum = taskResults.reduce(
+        (a, t) => a + (t.duration ?? 0),
+        0,
+    );
+    const allHaveDuration =
+        taskResults.length > 0 &&
+        taskResults.every((t) => t.duration != null);
+    const taskDurationSeconds = allHaveDuration
+        ? taskDurationSum
+        : (data.total_duration_seconds ?? null);
     return {
         id,
         startTime: data.start_time ?? null,
         endTime: data.end_time ?? null,
-        durationSeconds: data.total_duration_seconds ?? null,
+        taskDurationSeconds,
         tasksRun: data.tasks_run ?? taskResults.length,
         tasksSucceeded: data.tasks_succeeded ?? 0,
         tasksFailed: data.tasks_failed ?? 0,

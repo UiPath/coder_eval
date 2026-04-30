@@ -102,7 +102,7 @@ export default async function Page() {
                                         {fmtCost(r.totalCostUsd)}
                                     </td>
                                     <td className="py-3 px-4 text-right tabular-nums text-gray-700">
-                                        {fmtDuration(r.durationSeconds)}
+                                        {fmtDuration(r.taskDurationSeconds)}
                                     </td>
                                 </tr>
                             );
