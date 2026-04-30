@@ -312,7 +312,7 @@ class Orchestrator:
 
         # Calculate task log path
         task_log_file = task_log_path(self.run_dir)
-        task_log_file.parent.mkdir(parents=True, exist_ok=True)
+        task_log_file.parent.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
 
         # Use context manager for automatic log handler management
         with task_log_handler(task_log_file, task_id=self._log_task_id) as log_tail:
@@ -497,8 +497,10 @@ class Orchestrator:
         )
 
         # Persist
-        self.report_path.parent.mkdir(parents=True, exist_ok=True)
-        self.report_path.write_text(self.result.model_dump_json(indent=2), encoding="utf-8")
+        self.report_path.parent.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
+        self.report_path.write_text(  # noqa: CE002 — small JSON write at end of run
+            self.result.model_dump_json(indent=2), encoding="utf-8"
+        )
 
         # Also emit an HTML trace/report alongside task.json. HTML failure must
         # never mask the underlying run outcome — write_task_html logs and
@@ -582,7 +584,7 @@ class Orchestrator:
         # Create snapshot directory if snapshots enabled
         if self.task.sandbox.snapshots.mode != SnapshotMode.DISABLED:
             self.snapshot_base_dir = self.run_dir / "snapshots"
-            self.snapshot_base_dir.mkdir(parents=True, exist_ok=True)
+            self.snapshot_base_dir.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
             logger.info(f"Snapshots enabled: mode={self.task.sandbox.snapshots.mode.value}")
 
         # Create success checker

@@ -43,8 +43,8 @@ from coder_eval.models import (
     ResultSummary,
     TokenUsage,
     TurnRecord,
+    to_bedrock_inference_profile,
 )
-from coder_eval.models.routing import to_bedrock_inference_profile
 from coder_eval.resources import get_ignore_patterns, should_ignore_path
 from coder_eval.streaming.callbacks import StreamCallback, safe_emit
 from coder_eval.streaming.events import TextChunkEvent, ToolCallEvent, ToolResultEvent

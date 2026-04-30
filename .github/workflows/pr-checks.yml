@@ -63,13 +63,16 @@ jobs:
       - name: Lint code (ruff check)
         run: .venv/bin/ruff check src/ tests/
 
+      - name: Custom architectural lint (CE001+)
+        run: .venv/bin/pytest tests/test_custom_lint.py -v --tb=short --no-header -p no:warnings
+
       # PHASE 2: Type checking
       - name: Type check with pyright
         run: .venv/bin/pyright
 
       # PHASE 3: Security scanning
       - name: Security - Dependency vulnerabilities (pip-audit)
-        run: .venv/bin/pip-audit --desc --skip-editable --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219  # pygments 2.19.2 ReDoS + pip 26.0.1 tar/ZIP ambiguity; no fixes available on PyPI yet — revisit quarterly
+        run: .venv/bin/pip-audit --desc --skip-editable --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219 # pygments 2.19.2 ReDoS + pip 26.0.1 tar/ZIP ambiguity; no fixes available on PyPI yet — revisit quarterly
 
       - name: Security - Code analysis (bandit)
         run: .venv/bin/bandit -r src/ -ll --format json -o bandit-report.json
@@ -87,7 +90,7 @@ jobs:
       - name: Run test suite with coverage
         run: |
           .venv/bin/pytest tests/ -v \
-            -m "not live" \
+            -m "not live and not lint" \
             --cov=coder_eval \
             --cov-report=term-missing \
             --cov-report=xml \
@@ -161,7 +164,7 @@ jobs:
         run: .venv/Scripts/pyright
 
       - name: Run test suite
-        run: .venv/Scripts/pytest tests/ -v -m "not live"
+        run: .venv/Scripts/pytest tests/ -v -m "not live and not lint"
 
   e2e-smoke:
     name: E2E Smoke Tests (Real API)

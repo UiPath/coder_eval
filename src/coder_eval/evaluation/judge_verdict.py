@@ -14,7 +14,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from coder_eval.models.judge import JudgeVerdict
+from coder_eval.models import JudgeVerdict
 
 
 def _iter_top_level_object_spans(text: str) -> list[str]:

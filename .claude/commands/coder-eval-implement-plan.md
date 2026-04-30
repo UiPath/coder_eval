@@ -27,6 +27,7 @@ If no plan path provided, ask for one.
 ### Resuming Work
 
 If the plan has existing checkmarks:
+
 - Before resuming, run the success criteria for the most recently completed phase (or `make verify`) to confirm the starting state is clean
 - Verify if earlier completed steps are correct
 - Resume from the first unchecked item
@@ -35,6 +36,7 @@ If the plan has existing checkmarks:
 ## Implementation Philosophy
 
 Plans are carefully designed, but reality can be messy. Your job is to:
+
 - Follow the plan's intent while adapting to what you find in the current codebase
 - Implement each phase fully before moving to the next
 - **Stay within scope** — do not refactor, improve, or extend beyond what the plan specifies
@@ -55,6 +57,7 @@ How should I proceed?
 ### Codebase-Specific Guidelines
 
 When implementing, keep these coder_eval conventions in mind:
+
 - **Models**: All Pydantic models must be importable from `coder_eval.models` — update `models/__init__.py` if adding new models
 - **Criteria**: New criteria use `@register_criterion` decorator in `criteria/` and must be added to the `SuccessCriterion` discriminated union in `models/criteria.py`
 - **Agents**: New agents implement the `Agent` ABC (start, communicate, stop, get_state) and register in `AgentKind` enum + `Orchestrator._create_agent()`
@@ -74,6 +77,7 @@ For each phase in the plan, execute this cycle:
 ### Step 2: Commit the Phase
 
 Commit after completing each phase (or logical group of changes):
+
 - Use a conventional commit message referencing the phase (e.g., `feat(criteria): phase 2 — add import_check criterion`)
 - This gives clean rollback points if later phases need rethinking
 - Do NOT commit broken or partially-verified work
@@ -104,14 +108,17 @@ After automated verification passes, launch an **Opus sub-agent** (`Agent` tool 
 ### Step 5: Fix Review Findings
 
 Fix all medium-severity and above issues found by the sub-agent:
+
 - **Logic/correctness bugs**: Write a unit test that fails, fix the code, re-run the test. If not reproducible, mark as false positive.
 - **Structural issues** (naming, KISS/DRY): Fix directly — no test required.
+- **Regression lint**: For each logic/correctness bug fixed, ask: _is this pattern mechanically detectable by an AST rule?_ If yes, add a custom lint rule to `tests/lint/rules/` following the CE001–CE005 pattern and wire it up in `tests/lint/runner.py`. Run `make lint` to confirm. This converts a one-time fix into permanent enforcement — future code cannot reintroduce the same class of bug.
 
 After all fixes, re-run `make verify`. Commit review fixes as a separate commit (e.g., `fix(criteria): code review fixes for phase 2`) — do not amend the implementation commit. Low-severity issues are noted but not fixed.
 
 ### Step 6: Checkpoint
 
 After all fixes pass verification:
+
 1. Check off completed items in the plan file using Edit
 2. Update your todo list
 3. Pause and inform the user:
@@ -138,6 +145,7 @@ Do not check off manual testing steps until confirmed by the user.
 ## If You Get Stuck
 
 When something isn't working as expected:
+
 - Read and understand all the relevant code — check if the codebase evolved since the plan was written
 - Check for circular imports if adding new model exports
 - Check if `criteria/__init__.py` static fallback set needs updating for new criteria
@@ -148,6 +156,7 @@ Use sub-agents sparingly — mainly for targeted debugging or exploring unfamili
 ## Implementation Completion
 
 When all phases are done:
+
 1. Review all changes against the starting commit SHA (`git diff <start-sha>..HEAD`) to ensure nothing was missed. If something was missed, fix it.
 2. If the plan contains a Master Acceptance Checklist, check off each item. For any item you cannot verify, flag it to the user.
 3. Run the full verification suite: `make verify`
@@ -205,6 +214,7 @@ At the end of all phases (or when stopping), present a concise end-to-end summar
 Both the per-phase Opus review (Step 4) and the Full Code Review use these same criteria.
 
 **Principles** — evaluate against all of these:
+
 - **Bug-free code**: Logic errors, edge cases, off-by-one errors, unhandled states
 - **KISS**: Is the code as simple as it can be? No unnecessary abstractions or indirection
 - **DRY**: No duplicated logic that should be consolidated; no premature abstraction either
@@ -214,6 +224,7 @@ Both the per-phase Opus review (Step 4) and the Full Code Review use these same 
 - **CLAUDE.md adherence**: Follows patterns defined in CLAUDE.md and the codebase — no ad-hoc solutions that bypass established abstractions
 
 **Checklist** — check every item:
+
 1. **Correctness**: Does the implementation match the plan's intent? Are all edge cases handled?
 2. **Type safety**: Proper annotations, no `Any` escape hatches, Pydantic fields have correct types/defaults/descriptions
 3. **Ripple completeness**: All references updated when a model field/config key/CLI flag is added/removed/renamed (task YAMLs, experiment YAMLs, `.claude/commands/`, docs, autogen templates, `experiments/default.yaml`, `models/__init__.py`)
@@ -222,3 +233,13 @@ Both the per-phase Opus review (Step 4) and the Full Code Review use these same 
 6. **Allowlist over denylist**: Status classification uses explicit allowlists, not denylists
 7. **Resource cleanup**: No file handle, subprocess, or temp directory leaks — especially in error paths
 8. **Public API surface**: New exports from `coder_eval.models` are intentional; discriminated unions updated if needed
+9. **Regression lint**: For each correctness bug found, consider whether it is mechanically detectable (wrong import path, missing decorator, blocking call in async, silent exception). If so, flag it as a candidate for a new rule in `tests/lint/rules/` — the reviewer should call this out explicitly so it gets actioned in Step 5.
+10. **Layer-merge coverage**: New fields on `ResolvedTask` / `AgentConfig` / `BatchRunConfig` have explicit coverage in `test_experiment_resolver.py` exercising all 5 merge layers (default → exp defaults → task → variant → CLI), and a matching CLI override in `_apply_cli_overrides`. Fix-commit family includes `8ed1d6c`, `a5466b5`, `d2fa30d`, `56a5e38`, `2b2086b`.
+11. **Pydantic round-trip integrity**: Changes to layered configs or polymorphic `CriterionResult` subclasses preserve `model_fields_set` and the discriminator across `model_dump(exclude_unset=True)` → `model_validate()`. Round-trip tests exist for new variants.
+12. **Discriminated unions**: New or modified Pydantic unions use `Annotated[..., Field(discriminator="type")]`. Bare `A | B | C` unions silently coerce to the first variant on a missing or typo'd `type`.
+13. **Cross-retry state hygiene**: After `AgentCrashError` / `TurnTimeoutError` / `is_error=True` SDK message, the agent resets `_session_id`, `pending_turn`, watchdog references, streaming-event `ContextVar`s, and iteration counters before the next attempt. Test covers a crashing turn followed by a successful turn in the same `Orchestrator` instance.
+14. **Untrusted text in evaluator prompts**: Strings derived from agent output (tool-call args, stdout, file contents, dialog history) injected into a judge / simulator / reviewer prompt are wrapped in a fenced block with explicit untrusted-data framing; the system prompt instructs the model to treat that block as adversarial.
+15. **NaN / non-finite guards**: Score and threshold clamps via `max(lo, min(hi, x))` are preceded by `math.isfinite(x)`. Bad parses fail explicitly instead of silently returning the upper bound (`max(0.0, min(1.0, nan)) == 1.0`).
+16. **Registry over hardcoded dispatch**: New agent / criterion / template / route variants go through the existing registry (`@register_criterion`, etc.). `if x.type == ...` / `isinstance(...)` ladders in `orchestrator.py`, `simulation/`, or `evaluation/` are rejected.
+17. **Test mocks match real SDK shape**: Mocks of `claude_agent_sdk` types only set attributes present on the installed class. Use `Mock(spec=RealType)` or assert `hasattr(RealType, attr)` in test setup so production reads of fabricated fields surface as test failures.
+18. **`extra="forbid"` on configs**: Pydantic models that consume YAML or CLI input declare `model_config = ConfigDict(extra="forbid")`. Unknown keys raise instead of being silently dropped.

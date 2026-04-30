@@ -19,6 +19,7 @@ just as it is never passed to the coding agent.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import tempfile
@@ -26,8 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from coder_eval.models import AgentConfig, AgentKind, SimulationConfig
-from coder_eval.models.routing import ApiRoute
+from coder_eval.models import AgentConfig, AgentKind, ApiRoute, SimulationConfig
 
 
 if TYPE_CHECKING:
@@ -249,7 +249,7 @@ class UserSimulator:
                 logger.exception("Error stopping simulator agent")
             self._agent = None
         if self._scratch_dir is not None and self._scratch_dir.exists():
-            shutil.rmtree(self._scratch_dir, ignore_errors=True)
+            await asyncio.to_thread(shutil.rmtree, self._scratch_dir, ignore_errors=True)
             self._scratch_dir = None
 
     async def next_user_message(self, dialog_pairs: list[tuple[str, str]]) -> SimulatorResult:

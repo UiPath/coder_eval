@@ -81,6 +81,10 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
+external = ["CE001", "CE002", "CE003", "CE004", "CE005"]  # custom architectural lint rules (tests/lint/)
+
+[tool.ruff.lint.per-file-ignores]
+"tests/lint/**" = ["N802"]  # visit_* methods must match AST node class names (PascalCase required by ast.NodeVisitor)
 
 [tool.ruff.lint.isort]
 known-first-party = ["coder_eval"]
@@ -193,6 +197,7 @@ markers = [
     "e2e: marks tests as end-to-end tests",
     "requires_api_key: marks tests that need real API keys",
     "live: marks tests that hit real external services (LLM Gateway, etc.)",
+    "lint: marks tests that enforce custom architectural lint rules",
 ]
 
 # Test discovery patterns

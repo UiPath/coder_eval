@@ -1,4 +1,4 @@
-.PHONY: help install format check typecheck test test-live test-smoke verify clean run
+.PHONY: help install format check typecheck test test-live test-smoke verify clean run lint
 
 help:  ## Show this help message
 	@echo "Available commands:"
@@ -14,11 +14,14 @@ format:  ## Auto-format code with ruff
 check:  ## Run linting checks
 	uv run ruff check src/ tests/
 
+lint:  ## Run custom architectural lint rules (CE001–CE005)
+	uv run pytest tests/test_custom_lint.py -v --tb=short --no-header -p no:warnings
+
 typecheck:  ## Run type checking with pyright
 	uv run pyright
 
-test:  ## Run test suite (excludes live tests)
-	uv run pytest -n auto -m "not live" tests/
+test:  ## Run test suite (excludes live + lint tests; run `make lint` for those)
+	uv run pytest -n auto -m "not live and not lint" tests/
 
 test-live:  ## Run live-only tests (real Anthropic API + claude CLI; requires ANTHROPIC_API_KEY)
 	uv run pytest -m live tests/ -v
@@ -32,9 +35,10 @@ verify:  ## Run all verification steps (CI equivalent)
 	uv run ruff format --check src/ tests/
 	uv run ruff check src/ tests/
 	uv run pyright
+	uv run pytest tests/test_custom_lint.py -v --tb=short --no-header -p no:warnings
 	# uv run pip-audit --desc --skip-editable
 	# uv run bandit -r src/ -ll --format json -o bandit-report.json
-	uv run pytest tests/ -n auto -m "not live" --cov=coder_eval --cov-report=term-missing --cov-report=xml --cov-fail-under=80
+	uv run pytest tests/ -n auto -m "not live and not lint" --cov=coder_eval --cov-report=term-missing --cov-report=xml --cov-fail-under=80
 
 clean:  ## Clean build artifacts and cache
 	rm -rf build/ dist/ *.egg-info .pytest_cache .ruff_cache .coverage coverage.xml htmlcov/ bandit-report.json coverage.xml

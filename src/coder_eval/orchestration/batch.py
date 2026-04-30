@@ -65,7 +65,7 @@ async def run_batch(
         task_callback = stream_callback_factory(stream_label) if stream_callback_factory else None
         async with semaphore:
             try:
-                rt.run_dir.mkdir(parents=True, exist_ok=True)
+                rt.run_dir.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
                 orchestrator = Orchestrator(
                     task=rt.task,
                     run_dir=rt.run_dir,

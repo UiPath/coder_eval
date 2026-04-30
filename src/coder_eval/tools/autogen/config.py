@@ -6,8 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from coder_eval.models.enums import AgentKind
-from coder_eval.models.tasks import AgentConfig
+from coder_eval.models import AgentConfig, AgentKind
 
 
 class AutogenConfig(BaseModel):

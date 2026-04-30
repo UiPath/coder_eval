@@ -6,7 +6,7 @@ from pathlib import Path
 from dotenv import dotenv_values, load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from coder_eval.models.enums import ApiBackend
+from coder_eval.models import ApiBackend
 
 
 # Load .env file with override so .env values always win over shell environment

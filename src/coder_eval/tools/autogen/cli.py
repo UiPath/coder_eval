@@ -11,8 +11,7 @@ from pydantic import ValidationError
 
 from coder_eval.cli.console import console
 from coder_eval.config import Settings
-from coder_eval.models import AgentConfig, ExperimentDefinition
-from coder_eval.models.enums import AgentKind, ApiBackend
+from coder_eval.models import AgentConfig, AgentKind, ApiBackend, ExperimentDefinition, proxy_config_from_settings
 from coder_eval.tools.autogen.config import AutogenConfig
 from coder_eval.tools.autogen.generator import generate_experiment, generate_tasks, task_to_yaml
 from coder_eval.tools.autogen.validator import validate_tasks
@@ -117,7 +116,6 @@ async def _run_autogen(
 
     if settings.api_backend == ApiBackend.PROXY:
         settings.validate_api_keys("claude-code")
-        from coder_eval.models.routing import proxy_config_from_settings
         from coder_eval.proxy import LLMGatewayProxy
 
         try:
@@ -131,8 +129,8 @@ async def _run_autogen(
 
     tasks_dir = output / "tasks"
     experiments_dir = output / "experiments"
-    tasks_dir.mkdir(parents=True, exist_ok=True)
-    experiments_dir.mkdir(parents=True, exist_ok=True)
+    tasks_dir.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
+    experiments_dir.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
 
     console.print(f"\n[bold]Autogen[/bold] -- {plugins.resolve().name}")
     console.print(f"  Coverage  : [yellow]{config.coverage}[/yellow]")
@@ -198,7 +196,7 @@ async def _run_autogen(
             continue
 
         out_dict = task.model_dump(mode="json", exclude_none=True)
-        out_path.write_text(task_to_yaml(out_dict))
+        out_path.write_text(task_to_yaml(out_dict))  # noqa: CE002 — small YAML file
         console.print(f"  [green]✓[/green]  {filename}")
         written += 1
 
@@ -219,7 +217,7 @@ async def _run_autogen(
 
         experiment_id = experiment_dict["experiment_id"]
         experiment_path = experiments_dir / f"{experiment_id}.yaml"
-        experiment_path.write_text(task_to_yaml(experiment_dict))
+        experiment_path.write_text(task_to_yaml(experiment_dict))  # noqa: CE002 — small YAML file
         console.print(f"\n[green]✓[/green]  Experiment: {experiment_path}")
         console.print("\nRun generated tasks:")
         console.print(f"  [cyan]coder-eval run {tasks_dir}/*.yaml -e {experiment_path}[/cyan]")

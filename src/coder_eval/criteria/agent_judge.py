@@ -31,8 +31,8 @@ from coder_eval.models import (
     AgentKind,
     ApiBackend,
     CriterionResult,
+    resolve_route,
 )
-from coder_eval.models.routing import resolve_route
 
 
 if TYPE_CHECKING:

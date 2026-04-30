@@ -13,7 +13,7 @@ from typing import Any
 import anthropic
 import yaml
 
-import coder_eval.models.criteria as _criteria_module
+import coder_eval.models.criteria as _criteria_module  # noqa: CE001 -- runtime introspection of the criteria module (iterates members), not importing a type
 from coder_eval.tools.autogen.config import AutogenConfig
 
 

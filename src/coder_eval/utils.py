@@ -52,25 +52,25 @@ def get_version_info(sandbox_path: Path | None = None) -> dict[str, Any]:
         version_info[f"{name}_git_commit"] = _git_short_sha(repo_path)
 
     # Get coder_eval version
-    try:
-        from importlib.metadata import version
+    from importlib.metadata import PackageNotFoundError, version
 
+    try:
         version_info["coder_eval"] = version("coder_eval")
-    except Exception:
+    except PackageNotFoundError:
         version_info["coder_eval"] = "unknown"
 
     # Try to get Claude CLI version
     try:
         result = subprocess.run(["claude", "-v"], capture_output=True, text=True, timeout=5)
         version_info["claude_code_cli"] = result.stdout.strip()
-    except Exception:
+    except (FileNotFoundError, subprocess.SubprocessError):
         version_info["claude_code_cli"] = "Not Found"
 
     # Try to get uv version
     try:
         result = subprocess.run(["uv", "--version"], capture_output=True, text=True, timeout=5)
         version_info["uv"] = result.stdout.strip()
-    except Exception:
+    except (FileNotFoundError, subprocess.SubprocessError):
         version_info["uv"] = "Not Found"
 
     # Get Python packages

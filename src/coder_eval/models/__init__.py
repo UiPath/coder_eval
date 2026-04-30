@@ -102,6 +102,7 @@ from coder_eval.models.routing import (
     ProxyRoute,
     proxy_config_from_settings,
     resolve_route,
+    to_bedrock_inference_profile,
 )
 
 # Sandbox
@@ -186,6 +187,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "BedrockRoute",
     "resolve_route",
     "proxy_config_from_settings",
+    "to_bedrock_inference_profile",
     # Templates
     "BaseTemplateSource",
     "RepoSource",

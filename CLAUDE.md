@@ -206,8 +206,11 @@ make format      # ruff format
 make check       # ruff check (lint)
 make typecheck   # pyright
 make test        # pytest
+make lint        # custom architectural lint rules (CE001–CE005)
 make verify      # All of the above + coverage check (CI equivalent)
 ```
+
+When fixing a bug, ask: *could a custom lint rule have prevented this?* If the root cause is a mechanically detectable pattern (e.g., "always import from `coder_eval.models`", "never call blocking IO in async"), add a rule to `tests/lint/rules/` following the CE001–CE005 pattern and wire it up in `tests/lint/runner.py`. This turns a one-time fix into permanent enforcement. See `tests/test_custom_lint.py` for how rules are tested.
 
 ## Configuration
 
