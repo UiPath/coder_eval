@@ -168,7 +168,12 @@ jobs:
 
   e2e-smoke:
     name: E2E Smoke Tests (Real API)
-    runs-on: ubuntu-latest
+    # 24.04 ships bubblewrap 0.8+ (vs 22.04's 0.6.1, which the SDK's bwrap
+    # invocation engages but doesn't actually mask via mount overlays — the
+    # runner kernel CAN do mount overlays, but 0.6.1 is missing features the
+    # SDK relies on). 24.04's AppArmor restriction on unprivileged userns is
+    # relaxed via the sysctl + aa-disable steps below.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     # Skip on fork PRs where secrets aren't available
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -193,6 +198,22 @@ jobs:
 
       - name: Install Claude CLI
         run: npm install -g @anthropic-ai/claude-code
+
+      - name: Install OS sandbox dependencies (bubblewrap + socat)
+        # Required for AgentConfig.isolation=true to engage on Linux. The
+        # bundled claude CLI silently falls back to no-sandbox if either is
+        # missing, which would let isolation probes pass without actually
+        # exercising bwrap.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends bubblewrap socat
+          # Ubuntu 24.04 restricts unprivileged user namespaces by default;
+          # bwrap needs them to set up its mount/network namespaces. Relax
+          # the AppArmor sysctl and disable the per-binary bwrap profile.
+          echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true
+          for prof in /etc/apparmor.d/bwrap-userns-restrict /etc/apparmor.d/bwrap; do
+            [ -f "$prof" ] && sudo aa-disable "$prof" || true
+          done
 
       - name: Cache dependencies
         uses: actions/cache@v5

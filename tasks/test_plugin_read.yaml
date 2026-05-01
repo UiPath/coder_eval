@@ -1,0 +1,21 @@
+task_id: test_plugin_read
+description: Minimal probe — does Read tool work on a configured plugin's skills dir when isolation is on?
+tags: [sandbox-isolation, requires-plugin-path]
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Read", "Write", "Bash", "Glob"]
+  isolation: true
+  plugins:
+    - type: "local"
+      path: "$PLUGIN_PATH"
+sandbox:
+  driver: tempdir
+  python: {}
+initial_prompt: |
+  Use the Read tool to read uipath-maestro-flow/SKILL.md (from uipath-maestro-flow skill)
+  Write its first line to result.txt using bash.
+success_criteria:
+  - type: "file_exists"
+    path: "result.txt"
+    description: "Probe completes."

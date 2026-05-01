@@ -1,0 +1,72 @@
+task_id: "test_bash_isolation"
+description: "Cross-platform probe — verifies sandbox.filesystem.{deny,allow}{Read,Write} blocks Bash access to sibling-task dirs (denyRead <runs-base>/**) while keeping cwd readable. Linux uses bwrap, macOS uses Seatbelt; both deny via 'Operation not permitted' / 'No such file'."
+initial_prompt: |
+  Probe Bash-layer cross-task isolation.
+
+  The OS sandbox is configured so cwd is the only readable path under
+  <runs>/**. The orchestrator writes task.log to <run-dir>/00/task.log
+  (i.e. ../../task.log relative to cwd) — a real file outside cwd that
+  isolation must mask.
+
+  Note: `ls ..` is NOT a reliable probe. bwrap auto-creates intermediate
+  directory entries to host the cwd bind-mount, so `ls ..` shows this
+  task's own directory name even when isolation is correctly engaged.
+  Test by directly trying to read a known file outside cwd.
+
+  Run via Bash:
+    1. `cat ./haystack.txt 2>&1`                            -> haystack_bash
+    2. `cat ../../task.log 2>&1 | head -c 200`              -> sibling_read_bash
+
+  Write the result to 'probe.json' in the working directory:
+      {
+        "haystack_bash": "<raw output OR error>",
+        "sibling_read_bash": "<raw output OR error>"
+      }
+
+  Record stderr verbatim. If a Bash command fails with the OS sandbox killing the
+  process before it produces any output (exit code non-zero, empty stdout/stderr),
+  write the literal string "blocked" as that field's value. Do NOT add explanations
+  or interpretation — just the raw output, the verbatim error, or the word "blocked".
+tags: [smoke, sandbox-isolation, requires-bwrap]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Read", "Write", "Bash"]
+  isolation: true
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../templates/test_isolation"
+
+success_criteria:
+  - type: "file_exists"
+    path: "probe.json"
+    description: "Agent must produce probe.json."
+
+  - type: "json_check"
+    path: "probe.json"
+    assertions:
+      - expression: "haystack_bash"
+        operator: "equals"
+        expected: "needle123"
+    description: |
+      Sanity check: cwd files must remain readable from Bash. Confirms the OS
+      sandbox isn't over-broad — denying everything would also block the agent
+      from reading its own working directory.
+    weight: 2.0
+
+  - type: "json_check"
+    path: "probe.json"
+    assertions:
+      - expression: "sibling_read_bash"
+        operator: "regex"
+        expected: "(Permission denied|Operation not permitted|No such file|blocked|^$)"
+    description: |
+      `<run-dir>/00/task.log` is the orchestrator's per-task log — a real file
+      outside cwd, inside the runs/ tree. The OS sandbox should mask it. If
+      this returns the log contents, cross-task isolation isn't engaging.
+    weight: 2.0

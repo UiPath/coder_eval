@@ -136,6 +136,77 @@ def _serialize_value(value: Any) -> Any:
     return str(value)
 
 
+def _perm_path(path: str | Path) -> str:
+    """Format an absolute path for the CLI's permission matcher.
+
+    The bundled CLI (claude 2.1.x) silently fails to match
+    ``Tool(/abs/path/**)`` patterns; the undocumented workaround is to
+    prefix absolute paths with a second slash (``Tool(//abs/path/**)``).
+    Tilde-prefixed, relative, and already-double-slashed paths pass through.
+    """
+    s = str(path)
+    return "/" + s if s.startswith("/") and not s.startswith("//") else s
+
+
+def _resolve_skill_globs(plugin_path: str | Path) -> list[str]:
+    """Resolve absolute ``<dir>/**`` globs for one plugin's skill directories.
+
+    Reads ``<plugin>/.claude-plugin/plugin.json`` and extracts the ``skills``
+    field (string or list, relative paths resolve against the plugin root,
+    default ``./skills/`` when absent). Returns an empty list when the
+    plugin root doesn't exist or the manifest is unparseable.
+    """
+    root = Path(plugin_path).expanduser().resolve()
+    if not root.is_dir():
+        return []
+
+    skills_field: object = "./skills/"
+    manifest = root / ".claude-plugin" / "plugin.json"
+    if manifest.is_file():
+        try:
+            skills_field = json.loads(manifest.read_text()).get("skills", skills_field)
+        except (OSError, json.JSONDecodeError):
+            return []
+
+    raw_paths: list[str] = (
+        [skills_field]
+        if isinstance(skills_field, str)
+        else [p for p in skills_field if isinstance(p, str)]
+        if isinstance(skills_field, list)
+        else []
+    )
+    return [f"{(root / raw if not Path(raw).is_absolute() else Path(raw)).resolve()}/**" for raw in raw_paths]
+
+
+def _build_filesystem_rules(*, cwd: Path, cwd_glob: str, plugin_globs: list[str]) -> dict[str, list[str]]:
+    """Build ``sandbox.filesystem.{deny,allow}{Read,Write}`` rules.
+
+    Concrete-path deny on the orchestrator's ``runs/`` tree, with the task's
+    cwd carved back via allowRead/allowWrite. Closes cross-task reads at the
+    bash subprocess layer (bwrap on Linux, Seatbelt on macOS).
+
+    ``~/.claude/**`` is in allowRead because macOS Seatbelt tightens its base
+    profile when any filesystem rule is set and starts denying the SDK's own
+    shell-snapshot files there, corrupting every bash command's output. No
+    deny rules are emitted when cwd isn't under ``settings.runs_dir`` (e.g.
+    a local script invocation outside the orchestrator).
+    """
+    from coder_eval.config import settings  # lazy: avoid import cycle in tests
+
+    rules: dict[str, list[str]] = {
+        "allowRead": [cwd_glob, "~/.claude/**", *plugin_globs],
+        "allowWrite": [cwd_glob],
+    }
+    runs_base = settings.runs_dir.resolve()
+    try:
+        cwd.relative_to(runs_base)
+    except ValueError:
+        return rules
+    rules["denyRead"] = [f"{runs_base}/**"]
+    rules["denyWrite"] = [f"{runs_base}/**"]
+    return rules
+
+
 _SENSITIVE_ENV_KEYWORDS = {"TOKEN", "KEY", "SECRET"}
 
 _JSON_START_SEARCH_LIMIT = 200
@@ -281,6 +352,92 @@ class ClaudeCodeAgent(Agent):
             return effective
         return config_model or route_model
 
+    # FS tools whose bare names (in `allowed_tools` or `permissions.allow`)
+    # would otherwise pre-approve any path. Isolation rewrites each into a
+    # path-scoped form. Order: any FS tool the CLI exposes that takes a path.
+    _FS_TOOLS = frozenset({"Read", "Write", "Edit", "Replace", "Glob", "Grep"})
+
+    def _resolve_isolation(
+        self,
+        *,
+        allowed_tools: list[str],
+        plugins: list[dict[str, Any]],
+    ) -> tuple[list[str], dict[str, Any] | None, str | None]:
+        """Derive ``(allowed_tools, sandbox, settings_json)`` for the SDK call.
+
+        When ``self.config.isolation`` is False, returns the user's values
+        unchanged (no sandbox dict). When True, configures three layers
+        targeting cross-task leakage in the orchestrator's ``runs/`` tree:
+
+        1. **OS sandbox** (``filesystem.{deny,allow}{Read,Write}``) — bwrap on
+           Linux, Seatbelt on macOS. Denies ``<runs>/**`` and re-allows the
+           task's cwd. Covers Bash subprocesses.
+        2. **CLI permission engine** (``permissions.allow``) — path-scoped
+           allow rules for cwd + plugin skill dirs. Sub-agents spawned via
+           the Agent tool inherit these (they don't inherit ``allowed_tools``).
+        3. **`allowed_tools` flag** — same path-scope rewrite. Required because
+           bare ``--allowedTools Read`` pre-approves every Read call and
+           silently bypasses ``permissions.deny`` (verified empirically).
+
+        No ``permissions.deny`` is emitted — the CLI engine does deny-wins
+        regardless of allow specificity, so a broad ``<runs>/**`` deny would
+        mask the cwd allow. Cross-task isolation at the tool layer comes
+        from the closed allowlist alone.
+        """
+        if not self.config.isolation:
+            settings_value = (
+                json.dumps(self.config.claude_settings)
+                if isinstance(self.config.claude_settings, dict)
+                else self.config.claude_settings
+            )
+            return allowed_tools, None, settings_value
+
+        cwd = self.working_directory.resolve()
+        cwd_glob = f"{cwd}/**"
+        plugin_globs = [g for p in plugins if "path" in p for g in _resolve_skill_globs(p["path"])]
+        scoped_globs = [cwd_glob, *plugin_globs]
+
+        # Layer 1: OS sandbox.
+        # `enableWeakerNestedSandbox` is for unprivileged Docker (per docs:
+        # "considerably weakens security; only use where additional isolation
+        # is otherwise enforced"). Auto-detect via /.dockerenv; bare-metal
+        # Linux uses the default strong sandbox.
+        sandbox_settings: dict[str, Any] = {
+            "enabled": True,
+            "autoAllowBashIfSandboxed": True,
+            "allowUnsandboxedCommands": False,
+            "enableWeakerNestedSandbox": Path("/.dockerenv").exists(),
+            "filesystem": _build_filesystem_rules(cwd=cwd, cwd_glob=cwd_glob, plugin_globs=plugin_globs),
+        }
+
+        # Layer 2: CLI permission engine.
+        if isinstance(self.config.claude_settings, str):
+            self._log.warning(
+                "isolation=True with file-path claude_settings; framework allow "
+                "rules will NOT be merged. Use a dict form to layer them in."
+            )
+            settings_value = self.config.claude_settings
+        else:
+            user_settings: dict[str, Any] = dict(self.config.claude_settings or {})
+            permissions = dict(user_settings.get("permissions") or {})
+            existing_allow = list(permissions.get("allow") or [])
+            for rule in (f"{tool}({_perm_path(g)})" for tool in self._FS_TOOLS for g in scoped_globs):
+                if rule not in existing_allow:
+                    existing_allow.append(rule)
+            permissions["allow"] = existing_allow
+            user_settings["permissions"] = permissions
+            settings_value = json.dumps(user_settings)
+
+        # Layer 3: allowed_tools (CLI flag).
+        expanded: list[str] = []
+        for tool in allowed_tools:
+            if tool in self._FS_TOOLS:
+                expanded.extend(f"{tool}({_perm_path(g)})" for g in scoped_globs)
+            else:
+                expanded.append(tool)
+
+        return expanded, sandbox_settings, settings_value
+
     async def communicate(
         self,
         user_input: str,
@@ -394,12 +551,20 @@ class ClaudeCodeAgent(Agent):
             if "ToolSearch" not in disallowed_tools:
                 disallowed_tools.append("ToolSearch")
 
+            # Resolve isolation: derive sandbox + permission deny + path-scoped
+            # allowed_tools from `isolation: true`. User-supplied claude_settings
+            # extends the deny set.
+            allowed_tools, sandbox_settings, settings_value = self._resolve_isolation(
+                allowed_tools=list(self.config.allowed_tools or []),
+                plugins=plugins,
+            )
+
             # as_posix(), not str(): bash on Windows strips backslashes from unquoted
             # paths, so a redirect like `> D:\foo\bar` ends up writing to "Dfoobar".
             options = ClaudeAgentOptions(
                 cwd=self.working_directory.as_posix(),
                 permission_mode=self.config.permission_mode,
-                allowed_tools=self.config.allowed_tools or [],
+                allowed_tools=allowed_tools,
                 disallowed_tools=disallowed_tools,
                 model=effective_model,
                 max_turns=self.config.max_turns,
@@ -409,13 +574,23 @@ class ClaudeCodeAgent(Agent):
                 system_prompt=self.config.system_prompt,
                 setting_sources=self.config.setting_sources if self.config.setting_sources is not None else ["project"],
                 resume=self._session_id,
-                settings=json.dumps(self.config.claude_settings)
-                if isinstance(self.config.claude_settings, dict)
-                else self.config.claude_settings,
+                settings=settings_value,
+                sandbox=sandbox_settings,  # type: ignore[arg-type]
             )
 
-            # Dump SDK options for later inspection (captures all 37+ fields including defaults)
+            # Dump SDK options for later inspection (captures all 37+ fields including defaults).
+            # Also write to <task-run-dir>/sdk_options.json so it's available
+            # mid-run without waiting for task.json. Sits alongside task.log,
+            # outside the agent's artifacts/ tree so it isn't visible to the agent.
             self._sdk_options_dump = _dump_sdk_options(options)
+            with suppress(OSError, ValueError, IndexError):
+                # working_directory is <task-run-dir>/artifacts/<task-id>
+                task_run_dir = self.working_directory.parent.parent
+                # noqa: CE002 — small JSON dump, best-effort, suppressed on errors;
+                # not worth the to_thread overhead.
+                (task_run_dir / "sdk_options.json").write_text(  # noqa: CE002
+                    json.dumps(self._sdk_options_dump, indent=2)
+                )
 
             # When a timeout is set, pre-construct the transport ourselves and
             # hand it to query() so we retain a reference to the subprocess

@@ -1,0 +1,66 @@
+task_id: "test_root_isolation"
+description: "Read-tool layer probe. Mirrors test_bash_isolation but exercises in-process Read calls. Verifies (a) cwd files are readable via Read, (b) sibling-task paths under <runs-base>/** are blocked by permissions.deny, (c) /etc/passwd is readable (NOT in deny — Read tool isolation only covers cross-task, not generic host files)."
+initial_prompt: |
+  Probe Read-tool isolation across sibling/parent paths under runs/.
+
+  Step 1 (Bash): pick a parent dir we know exists. Use Bash to find one
+  task.log under '..' (the per-task run dir's `task.log` is at
+  `../../task.log` from the cwd's perspective). If unsure, run
+  `realpath ../../../task.log 2>&1 || ls ../..`. Record the absolute
+  path you'll target as `sibling_target_path`.
+
+  Step 2 (Read tool): read './haystack.txt' (cwd file — should succeed)
+  and the sibling_target_path you found. Report verbatim what Read returned.
+
+  Step 3 (Read tool): read '/etc/passwd' (outside runs/, should pass).
+
+  Write result to 'probe.json':
+      {
+        "sibling_target_path": "<the path you picked>",
+        "haystack_read_tool": "<contents>",
+        "sibling_read_tool": "<contents OR verbatim denial>",
+        "etc_passwd_read_tool": "<contents OR verbatim denial>"
+      }
+
+  Truncate any successful read to 80 chars. Denial strings recorded verbatim.
+
+tags: [smoke, sandbox-isolation, read-tool]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Read", "Write", "Bash"]
+  isolation: true
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../templates/test_isolation"   # reuse haystack.txt template
+
+success_criteria:
+  - type: "file_exists"
+    path: "probe.json"
+    description: "Agent must produce probe.json."
+
+  - type: "json_check"
+    path: "probe.json"
+    assertions:
+      - expression: "haystack_read_tool"
+        operator: "contains"
+        expected: "needle123"
+    description: "Cwd file must be readable via Read tool."
+    weight: 2.0
+
+  - type: "json_check"
+    path: "probe.json"
+    assertions:
+      - expression: "sibling_read_tool"
+        operator: "regex"
+        expected: "(permissions|denied|not allowed|blocked|haven't granted)"
+    description: |
+      A real existing path under <runs-base>/** outside cwd must be blocked
+      via permissions.deny at the Read-tool layer. If this passes (returns
+      content), bare `--allowedTools Read` is bypassing the deny rule.
+    weight: 2.0
