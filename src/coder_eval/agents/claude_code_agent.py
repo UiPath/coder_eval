@@ -394,8 +394,10 @@ class ClaudeCodeAgent(Agent):
             if "ToolSearch" not in disallowed_tools:
                 disallowed_tools.append("ToolSearch")
 
+            # as_posix(), not str(): bash on Windows strips backslashes from unquoted
+            # paths, so a redirect like `> D:\foo\bar` ends up writing to "Dfoobar".
             options = ClaudeAgentOptions(
-                cwd=str(self.working_directory),
+                cwd=self.working_directory.as_posix(),
                 permission_mode=self.config.permission_mode,
                 allowed_tools=self.config.allowed_tools or [],
                 disallowed_tools=disallowed_tools,

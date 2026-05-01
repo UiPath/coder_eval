@@ -230,6 +230,29 @@ async def test_claude_agent_tool_search_not_duplicated():
 
 
 @pytest.mark.asyncio
+async def test_claude_agent_cwd_uses_posix_form():
+    """ClaudeAgentOptions.cwd uses forward slashes so bash redirects on Windows don't lose backslashes.
+
+    Anchors the `as_posix()` choice in claude_code_agent.py: bash subprocesses on Windows strip
+    backslashes from unquoted paths (e.g. `> D:\\foo\\bar` writes to "Dfoobar"), so the SDK must
+    receive a POSIX-style path. On Linux the value is unchanged, so the assertion holds on both
+    platforms.
+    """
+    from pathlib import Path
+
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    cwd = captured_options[0].cwd
+    assert isinstance(cwd, str)
+    assert "\\" not in cwd, f"cwd must use POSIX separators, got: {cwd!r}"
+    # Cross-check: a Path roundtrip on the captured cwd matches the agent's working dir.
+    assert Path(cwd) == agent.working_directory
+
+
+@pytest.mark.asyncio
 async def test_claude_settings_dict_serialized_to_json():
     """Dict claude_settings is JSON-serialized before passing to ClaudeAgentOptions.settings."""
     import json
