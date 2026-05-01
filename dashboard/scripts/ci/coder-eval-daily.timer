@@ -1,8 +1,8 @@
 [Unit]
-Description=Daily coder-eval eval suite (Mon-Fri 06:00 UTC)
+Description=Daily coder-eval eval suite (Mon-Fri 04:00 UTC)
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 06:00:00 UTC
+OnCalendar=Mon..Fri *-*-* 04:00:00 UTC
 Persistent=true
 RandomizedDelaySec=120
 Unit=coder-eval-daily.service

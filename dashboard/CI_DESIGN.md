@@ -6,7 +6,7 @@ _Last verified: 2026-04-29_ · _Owner: bai.li@uipath.com_
 
 ## Overview
 
-Every weeknight at 23:00 PT a `systemd --user` timer on a long-lived Azure VM kicks off `daily.sh`. The wrapper pulls `main` for `coder_eval`, `skills`, and `cli`, syncs deps, runs the `skills` suite at 10x parallel via `dashboard run`, uploads the run directory to Azure Blob, ingests it into ADX, and posts a mechanical metrics summary to Slack. Auth to UiPath is via a **dedicated bot user** (`coder-eval-bot@uipath-qa.com`) signed in once interactively and refreshed in place; auth to Azure Blob and ADX is via `bai.li@uipath.com`'s `az login` plus RBAC roles. A 4-hour systemd timeout and a `flock` on `/var/lock/uip-daily.lock` prevent runaway / overlapping runs.
+Every weeknight at 04:00 UTC (21:00 PT prev day / 07:00 Romania) a `systemd --user` timer on a long-lived Azure VM kicks off `daily.sh`. The slot is chosen to finish ~06:00 UTC — fresh before Romania's 9 AM standup, after Bellevue's workday. The wrapper pulls `main` for `coder_eval`, `skills`, and `cli`, syncs deps, runs the `skills` suite at 10x parallel via `dashboard run`, uploads the run directory to Azure Blob, ingests it into ADX, and posts a mechanical metrics summary to Slack. Auth to UiPath is via a **dedicated bot user** (`coder-eval-bot@uipath-qa.com`) signed in once interactively and refreshed in place; auth to Azure Blob and ADX is via `bai.li@uipath.com`'s `az login` plus RBAC roles. A 4-hour systemd timeout and a `flock` on `/var/lock/uip-daily.lock` prevent runaway / overlapping runs.
 
 ## Where things live
 
@@ -20,10 +20,10 @@ Every weeknight at 23:00 PT a `systemd --user` timer on a long-lived Azure VM ki
 | Auth file | `~/.uipath/.auth` (bot user refresh token) |
 | Blob | `coderevaltests/runs` · `https://coderevaltests.blob.core.windows.net/runs/<run-id>/` |
 | ADX | cluster `kvc-6xx4u3sa8nz1hq7dxn.southcentralus.kusto.windows.net` · db `coder-eval-runs-db` |
-| Dashboard UI | `https://flow-evalboard.uipath-dev.com/runs/<run-id>` |
+| Dashboard UI | `https://coder-evalboard.uipath-dev.com/runs/<run-id>` |
 | Slack | `#flow-skill-sandbox` (sandbox webhook). |
 | Versioned units | `dashboard/scripts/ci/{daily.sh, slack_summary.py, coder-eval-daily.service, coder-eval-daily.timer}` |
-| UiPath env | `https://alpha.uipath.com` · org `popoc` · tenant `flow_eval` |
+| UiPath env | `https://alpha.uipath.com` · org `codereval` · tenant `DefaultTenant` |
 
 ## What runs nightly
 
@@ -69,7 +69,7 @@ The working path. We use a **dedicated bot user** that has gone through the one-
 |---|---|
 | Bot user | `coder-eval-bot@uipath-qa.com` · `sub: 7524a477-593e-47ce-b94a-5dce9eb78ede` |
 | Mailbox | Shared `uipath-qa.com` test-account service. Login: `contact@uipath-qa.com`. |
-| Tenant | Invited into the existing `popoc/flow_eval` tenant (do **not** create a new alpha org — they self-delete after 60 days). |
+| Tenant | Invited into the `codereval/DefaultTenant` tenant (the dedicated CoderEval org on alpha; permanent, not subject to alpha-org auto-cleanup). |
 | Tenant roles | Automation User · Folder Administrator · Personal Workspace Administrator · "Enable user to run automations" · "Create a personal workspace" · "enable optimal Studio Web experience" |
 | OIDC client | `36dea5b8-e8bb-423d-8e7b-c808df8f1c00` (the standard `uip` interactive client) |
 | Auth file | `~/.uipath/.auth` on the VM — `UIPATH_ACCESS_TOKEN` (1h TTL, transparently refreshed) + `UIPATH_REFRESH_TOKEN` (one-time-use, rolling) |
@@ -85,14 +85,14 @@ The working path. We use a **dedicated bot user** that has gone through the one-
 #### One-time bot provisioning (already done; reproduce only on a fresh tenant)
 
 1. Create `coder-eval-bot@uipath-qa.com` via [https://uipath-qa.com/mail/](https://uipath-qa.com/mail/). Strong password (the inbox is shared — can't trust password reset). Store the password somewhere durable.
-2. Sign up on alpha with that email. Invite into `popoc/flow_eval` (Admin → Accounts & Groups → Invite Users).
+2. Sign up on alpha with that email. Invite into `codereval/DefaultTenant` (Admin → Accounts & Groups → Invite Users).
 3. On the bot's user record, enable the tenant roles listed above.
 4. Sign in as the bot via Studio Web in incognito. **This is the magic step** — it provisions the Personal Workspace + personal robot. Neither has a programmatic provisioning API.
 5. Sanity-check folders include a `Personal` row:
    ```bash
    TOKEN=$(grep "^UIPATH_ACCESS_TOKEN=" ~/.uipath/.auth | cut -d= -f2)
    curl -s -H "Authorization: Bearer $TOKEN" \
-     "https://alpha.uipath.com/popoc/flow_eval/orchestrator_/odata/Folders" | \
+     "https://alpha.uipath.com/codereval/DefaultTenant/orchestrator_/odata/Folders" | \
      python3 -c "import json,sys; [print(f['DisplayName'], '-', f['FolderType']) for f in json.load(sys.stdin)['value']]"
    ```
 
@@ -143,7 +143,7 @@ Slack post is a **Workflow Builder webhook** (not the classic Incoming Webhooks 
 :white_check_mark: 103/153 passed (67%) · :x: 50 failed (34 fail + 16 error)
 :moneybag: $113.55 · :stopwatch: 1h 46m · 10x parallel
 :package: coder_eval @ aba0525 · skills @ 0126731 · cli @ 2ed060f
-:bar_chart: https://flow-evalboard.uipath-dev.com/runs/2026-04-29_04-09-34
+:bar_chart: https://coder-evalboard.uipath-dev.com/runs/2026-04-29_04-09-34
 ```
 
 Pure mechanical metrics — no LLM analysis, no comparison to previous runs. The parallelism field is the configured concurrency cap from `RunSummary.max_parallel` (the suite's `BatchRunConfig.max_parallel`); older `run.json` files without that field omit the parallelism segment. On hard failure (no `run.json`) or `flock` skip (exit 75), the payload degrades to a one-liner status.

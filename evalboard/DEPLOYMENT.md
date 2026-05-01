@@ -1,12 +1,14 @@
 # Evalboard Deployment (Azure App Service)
 
-Production deployment of the Next.js evalboard at `flow-evalboard`. Operational reference only — history / decisions / dead ends are in git log.
+Production deployment of the Next.js evalboard at `coder-evalboard.uipath-dev.com`. Operational reference only — history / decisions / dead ends are in git log.
+
+> The underlying Azure App Service is still named `flow-evalboard` — that name predates the product rename and is intentionally not changed in Azure to avoid recreating the resource. All `az webapp` commands below target it by that name.
 
 ## TL;DR
 
 | | |
 |---|---|
-| **App URL** | `https://flow-evalboard.uipath-dev.com` (default `*.azurewebsites.net` hostname still works as fallback) |
+| **App URL** | `https://coder-evalboard.uipath-dev.com` (legacy `https://flow-evalboard.uipath-dev.com` is bound to the same App Service during the transition) |
 | **Subscription** | `DevTest-ML-EA` (`5db48574-8a20-418f-b488-1fafd8d021df`) |
 | **Resource group** | `rg-coder-eval-tests` (West US 2) |
 | **Runtime** | Node 22 LTS on Linux, B1 SKU (~$9/mo) |
@@ -46,7 +48,7 @@ az role assignment create \
 
 ## Auth
 
-Easy Auth enabled via Entra app `flow-evalboard` (client ID `d96ec2c5-d6fb-4674-8392-771ef01729c3`). UiPath tenant only.
+Easy Auth enabled via Entra app `flow-evalboard` (client ID `d96ec2c5-d6fb-4674-8392-771ef01729c3`; same app, not renamed). UiPath tenant only. Redirect URI list must include callbacks for both `coder-evalboard.uipath-dev.com` and `flow-evalboard.uipath-dev.com` for the duration of the transition.
 
 **Load-bearing:** `loginParameters` is pinned to `scope=openid profile email` — the exact set admin-consented via IT-184799. Don't broaden it without new admin consent, or every user will hit an approval-required screen.
 

@@ -4,7 +4,7 @@ import { ADX_URL } from "@/lib/config";
 import "./globals.css";
 
 export const metadata = {
-    title: "Flow Evalboard",
+    title: "Coder Evalboard",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
@@ -23,7 +23,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                             height={28}
                             priority
                         />
-                        <span className="text-lg">Flow Evalboard</span>
+                        <span className="text-lg">Coder Evalboard</span>
                     </a>
                     <div className="flex items-center gap-4 text-sm">
                         <a

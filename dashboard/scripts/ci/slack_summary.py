@@ -20,7 +20,7 @@ from pathlib import Path
 
 REPO = Path(os.environ.get("CODER_EVAL_REPO", "/home/azureuser/uipath/coder_eval"))
 RUNS = REPO / "runs"
-DASHBOARD_BASE = "https://flow-evalboard.uipath-dev.com/runs"
+DASHBOARD_BASE = "https://coder-evalboard.uipath-dev.com/runs"
 
 
 def fmt_duration(seconds: float) -> str:
