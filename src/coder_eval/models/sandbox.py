@@ -146,6 +146,18 @@ class SandboxConfig(BaseModel):
         default=None, description="Sequential list of template sources to apply"
     )
 
+    mock_path_dirs: list[str] | None = Field(
+        default=None,
+        description=(
+            "Sandbox-relative directories whose contents act as PATH-prepended mock "
+            "binaries for the agent subprocess. After templates are applied, the "
+            "sandbox marks plain files in each listed directory executable (+x) and "
+            "returns absolute paths to the orchestrator, which forwards them to the "
+            "agent. Missing entries are skipped silently. Example: "
+            '["mocks"] with a `mocks/uip` script placed via `template_sources`.'
+        ),
+    )
+
     # Snapshot configuration
     snapshots: SnapshotConfig = Field(default_factory=SnapshotConfig, description="Iteration snapshot configuration")
 

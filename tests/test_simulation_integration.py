@@ -110,7 +110,7 @@ class _ExplodingAgent(Agent):
         self._message = message
         self._state = AgentState.WORKING
 
-    async def start(self, working_directory: str) -> None:
+    async def start(self, working_directory: str, *, env_path_prepend: list[str] | None = None) -> None:
         pass
 
     async def stop(self) -> None:

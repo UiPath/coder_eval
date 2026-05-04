@@ -148,7 +148,7 @@ def test_claude_agent_disallowed_tools_defaults_to_none():
     assert agent.config.disallowed_tools is None
 
 
-async def _capture_sdk_options(agent: ClaudeCodeAgent) -> "list":
+async def _capture_sdk_options(agent: ClaudeCodeAgent, *, env_path_prepend: list[str] | None = None) -> "list":
     """Run one communicate() turn with a mocked query() and return captured options list."""
     import tempfile
 
@@ -174,7 +174,7 @@ async def _capture_sdk_options(agent: ClaudeCodeAgent) -> "list":
         yield ResultMessage()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        await agent.start(tmpdir)
+        await agent.start(tmpdir, env_path_prepend=env_path_prepend)
         with patch("coder_eval.agents.claude_code_agent.query", mock_query):
             await agent.communicate("hello")
 
@@ -250,6 +250,38 @@ async def test_claude_agent_cwd_uses_posix_form():
     assert "\\" not in cwd, f"cwd must use POSIX separators, got: {cwd!r}"
     # Cross-check: a Path roundtrip on the captured cwd matches the agent's working dir.
     assert Path(cwd) == agent.working_directory
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_env_path_prepend_propagates_to_sdk_options(monkeypatch):
+    """start(env_path_prepend=[...]) -> ClaudeAgentOptions.env['PATH'] is prefixed in order.
+
+    End-to-end check that the orchestrator->agent wiring works: directories passed at
+    start() time appear (in order, with the parent PATH appended) on the SDK env so the
+    subprocess can shadow real CLIs with sandbox mocks.
+    """
+    import os
+
+    monkeypatch.setenv("PATH", "/parent/bin")
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent, env_path_prepend=["/sandbox/mocks", "/sandbox/bins"])
+
+    sdk_path = captured_options[0].env["PATH"]
+    assert sdk_path == f"/sandbox/mocks{os.pathsep}/sandbox/bins{os.pathsep}/parent/bin"
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_no_env_path_prepend_is_default(monkeypatch):
+    """Omitting env_path_prepend at start() leaves PATH equal to the parent PATH."""
+    monkeypatch.setenv("PATH", "/parent/bin")
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    assert captured_options[0].env["PATH"] == "/parent/bin"
 
 
 @pytest.mark.asyncio

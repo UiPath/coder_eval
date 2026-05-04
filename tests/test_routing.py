@@ -90,6 +90,31 @@ class TestBuildSdkEnv:
         env, _ = ClaudeCodeAgent._build_sdk_env(route)
         assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "eu.anthropic.claude-haiku-4-5"
 
+    def test_path_prepend_prefixes_existing_path(self, monkeypatch):
+        """path_prepend dirs are prepended (in order) to PATH, with parent PATH preserved after."""
+        import os
+
+        monkeypatch.setenv("PATH", "/parent/bin")
+        env, _ = ClaudeCodeAgent._build_sdk_env(DirectRoute(), path_prepend=["/sandbox/mocks", "/sandbox/bins"])
+        assert env["PATH"] == f"/sandbox/mocks{os.pathsep}/sandbox/bins{os.pathsep}/parent/bin"
+
+    def test_path_prepend_works_when_parent_path_unset(self, monkeypatch):
+        """path_prepend still produces a usable PATH when the parent has none."""
+        import os
+
+        monkeypatch.delenv("PATH", raising=False)
+        env, _ = ClaudeCodeAgent._build_sdk_env(DirectRoute(), path_prepend=["/sandbox/mocks"])
+        # Trailing pathsep is harmless (POSIX/Windows treat empty entries as "skip").
+        assert env["PATH"] == f"/sandbox/mocks{os.pathsep}"
+
+    def test_path_prepend_none_or_empty_leaves_path_alone(self, monkeypatch):
+        """No prepend list (or an empty one) must not mutate PATH."""
+        monkeypatch.setenv("PATH", "/parent/bin")
+        env_none, _ = ClaudeCodeAgent._build_sdk_env(DirectRoute(), path_prepend=None)
+        env_empty, _ = ClaudeCodeAgent._build_sdk_env(DirectRoute(), path_prepend=[])
+        assert env_none["PATH"] == "/parent/bin"
+        assert env_empty["PATH"] == "/parent/bin"
+
 
 class TestToBedrockInferenceProfile:
     """Test to_bedrock_inference_profile() — vendor + region qualification."""

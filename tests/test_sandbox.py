@@ -720,3 +720,123 @@ def test_sandbox_run_command_empty_output_not_logged(caplog, clean_logging):
 
     finally:
         sandbox.cleanup()
+
+
+def test_mock_path_dirs_unset_returns_empty():
+    """No mock_path_dirs configured -> resolved_mock_path_dirs is []. Opt-in by design."""
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="mock_unset")
+
+    try:
+        sandbox.setup()
+        assert sandbox.resolved_mock_path_dirs == []
+    finally:
+        sandbox.cleanup()
+
+
+def test_mock_path_dirs_missing_directory_skipped():
+    """Configured directory that doesn't exist on disk is filtered out, not raised."""
+    config = SandboxConfig(driver="tempdir", python=None, mock_path_dirs=["does_not_exist"])
+    sandbox = Sandbox(config, task_id="mock_missing")
+
+    try:
+        sandbox.setup()
+        assert sandbox.resolved_mock_path_dirs == []
+    finally:
+        sandbox.cleanup()
+
+
+def test_mock_path_dirs_chmod_applied_to_plain_files():
+    """Plain files in a configured mock dir get +x; subdirectories are skipped.
+
+    Anchors the contract documented on SandboxConfig.mock_path_dirs: each listed
+    directory yields executable mock binaries. Subdirectories under it are treated
+    as fixtures, not bins, and must NOT be touched.
+    """
+    from coder_eval.models.templates import StarterFile, StarterFilesSource
+
+    config = SandboxConfig(
+        driver="tempdir",
+        python=None,
+        template_sources=[
+            StarterFilesSource(
+                files=[
+                    StarterFile(path="mocks/uip", content="#!/bin/sh\necho mock-uip\n"),
+                    StarterFile(path="mocks/fixtures/data.json", content='{"x": 1}'),
+                ]
+            )
+        ],
+        mock_path_dirs=["mocks"],
+    )
+    sandbox = Sandbox(config, task_id="mock_chmod")
+
+    try:
+        sandbox_dir = sandbox.setup()
+
+        mocks_dir = sandbox_dir / "mocks"
+        # Sandbox returns the absolute path of the mocks dir for PATH-prepend.
+        assert sandbox.resolved_mock_path_dirs == [mocks_dir.resolve()]
+
+        # Plain file under mocks/ has the executable bit set on POSIX.
+        # Windows does not represent +x in st_mode (execution is governed by
+        # PATHEXT and ACLs), so the chmod call is a no-op there -- skip the
+        # assertion rather than fake-pass on a constant.
+        mock_uip = mocks_dir / "uip"
+        if os.name != "nt":
+            assert mock_uip.stat().st_mode & 0o111 != 0
+        # Nested fixture file is preserved on disk; the chmod loop skips
+        # subdirectories so we don't accidentally mark fixtures executable.
+        assert (mocks_dir / "fixtures" / "data.json").is_file()
+    finally:
+        sandbox.cleanup()
+
+
+def test_mock_path_dirs_rejects_traversal():
+    """Sandbox-escaping entries (relative or absolute) must raise, not silently chmod the host.
+
+    Mirrors the containment check enforced for `template_dir.mount_point` and the path-traversal
+    rejection enforced for `starter_files`. Even with trusted task authors, a typo like
+    `mock_path_dirs: ["../mocks"]` would otherwise let `_prepare_mock_path_dirs` apply +x to
+    every file directly under the resolved escape target.
+    """
+    # Relative traversal: ".." escapes the sandbox parent.
+    config_relative = SandboxConfig(driver="tempdir", python=None, mock_path_dirs=["../escape"])
+    sandbox = Sandbox(config_relative, task_id="mock_traversal_relative")
+    with pytest.raises(RuntimeError, match="mock_path_dirs entry escapes sandbox"):
+        sandbox.setup()
+
+    # Absolute traversal: joining an absolute path discards the sandbox prefix.
+    # Pick a directory that exists on the target OS so we exercise the traversal
+    # check, not the `is_dir()` filter.
+    abs_target = "C:\\Windows" if os.name == "nt" else "/tmp"
+    config_absolute = SandboxConfig(driver="tempdir", python=None, mock_path_dirs=[abs_target])
+    sandbox = Sandbox(config_absolute, task_id="mock_traversal_absolute")
+    with pytest.raises(RuntimeError, match="mock_path_dirs entry escapes sandbox"):
+        sandbox.setup()
+
+
+def test_mock_path_dirs_resolved_order_matches_config():
+    """Resolved list preserves the order entries appear in config (PATH precedence matters)."""
+    from coder_eval.models.templates import StarterFile, StarterFilesSource
+
+    config = SandboxConfig(
+        driver="tempdir",
+        python=None,
+        template_sources=[
+            StarterFilesSource(
+                files=[
+                    StarterFile(path="a/x", content="x"),
+                    StarterFile(path="b/y", content="y"),
+                ]
+            )
+        ],
+        mock_path_dirs=["b", "a"],
+    )
+    sandbox = Sandbox(config, task_id="mock_order")
+
+    try:
+        sandbox_dir = sandbox.setup()
+        resolved = sandbox.resolved_mock_path_dirs
+        assert resolved == [(sandbox_dir / "b").resolve(), (sandbox_dir / "a").resolve()]
+    finally:
+        sandbox.cleanup()

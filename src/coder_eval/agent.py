@@ -26,11 +26,14 @@ class Agent(ABC):
     """
 
     @abstractmethod
-    async def start(self, working_directory: str) -> None:
+    async def start(self, working_directory: str, *, env_path_prepend: list[str] | None = None) -> None:
         """Initialize and start the agent.
 
         Args:
             working_directory: Path to the working directory for the agent
+            env_path_prepend: Optional absolute directories to prepend to PATH for any
+                subprocess the agent spawns (typically resolved sandbox mock dirs).
+                Implementations that don't shell out may ignore this argument.
         """
         pass
 

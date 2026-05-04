@@ -278,30 +278,44 @@ class ClaudeCodeAgent(Agent):
         # so kill() can reach into the CLI subprocess when the SDK swallows
         # asyncio cancellation.
         self._active_transport: SubprocessCLITransport | None = None
+        self._env_path_prepend: list[str] = []
         self._log = _PrefixedAdapter(logger, {"prefix": instance_name})
         self.pending_turn: TurnRecord | None = None
 
-    async def start(self, working_directory: str) -> None:
+    async def start(self, working_directory: str, *, env_path_prepend: list[str] | None = None) -> None:
         """Initialize and start the Claude Code agent.
 
         Args:
             working_directory: Path to the working directory
+            env_path_prepend: Absolute directories to prepend to PATH for the SDK
+                subprocess (typically the resolved ``SandboxConfig.mock_path_dirs``).
         """
         self.working_directory = Path(working_directory)
+        self._env_path_prepend = list(env_path_prepend or [])
         self._state = AgentState.WORKING
         # Note: Client is created per-communication to avoid transport issues
 
     @staticmethod
-    def _build_sdk_env(route: ApiRoute) -> tuple[dict[str, str], str | None]:
+    def _build_sdk_env(route: ApiRoute, path_prepend: list[str] | None = None) -> tuple[dict[str, str], str | None]:
         """Build SDK environment variables and resolve effective model for the given route.
+
+        Args:
+            route: API routing configuration.
+            path_prepend: Absolute directories to prepend (in order) to PATH so their
+                contents shadow same-named binaries in the parent PATH. Resolved by the
+                sandbox manager from ``SandboxConfig.mock_path_dirs``; the agent does no
+                filesystem inspection of its own.
 
         Returns:
             Tuple of (env_vars_dict, model_override_or_None).
         """
-        # Start with PATH from parent environment to ensure agent can locate executables
         base_env: dict[str, str] = {}
         if path := os.environ.get("PATH"):
             base_env["PATH"] = path
+
+        if path_prepend:
+            prefix = os.pathsep.join(path_prepend)
+            base_env["PATH"] = f"{prefix}{os.pathsep}{base_env.get('PATH', '')}"
 
         match route:
             case BedrockRoute() as br:
@@ -543,7 +557,7 @@ class ClaudeCodeAgent(Agent):
 
             # Build env overrides and resolve model for the configured API route.
             # Precedence: task/CLI agent.model > route default (e.g. BEDROCK_MODEL).
-            env, route_model = self._build_sdk_env(self.route)
+            env, route_model = self._build_sdk_env(self.route, path_prepend=self._env_path_prepend)
             effective_model = self._resolve_effective_model(self.config.model, env, route_model)
 
             disallowed_tools = list(self.config.disallowed_tools or [])

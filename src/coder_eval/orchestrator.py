@@ -607,9 +607,11 @@ class Orchestrator:
         # Create and start agent with retry logic
         self.agent = await self._create_agent()
 
+        env_path_prepend = [str(p) for p in self.sandbox.resolved_mock_path_dirs]
+
         async def _start_agent() -> None:
             assert self.agent is not None
-            await self.agent.start(str(sandbox_dir))
+            await self.agent.start(str(sandbox_dir), env_path_prepend=env_path_prepend)
 
         await execute_with_retry(
             operation=_start_agent,

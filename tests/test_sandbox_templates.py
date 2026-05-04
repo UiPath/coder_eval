@@ -314,7 +314,7 @@ class TestStarterFiles:
         )
         sandbox = Sandbox(config, task_id="test-starter-traversal")
 
-        with pytest.raises(RuntimeError, match=r"Invalid file path.*outside sandbox"):
+        with pytest.raises(RuntimeError, match=r"starter_files path escapes sandbox"):
             sandbox.setup()
 
 

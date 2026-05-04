@@ -111,6 +111,9 @@ class Sandbox:
             # Setup template content (repo, directory, or inline files)
             self._setup_template()
 
+            # Mark mock binaries executable so the agent's PATH can shadow real CLIs
+            self._prepare_mock_path_dirs()
+
             # Set up Python virtual environment (only if python config is provided)
             if self.config.python:
                 self._setup_virtualenv()
@@ -165,6 +168,33 @@ class Sandbox:
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to clone repository: {e.stderr}") from e
 
+    def _resolve_within_sandbox(self, rel: str, *, field: str) -> Path:
+        """Join ``rel`` with the sandbox root, resolve, and reject if it escapes.
+
+        Used by every code path that consumes a sandbox-relative path supplied by
+        a task author (``template_dir.mount_point``, ``starter_files`` paths,
+        ``mock_path_dirs`` entries). The result is allowed to equal the sandbox
+        root (e.g. an empty ``mount_point``); anything that resolves outside
+        raises ``RuntimeError`` with the originating ``field`` named so the task
+        author can locate the bad entry in their YAML.
+
+        Args:
+            rel: The user-supplied path. May be a relative path, an absolute
+                path (joining discards the sandbox prefix), or a string with
+                ``..`` segments.
+            field: Human-readable label of the YAML field being checked,
+                surfaced in the error message.
+
+        Returns:
+            Absolute, resolved path that is guaranteed to be inside the sandbox.
+        """
+        assert self.sandbox_dir is not None, "Sandbox directory not initialized"
+        sandbox_root = self.sandbox_dir.resolve()
+        candidate = (self.sandbox_dir / rel).resolve()
+        if candidate != sandbox_root and sandbox_root not in candidate.parents:
+            raise RuntimeError(f"{field} escapes sandbox: {rel!r} -> {candidate}")
+        return candidate
+
     def _setup_template(self) -> None:
         """Setup template files/directory in sandbox.
 
@@ -201,11 +231,7 @@ class Sandbox:
         if not template_path.is_dir():
             raise RuntimeError(f"Template path is not a directory: {template_path}")
 
-        # Resolve mount point inside the sandbox and ensure it stays within bounds
-        mount_root = (self.sandbox_dir / source.mount_point).resolve()
-        sandbox_root = self.sandbox_dir.resolve()
-        if mount_root != sandbox_root and sandbox_root not in mount_root.parents:
-            raise RuntimeError(f"Template mount_point escapes sandbox: {source.mount_point!r} -> {mount_root}")
+        mount_root = self._resolve_within_sandbox(source.mount_point, field="Template mount_point")
         mount_root.mkdir(parents=True, exist_ok=True)
 
         # Track overwrites for logging
@@ -237,6 +263,46 @@ class Sandbox:
             else:
                 logger.debug(f"Overwrote {len(overwrites)} files from {source.path}")
 
+    def _prepare_mock_path_dirs(self) -> None:
+        """Apply +x to plain files in each ``mock_path_dirs`` entry.
+
+        Resolves each configured directory against the sandbox root and, for every
+        plain file directly under it, ORs in the user/group/other execute bits.
+        Required on NTFS and after copies that drop the +x bit; a no-op when the
+        bit is already set. Missing entries and non-files (e.g. fixture
+        subdirectories) are skipped silently. PATH wiring happens in the agent --
+        this method only owns the filesystem side.
+        """
+        assert self.sandbox_dir is not None, "Sandbox directory not initialized"
+
+        for dir_path in self.resolved_mock_path_dirs:
+            for entry in dir_path.iterdir():
+                if entry.is_file():
+                    entry.chmod(entry.stat().st_mode | 0o111)
+
+    @property
+    def resolved_mock_path_dirs(self) -> list[Path]:
+        """Absolute paths of configured mock dirs that exist on disk.
+
+        Returned in the order they appear in ``SandboxConfig.mock_path_dirs``;
+        non-existent and non-directory entries are filtered out so the caller
+        can pass the result straight to PATH-prepend logic.
+
+        Entries that resolve outside the sandbox root are rejected with a
+        RuntimeError -- a typo like ``"../mocks"`` would otherwise let
+        ``_prepare_mock_path_dirs`` chmod +x files on the host filesystem.
+        Mirrors the ``mount_point`` containment check in
+        :meth:`_apply_template_dir_source`.
+        """
+        if self.sandbox_dir is None or not self.config.mock_path_dirs:
+            return []
+        resolved: list[Path] = []
+        for rel in self.config.mock_path_dirs:
+            candidate = self._resolve_within_sandbox(rel, field="mock_path_dirs entry")
+            if candidate.is_dir():
+                resolved.append(candidate)
+        return resolved
+
     def _apply_starter_files_source(self, source: StarterFilesSource) -> None:
         """Create inline starter files in sandbox with overwrite tracking.
 
@@ -252,13 +318,10 @@ class Sandbox:
         overwrites: set[str] = set()
 
         for starter_file in source.files:
-            file_path = self.sandbox_dir / starter_file.path
-
-            # Security: prevent path traversal
-            try:
-                file_path.resolve().relative_to(self.sandbox_dir.resolve())
-            except ValueError as e:
-                raise RuntimeError(f"Invalid file path (outside sandbox): {starter_file.path}") from e
+            # Reject path traversal before any filesystem write; the helper allows
+            # the resolved path to equal sandbox_root, which is harmless for files
+            # because subsequent mkdir/write_text would fail on an empty path anyway.
+            file_path = self._resolve_within_sandbox(starter_file.path, field="starter_files path")
 
             # Track overwrites
             if file_path.exists():

@@ -34,7 +34,7 @@ def test_starter_files_rejects_path_traversal(tmp_path):
     sandbox.sandbox_dir.mkdir()
 
     # Attempt to apply starter files
-    with pytest.raises(RuntimeError, match="Invalid file path \\(outside sandbox\\)"):
+    with pytest.raises(RuntimeError, match="starter_files path escapes sandbox"):
         sandbox._apply_starter_files_source(malicious_files)
 
     # Verify file not created outside sandbox
@@ -63,7 +63,7 @@ def test_starter_files_rejects_absolute_paths(tmp_path):
     sandbox.sandbox_dir.mkdir()
 
     # Attempt to apply starter files
-    with pytest.raises(RuntimeError, match="Invalid file path \\(outside sandbox\\)"):
+    with pytest.raises(RuntimeError, match="starter_files path escapes sandbox"):
         sandbox._apply_starter_files_source(malicious_files)
 
     # Verify system file not modified (only on Unix where /etc/passwd exists)
@@ -88,7 +88,7 @@ def test_starter_files_rejects_nested_traversal(tmp_path):
     sandbox.sandbox_dir = tmp_path / "sandbox"
     sandbox.sandbox_dir.mkdir()
 
-    with pytest.raises(RuntimeError, match="Invalid file path \\(outside sandbox\\)"):
+    with pytest.raises(RuntimeError, match="starter_files path escapes sandbox"):
         sandbox._apply_starter_files_source(malicious_files)
 
 

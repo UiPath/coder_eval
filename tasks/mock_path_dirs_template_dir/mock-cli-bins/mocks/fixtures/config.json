@@ -1,0 +1,4 @@
+{
+  "comment": "Fixture file under mocks/. Lives in a subdirectory so the sandbox chmod loop skips it -- only top-level plain files in mocks/ get +x.",
+  "sample": "data"
+}
