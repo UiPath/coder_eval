@@ -57,6 +57,64 @@ class TestJMESPathAssertionModel:
         assert a.expected is None
 
 
+class TestSubstringContainsMinLength:
+    """Reject `operator: contains` with literals shorter than 8 characters.
+
+    A short `contains` substring is brittle when the JSON value is paraphrased
+    natural language (the original failure: `expected: "scalat"` for
+    "escalation" missed when the agent wrote "review" instead). The validator
+    forces authors to choose `operator='regex'` for an explicit anchored
+    pattern or `operator='equals'` for a canonical machine name.
+    """
+
+    def test_short_literal_rejected(self):
+        with pytest.raises(ValidationError, match=r"Brittle 'contains' assertion"):
+            JMESPathAssertion(expression="pattern", operator="contains", expected="scalat")
+
+    def test_seven_char_literal_rejected(self):
+        with pytest.raises(ValidationError, match="Brittle 'contains' assertion"):
+            JMESPathAssertion(expression="x", operator="contains", expected="approve")
+
+    def test_eight_char_literal_accepted(self):
+        """8 chars is the threshold (>=) — full common words like 'approval' pass."""
+        a = JMESPathAssertion(expression="x", operator="contains", expected="approval")
+        assert a.expected == "approval"
+
+    def test_long_canonical_name_accepted(self):
+        a = JMESPathAssertion(expression="pattern", operator="contains", expected="exception-escalation")
+        assert a.expected == "exception-escalation"
+
+    def test_short_literal_with_regex_operator_accepted(self):
+        """Regex with a short pattern is fine — the operator makes intent explicit."""
+        a = JMESPathAssertion(expression="pattern", operator="regex", expected="(?i)classif")
+        assert a.operator == "regex"
+
+    def test_short_literal_with_equals_accepted(self):
+        """Equals never substring-matches, so length is irrelevant."""
+        a = JMESPathAssertion(expression="status", operator="equals", expected="ok")
+        assert a.expected == "ok"
+
+    def test_non_string_expected_unaffected(self):
+        """Numeric/list `expected` for `contains` is a different shape and out of scope."""
+        a = JMESPathAssertion(expression="codes", operator="contains", expected=42)
+        assert a.expected == 42
+
+    def test_empty_string_rejected(self):
+        """An empty `expected` is the limit case — matches anything, must be rejected."""
+        with pytest.raises(ValidationError, match="Brittle 'contains' assertion"):
+            JMESPathAssertion(expression="x", operator="contains", expected="")
+
+    def test_whitespace_only_literal_rejected(self):
+        """Whitespace-only literals bypass raw length but match almost any non-empty string."""
+        with pytest.raises(ValidationError, match="Brittle 'contains' assertion"):
+            JMESPathAssertion(expression="x", operator="contains", expected="        ")
+
+    def test_padded_long_literal_rejected_when_stripped_short(self):
+        """A 10-char string of whitespace + a 2-char token is still brittle after `.strip()`."""
+        with pytest.raises(ValidationError, match="Brittle 'contains' assertion"):
+            JMESPathAssertion(expression="x", operator="contains", expected="   ok    ")
+
+
 class TestJsonCheckCriterionModel:
     """Verify JsonCheckCriterion model defaults and construction."""
 
@@ -205,16 +263,17 @@ class TestJsonCheckOperators:
         assert self._check({"s": "ok"}, "s", "not_equals", "ok") == 0.0
 
     def test_contains_string(self):
-        assert self._check({"s": "hello world"}, "s", "contains", "world") == 1.0
+        # Literal must be >=8 chars to satisfy reject_brittle_substring_contains.
+        assert self._check({"s": "hello distant world"}, "s", "contains", "distant world") == 1.0
 
     def test_contains_list(self):
         assert self._check({"items": [1, 2, 3]}, "items", "contains", 2) == 1.0
 
     def test_contains_fail(self):
-        assert self._check({"s": "hello"}, "s", "contains", "xyz") == 0.0
+        assert self._check({"s": "hello"}, "s", "contains", "absent-token") == 0.0
 
     def test_contains_non_iterable_scores_zero(self):
-        assert self._check({"n": 42}, "n", "contains", "x") == 0.0
+        assert self._check({"n": 42}, "n", "contains", "absent-token") == 0.0
 
     def test_gt_pass(self):
         assert self._check({"n": 10}, "n", "gt", 5) == 1.0

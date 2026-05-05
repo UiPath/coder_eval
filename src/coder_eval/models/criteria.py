@@ -178,6 +178,10 @@ _OPERATORS_REQUIRING_EXPECTED = frozenset(
     }
 )
 
+# 8 admits common complete words while still catching truncated fragments;
+# see reject_brittle_substring_contains docstring for full rationale.
+_MIN_CONTAINS_LITERAL_LEN = 8
+
 
 class JMESPathAssertion(BaseModel):
     """A single JMESPath assertion within JsonCheckCriterion."""
@@ -198,6 +202,38 @@ class JMESPathAssertion(BaseModel):
         expected_provided = "expected" in self.model_fields_set
         if self.operator in _OPERATORS_REQUIRING_EXPECTED and not expected_provided:
             raise ValueError(f"'expected' is required when operator is '{self.operator}'")
+        return self
+
+    @model_validator(mode="after")
+    def reject_brittle_substring_contains(self) -> JMESPathAssertion:
+        """Reject `operator: contains` with a literal `expected` shorter than 8 stripped characters.
+
+        A short `contains` substring against an agent-paraphrased JSON value
+        flakes when the agent's wording shifts (e.g. `"scalat"` chosen as
+        a fragment of "escalation" misses when the agent writes "review"
+        instead). Whitespace-only literals (e.g. `"        "`) are equally
+        brittle — they match almost any non-empty string — so length is
+        measured after `.strip()`.
+
+        Scope is deliberately narrow:
+        - `regex` and `equals` are not validated: those operators are explicit
+          author signals that brittle short matching is intentional (e.g. an
+          anchored regex or a canonical machine name).
+        - Non-string `expected` (numeric, list) is not validated: `contains`
+          against a list is exact element equality, not substring matching.
+        """
+        if (
+            self.operator == "contains"
+            and isinstance(self.expected, str)
+            and len(self.expected.strip()) < _MIN_CONTAINS_LITERAL_LEN
+        ):
+            raise ValueError(
+                f"Brittle 'contains' assertion: expected literal {self.expected!r}"
+                + f" has {len(self.expected.strip())} non-whitespace characters; short"
+                + " substrings of paraphrased JSON values flake when agent wording varies."
+                + " Use operator='regex' with an anchored pattern, or"
+                + " operator='equals' with a canonical machine name."
+            )
         return self
 
 
