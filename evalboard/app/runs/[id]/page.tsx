@@ -1,7 +1,8 @@
 import { Suspense } from "react";
 import { notFound } from "next/navigation";
-import { readRunSummary, readRunTasks } from "@/lib/runs";
+import { readRunAnalysis, readRunSummary, readRunTasks } from "@/lib/runs";
 import { fmtRunTime } from "@/lib/format";
+import { AnalysisPanel } from "./analysis-panel";
 import { RunView } from "./run-view";
 
 export const dynamic = "force-dynamic";
@@ -12,9 +13,10 @@ export default async function RunPage({
     params: Promise<{ id: string }>;
 }) {
     const { id } = await params;
-    const [summary, tasks] = await Promise.all([
+    const [summary, tasks, analysis] = await Promise.all([
         readRunSummary(id),
         readRunTasks(id),
+        readRunAnalysis(id),
     ]);
     if (!summary || !tasks) notFound();
 
@@ -49,6 +51,8 @@ export default async function RunPage({
                     </div>
                 )}
             </div>
+
+            {analysis && <AnalysisPanel markdown={analysis} />}
 
             <Suspense fallback={null}>
                 <RunView runId={id} tasks={tasks} />

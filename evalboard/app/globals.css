@@ -7,3 +7,19 @@ body {
     background: #ffffff;
     color: #1f2937;
 }
+
+/* Inline-code styling for the AI analysis panel.
+ * `:not(pre code)` so we don't touch code blocks (the typography plugin
+ * already styles those — adding a chip background there breaks the look).
+ * Scoped via `.analysis-prose` to keep this from affecting other prose. */
+.analysis-prose code:not(pre code) {
+    font-weight: 400;
+    background-color: rgb(243 244 246); /* gray-100 */
+    padding: 0.125rem 0.25rem;
+    border-radius: 0.25rem;
+    font-size: 0.85em;
+}
+.analysis-prose code:not(pre code)::before,
+.analysis-prose code:not(pre code)::after {
+    content: none;
+}

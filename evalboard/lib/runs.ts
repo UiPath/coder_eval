@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import {
+    ensureRunAnalysis,
     ensureRunSummary,
     ensureTaskDir,
     isValidId,
@@ -534,6 +535,13 @@ export async function readTaskDetail(
         flowDebug,
         toolCalls,
     };
+}
+
+export async function readRunAnalysis(runId: string): Promise<string | null> {
+    await ensureRunAnalysis(runId, RUNS_DIR);
+    return fs
+        .readFile(path.join(RUNS_DIR, runId, "analysis.md"), "utf-8")
+        .catch(() => null);
 }
 
 export async function readLogTail(

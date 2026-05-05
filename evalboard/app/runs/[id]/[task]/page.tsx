@@ -41,17 +41,6 @@ export default async function TaskPage({
                         {humanizeTaskId(taskId)}
                     </h1>
                     <StatusPill status={task.status} relabel />
-                    {flowDebug?.studioWebUrl && (
-                        <a
-                            href={flowDebug.studioWebUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="ml-auto inline-flex items-center gap-1.5 text-sm bg-studio-blue hover:bg-studio-blue-hover text-white px-3 py-1.5 rounded-md transition-colors"
-                        >
-                            Open in Studio Web
-                            <span className="text-xs">↗</span>
-                        </a>
-                    )}
                 </div>
                 <div className="text-xs text-gray-500 tabular-nums font-mono">
                     {taskId} · run {id}

@@ -115,6 +115,20 @@ export async function ensureRunSummary(
     });
 }
 
+export async function ensureRunAnalysis(
+    runId: string,
+    destRoot: string,
+): Promise<void> {
+    assertValidId(runId, "runId");
+    return dedupe(`analysis:${runId}`, async () => {
+        try {
+            await downloadBlob(`${runId}/analysis.md`, destRoot);
+        } catch (err) {
+            if (!isNotFound(err)) throw err;
+        }
+    });
+}
+
 // Narrow fetch: run.json + just one task subdir. Used by the per-task
 // detail page so opening a deep link to a 50-task run doesn't pull every
 // task's artifacts.
