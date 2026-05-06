@@ -7,10 +7,22 @@
 # or the VM's managed identity).
 # Storage account + container + (optional) key are read from dashboard/.env.
 #
+# By default, pulls only the high-signal files needed for triage / analysis,
+# skipping the bulky per-task agent workspace artifacts (which routinely add
+# multiple GB per run from `.venv` and similar). The default file set is:
+#
+#   - <run-id>/run.json, run.md
+#   - <run-id>/analysis.md (if present)
+#   - <run-id>/experiment.* (any extension at run root)
+#   - <run-id>/<variant>/<task-id>/<replicate>/task.{json,html,log}
+#
+# Use --full to pull everything (the prior behavior, including artifacts/).
+#
 # Usage:
 #   dashboard/scripts/pull-run.sh list
 #   dashboard/scripts/pull-run.sh <run-id> [dest-dir]
 #   dashboard/scripts/pull-run.sh --container <name> <run-id> [dest-dir]
+#   dashboard/scripts/pull-run.sh --full <run-id> [dest-dir]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,14 +36,21 @@ cd "$REPO_ROOT"
 usage() {
   cat <<EOF
 Usage:
-  $0                               Download the latest run (default dest: runs/<run-id>, falls back to tmp/runs/<run-id> if it exists)
+  $0                               Download the latest run, targeted file set (default dest: runs/<run-id>, falls back to tmp/runs/<run-id> if it exists)
   $0 list                          List run ids in the container
-  $0 <run-id> [dest-dir]           Download run (default dest: runs/<run-id>, falls back to tmp/runs/<run-id> if it exists)
+  $0 <run-id> [dest-dir]           Download run, targeted file set
+  $0 --full <run-id> [dest-dir]    Download every blob under <run-id>/ (incl. per-task artifacts/ workspace)
   $0 --container <name> ...        Override container (default from .env, else 'runs')
+
+Targeted file set (default — used by triage / analysis):
+  <run-id>/{run.json,run.md,analysis.md}
+  <run-id>/experiment.*
+  <run-id>/<variant>/<task-id>/<replicate>/task.{json,html,log}
 EOF
 }
 
 CONTAINER_OVERRIDE=""
+FULL_PULL=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help|help)
@@ -42,6 +61,10 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { usage; exit 2; }
       CONTAINER_OVERRIDE="$2"
       shift 2
+      ;;
+    --full)
+      FULL_PULL=1
+      shift
       ;;
     *)
       break
@@ -75,8 +98,14 @@ if [[ -z "$ACCOUNT" ]]; then
 fi
 
 # Build az auth flags once: prefer key when present, else fall back to login.
+# When using key auth, export AZURE_STORAGE_KEY (the env var az auto-picks up)
+# instead of passing --account-key on the command line, so the secret never
+# appears in argv — visible via `ps` / `/proc/*/cmdline` to other users on the
+# host. Targeted mode multiplies the exposure window (one az process per blob)
+# vs the prior single download-batch invocation.
 if [[ -n "$ACCOUNT_KEY" ]]; then
-  AUTH_ARGS=(--auth-mode key --account-key "$ACCOUNT_KEY")
+  export AZURE_STORAGE_KEY="$ACCOUNT_KEY"
+  AUTH_ARGS=(--auth-mode key)
 else
   AUTH_ARGS=(--auth-mode login)
   if ! az account show --query "user.name" -o tsv >/dev/null 2>&1; then
@@ -135,20 +164,91 @@ if [[ -z "$DEST" ]]; then
 fi
 mkdir -p "$DEST"
 
-echo "Downloading $CONTAINER/$RUN_ID/* from $ACCOUNT → $DEST"
-# `az storage blob download-batch` preserves the full blob name (e.g.
-# `<RUN_ID>/foo.json`) under --destination, which would nest files at
-# $DEST/$RUN_ID/... — duplicating the run id. Stage to a temp parent and
-# move the inner $RUN_ID directory's contents into $DEST so files land
-# directly under $DEST regardless of what the user passed.
+# Stage everything to a temp parent so we can atomically move into $DEST
+# at the end and avoid leaving partial pulls in the canonical runs/ tree.
+# `az storage blob download[-batch]` preserves the full blob name (incl. the
+# leading $RUN_ID/) under --destination, so we move the inner $RUN_ID directory
+# contents into $DEST after download completes.
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
-az storage blob download-batch \
-  --source "$CONTAINER" \
-  --destination "$STAGE" \
-  --pattern "$RUN_ID/*" \
-  --account-name "$ACCOUNT" \
-  "${AUTH_ARGS[@]}"
+if [[ "$FULL_PULL" -eq 1 ]]; then
+  echo "Downloading $CONTAINER/$RUN_ID/* (FULL — includes per-task artifacts/) from $ACCOUNT → $DEST"
+  az storage blob download-batch \
+    --source "$CONTAINER" \
+    --destination "$STAGE" \
+    --pattern "$RUN_ID/*" \
+    --account-name "$ACCOUNT" \
+    "${AUTH_ARGS[@]}"
+else
+  echo "Listing blobs under $CONTAINER/$RUN_ID/ ..."
+  ALL_BLOBS="$(az storage blob list \
+    --container-name "$CONTAINER" \
+    --account-name "$ACCOUNT" \
+    "${AUTH_ARGS[@]}" \
+    --num-results '*' \
+    --prefix "$RUN_ID/" \
+    --query "[].name" -o tsv 2>/dev/null)"
+
+  # Filter: keep only the targeted file set. NF counts segments after `awk -F/`.
+  # NF==2 = run-root file (run.json, run.md, analysis.md, experiment.*).
+  # NF==5 = task file at <run>/<variant>/<task_id>/<replicate>/task.{json,html,log}.
+  # Contract: if the run-output layout changes (e.g., extra nesting level under
+  # <run-id>/), both NF guards must be updated or matching files will be
+  # silently dropped. Anchored prefix-match on $1 keeps blobs from other run
+  # ids from leaking in if a future caller widens the --prefix.
+  WANTED="$(printf '%s\n' "$ALL_BLOBS" | awk -F/ -v r="$RUN_ID" '
+    NF == 2 && $1 == r && \
+      ($2 == "run.json" || $2 == "run.md" || $2 == "analysis.md" || $2 ~ /^experiment\./) { print; next }
+    NF == 5 && $1 == r && $5 ~ /^task\.(json|html|log)$/ { print; next }
+  ')"
+
+  if [[ -z "$WANTED" ]]; then
+    echo "error: no targeted files found under $CONTAINER/$RUN_ID/ — is the run id correct, or did the upload not finish?" >&2
+    exit 1
+  fi
+
+  TOTAL=$(printf '%s\n' "$WANTED" | wc -l | tr -d ' ')
+  echo "Downloading $TOTAL targeted file(s) (run/experiment metadata + task.{json,html,log}) → $DEST"
+  echo "  (use --full to also pull per-task artifacts/ workspace)"
+
+  # Parallel per-blob download. Each `az storage blob download` invocation has
+  # ~0.5-1s of Python startup; xargs -P 16 keeps overall wall-clock low.
+  # AUTH_ARGS is forwarded as positional args after the {} placeholder so the
+  # bash -c subprocess inherits the same auth mode (key vs login) chosen above.
+  # AZURE_STORAGE_KEY (when set) is exported above and inherited by subprocesses
+  # automatically, so the secret never appears in argv.
+  #
+  # Failures: each worker appends the failed blob name to FAIL_LOG and exits 1
+  # so xargs's own exit code (123) signals "at least one input failed". Short
+  # appends to a single file from parallel workers are atomic on POSIX as long
+  # as each write is below PIPE_BUF (~4KB on Linux); blob names are well under
+  # that. We `|| true` the pipeline so the script can read FAIL_LOG itself
+  # rather than abort mid-summary, then exit non-zero with a precise count.
+  FAIL_LOG="$STAGE/.failures"
+  : > "$FAIL_LOG"
+  export STAGE CONTAINER ACCOUNT FAIL_LOG
+  printf '%s\n' "$WANTED" | xargs -P 16 -I{} bash -c '
+    blob="$1"; shift
+    out="$STAGE/$blob"
+    mkdir -p "$(dirname "$out")"
+    if ! az storage blob download \
+        --container-name "$CONTAINER" \
+        --account-name "$ACCOUNT" \
+        "$@" \
+        --name "$blob" \
+        --file "$out" \
+        --no-progress >/dev/null; then
+      echo "$blob" >> "$FAIL_LOG"
+      exit 1
+    fi
+  ' _ {} "${AUTH_ARGS[@]}" || true
+
+  FAIL_COUNT="$(wc -l < "$FAIL_LOG" | tr -d ' ')"
+  if [[ "$FAIL_COUNT" -gt 0 ]]; then
+    echo "error: $FAIL_COUNT of $TOTAL blob download(s) failed — see az error output above" >&2
+    exit 1
+  fi
+fi
 
 if [[ -d "$STAGE/$RUN_ID" ]]; then
   shopt -s dotglob nullglob

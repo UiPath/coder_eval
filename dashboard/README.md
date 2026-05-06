@@ -115,12 +115,15 @@ uv run dashboard schema --drop
 
 `dashboard/scripts/pull-run.sh` downloads run blobs back to a local directory. Auth and config come from `dashboard/.env` exactly like the upload path — no extra credentials needed.
 
+By default it pulls only the high-signal files needed for triage / analysis (`run.json`, `run.md`, `analysis.md`, `experiment.*`, and per-task `task.{json,html,log}`) — roughly ~37 MB / ~465 files vs the prior ~7+ GB / 8000+ files when the per-task `artifacts/` workspace is also pulled. Pass `--full` to opt back into the prior behavior when you need to inspect the agent's `.venv` / rendered artifacts.
+
 ```bash
-dashboard/scripts/pull-run.sh                       # latest run → runs/<run-id>
+dashboard/scripts/pull-run.sh                       # latest run, targeted set → runs/<run-id>
 dashboard/scripts/pull-run.sh list                  # list run ids in the container
-dashboard/scripts/pull-run.sh <run-id>              # specific run → runs/<run-id>
+dashboard/scripts/pull-run.sh <run-id>              # specific run, targeted set → runs/<run-id>
 dashboard/scripts/pull-run.sh <run-id> some/dir     # custom destination
-dashboard/scripts/pull-run.sh --container <name>    # override AZURE_BLOB_CONTAINER
+dashboard/scripts/pull-run.sh --full <run-id>       # full pull (incl. per-task artifacts/ workspace)
+dashboard/scripts/pull-run.sh --container <name> .. # override AZURE_BLOB_CONTAINER
 ```
 
 If `runs/<run-id>` already exists locally, the script warns and writes to `tmp/runs/<run-id>` instead. Note: this pulls only blob artifacts — structured run data already in ADX is not re-fetched.
