@@ -20,6 +20,7 @@ from coder_eval.models import CriterionResult, LLMJudgeCriterion
 
 if TYPE_CHECKING:
     from coder_eval.models.results import TurnRecord
+    from coder_eval.models.routing import ApiRoute
     from coder_eval.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
         sandbox: Sandbox,
         reference_code: str | None = None,
         turn_records: list[TurnRecord] | None = None,
+        route: ApiRoute | None = None,
     ) -> CriterionResult:
         context = JudgeContextBuilder(
             files=criterion.files,

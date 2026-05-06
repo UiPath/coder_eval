@@ -373,26 +373,14 @@ def test_resolve_route_bedrock():
     assert route.model == "eu.anthropic.claude-sonnet-4-6"
 
 
-def test_resolve_route_proxy():
-    """resolve_route with PROXY returns ProxyRoute with given port."""
-    from coder_eval.config import Settings
-    from coder_eval.models import ProxyRoute, resolve_route
-    from coder_eval.models.enums import ApiBackend
-
-    s = Settings(api_backend=ApiBackend.PROXY)
-    route = resolve_route(s, proxy_port=8080)
-    assert isinstance(route, ProxyRoute)
-    assert route.port == 8080
-
-
-def test_resolve_route_proxy_no_port_asserts():
-    """resolve_route with PROXY and no port raises AssertionError."""
+def test_resolve_route_proxy_raises():
+    """resolve_route does not handle PROXY — the orchestrator constructs ProxyRoute inline."""
     from coder_eval.config import Settings
     from coder_eval.models import resolve_route
     from coder_eval.models.enums import ApiBackend
 
     s = Settings(api_backend=ApiBackend.PROXY)
-    with pytest.raises(AssertionError, match="proxy_port"):
+    with pytest.raises(ValueError, match="PROXY"):
         resolve_route(s)
 
 

@@ -6,11 +6,15 @@ the criteria registry.
 """
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..criteria import BaseCriterion, CriterionRegistry, init_criteria
 from ..models import CriteriaResults, CriterionResult, SuccessCriteria, SuccessCriterion, TurnRecords
 from ..sandbox import Sandbox
+
+
+if TYPE_CHECKING:
+    from ..models.routing import ApiRoute
 
 
 # Get module logger
@@ -61,6 +65,7 @@ class SuccessChecker:
         sandbox: Sandbox,
         init_registry: bool = True,
         validate_registry: bool = True,
+        route: "ApiRoute | None" = None,
     ):
         """Initialize the success checker.
 
@@ -68,6 +73,11 @@ class SuccessChecker:
             sandbox: Sandbox instance for running checks
             init_registry: Whether to initialize the criteria registry
             validate_registry: Whether to validate all expected types are registered
+            route: Resolved ``ApiRoute`` from the orchestrator. Forwarded to every
+                checker's ``check()`` so criteria that spawn sub-agents (e.g.
+                ``agent_judge``) can route through the same backend (Direct /
+                Proxy / Bedrock) as the main coding agent. ``None`` is acceptable
+                for non-sub-agent criteria; ``agent_judge`` requires a route.
         """
         self.sandbox = sandbox
         self._checker_instances: dict[str, BaseCriterion[Any]] = {}
@@ -76,6 +86,7 @@ class SuccessChecker:
         self._reference_code: str | None = None
         # Cached turn records - set by check()/check_all() when provided
         self._turn_records: TurnRecords | None = None
+        self.route = route
 
         # V3: Lazy initialization - registry loaded here, not at import
         if init_registry:
@@ -172,7 +183,7 @@ class SuccessChecker:
         try:
             # Get cached instance
             checker = self._get_checker_instance(criterion_type)
-            result = checker.check(criterion, self.sandbox, reference_code, turn_records=turn_records)
+            result = checker.check(criterion, self.sandbox, reference_code, turn_records=turn_records, route=self.route)
             result.pass_threshold = criterion.pass_threshold
 
             logger.debug(f"Criterion '{criterion_type}' score: {result.score:.2f}")

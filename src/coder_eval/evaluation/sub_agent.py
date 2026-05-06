@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
-from coder_eval.models import AgentConfig, ProxyRoute
+from coder_eval.models import AgentConfig
 
 
 if TYPE_CHECKING:
@@ -26,10 +26,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-
-class UnsupportedRouteError(RuntimeError):
-    """Raised by SubAgentRunner when the configured API route is not supported."""
 
 
 def _ignore_patterns_and_symlinks(patterns: list[str]):
@@ -59,7 +55,6 @@ class SubAgentRunner:
     """Spawn a Claude Code SDK agent in an isolated sandbox copy and return its turn.
 
     Owns:
-    - PROXY fail-fast (the SDK bridging isn't wired through the evaluator proxy yet).
     - ``mkdtemp`` + ``copytree`` with symlink filtering + pattern ignores.
     - ``ClaudeCodeAgent`` construction, ``start``/``communicate``/``stop``/``kill`` lifecycle.
     - Temp-dir cleanup on every exit path.
@@ -96,13 +91,8 @@ class SubAgentRunner:
     def run(self, user_msg: str, turn_timeout: float) -> TurnRecord:
         """Copy sandbox → start agent → communicate → stop. Kill on any exception.
 
-        Raises ``UnsupportedRouteError`` when the route is ``ProxyRoute`` (fail-fast
-        before allocating any resources).
         Raises ``TurnTimeoutError`` when the agent exceeds ``turn_timeout``.
         """
-        if isinstance(self._route, ProxyRoute):
-            raise UnsupportedRouteError("sub_agent: PROXY backend not supported in MVP")
-
         # Narrow via local var — checked in __init__ but pyright doesn't track that.
         src_dir = self._sandbox.sandbox_dir
         assert src_dir is not None, "sandbox not initialized"

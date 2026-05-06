@@ -10,11 +10,10 @@ import pytest
 from coder_eval.errors.timeout import TurnTimeoutError
 from coder_eval.evaluation.sub_agent import (
     SubAgentRunner,
-    UnsupportedRouteError,
     _ignore_patterns_and_symlinks,
 )
 from coder_eval.models import AgentConfig, AgentKind, TurnRecord
-from coder_eval.models.routing import DirectRoute, ProxyRoute
+from coder_eval.models.routing import DirectRoute
 from coder_eval.sandbox import Sandbox
 
 
@@ -183,24 +182,6 @@ def test_runner_propagates_turn_timeout(sandbox: Sandbox) -> None:
         runner.run("grade", turn_timeout=30.0)
 
     assert not Path(captured["path"]).exists()
-
-
-# --- PROXY fail-fast ---
-
-
-def test_runner_proxy_fails_fast(sandbox: Sandbox) -> None:
-    runner = SubAgentRunner(
-        sandbox=sandbox,
-        agent_config=_make_agent_config(),
-        ignore_patterns=[],
-        route=ProxyRoute(port=8080),
-    )
-    with (
-        patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent") as mock_cls,
-        pytest.raises(UnsupportedRouteError, match="PROXY"),
-    ):
-        runner.run("grade", turn_timeout=30.0)
-    mock_cls.assert_not_called()
 
 
 # --- security contract ---

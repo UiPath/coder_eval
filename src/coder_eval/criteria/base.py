@@ -14,6 +14,7 @@ from coder_eval.models import BaseSuccessCriterion, CriterionAggregate, Criterio
 
 if TYPE_CHECKING:
     from coder_eval.models.results import TurnRecord
+    from coder_eval.models.routing import ApiRoute
     from coder_eval.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
@@ -35,9 +36,10 @@ def handle_criterion_errors(func: Callable[..., CriterionResult]) -> Callable[..
         sandbox: "Sandbox",
         reference_code: str | None = None,
         turn_records: list["TurnRecord"] | None = None,
+        route: "ApiRoute | None" = None,
     ) -> CriterionResult:
         try:
-            return func(self, criterion, sandbox, reference_code, turn_records=turn_records)
+            return func(self, criterion, sandbox, reference_code, turn_records=turn_records, route=route)
         except Exception as e:
             exc_info = f"{e.__class__.__name__}: {e}"
             tb = ""
@@ -97,6 +99,7 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         sandbox: "Sandbox",
         reference_code: str | None = None,
         turn_records: list["TurnRecord"] | None = None,
+        route: "ApiRoute | None" = None,
     ) -> CriterionResult:
         """Execute the criterion check with centralized error handling.
 
@@ -108,11 +111,15 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             sandbox: Sandbox instance for file access and command execution
             reference_code: Optional reference code string for comparison
             turn_records: Optional list of turn records for command inspection
+            route: Optional resolved ApiRoute. Forwarded by SuccessChecker so
+                criteria that spawn sub-agents (e.g. agent_judge) can route
+                through the same backend (Direct/Proxy/Bedrock) as the main
+                agent. Most checkers ignore it.
 
         Returns:
             CriterionResult with score (0.0-1.0), details, and error info
         """
-        return self._check_impl(criterion, sandbox, reference_code, turn_records=turn_records)
+        return self._check_impl(criterion, sandbox, reference_code, turn_records=turn_records, route=route)
 
     @abstractmethod
     def _check_impl(
@@ -121,6 +128,7 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         sandbox: "Sandbox",
         reference_code: str | None = None,
         turn_records: list["TurnRecord"] | None = None,
+        route: "ApiRoute | None" = None,
     ) -> CriterionResult:
         """Implement the actual criterion checking logic.
 
@@ -131,6 +139,7 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             sandbox: Sandbox instance for file access and command execution
             reference_code: Optional reference code string for comparison
             turn_records: Optional list of turn records for command inspection
+            route: Optional resolved ApiRoute (see ``check()``).
 
         Returns:
             CriterionResult with score (0.0-1.0), details, and error info

@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from coder_eval.config import settings
 from coder_eval.criteria.base import BaseCriterion, register_criterion
 from coder_eval.errors.timeout import TurnTimeoutError
 from coder_eval.evaluation.judge_context import (
@@ -29,14 +28,13 @@ from coder_eval.models import (
     AgentConfig,
     AgentJudgeCriterion,
     AgentKind,
-    ApiBackend,
     CriterionResult,
-    resolve_route,
 )
 
 
 if TYPE_CHECKING:
     from coder_eval.models.results import TurnRecord
+    from coder_eval.models.routing import ApiRoute
     from coder_eval.sandbox import Sandbox
 
 
@@ -78,21 +76,18 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
         sandbox: Sandbox,
         reference_code: str | None = None,
         turn_records: list[TurnRecord] | None = None,
+        route: ApiRoute | None = None,
     ) -> CriterionResult:
         assert sandbox.sandbox_dir is not None, "sandbox not initialized"
-
-        # PROXY fail-fast before constructing the context or calling resolve_route:
-        # resolve_route asserts when PROXY is set without a port, which would show up
-        # as an opaque AssertionError instead of the actionable message users expect.
-        # SubAgentRunner also rejects ProxyRoute as defense-in-depth for direct callers.
-        if settings.api_backend == ApiBackend.PROXY:
-            return CriterionResult(
-                criterion_type=criterion.type,
-                description=criterion.description,
-                score=0.0,
-                details="agent_judge does not yet support the PROXY backend (issue #166 follow-up).",
-                error="agent_judge: PROXY backend not supported in MVP",
+        if route is None:
+            # Explicit raise (not assert) so `python -O` cannot strip this guard;
+            # `test_agent_judge_with_no_route_raises` locks in the contract message.
+            msg = (
+                "agent_judge requires a route from SuccessChecker; the orchestrator "
+                + "must construct one (DirectRoute / ProxyRoute / BedrockRoute) and pass "
+                + "it via SuccessChecker(..., route=...)"
             )
+            raise ValueError(msg)
 
         context = JudgeContextBuilder(
             files=criterion.files,
@@ -110,7 +105,7 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
             sandbox=sandbox,
             agent_config=agent_config,
             ignore_patterns=criterion.ignore_patterns,
-            route=resolve_route(settings),
+            route=route,
         )
 
         try:

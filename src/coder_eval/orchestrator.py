@@ -551,7 +551,23 @@ class Orchestrator:
             # evaluate-only mode: sandbox already set up, skip agent
             assert self.result is not None
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
-            self.success_checker = SuccessChecker(self.sandbox)
+
+            # Start the LLMGW proxy for re-grading workflows that include
+            # agent_judge criteria — the judge sub-agent routes through the same
+            # proxy as the (already-completed) main coding agent would have.
+            # _cleanup handles teardown via `if self.proxy:`.
+            if settings.api_backend == ApiBackend.PROXY:
+                from .proxy import LLMGatewayProxy
+
+                proxy_config = proxy_config_from_settings(settings, task_id=self._log_task_id)
+                self.proxy = LLMGatewayProxy(proxy_config)
+                proxy_port = await self.proxy.start()
+                self.route = ProxyRoute(port=proxy_port)
+                logger.info("LLM Gateway proxy started on port %d (evaluate-only mode)", proxy_port)
+            else:
+                self.route = resolve_route(settings)
+            logger.info("API routing: %s", ROUTE_NAMES[type(self.route)])
+            self.success_checker = SuccessChecker(self.sandbox, route=self.route)
             return
 
         # Validate API keys (agent guaranteed non-None after experiment resolution)
@@ -587,22 +603,19 @@ class Orchestrator:
             self.snapshot_base_dir.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
             logger.info(f"Snapshots enabled: mode={self.task.sandbox.snapshots.mode.value}")
 
-        # Create success checker
-        self.success_checker = SuccessChecker(self.sandbox)
-
         # Determine API routing from settings.api_backend enum
-        proxy_port: int | None = None
         if settings.api_backend == ApiBackend.PROXY:
             from .proxy import LLMGatewayProxy
 
             proxy_config = proxy_config_from_settings(settings, task_id=self._log_task_id)
             self.proxy = LLMGatewayProxy(proxy_config)
-            await self.proxy.start()
-            proxy_port = self.proxy.port
+            proxy_port = await self.proxy.start()
+            self.route = ProxyRoute(port=proxy_port)
             logger.info("LLM Gateway proxy started on port %d", proxy_port)
-
-        self.route = resolve_route(settings, proxy_port=proxy_port)
+        else:
+            self.route = resolve_route(settings)
         logger.info("API routing: %s", ROUTE_NAMES[type(self.route)])
+        self.success_checker = SuccessChecker(self.sandbox, route=self.route)
 
         # Create and start agent with retry logic
         self.agent = await self._create_agent()

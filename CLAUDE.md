@@ -170,7 +170,7 @@ templates/                         # Sandbox template directories
 | `classification_match` | Binary | File-based label match (observed vs expected) with `(none)`/`(other)` sentinels; emits `ClassificationCriterionResult` for suite-level P/R/F1 |
 | `skill_triggered` | Binary | Did the agent invoke a `Skill` tool during the run? Emits `ClassificationCriterionResult` for suite-level P/R/F1 |
 | `llm_judge` | Continuous | LLM grades artifacts + optional trajectory + optional reference via UiPath LLM Gateway |
-| `agent_judge` | Continuous | Spawns a Claude Code SDK agent in an isolated sandbox copy; judge uses tools (Bash/Read/Grep/…) to investigate and returns a JSON verdict. Expensive; runs with evaluator credentials — see SECURITY note in the criterion docstring. Does not support the PROXY backend (follow-up). |
+| `agent_judge` | Continuous | Spawns a Claude Code SDK agent in an isolated sandbox copy; judge uses tools (Bash/Read/Grep/…) to investigate and returns a JSON verdict. Expensive; runs with evaluator credentials — see SECURITY note in the criterion docstring. |
 
 All criteria support `weight` (default 1.0) and `pass_threshold` (default 0.9). On dataset-backed tasks, criteria may also set `suite_thresholds: {metric: min_value}` — the suite gate passes iff every listed metric (from the criterion's `aggregate()` output) meets its minimum.
 

@@ -25,6 +25,7 @@ from coder_eval.models import CriterionResult, ImportCheckCriterion
 
 if TYPE_CHECKING:
     from coder_eval.models.results import TurnRecord
+    from coder_eval.models.routing import ApiRoute
     from coder_eval.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,7 @@ class ImportCheckChecker(BaseCriterion[ImportCheckCriterion]):
         sandbox: "Sandbox",
         reference_code: str | None = None,
         turn_records: list["TurnRecord"] | None = None,
+        route: "ApiRoute | None" = None,
     ) -> CriterionResult:
         """Check that a Python file parses and its imports resolve."""
         # 1. File existence

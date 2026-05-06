@@ -96,11 +96,17 @@ ROUTE_NAMES: dict[type, str] = {
 }
 
 
-def resolve_route(settings: Settings, *, proxy_port: int | None = None) -> ApiRoute:
-    """Construct the appropriate ApiRoute for the given backend.
+def resolve_route(settings: Settings) -> ApiRoute:
+    """Resolve an ``ApiRoute`` from static settings.
 
-    Called after validate_api_keys() has verified credentials.
-    Uses assert for type narrowing (not ValueError) since this is an internal contract.
+    Handles only backends whose route is fully determined by ``Settings``
+    (``DIRECT`` and ``BEDROCK``). PROXY is **not** handled here — its port is
+    runtime state owned by ``Orchestrator``, which constructs
+    ``ProxyRoute(port=self.proxy.port)`` inline next to the proxy-start block.
+
+    Called after ``validate_api_keys()`` has verified credentials. Uses
+    ``assert`` for type narrowing (not ``ValueError``) since the Bedrock
+    credential checks are an internal contract.
     """
     match settings.api_backend:
         case ApiBackend.BEDROCK:
@@ -117,8 +123,11 @@ def resolve_route(settings: Settings, *, proxy_port: int | None = None) -> ApiRo
                 small_model=to_bedrock_inference_profile(settings.bedrock_small_model, settings.aws_region),
             )
         case ApiBackend.PROXY:
-            assert proxy_port is not None, "Proxy backend requires proxy_port"
-            return ProxyRoute(port=proxy_port)
+            msg = (
+                "PROXY backend must construct ProxyRoute(port=...) directly with the running "
+                + "proxy port; resolve_route handles only static-from-settings backends."
+            )
+            raise ValueError(msg)
         case ApiBackend.DIRECT:
             return DirectRoute()
 
