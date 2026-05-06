@@ -31,7 +31,7 @@ The systemd timer fires the `coder-eval-daily.service` oneshot, which `ExecStart
 
 1. **`git pull main`** for `coder_eval` (or whatever `BRANCH` env override sets), `skills`, `cli`. Honors `flock` (one wrapper at a time).
 2. **Source `.env` files** — `~/uipath/coder_eval/.env` (bedrock keys, LLMGW, GH PAT, UV index password, optional Slack webhook) and `~/uipath/coder_eval/dashboard/.env` (ADX, Azure storage, optional storage key fallback). Done after the pull so newly-added keys upstream get picked up.
-3. **Rebuild `uip` CLI** — `bun install && bun run dev:install-cli` in `~/uipath/cli`. Idempotent; recreates the bun-managed symlink chain (which can rot if a `bun install` elsewhere cleans up the global node_modules dir).
+3. **Rebuild `uip` CLI** — `bun install && bun run dev:cli:install` in `~/uipath/cli`. Idempotent; recreates the bun-managed symlink chain (which can rot if a `bun install` elsewhere cleans up the global node_modules dir).
 4. **Sync Python deps** — `uv pip install -e ".[dev]"` and `-e "./dashboard"` against the in-tree `.venv`.
 5. **`dashboard run --suite skills`** under `flock -n -E 75`. Skills suite is 153 tasks × `claude-sonnet-4-6` × bedrock backend × `concurrency=10`. Tasks run in sandboxed tempdirs, each calling the bot-authenticated `uip` CLI for flow validation/debug.
 6. **Blob upload + ADX ingest** — both wrapped in try/except inside `cli.py`. A failure prints a traceback and continues, so the Slack post still fires with metrics from `runs/latest/run.json`.
@@ -54,7 +54,7 @@ Total wall time: ~1–2 hours at 10x parallel. Peak memory: ~8 GB out of 16 GB (
 
 - `uv 0.11.8`, `node v20.20.2`, `bun 1.3.13`, `gh 2.92.0`, `azure-cli 2.85.0`
 - Python 3.13 inside `.venv` (managed by `uv`); system Python is 3.12 (unused).
-- `uip` v1.0.0 built from source via `bun run dev:install-cli` → bun-linked at `~/.bun/bin/uip` and symlinked to `/usr/local/bin/uip` so non-interactive sshd PATH resolves it.
+- `uip` v1.0.0 built from source via `bun run dev:cli:install` → bun-linked at `~/.bun/bin/uip` and symlinked to `/usr/local/bin/uip` so non-interactive sshd PATH resolves it.
 - Note: `npm i -g @uipath/cli` is a trap — plugins land under root-owned `/usr/lib/node_modules/@uipath/` and the maestro plugin auto-install EACCES-es. Build from source via `bun` (where plugins land in `~/.bun/install/global/`) and remove any system npm install.
 
 ## Auth model

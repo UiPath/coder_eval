@@ -53,7 +53,7 @@ done
 # Skills + CLI always track main — only coder_eval honors $BRANCH (for ad-hoc smoke tests).
 (cd "$SKILLS_REPO" && git fetch --quiet && git checkout --quiet main && git pull --ff-only --quiet)
 (cd "$CLI_REPO"    && git fetch --quiet && git checkout --quiet main && git pull --ff-only --quiet \
-                   && bun install --silent && bun run dev:install-cli)
+                   && bun install --silent && bun run dev:cli:install)
 
 [ -d .venv ] || uv venv --python 3.13
 uv pip install --python .venv/bin/python -e ".[dev]" --quiet

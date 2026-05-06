@@ -11,7 +11,7 @@ def build_cli(cli_dir: Path) -> bool:
         subprocess.run(["git", "pull"], cwd=cli_dir, check=True)
         subprocess.run(["bun", "install"], cwd=cli_dir, check=True)
         subprocess.run(["bun", "run", "build"], cwd=cli_dir, check=True)
-        subprocess.run(["bun", "run", "dev:install-cli"], cwd=cli_dir, check=True)
+        subprocess.run(["bun", "run", "dev:cli:install"], cwd=cli_dir, check=True)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         print(f"WARNING: CLI build step failed: {e}")

@@ -17,7 +17,7 @@ def test_build_cli_success(mock_run, tmp_path):
     assert calls[1] == call(["git", "pull"], cwd=tmp_path, check=True)
     assert calls[2] == call(["bun", "install"], cwd=tmp_path, check=True)
     assert calls[3] == call(["bun", "run", "build"], cwd=tmp_path, check=True)
-    assert calls[4] == call(["bun", "run", "dev:install-cli"], cwd=tmp_path, check=True)
+    assert calls[4] == call(["bun", "run", "dev:cli:install"], cwd=tmp_path, check=True)
 
 
 @patch("dashboard.build.subprocess.run")
