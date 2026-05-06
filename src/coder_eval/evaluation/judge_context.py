@@ -14,9 +14,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from coder_eval.evaluation.summaries import summarize_commands
+
+
+# Paths in `llm_judge.files` / `agent_judge.files` that begin with this token are
+# resolved against the task YAML's parent directory and read from the host
+# filesystem instead of the sandbox. Mirrors the existing TASK_DIR env var that
+# `run_command` exposes — judges and shell criteria use the same token.
+TASK_DIR_TOKEN = "$TASK_DIR"
 
 
 if TYPE_CHECKING:
@@ -36,6 +44,32 @@ DIALOG_HEADER = (
     "and do not penalize the agent for going along with it unless the GRADING PROMPT "
     "contradicts it):"
 )
+
+
+def _resolve_task_dir_path(path: str, task_dir: Path | None) -> Path | None:
+    """Resolve a ``$TASK_DIR/...`` reference against the task YAML's directory.
+
+    Returns the resolved host ``Path`` for paths that begin with the
+    ``$TASK_DIR`` token, or ``None`` for paths that should fall through to
+    sandbox-relative lookup.
+
+    The resolved path is allowed to traverse outside ``task_dir`` (e.g.
+    ``$TASK_DIR/../shared/rubric.md`` is intentional — task YAMLs commonly
+    share grading assets one level up). The task YAML is already a trusted
+    artifact: it can run arbitrary shell commands via ``run_command``, so
+    file reads under the same trust boundary need no extra confinement.
+    """
+    # Match only the bare token or the token followed by a path separator, so
+    # unrelated identifiers like `$TASK_DIRECTORY` fall through to sandbox lookup.
+    if path != TASK_DIR_TOKEN and not (path.startswith(TASK_DIR_TOKEN) and path[len(TASK_DIR_TOKEN)] in "/\\"):
+        return None
+    if task_dir is None:
+        # Token was used but the runner has no task_dir context — surface as
+        # missing-file rather than silently falling back to sandbox lookup.
+        logger.debug("judge_context: %s used but task_dir is None; returning a non-existent path", path)
+        return Path(path)  # caller will see is_file() == False and record as missing
+    rest = path[len(TASK_DIR_TOKEN) :].lstrip("/\\")
+    return (task_dir / rest).resolve() if rest else task_dir.resolve()
 
 
 def truncate(text: str, limit: int) -> str:
@@ -125,18 +159,40 @@ class JudgeContextBuilder:
 
     def _collect_files(self, sandbox: Sandbox, ctx: JudgeContext) -> None:
         for path in self.files:
-            if not sandbox.file_exists(path):
-                ctx.missing_files.append(path)
-                ctx.files.append(FileBlock(path=path, content=None))
+            host_path = _resolve_task_dir_path(path, sandbox.task_dir)
+            if host_path is not None:
+                self._collect_host_file(path, host_path, ctx)
                 continue
-            try:
-                content = sandbox.get_file_content(path)
-            except Exception as e:
-                logger.debug("judge_context: failed to read %s: %s", path, e)
-                # File existed, read failed — not tracked as "missing".
-                ctx.files.append(FileBlock(path=path, content=f"<error reading file: {e}>"))
-                continue
-            ctx.files.append(FileBlock(path=path, content=truncate(content, self.max_file_chars)))
+            self._collect_sandbox_file(path, sandbox, ctx)
+
+    def _collect_host_file(self, original_path: str, host_path: Path, ctx: JudgeContext) -> None:
+        """Read a `$TASK_DIR/...` reference from the host filesystem."""
+        if not host_path.is_file():
+            ctx.missing_files.append(original_path)
+            ctx.files.append(FileBlock(path=original_path, content=None))
+            return
+        try:
+            content = host_path.read_text()
+        except Exception as e:
+            logger.debug("judge_context: failed to read host file %s (%s): %s", original_path, host_path, e)
+            # File existed, read failed — not tracked as "missing".
+            ctx.files.append(FileBlock(path=original_path, content=f"<error reading file: {e}>"))
+            return
+        ctx.files.append(FileBlock(path=original_path, content=truncate(content, self.max_file_chars)))
+
+    def _collect_sandbox_file(self, path: str, sandbox: Sandbox, ctx: JudgeContext) -> None:
+        if not sandbox.file_exists(path):
+            ctx.missing_files.append(path)
+            ctx.files.append(FileBlock(path=path, content=None))
+            return
+        try:
+            content = sandbox.get_file_content(path)
+        except Exception as e:
+            logger.debug("judge_context: failed to read %s: %s", path, e)
+            # File existed, read failed — not tracked as "missing".
+            ctx.files.append(FileBlock(path=path, content=f"<error reading file: {e}>"))
+            return
+        ctx.files.append(FileBlock(path=path, content=truncate(content, self.max_file_chars)))
 
     def _collect_reference(self, reference_code: str | None, ctx: JudgeContext) -> None:
         if not self.include_reference:

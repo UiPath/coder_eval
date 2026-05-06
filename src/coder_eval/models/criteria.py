@@ -589,7 +589,9 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
     files: list[str] = Field(
         default_factory=list,
         description=(
-            "Sandbox-relative paths whose contents are shown to the judge. "
+            "Paths whose contents are shown to the judge. Plain entries are sandbox-relative; "
+            "entries prefixed with '$TASK_DIR/' are read from the host filesystem relative to "
+            "the task YAML's parent directory (useful for shared rubrics outside the sandbox). "
             "Missing files are rendered as '<file not found>' so the rubric can penalize them."
         ),
     )
@@ -676,8 +678,10 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
     files: list[str] = Field(
         default_factory=list,
         description=(
-            "Sandbox-relative paths pre-attached to the judge prompt. The judge also has "
-            "live access to these files via its working directory (a sandbox copy)."
+            "Paths pre-attached to the judge prompt. Plain entries are sandbox-relative — "
+            "the judge also has live access to those via its working directory (a sandbox copy). "
+            "Entries prefixed with '$TASK_DIR/' are read from the host filesystem relative to "
+            "the task YAML's parent directory and are inlined into the prompt only."
         ),
     )
     include_reference: bool = Field(

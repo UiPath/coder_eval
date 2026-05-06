@@ -106,6 +106,76 @@ def test_builder_mixed_present_missing(sandbox: Sandbox, tmp_path: Path) -> None
     assert ctx.missing_files == ["b.py"]
 
 
+def test_builder_task_dir_token_resolves_to_host_file(tmp_path: Path) -> None:
+    """`$TASK_DIR/...` reads from the task YAML's parent dir, not the sandbox."""
+    from coder_eval.models import SandboxConfig
+
+    task_dir = tmp_path / "tasks" / "subdir"
+    task_dir.mkdir(parents=True)
+    (task_dir.parent / "rubric.md").write_text("RUBRIC BODY")
+
+    sandbox_dir = tmp_path / "sandbox"
+    sandbox_dir.mkdir()
+    sb = Sandbox(SandboxConfig(driver="tempdir"), task_id="t", task_dir=task_dir)
+    sb.sandbox_dir = sandbox_dir
+
+    ctx = _make_builder(files=["$TASK_DIR/../rubric.md"]).build(sb, None, None)
+    assert len(ctx.files) == 1
+    assert ctx.files[0].path == "$TASK_DIR/../rubric.md"
+    assert ctx.files[0].content == "RUBRIC BODY"
+    assert ctx.missing_files == []
+
+
+def test_builder_task_dir_token_missing_host_file(tmp_path: Path) -> None:
+    """A `$TASK_DIR/...` reference that doesn't resolve is tracked as missing."""
+    from coder_eval.models import SandboxConfig
+
+    task_dir = tmp_path / "tasks"
+    task_dir.mkdir()
+    sandbox_dir = tmp_path / "sandbox"
+    sandbox_dir.mkdir()
+    sb = Sandbox(SandboxConfig(driver="tempdir"), task_id="t", task_dir=task_dir)
+    sb.sandbox_dir = sandbox_dir
+
+    ctx = _make_builder(files=["$TASK_DIR/nope.md"]).build(sb, None, None)
+    assert ctx.files == [FileBlock(path="$TASK_DIR/nope.md", content=None)]
+    assert ctx.missing_files == ["$TASK_DIR/nope.md"]
+
+
+def test_builder_task_dir_token_no_task_dir_treated_as_missing(tmp_path: Path) -> None:
+    """When the runner has no task_dir context, `$TASK_DIR/...` records as missing."""
+    from coder_eval.models import SandboxConfig
+
+    sb = Sandbox(SandboxConfig(driver="tempdir"), task_id="t")  # task_dir defaults to None
+    sb.sandbox_dir = tmp_path
+
+    ctx = _make_builder(files=["$TASK_DIR/anything.md"]).build(sb, None, None)
+    assert ctx.missing_files == ["$TASK_DIR/anything.md"]
+    assert ctx.files[0].content is None
+
+
+def test_builder_non_token_path_uses_sandbox(tmp_path: Path) -> None:
+    """A path without the token still reads from the sandbox even when task_dir is set."""
+    from coder_eval.models import SandboxConfig
+
+    task_dir = tmp_path / "tasks"
+    task_dir.mkdir()
+    (task_dir / "rubric.md").write_text("HOST")  # exists on host, NOT in sandbox
+
+    sandbox_dir = tmp_path / "sandbox"
+    sandbox_dir.mkdir()
+    (sandbox_dir / "main.py").write_text("SANDBOX")
+    sb = Sandbox(SandboxConfig(driver="tempdir"), task_id="t", task_dir=task_dir)
+    sb.sandbox_dir = sandbox_dir
+
+    # Plain "rubric.md" must not accidentally pick up the host file.
+    ctx = _make_builder(files=["rubric.md", "main.py"]).build(sb, None, None)
+    paths = {f.path: f.content for f in ctx.files}
+    assert paths["rubric.md"] is None
+    assert paths["main.py"] == "SANDBOX"
+    assert ctx.missing_files == ["rubric.md"]
+
+
 def test_builder_read_exception_recovers(
     sandbox: Sandbox,
     tmp_path: Path,

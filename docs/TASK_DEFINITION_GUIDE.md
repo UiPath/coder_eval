@@ -514,7 +514,7 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
 | Field | Default | Description |
 |-------|---------|-------------|
 | `prompt` | *required* | Grading instructions shown to the judge |
-| `files` | `[]` | Sandbox-relative paths whose contents are shown to the judge (missing files render as `<file not found>`) |
+| `files` | `[]` | Paths whose contents are shown to the judge. Plain entries are sandbox-relative; entries prefixed with `$TASK_DIR/` are read from the host filesystem relative to the task YAML's parent directory (e.g. `$TASK_DIR/../shared/rubric.md` for a rubric shared across a task family). Missing files render as `<file not found>`. |
 | `include_reference` | `false` | Include the task's reference solution in the judge prompt (silently omitted if no reference is configured). Never shown to the agent. |
 | `include_agent_output` | `false` | Include the latest agent turn's raw output (wrapped as UNTRUSTED DATA) |
 | `include_tool_calls` | `false` | Include a summary of the latest agent turn's tool calls |
@@ -577,7 +577,7 @@ Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LL
 | Field | Default | Description |
 |-------|---------|-------------|
 | `prompt` | *required* | Evaluation instructions for the judge agent |
-| `files` | `[]` | Sandbox-relative paths pre-attached to the prompt (judge also has live access to these files) |
+| `files` | `[]` | Paths pre-attached to the prompt. Plain entries are sandbox-relative (the judge also has live access via its working-directory copy); entries prefixed with `$TASK_DIR/` are read from the host filesystem relative to the task YAML's parent directory and are inlined into the prompt only. |
 | `include_reference` | `false` | Include the task's reference solution in the judge prompt |
 | `include_agent_output` | `false` | Include the latest agent turn's raw output (UNTRUSTED) |
 | `include_tool_calls` | `false` | Include summarized tool-call telemetry from the latest agent turn |
