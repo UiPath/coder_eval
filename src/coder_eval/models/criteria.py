@@ -639,7 +639,13 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
     )
     model: str = Field(
         default=DEFAULT_GATEWAY_MODEL,
-        description="Gateway model name (e.g. 'anthropic.claude-sonnet-4-6').",
+        description=(
+            "Gateway model name (e.g. 'anthropic.claude-sonnet-4-6'). "
+            "On a BedrockRoute / DirectRoute / ProxyRoute the value is auto-translated: "
+            "trailing '-vN[:M]' suffixes and the 'anthropic.' prefix are stripped where "
+            "the backend doesn't accept them; on Bedrock the cross-region inference-profile "
+            "prefix is added based on AWS_REGION."
+        ),
     )
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=1000, gt=0)

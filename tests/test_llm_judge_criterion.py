@@ -456,6 +456,133 @@ def test_judge_reference_not_leaked_on_parse_failure(sandbox: Sandbox) -> None:
         assert field_value is None or sentinel not in field_value
 
 
+# --- route dispatch ---
+
+
+def test_judge_no_route_falls_back_to_llmgw(sandbox: Sandbox) -> None:
+    """No route -> LLMGW path; Bedrock and Anthropic invokers are NOT called."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    mock_llm = _make_mock_llm('{"score": 0.6, "rationale": "ok"}')
+    with (
+        patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm) as m_llmgw,
+        patch("coder_eval.criteria.llm_judge.invoke_bedrock_judge") as m_bedrock,
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge") as m_anthropic,
+    ):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+    assert result.score == 0.6
+    assert m_llmgw.call_count == 1
+    assert m_bedrock.call_count == 0
+    assert m_anthropic.call_count == 0
+
+
+def test_judge_bedrock_route_uses_bedrock_invoker(sandbox: Sandbox) -> None:
+    from coder_eval.models.routing import BedrockRoute
+
+    route = BedrockRoute(bearer_token="t", region="eu-north-1")
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    with (
+        patch(
+            "coder_eval.criteria.llm_judge.invoke_bedrock_judge", return_value='{"score":0.7,"rationale":"ok"}'
+        ) as m_bedrock,
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge") as m_anthropic,
+        patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model") as m_llmgw,
+    ):
+        result = SuccessChecker(sandbox, init_registry=False, route=route).check(criterion)
+    assert result.score == 0.7
+    m_bedrock.assert_called_once()
+    kwargs = m_bedrock.call_args.kwargs
+    assert kwargs["route"] is route
+    assert kwargs["model"] == criterion.model
+    assert kwargs["temperature"] == criterion.temperature
+    assert kwargs["max_tokens"] == criterion.max_tokens
+    assert m_anthropic.call_count == 0
+    assert m_llmgw.call_count == 0
+
+
+def test_judge_direct_route_uses_anthropic_invoker(sandbox: Sandbox) -> None:
+    from coder_eval.models.routing import DirectRoute
+
+    route = DirectRoute()
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    with (
+        patch(
+            "coder_eval.criteria.llm_judge.invoke_anthropic_judge", return_value='{"score":0.5,"rationale":"ok"}'
+        ) as m_anthropic,
+        patch("coder_eval.criteria.llm_judge.invoke_bedrock_judge") as m_bedrock,
+        patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model") as m_llmgw,
+    ):
+        result = SuccessChecker(sandbox, init_registry=False, route=route).check(criterion)
+    assert result.score == 0.5
+    m_anthropic.assert_called_once()
+    assert m_anthropic.call_args.kwargs["route"] is route
+    assert m_bedrock.call_count == 0
+    assert m_llmgw.call_count == 0
+
+
+def test_judge_proxy_route_uses_anthropic_invoker(sandbox: Sandbox) -> None:
+    from coder_eval.models.routing import ProxyRoute
+
+    route = ProxyRoute(port=12345)
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    with (
+        patch(
+            "coder_eval.criteria.llm_judge.invoke_anthropic_judge", return_value='{"score":0.4,"rationale":"ok"}'
+        ) as m_anthropic,
+        patch("coder_eval.criteria.llm_judge.invoke_bedrock_judge") as m_bedrock,
+        patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model") as m_llmgw,
+    ):
+        result = SuccessChecker(sandbox, init_registry=False, route=route).check(criterion)
+    assert result.score == 0.4
+    m_anthropic.assert_called_once()
+    assert m_anthropic.call_args.kwargs["route"] is route
+    assert m_bedrock.call_count == 0
+    assert m_llmgw.call_count == 0
+
+
+def test_judge_bedrock_invoke_runtime_error_maps_to_score_zero(sandbox: Sandbox) -> None:
+    from coder_eval.models.routing import BedrockRoute
+
+    route = BedrockRoute(bearer_token="t", region="eu-north-1")
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    with patch(
+        "coder_eval.criteria.llm_judge.invoke_bedrock_judge",
+        side_effect=RuntimeError("Bedrock invoke failed: 403 forbidden"),
+    ):
+        result = SuccessChecker(sandbox, init_registry=False, route=route).check(criterion)
+    assert result.score == 0.0
+    assert result.error is not None
+    assert "Bedrock invoke failed" in result.error
+
+
+def test_judge_anthropic_invoke_runtime_error_maps_to_score_zero(sandbox: Sandbox) -> None:
+    from coder_eval.models.routing import DirectRoute
+
+    route = DirectRoute()
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    with patch(
+        "coder_eval.criteria.llm_judge.invoke_anthropic_judge",
+        side_effect=RuntimeError("Anthropic API connection refused"),
+    ):
+        result = SuccessChecker(sandbox, init_registry=False, route=route).check(criterion)
+    assert result.score == 0.0
+    assert result.error is not None
+    assert "connection refused" in result.error
+
+
+def test_judge_bedrock_route_threads_model_unchanged(sandbox: Sandbox) -> None:
+    """Translation happens INSIDE the helper, not at the dispatch site."""
+    from coder_eval.models.routing import BedrockRoute
+
+    route = BedrockRoute(bearer_token="t", region="eu-north-1")
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", model="anthropic.claude-opus-4-6-v1")
+    with patch(
+        "coder_eval.criteria.llm_judge.invoke_bedrock_judge",
+        return_value='{"score":0.9,"rationale":"ok"}',
+    ) as m_bedrock:
+        SuccessChecker(sandbox, init_registry=False, route=route).check(criterion)
+    assert m_bedrock.call_args.kwargs["model"] == "anthropic.claude-opus-4-6-v1"
+
+
 def test_judge_agent_output_empty_does_not_emit_block(sandbox: Sandbox) -> None:
     """include_agent_output=True with empty agent_output must not produce an empty header block,
     but MUST record a degradation note so the caller can spot the missing context."""

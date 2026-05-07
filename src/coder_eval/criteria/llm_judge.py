@@ -6,6 +6,8 @@ import logging
 from typing import TYPE_CHECKING
 
 from coder_eval.criteria.base import BaseCriterion, register_criterion
+from coder_eval.evaluation.judge_anthropic import invoke_anthropic_judge
+from coder_eval.evaluation.judge_bedrock import invoke_bedrock_judge
 from coder_eval.evaluation.judge_context import (
     DIALOG_HEADER,
     JudgeContext,
@@ -15,7 +17,7 @@ from coder_eval.evaluation.judge_context import (
 )
 from coder_eval.evaluation.judge_verdict import parse_judge_verdict
 from coder_eval.evaluation.llmgw import get_llmgw_chat_model
-from coder_eval.models import CriterionResult, LLMJudgeCriterion
+from coder_eval.models import BedrockRoute, CriterionResult, DirectRoute, LLMJudgeCriterion, ProxyRoute
 
 
 if TYPE_CHECKING:
@@ -58,18 +60,39 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
 
         user_msg = _render_user_message(criterion.prompt, context)
 
-        llm = get_llmgw_chat_model(
-            model=criterion.model,
-            temperature=criterion.temperature,
-            max_tokens=criterion.max_tokens,
-        )
-        response = llm.invoke(
-            [
-                {"role": "system", "content": _SYSTEM_MESSAGE},
-                {"role": "user", "content": user_msg},
-            ]
-        )
-        content = response.content if isinstance(response.content, str) else str(response.content)
+        match route:
+            case BedrockRoute():
+                content = invoke_bedrock_judge(
+                    route=route,
+                    model=criterion.model,
+                    system=_SYSTEM_MESSAGE,
+                    user=user_msg,
+                    temperature=criterion.temperature,
+                    max_tokens=criterion.max_tokens,
+                )
+            case DirectRoute() | ProxyRoute():
+                content = invoke_anthropic_judge(
+                    route=route,
+                    model=criterion.model,
+                    system=_SYSTEM_MESSAGE,
+                    user=user_msg,
+                    temperature=criterion.temperature,
+                    max_tokens=criterion.max_tokens,
+                )
+            case _:
+                # route is None or a future ApiRoute variant — keep LLMGW as the safe default.
+                llm = get_llmgw_chat_model(
+                    model=criterion.model,
+                    temperature=criterion.temperature,
+                    max_tokens=criterion.max_tokens,
+                )
+                response = llm.invoke(
+                    [
+                        {"role": "system", "content": _SYSTEM_MESSAGE},
+                        {"role": "user", "content": user_msg},
+                    ]
+                )
+                content = response.content if isinstance(response.content, str) else str(response.content)
 
         # Sanitize any raw model text we persist to CriterionResult.details. A misbehaving
         # model could echo the reference back in an unparseable response, so we scrub it.
