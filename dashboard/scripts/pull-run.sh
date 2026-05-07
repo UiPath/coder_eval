@@ -15,6 +15,8 @@
 #   - <run-id>/analysis.md (if present)
 #   - <run-id>/experiment.* (any extension at run root)
 #   - <run-id>/<variant>/<task-id>/<replicate>/task.{json,html,log}
+#   - <run-id>/<variant>/<task-id>/<replicate>/artifacts/**/*.flow
+#     (Maestro flow definitions — small text files needed for flow-task triage)
 #
 # Use --full to pull everything (the prior behavior, including artifacts/).
 #
@@ -46,6 +48,7 @@ Targeted file set (default — used by triage / analysis):
   <run-id>/{run.json,run.md,analysis.md}
   <run-id>/experiment.*
   <run-id>/<variant>/<task-id>/<replicate>/task.{json,html,log}
+  <run-id>/<variant>/<task-id>/<replicate>/artifacts/**/*.flow
 EOF
 }
 
@@ -192,14 +195,19 @@ else
   # Filter: keep only the targeted file set. NF counts segments after `awk -F/`.
   # NF==2 = run-root file (run.json, run.md, analysis.md, experiment.*).
   # NF==5 = task file at <run>/<variant>/<task_id>/<replicate>/task.{json,html,log}.
+  # NF>=7, $5=="artifacts", *.flow = Maestro flow under per-task artifacts/
+  #   workspace. Depth varies (NF=8..13 observed) because the agent's project
+  #   layout — <task-id>/[<solution>/]<project>/<name>.flow — isn't fixed, so
+  #   we anchor on segment 5 and the .flow extension instead of a hard NF.
   # Contract: if the run-output layout changes (e.g., extra nesting level under
-  # <run-id>/), both NF guards must be updated or matching files will be
+  # <run-id>/), all three guards must be updated or matching files will be
   # silently dropped. Anchored prefix-match on $1 keeps blobs from other run
   # ids from leaking in if a future caller widens the --prefix.
   WANTED="$(printf '%s\n' "$ALL_BLOBS" | awk -F/ -v r="$RUN_ID" '
     NF == 2 && $1 == r && \
       ($2 == "run.json" || $2 == "run.md" || $2 == "analysis.md" || $2 ~ /^experiment\./) { print; next }
     NF == 5 && $1 == r && $5 ~ /^task\.(json|html|log)$/ { print; next }
+    NF >= 7 && $1 == r && $5 == "artifacts" && /\.flow$/ { print; next }
   ')"
 
   if [[ -z "$WANTED" ]]; then
@@ -208,8 +216,8 @@ else
   fi
 
   TOTAL=$(printf '%s\n' "$WANTED" | wc -l | tr -d ' ')
-  echo "Downloading $TOTAL targeted file(s) (run/experiment metadata + task.{json,html,log}) → $DEST"
-  echo "  (use --full to also pull per-task artifacts/ workspace)"
+  echo "Downloading $TOTAL targeted file(s) (run/experiment metadata + task.{json,html,log} + artifacts/**/*.flow) → $DEST"
+  echo "  (use --full to also pull the rest of the per-task artifacts/ workspace)"
 
   # Parallel per-blob download. Each `az storage blob download` invocation has
   # ~0.5-1s of Python startup; xargs -P 16 keeps overall wall-clock low.

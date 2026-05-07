@@ -115,7 +115,7 @@ uv run dashboard schema --drop
 
 `dashboard/scripts/pull-run.sh` downloads run blobs back to a local directory. Auth and config come from `dashboard/.env` exactly like the upload path — no extra credentials needed.
 
-By default it pulls only the high-signal files needed for triage / analysis (`run.json`, `run.md`, `analysis.md`, `experiment.*`, and per-task `task.{json,html,log}`) — roughly ~37 MB / ~465 files vs the prior ~7+ GB / 8000+ files when the per-task `artifacts/` workspace is also pulled. Pass `--full` to opt back into the prior behavior when you need to inspect the agent's `.venv` / rendered artifacts.
+By default it pulls only the high-signal files needed for triage / analysis (`run.json`, `run.md`, `analysis.md`, `experiment.*`, per-task `task.{json,html,log}`, and per-task `artifacts/**/*.flow` — Maestro flow definitions, ~1 KB each) — roughly ~37 MB / ~550 files vs the prior ~7+ GB / 8000+ files when the rest of the per-task `artifacts/` workspace is also pulled. Pass `--full` to opt back into the prior behavior when you need to inspect the agent's `.venv` / rendered artifacts.
 
 ```bash
 dashboard/scripts/pull-run.sh                       # latest run, targeted set → runs/<run-id>
