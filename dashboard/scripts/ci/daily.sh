@@ -52,8 +52,16 @@ done
 
 # Skills + CLI always track main — only coder_eval honors $BRANCH (for ad-hoc smoke tests).
 (cd "$SKILLS_REPO" && git fetch --quiet && git checkout --quiet main && git pull --ff-only --quiet)
-(cd "$CLI_REPO"    && git fetch --quiet && git checkout --quiet main && git pull --ff-only --quiet \
-                   && bun install --silent && bun run dev:cli:install)
+
+# CLI install: do a recursive node_modules clean before `bun install`.
+# `bun install --silent` is incremental and won't prune stale per-package
+# typescript copies left behind when upstream version pins shift; we got
+# bitten by this in 2026-05 when an upstream `ignoreDeprecations` bump
+# landed against stale nested typescript@5.9.3 dirs from an earlier
+# install. The clean adds ~30s but eliminates the whole class of bug.
+(cd "$CLI_REPO" && git fetch --quiet && git checkout --quiet main && git pull --ff-only --quiet \
+                && find . -name node_modules -type d -prune -exec rm -rf {} + \
+                && bun install --silent && bun run dev:cli:install)
 
 [ -d .venv ] || uv venv --python 3.13
 uv pip install --python .venv/bin/python -e ".[dev]" --quiet

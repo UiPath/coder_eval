@@ -228,7 +228,7 @@ simulation:
         )
         config = BatchRunConfig(run_dir=tmp_path / "runs")
 
-        resolved = resolve_all_tasks([task_yaml], experiment, default_exp, config)
+        resolved, _ = resolve_all_tasks([task_yaml], experiment, default_exp, config)
 
         # 2 variants * 3 trials = 6 ResolvedTasks
         assert len(resolved) == 6

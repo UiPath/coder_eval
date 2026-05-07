@@ -59,6 +59,8 @@ def build_metrics(cur: dict, suite: str, model: str, backend: str) -> str:
     n_pass = cur.get("tasks_succeeded", 0)
     n_fail = cur.get("tasks_failed", 0)
     n_err = cur.get("tasks_error", 0)
+    skipped = cur.get("skipped_tasks") or []
+    n_skip = len(skipped)
     pct = (n_pass / n_run * 100) if n_run else 0.0
     duration = fmt_duration(cur.get("total_duration_seconds") or 0)
     cost = total_cost(cur)
@@ -67,19 +69,20 @@ def build_metrics(cur: dict, suite: str, model: str, backend: str) -> str:
 
     env = cur.get("environment_info") or {}
     coder = (env.get("git_commit") or "?")[:7]
-    skills = (env.get("skills_git_commit") or "?")[:7]
+    skills_sha = (env.get("skills_git_commit") or "?")[:7]
     cli = (env.get("cli_git_commit") or "?")[:7]
 
     label = " / ".join(filter(None, [model, backend])) or "unknown config"
 
     fail_total = n_fail + n_err
+    skipped_line = f" · :wastebasket: {n_skip} skipped (load error)" if n_skip else ""
     return "\n".join(
         [
             f":chart_with_upwards_trend: {suite or 'eval'} suite — {run_id} ({label})",
             f":white_check_mark: {n_pass}/{n_run} passed ({pct:.0f}%) · "
-            f":x: {fail_total} failed ({n_fail} fail + {n_err} error)",
+            f":x: {fail_total} failed ({n_fail} fail + {n_err} error){skipped_line}",
             f":moneybag: ${cost:.2f} · :stopwatch: {duration}{parallel_str}",
-            f":package: coder_eval @ {coder} · skills @ {skills} · cli @ {cli}",
+            f":package: coder_eval @ {coder} · skills @ {skills_sha} · cli @ {cli}",
             f":bar_chart: {DASHBOARD_BASE}/{run_id}",
         ]
     )

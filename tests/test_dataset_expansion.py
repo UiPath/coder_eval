@@ -339,7 +339,7 @@ class TestResolveAllTasksIntegration:
         default_exp, experiment = self._make_experiment(["v1", "v2"])
         config = BatchRunConfig(run_dir=tmp_path / "runs")
 
-        resolved = resolve_all_tasks(
+        resolved, _ = resolve_all_tasks(
             task_files=[task_file],
             experiment=experiment,
             default_experiment=default_exp,
@@ -363,7 +363,7 @@ class TestResolveAllTasksIntegration:
         default_exp, experiment = self._make_experiment(["v1"])
         config = BatchRunConfig(run_dir=tmp_path / "runs", max_rows=1)
 
-        resolved = resolve_all_tasks(
+        resolved, _ = resolve_all_tasks(
             task_files=[task_file],
             experiment=experiment,
             default_experiment=default_exp,
@@ -377,7 +377,7 @@ class TestResolveAllTasksIntegration:
         default_exp, experiment = self._make_experiment(["v1"])
         config = BatchRunConfig(run_dir=tmp_path / "runs", max_rows=99)
 
-        resolved = resolve_all_tasks(
+        resolved, _ = resolve_all_tasks(
             task_files=[task_file],
             experiment=experiment,
             default_experiment=default_exp,
@@ -418,7 +418,7 @@ class TestResolveAllTasksIntegration:
         )
         config = BatchRunConfig(run_dir=tmp_path / "runs")
 
-        resolved = resolve_all_tasks(
+        resolved, _ = resolve_all_tasks(
             task_files=[task_file],
             experiment=experiment,
             default_experiment=default_exp,
@@ -439,7 +439,7 @@ class TestResolveAllTasksIntegration:
         default_exp, experiment = self._make_experiment(["v1"])
         config = BatchRunConfig(run_dir=tmp_path / "runs")
 
-        resolved = resolve_all_tasks(
+        resolved, _ = resolve_all_tasks(
             task_files=[task_file],
             experiment=experiment,
             default_experiment=default_exp,
@@ -520,7 +520,7 @@ class TestDatasetRepeatsFanout:
         )
         config = BatchRunConfig(run_dir=tmp_path / "runs")
 
-        resolved = resolve_all_tasks([task_file], experiment, default_exp, config)
+        resolved, _ = resolve_all_tasks([task_file], experiment, default_exp, config)
         assert len(resolved) == 12
 
         # Each (row, variant) pair has replicate_index 0, 1, 2
@@ -549,7 +549,7 @@ class TestDatasetRepeatsFanout:
             variants=[ExperimentVariant(variant_id="default")],
         )
         config = BatchRunConfig(run_dir=tmp_path / "runs")
-        resolved = resolve_all_tasks([task_file], experiment, default_exp, config)
+        resolved, _ = resolve_all_tasks([task_file], experiment, default_exp, config)
 
         subdirs = sorted(rt.run_dir.name for rt in resolved if rt.variant_id == "v1")
         assert subdirs == ["00", "01", "02"]

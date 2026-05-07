@@ -74,7 +74,7 @@ class TestResolveAllTasks:
         )
 
         config = _make_config(run_dir)
-        resolved = resolve_all_tasks(
+        resolved, _ = resolve_all_tasks(
             task_files=[task1, task2],
             experiment=experiment,
             default_experiment=default_experiment,
@@ -96,7 +96,7 @@ class TestResolveAllTasks:
         )
 
         config = _make_config(run_dir)
-        resolved = resolve_all_tasks(
+        resolved, _ = resolve_all_tasks(
             task_files=[task1],
             experiment=experiment,
             default_experiment=default_experiment,
@@ -118,7 +118,7 @@ class TestResolveAllTasks:
         )
 
         config = _make_config(run_dir)
-        resolved = resolve_all_tasks(
+        resolved, _ = resolve_all_tasks(
             task_files=[task1],
             experiment=experiment,
             default_experiment=default_experiment,
@@ -138,7 +138,7 @@ class TestResolveAllTasks:
         )
 
         config = _make_config(run_dir)
-        resolved = resolve_all_tasks(
+        resolved, _ = resolve_all_tasks(
             task_files=[task1],
             experiment=experiment,
             default_experiment=default_experiment,
@@ -158,7 +158,7 @@ class TestResolveAllTasks:
         )
 
         config = _make_config(run_dir)
-        resolved = resolve_all_tasks(
+        resolved, _ = resolve_all_tasks(
             task_files=[task1],
             experiment=experiment,
             default_experiment=default_experiment,
@@ -186,6 +186,31 @@ class TestResolveAllTasks:
                 default_experiment=default_experiment,
                 config=config,
             )
+
+    def test_skips_invalid_yaml_continues_with_rest(self, tmp_path, run_dir, default_experiment):
+        """Bad task YAML is recorded in skipped + excluded; valid tasks still run."""
+        good = _write_task_yaml(tmp_path, "task-good", agent={"type": "claude-code"})
+        bad = tmp_path / "task-bad.yaml"
+        # Missing required fields (task_id, initial_prompt, etc.) — Pydantic should reject.
+        bad.write_text("description: 'malformed task'\n")
+
+        experiment = ExperimentDefinition(
+            experiment_id="test-exp",
+            variants=[ExperimentVariant(variant_id="v")],
+        )
+        config = _make_config(run_dir)
+        resolved, skipped = resolve_all_tasks(
+            task_files=[good, bad],
+            experiment=experiment,
+            default_experiment=default_experiment,
+            config=config,
+        )
+
+        assert len(resolved) == 1
+        assert resolved[0].task.task_id == "task-good"
+        assert len(skipped) == 1
+        assert skipped[0].path == str(bad)
+        assert "ValueError" in skipped[0].reason or "ValidationError" in skipped[0].reason
 
 
 class TestAggregateResults:

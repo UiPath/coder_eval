@@ -16,7 +16,16 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from ..models import AgentKind, EvaluationResult, FinalStatus, ResolvedTask, RunSummary, TaskDefinition, TaskResult
+from ..models import (
+    AgentKind,
+    EvaluationResult,
+    FinalStatus,
+    ResolvedTask,
+    RunSummary,
+    SkippedTask,
+    TaskDefinition,
+    TaskResult,
+)
 from ..path_utils import format_task_log_id
 from ..reports_experiment import eval_result_to_task_dict
 from ..streaming.callbacks import StreamCallback
@@ -33,6 +42,7 @@ async def run_batch(
     on_task_complete: Callable[[TaskResult], None] | None = None,
     on_batch_start: Callable[[int], None] | None = None,
     stream_callback_factory: Callable[[str], StreamCallback] | None = None,
+    skipped_tasks: list[SkippedTask] | None = None,
 ) -> tuple[RunSummary, list[TaskResult]]:
     """Run resolved tasks in batch with optional parallelism.
 
@@ -45,6 +55,8 @@ async def run_batch(
         on_task_complete: Optional callback invoked after each task finishes.
         on_batch_start: Optional callback invoked with the final task count.
         stream_callback_factory: Optional factory for streaming callbacks.
+        skipped_tasks: Task YAMLs that failed to load upstream and should be
+            recorded in the run summary (informational; they don't run).
 
     Returns:
         Tuple of (RunSummary, list[TaskResult]).
@@ -130,7 +142,13 @@ async def run_batch(
 
     end_time = datetime.now()
     summary = _generate_run_summary(
-        config.run_dir, processed, start_time, end_time, task_tags, max_parallel=config.max_parallel
+        config.run_dir,
+        processed,
+        start_time,
+        end_time,
+        task_tags,
+        max_parallel=config.max_parallel,
+        skipped_tasks=skipped_tasks or [],
     )
     return summary, processed
 
@@ -199,6 +217,7 @@ def _generate_run_summary(
     end_time: datetime,
     task_tags: dict[str, list[str]] | None = None,
     max_parallel: int = 1,
+    skipped_tasks: list[SkippedTask] | None = None,
 ) -> RunSummary:
     """Generate run-level summary from batch results.
 
@@ -208,6 +227,7 @@ def _generate_run_summary(
         start_time: Batch start time.
         end_time: Batch end time.
         task_tags: Optional mapping of task_id -> tags.
+        skipped_tasks: Task YAMLs that failed to load upstream.
 
     Returns:
         RunSummary with aggregated statistics.
@@ -229,6 +249,7 @@ def _generate_run_summary(
         tasks_succeeded=sum(1 for s in statuses if s.category == "succeeded"),
         tasks_failed=sum(1 for s in statuses if s.category == "failed"),
         tasks_error=sum(1 for s in statuses if s.category == "error"),
+        skipped_tasks=skipped_tasks or [],
         max_parallel=max_parallel,
         task_results=[
             eval_result_to_task_dict(

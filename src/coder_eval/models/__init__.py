@@ -87,6 +87,7 @@ from coder_eval.models.results import (
     ResultSummary,
     RunSummary,
     SimulationTelemetry,
+    SkippedTask,
     SuiteRollup,
     TaskConfigRecord,
     ThresholdCheck,
@@ -227,6 +228,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "SuiteRollup",
     "TaskConfigRecord",
     "RunSummary",
+    "SkippedTask",
     # Gateway
     "DEFAULT_GATEWAY_MODEL",
     # Judge

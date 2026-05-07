@@ -455,6 +455,18 @@ class SuiteRollup(BaseModel):
     )
 
 
+class SkippedTask(BaseModel):
+    """A task YAML that failed to load and was excluded from the run.
+
+    Recorded by ``resolve_all_tasks`` when ``load_task`` (YAML parse / Pydantic
+    validation) or ``expand_dataset`` raises. The run continues with the
+    remaining tasks; the suite is not aborted by a single bad file.
+    """
+
+    path: str = Field(description="Absolute path to the task YAML that failed to load.")
+    reason: str = Field(description="Short failure description (exception type + message).")
+
+
 class RunSummary(BaseModel):
     """Summary of an entire evaluation run across multiple tasks."""
 
@@ -468,6 +480,14 @@ class RunSummary(BaseModel):
     tasks_succeeded: int = Field(description="Number of tasks that succeeded")
     tasks_failed: int = Field(description="Number of tasks that failed")
     tasks_error: int = Field(description="Number of tasks that encountered errors")
+
+    # Tasks excluded at load time (YAML / schema errors). Distinct from
+    # tasks_error: these never reached the orchestrator. Empty for runs
+    # where every task YAML loaded cleanly.
+    skipped_tasks: list[SkippedTask] = Field(
+        default_factory=list,
+        description="Task YAMLs that failed schema validation and were excluded from execution.",
+    )
 
     # Configured concurrency (BatchRunConfig.max_parallel). Defaulted so existing
     # callers and fixtures don't have to set it.

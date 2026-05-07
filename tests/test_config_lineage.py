@@ -413,7 +413,7 @@ class TestResolveAllTasksLineage:
             mock_settings.default_agent_model = None
             mock_settings.default_permission_mode = None
             mock_settings.default_max_turns = None
-            resolved = resolve_all_tasks(
+            resolved, _ = resolve_all_tasks(
                 task_files=[task_file],
                 experiment=experiment,
                 default_experiment=default_exp,

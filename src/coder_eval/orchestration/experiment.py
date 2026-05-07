@@ -26,6 +26,7 @@ from ..models import (
     PromptRephrase,
     ResolvedTask,
     SimulationConfig,
+    SkippedTask,
     SnapshotMode,
     TaskDefinition,
     TaskExperimentSummary,
@@ -651,7 +652,7 @@ def resolve_all_tasks(
     default_experiment: ExperimentDefinition,
     config: BatchRunConfig,
     experiment_file: Path | None = None,
-) -> list[ResolvedTask]:
+) -> tuple[list[ResolvedTask], list[SkippedTask]]:
     """Resolve all (task x variant) combinations into typed, run-ready entries.
 
     Applies all 5 config layers in one place:
@@ -663,6 +664,12 @@ def resolve_all_tasks(
 
     Also handles tag filtering and unique task ID validation.
 
+    Task YAMLs that fail to load (YAML parse error, Pydantic validation,
+    dataset expansion error) are recorded in the returned ``skipped`` list
+    and excluded from the resolved set rather than aborting the suite. The
+    caller surfaces ``skipped`` in the run summary so the failure is loud
+    but recoverable.
+
     Args:
         task_files: Paths to task YAML files.
         experiment: The active experiment definition.
@@ -673,12 +680,13 @@ def resolve_all_tasks(
             file directory when None.
 
     Returns:
-        List of ResolvedTask entries ready for run_batch.
+        Tuple of (resolved tasks ready for run_batch, skipped task records).
 
     Raises:
         ValueError: If duplicate task IDs are found after resolution.
     """
     resolved: list[ResolvedTask] = []
+    skipped: list[SkippedTask] = []
 
     # Resolve variant-level initial_prompt_file paths before the main loop
     exp_dir = experiment_file.parent if experiment_file is not None else None
@@ -692,12 +700,22 @@ def resolve_all_tasks(
             resolve_variant_initial_prompt_file(variant, exp_dir)
 
     for task_file in task_files:
-        task, source_yaml = load_task(task_file)
-
-        # Dataset fan-out BEFORE variant resolution: one task per row, each
-        # treated as an independent task for the 4-layer merge below. This
-        # locks the invariant that variants cannot override the dataset.
-        expanded_tasks = expand_dataset(task, task_file.parent, max_rows=config.max_rows)
+        try:
+            task, source_yaml = load_task(task_file)
+            # Dataset fan-out BEFORE variant resolution: one task per row, each
+            # treated as an independent task for the 4-layer merge below. This
+            # locks the invariant that variants cannot override the dataset.
+            expanded_tasks = expand_dataset(task, task_file.parent, max_rows=config.max_rows)
+        # Narrow set: real load failures only. We deliberately don't catch
+        # AttributeError / TypeError / ImportError — those signal a regression
+        # in load_task / expand_dataset and should crash loudly rather than
+        # silently demote every task to "skipped". Pydantic ValidationError
+        # is a ValueError subclass in v2, so it's covered.
+        except (FileNotFoundError, OSError, ValueError, yaml.YAMLError) as exc:
+            reason = f"{type(exc).__name__}: {exc}"[:500]
+            logger.warning("Skipping task file %s — %s", task_file, reason)
+            skipped.append(SkippedTask(path=str(task_file), reason=reason))
+            continue
 
         for expanded_task in expanded_tasks:
             for variant in experiment.variants:
@@ -769,7 +787,7 @@ def resolve_all_tasks(
     variant_order = {v.variant_id: i for i, v in enumerate(experiment.variants)}
     resolved.sort(key=lambda rt: (rt.replicate_index, task_order[rt.task_file], variant_order[rt.variant_id]))
 
-    return resolved
+    return resolved, skipped
 
 
 def _pick_worst_status(statuses: list[FinalStatus]) -> FinalStatus:

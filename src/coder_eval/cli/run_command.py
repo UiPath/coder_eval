@@ -508,7 +508,7 @@ async def _run_with_experiment(
         default_experiment = experiment  # fall back to custom as its own baseline
 
     # Resolve tasks through experiment layer (applies all 5 config layers)
-    resolved = resolve_all_tasks(
+    resolved, skipped = resolve_all_tasks(
         task_files=all_task_files,
         experiment=experiment,
         default_experiment=default_experiment,
@@ -516,11 +516,17 @@ async def _run_with_experiment(
         experiment_file=exp_path,
     )
 
+    if skipped:
+        console.print(
+            f"[yellow]⚠[/] {len(skipped)} task file(s) skipped due to load errors"
+            " (see run.json `skipped_tasks` for details)"
+        )
+
     # Print execution mode
     print_execution_mode(len(resolved), max_parallel)
 
     summary, task_results = await _run_with_callbacks(
-        execute_fn=lambda **kwargs: run_batch(resolved_tasks=resolved, config=config, **kwargs),
+        execute_fn=lambda **kwargs: run_batch(resolved_tasks=resolved, config=config, skipped_tasks=skipped, **kwargs),
         task_count=len(resolved),
         stream_mode=stream_mode,
     )
