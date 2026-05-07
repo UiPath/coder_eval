@@ -57,6 +57,7 @@ def run_tests(
     model: str = "claude-sonnet-4-6",
     tags: str | None = "smoke",
     task_patterns: list[str] | None = None,
+    exclude_patterns: list[str] | None = None,
     concurrency: int | None = None,
     experiment: str | None = None,
     extra_env: dict[str, str] | None = None,
@@ -70,6 +71,12 @@ def run_tests(
     task_files: list[str] = []
     for pattern in task_patterns:
         task_files.extend(sorted(glob(str(CODER_EVAL_DIR / pattern), recursive=True)))
+
+    if exclude_patterns:
+        excluded: set[str] = set()
+        for pattern in exclude_patterns:
+            excluded.update(glob(str(CODER_EVAL_DIR / pattern), recursive=True))
+        task_files = [f for f in task_files if f not in excluded]
 
     if not task_files:
         raise FileNotFoundError(f"No task YAML files found for patterns {task_patterns}")

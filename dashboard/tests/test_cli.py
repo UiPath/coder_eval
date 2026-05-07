@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
-from dashboard.cli import _build_skills_suite, cli
+from dashboard.cli import _build_activation_suite, _build_skills_suite, cli
 
 
 @patch("dashboard.cli.Config")
@@ -104,6 +104,20 @@ def test_build_skills_suite():
     suite = _build_skills_suite("/path/to/skills")
     assert suite.name == "skills"
     assert suite.task_patterns == ["/path/to/skills/tests/tasks/**/*.yaml"]
-    assert suite.experiment == "/path/to/skills/tests/experiments/default.yaml"
+    # Activation/ is carved out structurally; it's owned by the activation suite.
+    assert suite.exclude_patterns == ["/path/to/skills/tests/tasks/activation/**/*.yaml"]
+    assert suite.experiment == "/path/to/skills/tests/experiments/e2e.yaml"
     assert suite.uip_login is True
+    assert suite.default is True
+    assert suite.env == {"SKILLS_REPO_PATH": "/path/to/skills"}
+
+
+def test_build_activation_suite():
+    """Activation suite is opt-in (default=False) so it doesn't run on the daily."""
+    suite = _build_activation_suite("/path/to/skills")
+    assert suite.name == "activation"
+    assert suite.task_patterns == ["/path/to/skills/tests/tasks/activation/**/*.yaml"]
+    assert suite.experiment == "/path/to/skills/tests/experiments/activation.yaml"
+    assert suite.default is False
+    assert suite.uip_login is False
     assert suite.env == {"SKILLS_REPO_PATH": "/path/to/skills"}

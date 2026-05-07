@@ -511,34 +511,35 @@ class ClassificationMatchCriterion(BaseSuccessCriterion):
 class SkillTriggeredCriterion(BaseSuccessCriterion):
     """Binary classifier: did the agent invoke a Skill tool during the run?
 
-    Observed label is ``"yes"`` when any ``Skill`` tool invocation is
-    recorded in ``turn_records`` (optionally filtered by ``skill_name``),
-    otherwise ``"no"``. Compared to the ``expected`` label threaded from
-    the dataset row. Returns a ``ClassificationCriterionResult`` so the
-    suite-level aggregator produces accuracy / recall / F1 / confusion.
+    Observed label is ``"yes"`` when any ``Skill`` tool invocation matching
+    ``skill_name`` is recorded in ``turn_records``, otherwise ``"no"``.
+    Expected label is ``"yes"`` iff ``expected_skill == skill_name``.
+
+    Stack one criterion per skill against a single dataset labeled with
+    ``expected_skill`` (the row's true skill, ``""`` for negatives) to get
+    per-skill confusion matrices from the same agent traces.
+
+    Returns a ``ClassificationCriterionResult`` so the suite-level
+    aggregator produces accuracy / recall / F1 / confusion.
 
     Example YAML:
 
         success_criteria:
           - type: "skill_triggered"
-            expected: "${row.should_trigger}"
-            description: "Agent invoked a flow skill for row ${row.id}"
-            suite_thresholds:
-              accuracy: 0.75
-              recall.yes: 0.7
-              recall.no: 0.7
+            description: "uipath-maestro-flow activation"
+            skill_name: uipath-maestro-flow
+            expected_skill: "${row.expected_skill}"
+            suite_thresholds: {recall.yes: 0.70}
     """
 
     requires_agent: ClassVar[bool] = True
 
     type: Literal["skill_triggered"] = "skill_triggered"
-    expected: str = Field(description="Expected label ('yes' or 'no' after row substitution).")
-    skill_name: str | None = Field(
-        default=None,
-        description=(
-            "Optional filter: only count Skill invocations whose 'skill' parameter matches this name. "
-            "Default (None) counts any Skill call."
-        ),
+    expected_skill: str = Field(
+        description="The row's expected skill (after substitution); empty string '' for negatives.",
+    )
+    skill_name: str = Field(
+        description="Only count Skill invocations whose 'skill' parameter matches this name.",
     )
 
 

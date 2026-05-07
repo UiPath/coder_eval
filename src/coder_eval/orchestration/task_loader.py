@@ -198,20 +198,12 @@ def resolve_system_prompt_files(task: TaskDefinition, base_dir: Path) -> TaskDef
     return task
 
 
-def _load_dataset_rows(dataset: Dataset, task_file_dir: Path) -> list[dict[str, Any]]:
-    """Load dataset rows from inline list or a JSONL file."""
-    if dataset.rows is not None:
-        return [dict(r) for r in dataset.rows]
-
-    assert dataset.path is not None  # guaranteed by Dataset.check_source
-    p = Path(dataset.path)
-    if not p.is_absolute():
-        p = (task_file_dir / p).resolve()
-    if not p.exists():
-        raise FileNotFoundError(f"Dataset file not found: {p}")
-
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Read a JSONL file into a list of dicts."""
+    if not path.exists():
+        raise FileNotFoundError(f"Dataset file not found: {path}")
     rows: list[dict[str, Any]] = []
-    with p.open(encoding="utf-8") as f:
+    with path.open(encoding="utf-8") as f:
         for line_num, raw_line in enumerate(f, start=1):
             line = raw_line.strip()
             if not line:
@@ -219,10 +211,27 @@ def _load_dataset_rows(dataset: Dataset, task_file_dir: Path) -> list[dict[str, 
             try:
                 row = json.loads(line)
             except json.JSONDecodeError as e:
-                raise ValueError(f"Dataset {p}: invalid JSON on line {line_num}: {e}") from e
+                raise ValueError(f"Dataset {path}: invalid JSON on line {line_num}: {e}") from e
             if not isinstance(row, dict):
-                raise ValueError(f"Dataset {p}: row on line {line_num} is not a JSON object: {row!r}")
+                raise ValueError(f"Dataset {path}: row on line {line_num} is not a JSON object: {row!r}")
             rows.append(row)
+    return rows
+
+
+def _resolve_path(p: str, task_file_dir: Path) -> Path:
+    path = Path(p)
+    return path if path.is_absolute() else (task_file_dir / path).resolve()
+
+
+def _load_dataset_rows(dataset: Dataset, task_file_dir: Path) -> list[dict[str, Any]]:
+    """Load dataset rows from inline list or one or more JSONL files."""
+    if dataset.rows is not None:
+        return [dict(r) for r in dataset.rows]
+
+    assert dataset.paths is not None  # guaranteed by Dataset.check_source
+    rows: list[dict[str, Any]] = []
+    for p in dataset.paths:
+        rows.extend(_load_jsonl(_resolve_path(p, task_file_dir)))
     return rows
 
 
@@ -274,7 +283,7 @@ def expand_dataset(
 
     Args:
         task: Task that may carry a dataset.
-        task_file_dir: Directory of the source task YAML (for resolving dataset.path).
+        task_file_dir: Directory of the source task YAML (for resolving dataset.paths).
         max_rows: Optional CLI cap on rows used (for cheap smoke runs). First
             N rows. When provided, overrides ``dataset.sample`` from the task YAML.
 

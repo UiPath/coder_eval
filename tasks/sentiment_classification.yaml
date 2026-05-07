@@ -16,7 +16,8 @@ sandbox:
 # A correct model produces: accuracy 2/3, recall(positive)=1/2, recall(negative)=1/1,
 # precision(positive)=1/1, precision(negative)=1/2, f1(positive)=f1(negative)=2/3.
 dataset:
-  path: "datasets/sentiment.jsonl"
+  paths:
+    - "datasets/sentiment.jsonl"
 
 initial_prompt: |
   Classify the sentiment of the following text as exactly one word: 'positive' or 'negative'.

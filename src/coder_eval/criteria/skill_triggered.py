@@ -53,17 +53,17 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
                 error="turn_records not provided to checker",
             )
 
-        triggered = any(
-            cmd.tool_name == "Skill"
-            and (criterion.skill_name is None or cmd.parameters.get("skill") == criterion.skill_name)
+        triggered: bool = any(
+            cmd.tool_name == "Skill" and cmd.parameters.get("skill", "").split(":")[-1] == criterion.skill_name
             for turn in turn_records
             for cmd in turn.commands
         )
+        expected_yes: bool = criterion.expected_skill == criterion.skill_name
+        score = 1.0 if triggered == expected_yes else 0.0
         observed = _YES if triggered else _NO
-        expected = criterion.expected
-        score = 1.0 if observed == expected else 0.0
+        expected = _YES if expected_yes else _NO
 
-        filt = f" (skill_name={criterion.skill_name!r})" if criterion.skill_name else ""
+        filt = f" (skill_name={criterion.skill_name!r})"
         return ClassificationCriterionResult(
             criterion_type=criterion.type,
             description=criterion.description,

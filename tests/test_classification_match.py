@@ -578,4 +578,4 @@ def test_example_yaml_loads_via_pydantic() -> None:
     task = TaskDefinition(**data)
     assert task.task_id == "sentiment-classification"
     assert task.dataset is not None
-    assert task.dataset.path == "datasets/sentiment.jsonl"
+    assert task.dataset.paths == ["datasets/sentiment.jsonl"]

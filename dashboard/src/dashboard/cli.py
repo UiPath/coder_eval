@@ -12,12 +12,18 @@ from .config import Config
 class Suite:
     name: str
     task_patterns: list[str]
+    # Glob patterns whose matches are removed from `task_patterns` results.
+    # Use to carve out subdirs that belong to a different (opt-in) suite.
+    exclude_patterns: list[str] | None = None
     tags: str | None = None
     concurrency: int | None = None
     experiment: str | None = None
     uip_login: bool = False
     uip_tenant: str | None = None
     env: dict[str, str] | None = None
+    # When False, the suite is opt-in (only runs via `--suite <name>`) and
+    # is excluded from the default daily pipeline.
+    default: bool = True
 
 
 SUITES: list[Suite] = [
@@ -34,13 +40,34 @@ SUITES: list[Suite] = [
 
 
 def _build_skills_suite(skills_dir: str) -> Suite:
-    """Build a skills suite with absolute paths resolved from skills_dir."""
+    """Build a skills suite with absolute paths resolved from skills_dir.
+
+    The activation/ benchmark dir is carved out via `exclude_patterns` —
+    it lives in its own opt-in suite (see ``_build_activation_suite``).
+    """
     return Suite(
         name="skills",
         task_patterns=[f"{skills_dir}/tests/tasks/**/*.yaml"],
+        exclude_patterns=[f"{skills_dir}/tests/tasks/activation/**/*.yaml"],
         experiment=f"{skills_dir}/tests/experiments/e2e.yaml",
         concurrency=10,
         uip_login=True,
+        env={"SKILLS_REPO_PATH": skills_dir},
+    )
+
+
+def _build_activation_suite(skills_dir: str) -> Suite:
+    """Skill-activation benchmark — opt-in only.
+
+    Expensive classification eval over a large prompt dataset; excluded
+    from the default pipeline. Invoke with ``dashboard run --suite activation``.
+    """
+    return Suite(
+        name="activation",
+        task_patterns=[f"{skills_dir}/tests/tasks/activation/**/*.yaml"],
+        experiment=f"{skills_dir}/tests/experiments/activation.yaml",
+        concurrency=4,
+        default=False,
         env={"SKILLS_REPO_PATH": skills_dir},
     )
 
@@ -106,15 +133,20 @@ def run(
     else:
         pull_coder_eval()
 
-    # 3. Determine which suites to run
-    all_suites = [_build_skills_suite(str(cfg.skills_dir)), *SUITES]
+    # 3. Determine which suites to run. Opt-in suites (default=False) are
+    # skipped on a bare `dashboard run` and only execute when named via --suite.
+    all_suites = [
+        _build_skills_suite(str(cfg.skills_dir)),
+        _build_activation_suite(str(cfg.skills_dir)),
+        *SUITES,
+    ]
     if suite:
         suites_to_run = [s for s in all_suites if s.name == suite]
         if not suites_to_run:
             names = ", ".join(s.name for s in all_suites)
             raise click.BadParameter(f"Unknown suite '{suite}'. Available: {names}")
     else:
-        suites_to_run = all_suites
+        suites_to_run = [s for s in all_suites if s.default]
 
     # 3b. Validate UiPath credentials and tenant eagerly (fail-fast before any suite runs)
     login_suites = [s for s in suites_to_run if s.uip_login]
@@ -158,6 +190,7 @@ def run(
             model=model,
             tags=suite_tags,
             task_patterns=s.task_patterns,
+            exclude_patterns=s.exclude_patterns,
             concurrency=suite_concurrency,
             experiment=s.experiment,
             extra_env=suite_env,

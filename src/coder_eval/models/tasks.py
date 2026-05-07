@@ -250,10 +250,11 @@ class ReferenceSource(BaseModel):
 class Dataset(BaseModel):
     """Dataset that fans out a single task into N sub-tasks, one per row.
 
-    Exactly one of ``rows`` (inline list of dicts) or ``path`` (JSONL file
-    relative to the task YAML) must be provided. Each row must contain the
-    field named by ``id_field``; that value is used as the stable row
-    identifier and becomes a suffix on the task_id ("<task_id>/<row.id>").
+    Exactly one of ``rows`` (inline list of dicts) or ``paths`` (one or more
+    JSONL files concatenated in declared order) must be provided. Each row
+    must contain the field named by ``id_field``; that value is used as the
+    stable row identifier and becomes a suffix on the task_id
+    ("<task_id>/<row.id>").
 
     Row values are substituted into the task's ``initial_prompt`` and into
     string fields of each ``success_criteria`` entry using ``${row.<field>}``
@@ -263,13 +264,16 @@ class Dataset(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    path: str | None = Field(
+    paths: list[str] | None = Field(
         default=None,
-        description="Path to a JSONL file (one JSON object per line), relative to the task YAML.",
+        description=(
+            "JSONL file paths (relative to the task YAML), concatenated into a single "
+            "row stream in declared order. Mutually exclusive with 'rows'."
+        ),
     )
     rows: list[dict[str, Any]] | None = Field(
         default=None,
-        description="Inline list of row dicts. Mutually exclusive with 'path'.",
+        description="Inline list of row dicts. Mutually exclusive with 'paths'.",
     )
     id_field: str = Field(
         default="id",
@@ -286,10 +290,12 @@ class Dataset(BaseModel):
 
     @model_validator(mode="after")
     def check_source(self) -> Self:
-        if self.path is None and self.rows is None:
-            raise ValueError("Dataset must specify either 'path' or 'rows'")
-        if self.path is not None and self.rows is not None:
-            raise ValueError("Dataset must specify only one of 'path' or 'rows', not both")
+        if self.paths is None and self.rows is None:
+            raise ValueError("Dataset must specify either 'paths' or 'rows'")
+        if self.paths is not None and self.rows is not None:
+            raise ValueError("Dataset must specify only one of 'paths' or 'rows'")
+        if self.paths is not None and not self.paths:
+            raise ValueError("Dataset.paths must be a non-empty list")
         return self
 
 

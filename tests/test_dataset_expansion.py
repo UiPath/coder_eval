@@ -155,13 +155,13 @@ class TestExpandDatasetJsonl:
                 ]
             )
         )
-        task = _make_task_with_dataset(path="rows.jsonl")
+        task = _make_task_with_dataset(paths=["rows.jsonl"])
         expanded = expand_dataset(task, tmp_path)
         assert [t.task_id for t in expanded] == ["suite/j1", "suite/j2"]
         assert expanded[0].initial_prompt == "Prompt: jp1"
 
     def test_missing_file(self, tmp_path: Path) -> None:
-        task = _make_task_with_dataset(path="does_not_exist.jsonl")
+        task = _make_task_with_dataset(paths=["does_not_exist.jsonl"])
         with pytest.raises(FileNotFoundError):
             expand_dataset(task, tmp_path)
 
@@ -171,7 +171,7 @@ class TestExpandDatasetJsonl:
         ds_path = tmp_path / "datasets" / "rows.jsonl"
         ds_path.write_text(json.dumps({"id": "s1", "prompt": "sp", "expected": "se"}) + "\n")
 
-        task = _make_task_with_dataset(path="datasets/rows.jsonl")
+        task = _make_task_with_dataset(paths=["datasets/rows.jsonl"])
         expanded = expand_dataset(task, tmp_path)
         assert [t.task_id for t in expanded] == ["suite/s1"]
 
@@ -182,7 +182,7 @@ class TestExpandDatasetJsonl:
         ds_path = tmp_path / "datasets" / "rows.jsonl"
         ds_path.write_text(json.dumps({"id": "p1", "prompt": "pp", "expected": "pe"}) + "\n")
 
-        task = _make_task_with_dataset(path="../datasets/rows.jsonl")
+        task = _make_task_with_dataset(paths=["../datasets/rows.jsonl"])
         expanded = expand_dataset(task, tmp_path / "tasks")
         assert [t.task_id for t in expanded] == ["suite/p1"]
 
@@ -190,7 +190,7 @@ class TestExpandDatasetJsonl:
         ds_path = tmp_path / "abs.jsonl"
         ds_path.write_text(json.dumps({"id": "a1", "prompt": "ap", "expected": "ae"}) + "\n")
 
-        task = _make_task_with_dataset(path=str(ds_path))
+        task = _make_task_with_dataset(paths=[str(ds_path)])
         # Pass a different task_file_dir to confirm absolute paths are honored regardless.
         other_dir = tmp_path / "other"
         other_dir.mkdir()
@@ -200,14 +200,14 @@ class TestExpandDatasetJsonl:
     def test_malformed_jsonl_line(self, tmp_path: Path) -> None:
         ds_path = tmp_path / "rows.jsonl"
         ds_path.write_text('{"id": "ok", "prompt": "p", "expected": "e"}\n{not json}\n')
-        task = _make_task_with_dataset(path="rows.jsonl")
+        task = _make_task_with_dataset(paths=["rows.jsonl"])
         with pytest.raises(ValueError, match="invalid JSON on line 2"):
             expand_dataset(task, tmp_path)
 
     def test_non_object_row(self, tmp_path: Path) -> None:
         ds_path = tmp_path / "rows.jsonl"
         ds_path.write_text('["not", "an", "object"]\n')
-        task = _make_task_with_dataset(path="rows.jsonl")
+        task = _make_task_with_dataset(paths=["rows.jsonl"])
         with pytest.raises(ValueError, match="not a JSON object"):
             expand_dataset(task, tmp_path)
 
@@ -231,7 +231,7 @@ class TestExpandDatasetValidation:
     def test_empty_dataset(self, tmp_path: Path) -> None:
         ds_path = tmp_path / "rows.jsonl"
         ds_path.write_text("")
-        task = _make_task_with_dataset(path="rows.jsonl")
+        task = _make_task_with_dataset(paths=["rows.jsonl"])
         with pytest.raises(ValueError, match="empty"):
             expand_dataset(task, tmp_path)
 
@@ -260,17 +260,46 @@ class TestExpandDatasetValidation:
 
 
 class TestDatasetModelValidation:
-    def test_requires_rows_or_path(self) -> None:
-        with pytest.raises(ValueError, match="either 'path' or 'rows'"):
+    def test_requires_one_source(self) -> None:
+        with pytest.raises(ValueError, match="either 'paths' or 'rows'"):
             Dataset()
 
-    def test_forbids_both_rows_and_path(self) -> None:
+    def test_forbids_paths_and_rows(self) -> None:
         with pytest.raises(ValueError, match="only one of"):
-            Dataset(rows=[{"id": "r1"}], path="rows.jsonl")
+            Dataset(paths=["a.jsonl"], rows=[{"id": "r1"}])
+
+    def test_forbids_empty_paths(self) -> None:
+        with pytest.raises(ValueError, match="non-empty"):
+            Dataset(paths=[])
 
     def test_forbids_extra_fields(self) -> None:
         with pytest.raises(ValueError):
             Dataset.model_validate({"rows": [{"id": "r1"}], "unknown": "x"})
+
+
+class TestExpandDatasetMultiPath:
+    def test_concatenates_files_in_order(self, tmp_path: Path) -> None:
+        pos = tmp_path / "pos.jsonl"
+        neg = tmp_path / "neg.jsonl"
+        pos.write_text(
+            json.dumps({"id": "p1", "prompt": "pp1", "expected": "ee1", "label": "yes"})
+            + "\n"
+            + json.dumps({"id": "p2", "prompt": "pp2", "expected": "ee2", "label": "yes"})
+            + "\n",
+            encoding="utf-8",
+        )
+        neg.write_text(
+            json.dumps({"id": "n1", "prompt": "nn1", "expected": "ne1", "label": "no"}) + "\n", encoding="utf-8"
+        )
+        task = _make_task_with_dataset(paths=["pos.jsonl", "neg.jsonl"])
+        expanded = expand_dataset(task, tmp_path)
+        assert [t.row_id for t in expanded] == ["p1", "p2", "n1"]
+        assert all(t.dataset is None for t in expanded)
+
+    def test_missing_file_raises(self, tmp_path: Path) -> None:
+        task = _make_task_with_dataset(paths=["missing.jsonl"])
+        with pytest.raises(FileNotFoundError):
+            expand_dataset(task, tmp_path)
 
 
 class TestResolveAllTasksIntegration:
