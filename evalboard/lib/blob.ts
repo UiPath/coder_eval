@@ -11,6 +11,12 @@ import {
 const ACCOUNT = "coderevaltests";
 const CONTAINER = "runs";
 
+// When set, evalboard reads runs from this local directory and never touches
+// blob — listing comes from the filesystem and ensure* becomes a no-op.
+// Lib/runs.ts also resolves RUNS_DIR to this path so readers see the files
+// directly.
+export const LOCAL_RUNS_DIR = process.env.EVALBOARD_LOCAL_RUNS_DIR || null;
+
 // Run / task IDs get reflected into filesystem paths and blob prefixes, so
 // reject anything outside a narrow whitelist before any side effect.
 const ID_RE = /^[\w.-]+$/;
@@ -45,6 +51,7 @@ function getContainer(): ContainerClient {
 }
 
 export async function listRunIdsRemote(): Promise<string[]> {
+    if (LOCAL_RUNS_DIR) return listRunIdsLocal(LOCAL_RUNS_DIR);
     const c = getContainer();
     const ids: string[] = [];
     for await (const item of c.listBlobsByHierarchy("/")) {
@@ -53,6 +60,27 @@ export async function listRunIdsRemote(): Promise<string[]> {
             if (id !== "latest") ids.push(id);
         }
     }
+    return ids.sort().reverse();
+}
+
+// In local mode, only directories with a run.json count as runs — this drops
+// the `latest` symlink and any half-written run dirs that the eval framework
+// created but never populated.
+async function listRunIdsLocal(root: string): Promise<string[]> {
+    const entries = await fs
+        .readdir(root, { withFileTypes: true })
+        .catch(() => []);
+    const ids: string[] = [];
+    await Promise.all(
+        entries.map(async (e) => {
+            if (!e.isDirectory()) return;
+            if (e.name === "latest") return;
+            if (!isValidId(e.name)) return;
+            if (await exists(path.join(root, e.name, "run.json"))) {
+                ids.push(e.name);
+            }
+        }),
+    );
     return ids.sort().reverse();
 }
 
@@ -103,6 +131,7 @@ export async function ensureRunSummary(
     destRoot: string,
 ): Promise<void> {
     assertValidId(runId, "runId");
+    if (LOCAL_RUNS_DIR) return;
     return dedupe(`summary:${runId}`, async () => {
         // Only 404 is "run not uploaded yet" — readers observe an absent
         // file on disk. Auth, network, and IMDS failures must propagate so
@@ -120,6 +149,7 @@ export async function ensureRunAnalysis(
     destRoot: string,
 ): Promise<void> {
     assertValidId(runId, "runId");
+    if (LOCAL_RUNS_DIR) return;
     return dedupe(`analysis:${runId}`, async () => {
         try {
             await downloadBlob(`${runId}/analysis.md`, destRoot);
@@ -139,6 +169,7 @@ export async function ensureTaskDir(
 ): Promise<void> {
     assertValidId(runId, "runId");
     assertValidId(taskId, "taskId");
+    if (LOCAL_RUNS_DIR) return;
     return dedupe(`task:${runId}/${taskId}`, async () => {
         await ensureRunSummary(runId, destRoot);
         const c = getContainer();

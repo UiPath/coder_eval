@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import {
+    LOCAL_RUNS_DIR,
     ensureRunAnalysis,
     ensureRunSummary,
     ensureTaskDir,
@@ -8,11 +9,16 @@ import {
     listRunIdsRemote,
 } from "./blob";
 
-// Override via EVALBOARD_RUNS_DIR when process.cwd() is read-only
-// (e.g., App Service Run From Package, where wwwroot is a mounted zip).
-export const RUNS_DIR =
-    process.env.EVALBOARD_RUNS_DIR ??
-    path.resolve(process.cwd(), "runs-remote");
+// Resolution order:
+//   1. EVALBOARD_LOCAL_RUNS_DIR — local mode, points at a coder_eval runs dir
+//      (no blob, no caching).
+//   2. EVALBOARD_RUNS_DIR — blob-mode cache override, used when process.cwd()
+//      is read-only (e.g., App Service Run From Package).
+//   3. ./runs-remote — default blob-mode cache.
+export const RUNS_DIR = LOCAL_RUNS_DIR
+    ? path.resolve(LOCAL_RUNS_DIR)
+    : (process.env.EVALBOARD_RUNS_DIR ??
+      path.resolve(process.cwd(), "runs-remote"));
 
 // ---------- Types ----------
 

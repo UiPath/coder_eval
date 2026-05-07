@@ -50,6 +50,24 @@ Storage account (`coderevaltests`), container (`runs`), and the ADX
 dashboard URL are hardcoded in `lib/config.ts` and `lib/blob.ts` — no env
 file needed.
 
+## Local mode
+
+To visualize a local runs directory without touching blob, set
+`EVALBOARD_LOCAL_RUNS_DIR` to the directory path. The listing comes from
+the filesystem and all blob calls become no-ops, so no `az login` is
+needed.
+
+```bash
+# coder_eval's own runs/ (relative to evalboard/)
+pnpm dev:local
+
+# any other directory
+EVALBOARD_LOCAL_RUNS_DIR=/path/to/runs pnpm dev
+```
+
+Only directories containing a `run.json` show up in the index — empty
+shells and the `latest` symlink are filtered out.
+
 ## Conventions
 
 - `/api/file?run=<id>&path=<relpath>` serves `.flow`, `.uipx`, etc. with
