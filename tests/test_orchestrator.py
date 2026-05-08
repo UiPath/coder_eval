@@ -2025,3 +2025,95 @@ def test_finalize_result_logs_zero_score_when_no_criteria(tmp_path, caplog):
     msg = summary_records[0].getMessage()
     assert "score=0.000" in msg
     assert "duration=" in msg
+
+
+# --- Evaluate-only mode loads reference and forwards it to check_all ---
+
+
+@pytest.mark.asyncio
+async def test_evaluation_loop_evaluate_only_loads_reference(tmp_path):
+    """Evaluate-only branch (agent is None) must call load_reference_code and
+    forward the resolved reference to SuccessChecker.check_all.
+
+    Regression: previously this branch called check_all without reference_code,
+    so judge-style criteria (llm_judge / agent_judge) silently saw no
+    reference even when task.reference was set — surfaced as
+    "include_reference=True but reference not set" in the judge_context log.
+    """
+    from datetime import datetime
+    from unittest.mock import MagicMock
+
+    from coder_eval.models import (
+        AgentConfig,
+        AgentKind,
+        CriterionResult,
+        EvaluationResult,
+        FileExistsCriterion,
+        ReferenceSource,
+        SandboxConfig,
+        TaskDefinition,
+    )
+
+    ref_path = tmp_path / "reference.txt"
+    ref_path.write_text("REFERENCE_CONTENT")
+
+    agent_cfg = AgentConfig.model_construct(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+        allowed_tools=None,
+        model=None,
+        max_turns=1,
+        turn_timeout=None,
+        ignore_patterns=[],
+    )
+    task = TaskDefinition.model_construct(
+        task_id="evaluate_only_ref_test",
+        description="evaluate-only with reference",
+        initial_prompt="ignored",
+        tags=[],
+        agent=agent_cfg,
+        sandbox=SandboxConfig(driver="tempdir"),
+        success_criteria=[FileExistsCriterion(type="file_exists", path="x", description="x")],
+        task_timeout=None,
+        reference=ReferenceSource(file="reference.txt"),
+    )
+
+    run_dir = tmp_path / "run" / "evaluate_only_ref"
+    run_dir.mkdir(parents=True)
+
+    # task_file is what load_reference_code resolves the reference path against.
+    task_yaml = tmp_path / "task.yaml"
+    task_yaml.write_text("# placeholder")
+
+    orchestrator = Orchestrator(
+        task=task,
+        run_dir=run_dir,
+        variant_id="evaluate-only-test",
+        task_file=task_yaml,
+    )
+    orchestrator.result = EvaluationResult(
+        task_id="evaluate_only_ref_test",
+        task_description="evaluate-only with reference",
+        variant_id="evaluate-only-test",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+    # Evaluate-only mode is signalled by orchestrator.agent is None.
+    assert orchestrator.agent is None
+
+    mock_checker = MagicMock()
+    mock_checker.check_all = MagicMock(
+        return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
+    )
+    orchestrator.success_checker = mock_checker
+
+    await orchestrator._evaluation_loop()
+
+    mock_checker.check_all.assert_called_once()
+    kwargs = mock_checker.check_all.call_args.kwargs
+    assert kwargs["reference_code"] == "REFERENCE_CONTENT"
+    # turn_records is empty in evaluate-only mode but the kwarg should still be wired.
+    assert kwargs["turn_records"] == []

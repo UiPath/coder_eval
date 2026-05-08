@@ -807,7 +807,17 @@ class Orchestrator:
                     unsupported,
                 )
             self.result.iteration_count = 1
-            criteria_results = await asyncio.to_thread(self.success_checker.check_all, self.task.success_criteria)
+            reference_code, self._reference_code = load_reference_code(
+                task=self.task,
+                task_file=self.task_file,
+                cached_reference=self._reference_code,
+            )
+            criteria_results = await asyncio.to_thread(
+                self.success_checker.check_all,
+                self.task.success_criteria,
+                reference_code=reference_code,
+                turn_records=self.result.turns,
+            )
             self.result.success_criteria_results = criteria_results
             all_passed = all(
                 r.score >= c.pass_threshold for r, c in zip(criteria_results, self.task.success_criteria, strict=True)
