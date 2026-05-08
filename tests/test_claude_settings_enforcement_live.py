@@ -56,14 +56,13 @@ async def _run_single_turn(sandbox_dir: Path, prompt: str, claude_settings: dict
         permission_mode="acceptEdits",
         # Intentionally omit allowed_tools: a populated --allowed-tools flag appears
         # to short-circuit settings-level permissions.deny in the CLI.
-        max_turns=3,
         model="claude-haiku-4-5-20251001",
         claude_settings=claude_settings,
     )
     agent = ClaudeCodeAgent(config, route=_route_from_env())
     await agent.start(str(sandbox_dir))
     try:
-        turn = await agent.communicate(prompt, timeout=60.0)
+        turn = await agent.communicate(prompt, timeout=60.0, max_turns=3)
     finally:
         await agent.stop()
     return agent, turn

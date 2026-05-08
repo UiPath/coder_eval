@@ -458,6 +458,7 @@ class ClaudeCodeAgent(Agent):
         *,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
+        max_turns: int | None = None,
     ) -> TurnRecord:
         """Send a message to Claude and receive its response.
 
@@ -468,6 +469,8 @@ class ClaudeCodeAgent(Agent):
                 watchdog task force-kills the CLI subprocess (the SDK's anyio
                 task groups suppress cooperative cancellation, so a graceful
                 asyncio.wait_for is not sufficient).
+            max_turns: Hard cap on inner-loop turns for this call. None defers
+                to the SDK default.
 
         Returns:
             TurnRecord containing the complete interaction
@@ -479,6 +482,11 @@ class ClaudeCodeAgent(Agent):
         """
         if not self.working_directory:
             raise RuntimeError("Agent not started. Call start() first.")
+
+        # AgentConfig.type is `AgentKind | None` (Phase 3) but the orchestrator,
+        # SubAgentRunner, and UserSimulator all set it before construction. Assert
+        # the invariant so streaming-event sites below can safely call `type.value`.
+        assert self.config.type is not None, "ClaudeCodeAgent requires AgentConfig.type to be set before communicate()"
 
         # Reset slot defensively in case the previous caller forgot to drain it.
         self.pending_turn = None
@@ -581,7 +589,7 @@ class ClaudeCodeAgent(Agent):
                 allowed_tools=allowed_tools,
                 disallowed_tools=disallowed_tools,
                 model=effective_model,
-                max_turns=self.config.max_turns,
+                max_turns=max_turns,
                 plugins=plugins,  # type: ignore[arg-type]
                 stderr=capture_stderr,  # Capture stderr for better error messages
                 env=env,
@@ -846,13 +854,13 @@ class ClaudeCodeAgent(Agent):
 
         # max_turns exhaustion: ResultMessage subtype OR num_turns > max_turns (strict; == is a normal completion).
         max_turns_exhausted = self._is_max_turns_result(sdk_result_summary) or (
-            self.config.max_turns is not None and sdk_num_turns is not None and sdk_num_turns > self.config.max_turns
+            max_turns is not None and sdk_num_turns is not None and sdk_num_turns > max_turns
         )
         if max_turns_exhausted:
             self._log.warning(
-                "Agent exhausted max_turns (%d/%d) — the SDK hit the turn limit before the agent completed.",
+                "Agent exhausted max_turns (%s/%s) — the SDK hit the turn limit before the agent completed.",
                 sdk_num_turns,
-                self.config.max_turns,
+                max_turns,
             )
 
         duration = time.monotonic() - turn_start_time

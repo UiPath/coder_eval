@@ -204,7 +204,6 @@ class UserSimulator:
         self._agent_config = AgentConfig(
             type=AgentKind.CLAUDE_CODE,
             model=None,
-            max_turns=1,
             allowed_tools=[],
             disallowed_tools=_SIMULATOR_DISALLOWED_TOOLS,
             plugins=None,
@@ -274,7 +273,8 @@ class UserSimulator:
 
         assert self._agent is not None, "UserSimulator.start() must be called before next_user_message()"
         prompt = dialog_pairs[-1][1] if dialog_pairs else _OPENER_NUDGE
-        turn = await self._agent.communicate(prompt)
+        # Simulator emits one user utterance per call, so cap the inner loop at 1 turn.
+        turn = await self._agent.communicate(prompt, max_turns=1)
         raw = turn.agent_output or ""
         usage = turn.token_usage
         input_tokens = usage.input_tokens if usage is not None else None

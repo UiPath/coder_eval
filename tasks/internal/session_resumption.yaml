@@ -7,12 +7,12 @@ description: >
   if not, it wastes turns re-exploring the sandbox.
 tags: [smoke, internal, pure-python]
 
+max_turns: 10
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Bash", "Read", "Write", "Edit"]
   model: claude-haiku-4-5
-  max_turns: 10
 
 sandbox:
   driver: tempdir

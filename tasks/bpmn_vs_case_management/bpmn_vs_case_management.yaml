@@ -2,11 +2,11 @@ task_id: "bpmn-vs-case-management"
 description: "Binary classification: given an automation description, decide whether it should be implemented as a Maestro BPMN process or Maestro Agentic Case Management."
 tags: [classification, uipath-maestro, case-management, bpmn]
 
+max_turns: 3
 agent:
   type: "claude-code"
   permission_mode: "acceptEdits"
   allowed_tools: ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
-  max_turns: 3
 
 sandbox:
   driver: "tempdir"

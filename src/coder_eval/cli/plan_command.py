@@ -90,11 +90,14 @@ def plan_command(
             console.print(f"[green]\u2713[/green] {task_file.name}")
             console.print(f"  [dim]Task ID: {task.task_id}[/dim]")
 
-            # Handle optional agent field
-            if task.agent is not None:
-                console.print(f"  [dim]Agent: {task.agent.type.value}[/dim]")
-            else:
+            # Handle optional agent field. Phase 3 made agent.type optional —
+            # tasks may now defer it to experiment defaults / --type.
+            if task.agent is None:
                 console.print("  [dim]Agent: N/A (resolved from experiment)[/dim]")
+            elif task.agent.type is None:
+                console.print("  [dim]Agent type: (deferred to experiment / --type)[/dim]")
+            else:
+                console.print(f"  [dim]Agent: {task.agent.type.value}[/dim]")
 
             console.print(f"  [dim]Success criteria: {len(task.success_criteria)}[/dim]")
 

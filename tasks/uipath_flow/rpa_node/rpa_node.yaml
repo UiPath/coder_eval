@@ -4,11 +4,11 @@ description: >
   skill's resource node guides and the uip registry CLI.
 tags: [flow, flow-json, generate, dynamic, tier-3, integration]
 
+max_turns: 50
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 50
 
 sandbox:
   driver: tempdir

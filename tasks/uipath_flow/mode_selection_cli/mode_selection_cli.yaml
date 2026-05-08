@@ -4,11 +4,11 @@ description: >
   "use uip commands" — should use uip maestro flow init or uip maestro flow node add.
 tags: [flow, mode-selection, cli]
 
+max_turns: 50
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 50
 
 sandbox:
   driver: tempdir

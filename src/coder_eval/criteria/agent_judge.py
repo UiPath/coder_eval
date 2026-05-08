@@ -109,7 +109,11 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
         )
 
         try:
-            turn = runner.run(user_msg, float(criterion.turn_timeout))
+            turn = runner.run(
+                user_msg,
+                max_turns=criterion.max_turns,
+                turn_timeout=float(criterion.turn_timeout),
+            )
         except TurnTimeoutError as e:
             logger.warning("agent_judge: turn timeout after %ds", criterion.turn_timeout)
             return CriterionResult(
@@ -127,12 +131,10 @@ def _build_agent_config(criterion: AgentJudgeCriterion) -> AgentConfig:
     return AgentConfig(
         type=AgentKind.CLAUDE_CODE,
         model=criterion.model,
-        max_turns=criterion.max_turns,
         permission_mode=criterion.permission_mode,
         allowed_tools=criterion.allowed_tools,
         disallowed_tools=criterion.disallowed_tools,
         system_prompt=_JUDGE_SYSTEM_PROMPT,
-        turn_timeout=criterion.turn_timeout,
         # SECURITY: force setting_sources=[] so the SDK does NOT load
         # .claude/settings.json or .mcp.json from the judge's cwd. Those
         # files can install pre-LLM lifecycle hooks (SessionStart/PreToolUse)

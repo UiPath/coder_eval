@@ -24,6 +24,7 @@ class BatchRunConfig(BaseModel):
     exclude_tags: set[str] | None = Field(default=None, description="Skip tasks matching any of these tags")
 
     # Agent overrides (CLI > .env > task YAML)
+    agent_type: str | None = Field(default=None, description="Override agent type for all tasks (e.g., 'claude-code')")
     agent_model: str | None = Field(default=None, description="Override agent model for all tasks")
     permission_mode: str | None = Field(default=None, description="Override permission mode for all tasks")
     max_turns: int | None = Field(default=None, description="Override max turns for all tasks")

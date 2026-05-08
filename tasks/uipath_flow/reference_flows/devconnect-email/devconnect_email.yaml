@@ -14,6 +14,8 @@ initial_prompt: |
   directly to building the flow with the required nodes.
 tags: [flow, uip, agent, outlook, slack, switch, intermediate, generate]
 
+max_turns: 60
+turn_timeout: 600
 agent:
   type: claude-code
   permission_mode: acceptEdits
@@ -21,8 +23,6 @@ agent:
   plugins:
     - type: "local"
       path: $UIPATH_PLUGIN_MARKETPLACE_DIR/
-  max_turns: 60
-  turn_timeout: 600
 
 sandbox:
   driver: tempdir

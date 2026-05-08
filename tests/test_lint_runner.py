@@ -223,3 +223,48 @@ def test_ce005_bound_exception_referenced_passes(write_py):
     path = write_py(source)
     violations = check_file(path, rules=[NoSilentExcept])
     assert violations == []
+
+
+# ---------- CE006 agent timing access ----------
+
+
+def test_ce006_flags_agent_max_turns_read(write_py):
+    """`task.agent.max_turns` (read) should be flagged."""
+    from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
+
+    source = "def f(task):\n    return task.agent.max_turns\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[NoAgentTimingAccess])
+    assert len(violations) == 1
+    assert violations[0].rule_id == "CE006"
+
+
+def test_ce006_flags_agent_turn_timeout_write(write_py):
+    """`task.agent.turn_timeout = ...` (write) should be flagged."""
+    from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
+
+    source = "def f(task):\n    task.agent.turn_timeout = 30\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[NoAgentTimingAccess])
+    assert len(violations) == 1
+    assert violations[0].rule_id == "CE006"
+
+
+def test_ce006_allows_top_level_max_turns(write_py):
+    """`task.max_turns` (top-level field) should NOT be flagged."""
+    from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
+
+    source = "def f(task):\n    return task.max_turns\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[NoAgentTimingAccess])
+    assert violations == []
+
+
+def test_ce006_allows_criterion_max_turns(write_py):
+    """`criterion.max_turns` (real field on judge criteria) should NOT be flagged."""
+    from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
+
+    source = "def f(criterion):\n    return criterion.max_turns\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[NoAgentTimingAccess])
+    assert violations == []

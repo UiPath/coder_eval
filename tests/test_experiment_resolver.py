@@ -265,7 +265,7 @@ class TestDefaultExperimentScalarOverrides:
         )
 
         resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.agent.turn_timeout == 60
+        assert resolved.turn_timeout == 60
 
     def test_experiment_base_overrides_default_experiment_scalars(self):
         """experiment.defaults scalars (layer 2) should override default_experiment.defaults (layer 1)."""
@@ -342,7 +342,7 @@ class TestTurnTimeoutResolution:
         )
 
         resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.agent.turn_timeout == 300, f"Expected 300, got {resolved.agent.turn_timeout}"
+        assert resolved.turn_timeout == 300, f"Expected 300, got {resolved.turn_timeout}"
 
     def test_default_yaml_turn_timeout_preserved(self):
         """Regression: turn_timeout from actual default.yaml must survive resolution."""
@@ -359,7 +359,7 @@ class TestTurnTimeoutResolution:
         )
 
         resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.agent.turn_timeout == expected_timeout
+        assert resolved.turn_timeout == expected_timeout
 
     def test_scalar_turn_timeout_overrides_agent_dict(self):
         """When turn_timeout is set at both defaults level AND in agent dict, scalar wins."""
@@ -378,7 +378,7 @@ class TestTurnTimeoutResolution:
         )
 
         resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.agent.turn_timeout == 400
+        assert resolved.turn_timeout == 400
 
 
 class TestTemplateSourcesOverlay:

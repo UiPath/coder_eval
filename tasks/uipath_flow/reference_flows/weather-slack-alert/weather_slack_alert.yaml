@@ -13,6 +13,7 @@ initial_prompt: |
   After creating it, validate the JSON syntax and structure.
 tags: [flow, integration, intermediate]
 
+max_turns: 30
 agent:
   type: "claude-code"
   permission_mode: "acceptEdits"
@@ -20,7 +21,6 @@ agent:
   plugins:
     - type: "local"
       path: $UIPATH_PLUGIN_MARKETPLACE_DIR/
-  max_turns: 30
 
 sandbox:
   driver: tempdir

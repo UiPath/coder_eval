@@ -168,12 +168,16 @@ def test_agent_judge_config_propagates(sandbox: Sandbox, direct_route: DirectRou
 
     (agent_config,) = mock_cls.call_args.args
     assert agent_config.model == "claude-sonnet-4-6"
-    assert agent_config.max_turns == 3
-    assert agent_config.turn_timeout == 45
     assert agent_config.permission_mode == "plan"
     assert agent_config.allowed_tools == ["Read", "Grep"]
     assert agent_config.disallowed_tools == ["Bash"]
     assert agent_config.setting_sources == []
+    # max_turns and turn_timeout are passed as call-time args to communicate(),
+    # not stored on AgentConfig.
+    mock_agent.communicate.assert_awaited_once()
+    kwargs = mock_agent.communicate.call_args.kwargs
+    assert kwargs["timeout"] == 45.0
+    assert kwargs["max_turns"] == 3
 
 
 def test_agent_judge_rejects_turn_timeout_below_ten() -> None:

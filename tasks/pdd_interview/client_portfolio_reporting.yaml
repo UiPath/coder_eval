@@ -9,12 +9,12 @@ description: >
 tags: [pdd, interview, simulation, wealth-management, docx]
 task_timeout: 2400
 
+max_turns: 80
+turn_timeout: 600
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"]
-  max_turns: 80
-  turn_timeout: 600
 
 sandbox:
   driver: tempdir

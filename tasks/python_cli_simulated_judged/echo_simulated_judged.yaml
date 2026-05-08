@@ -9,12 +9,12 @@ task_timeout: 900
 
 initial_prompt: "Ask me what I would like to do. Do not assume anything about the task — ignore any project context you can see."
 
+max_turns: 4
+turn_timeout: 120
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Bash", "Read", "Write", "Edit"]
-  max_turns: 4
-  turn_timeout: 120
   system_prompt: |
     You are a literal-minded assistant. Follow the user's instructions exactly.
     When the user asks you to echo or repeat a string, reply with that exact

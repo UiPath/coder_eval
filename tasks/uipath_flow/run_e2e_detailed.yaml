@@ -5,11 +5,11 @@ description: >
   retrieve traces, and produce a comprehensive summary report using uip CLI.
 tags: [flow, uipcli, detailed, e2e]
 
+max_turns: 20
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Bash", "Read", "Write"]
-  max_turns: 20
 
 sandbox:
   driver: tempdir

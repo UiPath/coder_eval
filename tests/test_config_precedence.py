@@ -281,7 +281,8 @@ def test_agent_override_precedence_cli_over_env_over_yaml():
         task_id="test-precedence",
         description="Test precedence",
         initial_prompt="test",
-        agent=AgentConfig(type=AgentKind.CLAUDE_CODE, model="yaml-model", permission_mode="default", max_turns=10),
+        agent=AgentConfig(type=AgentKind.CLAUDE_CODE, model="yaml-model", permission_mode="default"),
+        max_turns=10,
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[{"type": "file_exists", "path": "test.py", "description": "test"}],
     )
@@ -305,11 +306,11 @@ def test_agent_override_precedence_cli_over_env_over_yaml():
 
     effective_max_turns = config.max_turns if config.max_turns is not None else None
     if effective_max_turns is not None:
-        task.agent.max_turns = effective_max_turns
+        task.max_turns = effective_max_turns
 
     assert task.agent.model == "cli-model"
     assert task.agent.permission_mode == "bypassPermissions"
-    assert task.agent.max_turns == 99
+    assert task.max_turns == 99
 
 
 def test_api_backend_enum_values():

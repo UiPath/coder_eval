@@ -131,20 +131,6 @@ class TestLLMJudgeCriterion:
 class TestAgentConfig:
     """Tests for AgentConfig fields."""
 
-    def test_max_turns_default_none(self):
-        """Test that max_turns defaults to None."""
-        from coder_eval.models import AgentConfig, AgentKind
-
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
-        assert config.max_turns is None
-
-    def test_max_turns_set_from_yaml(self):
-        """Test that max_turns can be set (e.g., from task YAML)."""
-        from coder_eval.models import AgentConfig, AgentKind
-
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE, max_turns=3)
-        assert config.max_turns == 3
-
     def test_invalid_permission_mode_assignment_rejected(self):
         """Test that assigning invalid permission_mode via attribute raises ValidationError."""
         from pydantic import ValidationError

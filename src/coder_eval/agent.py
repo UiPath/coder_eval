@@ -44,6 +44,7 @@ class Agent(ABC):
         *,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
+        max_turns: int | None = None,
     ) -> TurnRecord:
         """Send a message to the agent and receive its response.
 
@@ -55,6 +56,10 @@ class Agent(ABC):
                 TurnTimeoutError. Implementations should not rely solely on
                 asyncio cancellation (the Claude Agent SDK uses anyio task
                 groups that swallow cooperative cancellation).
+            max_turns: Hard cap on inner-loop turns within this single
+                ``communicate()`` call. When the agent would exceed it, the
+                returned ``TurnRecord`` has ``max_turns_exhausted=True``.
+                None defers to the underlying SDK default.
 
         Returns:
             TurnRecord containing the complete interaction

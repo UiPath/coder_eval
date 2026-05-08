@@ -4,11 +4,11 @@ description: >
   placeholders for dynamic nodes — no CLI, pure JSON authoring.
 tags: [flow, flow-json, generate, no-cli, tier-2]
 
+max_turns: 40
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 40
 
 sandbox:
   driver: tempdir

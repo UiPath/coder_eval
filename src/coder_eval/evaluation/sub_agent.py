@@ -88,7 +88,7 @@ class SubAgentRunner:
         self._ignore_patterns = ignore_patterns
         self._route = route
 
-    def run(self, user_msg: str, turn_timeout: float) -> TurnRecord:
+    def run(self, user_msg: str, *, max_turns: int | None, turn_timeout: float) -> TurnRecord:
         """Copy sandbox → start agent → communicate → stop. Kill on any exception.
 
         Raises ``TurnTimeoutError`` when the agent exceeds ``turn_timeout``.
@@ -114,15 +114,15 @@ class SubAgentRunner:
 
             agent = ClaudeCodeAgent(self._agent_config, route=self._route)
             logger.info(
-                "sub_agent: starting (model=%s, max_turns=%d, allowed_tools=%s)",
+                "sub_agent: starting (model=%s, max_turns=%s, allowed_tools=%s)",
                 self._agent_config.model,
-                self._agent_config.max_turns,
+                max_turns,
                 self._agent_config.allowed_tools,
             )
             # Safe because callers run check_all via asyncio.to_thread, so this
             # invocation is on a worker thread with no active event loop. A direct
             # async caller would get RuntimeError — acceptable for the architecture.
-            turn = asyncio.run(self._run_agent(agent, judge_dir, user_msg, turn_timeout))
+            turn = asyncio.run(self._run_agent(agent, judge_dir, user_msg, max_turns, turn_timeout))
             logger.info(
                 "sub_agent: finished (duration=%.1fs, tokens=%s)",
                 turn.duration_seconds,
@@ -137,6 +137,7 @@ class SubAgentRunner:
         agent: ClaudeCodeAgent,
         judge_dir: Path,
         user_msg: str,
+        max_turns: int | None,
         turn_timeout: float,
     ) -> TurnRecord:
         """Run the sub-agent. Hard-kill on any exit path.
@@ -146,7 +147,7 @@ class SubAgentRunner:
         """
         try:
             await agent.start(str(judge_dir))
-            return await agent.communicate(user_msg, timeout=turn_timeout)
+            return await agent.communicate(user_msg, timeout=turn_timeout, max_turns=max_turns)
         except BaseException:
             with contextlib.suppress(Exception):
                 await agent.kill()

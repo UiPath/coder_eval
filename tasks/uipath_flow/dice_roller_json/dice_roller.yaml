@@ -4,11 +4,11 @@ description: >
   schemas and templates — no CLI, no registry, pure JSON authoring.
 tags: [flow, flow-json, generate, no-cli]
 
+max_turns: 30
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 30
 
 sandbox:
   driver: tempdir

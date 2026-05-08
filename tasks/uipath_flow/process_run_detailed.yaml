@@ -4,11 +4,11 @@ description: >
   UiPath Flow process, monitor its job status and traces using uip CLI.
 tags: [flow, uipcli, detailed]
 
+max_turns: 18
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Bash", "Read", "Write"]
-  max_turns: 18
 
 sandbox:
   driver: tempdir

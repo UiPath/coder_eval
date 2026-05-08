@@ -33,6 +33,43 @@ def test_evaluate_command_success(tmp_path):
         assert exc_info.value.exit_code == 0
 
 
+def test_evaluate_command_defaults_agent_type_when_missing(tmp_path):
+    """Phase-3 regression: evaluate-only must work for tasks without `agent:` or `agent.type`.
+
+    Such tasks defer the agent kind to experiment / --type for run paths, but
+    evaluate-only bypasses both. The CLI fills in CLAUDE_CODE so the orchestrator
+    invariants hold (the agent type is purely a label here — no agent runs).
+    """
+    task_file = tmp_path / "no_agent_task.yaml"
+    task_file.write_text(
+        "task_id: no_agent_task\n"
+        "description: deferred-agent-type evaluate-only path\n"
+        "initial_prompt: noop\n"
+        "sandbox:\n"
+        "  driver: tempdir\n"
+        "  python: null\n"
+        "success_criteria:\n"
+        "  - type: file_exists\n"
+        "    path: app.py\n"
+        "    description: app.py must exist\n",
+        encoding="utf-8",
+    )
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "app.py").write_text("print('hello')")
+
+    from coder_eval.cli.evaluate_command import evaluate_command
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    with patch("coder_eval.cli.console.console.print"), patch("coder_eval.logging_config.setup_logging"):
+        with pytest.raises(typer.Exit) as exc_info:
+            evaluate_command(task_file=task_file, work_dir=work_dir, run_dir=run_dir)
+        assert exc_info.value.exit_code == 0
+
+
 def test_evaluate_command_failure(tmp_path):
     """Test evaluate command with failing criteria."""
     task_file = FIXTURES_DIR / "tasks" / "test_task_pass.yaml"

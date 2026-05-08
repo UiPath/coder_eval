@@ -8,11 +8,11 @@ description: >
   Tests registry discovery, output filtering, and planning documentation.
 tags: [flow, uipcli, output-filter, jmespath, planning, registry, intermediate]
 
+max_turns: 50
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Glob", "Grep"]
-  max_turns: 50
   plugins:
     - type: "local"
       path: $UIPATH_PLUGIN_MARKETPLACE_DIR/

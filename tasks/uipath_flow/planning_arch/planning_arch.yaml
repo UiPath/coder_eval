@@ -4,11 +4,11 @@ description: >
   weather notification flow — tests the two-phase planning methodology.
 tags: [flow, planning, arch, tier-3]
 
+max_turns: 40
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 40
 
 sandbox:
   driver: tempdir

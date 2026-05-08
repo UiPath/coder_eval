@@ -20,8 +20,7 @@ defaults:
 
 variants:
   - variant_id: with-folder-hint
-    agent:
-      max_turns: 30
+    max_turns: 30
     template_sources:
       - type: starter_files
         files:

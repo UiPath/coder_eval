@@ -4,11 +4,11 @@ description: >
   process and check its job status using uip CLI with no step-by-step guidance.
 tags: [flow, uipcli, simple]
 
+max_turns: 15
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Bash", "Read", "Write"]
-  max_turns: 15
 
 sandbox:
   driver: tempdir

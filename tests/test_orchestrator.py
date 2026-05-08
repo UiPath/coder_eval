@@ -1441,13 +1441,13 @@ async def test_run_batch_applies_max_turns_override(tmp_path):
     )
 
     task, _ = load_task(task_file)
-    assert task.agent.max_turns is None  # Default
+    assert task.max_turns is None  # Default
 
     effective_max_turns = config.max_turns if config.max_turns is not None else None
     if effective_max_turns is not None:
-        task.agent.max_turns = effective_max_turns
+        task.max_turns = effective_max_turns
 
-    assert task.agent.max_turns == 42
+    assert task.max_turns == 42
 
 
 # ==================== Duplicate Task ID Validation Tests ====================

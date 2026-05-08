@@ -6,7 +6,7 @@ from pathlib import Path
 import typer
 
 from ..logging_config import setup_logging
-from ..models import EvaluationResult, FinalStatus, TemplateDirSource
+from ..models import AgentKind, EvaluationResult, FinalStatus, TemplateDirSource
 from ..orchestration.task_loader import load_task
 from ..orchestrator import Orchestrator
 from ..sandbox import Sandbox
@@ -64,6 +64,18 @@ def evaluate_command(
     except Exception as e:
         console.print(f"[red]✗ Failed to load task:[/red] {e}")
         raise typer.Exit(1) from e
+
+    # Evaluate-only mode bypasses experiment resolution + CLI overrides, so
+    # `agent` may be None or `agent.type` may be unset for tasks that defer
+    # those to the experiment / CLI layers. The orchestrator only uses
+    # `agent.type` for result labeling here (no agent is created), so a
+    # default is safe.
+    from ..models import AgentConfig
+
+    if task.agent is None:
+        task.agent = AgentConfig(type=AgentKind.CLAUDE_CODE)
+    elif task.agent.type is None:
+        task.agent.type = AgentKind.CLAUDE_CODE
 
     if not work_dir.is_dir():
         console.print(f"[red]✗ Work directory is not a directory:[/red] {work_dir}")

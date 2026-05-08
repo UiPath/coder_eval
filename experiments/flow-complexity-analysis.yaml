@@ -43,25 +43,25 @@ defaults:
 variants:
   # ── Sonnet (fast, cost-effective baseline) ──────────────────────────────
   - variant_id: plugin_cli
+    max_turns: 1000
+    turn_timeout: 1200
     agent:
-      max_turns: 1000
-      turn_timeout: 1200
       plugins:
         - type: "local"
           path: "$CLI_PLUGIN_PATH"
 
   - variant_id: plugin_json
+    max_turns: 1000
+    turn_timeout: 1200
     agent:
-      max_turns: 1000
-      turn_timeout: 1200
       plugins:
         - type: "local"
           path: "$JSON_PLUGIN_PATH"
 
   - variant_id: plugin_refactored
+    max_turns: 1000
+    turn_timeout: 1200
     agent:
-      max_turns: 1000
-      turn_timeout: 1200
       plugins:
         - type: "local"
           path: "$REFACTORED_PLUGIN_PATH"

@@ -148,7 +148,12 @@ def test_claude_agent_disallowed_tools_defaults_to_none():
     assert agent.config.disallowed_tools is None
 
 
-async def _capture_sdk_options(agent: ClaudeCodeAgent, *, env_path_prepend: list[str] | None = None) -> "list":
+async def _capture_sdk_options(
+    agent: ClaudeCodeAgent,
+    *,
+    env_path_prepend: list[str] | None = None,
+    max_turns: int | None = None,
+) -> "list":
     """Run one communicate() turn with a mocked query() and return captured options list."""
     import tempfile
 
@@ -176,9 +181,33 @@ async def _capture_sdk_options(agent: ClaudeCodeAgent, *, env_path_prepend: list
     with tempfile.TemporaryDirectory() as tmpdir:
         await agent.start(tmpdir, env_path_prepend=env_path_prepend)
         with patch("coder_eval.agents.claude_code_agent.query", mock_query):
-            await agent.communicate("hello")
+            await agent.communicate("hello", max_turns=max_turns)
 
     return captured_options
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_max_turns_kwarg_reaches_sdk_options():
+    """`communicate(max_turns=N)` propagates N to ClaudeAgentOptions.max_turns.
+
+    Regression-guard for the Phase-1 refactor: max_turns is a per-call argument
+    (mirrors `timeout`), not a stored field on the agent.
+    """
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent, max_turns=42)
+    assert captured_options[0].max_turns == 42
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_max_turns_default_is_none():
+    """Without an explicit max_turns kwarg, ClaudeAgentOptions.max_turns is None (SDK default)."""
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+    assert captured_options[0].max_turns is None
 
 
 @pytest.mark.asyncio
@@ -1213,7 +1242,7 @@ async def test_claude_agent_error_max_turns_is_clean_completion_not_crash():
     through to the success path so the orchestrator's existing
     ``max_turns_exhausted`` handling can stop iterating.
     """
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits", max_turns=10)
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     class AssistantMessage:
@@ -1266,7 +1295,7 @@ async def test_claude_agent_error_max_turns_clean_completion_via_exception_path(
     ``except`` branches; this asserts the ``except Exception`` branch
     short-circuits the same way (clean completion, no crash, no rollback).
     """
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits", max_turns=10)
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     class AssistantMessage:

@@ -18,10 +18,25 @@ logger = logging.getLogger(__name__)
 
 
 class ConfigLineageEntry(BaseModel):
-    """Records which config layer provided a specific value."""
+    """Records which config layer provided a specific value.
+
+    The ``-agent-deprecated`` suffixes mark values that came from the legacy
+    location (``agent.max_turns`` / ``agent.turn_timeout`` inside the experiment
+    or task YAML). Removed alongside the hoist shim on 2026-05-15.
+    """
 
     value: Any
-    source: Literal["default", "task", "experiment-defaults", "variant", "cli", "mutation"]
+    source: Literal[
+        "default",
+        "task",
+        "experiment-defaults",
+        "variant",
+        "cli",
+        "mutation",
+        "default-agent-deprecated",
+        "experiment-defaults-agent-deprecated",
+        "variant-agent-deprecated",
+    ]
     source_detail: str | None = None
 
 

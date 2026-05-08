@@ -21,6 +21,10 @@ defaults:
   # Maximum seconds per agent turn / communicate call (null = no limit)
   turn_timeout: 300
 
+  # Maximum agent inner-loop turns per iteration (null = SDK default)
+  # Typical range in tasks: 3-18 depending on complexity
+  max_turns: 20
+
   agent:
     # Agent type (currently only "claude-code" is supported)
     type: claude-code
@@ -35,10 +39,6 @@ defaults:
     # Specific model to use (null = defer to Claude Code CLI default)
     # Examples: claude-sonnet-4-6, claude-opus-4-6
     model: claude-sonnet-4-6
-
-    # Maximum agent inner-loop turns per iteration (null = SDK default)
-    # Typical range in tasks: 3-18 depending on complexity
-    max_turns: 20
 
     # Allowed tools — restrict which tools the agent can use (null = all tools)
     # Most tasks use ["Bash"] or ["Bash", "Read", "Write"]. This default

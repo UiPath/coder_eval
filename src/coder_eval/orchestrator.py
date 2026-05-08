@@ -294,6 +294,10 @@ class Orchestrator:
         assert self.task.agent is not None, (
             f"Task '{self.task.task_id}' has no agent config. Ensure experiment resolution ran before orchestration."
         )
+        assert self.task.agent.type is not None, (
+            f"Task '{self.task.task_id}' has no agent.type. Ensure experiment resolution + CLI overrides "
+            "ran before orchestration."
+        )
 
         start_time = time.time()
         started_at = datetime.now()
@@ -696,7 +700,8 @@ class Orchestrator:
         agent = self.agent
         # Local rebind: pyright doesn't carry "is not None" narrowing into closures.
         result = self.result
-        turn_timeout = self.task.agent.turn_timeout
+        turn_timeout = self.task.turn_timeout
+        max_turns = self.task.max_turns
 
         agent_callback: StreamCallback | None = None
         if self.stream_callback is not None:
@@ -744,6 +749,7 @@ class Orchestrator:
                 prompt,
                 stream_callback=agent_callback,
                 timeout=turn_timeout,
+                max_turns=max_turns,
             )
             if turn_timeout is None:
                 return await coro
@@ -904,7 +910,7 @@ class Orchestrator:
             self.result.max_turns_exhausted = True
             logger.warning(
                 "Agent exhausted max_turns (%s) without passing criteria.",
-                self.task.agent.max_turns,
+                self.task.max_turns,
             )
 
         return all_passed

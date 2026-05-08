@@ -32,8 +32,6 @@ def _make_task(*, turn_timeout: float | None = None, task_timeout: float | None 
         permission_mode="acceptEdits",
         allowed_tools=None,
         model=None,
-        max_turns=None,
-        turn_timeout=turn_timeout,
         ignore_patterns=[],
     )
     task = TaskDefinition.model_construct(
@@ -44,6 +42,8 @@ def _make_task(*, turn_timeout: float | None = None, task_timeout: float | None 
         agent=agent,
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(type="file_exists", path="test.py", description="test.py must exist")],
+        max_turns=None,
+        turn_timeout=turn_timeout,
         task_timeout=task_timeout,
         reference=None,
     )

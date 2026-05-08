@@ -30,8 +30,6 @@ def _make_agent_config() -> AgentConfig:
     return AgentConfig(
         type=AgentKind.CLAUDE_CODE,
         model="claude-opus-4-6",
-        max_turns=3,
-        turn_timeout=30,
         permission_mode="bypassPermissions",
         allowed_tools=["Read"],
         system_prompt="x",
@@ -66,11 +64,11 @@ def test_runner_happy_path(sandbox: Sandbox, tmp_path: Path) -> None:
     )
     mock_agent = _make_mock_agent()
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
-        turn = runner.run("grade this", turn_timeout=30.0)
+        turn = runner.run("grade this", max_turns=10, turn_timeout=30.0)
 
     assert turn.agent_output == '{"score": 1.0, "rationale": "ok"}'
     mock_agent.start.assert_awaited_once()
-    mock_agent.communicate.assert_awaited_once_with("grade this", timeout=30.0)
+    mock_agent.communicate.assert_awaited_once_with("grade this", timeout=30.0, max_turns=10)
     mock_agent.stop.assert_awaited()
 
 
@@ -85,7 +83,7 @@ def test_runner_starts_in_temp_copy_not_original(sandbox: Sandbox, tmp_path: Pat
     )
     mock_agent = _make_mock_agent()
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
-        runner.run("grade", turn_timeout=30.0)
+        runner.run("grade", max_turns=10, turn_timeout=30.0)
 
     start_arg = mock_agent.start.call_args.args[0]
     assert start_arg != str(sandbox.sandbox_dir)
@@ -107,7 +105,7 @@ def test_runner_cleans_up_on_success(sandbox: Sandbox) -> None:
 
     mock_agent.start.side_effect = capture_start
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
-        runner.run("grade", turn_timeout=30.0)
+        runner.run("grade", max_turns=10, turn_timeout=30.0)
 
     assert captured["path"]
     assert not Path(captured["path"]).exists()
@@ -133,7 +131,7 @@ def test_runner_cleans_up_on_communicate_exception(sandbox: Sandbox) -> None:
         patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent),
         pytest.raises(RuntimeError, match="boom"),
     ):
-        runner.run("grade", turn_timeout=30.0)
+        runner.run("grade", max_turns=10, turn_timeout=30.0)
 
     assert not Path(captured["path"]).exists()
     mock_agent.kill.assert_awaited()
@@ -154,7 +152,7 @@ def test_runner_cleans_up_on_start_failure(sandbox: Sandbox) -> None:
         patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent),
         pytest.raises(RuntimeError, match="claude binary not found"),
     ):
-        runner.run("grade", turn_timeout=30.0)
+        runner.run("grade", max_turns=10, turn_timeout=30.0)
 
     mock_agent.kill.assert_awaited()
 
@@ -179,7 +177,7 @@ def test_runner_propagates_turn_timeout(sandbox: Sandbox) -> None:
         patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent),
         pytest.raises(TurnTimeoutError),
     ):
-        runner.run("grade", turn_timeout=30.0)
+        runner.run("grade", max_turns=10, turn_timeout=30.0)
 
     assert not Path(captured["path"]).exists()
 
@@ -193,8 +191,6 @@ def test_runner_asserts_setting_sources_empty(sandbox: Sandbox, bad_sources: lis
     bad_config = AgentConfig(
         type=AgentKind.CLAUDE_CODE,
         model="claude-opus-4-6",
-        max_turns=3,
-        turn_timeout=30,
         permission_mode="bypassPermissions",
         allowed_tools=["Read"],
         system_prompt="x",
@@ -261,7 +257,7 @@ def test_runner_copytree_drops_top_level_symlinks(sandbox: Sandbox, tmp_path: Pa
 
     mock_agent.start.side_effect = capture_start
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
-        runner.run("grade", turn_timeout=30.0)
+        runner.run("grade", max_turns=10, turn_timeout=30.0)
 
     assert "real.txt" in captured["entries"]
     assert "leak" not in captured["entries"]
@@ -290,7 +286,7 @@ def test_runner_copytree_drops_nested_symlinks(sandbox: Sandbox, tmp_path: Path)
 
     mock_agent.start.side_effect = capture_start
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
-        runner.run("grade", turn_timeout=30.0)
+        runner.run("grade", max_turns=10, turn_timeout=30.0)
 
     assert "keep.txt" in captured["sub_entries"]
     assert "nested_leak" not in captured["sub_entries"]
@@ -316,7 +312,7 @@ def test_runner_copytree_honors_patterns(sandbox: Sandbox, tmp_path: Path) -> No
 
     mock_agent.start.side_effect = capture_start
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
-        runner.run("grade", turn_timeout=30.0)
+        runner.run("grade", max_turns=10, turn_timeout=30.0)
 
     assert captured["has_git"] == "False"
     assert captured["has_main"] == "True"
@@ -348,7 +344,7 @@ def test_runner_excludes_nested_claude_and_mcp(sandbox: Sandbox, tmp_path: Path)
 
     mock_agent.start.side_effect = capture_start
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
-        runner.run("grade", turn_timeout=30.0)
+        runner.run("grade", max_turns=10, turn_timeout=30.0)
 
     assert ".claude" not in captured["sub_entries"]
     assert ".mcp.json" not in captured["sub_entries"]

@@ -5,11 +5,11 @@ description: >
   with no step-by-step guidance.
 tags: [flow, uipcli, simple, e2e]
 
+max_turns: 15
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Bash", "Read", "Write"]
-  max_turns: 15
 
 sandbox:
   driver: tempdir

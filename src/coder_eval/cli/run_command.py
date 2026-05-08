@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from ..config import settings
 from ..logging_config import setup_logging
-from ..models import RunSummary
+from ..models import AgentKind, RunSummary
 from ..orchestration.config import BatchRunConfig
 from ..path_utils import create_latest_symlink, format_task_log_id
 from ..streaming.renderers import RichStreamRenderer
@@ -120,6 +120,17 @@ def run_command(
         None,
         "--exclude-tags",
         help="Skip tasks matching any of these tags (comma-separated, e.g., 'example,integration')",
+    ),
+    agent_type: str | None = typer.Option(
+        None,
+        "--type",
+        "-T",
+        # NOTE: Choices are restricted to agent kinds the orchestrator can actually
+        # construct today. AgentKind has unsupported placeholder members; let
+        # AgentKind() coercion fail at override time rather than silently
+        # accepting them at the CLI boundary.
+        click_type=click.Choice([AgentKind.CLAUDE_CODE.value], case_sensitive=False),
+        help="Override agent type for all tasks (currently only 'claude-code')",
     ),
     model: str | None = typer.Option(
         None,
@@ -292,6 +303,7 @@ def run_command(
                 snapshot_checkpoint_freq,
                 include_tags,
                 exclude_tags_set,
+                agent_type,
                 model,
                 permission_mode,
                 max_turns,
@@ -321,6 +333,7 @@ async def _run_all_tasks(
     snapshot_checkpoint_freq: int | None,
     include_tags: set[str] | None = None,
     exclude_tags: set[str] | None = None,
+    agent_type: str | None = None,
     agent_model: str | None = None,
     permission_mode: str | None = None,
     max_turns: int | None = None,
@@ -381,6 +394,7 @@ async def _run_all_tasks(
         snapshot_checkpoint_freq=snapshot_checkpoint_freq,
         include_tags=include_tags,
         exclude_tags=exclude_tags,
+        agent_type=agent_type,
         agent_model=agent_model,
         permission_mode=permission_mode,
         max_turns=max_turns,

@@ -4,11 +4,11 @@ description: >
   and pack a Flow project using uip CLI with no step-by-step guidance.
 tags: [flow, uipcli, simple]
 
+max_turns: 12
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Bash", "Read", "Write"]
-  max_turns: 12
 
 sandbox:
   driver: tempdir

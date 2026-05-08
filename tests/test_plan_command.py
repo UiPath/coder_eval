@@ -98,6 +98,31 @@ class TestPlanCommandAgentNone:
         assert len(agent_lines) == 1
         assert "claude-code" in agent_lines[0]
 
+    def test_plan_shows_deferred_when_agent_type_is_none(self, tmp_path: Path) -> None:
+        """Phase 3: agent.type may be None on the task; plan must not crash on `.value`."""
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("placeholder")
+
+        # AgentConfig with model only — type deferred to experiment / --type.
+        agent = AgentConfig(model="claude-opus-4-7")
+        task = _make_task(agent=agent)
+        experiment = _make_experiment(variants=[ExperimentVariant(variant_id="default")])
+        resolved_task = _make_task(agent=AgentConfig(type=AgentKind.CLAUDE_CODE, model="claude-opus-4-7"))
+
+        with (
+            patch("coder_eval.cli.plan_command.check_tools"),
+            patch("coder_eval.cli.plan_command.check_api_keys"),
+            patch("coder_eval.cli.plan_command.load_task", return_value=(task, "mock yaml")),
+            patch(f"{_EXP}.load_experiment", return_value=experiment),
+            patch(f"{_EXP}.resolve_task_for_variant", return_value=(resolved_task, {}, 1)),
+            patch("coder_eval.cli.plan_command.console") as mock_console,
+        ):
+            plan_command(task_files=[task_file])
+
+        printed = [str(call) for call in mock_console.print.call_args_list]
+        deferred_lines = [p for p in printed if "deferred" in p]
+        assert len(deferred_lines) == 1
+
 
 class TestPlanCommandExperiment:
     """Tests for experiment-aware plan output."""

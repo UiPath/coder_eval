@@ -22,6 +22,7 @@ class ExperimentVariant(BaseModel):
     agent: dict[str, Any] | None = Field(default=None, description="Partial agent config overrides")
     task_timeout: int | None = Field(default=None, ge=30, description="Override task timeout (seconds)")
     turn_timeout: int | None = Field(default=None, ge=10, description="Override turn timeout (seconds)")
+    max_turns: int | None = Field(default=None, gt=0, description="Override max agent turns per iteration")
     simulation: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -73,6 +74,7 @@ class ExperimentDefaults(BaseModel):
 
     task_timeout: int | None = Field(default=None, ge=30, description="Default task timeout (seconds)")
     turn_timeout: int | None = Field(default=None, ge=10, description="Default turn timeout (seconds)")
+    max_turns: int | None = Field(default=None, gt=0, description="Default max agent turns per iteration")
     repeats: int | None = Field(
         default=None,
         ge=1,

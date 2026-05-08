@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.resources
 import logging
 import re
+import warnings
 from pathlib import Path
 from typing import Any, Literal
 
@@ -18,6 +19,7 @@ import yaml
 
 from ..models import (
     AgentConfig,
+    AgentKind,
     ConfigLineageEntry,
     ExperimentDefinition,
     ExperimentResult,
@@ -124,6 +126,43 @@ def load_experiment(experiment_file: Path) -> ExperimentDefinition:
         raise ValueError(f"Invalid experiment definition: {e}") from e
 
 
+def _hoist_agent_timing_dict(
+    agent_dict: dict[str, Any] | None,
+    *,
+    layer_label: str,
+) -> tuple[dict[str, Any] | None, int | None, int | None]:
+    """Pop legacy ``max_turns``/``turn_timeout`` out of an agent dict and return them as scalars.
+
+    Mirrors ``TaskDefinition._hoist_legacy_agent_timing`` for experiment-side
+    agent dicts (``ExperimentDefaults.agent``, ``ExperimentVariant.agent``)
+    which are typed ``dict[str, Any]`` and bypass Pydantic validation.
+
+    Emits a single ``DeprecationWarning`` per hoisted field. ``layer_label``
+    is included in the warning text so users can pinpoint which layer is on
+    the legacy shape (e.g. ``"experiment defaults"``, ``"variant 'sonnet'"``).
+    Scheduled removal: 2026-05-15.
+
+    Returns:
+        Tuple of ``(cleaned_dict_or_None, max_turns, turn_timeout)``. The
+        cleaned dict is ``None`` when the input was ``None`` or when removing
+        the timing keys leaves it empty.
+    """
+    if agent_dict is None:
+        return None, None, None
+    cleaned = dict(agent_dict)
+    max_turns = cleaned.pop("max_turns", None)
+    turn_timeout = cleaned.pop("turn_timeout", None)
+    for name, val in (("max_turns", max_turns), ("turn_timeout", turn_timeout)):
+        if val is not None:
+            warnings.warn(
+                f"{name!r} under {layer_label} agent: is deprecated and will be removed on "
+                + "2026-05-15; move it to the experiment defaults / variant top level.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+    return (cleaned or None), max_turns, turn_timeout
+
+
 def _merge_agent_dicts(*layers: dict[str, Any] | None) -> dict[str, Any]:
     """Merge multiple partial agent config dicts (left to right, later wins).
 
@@ -145,7 +184,16 @@ def _merge_agent_dicts(*layers: dict[str, Any] | None) -> dict[str, Any]:
     return merged
 
 
-type ConfigSource = Literal["default", "task", "experiment-defaults", "variant", "cli"]
+type ConfigSource = Literal[
+    "default",
+    "task",
+    "experiment-defaults",
+    "variant",
+    "cli",
+    "default-agent-deprecated",
+    "experiment-defaults-agent-deprecated",
+    "variant-agent-deprecated",
+]
 
 
 def _resolve_simulation(
@@ -362,20 +410,30 @@ def resolve_task_for_variant(
     Returns:
         Tuple of (resolved TaskDefinition, config lineage dict, effective_repeats).
     """
-    # Layer 1: default experiment defaults agent
-    default_agent = default_experiment.defaults.agent if default_experiment.defaults else None
-
-    # Layer 2: experiment defaults agent
-    exp_defaults_agent = experiment.defaults.agent if experiment.defaults else None
+    # Layer 1-4 raw agent dicts. Hoist legacy max_turns/turn_timeout out of the
+    # experiment-side dicts up front (task.agent is already pre-hoisted by
+    # TaskDefinition._hoist_legacy_agent_timing). The hoisted values feed into
+    # the unified scalar resolution below alongside the canonical top-level fields.
+    default_agent, default_agent_mt, default_agent_tt = _hoist_agent_timing_dict(
+        default_experiment.defaults.agent if default_experiment.defaults else None,
+        layer_label="default experiment defaults",
+    )
+    exp_defaults_agent, exp_defaults_agent_mt, exp_defaults_agent_tt = _hoist_agent_timing_dict(
+        experiment.defaults.agent if experiment.defaults else None,
+        layer_label="experiment defaults",
+    )
+    variant_agent_clean, variant_agent_mt, variant_agent_tt = _hoist_agent_timing_dict(
+        variant.agent,
+        layer_label=f"variant '{variant.variant_id}'",
+    )
 
     # Layer 3: task agent (only explicitly-set fields, not Pydantic defaults)
     task_agent = task.agent.model_dump(exclude_unset=True) if task.agent else None
 
-    # Layer 4: variant agent
-    variant_agent = variant.agent
-
-    # Merge agent dicts
-    merged_agent_dict = _merge_agent_dicts(default_agent, exp_defaults_agent, task_agent, variant_agent)
+    # Merge agent dicts. Type is enforced after CLI overrides (layer 5) are
+    # applied — see _apply_cli_overrides — so `--type` can satisfy the contract
+    # for tasks that omit `agent.type` entirely.
+    merged_agent_dict = _merge_agent_dicts(default_agent, exp_defaults_agent, task_agent, variant_agent_clean)
     resolved_agent = AgentConfig(**merged_agent_dict)
 
     # Build agent lineage
@@ -384,59 +442,100 @@ def resolve_task_for_variant(
             ("default", default_agent),
             ("experiment-defaults", exp_defaults_agent),
             ("task", task_agent),
-            ("variant", variant_agent),
+            ("variant", variant_agent_clean),
         ]
     )
 
     # Resolve scalar overrides and track lineage simultaneously (4-layer precedence)
     # Order: default → experiment-defaults → task → variant (task wins over experiment defaults)
     resolved_task_timeout = task.task_timeout
-    resolved_turn_timeout = task.agent.turn_timeout if task.agent else None
+    resolved_turn_timeout = task.turn_timeout
+    resolved_max_turns = task.max_turns
 
     scalar_lineage: dict[str, ConfigLineageEntry] = {}
     task_explicit = task.model_fields_set
-    task_agent_explicit = task.agent.model_fields_set if task.agent else set()
 
     # Layer 1: default experiment defaults scalars
-    if default_experiment.defaults:
-        if default_experiment.defaults.task_timeout is not None and "task_timeout" not in task_explicit:
-            resolved_task_timeout = default_experiment.defaults.task_timeout
-            scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="default")
-        if default_experiment.defaults.turn_timeout is not None and "turn_timeout" not in task_agent_explicit:
+    if (
+        default_experiment.defaults
+        and default_experiment.defaults.task_timeout is not None
+        and "task_timeout" not in task_explicit
+    ):
+        resolved_task_timeout = default_experiment.defaults.task_timeout
+        scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="default")
+    # turn_timeout / max_turns: top-level field wins over hoisted-from-agent value
+    # within the same layer (variant precedence rule, applied uniformly).
+    if "turn_timeout" not in task_explicit:
+        if default_experiment.defaults and default_experiment.defaults.turn_timeout is not None:
             resolved_turn_timeout = default_experiment.defaults.turn_timeout
             scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=resolved_turn_timeout, source="default")
+        elif default_agent_tt is not None:
+            resolved_turn_timeout = default_agent_tt
+            scalar_lineage["turn_timeout"] = ConfigLineageEntry(
+                value=resolved_turn_timeout, source="default-agent-deprecated"
+            )
+    if "max_turns" not in task_explicit:
+        if default_experiment.defaults and default_experiment.defaults.max_turns is not None:
+            resolved_max_turns = default_experiment.defaults.max_turns
+            scalar_lineage["max_turns"] = ConfigLineageEntry(value=resolved_max_turns, source="default")
+        elif default_agent_mt is not None:
+            resolved_max_turns = default_agent_mt
+            scalar_lineage["max_turns"] = ConfigLineageEntry(
+                value=resolved_max_turns, source="default-agent-deprecated"
+            )
 
     # Layer 2: experiment defaults scalars (overrides default, but task can still override these)
-    if experiment.defaults:
-        if experiment.defaults.task_timeout is not None and "task_timeout" not in task_explicit:
-            resolved_task_timeout = experiment.defaults.task_timeout
-            scalar_lineage["task_timeout"] = ConfigLineageEntry(
-                value=resolved_task_timeout, source="experiment-defaults"
-            )
-        if experiment.defaults.turn_timeout is not None and "turn_timeout" not in task_agent_explicit:
+    if experiment.defaults and experiment.defaults.task_timeout is not None and "task_timeout" not in task_explicit:
+        resolved_task_timeout = experiment.defaults.task_timeout
+        scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="experiment-defaults")
+    if "turn_timeout" not in task_explicit:
+        if experiment.defaults and experiment.defaults.turn_timeout is not None:
             resolved_turn_timeout = experiment.defaults.turn_timeout
             scalar_lineage["turn_timeout"] = ConfigLineageEntry(
                 value=resolved_turn_timeout, source="experiment-defaults"
+            )
+        elif exp_defaults_agent_tt is not None:
+            resolved_turn_timeout = exp_defaults_agent_tt
+            scalar_lineage["turn_timeout"] = ConfigLineageEntry(
+                value=resolved_turn_timeout, source="experiment-defaults-agent-deprecated"
+            )
+    if "max_turns" not in task_explicit:
+        if experiment.defaults and experiment.defaults.max_turns is not None:
+            resolved_max_turns = experiment.defaults.max_turns
+            scalar_lineage["max_turns"] = ConfigLineageEntry(value=resolved_max_turns, source="experiment-defaults")
+        elif exp_defaults_agent_mt is not None:
+            resolved_max_turns = exp_defaults_agent_mt
+            scalar_lineage["max_turns"] = ConfigLineageEntry(
+                value=resolved_max_turns, source="experiment-defaults-agent-deprecated"
             )
 
     # Layer 3: task-explicit scalars (override experiment defaults)
     if "task_timeout" in task_explicit:
         scalar_lineage["task_timeout"] = ConfigLineageEntry(value=task.task_timeout, source="task")
-    if task.agent and "turn_timeout" in task_agent_explicit:
-        scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=task.agent.turn_timeout, source="task")
+    if "turn_timeout" in task_explicit:
+        scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=task.turn_timeout, source="task")
+    if "max_turns" in task_explicit:
+        scalar_lineage["max_turns"] = ConfigLineageEntry(value=task.max_turns, source="task")
 
-    # Layer 4: variant scalars (highest precedence before CLI)
+    # Layer 4: variant scalars (highest precedence before CLI). Top-level always
+    # wins over the agent-hoisted value within the variant layer.
     if variant.task_timeout is not None:
         resolved_task_timeout = variant.task_timeout
         scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="variant")
     if variant.turn_timeout is not None:
         resolved_turn_timeout = variant.turn_timeout
         scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=resolved_turn_timeout, source="variant")
-
-    # Apply turn_timeout to agent config (only if scalar path resolved a value;
-    # otherwise preserve the value from the agent dict merge)
-    if resolved_turn_timeout is not None:
-        resolved_agent.turn_timeout = resolved_turn_timeout
+    elif variant_agent_tt is not None:
+        resolved_turn_timeout = variant_agent_tt
+        scalar_lineage["turn_timeout"] = ConfigLineageEntry(
+            value=resolved_turn_timeout, source="variant-agent-deprecated"
+        )
+    if variant.max_turns is not None:
+        resolved_max_turns = variant.max_turns
+        scalar_lineage["max_turns"] = ConfigLineageEntry(value=resolved_max_turns, source="variant")
+    elif variant_agent_mt is not None:
+        resolved_max_turns = variant_agent_mt
+        scalar_lineage["max_turns"] = ConfigLineageEntry(value=resolved_max_turns, source="variant-agent-deprecated")
 
     # Resolve template_sources: task base + experiment defaults overlays + variant overlays (append semantics)
     base_sources: list[TemplateSource] = list(task.sandbox.template_sources or [])
@@ -481,6 +580,8 @@ def resolve_task_for_variant(
         update={
             "agent": resolved_agent,
             "task_timeout": resolved_task_timeout,
+            "turn_timeout": resolved_turn_timeout,
+            "max_turns": resolved_max_turns,
             "sandbox": resolved_sandbox,
             "post_run": resolved_post_run,
             "pre_run": resolved_pre_run,
@@ -491,6 +592,15 @@ def resolve_task_for_variant(
     # Resolve repeats (4-layer: default → experiment-defaults → variant → cli; skips task layer)
     _config = config if config is not None else BatchRunConfig(run_dir=Path("."))
     effective_repeats = _resolve_repeats(default_experiment, experiment, variant, _config, lineage)
+
+    # When no config was supplied (direct callers / tests), enforce the agent.type
+    # contract here — _apply_cli_overrides won't run to do it later.
+    if config is None and resolved_agent.type is None:
+        raise ValueError(
+            f"Agent 'type' is required but was not set by any layer (default experiment, "
+            f"experiment defaults, task, or variant) for task {task.task_id!r}. "
+            f"Set it in the task YAML or the experiment."
+        )
 
     return resolved_task, lineage, effective_repeats
 
@@ -519,6 +629,10 @@ def _apply_cli_overrides(
     # Agent overrides (CLI > .env > task)
     assert task.agent is not None, f"Task '{task.task_id}' has no agent config"
 
+    if config.agent_type is not None:
+        task.agent.type = AgentKind(config.agent_type)  # validated by AgentKind enum
+        _record("agent.type", config.agent_type, "--type")
+
     effective_model = config.agent_model if config.agent_model is not None else app_settings.default_agent_model
     if effective_model is not None:
         task.agent.model = effective_model
@@ -535,16 +649,16 @@ def _apply_cli_overrides(
 
     effective_max_turns = config.max_turns if config.max_turns is not None else app_settings.default_max_turns
     if effective_max_turns is not None:
-        task.agent.max_turns = effective_max_turns
+        task.max_turns = effective_max_turns
         detail = "--max-turns" if config.max_turns is not None else ".env DEFAULT_MAX_TURNS"
-        _record("agent.max_turns", effective_max_turns, detail)
+        _record("max_turns", effective_max_turns, detail)
 
     # Timeout overrides (CLI > task YAML)
     if config.task_timeout is not None:
         task.task_timeout = config.task_timeout
         _record("task_timeout", config.task_timeout, "--task-timeout")
     if config.turn_timeout is not None:
-        task.agent.turn_timeout = config.turn_timeout
+        task.turn_timeout = config.turn_timeout
         _record("turn_timeout", config.turn_timeout, "--turn-timeout")
 
     # Tool/plugin overrides
@@ -578,6 +692,14 @@ def _apply_cli_overrides(
             _record("sandbox.snapshots.mode", mode, "--snapshot-mode")
         if config.snapshot_checkpoint_freq is not None:
             _record("sandbox.snapshots.checkpoint_frequency", checkpoint_freq, "--snapshot-checkpoint-freq")
+
+    # Final guard: agent.type must be set after all 5 layers have merged.
+    if task.agent.type is None:
+        raise ValueError(
+            f"Agent 'type' is required but was not set by any layer (default experiment, "
+            f"experiment defaults, task, variant, or CLI) for task {task.task_id!r}. "
+            f"Set it in the task YAML, the experiment, or via --type."
+        )
 
 
 def resolve_task_files(

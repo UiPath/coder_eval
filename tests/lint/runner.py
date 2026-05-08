@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 from tests.lint.rules.base import BaseRule
+from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
 from tests.lint.rules.no_silent_except import NoSilentExcept
@@ -25,6 +26,7 @@ ALL_RULES: list[RuleClass] = [
     RegisterCriterionRequired,
     NoCliImportsInCore,
     NoSilentExcept,
+    NoAgentTimingAccess,
 ]
 
 _NOQA_ALL = re.compile(r"#\s*noqa\s*$")

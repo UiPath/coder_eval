@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import warnings
 from typing import Any, Literal, Self
 
 from claude_agent_sdk import SdkPluginConfig, SettingSource
@@ -18,7 +19,13 @@ class AgentConfig(BaseModel):
 
     model_config = ConfigDict(validate_assignment=True, populate_by_name=True, extra="forbid")
 
-    type: AgentKind = Field(description="The type of agent to use (claude-code, aider, etc.)")
+    type: AgentKind | None = Field(
+        default=None,
+        description=(
+            "The type of agent to use (claude-code, aider, etc.). "
+            "May be omitted on the task and supplied via experiment defaults or --type."
+        ),
+    )
     permission_mode: Literal["default", "acceptEdits", "plan", "bypassPermissions"] = Field(
         default="acceptEdits", description="Permission mode for agent actions"
     )
@@ -29,14 +36,7 @@ class AgentConfig(BaseModel):
         default=None, description="List of disallowed tools (e.g., ['TodoWrite'])"
     )
     model: str | None = Field(default=None, description="Specific model to use (if applicable)")
-    max_turns: int | None = Field(default=None, description="Maximum agent inner-loop turns per iteration")
     plugins: list[SdkPluginConfig] | None = Field(default=None, description="List of Claude Code plugins")
-
-    turn_timeout: int | None = Field(
-        default=None,
-        ge=10,
-        description="Maximum seconds per agent turn (communicate call). None = no limit.",
-    )
 
     # Customizable ignore patterns for file tracking
     ignore_patterns: list[str] = Field(
@@ -363,6 +363,16 @@ class TaskDefinition(BaseModel):
     )
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
     success_criteria: list[SuccessCriterion] = Field(description="List of criteria that must all pass for task success")
+    max_turns: int | None = Field(
+        default=None,
+        gt=0,
+        description="Maximum agent inner-loop turns per iteration. None = SDK default.",
+    )
+    turn_timeout: int | None = Field(
+        default=None,
+        ge=10,
+        description="Maximum seconds per agent communicate() call. None = no limit.",
+    )
     task_timeout: int | None = Field(
         default=None,
         ge=30,
@@ -419,6 +429,35 @@ class TaskDefinition(BaseModel):
             "the default single-shot iteration loop."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _hoist_legacy_agent_timing(cls, data: Any) -> Any:
+        """Back-compat: lift max_turns/turn_timeout from agent: to top level.
+
+        Scheduled removal: 2026-05-15. See plan
+        c/2026-05-07-move-agent-timing-to-task.md.
+        """
+        if not isinstance(data, dict):
+            return data
+        agent = data.get("agent")
+        if not isinstance(agent, dict):
+            return data
+        for field in ("max_turns", "turn_timeout"):
+            if field in agent:
+                if data.get(field) is not None:
+                    raise ValueError(
+                        f"{field!r} set both at top level and under agent: — "
+                        + "remove the one under agent: (deprecated location)."
+                    )
+                data[field] = agent.pop(field)
+                warnings.warn(
+                    f"{field!r} under agent: is deprecated and will be removed on 2026-05-15; "
+                    + "move it to the top level of the task definition.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+        return data
 
     @model_validator(mode="after")
     def check_prompt_fields(self) -> Self:

@@ -6,11 +6,11 @@ description: >
   and editing connections.
 tags: [is, uipcli, detailed]
 
+max_turns: 25
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Bash", "Read", "Write"]
-  max_turns: 25
 
 sandbox:
   driver: tempdir

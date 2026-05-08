@@ -4,11 +4,11 @@ description: >
   details — tests Phase 2 of the two-phase planning methodology.
 tags: [flow, planning, impl, tier-3]
 
+max_turns: 40
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 40
 
 sandbox:
   driver: tempdir

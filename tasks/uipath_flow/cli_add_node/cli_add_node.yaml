@@ -4,11 +4,11 @@ description: >
   uip maestro flow node add and edge add. Tests CLI editing of existing flows.
 tags: [flow, cli, modify, tier-2]
 
+max_turns: 40
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 40
 
 sandbox:
   driver: tempdir

@@ -3,37 +3,49 @@
 import pytest
 from pydantic import ValidationError
 
-from coder_eval.models import AgentConfig, TaskDefinition
+from coder_eval.models import TaskDefinition
 from coder_eval.orchestration.config import BatchRunConfig
 
 
-class TestAgentConfigTurnTimeout:
-    """Test turn_timeout on AgentConfig."""
+class TestTaskDefinitionTurnTimeout:
+    """Test turn_timeout on TaskDefinition (moved from AgentConfig in 2026-05)."""
+
+    def _minimal_task(self, **overrides):
+        defaults = {
+            "task_id": "test",
+            "description": "test task",
+            "initial_prompt": "do something",
+            "agent": {"type": "claude-code"},
+            "sandbox": {"driver": "tempdir"},
+            "success_criteria": [{"type": "file_exists", "path": "test.py", "description": "test.py must exist"}],
+        }
+        defaults.update(overrides)
+        return TaskDefinition(**defaults)
 
     def test_default_is_none(self):
         """turn_timeout defaults to None (disabled)."""
-        config = AgentConfig(type="claude-code")
-        assert config.turn_timeout is None
+        task = self._minimal_task()
+        assert task.turn_timeout is None
 
     def test_valid_value(self):
         """Accepts valid turn_timeout >= 10."""
-        config = AgentConfig(type="claude-code", turn_timeout=60)
-        assert config.turn_timeout == 60
+        task = self._minimal_task(turn_timeout=60)
+        assert task.turn_timeout == 60
 
     def test_minimum_value(self):
         """Accepts minimum valid value of 10."""
-        config = AgentConfig(type="claude-code", turn_timeout=10)
-        assert config.turn_timeout == 10
+        task = self._minimal_task(turn_timeout=10)
+        assert task.turn_timeout == 10
 
     def test_below_minimum_rejected(self):
         """Rejects turn_timeout < 10."""
         with pytest.raises(ValidationError, match="greater than or equal to 10"):
-            AgentConfig(type="claude-code", turn_timeout=5)
+            self._minimal_task(turn_timeout=5)
 
     def test_none_accepted(self):
         """Explicitly passing None is accepted."""
-        config = AgentConfig(type="claude-code", turn_timeout=None)
-        assert config.turn_timeout is None
+        task = self._minimal_task(turn_timeout=None)
+        assert task.turn_timeout is None
 
 
 class TestTaskDefinitionTaskTimeout:

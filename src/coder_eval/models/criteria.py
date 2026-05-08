@@ -743,7 +743,7 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
     max_turns: int = Field(default=10, gt=0, description="Inner-loop turn limit for the judge agent")
     turn_timeout: int = Field(
         default=300,
-        ge=10,  # Matches AgentConfig.turn_timeout so load-time errors are readable
+        ge=10,
         description="Wall-clock timeout for the judge turn (seconds). Minimum 10.",
     )
     permission_mode: Literal["default", "acceptEdits", "plan", "bypassPermissions"] = Field(
