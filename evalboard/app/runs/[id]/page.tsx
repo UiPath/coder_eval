@@ -1,9 +1,11 @@
 import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { readRunAnalysis, readRunSummary, readRunTasks } from "@/lib/runs";
+import { readRunReviewIndex, indexByTask, tagCountsForRun } from "@/lib/reviews";
 import { fmtRunTime } from "@/lib/format";
 import { AnalysisPanel } from "./analysis-panel";
 import { RunView } from "./run-view";
+import { SearchBox } from "./search-box";
 
 export const dynamic = "force-dynamic";
 
@@ -13,17 +15,28 @@ export default async function RunPage({
     params: Promise<{ id: string }>;
 }) {
     const { id } = await params;
-    const [summary, tasks, analysis] = await Promise.all([
+    const [summary, tasks, analysis, reviewIndex] = await Promise.all([
         readRunSummary(id),
         readRunTasks(id),
         readRunAnalysis(id),
+        readRunReviewIndex(id),
     ]);
     if (!summary || !tasks) notFound();
+    const tagCounts = reviewIndex ? tagCountsForRun(reviewIndex) : [];
+    const reviewsByTask = reviewIndex ? indexByTask(reviewIndex) : undefined;
 
     return (
         <div className="space-y-5">
             <div className="space-y-1">
-                <h1 className="text-xl font-semibold text-gray-900">Run</h1>
+                <div className="grid grid-cols-3 items-center gap-4">
+                    <h1 className="text-xl font-semibold text-gray-900">
+                        Run
+                    </h1>
+                    <div className="flex justify-center">
+                        <SearchBox className="w-full max-w-md" />
+                    </div>
+                    <div />
+                </div>
                 <div className="text-xs text-gray-500 tabular-nums font-mono">
                     {id} · {fmtRunTime(id)}
                 </div>
@@ -55,7 +68,12 @@ export default async function RunPage({
             {analysis && <AnalysisPanel markdown={analysis} />}
 
             <Suspense fallback={null}>
-                <RunView runId={id} tasks={tasks} />
+                <RunView
+                    runId={id}
+                    tasks={tasks}
+                    reviewsByTask={reviewsByTask}
+                    reviewTagCounts={tagCounts}
+                />
             </Suspense>
         </div>
     );

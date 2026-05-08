@@ -60,5 +60,12 @@ def test_create_smoke_runs_has_expected_columns():
 
 def test_create_task_results_has_expected_columns():
     ddl = CREATE_COMMANDS["TaskResults"]
-    for col in ["task_id", "weighted_score", "total_cost_usd", "commands_by_tool"]:
+    for col in [
+        "task_id",
+        "weighted_score",
+        "total_cost_usd",
+        "commands_by_tool",
+        "review_tags",
+        "review_summary",
+    ]:
         assert col in ddl

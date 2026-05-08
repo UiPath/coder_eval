@@ -67,6 +67,10 @@ def build_task_result_row(run_id: str, task: dict) -> str:
     turns = task.get("turns", [])
     total_assistant_turns = sum(t.get("assistant_turn_count", 0) for t in turns)
 
+    review = task.get("_review") or {}
+    review_tags = review.get("tags") or []
+    review_summary = review.get("summary") or ""
+
     fields = [
         run_id,
         task.get("task_id", ""),
@@ -94,6 +98,8 @@ def build_task_result_row(run_id: str, task: dict) -> str:
         task.get("error_message") or "",
         task.get("started_at", ""),
         task.get("completed_at") or "",
+        json.dumps(review_tags),
+        review_summary,
     ]
     return to_csv_row(fields)
 
@@ -117,6 +123,23 @@ def build_criteria_rows(run_id: str, task: dict) -> list[str]:
         rows.append(to_csv_row(fields))
 
     return rows
+
+
+def _load_review(task_json_path: Path) -> dict:
+    """Load review.json sitting next to the task.json. Returns {} if absent or malformed."""
+    review_path = task_json_path.parent / "review.json"
+    if not review_path.exists():
+        return {}
+    try:
+        with open(review_path) as f:
+            payload = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"WARNING: failed to load {review_path}: {exc}")
+        return {}
+    if not isinstance(payload, dict):
+        print(f"WARNING: ignored non-object review payload at {review_path}: {type(payload).__name__}")
+        return {}
+    return payload
 
 
 def build_analysis_row(run_id: str, experiment_id: str, analysis_path: Path) -> str:
@@ -167,7 +190,9 @@ def _task_summary_to_task_dict(summary: dict) -> dict:
     }
 
 
-def parse_run(run_path: Path) -> tuple[str, str, str, list[str], list[str]]:
+def parse_run(
+    run_path: Path,
+) -> tuple[str, str, str, list[str], list[str]]:
     """Parse a run directory into CSV rows.
 
     Returns (run_id, experiment_id, smoke_row, task_rows, criteria_rows).
@@ -187,6 +212,9 @@ def parse_run(run_path: Path) -> tuple[str, str, str, list[str], list[str]]:
     for task_json_path in find_task_jsons(run_path):
         with open(task_json_path) as f:
             task_data = json.load(f)
+        # Per-task review.json sits alongside task.json (written by the
+        # /coder-eval-review skill). Absent for older runs — no-op.
+        task_data["_review"] = _load_review(task_json_path)
         task_rows.append(build_task_result_row(run_id, task_data))
         criteria_rows.extend(build_criteria_rows(run_id, task_data))
 

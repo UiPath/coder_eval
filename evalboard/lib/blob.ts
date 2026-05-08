@@ -159,6 +159,21 @@ export async function ensureRunAnalysis(
     });
 }
 
+export async function ensureRunReviewIndex(
+    runId: string,
+    destRoot: string,
+): Promise<void> {
+    assertValidId(runId, "runId");
+    if (LOCAL_RUNS_DIR) return;
+    return dedupe(`review-index:${runId}`, async () => {
+        try {
+            await downloadBlob(`${runId}/review_index.json`, destRoot);
+        } catch (err) {
+            if (!isNotFound(err)) throw err;
+        }
+    });
+}
+
 // Narrow fetch: run.json + just one task subdir. Used by the per-task
 // detail page so opening a deep link to a 50-task run doesn't pull every
 // task's artifacts.

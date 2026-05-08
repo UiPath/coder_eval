@@ -49,7 +49,9 @@ CREATE_TASK_RESULTS = """\
     commands_by_tool: dynamic,
     error_message: string,
     start_time: datetime,
-    completed_at: datetime
+    completed_at: datetime,
+    review_tags: dynamic,
+    review_summary: string
 )
 """
 

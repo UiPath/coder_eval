@@ -13,8 +13,10 @@
 #
 #   - <run-id>/run.json, run.md
 #   - <run-id>/analysis.md (if present)
+#   - <run-id>/review_index.json (if present — post-run review digest)
 #   - <run-id>/experiment.* (any extension at run root)
 #   - <run-id>/<variant>/<task-id>/<replicate>/task.{json,html,log}
+#   - <run-id>/<variant>/<task-id>/<replicate>/review.json (if present)
 #   - <run-id>/<variant>/<task-id>/<replicate>/artifacts/**/*.flow
 #     (Maestro flow definitions — small text files needed for flow-task triage)
 #
@@ -45,9 +47,10 @@ Usage:
   $0 --container <name> ...        Override container (default from .env, else 'runs')
 
 Targeted file set (default — used by triage / analysis):
-  <run-id>/{run.json,run.md,analysis.md}
+  <run-id>/{run.json,run.md,analysis.md,review_index.json}
   <run-id>/experiment.*
   <run-id>/<variant>/<task-id>/<replicate>/task.{json,html,log}
+  <run-id>/<variant>/<task-id>/<replicate>/review.json
   <run-id>/<variant>/<task-id>/<replicate>/artifacts/**/*.flow
 EOF
 }
@@ -193,8 +196,8 @@ else
     --query "[].name" -o tsv 2>/dev/null)"
 
   # Filter: keep only the targeted file set. NF counts segments after `awk -F/`.
-  # NF==2 = run-root file (run.json, run.md, analysis.md, experiment.*).
-  # NF==5 = task file at <run>/<variant>/<task_id>/<replicate>/task.{json,html,log}.
+  # NF==2 = run-root file (run.json, run.md, analysis.md, review_index.json, experiment.*).
+  # NF==5 = task file at <run>/<variant>/<task_id>/<replicate>/{task.{json,html,log},review.json}.
   # NF>=7, $5=="artifacts", *.flow = Maestro flow under per-task artifacts/
   #   workspace. Depth varies (NF=8..13 observed) because the agent's project
   #   layout — <task-id>/[<solution>/]<project>/<name>.flow — isn't fixed, so
@@ -205,8 +208,10 @@ else
   # ids from leaking in if a future caller widens the --prefix.
   WANTED="$(printf '%s\n' "$ALL_BLOBS" | awk -F/ -v r="$RUN_ID" '
     NF == 2 && $1 == r && \
-      ($2 == "run.json" || $2 == "run.md" || $2 == "analysis.md" || $2 ~ /^experiment\./) { print; next }
-    NF == 5 && $1 == r && $5 ~ /^task\.(json|html|log)$/ { print; next }
+      ($2 == "run.json" || $2 == "run.md" || $2 == "analysis.md" || \
+       $2 == "review_index.json" || $2 ~ /^experiment\./) { print; next }
+    NF == 5 && $1 == r && \
+      ($5 ~ /^task\.(json|html|log)$/ || $5 == "review.json") { print; next }
     NF >= 7 && $1 == r && $5 == "artifacts" && /\.flow$/ { print; next }
   ')"
 

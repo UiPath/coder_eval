@@ -99,6 +99,135 @@ def test_schema_drop_only(mock_get_client, mock_config_cls):
     assert mock_client.execute_mgmt.call_count == 4
 
 
+def _setup_run_pipeline_mocks(mock_config_cls, tmp_path):
+    """Configure shared mocks for `dashboard run` tests."""
+    mock_cfg = MagicMock()
+    mock_cfg.skills_dir = tmp_path / "skills"
+    mock_cfg.cli_dir = tmp_path / "cli"
+    mock_cfg.uip_authority = ""
+    mock_cfg.uip_client_id = ""
+    mock_cfg.uip_client_secret = ""
+    mock_cfg.uip_tenant = ""
+    mock_cfg.uip_scope = "OR.Default"
+    mock_cfg.azure_storage_account = "x"
+    mock_cfg.azure_blob_container = "runs"
+    mock_cfg.azure_storage_key = ""
+    mock_cfg.adx_cluster_uri = "https://x"
+    mock_cfg.adx_database = "x"
+    mock_config_cls.return_value = mock_cfg
+
+    latest_run = tmp_path / "run-1"
+    latest_run.mkdir()
+    return mock_cfg, latest_run
+
+
+@patch("dashboard.cli.Config")
+def test_cli_run_calls_review(mock_config_cls, tmp_path):
+    """`dashboard run` invokes generate_reviews after generate_analysis per suite."""
+    _, latest_run = _setup_run_pipeline_mocks(mock_config_cls, tmp_path)
+
+    with (
+        patch("dashboard.run.run_tests", return_value=latest_run),
+        patch("dashboard.analysis.generate_analysis") as mock_analysis,
+        patch("dashboard.review.generate_reviews") as mock_review,
+        patch("dashboard.blob.upload_run"),
+        patch("dashboard.ingest.ingest_run"),
+    ):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["run", "--skip-build", "--skip-pull", "--skip-login", "--suite", "smoke"],
+        )
+
+    assert result.exit_code == 0, result.output
+    mock_analysis.assert_called_once_with(latest_run)
+    mock_review.assert_called_once_with(latest_run)
+
+
+@patch("dashboard.cli.Config")
+def test_cli_skip_review(mock_config_cls, tmp_path):
+    """--skip-review skips the call entirely."""
+    _, latest_run = _setup_run_pipeline_mocks(mock_config_cls, tmp_path)
+
+    with (
+        patch("dashboard.run.run_tests", return_value=latest_run),
+        patch("dashboard.analysis.generate_analysis"),
+        patch("dashboard.review.generate_reviews") as mock_review,
+        patch("dashboard.blob.upload_run"),
+        patch("dashboard.ingest.ingest_run"),
+    ):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "run",
+                "--skip-build",
+                "--skip-pull",
+                "--skip-login",
+                "--skip-review",
+                "--suite",
+                "smoke",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    mock_review.assert_not_called()
+    assert "Skipping task reviews" in result.output
+
+
+@patch("dashboard.cli.Config")
+def test_cli_warns_when_skip_analysis_without_skip_review(mock_config_cls, tmp_path):
+    """If analysis is skipped, the user should be warned reviews lose context."""
+    _, latest_run = _setup_run_pipeline_mocks(mock_config_cls, tmp_path)
+
+    with (
+        patch("dashboard.run.run_tests", return_value=latest_run),
+        patch("dashboard.review.generate_reviews"),
+        patch("dashboard.blob.upload_run"),
+        patch("dashboard.ingest.ingest_run"),
+    ):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "run",
+                "--skip-build",
+                "--skip-pull",
+                "--skip-login",
+                "--skip-analysis",
+                "--suite",
+                "smoke",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "WARNING: --skip-analysis is set but --skip-review is not" in result.output
+
+
+@patch("dashboard.cli.Config")
+def test_cli_review_failure_does_not_abort(mock_config_cls, tmp_path):
+    """If review generation raises, upload_run and ingest_run still run."""
+    _, latest_run = _setup_run_pipeline_mocks(mock_config_cls, tmp_path)
+
+    with (
+        patch("dashboard.run.run_tests", return_value=latest_run),
+        patch("dashboard.analysis.generate_analysis"),
+        patch("dashboard.review.generate_reviews", side_effect=RuntimeError("boom")),
+        patch("dashboard.blob.upload_run") as mock_upload,
+        patch("dashboard.ingest.ingest_run") as mock_ingest,
+    ):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["run", "--skip-build", "--skip-pull", "--skip-login", "--suite", "smoke"],
+        )
+
+    assert result.exit_code == 0, result.output
+    mock_upload.assert_called_once()
+    mock_ingest.assert_called_once()
+    assert "Task review generation failed" in result.output
+
+
 def test_build_skills_suite():
     """Test that _build_skills_suite constructs the right suite."""
     suite = _build_skills_suite("/path/to/skills")

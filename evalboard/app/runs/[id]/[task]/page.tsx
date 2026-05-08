@@ -1,8 +1,10 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { readLogTail, readTaskDetail } from "@/lib/runs";
+import { readTaskReview } from "@/lib/reviews";
 import { fmtRunTime, humanizeTaskId } from "@/lib/format";
 import { StatusPill } from "@/lib/pills";
+import { ReviewChips } from "../review-chips";
 import {
     ArtifactsSection,
     CriteriaSection,
@@ -21,6 +23,11 @@ export default async function TaskPage({
     const { id, task: taskId } = await params;
     const task = await readTaskDetail(id, taskId);
     if (!task) notFound();
+
+    // The rest of this page already assumes variant="default" and replicate
+    // "00" (mirrors readTaskDetail / ensureTaskDir). readTaskReview returns
+    // null for older runs that predate the review feature.
+    const review = await readTaskReview(id, "default", taskId, "00");
 
     const log = await readLogTail(id, taskId);
     const { flowDebug } = task;
@@ -120,6 +127,22 @@ export default async function TaskPage({
                 <div className="border border-red-200 bg-red-50 rounded-lg p-3 text-sm text-red-700 whitespace-pre-wrap">
                     {task.errorMessage}
                 </div>
+            )}
+
+            {review && (
+                <section className="space-y-2">
+                    <h2 className="text-sm font-semibold text-gray-900">
+                        Review
+                    </h2>
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 space-y-2">
+                        <p className="text-sm text-gray-800 leading-relaxed">
+                            {review.summary}
+                        </p>
+                        {review.tags.length > 0 && (
+                            <ReviewChips tags={review.tags} />
+                        )}
+                    </div>
+                </section>
             )}
 
             {flowDebug && <FlowDebugSection flowDebug={flowDebug} />}

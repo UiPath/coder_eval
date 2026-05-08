@@ -1,14 +1,15 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { TaskResultSummary } from "@/lib/runs";
+import type { ReviewIndexEntry } from "@/lib/reviews-types";
 import { fmtDuration, humanizeTaskId } from "@/lib/format";
 import { statusCategory } from "@/lib/status";
+import { ReviewTagFilterRow } from "./review-chips";
 import { TaskGrid } from "./task-grid";
 
 const TOP_N_TAGS = 10;
-const Q_DEBOUNCE_MS = 300;
 
 function parseTagsParam(raw: string | null): string[] {
     if (!raw) return [];
@@ -51,9 +52,13 @@ function Metric({
 export function RunView({
     runId,
     tasks,
+    reviewsByTask,
+    reviewTagCounts,
 }: {
     runId: string;
     tasks: TaskResultSummary[];
+    reviewsByTask?: Map<string, ReviewIndexEntry>;
+    reviewTagCounts?: { tag: string; count: number }[];
 }) {
     const router = useRouter();
     const pathname = usePathname();
@@ -65,63 +70,65 @@ export function RunView({
     );
     const selectedSet = useMemo(() => new Set(selectedTags), [selectedTags]);
 
-    const [q, setQ] = useState(() => searchParams.get("q") ?? "");
+    const selectedReviewTags = useMemo(
+        () => parseTagsParam(searchParams.get("rtags")),
+        [searchParams],
+    );
+    const selectedReviewSet = useMemo(
+        () => new Set(selectedReviewTags),
+        [selectedReviewTags],
+    );
+
+    const q = searchParams.get("q") ?? "";
     const [showAllTags, setShowAllTags] = useState(false);
 
-    // Sync q from URL when it changes externally (browser back/forward, manual
-    // edit, etc.). Doesn't loop with the debounced write below: this effect
-    // re-runs only when the URL string changes, and once URL and state agree
-    // the write effect's early-return prevents a re-write.
-    const urlQ = searchParams.get("q") ?? "";
-    useEffect(() => {
-        setQ((prev) => (prev.trim() === urlQ ? prev : urlQ));
-    }, [urlQ]);
-
-    // Debounced URL sync for q. Only fires when q diverges from the URL.
-    useEffect(() => {
-        const trimmed = q.trim();
-        const current = searchParams.get("q") ?? "";
-        if (trimmed === current) return;
-        const timer = setTimeout(() => {
-            const params = new URLSearchParams(searchParams.toString());
-            if (trimmed) params.set("q", trimmed);
-            else params.delete("q");
-            const qs = params.toString();
-            router.replace(qs ? `${pathname}?${qs}` : pathname, {
-                scroll: false,
-            });
-        }, Q_DEBOUNCE_MS);
-        return () => clearTimeout(timer);
-    }, [q, pathname, router, searchParams]);
-
-    const updateTags = useCallback(
-        (next: string[]) => {
-            const params = new URLSearchParams(searchParams.toString());
-            if (next.length === 0) params.delete("tags");
-            else params.set("tags", next.join(","));
+    const updateParam = useCallback(
+        (key: string, next: string[]) => {
+            // Read the live URL on commit so a concurrent debounced write
+            // from SearchBox doesn't clobber this update (or vice versa).
+            const params = new URLSearchParams(window.location.search);
+            if (next.length === 0) params.delete(key);
+            else params.set(key, next.join(","));
             const qs = params.toString();
             router.replace(qs ? `${pathname}?${qs}` : pathname, {
                 scroll: false,
             });
         },
-        [pathname, router, searchParams],
+        [pathname, router],
     );
 
     const toggleTag = useCallback(
         (tag: string) => {
-            updateTags(
+            updateParam(
+                "tags",
                 selectedSet.has(tag)
                     ? selectedTags.filter((t) => t !== tag)
                     : [...selectedTags, tag],
             );
         },
-        [selectedSet, selectedTags, updateTags],
+        [selectedSet, selectedTags, updateParam],
+    );
+
+    const toggleReviewTag = useCallback(
+        (tag: string) => {
+            updateParam(
+                "rtags",
+                selectedReviewSet.has(tag)
+                    ? selectedReviewTags.filter((t) => t !== tag)
+                    : [...selectedReviewTags, tag],
+            );
+        },
+        [selectedReviewSet, selectedReviewTags, updateParam],
     );
 
     const clearAll = useCallback(() => {
-        setQ("");
-        updateTags([]);
-    }, [updateTags]);
+        const params = new URLSearchParams(window.location.search);
+        params.delete("q");
+        params.delete("tags");
+        params.delete("rtags");
+        const qs = params.toString();
+        router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+    }, [pathname, router]);
 
     const allTags = useMemo(() => {
         const counts = new Map<string, number>();
@@ -145,6 +152,12 @@ export function RunView({
                 selectedTags.every((tag) => t.tags.includes(tag)),
             );
         }
+        if (selectedReviewTags.length > 0) {
+            arr = arr.filter((t) => {
+                const rtags = reviewsByTask?.get(t.taskId)?.tags ?? [];
+                return selectedReviewTags.every((tag) => rtags.includes(tag));
+            });
+        }
         if (qLower) {
             arr = arr.filter((t) => {
                 if (t.taskId.toLowerCase().includes(qLower)) return true;
@@ -154,13 +167,19 @@ export function RunView({
                     return true;
                 if (t.tags.some((tag) => tag.toLowerCase().includes(qLower)))
                     return true;
+                const rtags = reviewsByTask?.get(t.taskId)?.tags ?? [];
+                if (rtags.some((tag) => tag.toLowerCase().includes(qLower)))
+                    return true;
                 return false;
             });
         }
         return arr;
-    }, [tasks, selectedTags, qLower]);
+    }, [tasks, selectedTags, selectedReviewTags, reviewsByTask, qLower]);
 
-    const isFiltered = selectedTags.length > 0 || qLower.length > 0;
+    const isFiltered =
+        selectedTags.length > 0 ||
+        selectedReviewTags.length > 0 ||
+        qLower.length > 0;
 
     // Filter-aware metrics computed from `filtered`. Status categorization
     // is centralized in lib/status.ts and mirrors coder_eval FinalStatus.category.
@@ -212,10 +231,11 @@ export function RunView({
     const hiddenCount = allTags.length - visibleTags.length;
 
     const emptyHint = (() => {
-        if (selectedTags.length > 0 && !qLower) {
-            return `no tasks match all selected tags (${selectedTags.join(" + ")})`;
+        const allFilterTags = [...selectedTags, ...selectedReviewTags];
+        if (allFilterTags.length > 0 && !qLower) {
+            return `no tasks match all selected tags (${allFilterTags.join(" + ")})`;
         }
-        if (qLower && selectedTags.length === 0) {
+        if (qLower && allFilterTags.length === 0) {
             return `no tasks match "${q.trim()}"`;
         }
         if (isFiltered) return "no tasks match the current filter";
@@ -278,27 +298,6 @@ export function RunView({
             </div>
 
             <div className="flex flex-col md:flex-row md:flex-wrap md:items-start gap-x-3 gap-y-2">
-                <div className="relative w-full md:w-72 md:shrink-0">
-                    <input
-                        type="text"
-                        value={q}
-                        onChange={(e) => setQ(e.target.value)}
-                        placeholder="Search task or tag…"
-                        aria-label="Search tasks or tags"
-                        className="w-full text-sm border border-gray-200 rounded-md px-3 py-1.5 pr-7 focus:outline-none focus:border-studio-blue focus:ring-1 focus:ring-studio-blue"
-                    />
-                    {q && (
-                        <button
-                            type="button"
-                            onClick={() => setQ("")}
-                            aria-label="Clear search"
-                            className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700"
-                        >
-                            ×
-                        </button>
-                    )}
-                </div>
-
                 {allTags.length > 0 && (
                     <div className="flex flex-wrap items-center gap-1.5 md:flex-1 md:min-w-0">
                         <span className="text-xs text-gray-500 mr-1">
@@ -349,6 +348,14 @@ export function RunView({
                 )}
             </div>
 
+            {reviewTagCounts && reviewTagCounts.length > 0 && (
+                <ReviewTagFilterRow
+                    counts={reviewTagCounts}
+                    selectedSet={selectedReviewSet}
+                    onToggleTag={toggleReviewTag}
+                />
+            )}
+
             <div className="flex items-baseline gap-3 pt-1">
                 <h2 className="text-sm font-semibold text-gray-900">Tasks</h2>
                 <span className="text-xs text-gray-500 tabular-nums">
@@ -373,6 +380,9 @@ export function RunView({
                 selectedSet={selectedSet}
                 onToggleTag={toggleTag}
                 emptyHint={emptyHint}
+                reviewsByTask={reviewsByTask}
+                reviewSelectedSet={selectedReviewSet}
+                onToggleReviewTag={toggleReviewTag}
             />
         </div>
     );

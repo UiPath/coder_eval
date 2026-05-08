@@ -3,9 +3,11 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import type { TaskResultSummary } from "@/lib/runs";
+import type { ReviewIndexEntry } from "@/lib/reviews-types";
 import { humanizeTaskId } from "@/lib/format";
 import { StatusPill } from "@/lib/pills";
 import { statusSortRank } from "@/lib/status";
+import { ReviewChips } from "./review-chips";
 
 type SortKey = "task" | "status" | "score" | "duration" | "cost" | "tools";
 
@@ -82,12 +84,18 @@ export function TaskGrid({
     selectedSet,
     onToggleTag,
     emptyHint = "no tasks in this run",
+    reviewsByTask,
+    reviewSelectedSet,
+    onToggleReviewTag,
 }: {
     runId: string;
     tasks: TaskResultSummary[];
     selectedSet?: Set<string>;
     onToggleTag?: (tag: string) => void;
     emptyHint?: string;
+    reviewsByTask?: Map<string, ReviewIndexEntry>;
+    reviewSelectedSet?: Set<string>;
+    onToggleReviewTag?: (tag: string) => void;
 }) {
     const [sort, setSort] = useState<{
         key: SortKey;
@@ -165,7 +173,9 @@ export function TaskGrid({
                     </tr>
                 </thead>
                 <tbody>
-                    {sorted.map((t) => (
+                    {sorted.map((t) => {
+                        const review = reviewsByTask?.get(t.taskId);
+                        return (
                         <tr
                             key={t.taskId}
                             className="border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors"
@@ -211,6 +221,14 @@ export function TaskGrid({
                                             })}
                                         </div>
                                     )}
+                                    {review && review.tags.length > 0 && (
+                                        <ReviewChips
+                                            tags={review.tags}
+                                            title={review.summary_excerpt}
+                                            selectedSet={reviewSelectedSet}
+                                            onToggleTag={onToggleReviewTag}
+                                        />
+                                    )}
                                 </div>
                             </td>
                             <td className="py-3 px-4">
@@ -231,7 +249,8 @@ export function TaskGrid({
                                 {t.actualCommands ?? "—"}
                             </td>
                         </tr>
-                    ))}
+                        );
+                    })}
                     {sorted.length === 0 && (
                         <tr>
                             <td

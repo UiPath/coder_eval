@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from dashboard.ingest import (
+    _load_review,
     build_analysis_row,
     build_criteria_rows,
     build_smoke_runs_row,
@@ -86,6 +87,8 @@ def test_parse_run():
     assert "exp-smoke-20260312" in smoke_row
     assert len(task_rows) == 1
     assert len(criteria_rows) == 2
+    # Fixture has a review.json next to task.json — review tags should land in the row.
+    assert "criteria-bug" in task_rows[0]
 
 
 def test_to_csv_row_escapes_newlines():
@@ -165,9 +168,103 @@ def test_build_criteria_rows_non_string_details():
     }
     rows = build_criteria_rows("run-001", task)
     assert len(rows) == 2
-    # Should not crash and should contain serialized data
     assert "file_check" in rows[0]
     assert "pytest" in rows[1]
+
+
+def test_load_review_missing_returns_empty(tmp_path):
+    task_json = tmp_path / "task.json"
+    task_json.write_text("{}")
+    assert _load_review(task_json) == {}
+
+
+def test_load_review_malformed_returns_empty(tmp_path):
+    task_json = tmp_path / "task.json"
+    task_json.write_text("{}")
+    (tmp_path / "review.json").write_text("{not json")
+    assert _load_review(task_json) == {}
+
+
+def test_load_review_non_dict_payload_returns_empty_with_warning(tmp_path, capsys):
+    """A JSON-valid but non-object payload (e.g. a list) is dropped with a warning."""
+    task_json = tmp_path / "task.json"
+    task_json.write_text("{}")
+    (tmp_path / "review.json").write_text("[1, 2, 3]")
+    assert _load_review(task_json) == {}
+    captured = capsys.readouterr()
+    assert "ignored non-object review payload" in captured.out
+
+
+def test_load_review_returns_payload(tmp_path):
+    task_json = tmp_path / "task.json"
+    task_json.write_text("{}")
+    (tmp_path / "review.json").write_text(
+        json.dumps({"task_id": "t1", "summary": "ok", "tags": ["x"], "created_at": "ts"})
+    )
+    review = _load_review(task_json)
+    assert review["tags"] == ["x"]
+    assert review["summary"] == "ok"
+
+
+def test_build_task_result_row_with_review():
+    task = {
+        "task_id": "task_001",
+        "variant_id": "default",
+        "_review": {"tags": ["criteria-bug", "infra"], "summary": "Validation failed."},
+    }
+    row = build_task_result_row("run-001", task)
+    assert "criteria-bug" in row
+    assert "infra" in row
+    assert "Validation failed." in row
+
+
+def test_build_task_result_row_without_review():
+    task = {"task_id": "t1", "variant_id": "default"}
+    row = build_task_result_row("run-001", task)
+    # review_tags is the second-to-last field (JSON-encoded list); review_summary
+    # is the last field. With no review, both should be empty.
+    fields = row.rsplit(",", 2)
+    assert fields[-2] == "[]"
+    assert fields[-1] == ""
+
+
+def test_parse_run_threads_review(tmp_path):
+    """parse_run picks up per-task review.json files alongside task.json."""
+    (tmp_path / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "r1",
+                "start_time": "2026-05-08T00:00:00Z",
+                "end_time": "2026-05-08T00:01:00Z",
+                "total_duration_seconds": 60,
+                "tasks_run": 1,
+                "tasks_succeeded": 0,
+                "tasks_failed": 1,
+                "tasks_error": 0,
+            }
+        )
+    )
+    task_dir = tmp_path / "default" / "task_001" / "00"
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.json").write_text(
+        json.dumps({"task_id": "task_001", "variant_id": "default", "final_status": "FAILURE"})
+    )
+    (task_dir / "review.json").write_text(
+        json.dumps(
+            {
+                "task_id": "task_001",
+                "summary": "Validation failed on .flow file.",
+                "tags": ["validation-error"],
+                "created_at": "2026-05-08T01:00:00Z",
+            }
+        )
+    )
+
+    run_id, _, _, task_rows, _ = parse_run(tmp_path)
+    assert run_id == "r1"
+    assert len(task_rows) == 1
+    assert "validation-error" in task_rows[0]
+    assert "Validation failed on .flow file." in task_rows[0]
 
 
 def test_build_analysis_row(tmp_path):

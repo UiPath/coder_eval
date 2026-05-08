@@ -27,6 +27,12 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                     </a>
                     <div className="flex items-center gap-4 text-sm">
                         <a
+                            href="/hotspots"
+                            className="text-gray-700 hover:text-studio-blue"
+                        >
+                            Hotspots
+                        </a>
+                        <a
                             href={ADX_URL}
                             target="_blank"
                             rel="noreferrer"

@@ -87,6 +87,7 @@ def cli() -> None:
 @click.option("--skip-build", is_flag=True, help="Skip UiPath CLI build step.")
 @click.option("--skip-pull", is_flag=True, help="Skip git pull steps.")
 @click.option("--skip-analysis", is_flag=True, help="Skip AI analysis generation.")
+@click.option("--skip-review", is_flag=True, help="Skip post-run task review (review.json) generation.")
 @click.option(
     "--skip-login",
     is_flag=True,
@@ -108,6 +109,7 @@ def run(
     skip_build: bool,
     skip_pull: bool,
     skip_analysis: bool,
+    skip_review: bool,
     skip_login: bool,
     verbose: bool,
     backend: str | None,
@@ -217,6 +219,28 @@ def run(
 
                 traceback.print_exc()
                 print("WARNING: Analysis generation failed (see traceback above)")
+
+        # Generate per-task reviews after analysis so the skill can read
+        # analysis.md and the artifacts are included in the blob upload below.
+        if skip_review:
+            print("Skipping task reviews (--skip-review)")
+        else:
+            if skip_analysis:
+                print(
+                    "WARNING: --skip-analysis is set but --skip-review is not; "
+                    "the review skill will run without analysis.md as a hint, "
+                    "which produces lower-quality summaries."
+                )
+            try:
+                from .review import generate_reviews
+
+                generate_reviews(latest_run)
+                print("Task reviews generated")
+            except Exception:
+                import traceback
+
+                traceback.print_exc()
+                print("WARNING: Task review generation failed (see traceback above)")
 
         try:
             upload_run(
