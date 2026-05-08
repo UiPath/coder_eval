@@ -59,9 +59,13 @@ done
 # bitten by this in 2026-05 when an upstream `ignoreDeprecations` bump
 # landed against stale nested typescript@5.9.3 dirs from an earlier
 # install. The clean adds ~30s but eliminates the whole class of bug.
+#
+# cli has also flipped between `dev:install-cli` and `dev:cli:install`
+# (governance rollout PR #1525 → revert #1883); tolerate either by trying both.
 (cd "$CLI_REPO" && git fetch --quiet && git checkout --quiet main && git pull --ff-only --quiet \
                 && find . -name node_modules -type d -prune -exec rm -rf {} + \
-                && bun install --silent && bun run dev:cli:install)
+                && bun install --silent \
+                && (bun run dev:install-cli || bun run dev:cli:install))
 
 [ -d .venv ] || uv venv --python 3.13
 uv pip install --python .venv/bin/python -e ".[dev]" --quiet
