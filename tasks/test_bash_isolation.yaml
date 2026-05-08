@@ -27,7 +27,7 @@ initial_prompt: |
   process before it produces any output (exit code non-zero, empty stdout/stderr),
   write the literal string "blocked" as that field's value. Do NOT add explanations
   or interpretation — just the raw output, the verbatim error, or the word "blocked".
-tags: [smoke, sandbox-isolation, requires-bwrap]
+tags: [smoke, smoke-pass, sandbox-isolation, requires-bwrap]
 
 agent:
   type: "claude-code"

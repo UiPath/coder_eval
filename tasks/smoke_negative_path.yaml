@@ -1,0 +1,37 @@
+task_id: "smoke_negative_path"
+description: |
+  Sentinel task. The agent succeeds at the prompt, but a criterion is intentionally
+  unsatisfiable. Failure detection in CI is exercised end-to-end: if this task starts
+  passing, our success-checker stopped catching real failures.
+initial_prompt: |
+  Use the Write tool to create out.txt with exactly the four characters: pass
+
+  Do not include any other content. Do not write the words 'sentinel' or 'zzz'.
+tags: [smoke, smoke-fail]
+
+# max_turns lives at top level on TaskDefinition (PR #225, May 2026).
+# AgentConfig has extra="forbid", so do NOT put max_turns under agent:.
+# Set to 2 (not 1) so a model that narrates before calling Write still gets a
+# chance to produce out.txt — keeps the failure shape "agent succeeded at the
+# prompt but the unsatisfiable criterion fired" rather than MAX_TURNS_EXHAUSTED.
+max_turns: 2
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Write"]
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+
+success_criteria:
+  - type: "file_exists"
+    path: "out.txt"
+    description: "Sanity check: agent did write the file (this part should pass)."
+  - type: "file_contains"
+    path: "out.txt"
+    includes: ["coder_eval_smoke_fail_sentinel_zzz"]
+    description: |
+      Intentionally unsatisfiable. The prompt forbids this string. If this passes,
+      either the agent ignored the prompt or the file_contains checker is broken.

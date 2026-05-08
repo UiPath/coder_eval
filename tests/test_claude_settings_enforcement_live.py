@@ -41,6 +41,21 @@ def _route_from_env() -> ApiRoute:
     return resolve_route(settings)
 
 
+def _model_for_env() -> str | None:
+    """Return the model string for AgentConfig appropriate to the active backend.
+
+    DirectRoute has no per-route model default, so we pin haiku explicitly to
+    keep test runs cheap. BedrockRoute already carries a model resolved from
+    BEDROCK_MODEL via ``resolve_route()``; returning None lets that route
+    default apply (a hardcoded Anthropic-API model would 400 on Bedrock since
+    the cross-region inference profile expects a different ID format).
+    """
+    settings = Settings()
+    if settings.api_backend == ApiBackend.BEDROCK:
+        return None
+    return "claude-haiku-4-5-20251001"
+
+
 SECRET_CONTENTS = "TOP_SECRET_MARKER_42"
 
 
@@ -56,7 +71,7 @@ async def _run_single_turn(sandbox_dir: Path, prompt: str, claude_settings: dict
         permission_mode="acceptEdits",
         # Intentionally omit allowed_tools: a populated --allowed-tools flag appears
         # to short-circuit settings-level permissions.deny in the CLI.
-        model="claude-haiku-4-5-20251001",
+        model=_model_for_env(),
         claude_settings=claude_settings,
     )
     agent = ClaudeCodeAgent(config, route=_route_from_env())

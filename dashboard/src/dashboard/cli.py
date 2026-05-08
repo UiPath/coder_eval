@@ -27,7 +27,10 @@ class Suite:
 
 
 SUITES: list[Suite] = [
-    Suite(name="smoke", task_patterns=["tasks/*.yaml"], tags="smoke"),
+    # `smoke-pass` (not the umbrella `smoke`): excludes tasks/smoke_negative_path.yaml,
+    # which is tagged [smoke, smoke-fail] and is intentionally unsatisfiable. Including
+    # it here would make the daily smoke pipeline report a guaranteed failure forever.
+    Suite(name="smoke", task_patterns=["tasks/*.yaml"], tags="smoke-pass"),
     Suite(name="flow-init", task_patterns=["tasks/uipath_flow/init_*.yaml"], tags="flow"),
     Suite(
         name="flow",

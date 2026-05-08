@@ -81,7 +81,9 @@ Namespaced tags let downstream tools slice on a single dimension (e.g. ADX queri
 **CLI filtering:**
 
 ```bash
-coder-eval run tasks/*.yaml --tags smoke          # Only run smoke tasks
+coder-eval run tasks/*.yaml --tags smoke-pass     # Smoke tasks expected to succeed
+coder-eval run tasks/*.yaml --tags smoke-fail     # Smoke tasks expected to fail (failure-detection sentinels)
+coder-eval run tasks/*.yaml --tags smoke          # Umbrella tag: all smoke tasks (pass + fail buckets)
 coder-eval run tasks/*.yaml --tags golden,basic   # Run golden OR basic tasks
 coder-eval run tasks/*.yaml --exclude-tags example # Skip example tasks
 ```

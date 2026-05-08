@@ -1,7 +1,7 @@
 task_id: "test_sandbox_only"
 description: "Test task to verify sandbox and success criteria work (no agent execution)"
 initial_prompt: "This task tests the sandbox without running the agent"
-tags: [smoke, basic, example]
+tags: [basic, example]
 
 agent:
   type: "claude-code"

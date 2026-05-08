@@ -5,7 +5,7 @@ description: >
   that the prompt does not mention. Iteration 2 feedback asks the agent to
   add the missing file — if the session is resumed, it proceeds immediately;
   if not, it wastes turns re-exploring the sandbox.
-tags: [smoke, internal, pure-python]
+tags: [internal, pure-python]
 
 max_turns: 10
 agent:

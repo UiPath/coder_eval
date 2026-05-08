@@ -24,7 +24,7 @@ initial_prompt: |
 
   Truncate any successful read to 80 chars. Denial strings recorded verbatim.
 
-tags: [smoke, sandbox-isolation, read-tool]
+tags: [smoke, smoke-pass, sandbox-isolation, read-tool]
 
 agent:
   type: "claude-code"

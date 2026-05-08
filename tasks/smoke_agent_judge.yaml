@@ -1,0 +1,63 @@
+task_id: "smoke_agent_judge"
+description: |
+  Smoke task that exercises the agent_judge criterion end-to-end. The agent
+  writes a tiny Python module; the agent_judge spawns a Claude Code sub-agent
+  with Read access to the sandbox copy and grades against a structural rubric.
+  Catches regressions in sub-agent spawn, sandbox copy, JSON-verdict parsing,
+  and the route/auth handoff to the judge — surfaces nothing else in CI tests.
+initial_prompt: |
+  Use the Write tool to create greet.py with exactly one function:
+
+      def greet(name: str) -> str:
+          return f"Hello, {name}!"
+
+  No imports, no module docstring, no other code. The file must be a valid
+  Python module that can be imported.
+tags: [smoke, smoke-pass, judge]
+
+# Capped low; agent only needs to write one short file.
+max_turns: 3
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Write"]
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+
+success_criteria:
+  - type: "file_exists"
+    path: "greet.py"
+    description: "Sanity check: agent must have written the file."
+
+  - type: "agent_judge"
+    pass_threshold: 0.8
+    # Haiku is sufficient: the file is pre-attached via `files:` and tools are
+    # disabled, so the judge grades directly from the included content. With no
+    # tool-call phase to compete with the verdict turn, haiku's structured-
+    # output reliability is fine here. Default is opus which is wildly overkill.
+    model: "claude-haiku-4-5-20251001"
+    # Generous headroom for the rare case where the judge needs extra turns to
+    # settle on the strict JSON-only format. The file is already pre-attached
+    # so most runs verdict on turn 1.
+    max_turns: 8
+    # No tools: the file content is pre-attached, so the judge must grade from
+    # the included content rather than fishing with Read/Grep — eliminates the
+    # MAX_TURNS_EXHAUSTED flake where the judge burned turns on tool calls
+    # (incl. attempting Read on the wrong path) before the verdict turn.
+    # Also narrows the security surface (cf. AgentJudgeCriterion SECURITY note).
+    allowed_tools: []
+    files: ["greet.py"]
+    prompt: |
+      Grade greet.py structurally. The file content is included above. The agent
+      was instructed to define a single function `greet(name: str) -> str`
+      returning the f-string "Hello, {name}!" with no imports or other code.
+
+      Score 1.0 only if ALL of:
+        - file is valid Python (no obvious syntax errors)
+        - exactly one top-level def named `greet`
+        - return statement uses an f-string mentioning `name`
+      Score 0.0 otherwise.
+    description: "Sub-agent grades the greet.py module structurally."

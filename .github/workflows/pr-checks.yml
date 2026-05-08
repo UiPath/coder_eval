@@ -114,12 +114,16 @@ jobs:
     name: Windows Smoke Test
     runs-on: windows-latest
     timeout-minutes: 10
+    # Skip on fork PRs where secrets aren't available (matches e2e-smoke).
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     defaults:
       run:
         shell: bash
 
     env:
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+      # Job-level dummy key keeps the unit-test step deterministic and isolated
+      # from real-API leakage. The e2e step below overrides at step scope only.
       ANTHROPIC_API_KEY: "sk-ant-test-dummy-key-for-ci-tests-only"
 
     steps:
@@ -166,6 +170,44 @@ jobs:
       - name: Run test suite
         run: .venv/Scripts/pytest tests/ -v -m "not live and not lint"
 
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude CLI (Windows)
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Verify Claude CLI on PATH (Windows)
+        # Fail-fast diagnostic: if `claude` isn't resolvable here, the next
+        # step's failure surfaces inside the SDK rather than at the CLI layer,
+        # which is harder to triage. Cheap insurance.
+        run: claude --version
+
+      - name: Run hello_date smoke task
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}  # step-level override; job-level dummy stays for unit tests
+        run: .venv/Scripts/coder-eval run tasks/hello_date.yaml --model claude-haiku-4-5-20251001 --run-dir runs/win-smoke
+
+      - name: Verify hello_date result
+        shell: bash
+        run: |
+          F=runs/win-smoke/experiment.json
+          test -f "$F" || { echo "$F missing"; ls -la runs/ 2>/dev/null; exit 1; }
+          SUCCEEDED=$(jq '[.variant_aggregates[].tasks_succeeded] | add' "$F")
+          FAILED=$(jq '[.variant_aggregates[].tasks_failed] | add' "$F")
+          echo "windows hello_date: succeeded=$SUCCEEDED failed=$FAILED"
+          test "$SUCCEEDED" = "1" || { echo "Expected 1 success on Windows hello_date, got $SUCCEEDED"; exit 1; }
+          test "$FAILED" = "0" || { echo "Windows hello_date failed"; exit 1; }
+
+      - name: Upload Windows smoke artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-smoke-runs
+          path: runs/win-smoke/
+          retention-days: 7
+
   e2e-smoke:
     name: E2E Smoke Tests (Real API)
     # 24.04 ships bubblewrap 0.8+ (vs 22.04's 0.6.1, which the SDK's bwrap
@@ -181,6 +223,23 @@ jobs:
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+      # tasks_run for --tags smoke-pass. 6 task files (hello_date, dataset_example,
+      # test_bash_isolation, test_root_isolation, smoke_llm_judge, smoke_agent_judge);
+      # dataset_example fans out to 2 inline rows, so 7 sub-tasks. If you
+      # add/remove a smoke-pass task or change the dataset row count, bump these.
+      EXPECTED_SMOKE_PASS_RUN: "7"
+      EXPECTED_SMOKE_PASS_SUCCEEDED: "7"
+      # smoke-fail bucket: two tasks expected to fail.
+      #   1. smoke_negative_path: file_contains criterion is unsatisfiable
+      #      (sentinel-string regression detection for success-checker).
+      #   2. smoke_task_timeout: a `sleep 300` Bash call vs task_timeout: 30
+      #      (regression detection for the orchestrator's task_timeout watchdog).
+      EXPECTED_SMOKE_FAIL_RUN: "2"
+      EXPECTED_SMOKE_FAIL_FAILED: "2"
+      # smoke-variants bucket: one task fanned out across 2 experiment variants
+      # (experiments/smoke_variants.yaml) → tasks_run = 1 * 2.
+      EXPECTED_SMOKE_VARIANTS_RUN: "2"
+      EXPECTED_SMOKE_VARIANTS_SUCCEEDED: "2"
 
     steps:
       - name: Checkout code
@@ -237,28 +296,94 @@ jobs:
           uv venv .venv --clear
           uv pip install --python .venv/bin/python -e ".[dev]"
 
-      - name: Run e2e smoke tests
-        run: .venv/bin/coder-eval run tasks/*.yaml --tags smoke --model claude-haiku-4-5-20251001
-
-      - name: Verify results
+      - name: Run smoke-pass bucket (expect all to succeed)
         run: |
-          test -f runs/latest/experiment.json || {
-            echo "experiment.json not found - coder-eval may have crashed before producing results"
-            ls -la runs/ 2>/dev/null || echo "runs/ directory does not exist"
+          .venv/bin/coder-eval run tasks/*.yaml \
+            --tags smoke-pass \
+            --model claude-haiku-4-5-20251001 \
+            --run-dir runs/ci-smoke-pass
+
+      - name: Run smoke-fail bucket (expect failure detection)
+        run: |
+          # Inverted exit semantics: coder-eval exits 1 when a task fails. We *want* that.
+          if .venv/bin/coder-eval run tasks/*.yaml \
+              --tags smoke-fail \
+              --model claude-haiku-4-5-20251001 \
+              --run-dir runs/ci-smoke-fail; then
+            echo "FATAL: smoke-fail task succeeded — failure detection appears broken."
             exit 1
-          }
-          SUCCEEDED=$(jq '[.variant_aggregates[].tasks_succeeded] | add' runs/latest/experiment.json)
-          FAILED=$(jq '[.variant_aggregates[].tasks_failed] | add' runs/latest/experiment.json)
-          echo "Results: $SUCCEEDED succeeded, $FAILED failed"
-          test "$SUCCEEDED" -gt 0 || { echo "No tasks succeeded"; exit 1; }
-          test "$FAILED" -eq 0 || { echo "Some tasks failed"; exit 1; }
+          fi
+
+      - name: Run smoke-variants bucket (multi-variant resolver)
+        run: |
+          .venv/bin/coder-eval run tasks/*.yaml \
+            --tags smoke-variants \
+            --experiment experiments/smoke_variants.yaml \
+            --model claude-haiku-4-5-20251001 \
+            --run-dir runs/ci-smoke-variants
+
+      - name: Verify smoke-pass bucket
+        run: |
+          F=runs/ci-smoke-pass/experiment.json
+          test -f "$F" || { echo "$F missing"; ls -la runs/; exit 1; }
+          RUN=$(jq '[.variant_aggregates[].tasks_run] | add' "$F")
+          SUCCEEDED=$(jq '[.variant_aggregates[].tasks_succeeded] | add' "$F")
+          FAILED=$(jq '[.variant_aggregates[].tasks_failed] | add' "$F")
+          ERRORED=$(jq '[.variant_aggregates[].tasks_error] | add' "$F")
+          echo "smoke-pass: run=$RUN succeeded=$SUCCEEDED failed=$FAILED errored=$ERRORED"
+          test "$RUN" = "$EXPECTED_SMOKE_PASS_RUN" || { echo "smoke-pass tasks_run drift: expected $EXPECTED_SMOKE_PASS_RUN, got $RUN"; exit 1; }
+          test "$SUCCEEDED" = "$EXPECTED_SMOKE_PASS_SUCCEEDED" || { echo "smoke-pass succeeded drift: expected $EXPECTED_SMOKE_PASS_SUCCEEDED, got $SUCCEEDED"; exit 1; }
+          test "$FAILED" = "0" || { echo "smoke-pass had unexpected failures"; exit 1; }
+          test "$ERRORED" = "0" || { echo "smoke-pass had errors"; exit 1; }
+
+      - name: Verify smoke-fail bucket
+        run: |
+          F=runs/ci-smoke-fail/experiment.json
+          test -f "$F" || { echo "$F missing"; ls -la runs/; exit 1; }
+          RUN=$(jq '[.variant_aggregates[].tasks_run] | add' "$F")
+          FAILED=$(jq '[.variant_aggregates[].tasks_failed] | add' "$F")
+          ERRORED=$(jq '[.variant_aggregates[].tasks_error] | add' "$F")
+          echo "smoke-fail: run=$RUN failed=$FAILED errored=$ERRORED"
+          test "$RUN" = "$EXPECTED_SMOKE_FAIL_RUN" || { echo "smoke-fail tasks_run drift: expected $EXPECTED_SMOKE_FAIL_RUN, got $RUN"; exit 1; }
+          test "$FAILED" = "$EXPECTED_SMOKE_FAIL_FAILED" || { echo "smoke-fail expected $EXPECTED_SMOKE_FAIL_FAILED failure(s), got $FAILED — failure detection may be broken"; exit 1; }
+          test "$ERRORED" = "0" || { echo "smoke-fail unexpectedly errored (not the same as failing)"; exit 1; }
+
+      - name: Verify smoke-variants bucket
+        run: |
+          F=runs/ci-smoke-variants/experiment.json
+          test -f "$F" || { echo "$F missing"; ls -la runs/; exit 1; }
+          RUN=$(jq '[.variant_aggregates[].tasks_run] | add' "$F")
+          SUCCEEDED=$(jq '[.variant_aggregates[].tasks_succeeded] | add' "$F")
+          ERRORED=$(jq '[.variant_aggregates[].tasks_error] | add' "$F")
+          VARIANTS=$(jq '.variant_aggregates | length' "$F")
+          echo "smoke-variants: variants=$VARIANTS run=$RUN succeeded=$SUCCEEDED errored=$ERRORED"
+          test "$VARIANTS" = "2" || { echo "smoke-variants expected 2 variants, got $VARIANTS — multi-variant fan-out may be broken"; exit 1; }
+          test "$RUN" = "$EXPECTED_SMOKE_VARIANTS_RUN" || { echo "smoke-variants tasks_run drift: expected $EXPECTED_SMOKE_VARIANTS_RUN, got $RUN"; exit 1; }
+          test "$SUCCEEDED" = "$EXPECTED_SMOKE_VARIANTS_SUCCEEDED" || { echo "smoke-variants succeeded drift: expected $EXPECTED_SMOKE_VARIANTS_SUCCEEDED, got $SUCCEEDED"; exit 1; }
+          test "$ERRORED" = "0" || { echo "smoke-variants had errors"; exit 1; }
+
+      - name: Re-evaluate hello_date via `coder-eval evaluate` (no agent)
+        # PR #220 fixed a regression in evaluate-only mode (reference loading).
+        # This step re-runs hello_date.yaml's criteria against the artifacts
+        # the smoke-pass run already produced — no new agent invocation, so
+        # zero extra Anthropic calls. A regression in the evaluate code path
+        # surfaces as a non-zero exit code from `coder-eval evaluate`.
+        run: |
+          WORK="runs/ci-smoke-pass/default/hello_date_smoke_test/00/artifacts/hello_date_smoke_test"
+          test -d "$WORK" || { echo "Expected artifacts dir not found: $WORK"; find runs/ci-smoke-pass -maxdepth 5 -type d 2>/dev/null; exit 1; }
+          .venv/bin/coder-eval evaluate tasks/hello_date.yaml "$WORK" \
+            --run-dir runs/ci-smoke-eval-only
 
       - name: Upload run artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-smoke-runs
-          path: runs/
+          path: |
+            runs/ci-smoke-pass/
+            runs/ci-smoke-fail/
+            runs/ci-smoke-variants/
+            runs/ci-smoke-eval-only/
           retention-days: 7
 
   e2e-autogen-smoke:
@@ -320,4 +445,177 @@ jobs:
         with:
           name: e2e-autogen-output
           path: tmp/autogen-out/
+          retention-days: 7
+
+  live-tests:
+    name: Live Integration Tests (Proxy + Settings Enforcement)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Skip on fork PRs where secrets aren't available
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    env:
+      # Job-level env: default to DirectRoute (no API_BACKEND override). The
+      # settings-enforcement file uses this. The proxy-tests step below adds
+      # API_BACKEND=proxy at step scope only — NOT job scope, because that
+      # would route the settings-enforcement test through a ProxyRoute and
+      # fail without a running LLMGW proxy server (per the file's docstring).
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+      LLMGW_URL: ${{ secrets.LLMGW_URL }}
+      LLMGW_CLIENT_ID: ${{ secrets.LLMGW_CLIENT_ID }}
+      LLMGW_CLIENT_SECRET: ${{ secrets.LLMGW_CLIENT_SECRET }}
+      LLMGW_SEMANTIC_ORG_ID: ${{ secrets.LLMGW_SEMANTIC_ORG_ID }}
+      LLMGW_SEMANTIC_TENANT_ID: ${{ secrets.LLMGW_SEMANTIC_TENANT_ID }}
+      # Required by Governance policy lookup. Despite ProxyConfig.user_id
+      # defaulting to "" in code, an empty value triggers backend HTTP 500
+      # "Unable to retrieve policy for organization X tenant Y from
+      # Governance" — verified by reproducing CI failure locally.
+      LLMGW_SEMANTIC_USER_ID: ${{ secrets.LLMGW_SEMANTIC_USER_ID }}
+      # Onboarded product/feature names recognized by the LLMGW backend.
+      # The proxy/Settings defaults (`coder-eval` / `llm-judge`) are not
+      # registered with the gateway and produce 400s — must come from secrets
+      # to keep the onboarded names out of the public workflow file.
+      LLMGW_REQUESTING_PRODUCT: ${{ secrets.LLMGW_REQUESTING_PRODUCT }}
+      LLMGW_REQUESTING_FEATURE: ${{ secrets.LLMGW_REQUESTING_FEATURE }}
+      # Bedrock backend for the third settings-enforcement run. Job-level so
+      # the preflight secrets check can validate them; the BedrockRoute is
+      # only engaged via API_BACKEND=bedrock at step scope.
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      # No bubblewrap/AppArmor setup needed: neither live-test file engages
+      # AgentConfig.isolation=true, so the SDK doesn't shell out to bwrap.
+
+      - name: Cache dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.cache/pip
+            .venv
+          key: ${{ runner.os }}-py3.13-live-${{ hashFiles('**/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-py3.13-live-
+            ${{ runner.os }}-py3.13-
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+
+      - name: Install project dependencies
+        run: |
+          uv venv .venv --clear
+          uv pip install --python .venv/bin/python -e ".[dev]"
+
+      - name: Verify required secrets are present
+        run: |
+          : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY missing}"
+          : "${LLMGW_URL:?LLMGW_URL missing}"
+          : "${LLMGW_CLIENT_ID:?LLMGW_CLIENT_ID missing}"
+          : "${LLMGW_CLIENT_SECRET:?LLMGW_CLIENT_SECRET missing}"
+          : "${LLMGW_SEMANTIC_ORG_ID:?LLMGW_SEMANTIC_ORG_ID missing}"
+          : "${LLMGW_SEMANTIC_TENANT_ID:?LLMGW_SEMANTIC_TENANT_ID missing}"
+          : "${LLMGW_SEMANTIC_USER_ID:?LLMGW_SEMANTIC_USER_ID missing}"
+          : "${LLMGW_REQUESTING_PRODUCT:?LLMGW_REQUESTING_PRODUCT missing}"
+          : "${LLMGW_REQUESTING_FEATURE:?LLMGW_REQUESTING_FEATURE missing}"
+          : "${AWS_BEARER_TOKEN_BEDROCK:?AWS_BEARER_TOKEN_BEDROCK missing}"
+          : "${AWS_REGION:?AWS_REGION missing}"
+          : "${BEDROCK_MODEL:?BEDROCK_MODEL missing}"
+          echo "All live-test secrets present."
+
+      - name: Run claude-settings enforcement live tests (DirectRoute)
+        # No API_BACKEND override — Settings() defaults to DIRECT and uses ANTHROPIC_API_KEY.
+        # `-ra` surfaces skipped tests in the summary so CI logs show what ran vs skipped.
+        # `--strict-markers` rejects unregistered @pytest.mark.* (cheap typo insurance).
+        # JUnit XML feeds the post-run "tests actually passed" assertion below.
+        run: |
+          mkdir -p tmp
+          .venv/bin/pytest tests/test_claude_settings_enforcement_live.py \
+            -m live -v --tb=short --strict-markers -ra -n auto \
+            --junit-xml=tmp/junit-settings.xml
+
+      - name: Run claude-settings enforcement live tests (BedrockRoute)
+        # Same test file, different backend. Settings-enforcement lives in the
+        # Claude Code CLI and is backend-agnostic (per the file's docstring),
+        # so this run is the only thing in CI that exercises BedrockRoute
+        # end-to-end with the real Anthropic-on-Bedrock model.
+        env:
+          API_BACKEND: "bedrock"
+        run: |
+          .venv/bin/pytest tests/test_claude_settings_enforcement_live.py \
+            -m live -v --tb=short --strict-markers -ra -n auto \
+            --junit-xml=tmp/junit-settings-bedrock.xml
+
+      - name: Run proxy live tests (ProxyRoute via LLMGW)
+        env:
+          API_BACKEND: "proxy"
+        run: |
+          mkdir -p tmp
+          .venv/bin/pytest tests/test_proxy_live.py \
+            -m live -v --tb=short --strict-markers -ra -n auto \
+            --junit-xml=tmp/junit-proxy.xml
+
+      - name: Assert live tests actually ran (not silently skipped)
+        # Parse JUnit XML for *passed* count, not collected count. Pytest collects
+        # @pytest.mark.skipif-marked tests even when the predicate is True, so a
+        # collect-only count would still report N>0 even if every test silently
+        # skipped — defeating the purpose of the assertion. Passed = tests - skipped
+        # - errors - failures correctly catches the silent-skip regression class.
+        run: |
+          python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          def passed(path: str) -> int:
+              # Aggregate across all <testsuite> elements: pytest 8.x normally
+              # emits a single suite, but xdist or plugin variations can produce
+              # multiple suites under a <testsuites> root. Counting only the
+              # first would silently undercount and falsely fail the assertion.
+              root = ET.parse(path).getroot()
+              suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+              if not suites:
+                  sys.exit(f"{path}: no <testsuite> element")
+              total = sum(int(ts.get("tests", 0)) for ts in suites)
+              skipped = sum(int(ts.get("skipped", 0)) for ts in suites)
+              errors = sum(int(ts.get("errors", 0)) for ts in suites)
+              failures = sum(int(ts.get("failures", 0)) for ts in suites)
+              return total - skipped - errors - failures
+          p_proxy = passed("tmp/junit-proxy.xml")
+          p_settings_direct = passed("tmp/junit-settings.xml")
+          p_settings_bedrock = passed("tmp/junit-settings-bedrock.xml")
+          print(f"Passed: proxy={p_proxy}, settings(direct)={p_settings_direct}, settings(bedrock)={p_settings_bedrock}")
+          if p_proxy < 1:
+              sys.exit("test_proxy_live.py reported zero PASSED tests (silent-skip regression?)")
+          if p_settings_direct < 1:
+              sys.exit("test_claude_settings_enforcement_live.py (DirectRoute) reported zero PASSED tests")
+          if p_settings_bedrock < 1:
+              sys.exit("test_claude_settings_enforcement_live.py (BedrockRoute) reported zero PASSED tests")
+          PY
+
+      - name: Upload live-test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-tests-output
+          path: |
+            tmp/
+            runs/
           retention-days: 7

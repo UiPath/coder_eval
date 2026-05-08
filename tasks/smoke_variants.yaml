@@ -1,0 +1,27 @@
+task_id: "smoke_variants"
+description: |
+  Minimal task paired with experiments/smoke_variants.yaml to exercise the
+  experiment variant resolver in CI. Each of the experiment's 2 variants
+  runs this task once → tasks_run = 2 in the bucket aggregate.
+
+  The task itself is intentionally trivial (write one byte, check it exists)
+  so the e2e cost of fanning out across variants is ~1 API call each.
+initial_prompt: |
+  Use the Write tool to create out.txt containing the single character: x
+tags: [smoke-variants]
+
+max_turns: 4
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Write"]
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+
+success_criteria:
+  - type: "file_exists"
+    path: "out.txt"
+    description: "Per-variant: file written successfully."

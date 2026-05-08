@@ -4,7 +4,7 @@ description: >
   is told only to ask the user what they want; the simulated user supplies an
   exact string to echo. The judge — which sees the full dialog — verifies the
   agent reproduced the string exactly without paraphrasing or inventing.
-tags: [python, simulation, llm-judge, smoke]
+tags: [python, simulation, llm-judge]
 task_timeout: 900
 
 initial_prompt: "Ask me what I would like to do. Do not assume anything about the task — ignore any project context you can see."

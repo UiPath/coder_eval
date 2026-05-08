@@ -49,6 +49,8 @@ run:	## Run coder-eval on all tasks with 8 parallel jobs
 	uv run coder-eval run tasks/*.yaml -j 8
 
 test-smoke:  ## Run e2e smoke tests with real API (mirrors CI "E2E Smoke Tests" job)
-	uv run coder-eval run tasks/*.yaml --tags smoke --model claude-haiku-4-5-20251001 --max-iter 2
+	uv run coder-eval run tasks/*.yaml --tags smoke-pass --model claude-haiku-4-5-20251001
+	@echo "--- now running smoke-fail bucket (expected to exit non-zero) ---"
+	! uv run coder-eval run tasks/*.yaml --tags smoke-fail --model claude-haiku-4-5-20251001
 
 .DEFAULT_GOAL := help
