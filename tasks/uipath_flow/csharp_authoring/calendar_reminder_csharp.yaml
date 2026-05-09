@@ -1,0 +1,160 @@
+task_id: uipath-flow-csharp-calendar-reminder
+description: >
+  C# analogue of the v2 calendar-reminder task. Tests the full lifecycle:
+  scaffold via `dotnet new csflow`, author Workflow.cs against the analyzers,
+  build and test in-process, then convert to FIL + manifest + bindings, then
+  to v1 .flow, then validate + tidy. Also exercises connector discovery —
+  the Outlook 365 create-event-calendar action isn't in the example workflow.
+tags: [flow-csharp, csharp, generate, connector, registry, lifecycle]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 60
+  turn_timeout: 1500
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-csharp"
+
+initial_prompt: |
+  Author a UiPath C# Flow workflow named **CalendarReminder** in the current
+  directory. Read `SKILL.md` first — it describes the five-phase lifecycle
+  (scaffold → author + test in C# → convert to v2 → convert to v1 → validate
+  + tidy) and the helper scripts.
+
+  ## Scenario
+
+  A workflow that schedules a calendar event in Outlook 365.
+
+  1. The `Workflow.Execute()` method is called once (the manual trigger).
+  2. Hard-code a sample meeting request in C# — subject `"Team sync"`,
+     start `"2026-06-01T15:00:00"`, end `"2026-06-01T16:00:00"`,
+     timezone `"UTC"`. (No mock node is needed — this is just a local
+     C# variable, since stage-1 testing runs in-process.)
+  3. Call the Outlook 365 create-event-calendar action. Its full namespace is
+     `UiPath.Connectors.MicrosoftOutlook365`; the class name follows from the
+     short action name. To find the right class:
+
+     ```bash
+     dotnet run --project ~/src/flow-v2/csharp/src/CS2FIL -- dump-registry \
+       --csharp-root ~/src/flow-v2/csharp 2>/dev/null \
+       | python3 -c "import json,sys; [print(f'{c[\"shortClassName\"]:35s} {c[\"nodeType\"]}') for c in json.load(sys.stdin) if 'outlook' in c['nodeType'] and 'calendar' in c['nodeType'] and 'create' in c['nodeType']]"
+     ```
+
+     The class's `Inputs` record's required parameters tell you what to pass —
+     `subject`, `start.dateTime`, `end.dateTime`, `timezone` (and possibly more).
+
+  ## Phases
+
+  ```bash
+  dotnet new csflow --name CalendarReminder         # phase 1: scaffold
+  cd CalendarReminder
+  # phase 2: edit Workflow.cs to call the create-event action
+  dotnet build                                      # analyzers gate FIL-incompat
+  dotnet run -- --test                              # exercises against TestConnector
+  cd ..
+
+  ./convert-to-v2.sh CalendarReminder               # phase 3: → FIL+manifest+bindings
+  ./convert-to-v1.sh CalendarReminder               # phase 4: → CalendarReminder.flow
+  ./validate.sh    CalendarReminder                 # phase 5: validate + tidy
+  ```
+
+  ## Files at the end (project root)
+
+  - `CalendarReminder/`                          # the C# project (csproj, Workflow.cs, …)
+  - `CalendarReminder/CalendarReminder.fil`      # FIL output
+  - `CalendarReminder/CalendarReminder.manifest.flow`
+  - `CalendarReminder/CalendarReminder.bindings.flow`
+  - `CalendarReminder.flow`                      # v1 flow JSON
+  - `CalendarReminder.flow` is what `uip maestro flow validate` runs against
+
+success_criteria:
+  - type: file_exists
+    description: "C# project Workflow.cs exists"
+    path: "CalendarReminder/Workflow.cs"
+    weight: 1.0
+  - type: run_command
+    description: "C# project builds (analyzers pass)"
+    command: "dotnet build CalendarReminder/CalendarReminder.csproj"
+    timeout: 120
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "C# project runs in test mode"
+    command: "dotnet run --project CalendarReminder -- --test"
+    timeout: 120
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: file_exists
+    description: "FIL output exists"
+    path: "CalendarReminder/CalendarReminder.fil"
+    weight: 1.0
+  - type: file_exists
+    description: "Manifest exists"
+    path: "CalendarReminder/CalendarReminder.manifest.flow"
+    weight: 1.0
+  - type: file_exists
+    description: "Bindings file exists"
+    path: "CalendarReminder/CalendarReminder.bindings.flow"
+    weight: 1.0
+  - type: run_command
+    description: "Manifest references the create-event-calendar node type"
+    command: |
+      python3 -c "
+      import json
+      m = json.load(open('CalendarReminder/CalendarReminder.manifest.flow'))
+      types = [n.get('type', '') for n in m.get('nodes', {}).values()]
+      hits = [t for t in types if 'create-event' in t and 'calendar' in t.lower()]
+      assert hits, f'expected a create-event-calendar node, got types={types}'
+      print(f'create-event node type: {hits[0]}')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "FIL passes the registry-defined input fields (subject + start.dateTime + end.dateTime + timezone)"
+    command: |
+      python3 -c "
+      src = open('CalendarReminder/CalendarReminder.fil').read()
+      # Required fields for create-event-calendar-event are subject, start.dateTime,
+      # end.dateTime, timezone. Accept either dotted form ('start.dateTime') or
+      # nested object form ('start: { dateTime: ... }').
+      missing = []
+      if 'subject' not in src: missing.append('subject')
+      if 'dateTime' not in src: missing.append('dateTime (start.dateTime / end.dateTime)')
+      if 'timezone' not in src: missing.append('timezone')
+      if 'start' not in src: missing.append('start')
+      if 'end' not in src: missing.append('end')
+      assert not missing, f'FIL missing required parameter names: {missing}'
+      print('All required parameter names present')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: file_exists
+    description: "v1 .flow exists"
+    path: "CalendarReminder.flow"
+    weight: 1.0
+  - type: run_command
+    description: "v1 .flow validates"
+    command: "uip maestro flow validate CalendarReminder.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "tidy succeeds"
+    command: "uip maestro flow tidy CalendarReminder.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0

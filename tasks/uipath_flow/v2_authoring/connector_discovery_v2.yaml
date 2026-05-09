@@ -1,0 +1,89 @@
+task_id: uipath-flow-v2-connector-discovery
+description: >
+  v2 port of the connector-discovery task. Agent uses the IS CLI to find
+  the Slack connector and decides which 4-tier path applies. Output is a
+  markdown report — same as v1; the v2 angle is that the recommended node
+  type strings should be the v2 typeRef form (e.g.
+  `uipath.connector.uipath-salesforce-slack.send-message-to-channel@1.0.0`)
+  and the report should mention how to bind it in `bindings.json`.
+tags: [flow-v2, connector, discovery, no-build]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 50
+  turn_timeout: 900
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-v2"
+
+initial_prompt: |
+  Read `SKILL.md` first — it covers the v2 file shape, the connector
+  binding model, and the authoring loop. There is a worked example in
+  `example/` showing how the manifest references connector nodes and how
+  bindings.json maps named bindings to connection UUIDs.
+
+  ## Scenario
+
+  You want to send a Slack message from a v2 Flow. Use the `uip` CLI to
+  determine:
+
+  1. Does a Slack connector exist? (search the registry with
+     `uip maestro flow registry search "slack"`).
+  2. Does it have a send-message activity?
+  3. Is there a healthy connection available (`uip is connections list`)?
+
+  Write your findings to `connector-discovery-report.md` including:
+  - The connector key (e.g. `uipath-salesforce-slack`).
+  - The exact node-type string for the send-message activity, in v2
+    typeRef form: `<nodeType>@<version>`.
+  - Connection status (Enabled / Disabled / not configured).
+  - The connection's `Id` UUID (or note if no connection exists).
+  - The `FolderKey` UUID for that connection.
+  - A short snippet showing what the manifest entry would look like with
+    `binding` and `folderBinding` filled in.
+
+success_criteria:
+  - type: file_exists
+    description: "Discovery report file exists"
+    path: "connector-discovery-report.md"
+    weight: 2.0
+  - type: run_command
+    description: "Report mentions the Slack connector key"
+    command: "grep -i 'uipath-salesforce-slack' connector-discovery-report.md"
+    timeout: 5
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Report includes a v2 typeRef (with @version)"
+    command: "grep -E 'uipath\\.connector\\.uipath-salesforce-slack\\..+@[0-9]' connector-discovery-report.md"
+    timeout: 5
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Report mentions binding / folderBinding"
+    command: "grep -iE 'binding|folderBinding|connectionId' connector-discovery-report.md"
+    timeout: 5
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: llm_judge
+    description: "Report covers connector existence, send-message activity, connection status, and v2 binding shape"
+    prompt: |
+      Below is the agent's `connector-discovery-report.md`. Does it answer
+      all four:
+      (1) Does the Slack connector exist?
+      (2) Which activity sends a message? (gives the v2 typeRef with @version)
+      (3) Is a connection configured? (Id + FolderKey if yes)
+      (4) How would the v2 manifest reference it (binding / folderBinding)?
+    files:
+      - "connector-discovery-report.md"
+    weight: 3.0
+    pass_threshold: 0.7

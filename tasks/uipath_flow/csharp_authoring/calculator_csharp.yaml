@@ -1,0 +1,136 @@
+task_id: uipath-flow-csharp-calculator
+description: >
+  C# port of the calculator task — multiply two numbers. Different flavor than
+  the v2 version: in C# the multiplication is just an arithmetic expression,
+  not a script-node body. Tests local-variable handling (becomes flow vars
+  after conversion) and that simple arithmetic round-trips through FIL.
+tags: [flow-csharp, csharp, generate, variables]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 50
+  turn_timeout: 1200
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-csharp"
+
+initial_prompt: |
+  Author a UiPath C# Flow workflow named **Calculator** in the current
+  directory. Read `SKILL.md` first.
+
+  ## Scenario
+
+  Multiply two numeric inputs `a` and `b` and produce the result.
+
+  In C# space, write the arithmetic directly in `Execute()`:
+
+  ```csharp
+  public async Task Execute()
+  {
+      int a = 7;
+      int b = 6;
+      int result = a * b;
+      // … emit `result` somehow (e.g. via a connector or just leave it as a local;
+      //   the converter still records `a`, `b`, `result` as flow variables).
+  }
+  ```
+
+  Local declarations at the top of `Execute()` become v1 flow variables after
+  conversion. The variable mutability detector picks `let` vs `const` based
+  on whether the local is reassigned.
+
+  ## Phases
+
+  ```bash
+  dotnet new csflow --name Calculator
+  cd Calculator
+  # replace Workflow.cs with the calculator logic — keep it simple
+  dotnet build
+  dotnet run -- --test
+  cd ..
+  ./convert-to-v2.sh Calculator
+  ./convert-to-v1.sh Calculator
+  ./validate.sh    Calculator
+  ```
+
+success_criteria:
+  - type: file_exists
+    description: "C# project Workflow.cs exists"
+    path: "Calculator/Workflow.cs"
+    weight: 1.0
+  - type: run_command
+    description: "C# project builds"
+    command: "dotnet build Calculator/Calculator.csproj"
+    timeout: 120
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "C# project runs in test mode"
+    command: "dotnet run --project Calculator -- --test"
+    timeout: 120
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: file_exists
+    description: "FIL output exists"
+    path: "Calculator/Calculator.fil"
+    weight: 1.0
+  - type: run_command
+    description: "FIL contains a multiplication and references a, b"
+    command: |
+      python3 -c "
+      src = open('Calculator/Calculator.fil').read()
+      assert '*' in src, f'expected multiplication operator, FIL was:\n{src}'
+      assert 'a' in src and 'b' in src, f'expected a, b in FIL'
+      print('multiplication present')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: file_exists
+    description: "v1 .flow exists"
+    path: "Calculator.flow"
+    weight: 1.0
+  - type: run_command
+    description: "v1 .flow validates"
+    command: "uip maestro flow validate Calculator.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "tidy succeeds"
+    command: "uip maestro flow tidy Calculator.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: llm_judge
+    description: "Workflow multiplies a and b"
+    prompt: |
+      Does the workflow compute the product of two numeric variables `a`
+      and `b`?
+
+      Score 1.0 if `a` and `b` are declared as locals (or named anything
+      similar) at the top of `Execute()` and `result = a * b` (or equivalent)
+      is computed.
+
+      Don't penalize: choice of int vs double, hard-coded values vs
+      computed-from-input, additional logic around the arithmetic.
+
+      Score 0.5 if multiplication is present but the operands aren't
+      named `a` and `b`.
+      Score 0 if no multiplication appears.
+    files:
+      - "Calculator/Workflow.cs"
+      - "Calculator/Calculator.fil"
+    weight: 2.0
+    pass_threshold: 0.7

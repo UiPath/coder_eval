@@ -1,0 +1,120 @@
+task_id: uipath-flow-csharp-loop
+description: >
+  C# port of the BatchProcessor loop task. Tests `foreach` over a `List<T>`
+  emitting v1 core.logic.loop nodes after conversion.
+tags: [flow-csharp, csharp, generate, loop]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 60
+  turn_timeout: 1500
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-csharp"
+
+initial_prompt: |
+  Author a UiPath C# Flow workflow named **BatchProcessor** in the current
+  directory. Read `SKILL.md` first.
+
+  ## Scenario
+
+  Iterate over a batch of records and process each one.
+
+  1. Hard-code a small batch in C# — e.g. `List<string> items = new() {
+     "a", "b", "c" };`. Locals become flow variables; lists work for
+     `foreach`.
+  2. `foreach (string item in items) { … }` — the `foreach` becomes a
+     `core.logic.loop` node after conversion. (C-style `for (int i = 0;
+     i < n; i++)` does NOT — use `foreach` specifically.)
+  3. Inside the loop body, invoke a `core.logic.mock` placeholder for the
+     per-item action via the direct-ExecuteNodeAsync pattern:
+
+     ```csharp
+     await connector.ExecuteNodeAsync(
+         "core.logic.mock", "processItem1", "",
+         "{\"item\":\"" + item + "\"}");
+     ```
+
+  ## Phases
+
+  ```bash
+  dotnet new csflow --name BatchProcessor
+  cd BatchProcessor
+  dotnet build && dotnet run -- --test
+  cd ..
+  ./convert-to-v2.sh BatchProcessor
+  ./convert-to-v1.sh BatchProcessor
+  ./validate.sh    BatchProcessor
+  ```
+
+success_criteria:
+  - type: file_exists
+    description: "C# project Workflow.cs exists"
+    path: "BatchProcessor/Workflow.cs"
+    weight: 1.0
+  - type: run_command
+    description: "C# project builds"
+    command: "dotnet build BatchProcessor/BatchProcessor.csproj"
+    timeout: 120
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "C# project runs in test mode"
+    command: "dotnet run --project BatchProcessor -- --test"
+    timeout: 120
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: file_exists
+    description: "v1 .flow exists"
+    path: "BatchProcessor.flow"
+    weight: 1.0
+  - type: run_command
+    description: "v1 .flow validates"
+    command: "uip maestro flow validate BatchProcessor.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "tidy succeeds"
+    command: "uip maestro flow tidy BatchProcessor.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Converted .flow has a core.logic.loop node"
+    command: |
+      python3 -c "
+      import json
+      ns = json.load(open('BatchProcessor.flow'))['nodes']
+      loops = [n for n in ns if n['type'] == 'core.logic.loop']
+      assert loops, 'expected at least one core.logic.loop node'
+      print(f'{len(loops)} loop node(s)')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: llm_judge
+    description: "Workflow iterates over a batch with a loop"
+    prompt: |
+      Did the agent author a C# workflow that:
+      (a) declares a list of items,
+      (b) iterates with foreach,
+      (c) processes each item via a per-iteration `core.logic.mock` (or
+          another connector call) inside the loop body, and
+      (d) ends after the loop completes?
+    files:
+      - "BatchProcessor/Workflow.cs"
+      - "BatchProcessor/BatchProcessor.fil"
+    weight: 2.0
+    pass_threshold: 0.7

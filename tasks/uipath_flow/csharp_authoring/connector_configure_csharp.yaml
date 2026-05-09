@@ -1,0 +1,143 @@
+task_id: uipath-flow-csharp-connector-configure
+description: >
+  C# port of the connector-configure task. Tests that the agent wires a real
+  Slack connector call with a binding id that matches an entry in
+  appsettings.json (the C# analogue of bindings.json).
+tags: [flow-csharp, csharp, generate, connector, slack, binding]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 60
+  turn_timeout: 1500
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-csharp"
+
+initial_prompt: |
+  Author a UiPath C# Flow workflow named **SlackNotifier** in the current
+  directory. Read `SKILL.md` first.
+
+  ## Scenario
+
+  A workflow that sends a Slack message to a configured channel. End-to-end
+  it should:
+
+  1. Use the Slack send-message connector class (under
+     `UiPath.Connectors.SalesforceSlack`).
+  2. Pass a non-empty `bindingId` (e.g. `"slack"`) — the agent's appsettings.json
+     `Bindings` array must contain an entry with that id, with the right
+     shape (resource, propertyAttribute, etc.) for a Slack ConnectionId.
+     Also include a folderkey entry as the template scaffolds.
+  3. Convert through to v1 .flow and validate.
+
+  Use `dotnet user-secrets set "Bindings:0:resourceKey" "<uuid>"` to inject
+  the actual UUID locally if you want to simulate a real environment, but
+  the converter doesn't read user-secrets — the test only checks that the
+  bindingId is non-empty and that the appsettings entry is present.
+
+  ## Phases
+
+  ```bash
+  dotnet new csflow --name SlackNotifier
+  cd SlackNotifier
+  dotnet build && dotnet run -- --test
+  cd ..
+  ./convert-to-v2.sh SlackNotifier
+  ./convert-to-v1.sh SlackNotifier
+  ./validate.sh    SlackNotifier
+  ```
+
+success_criteria:
+  - type: file_exists
+    description: "C# project Workflow.cs exists"
+    path: "SlackNotifier/Workflow.cs"
+    weight: 1.0
+  - type: run_command
+    description: "C# project builds"
+    command: "dotnet build SlackNotifier/SlackNotifier.csproj"
+    timeout: 120
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "C# project runs in test mode"
+    command: "dotnet run --project SlackNotifier -- --test"
+    timeout: 120
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: file_exists
+    description: "v1 .flow exists"
+    path: "SlackNotifier.flow"
+    weight: 1.0
+  - type: run_command
+    description: "v1 .flow validates"
+    command: "uip maestro flow validate SlackNotifier.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Manifest references the Slack connector"
+    command: "grep -E 'uipath\\.connector\\.uipath-salesforce-slack\\.' SlackNotifier/SlackNotifier.manifest.flow"
+    timeout: 5
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Manifest's Slack node has a non-empty binding"
+    command: |
+      python3 -c "
+      import json
+      m = json.load(open('SlackNotifier/SlackNotifier.manifest.flow'))
+      slack = [n for n in m['nodes'].values() if 'salesforce-slack' in n.get('type','')]
+      assert slack, 'no slack node'
+      n = slack[0]
+      b = n.get('binding', '')
+      assert b, f'expected non-empty binding, got {n!r}'
+      print(f'binding: {b}')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Bindings.flow contains the binding id the manifest references"
+    command: |
+      python3 -c "
+      import json
+      m = json.load(open('SlackNotifier/SlackNotifier.manifest.flow'))
+      b = json.load(open('SlackNotifier/SlackNotifier.bindings.flow'))
+      slack_bindings = [n.get('binding') for n in m['nodes'].values() if 'salesforce-slack' in n.get('type','')]
+      bind_ids = {x.get('id') for x in b['bindings']}
+      missing = [bid for bid in slack_bindings if bid and bid not in bind_ids]
+      assert not missing, f'manifest references binding ids not in bindings.flow: {missing}'
+      print(f'bindings ids: {sorted(bind_ids)}')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: llm_judge
+    description: "Workflow uses Slack send-message with a configured binding"
+    prompt: |
+      Did the agent author a C# workflow that:
+      (a) calls a Slack send-message connector class,
+      (b) passes a non-empty `bindingId` argument (any sensible id —
+          "slack", "slackProd", etc.),
+      (c) the appsettings.json `Bindings` array has an entry with that
+          same id and `resource: "Connection"` (resourceKey may be empty,
+          to be filled via user-secrets / env)?
+    files:
+      - "SlackNotifier/Workflow.cs"
+      - "SlackNotifier/appsettings.json"
+      - "SlackNotifier/SlackNotifier.manifest.flow"
+      - "SlackNotifier/SlackNotifier.bindings.flow"
+    weight: 2.0
+    pass_threshold: 0.7

@@ -1,0 +1,82 @@
+task_id: uipath-flow-csharp-connector-discovery
+description: >
+  C# port of the connector-discovery task. Agent uses the cs2fil dump-registry
+  CLI plus `uip is connections list` to discover the Slack send-message
+  connector class and write a markdown report. No project authoring — just
+  research + write.
+tags: [flow-csharp, connector, discovery, no-build]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 40
+  turn_timeout: 900
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-csharp"
+
+initial_prompt: |
+  Read `SKILL.md` first — it covers the C# Flow workflow lifecycle and how
+  to discover connectors via the cs2fil registry dump.
+
+  ## Scenario
+
+  You want to send a Slack message from a C# Flow workflow. Determine:
+
+  1. Which connector class wraps the Slack send-message activity? (use the
+     dump-registry approach in SKILL.md, filtered to Slack send-message).
+  2. Its full `nodeType` string in v2 typeRef form (`<nodeType>@<version>`).
+  3. Is a Slack connection currently configured in the tenant? (use
+     `uip is connections list` and look for `ConnectorKey:
+     uipath-salesforce-slack`). Note its `Id` and `FolderKey`.
+  4. How would the agent reference this in C# — show the Workflow.cs call
+     site and the matching appsettings.json `Bindings` entry shape.
+
+  Write your findings to `connector-discovery-report.md` covering all four
+  questions.
+
+success_criteria:
+  - type: file_exists
+    description: "Discovery report file exists"
+    path: "connector-discovery-report.md"
+    weight: 2.0
+  - type: run_command
+    description: "Report mentions the Slack connector key"
+    command: "grep -i 'uipath-salesforce-slack' connector-discovery-report.md"
+    timeout: 5
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Report mentions the C# class name (e.g. SendMessageToChannel / SendMessageToUser)"
+    command: "grep -E 'SendMessageTo(Channel|User)' connector-discovery-report.md"
+    timeout: 5
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Report mentions a non-empty bindingId pattern"
+    command: "grep -iE 'binding|bindingId|appsettings' connector-discovery-report.md"
+    timeout: 5
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: llm_judge
+    description: "Report covers all four discovery questions"
+    prompt: |
+      Below is the agent's `connector-discovery-report.md`. Does it answer
+      all four:
+      (1) Which C# connector class wraps the Slack send-message activity?
+      (2) The full nodeType@version string?
+      (3) Is a Slack connection configured in the tenant? (Id + FolderKey
+          if yes; "not configured" is a valid answer)
+      (4) Example C# call site + matching appsettings.json `Bindings` entry?
+    files:
+      - "connector-discovery-report.md"
+    weight: 3.0
+    pass_threshold: 0.7

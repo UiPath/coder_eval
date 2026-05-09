@@ -1,0 +1,4 @@
+name: Weather Slack Alerts (v2)
+author: Rocky Madden
+prompt: Create a UiPath Flow v2 project (FIL + manifest + bindings) that fetches Denver's temperature from a free weather API, evaluates if it's warm (>60F) or cold (≤60F), and sends a Slack message with the appropriate response. Validate the flow structure.
+tags: [simple, http, slack, flow-v2]

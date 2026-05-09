@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "1",
+  "bindings": [
+    {
+      "id": "bFolderKey",
+      "name": "FolderKey",
+      "type": "string",
+      "resource": "Connection",
+      "resourceKey": "00000000-0000-0000-0000-00000000000F",
+      "default": "00000000-0000-0000-0000-00000000000F",
+      "propertyAttribute": "FolderKey"
+    },
+    {
+      "id": "b00000001",
+      "name": "Outlook connection",
+      "type": "string",
+      "resource": "Connection",
+      "resourceKey": "00000000-0000-0000-0000-000000000001",
+      "default": "00000000-0000-0000-0000-000000000001",
+      "propertyAttribute": "ConnectionId"
+    },
+    {
+      "id": "b00000002",
+      "name": "Slack connection",
+      "type": "string",
+      "resource": "Connection",
+      "resourceKey": "00000000-0000-0000-0000-000000000002",
+      "default": "00000000-0000-0000-0000-000000000002",
+      "propertyAttribute": "ConnectionId"
+    }
+  ]
+}

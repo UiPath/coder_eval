@@ -1,0 +1,124 @@
+task_id: uipath-flow-csharp-decision
+description: >
+  C# port of the email-classifier 3-way switch task. Tests if/else if/else
+  branching plus the direct-ExecuteNodeAsync path for core.logic.mock
+  placeholder nodes.
+tags: [flow-csharp, csharp, generate, decision, mock]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 60
+  turn_timeout: 1500
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-csharp"
+
+initial_prompt: |
+  Author a UiPath C# Flow workflow named **EmailClassifier** in the current
+  directory. Read `SKILL.md` first.
+
+  ## Scenario
+
+  Classify an email into one of three categories: `needs-response`,
+  `take-action`, `other`. Each branch has its own per-category action.
+
+  1. A `core.logic.mock` placeholder for "read email". Hard-code its category
+     in the C# code (the simplest C# pattern: bypass the mock entirely and
+     just declare `string category = "needs-response";` at the top — locals
+     become flow vars after conversion).
+
+     If you'd rather invoke the mock as a real node so the manifest carries
+     it, use the direct-ExecuteNodeAsync pattern:
+
+     ```csharp
+     string emailRaw = await connector.ExecuteNodeAsync(
+         "core.logic.mock", "readEmail1", "", "{}");
+     // parse the category however you like
+     ```
+
+  2. C# `if`/`else if`/`else` on `category`, with three branches.
+  3. Each branch invokes its own `core.logic.mock` action node (use the
+     direct-ExecuteNodeAsync pattern to record three distinct mock node ids
+     in the manifest).
+
+  ## Phases
+
+  ```bash
+  dotnet new csflow --name EmailClassifier
+  cd EmailClassifier
+  dotnet build && dotnet run -- --test
+  cd ..
+  ./convert-to-v2.sh EmailClassifier
+  ./convert-to-v1.sh EmailClassifier
+  ./validate.sh    EmailClassifier
+  ```
+
+success_criteria:
+  - type: file_exists
+    description: "C# project Workflow.cs exists"
+    path: "EmailClassifier/Workflow.cs"
+    weight: 1.0
+  - type: run_command
+    description: "C# project builds"
+    command: "dotnet build EmailClassifier/EmailClassifier.csproj"
+    timeout: 120
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "C# project runs in test mode"
+    command: "dotnet run --project EmailClassifier -- --test"
+    timeout: 120
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: file_exists
+    description: "v1 .flow exists"
+    path: "EmailClassifier.flow"
+    weight: 1.0
+  - type: run_command
+    description: "v1 .flow validates"
+    command: "uip maestro flow validate EmailClassifier.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "tidy succeeds"
+    command: "uip maestro flow tidy EmailClassifier.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Converted .flow has 3+ mock nodes (one per branch, optionally one for the email reader)"
+    command: |
+      python3 -c "
+      import json
+      ns = json.load(open('EmailClassifier.flow'))['nodes']
+      mocks = [n for n in ns if n['type'] == 'core.logic.mock']
+      assert len(mocks) >= 3, f'expected 3+ mocks, got {len(mocks)}'
+      print(f'{len(mocks)} mock nodes')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: llm_judge
+    description: "Workflow classifies email into 3 categories with separate branches"
+    prompt: |
+      Did the agent author a C# workflow that:
+      (a) takes (or hard-codes) an email category,
+      (b) branches three ways with C# if/else if/else, and
+      (c) has a separate `core.logic.mock` action per branch?
+    files:
+      - "EmailClassifier/Workflow.cs"
+      - "EmailClassifier/EmailClassifier.fil"
+    weight: 2.0
+    pass_threshold: 0.7

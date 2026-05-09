@@ -1,0 +1,149 @@
+task_id: uipath-flow-v2-calendar-reminder
+description: >
+  v2 task that requires looking up a connector action NOT in the bundled
+  example. Tests whether the agent uses `uip maestro flow registry` to
+  discover the input parameter schema rather than guessing.
+tags: [flow-v2, fil, generate, connector, registry]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 50
+  turn_timeout: 1200
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-v2"
+
+initial_prompt: |
+  Author a UiPath Flow v2 project named **CalendarReminder** in the current
+  directory. Read `SKILL.md` first — it describes the v2 file shape, FIL
+  syntax, the manifest envelope, the authoring loop using `verify.sh`,
+  and how to look up connector schemas with
+  `uip maestro flow registry search` / `get`.
+
+  The example in `example/` (OrderConfirm) shows a flow that uses
+  `outlook365.get-email-list` and `salesforce-slack.send-message-to-channel`.
+  Your task uses a DIFFERENT outlook365 action whose input schema is NOT
+  in the example — look it up with the registry CLI rather than guessing.
+
+  ## Scenario
+
+  A flow that schedules a calendar event in Outlook 365.
+
+  1. Manual trigger.
+  2. A `core.logic.mock` placeholder for "fetchMeetingRequest" — configure
+     its fixture to return something like
+     `{ "subject": "Team sync", "start": "2026-06-01T15:00:00", "end": "2026-06-01T16:00:00", "tz": "UTC" }`.
+  3. A connector node that creates a calendar event in Outlook 365. The
+     node type lives under `uipath.connector.uipath-microsoft-outlook365.*`
+     (find the exact name with
+     `uip maestro flow registry search "calendar event"` filtered to
+     `uipath.connector.*`). Pull the input schema with
+     `uip maestro flow registry get <NodeType>` and use the parameter names
+     it lists in your `executeNode` call. Pay attention to the REQUIRED
+     fields and any nested-field names (e.g. `start.dateTime` vs `start`).
+  4. End.
+
+  ## Files to write (project root)
+
+  - `CalendarReminder.fil.ts`        FIL source
+  - `CalendarReminder.manifest.flow` Manifest (mock fixture populated; the
+                                     create-event node's `binding` and
+                                     `folderBinding` can be stub UUIDs —
+                                     this task is dry-run only)
+  - `bindings.json`                  Empty bindings array
+
+  ## Authoring loop
+
+  ```bash
+  ./verify.sh           # compile + dispatch the mock; the create-event
+                        #   node will be flagged as having a stub binding
+                        #   (that's OK for this task)
+  ./convert.sh CalendarReminder
+  uip maestro flow validate CalendarReminder.flow
+  uip maestro flow tidy CalendarReminder.flow
+  ```
+
+success_criteria:
+  - type: file_exists
+    description: "FIL source file exists"
+    path: "CalendarReminder.fil.ts"
+    weight: 1.0
+  - type: file_exists
+    description: "Manifest exists"
+    path: "CalendarReminder.manifest.flow"
+    weight: 1.0
+  - type: file_exists
+    description: "Bindings file exists"
+    path: "bindings.json"
+    weight: 1.0
+  - type: run_command
+    description: "FIL compiles"
+    command: "./parse-fil.sh CalendarReminder.fil.ts"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "v2 → v1 conversion succeeds"
+    command: "./convert.sh CalendarReminder"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Converted .flow validates"
+    command: "uip maestro flow validate CalendarReminder.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "tidy succeeds"
+    command: "uip maestro flow tidy CalendarReminder.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Manifest references the create-event-calendar node type"
+    command: |
+      python3 -c "
+      import json
+      m = json.load(open('CalendarReminder.manifest.flow'))
+      types = [n.get('type', '') for n in m.get('nodes', {}).values()]
+      hits = [t for t in types if 'create-event' in t and 'calendar' in t.lower()]
+      assert hits, f'expected a create-event-calendar node, got types={types}'
+      print(f'create-event node type: {hits[0]}')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "FIL passes the registry-defined input fields (subject + start.dateTime + end.dateTime + timezone)"
+    command: |
+      python3 -c "
+      src = open('CalendarReminder.fil.ts').read()
+      # The registry's required fields for create-event-calendar-event are:
+      # subject, start.dateTime, end.dateTime, timezone. The agent's executeNode
+      # call should pass all four. We accept either the dotted form
+      # ('start.dateTime') or the nested object form ('start: { dateTime: ... }').
+      missing = []
+      if 'subject' not in src: missing.append('subject')
+      if 'dateTime' not in src: missing.append('dateTime (start.dateTime / end.dateTime)')
+      if 'timezone' not in src: missing.append('timezone')
+      if 'start' not in src: missing.append('start')
+      if 'end' not in src: missing.append('end')
+      assert not missing, f'FIL missing required parameter names: {missing}'
+      print('All required parameter names present')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0

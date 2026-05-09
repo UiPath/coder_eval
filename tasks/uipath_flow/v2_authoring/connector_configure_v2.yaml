@@ -1,0 +1,150 @@
+task_id: uipath-flow-v2-connector-configure
+description: >
+  v2 port of the connector-configure task: a real Slack-notify flow with a
+  configured connector node. Tests the v2 binding model end-to-end (manifest
+  binding → bindings.json resourceKey → real connection UUID).
+tags: [flow-v2, fil, generate, connector, slack]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 50
+  turn_timeout: 1500
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-v2"
+
+initial_prompt: |
+  Author a UiPath Flow v2 project named **SlackNotifier** in the current
+  directory. Read `SKILL.md` first — pay particular attention to the
+  binding model: `bindings.json` declares named bindings with
+  `resourceKey` (a real connection UUID); the manifest's connector node
+  references the binding's `id`. Worked example in `example/`.
+
+  ## Scenario
+
+  A flow that sends a Slack message to a configured channel.
+
+  Discover the Slack connection:
+  1. `uip is connections list` — find a Slack connection (`ConnectorKey:
+     uipath-salesforce-slack`). Note its `Id` and `FolderKey`.
+  2. Look up the send-message activity with
+     `uip maestro flow registry search "slack"`. The full v2 typeRef will
+     look like
+     `uipath.connector.uipath-salesforce-slack.send-message-to-channel@1.0.0`
+     (or `send-message-to-user@1.0.0` if you prefer DMs).
+
+  Author the v2 project:
+  - Manual trigger → Slack send-message → End.
+  - The connector node's `binding` in the manifest is the connection UUID
+    (verbatim, not a binding-id reference).
+  - `folderBinding` is the FolderKey UUID.
+  - `bindings.json` must include both bindings (Slack connection and
+    FolderKey) so v2-to-v1 produces a valid v1 bindings array.
+
+  ## Files to write (project root)
+
+  - `SlackNotifier.fil.ts`        FIL source
+  - `SlackNotifier.manifest.flow` Manifest
+  - `bindings.json`               Bindings (folder + Slack connection)
+
+  ## Authoring loop
+
+  ```bash
+  ./verify.sh           # compile + binding check; flow-run validates the
+                        # binding UUIDs against your real `uip is connections list`
+  ./convert.sh SlackNotifier
+  uip maestro flow validate SlackNotifier.flow
+  uip maestro flow tidy SlackNotifier.flow
+  ```
+
+  Iterate against `verify.sh` first. If it complains about a stub UUID or
+  a binding that's not in your tenant, it will list candidate connection
+  IDs from your tenant — paste the right one in.
+
+success_criteria:
+  - type: file_exists
+    description: "FIL source file exists"
+    path: "SlackNotifier.fil.ts"
+    weight: 1.0
+  - type: file_exists
+    description: "Manifest exists"
+    path: "SlackNotifier.manifest.flow"
+    weight: 1.0
+  - type: file_exists
+    description: "Bindings file exists"
+    path: "bindings.json"
+    weight: 1.0
+  - type: run_command
+    description: "FIL compiles"
+    command: "./parse-fil.sh SlackNotifier.fil.ts"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "v2 → v1 conversion succeeds"
+    command: "./convert.sh SlackNotifier"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Converted .flow validates"
+    command: "uip maestro flow validate SlackNotifier.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "tidy succeeds"
+    command: "uip maestro flow tidy SlackNotifier.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Manifest references the Slack connector"
+    command: "grep -E 'uipath\\.connector\\.uipath-salesforce-slack\\.' SlackNotifier.manifest.flow"
+    timeout: 5
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Manifest has both binding and folderBinding"
+    command: |
+      python3 -c "
+      import json, sys
+      m = json.load(open('SlackNotifier.manifest.flow'))
+      slack = [n for n in m['nodes'].values() if 'salesforce-slack' in n.get('type','')]
+      assert slack, 'no slack node in manifest'
+      n = slack[0]
+      assert n.get('binding') and n.get('folderBinding'), f'missing binding/folderBinding: {n}'
+      print('OK')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: llm_judge
+    description: "Flow uses a real Slack connection binding via v2 binding model"
+    prompt: |
+      Did the agent author a v2 Flow that:
+      (a) uses a Slack send-message connector node,
+      (b) has a manifest entry whose `binding` is a real ConnectionId UUID
+          (not a stub like 00000000-...),
+      (c) has a `folderBinding` that's also a real FolderKey UUID,
+      (d) includes corresponding entries in bindings.json that match those
+          UUIDs?
+      The FIL source, manifest, and bindings file are included below.
+    files:
+      - "SlackNotifier.fil.ts"
+      - "SlackNotifier.manifest.flow"
+      - "bindings.json"
+    weight: 3.0
+    pass_threshold: 0.7

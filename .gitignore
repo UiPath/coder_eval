@@ -61,3 +61,5 @@ reports/
 .DS_Store
 tmp/
 refs/
+# added by flow-run
+.flow-run/

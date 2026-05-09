@@ -1,0 +1,141 @@
+task_id: uipath-flow-v2-loop
+description: >
+  v2 port of the BatchProcessor loop task. Tests FIL's `for`/`for-of`
+  iteration emitting v1 core.logic.loop nodes with proper loopBack wiring.
+tags: [flow-v2, fil, generate, loop, mock]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 50
+  turn_timeout: 1200
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-v2"
+
+initial_prompt: |
+  Author a UiPath Flow v2 project named **BatchProcessor** in the current
+  directory. Read `SKILL.md` first — it describes the v2 file shape, FIL
+  syntax (including `for`/`for-of` loops), the manifest envelope, and the
+  authoring loop using `verify.sh`. Worked example in `example/`.
+
+  ## Scenario
+
+  Iterate over a batch of records and process each one.
+
+  1. Manual trigger.
+  2. A `core.logic.mock` placeholder for fetching the batch — configure
+     its fixture to return an array like `{ "items": [{"id":1},{"id":2},{"id":3}] }`
+     so verify.sh has data to iterate.
+  3. A FIL **`for-of`** loop over the items (e.g.
+     `for (const item of items) { ... }`). Use `for-of` specifically —
+     C-style `for (let i = 0; i < n; i++)` does NOT convert to a
+     `core.logic.loop` node, so it won't satisfy the loop-shape check.
+     Inside the loop body, call another `core.logic.mock` placeholder
+     representing the per-item action.
+  4. End after the loop completes.
+
+  **Heads-up:** SKILL.md's "Object literals with non-trivial values" section
+  flags a known FIL emitter bug — `JSON.stringify({ id: item.id })` (object
+  literal whose value is a multi-instruction expression like a json field
+  access or i32 conversion) fails to compile. Inside the loop, pass `"{}"`
+  for the per-item action's input (the mock doesn't read it), pass the json
+  item directly via `JSON.stringify(item)`, or concat the JSON as a string
+  (`"{\"id\":" + item.id + "}"`).
+
+  ## Files to write (project root)
+
+  - `BatchProcessor.fil.ts`        FIL source
+  - `BatchProcessor.manifest.flow` Manifest
+  - `bindings.json`                Empty bindings array
+
+  ## Authoring loop
+
+  ```bash
+  ./verify.sh           # compile + execute the for-of against the mock fixture
+  ./convert.sh BatchProcessor
+  uip maestro flow validate BatchProcessor.flow
+  uip maestro flow tidy BatchProcessor.flow
+  ```
+
+success_criteria:
+  - type: file_exists
+    description: "FIL source file exists"
+    path: "BatchProcessor.fil.ts"
+    weight: 1.0
+  - type: file_exists
+    description: "Manifest exists"
+    path: "BatchProcessor.manifest.flow"
+    weight: 1.0
+  - type: file_exists
+    description: "Bindings file exists"
+    path: "bindings.json"
+    weight: 1.0
+  - type: run_command
+    description: "FIL compiles"
+    command: "./parse-fil.sh BatchProcessor.fil.ts"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "verify.sh dry-run succeeds"
+    command: "./verify.sh"
+    timeout: 60
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "v2 → v1 conversion succeeds"
+    command: "./convert.sh BatchProcessor"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Converted .flow validates"
+    command: "uip maestro flow validate BatchProcessor.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "tidy succeeds"
+    command: "uip maestro flow tidy BatchProcessor.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Converted flow has a core.logic.loop node"
+    command: |
+      python3 -c "
+      import json, sys
+      ns = json.load(open('BatchProcessor.flow'))['nodes']
+      loops = [n for n in ns if n['type'] == 'core.logic.loop']
+      assert loops, 'expected at least one core.logic.loop node'
+      print(f'{len(loops)} loop node(s)')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: llm_judge
+    description: "Flow iterates over a batch with a loop"
+    prompt: |
+      Did the agent author a v2 Flow that:
+      (a) fetches a batch (mock placeholder),
+      (b) iterates over the batch with a FIL for/for-of loop,
+      (c) processes each item via another mock placeholder inside the loop body,
+      (d) ends after the loop?
+      The FIL source and manifest are included below.
+    files:
+      - "BatchProcessor.fil.ts"
+      - "BatchProcessor.manifest.flow"
+    weight: 2.0
+    pass_threshold: 0.7

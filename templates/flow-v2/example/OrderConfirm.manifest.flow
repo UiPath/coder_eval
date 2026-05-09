@@ -1,0 +1,47 @@
+{
+  "schemaVersion": "1",
+  "flowId": "order-confirm",
+  "flowName": "Order Confirm",
+  "flowVersion": "1.0.0",
+  "solutionId": "00000000-0000-0000-0000-000000000000",
+  "projectId": "00000000-0000-0000-0000-000000000000",
+  "nodes": {
+    "start": {
+      "type": "core.trigger.manual@1.0.0",
+      "ui": {
+        "position": {
+          "x": 256,
+          "y": 144
+        }
+      },
+      "label": "Start",
+      "rawInputs": {}
+    },
+    "uipath.connector.uipath-microsoft-outlook365.get-email-list": {
+      "type": "uipath.connector.uipath-microsoft-outlook365.get-email-list@1.0.0",
+      "ui": {
+        "position": {
+          "x": 432,
+          "y": 144
+        }
+      },
+      "label": "Get Email List",
+      "binding": "00000000-0000-0000-0000-000000000001",
+      "configuration": {},
+      "folderBinding": "00000000-0000-0000-0000-00000000000F"
+    },
+    "uipath.connector.uipath-salesforce-slack.send-message-to-channel": {
+      "type": "uipath.connector.uipath-salesforce-slack.send-message-to-channel@1.0.0",
+      "ui": {
+        "position": {
+          "x": 784,
+          "y": 80
+        }
+      },
+      "label": "Send Slack Message",
+      "binding": "00000000-0000-0000-0000-000000000002",
+      "configuration": {},
+      "folderBinding": "00000000-0000-0000-0000-00000000000F"
+    }
+  }
+}

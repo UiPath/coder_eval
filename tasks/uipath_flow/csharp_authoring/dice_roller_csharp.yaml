@@ -1,0 +1,157 @@
+task_id: uipath-flow-csharp-dice-roller
+description: >
+  C# port of the dice-roller task. Tests the replay-safe pattern: random output
+  must come from a script node invoked via `connector.ExecuteNodeAsync(...)`,
+  not from a sync helper (which would re-roll on every FIL replay and break
+  history). Exercises the direct-ExecuteNodeAsync path the agent reaches when
+  there's no generated wrapper class.
+tags: [flow-csharp, csharp, generate, script]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 60
+  turn_timeout: 1500
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-csharp"
+
+initial_prompt: |
+  Author a UiPath C# Flow workflow named **DiceRoller** in the current
+  directory. Read `SKILL.md` first — it describes the five-phase lifecycle
+  (scaffold → author + test in C# → convert to v2 → convert to v1 → validate
+  + tidy).
+
+  ## Scenario
+
+  Simulate rolling a six-sided die. Output a random integer 1-6.
+
+  **Replay safety:** the analyzer (CS2FIL021) rejects `Random.Next` and
+  similar non-deterministic calls inside sync helper methods. That's
+  intentional — sync helpers map to FIL `__script_<id>` functions that are
+  inlined into the state machine and run on every replay. Different rolls
+  per replay would break history.
+
+  Instead, invoke a script node via the connector. The C# pattern:
+
+  ```csharp
+  string rolledRaw = await connector.ExecuteNodeAsync(
+      "core.action.script",
+      "roll1",
+      "",  // bindingId — script nodes don't need a connection
+      "{\"script\":\"return Math.floor(Math.random() * 6) + 1;\"}");
+  ```
+
+  This emits FIL `executeNode("core.action.script", ...)` whose result is
+  captured in history once per real run; replays read the recorded value.
+
+  ## Phases
+
+  ```bash
+  dotnet new csflow --name DiceRoller
+  cd DiceRoller
+  # edit Workflow.cs to call the script node
+  dotnet build
+  dotnet run -- --test
+  cd ..
+  ./convert-to-v2.sh DiceRoller
+  ./convert-to-v1.sh DiceRoller
+  ./validate.sh    DiceRoller
+  ```
+
+success_criteria:
+  - type: file_exists
+    description: "C# project Workflow.cs exists"
+    path: "DiceRoller/Workflow.cs"
+    weight: 1.0
+  - type: run_command
+    description: "C# project builds (analyzers pass)"
+    command: "dotnet build DiceRoller/DiceRoller.csproj"
+    timeout: 120
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "C# project runs in test mode"
+    command: "dotnet run --project DiceRoller -- --test"
+    timeout: 120
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: file_exists
+    description: "FIL output exists"
+    path: "DiceRoller/DiceRoller.fil"
+    weight: 1.0
+  - type: file_exists
+    description: "Manifest exists"
+    path: "DiceRoller/DiceRoller.manifest.flow"
+    weight: 1.0
+  - type: run_command
+    description: "FIL invokes a script node via executeNode (not an inlined __script_ helper)"
+    command: |
+      python3 -c "
+      import json, re
+      fil = open('DiceRoller/DiceRoller.fil').read()
+      manifest = json.load(open('DiceRoller/DiceRoller.manifest.flow'))
+      assert 'random' in fil.lower(), 'expected random expression in the script body'
+      script_ids = [nid for nid, n in manifest['nodes'].items() if n['type'].startswith('core.action.script')]
+      assert script_ids, f'no script node in manifest: {list(manifest[\"nodes\"])}'
+      assert any(re.search(rf'executeNode\(\"{re.escape(sid)}\"', fil) for sid in script_ids), \
+        f'no executeNode call to a script-typed nodeId. script ids={script_ids}, FIL=\n{fil}'
+      print(f'script node {script_ids[0]} invoked via executeNode')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: file_exists
+    description: "v1 .flow exists"
+    path: "DiceRoller.flow"
+    weight: 1.0
+  - type: run_command
+    description: "v1 .flow validates"
+    command: "uip maestro flow validate DiceRoller.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "tidy succeeds"
+    command: "uip maestro flow tidy DiceRoller.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: llm_judge
+    description: "Workflow implements a replay-safe six-sided die roll"
+    prompt: |
+      Two things matter:
+
+      1. The workflow simulates a fair six-sided die — produces an integer in
+         {1..6}. Any algebraically correct formula counts.
+
+      2. **Replay safety**: the random call is in a script node body invoked
+         via `connector.ExecuteNodeAsync("core.action.script", ...)`, NOT
+         inside a sync helper method on the Workflow class.
+
+         If the agent wrote `private int RollDie() => ...Random...`, the
+         analyzer would have rejected it (CS2FIL021). If they bypassed by
+         using `DateTime.UtcNow.Ticks` or some other side-channel, that's
+         also replay-broken — score this criterion ≤ 0.4.
+
+      Scoring:
+        • 1.0 if both: correct 1-6 die AND replay-safe (script-node path).
+        • 0.5 if correct die but the random call lives in a sync helper.
+        • 0.3 if range is wrong but structure is right.
+        • 0   if no random output at all.
+    files:
+      - "DiceRoller/Workflow.cs"
+      - "DiceRoller/DiceRoller.fil"
+      - "DiceRoller/DiceRoller.manifest.flow"
+    weight: 2.0
+    pass_threshold: 0.7

@@ -1,0 +1,141 @@
+task_id: uipath-flow-v2-order-notify
+description: >
+  Author a small Flow v2 project (FIL + manifest + bindings) describing a
+  Slack-notify-on-order workflow. Smallest reasonable v2 task — one branch,
+  two connectors, ~7 nodes after conversion. Verifies the agent can read
+  SKILL.md, write FIL, and produce a v1 .flow that `uip maestro flow
+  validate` accepts.
+tags: [flow-v2, fil, generate]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 50
+  turn_timeout: 1200
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-v2"
+
+initial_prompt: |
+  Author a UiPath Flow v2 project named **OrderNotify** in the current
+  directory. Read `SKILL.md` first — it describes the v2 file shape, FIL
+  syntax, the manifest envelope, and the binding requirements. There is a
+  worked example in `example/`.
+
+  ## Scenario
+
+  When a customer order email arrives in Outlook, post a Slack message to
+  `#orders` summarizing it; do nothing if there's no new email.
+
+  Concretely:
+  1. Get the most-recent unread email from the Outlook inbox.
+  2. If at least one email exists, send a Slack message to `#orders` with
+     the email's subject in the message body. Otherwise end without
+     posting.
+
+  ## Files to write (project root, not under `example/`)
+
+  - `OrderNotify.fil.ts`        FIL source
+  - `OrderNotify.manifest.flow`     Manifest
+  - `bindings.json`             Connection IDs (stub UUIDs are fine)
+
+  ## Verifying your work
+
+  ```bash
+  ./verify.sh                                  # compile + binding check
+  ./convert.sh OrderNotify                     # produces OrderNotify.flow
+  uip maestro flow validate OrderNotify.flow   # must print "Result": "Success"
+  uip maestro flow tidy OrderNotify.flow       # designer-friendly layout
+  ```
+
+  Iterate until validate prints `"Result": "Success"`. Validation errors
+  point at fields in your manifest or bindings; conversion errors point at
+  FIL syntax or naming mismatches.
+
+  Connectors you'll need (look up with
+  `uip maestro flow registry search "<keyword>"`):
+  - `uipath.connector.uipath-microsoft-outlook365.get-email-list`
+  - `uipath.connector.uipath-salesforce-slack.send-message-to-channel`
+
+success_criteria:
+  # ── 1. Three v2 source files exist ───────────────────────────────────────
+  - type: file_exists
+    description: "FIL source file exists"
+    path: "OrderNotify.fil.ts"
+    weight: 1.0
+
+  - type: file_exists
+    description: "Manifest exists"
+    path: "OrderNotify.manifest.flow"
+    weight: 1.0
+
+  - type: file_exists
+    description: "Bindings exist"
+    path: "bindings.json"
+    weight: 1.0
+
+  # ── 2. FIL parses cleanly ────────────────────────────────────────────────
+  - type: run_command
+    description: "FIL compiles to WAT (parses cleanly)"
+    command: "./parse-fil.sh OrderNotify.fil.ts"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+  # ── 3. v2 → v1 conversion succeeds ───────────────────────────────────────
+  - type: run_command
+    description: "v2 → v1 conversion produces OrderNotify.flow"
+    command: "./convert.sh OrderNotify"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  # ── 4. uip maestro flow validate passes ──────────────────────────────────
+  - type: run_command
+    description: "Converted .flow passes uip maestro flow validate"
+    command: "uip maestro flow validate OrderNotify.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  # ── 5. Converted flow has the expected structural shape ──────────────────
+  - type: run_command
+    description: "Converted .flow uses Outlook + Slack connectors and a decision branch"
+    command: |
+      python3 -c "
+      import json
+      ns = json.load(open('OrderNotify.flow'))['nodes']
+      types = [n['type'] for n in ns]
+      assert any('outlook365' in t for t in types), f'no Outlook node: {types}'
+      assert any('salesforce-slack' in t for t in types), f'no Slack node: {types}'
+      assert 'core.logic.decision' in types, f'no decision node: {types}'
+      print(f'{len(ns)} nodes: {types}')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  # ── 6. Semantic correctness ──────────────────────────────────────────────
+  - type: llm_judge
+    description: "Flow implements the described behavior"
+    prompt: |
+      Did the agent author a v2 Flow that:
+      (a) reads emails from Outlook (uipath-microsoft-outlook365.get-email-list),
+      (b) branches on whether at least one email exists, and
+      (c) sends a Slack message via uipath-salesforce-slack.send-message-to-channel
+          on the "exists" path only?
+      The FIL source and manifest are included below.
+    files:
+      - "OrderNotify.fil.ts"
+      - "OrderNotify.manifest.flow"
+    weight: 2.0
+    pass_threshold: 0.7
