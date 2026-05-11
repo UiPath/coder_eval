@@ -77,23 +77,6 @@ class AgentConfig(BaseModel):
             'specific paths: {"permissions": {"deny": ["Read(/some/path/**)"]}}.'
         ),
     )
-    isolation: bool = Field(
-        default=False,
-        description=(
-            "Isolate the agent from the host filesystem outside its working directory "
-            "and configured plugin paths. When true, the framework auto-configures: "
-            "(1) OS-level bash sandboxing via SandboxSettings, "
-            "(2) permission deny rules covering / and ~, "
-            "(3) path-scoped allowed_tools so Read/Write/Glob/Grep can only see "
-            "<cwd> and declared plugins. To whitelist additional paths, add entries "
-            "under `claude_settings.permissions.allow`. "
-            "PLATFORM NOTE: full enforcement requires Linux (uses bwrap mount "
-            "namespaces). On macOS the underlying Seatbelt profile explicitly allows "
-            "all file reads, so Bash subprocesses can still read host paths even with "
-            "isolation=true. The Read/Write/Glob/Grep tool restrictions apply on both "
-            "platforms; only the Bash filesystem perimeter is Linux-only."
-        ),
-    )
 
     @model_validator(mode="after")
     def check_prompt_exclusivity(self) -> Self:
