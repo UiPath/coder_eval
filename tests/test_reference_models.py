@@ -30,12 +30,12 @@ class TestReferenceSource:
 
     def test_exclusive_source(self):
         """Cannot provide both code and file."""
-        with pytest.raises(ValidationError, match="Only one of 'code' or 'file'"):
+        with pytest.raises(ValidationError, match="Only one of"):
             ReferenceSource(code="print('hello')", file="ref.py")
 
     def test_requires_source(self):
         """Must provide at least one source."""
-        with pytest.raises(ValidationError, match="One of 'code' or 'file' must be provided"):
+        with pytest.raises(ValidationError, match="One of"):
             ReferenceSource()
 
 

@@ -188,7 +188,7 @@ async def test_no_timeout_when_none(tmp_path) -> None:
         return_value=[CriterionResult(criterion_type="file_exists", description="test", score=1.0)]
     )
 
-    with patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)):
+    with patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)):
         success = await orchestrator._evaluation_loop()
 
     assert success is True
@@ -330,7 +330,7 @@ async def test_turn_timeout_is_per_attempt_not_cycle(tmp_path):
         return None
 
     with (
-        patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)),
+        patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
         patch("asyncio.sleep", side_effect=fast_retry_sleep),
     ):
         success = await orchestrator._evaluation_loop()
@@ -396,7 +396,7 @@ async def test_wait_for_backstop_calls_discard_pending_turn(tmp_path):
     orchestrator.success_checker = mock_checker
 
     with (
-        patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)),
+        patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
         pytest.raises(TurnTimeoutError),
     ):
         await orchestrator._evaluation_loop()

@@ -71,6 +71,7 @@ class SubAgentRunner:
         agent_config: AgentConfig,
         ignore_patterns: list[str],
         route: ApiRoute,
+        reference_dir: Path | None = None,
     ) -> None:
         # SECURITY: setting_sources=[] is enforced by the caller — it's the caller's
         # responsibility to build the AgentConfig correctly because the field is part of
@@ -87,6 +88,11 @@ class SubAgentRunner:
         self._agent_config = agent_config
         self._ignore_patterns = ignore_patterns
         self._route = route
+        # When set, copied into ``judge_dir / "_reference"`` after the main sandbox
+        # copy. The judge can browse it via Read/Glob. ``None`` skips the copy —
+        # callers MUST set this to None when the criterion has ``include_reference=False``
+        # so the judge can't see grading material it was opted out of.
+        self._reference_dir = reference_dir
 
     def run(self, user_msg: str, *, max_turns: int | None, turn_timeout: float) -> TurnRecord:
         """Copy sandbox → start agent → communicate → stop. Kill on any exception.
@@ -111,6 +117,34 @@ class SubAgentRunner:
                 ignore=_ignore_patterns_and_symlinks(self._ignore_patterns),
                 dirs_exist_ok=True,  # mkdtemp already created the target; allow merging in
             )
+
+            # Mount the reference solution at ``_reference/`` for the judge to browse.
+            # Same symlink-stripping ignore rules apply — a hostile symlink in the
+            # reference (unlikely but possible) shouldn't escape into the judge's reach.
+            #
+            # Defense-in-depth: ``AgentJudgeCriterion.ignore_patterns`` includes
+            # ``_reference`` so the first copytree above strips any sandbox-side
+            # ``_reference/`` (agent-planted or template-staged). If a caller
+            # overrides ignore_patterns and removes ``_reference``, the second
+            # copytree would FileExistsError; rmtree is the safety net AND ensures
+            # the judge sees grading material exclusively from ``task.reference``.
+            if self._reference_dir is not None:
+                ref_dest = judge_dir / "_reference"
+                if ref_dest.exists():
+                    shutil.rmtree(ref_dest, ignore_errors=True)
+                # Deliberately NO ``dirs_exist_ok=True`` here. The rmtree above
+                # is the canonical clear; if any file survives (read-only flag,
+                # ENOTEMPTY race, hostile permission bits), we want copytree to
+                # FileExistsError loudly rather than silently merge the reference
+                # into agent-planted content under the same path. Loud failure on
+                # a partial-rmtree edge case is preferred over silently grading
+                # against a tampered ``_reference/``.
+                shutil.copytree(
+                    self._reference_dir,
+                    ref_dest,
+                    symlinks=True,
+                    ignore=_ignore_patterns_and_symlinks(self._ignore_patterns),
+                )
 
             agent = ClaudeCodeAgent(self._agent_config, route=self._route)
             logger.info(

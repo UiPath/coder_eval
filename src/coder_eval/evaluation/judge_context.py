@@ -13,11 +13,13 @@ but retrieval/truncation/degradation logic is SSOT here.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from coder_eval.evaluation.summaries import summarize_commands
+from coder_eval.models import JudgeTranscript, JudgeTranscriptToolCall
 
 
 # Paths in `llm_judge.files` / `agent_judge.files` that begin with this token are
@@ -29,6 +31,7 @@ TASK_DIR_TOKEN = "$TASK_DIR"
 
 if TYPE_CHECKING:
     from coder_eval.models.results import TurnRecord
+    from coder_eval.models.telemetry import CommandTelemetry
     from coder_eval.sandbox import Sandbox
 
 
@@ -79,15 +82,99 @@ def truncate(text: str, limit: int) -> str:
     return text[:limit] + f"\n... (truncated, orig {len(text)} chars)"
 
 
-def scrub_reference(content: str, reference_code: str | None) -> str:
-    """Redact any occurrence of ``reference_code`` in ``content``.
+def scrub_reference(content: str, secrets: str | Iterable[str] | None) -> str:
+    """Redact any occurrence of each secret in ``content``.
 
-    No-op when ``reference_code`` is ``None`` or the empty string — guards
-    against ``"".replace("", "<redacted>")`` ballooning the string.
+    Accepts a single string (the original behavior — used for ``code`` / ``file``
+    references), an iterable of strings (used for ``directory`` references where
+    every file's content must be redacted), or ``None`` (no-op).
+
+    No-op for ``None`` or empty inputs — guards against the
+    ``"".replace("", "<redacted>")`` pathology that ballooned strings.
+    Secrets shorter than 8 characters are skipped: redacting a tiny common
+    substring (e.g. ``" = 1"``) would produce gibberish output and isn't a
+    realistic leak vector — references at that scale carry no proprietary
+    information. Directory-mode caveat: every file in the reference directory
+    becomes its own secret entry, so a reference solution that includes very
+    short files (a one-liner ``__init__.py``, a tiny config blob) will leave
+    those files unscrubbed — mention this explicitly because the per-file
+    threshold is invisible at the call site.
     """
-    if not reference_code:
+    if secrets is None:
         return content
-    return content.replace(reference_code, "<reference redacted>")
+    if isinstance(secrets, str):
+        items: list[str] = [secrets] if secrets else []
+    else:
+        items = [s for s in secrets if s]
+
+    out = content
+    for s in items:
+        if len(s) < 8:
+            continue
+        out = out.replace(s, "<reference redacted>")
+    return out
+
+
+# Budget for ``collect_reference_secrets``. Reference directories are expected to
+# be small project skeletons (a handful of source files); a runaway tree (vendored
+# node_modules, generated XML, embedded assets) must not pull the host into an OOM
+# or hang the walk. When a budget triggers we log + stop reading more files —
+# remaining files are left unscrubbed, which is no worse than the pre-budget world
+# would have been if the user had pointed at a code-form reference instead.
+_MAX_REFERENCE_FILES = 200
+_MAX_REFERENCE_BYTES = 2 * 1024 * 1024  # 2 MB total content cap
+
+
+def collect_reference_secrets(reference_dir: Path) -> list[str]:
+    """Read every file under ``reference_dir`` and return their contents.
+
+    Used by ``agent_judge`` to build the secret set for ``scrub_reference``
+    when the reference is a directory: a misbehaving judge that echoes any
+    file's content into its findings/transcript should have it redacted
+    before persistence. Binary files and unreadable files are skipped
+    silently — they're not realistic leak vectors and reading them would
+    raise UnicodeDecodeError.
+
+    Symlinks are NOT followed: a reference bundle that ships
+    ``secrets -> /etc/passwd`` would otherwise read the host file into the
+    scrub-key list (and quietly grow it), and a symlinked subdir back to the
+    root would loop ``rglob`` forever.
+
+    File count and total content are capped (``_MAX_REFERENCE_FILES`` /
+    ``_MAX_REFERENCE_BYTES``) — when either trips we log + stop. Remaining
+    files are left unscrubbed; the cap is sized well above any realistic
+    reference skeleton, so this only fires for misconfigured trees.
+
+    Returns an empty list when the directory is missing or empty.
+    """
+    if not reference_dir.is_dir():
+        return []
+    secrets: list[str] = []
+    total_bytes = 0
+    for path in reference_dir.rglob("*"):
+        if len(secrets) >= _MAX_REFERENCE_FILES or total_bytes >= _MAX_REFERENCE_BYTES:
+            logger.warning(
+                "collect_reference_secrets: reference directory %s exceeds budget "
+                "(>%d files or >%d bytes) — remaining files left unscrubbed",
+                reference_dir,
+                _MAX_REFERENCE_FILES,
+                _MAX_REFERENCE_BYTES,
+            )
+            break
+        # ``is_symlink()`` is checked BEFORE ``is_file()`` so symlinked regular
+        # files are skipped too — we want a single uniform "no symlinks" rule.
+        if path.is_symlink():
+            continue
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        if text:
+            secrets.append(text)
+            total_bytes += len(text)
+    return secrets
 
 
 @dataclass
@@ -261,3 +348,130 @@ def format_details(score: float, rationale: str, missing_files: list[str], degra
     if degraded_notes:
         lines.append(f"notes: {'; '.join(degraded_notes)}")
     return "\n".join(lines)
+
+
+# Per-tool detail/result_preview cap used when capturing an agent_judge transcript.
+# Generous enough to preserve audit value (a typical Bash command, a grep pattern,
+# a tool result blurb) but small enough that 100+ tool calls fit under the default
+# max_transcript_chars=100_000 cap before truncation kicks in.
+_TRANSCRIPT_DETAIL_CAP = 200
+_TRANSCRIPT_RESULT_CAP = 200
+
+
+def _summarize_command_for_transcript(cmd: CommandTelemetry) -> JudgeTranscriptToolCall:
+    """Reduce one ``CommandTelemetry`` to the audit fields a reviewer needs."""
+    detail = ""
+    params = cmd.parameters
+    if cmd.tool_name == "Bash" and "command" in params:
+        detail = str(params["command"])[:_TRANSCRIPT_DETAIL_CAP]
+    elif cmd.tool_name in ("Read", "Write", "Edit") and "file_path" in params:
+        detail = str(params["file_path"])[:_TRANSCRIPT_DETAIL_CAP]
+    elif cmd.tool_name in ("Glob", "Grep") and "pattern" in params:
+        detail = f"pattern={str(params['pattern'])[:_TRANSCRIPT_DETAIL_CAP]}"
+    elif cmd.tool_name in ("Task", "Agent") and "description" in params:
+        detail = str(params["description"])[:_TRANSCRIPT_DETAIL_CAP]
+    result_preview = (cmd.result_summary or "")[:_TRANSCRIPT_RESULT_CAP]
+    return JudgeTranscriptToolCall(
+        tool_name=cmd.tool_name,
+        detail=detail,
+        status=cmd.result_status or "unknown",
+        result_preview=result_preview,
+    )
+
+
+def build_judge_transcript(
+    *,
+    raw_verdict: str,
+    commands: list[CommandTelemetry] | None = None,
+    token_usage: object = None,
+    duration_seconds: float = 0.0,
+    judge_system_prompt: str = "",
+    judge_prompt: str = "",
+    max_chars: int,
+    scrub_key: str | Iterable[str] | None,
+) -> JudgeTranscript:
+    """Assemble a ``JudgeTranscript`` from raw judge telemetry.
+
+    Truncation strategy: budget ``max_chars`` across (raw_verdict + each tool
+    call's detail + result_preview + the rendered judge_prompt and
+    judge_system_prompt). When the running total exceeds the cap, drop trailing
+    tool calls and clip the raw verdict / prompt — set ``truncated=True`` so
+    downstream consumers can flag it. Reference-scrubbing happens last so a
+    misbehaving judge that echoes the reference inside any field is sanitized
+    before persistence.
+    """
+    # token_usage is typed `object` to avoid an import cycle in the dataclass file;
+    # callers pass a `TokenUsage | None` and pydantic re-validates on field assignment.
+    cmds = commands or []
+    tool_calls = [_summarize_command_for_transcript(c) for c in cmds]
+
+    # Budget pass: keep tool calls until we exhaust the cap, then start clipping.
+    # The only way ``len(kept) < len(tool_calls)`` is to break out of the loop,
+    # and that branch already sets ``truncated = True`` — no post-loop redundant
+    # assignment needed.
+    used = 0
+    kept: list[JudgeTranscriptToolCall] = []
+    truncated = False
+    for tc in tool_calls:
+        cost = len(tc.detail) + len(tc.result_preview) + len(tc.tool_name) + len(tc.status)
+        if used + cost > max_chars:
+            truncated = True
+            break
+        kept.append(tc)
+        used += cost
+
+    # SECURITY: scrub BEFORE clipping. ``scrub_reference`` uses ``str.replace``,
+    # which only matches the secret as a contiguous whole string. If we clipped
+    # first, a multi-KB reference cut by the per-field budget would leave a
+    # partial fragment in the field that no longer matches the full secret —
+    # ``replace`` finds nothing, the prefix gets persisted unsanitized. Scrubbing
+    # first guarantees the secret is replaced with the short ``<reference redacted>``
+    # marker before any clipping, so on-disk fields can never carry partial
+    # reference content.
+    if scrub_key:
+        raw_verdict = scrub_reference(raw_verdict, scrub_key)
+        judge_prompt = scrub_reference(judge_prompt, scrub_key)
+        judge_system_prompt = scrub_reference(judge_system_prompt, scrub_key)
+        kept = [
+            tc.model_copy(
+                update={
+                    "detail": scrub_reference(tc.detail, scrub_key),
+                    "result_preview": scrub_reference(tc.result_preview, scrub_key),
+                }
+            )
+            for tc in kept
+        ]
+
+    # Distribute the remaining budget across raw_verdict / judge_prompt / system_prompt.
+    # A naive even split would clip the verdict (the most important field) for tasks
+    # with long rubrics; weight verdict at 60%, user prompt at 30%, system at 10%.
+    remaining = max(0, max_chars - used)
+    verdict_budget = int(remaining * 0.6)
+    prompt_budget = int(remaining * 0.3)
+    system_budget = max(0, remaining - verdict_budget - prompt_budget)
+
+    clipped_verdict = _clip(raw_verdict, verdict_budget)
+    clipped_prompt = _clip(judge_prompt, prompt_budget)
+    clipped_system = _clip(judge_system_prompt, system_budget)
+    if clipped_verdict != raw_verdict or clipped_prompt != judge_prompt or clipped_system != judge_system_prompt:
+        truncated = True
+
+    from coder_eval.models import TokenUsage
+
+    typed_usage: TokenUsage | None = token_usage if isinstance(token_usage, TokenUsage) else None
+    return JudgeTranscript(
+        tool_calls=kept,
+        token_usage=typed_usage,
+        duration_seconds=duration_seconds,
+        raw_verdict=clipped_verdict,
+        judge_system_prompt=clipped_system,
+        judge_prompt=clipped_prompt,
+        truncated=truncated,
+    )
+
+
+def _clip(text: str, budget: int) -> str:
+    """Clip ``text`` to ``budget`` chars, appending the orig-length marker when cut."""
+    if len(text) <= budget:
+        return text
+    return text[:budget] + f"\n... (truncated, orig {len(text)} chars)"

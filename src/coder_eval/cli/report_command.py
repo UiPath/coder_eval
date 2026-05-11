@@ -91,6 +91,8 @@ def _regenerate_html_reports(run_dir: Path, output_file: Path | None) -> None:
         console.print(msg)
         raise typer.Exit(1)
 
+    from ..evaluation.judge_persistence import load_judge_transcripts
+
     written: list[Path] = []
     failed: list[Path] = []
     for task_json in task_json_paths:
@@ -100,6 +102,9 @@ def _regenerate_html_reports(run_dir: Path, output_file: Path | None) -> None:
             console.print(f"[yellow]Skipping {task_json}: {e}[/yellow]")
             failed.append(task_json)
             continue
+        # Pull any spilled judge transcripts back onto the in-memory result so
+        # the HTML re-render shows the same disclosures the original run produced.
+        load_judge_transcripts(result, task_json.parent)
         target = output_file if output_file else task_json.with_name("task.html")
         written_path = write_task_html(result, target)
         if written_path is None:

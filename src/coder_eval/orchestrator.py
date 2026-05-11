@@ -54,7 +54,7 @@ from .models import (
 )
 from .orchestration.batch import run_batch as run_batch_impl
 from .orchestration.config import BatchRunConfig
-from .orchestration.evaluation import create_iteration_snapshot, load_reference_code
+from .orchestration.evaluation import create_iteration_snapshot, load_reference
 from .path_utils import format_task_log_id, task_log_path
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, UserSimulator, evaluate_stop
@@ -502,8 +502,25 @@ class Orchestrator:
 
         # Persist
         self.report_path.parent.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
+
+        # Spill any judge transcripts to sibling judge-<idx>.yaml files BEFORE
+        # we dump task.json, so transcript_path is set on each judge result.
+        # The inline `transcript` field stays in memory — HTML rendering below
+        # uses it directly. We strip it from the JSON dump via `exclude=...`.
+        from .evaluation.judge_persistence import spill_judge_transcripts
+
+        spill_judge_transcripts(self.result, self.report_path.parent)
+
         self.report_path.write_text(  # noqa: CE002 — small JSON write at end of run
-            self.result.model_dump_json(indent=2), encoding="utf-8"
+            self.result.model_dump_json(
+                indent=2,
+                # Strip inline transcripts: they live in sibling judge-<idx>.yaml
+                # next to task.json, referenced by transcript_path. Excluding
+                # `transcript` here avoids ~20-100 KB of bloat per judge result
+                # in the row record without losing any data.
+                exclude={"success_criteria_results": {"__all__": {"transcript"}}},
+            ),
+            encoding="utf-8",
         )
 
         # Also emit an HTML trace/report alongside task.json. HTML failure must
@@ -807,7 +824,10 @@ class Orchestrator:
                     unsupported,
                 )
             self.result.iteration_count = 1
-            reference_code, self._reference_code = load_reference_code(
+            # Load reference in evaluate-only mode too: judge criteria with
+            # include_reference=true expect this populated even when no agent
+            # runs. The agent-driven branch below has the same call.
+            reference_code, reference_dir, self._reference_code = load_reference(
                 task=self.task,
                 task_file=self.task_file,
                 cached_reference=self._reference_code,
@@ -816,6 +836,7 @@ class Orchestrator:
                 self.success_checker.check_all,
                 self.task.success_criteria,
                 reference_code=reference_code,
+                reference_dir=reference_dir,
                 turn_records=self.result.turns,
             )
             self.result.success_criteria_results = criteria_results
@@ -889,7 +910,7 @@ class Orchestrator:
 
         # Check success criteria (pass reference code for reference_comparison criterion)
         logger.debug("Checking success criteria")
-        reference_code, self._reference_code = load_reference_code(
+        reference_code, reference_dir, self._reference_code = load_reference(
             task=self.task,
             task_file=self.task_file,
             cached_reference=self._reference_code,
@@ -898,6 +919,7 @@ class Orchestrator:
             self.success_checker.check_all,
             self.task.success_criteria,
             reference_code=reference_code,
+            reference_dir=reference_dir,
             turn_records=self.result.turns,
         )
         self.result.success_criteria_results = criteria_results
@@ -1104,7 +1126,7 @@ class Orchestrator:
 
                 criteria_checked_this_turn = False
                 if check_every_turn:
-                    reference_code, self._reference_code = load_reference_code(
+                    reference_code, reference_dir, self._reference_code = load_reference(
                         task=self.task,
                         task_file=self.task_file,
                         cached_reference=self._reference_code,
@@ -1113,6 +1135,7 @@ class Orchestrator:
                         self.success_checker.check_all,
                         self.task.success_criteria,
                         reference_code=reference_code,
+                        reference_dir=reference_dir,
                         turn_records=self.result.turns,
                     )
                     self.result.success_criteria_results = criteria_results
@@ -1175,7 +1198,7 @@ class Orchestrator:
                 sim_config.check_criteria in ("end_of_dialog", "both") or not criteria_checked_this_turn
             )
             if end_of_dialog_needed:
-                reference_code, self._reference_code = load_reference_code(
+                reference_code, reference_dir, self._reference_code = load_reference(
                     task=self.task,
                     task_file=self.task_file,
                     cached_reference=self._reference_code,
@@ -1184,6 +1207,7 @@ class Orchestrator:
                     self.success_checker.check_all,
                     self.task.success_criteria,
                     reference_code=reference_code,
+                    reference_dir=reference_dir,
                     turn_records=self.result.turns,
                 )
                 self.result.success_criteria_results = criteria_results

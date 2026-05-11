@@ -82,6 +82,109 @@ def _make_result(
     )
 
 
+def test_task_html_renders_judge_section():
+    """JudgeCriterionResult renders in a dedicated 'Judge Verdicts' section with
+    a per-judge card showing rationale, findings, and transcript disclosure."""
+    from coder_eval.models import JudgeCriterionResult, JudgeTranscript, JudgeTranscriptToolCall
+
+    judge = JudgeCriterionResult(
+        criterion_type="agent_judge",
+        description="grade project",
+        score=0.7,
+        details="score=0.700\nrationale: workflow looks correct overall",
+        findings=["main.xaml passes xmllint — correct", "tests/ directory missing — issue"],
+        transcript=JudgeTranscript(
+            tool_calls=[
+                JudgeTranscriptToolCall(
+                    tool_name="Bash",
+                    detail="xmllint --noout main.xaml",
+                    status="success",
+                    result_preview="OK (no errors)",
+                ),
+                JudgeTranscriptToolCall(
+                    tool_name="Read",
+                    detail="main.xaml",
+                    status="success",
+                    result_preview="File read: 482 bytes",
+                ),
+            ],
+            duration_seconds=2.5,
+            raw_verdict='{"score": 0.7, "rationale": "ok"}',
+            truncated=False,
+        ),
+    )
+    result = _make_result(criteria=[judge])
+    html = HTMLReportGenerator.generate_task_html(result)
+
+    # Dedicated section — appears after the criteria table.
+    assert "Judge Verdicts (1)" in html
+    assert 'class="judge-section"' in html
+    assert 'class="judge-card' in html
+    # Rationale extracted from details.
+    assert "workflow looks correct overall" in html
+    # Findings rendered as a list (open by default).
+    assert "Findings (2)" in html
+    assert "main.xaml passes xmllint" in html
+    # Transcript disclosure stays collapsible.
+    assert "Judge transcript (2 tool calls)" in html
+    assert "xmllint --noout main.xaml" in html
+    assert "duration: 2.5s" in html
+    assert "Raw verdict" in html
+
+
+def test_task_html_judge_section_round_trips_from_extras():
+    """Reading task.json back into a base CriterionResult preserves judge fields
+    via ``extra='allow'`` — the Judge Verdicts section must surface them whether
+    they arrive as typed JudgeCriterionResult or as model_extra dicts."""
+    base = CriterionResult(
+        criterion_type="agent_judge",
+        description="grade project",
+        score=0.6,
+        details="score=0.600\nrationale: round-tripped",
+        # These come in as extras after a model_validate_json round-trip.
+        findings=["finding via extras"],  # type: ignore[call-arg]
+        transcript={
+            "tool_calls": [
+                {
+                    "tool_name": "Grep",
+                    "detail": "pattern=foo",
+                    "status": "success",
+                    "result_preview": "match",
+                }
+            ],
+            "duration_seconds": 1.0,
+            "raw_verdict": "raw",
+            "truncated": False,
+            "token_usage": None,
+        },  # type: ignore[call-arg]
+    )
+    result = _make_result(criteria=[base])
+    html = HTMLReportGenerator.generate_task_html(result)
+
+    assert "Judge Verdicts (1)" in html
+    assert "round-tripped" in html
+    assert "finding via extras" in html
+    assert "pattern=foo" in html
+
+
+def test_task_html_non_judge_criterion_no_judge_section():
+    """A regular file_exists criterion should NOT emit a Judge Verdicts section."""
+    result = _make_result(
+        criteria=[
+            CriterionResult(
+                criterion_type="file_exists",
+                description="Main.cs exists",
+                score=1.0,
+                details="File exists",
+            )
+        ],
+    )
+    html = HTMLReportGenerator.generate_task_html(result)
+    assert "Judge Verdicts" not in html
+    assert "Judge transcript" not in html
+    assert "Findings (" not in html
+
+
 def test_task_html_minimal_success():
     result = _make_result(
         criteria=[

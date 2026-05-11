@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
 
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind, FinalStatus
@@ -50,7 +50,17 @@ class TaskConfigRecord(BaseModel):
 
 
 class CriterionResult(BaseModel):
-    """Result of checking a single success criterion."""
+    """Result of checking a single success criterion.
+
+    ``extra="allow"`` lets subclass-specific fields (e.g. ``observed_label`` from
+    ``ClassificationCriterionResult``, ``analysis`` / ``transcript`` from
+    ``JudgeCriterionResult``) round-trip through ``EvaluationResult.model_dump`` →
+    ``model_validate_json``. Without this, the typed list ``list[CriterionResult]``
+    silently strips fields that aren't on the base class when reading task.json
+    back — losing the audit data that's the whole point of the verbose verdict.
+    """
+
+    model_config = ConfigDict(extra="allow")
 
     criterion_type: str = Field(description="Type of criterion")
     description: str = Field(description="Description of what was checked")
@@ -80,6 +90,101 @@ class ClassificationCriterionResult(CriterionResult):
         description="Observed label emitted by the criterion (sentinels like '(none)' / '(other)' allowed)."
     )
     expected_label: str = Field(description="Ground-truth label threaded through from the task / dataset row.")
+
+
+class JudgeTranscriptToolCall(BaseModel):
+    """One tool invocation by an ``agent_judge`` sub-agent — the audit trail for one step.
+
+    Sourced from ``CommandTelemetry`` and reduced to the fields a reviewer needs
+    to verify the judge's claims (tool, target, exit status). All free-form
+    string fields go through ``scrub_reference`` before persistence.
+    """
+
+    tool_name: str = Field(description="SDK tool name (Bash, Read, Grep, ...).")
+    detail: str = Field(
+        default="",
+        description="Per-tool target (Bash command, file path, grep pattern, ...). Truncated and scrubbed.",
+    )
+    status: str = Field(default="unknown", description="success / error / unknown — copied from telemetry.")
+    result_preview: str = Field(
+        default="",
+        description="First ~200 chars of the tool result, truncated and scrubbed.",
+    )
+
+
+class JudgeTranscript(BaseModel):
+    """Captured trajectory of a judge sub-agent — written into ``JudgeCriterionResult``.
+
+    Populated by ``agent_judge`` from the returned ``TurnRecord``. ``llm_judge`` is
+    one-shot so its transcript only carries ``raw_verdict`` (the model's response),
+    ``token_usage``, and the rendered prompts; ``tool_calls`` is empty there.
+
+    ``judge_prompt`` and ``judge_system_prompt`` capture the exact rendered envelope
+    sent to the judge so reviewers can answer "why did the judge say X?" by replaying
+    the input post-hoc. Both go through ``scrub_reference`` before persistence so a
+    reference solution embedded via ``include_reference=true`` doesn't leak.
+    """
+
+    tool_calls: list[JudgeTranscriptToolCall] = Field(
+        default_factory=list,
+        description="Ordered tool invocations made by the judge during evaluation.",
+    )
+    token_usage: TokenUsage | None = Field(default=None, description="Token usage for the judge's turn.")
+    duration_seconds: float = Field(default=0.0, description="Wall-clock duration of the judge's turn.")
+    raw_verdict: str = Field(
+        default="",
+        description="Scrubbed + truncated raw text of the judge's final assistant message.",
+    )
+    judge_system_prompt: str = Field(
+        default="",
+        description="Scrubbed + truncated system prompt the judge was started with (constant per criterion config).",
+    )
+    judge_prompt: str = Field(
+        default="",
+        description=(
+            "Scrubbed + truncated rendered user message — the rubric + reference + artifacts + "
+            "dialog blocks the judge actually saw. Variable per row."
+        ),
+    )
+    truncated: bool = Field(
+        default=False,
+        description="True when the captured transcript was clipped to fit ``max_transcript_chars``.",
+    )
+
+
+class JudgeCriterionResult(CriterionResult):
+    """Per-row result for judge criteria (``llm_judge`` / ``agent_judge``).
+
+    Carries ``findings`` (bullet evidence the judge cited from the artifacts)
+    and an optional ``transcript`` so reviewers can audit the judge's verdict
+    instead of having to trust the one-line rationale alone. Subclass (rather
+    than base fields) keeps non-judge results lean.
+    """
+
+    findings: list[str] = Field(
+        default_factory=list,
+        description="Bullet observations the judge cited from the artifacts. Scrubbed before persistence.",
+    )
+    transcript: JudgeTranscript | None = Field(
+        default=None,
+        description=(
+            "Captured judge trajectory (tool calls + token usage + raw verdict). "
+            "None when the criterion sets ``capture_transcript=False`` or "
+            "when the judge errored before producing a turn. Held in memory "
+            "during the run for HTML rendering; excluded from ``task.json`` "
+            "via ``model_dump_json(exclude=...)`` so on-disk records carry "
+            "only ``transcript_path`` to a sibling file."
+        ),
+    )
+    transcript_path: str | None = Field(
+        default=None,
+        description=(
+            "Filename of the sibling JSON file holding this result's full transcript "
+            "(e.g. ``judge-0.yaml``), relative to the directory containing ``task.json``. "
+            "Set by ``spill_judge_transcripts`` after the run; reloaded by "
+            "``load_judge_transcripts`` for re-rendering. None when no transcript was captured."
+        ),
+    )
 
 
 class FileChange(BaseModel):
@@ -226,8 +331,15 @@ class EvaluationResult(BaseModel):
         default=None, ge=0.0, le=1.0, description="Weighted average of criterion scores (0.0 to 1.0)"
     )
     iteration_count: int = Field(description="Number of iterations completed")
-    success_criteria_results: list[CriterionResult] = Field(
-        default_factory=list, description="Results of all success criteria checks"
+    success_criteria_results: list[SerializeAsAny[CriterionResult]] = Field(
+        default_factory=list,
+        description=(
+            "Results of all success criteria checks. ``SerializeAsAny`` is required so that "
+            "subclass-specific fields (e.g. ``JudgeCriterionResult.analysis`` / ``transcript``, "
+            "``ClassificationCriterionResult.observed_label``) are emitted by ``model_dump`` — "
+            "without it, pydantic serializes against the declared base type and silently drops "
+            "subclass fields, losing the audit data on disk."
+        ),
     )
 
     # Detailed transcript

@@ -207,26 +207,42 @@ class SimulationConfig(BaseModel):
 
 
 class ReferenceSource(BaseModel):
-    """Defines the source for reference solution code.
+    """Defines the source for the reference solution.
 
-    This code is NEVER shown to the agent being evaluated.
-    It is used by:
-    - LLMJudgeCriterion: To provide expert feedback comparing agent output to reference
-    - ReferenceComparisonCriterion: For objective code similarity checks
+    The reference is NEVER shown to the agent being evaluated. It is used by:
 
-    Security: Reference solutions must never leak into agent prompts or logs.
+    - ``LLMJudgeCriterion``: inlines the reference content into the judge prompt
+      (string forms only — ``code`` or ``file``).
+    - ``ReferenceComparisonCriterion``: computes AST/token similarity (string forms only).
+    - ``AgentJudgeCriterion``: with ``include_reference=true``, the reference is
+      copied into the judge sub-agent's working directory (single file inlined
+      into the prompt for ``code``/``file``; ``directory`` is mounted at
+      ``_reference/`` for the judge to ``Glob``/``Read`` over).
+
+    Exactly one of ``code``, ``file``, or ``directory`` must be provided.
+    Security: reference solutions must never leak into agent prompts or logs.
     """
 
     code: str | None = Field(default=None, description="Inline reference code (for simple, short solutions)")
     file: str | None = Field(default=None, description="Path to file containing reference code (relative to task YAML)")
+    directory: str | None = Field(
+        default=None,
+        description=(
+            "Path to a directory containing the reference solution (relative to task YAML). "
+            "Only consumed by agent_judge — the judge gets a read-only copy at "
+            "``_reference/`` in its working directory and can browse it with Glob/Read. "
+            "llm_judge and reference_comparison only accept string forms (code/file)."
+        ),
+    )
 
     @model_validator(mode="after")
     def check_exclusive_source(self) -> Self:
-        """Ensure exactly one source is provided."""
-        if self.code is not None and self.file is not None:
-            raise ValueError("Only one of 'code' or 'file' can be provided for reference code.")
-        if self.code is None and self.file is None:
-            raise ValueError("One of 'code' or 'file' must be provided for reference code.")
+        """Ensure exactly one of code / file / directory is provided."""
+        provided = sum(1 for v in (self.code, self.file, self.directory) if v is not None)
+        if provided > 1:
+            raise ValueError("Only one of 'code', 'file', or 'directory' can be provided for reference.")
+        if provided == 0:
+            raise ValueError("One of 'code', 'file', or 'directory' must be provided for reference.")
         return self
 
 
@@ -459,6 +475,33 @@ class TaskDefinition(BaseModel):
             raise ValueError(
                 "Either 'initial_prompt' or 'initial_prompt_file' must be provided "
                 + "(unless 'simulation.enabled' is true, in which case the simulator generates the opener)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def check_directory_reference_compatibility(self) -> Self:
+        """Reject ``reference.directory`` paired with criteria that need a string reference.
+
+        ``reference_comparison`` and ``llm_judge`` only consume ``reference_code``
+        (the string forms ``code`` / ``file``). When ``reference.directory`` is
+        the only form set, those criteria silently degrade — ``reference_comparison``
+        deterministically scores 0.0 ("No reference code provided") and
+        ``llm_judge`` runs without the reference even when ``include_reference=True``.
+        Catch the misconfiguration at load time instead of at run time.
+        """
+        if self.reference is None or self.reference.directory is None:
+            return self
+        offenders: list[str] = []
+        for c in self.success_criteria:
+            ctype = getattr(c, "type", None)
+            if ctype == "reference_comparison":
+                offenders.append("reference_comparison")
+            elif ctype == "llm_judge" and getattr(c, "include_reference", False):
+                offenders.append("llm_judge (include_reference=true)")
+        if offenders:
+            raise ValueError(
+                "reference.directory is only consumed by agent_judge; the following "
+                f"criteria require a string reference (use 'code' or 'file' instead): {offenders}"
             )
         return self
 

@@ -110,6 +110,29 @@ def test_verdict_strips_rationale_whitespace() -> None:
     assert v.rationale == "ok"
 
 
+def test_verdict_collapses_multi_line_rationale_to_single_line() -> None:
+    """Regression for bug_005: a multi-line rationale would survive `.strip()`
+    and break two consumers — format_details writes 'rationale: <text>' on one
+    line, and reports_html._extract_rationale parses by line. Coerce to single
+    line at validation time so the contract is enforced everywhere."""
+    v, err = parse_judge_verdict(
+        '{"score": 0.5, "rationale": "Looks correct overall.\\nBut missing tests for edge cases."}'
+    )
+    assert err is None
+    assert v is not None
+    assert "\n" not in v.rationale
+    assert v.rationale == "Looks correct overall. But missing tests for edge cases."
+
+
+def test_verdict_collapses_runs_of_whitespace() -> None:
+    """Tabs and multi-space runs are also normalized — anything word-split sees
+    becomes a single space."""
+    v, err = parse_judge_verdict('{"score": 0.5, "rationale": "a\\t\\tb   c\\nd"}')
+    assert err is None
+    assert v is not None
+    assert v.rationale == "a b c d"
+
+
 def test_verdict_model_rejects_bool_directly() -> None:
     from pydantic import ValidationError
 
@@ -207,6 +230,67 @@ def test_parser_handles_nested_objects() -> None:
     assert err is None
     assert v is not None
     assert v.score == 0.6
+
+
+# --- verbose verdict (findings) ---
+
+
+def test_verdict_accepts_findings() -> None:
+    content = '{"score": 0.7, "rationale": "ok", "findings": ["main.py:12 missing return", "no tests added"]}'
+    v, err = parse_judge_verdict(content)
+    assert err is None
+    assert v is not None
+    assert v.score == 0.7
+    assert v.findings == ["main.py:12 missing return", "no tests added"]
+
+
+def test_verdict_accepts_legacy_two_field_form() -> None:
+    """Verdicts emitted before findings was added must still parse — findings defaults empty."""
+    v, err = parse_judge_verdict('{"score": 0.5, "rationale": "ok"}')
+    assert err is None
+    assert v is not None
+    assert v.findings == []
+
+
+def test_verdict_drops_non_list_findings() -> None:
+    """A misbehaving model that emits findings as a string shouldn't tank the verdict —
+    coerce to empty list and let the score/rationale stand."""
+    v, err = parse_judge_verdict('{"score": 0.5, "rationale": "ok", "findings": "string instead of list"}')
+    assert err is None
+    assert v is not None
+    assert v.findings == []
+
+
+def test_verdict_drops_blank_findings() -> None:
+    v, err = parse_judge_verdict('{"score": 0.5, "rationale": "ok", "findings": ["valid", "", "   ", null]}')
+    assert err is None
+    assert v is not None
+    assert v.findings == ["valid"]
+
+
+def test_verdict_strips_finding_whitespace() -> None:
+    v, err = parse_judge_verdict('{"score": 0.5, "rationale": "ok", "findings": ["  hello  "]}')
+    assert err is None
+    assert v is not None
+    assert v.findings == ["hello"]
+
+
+def test_verdict_ignores_unknown_keys_via_extra_ignore() -> None:
+    """Old verdicts that included an analysis field still parse cleanly — analysis is
+    no longer in the schema and gets silently dropped via model_config={'extra': 'ignore'}."""
+    v, err = parse_judge_verdict('{"score": 0.5, "rationale": "ok", "analysis": "old prose"}')
+    assert err is None
+    assert v is not None
+    assert v.score == 0.5
+    assert not hasattr(v, "analysis")
+
+
+def test_verdict_model_rejects_legacy_invalid_score_unchanged() -> None:
+    """Findings must NOT loosen score validation."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        JudgeVerdict.model_validate({"score": "great", "findings": ["x"]})
 
 
 # --- _iter_top_level_object_spans internals ---

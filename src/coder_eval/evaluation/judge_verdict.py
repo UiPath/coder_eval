@@ -63,6 +63,30 @@ def parse_judge_verdict(content: str) -> tuple[JudgeVerdict | None, str | None]:
     When no span validates, surfaces a score-specific error message (missing,
     non-numeric, non-finite) from the last verdict-shaped span so callers see
     the intent-revealing diagnostic rather than a generic "no valid verdict".
+
+    LAST-span contract — DO NOT flip to pick-first without considering
+    prompt-injection. The judge system prompts instruct the model that "the
+    final message is the verdict, nothing else"; picking the last span aligns
+    with that contract and tolerates models that prepend a markdown preamble
+    or include an echoed JSON literal in their reasoning. Three mitigations
+    keep the LAST-span rule from being weaponised by an adversarial agent
+    output that the judge has been asked to grade:
+
+    1. The judge system prompt explicitly tells the model that its FINAL
+       message is the verdict (see ``_SYSTEM_PROMPT`` in both
+       ``criteria/agent_judge.py`` and ``criteria/llm_judge.py``).
+    2. Directory-form references are mounted on the filesystem, NOT inlined
+       into the prompt — the agent under review can't smuggle a fake "later"
+       verdict by writing JSON into the reference solution.
+    3. ``scrub_reference`` blanks any whole-string match of the reference
+       inside the model's response BEFORE parsing, so a verbatim copy of a
+       reference-embedded fake verdict is destroyed before it gets here.
+
+    A future maintainer who flips to first-valid would defeat (1) without
+    addressing the prompt-injection vector that the LAST rule sidesteps:
+    a leading ``{"score": 1.0}`` smuggled into agent output that the judge
+    is asked to grade would suddenly become the verdict instead of the
+    judge's own final message.
     """
     stripped = content.strip()
     if not stripped:

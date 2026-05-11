@@ -1,5 +1,6 @@
 """Base criterion checker interface with error handling."""
 
+import inspect
 import logging
 import os
 import statistics
@@ -13,6 +14,8 @@ from coder_eval.models import BaseSuccessCriterion, CriterionAggregate, Criterio
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from coder_eval.models.results import TurnRecord
     from coder_eval.models.routing import ApiRoute
     from coder_eval.sandbox import Sandbox
@@ -37,9 +40,18 @@ def handle_criterion_errors(func: Callable[..., CriterionResult]) -> Callable[..
         reference_code: str | None = None,
         turn_records: list["TurnRecord"] | None = None,
         route: "ApiRoute | None" = None,
+        reference_dir: "Path | None" = None,
     ) -> CriterionResult:
         try:
-            return func(self, criterion, sandbox, reference_code, turn_records=turn_records, route=route)
+            return func(
+                self,
+                criterion,
+                sandbox,
+                reference_code,
+                turn_records=turn_records,
+                route=route,
+                reference_dir=reference_dir,
+            )
         except Exception as e:
             exc_info = f"{e.__class__.__name__}: {e}"
             tb = ""
@@ -92,6 +104,12 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
     # Subclasses MUST define this as a class variable
     criterion_type: ClassVar[str]
 
+    # Per-subclass cache of which kwargs the subclass's ``_check_impl`` accepts.
+    # Lets the base ``check`` forward forward-compat kwargs (e.g. ``reference_dir``,
+    # added when directory references were introduced) without forcing every
+    # subclass to declare them. Filled lazily in ``check()``.
+    _impl_accepted_params: ClassVar[set[str] | None] = None
+
     @handle_criterion_errors
     def check(
         self,
@@ -100,6 +118,7 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         reference_code: str | None = None,
         turn_records: list["TurnRecord"] | None = None,
         route: "ApiRoute | None" = None,
+        reference_dir: "Path | None" = None,
     ) -> CriterionResult:
         """Execute the criterion check with centralized error handling.
 
@@ -115,11 +134,25 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
                 criteria that spawn sub-agents (e.g. agent_judge) can route
                 through the same backend (Direct/Proxy/Bedrock) as the main
                 agent. Most checkers ignore it.
+            reference_dir: Optional resolved path to a reference directory
+                (from ``task.reference.directory``). Only consumed by
+                ``agent_judge``; non-judge checkers ignore it.
 
         Returns:
             CriterionResult with score (0.0-1.0), details, and error info
         """
-        return self._check_impl(criterion, sandbox, reference_code, turn_records=turn_records, route=route)
+        # Forward only the kwargs the subclass's _check_impl actually accepts.
+        # Older checkers haven't been updated to take ``reference_dir`` and would
+        # raise TypeError; the filter keeps them oblivious to the new field.
+        cls = type(self)
+        if cls._impl_accepted_params is None:
+            cls._impl_accepted_params = set(inspect.signature(cls._check_impl).parameters)
+        accepted = cls._impl_accepted_params
+
+        kwargs: dict[str, Any] = {"turn_records": turn_records, "route": route}
+        if "reference_dir" in accepted:
+            kwargs["reference_dir"] = reference_dir
+        return self._check_impl(criterion, sandbox, reference_code, **kwargs)
 
     @abstractmethod
     def _check_impl(
@@ -140,6 +173,11 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             reference_code: Optional reference code string for comparison
             turn_records: Optional list of turn records for command inspection
             route: Optional resolved ApiRoute (see ``check()``).
+
+        Subclasses may also declare ``reference_dir: Path | None = None`` —
+        ``check()`` introspects each subclass's signature and forwards the
+        kwarg only when accepted, so older subclasses don't have to update.
+        Currently only ``agent_judge`` consumes ``reference_dir``.
 
         Returns:
             CriterionResult with score (0.0-1.0), details, and error info

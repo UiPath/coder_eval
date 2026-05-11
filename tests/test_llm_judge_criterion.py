@@ -218,7 +218,9 @@ def test_judge_include_reference_true_no_reference_set(sandbox: Sandbox) -> None
 
 def test_judge_include_reference_false_omits_reference(sandbox: Sandbox) -> None:
     sentinel = "ANOTHER_SENTINEL_987"
-    criterion = LLMJudgeCriterion(description="x", prompt="grade")  # default False
+    # include_reference defaults to True now; opt out explicitly when the reference
+    # is for non-judge consumers (reference_comparison) and shouldn't reach the LLM.
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", include_reference=False)
     mock_llm = _make_mock_llm('{"score": 0.5, "rationale": "ok"}')
     with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
         SuccessChecker(sandbox, init_registry=False).check(criterion, reference_code=sentinel)
@@ -581,6 +583,183 @@ def test_judge_bedrock_route_threads_model_unchanged(sandbox: Sandbox) -> None:
     ) as m_bedrock:
         SuccessChecker(sandbox, init_registry=False, route=route).check(criterion)
     assert m_bedrock.call_args.kwargs["model"] == "anthropic.claude-opus-4-6-v1"
+
+
+# --- verbose verdict + transcript persistence ---
+
+
+def test_judge_persists_findings(sandbox: Sandbox) -> None:
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    verdict = (
+        '{"score": 0.7, "rationale": "ok", '
+        '"findings": ["main.py:5 missing return — issue", "no docstrings — minor deviation"]}'
+    )
+    mock_llm = _make_mock_llm(verdict)
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+
+    assert result.score == 0.7
+    assert getattr(result, "findings", []) == [
+        "main.py:5 missing return — issue",
+        "no docstrings — minor deviation",
+    ]
+
+
+def test_judge_prompt_requires_findings(sandbox: Sandbox) -> None:
+    """The system + user prompts must instruct the model to emit findings."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    mock_llm = _make_mock_llm('{"score": 0.5, "rationale": "ok"}')
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
+        SuccessChecker(sandbox, init_registry=False).check(criterion)
+
+    messages = mock_llm.invoke.call_args.args[0]
+    system_msg = messages[0]["content"]
+    user_msg = messages[1]["content"]
+    assert "findings" in system_msg.lower()
+    assert "findings" in user_msg.lower()
+    # Analysis was dropped — must NOT appear in the prompts.
+    assert "analysis" not in system_msg.lower()
+    assert "analysis" not in user_msg.lower()
+
+
+def test_judge_transcript_captures_raw_verdict_by_default(sandbox: Sandbox) -> None:
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    raw = '{"score": 0.5, "rationale": "ok", "findings": ["a"]}'
+    mock_llm = _make_mock_llm(raw)
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    assert transcript.raw_verdict == raw
+    assert transcript.tool_calls == []  # llm_judge has no tool calls
+
+
+def test_judge_capture_transcript_false_drops_transcript(sandbox: Sandbox) -> None:
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", capture_transcript=False)
+    mock_llm = _make_mock_llm('{"score": 0.5, "rationale": "ok"}')
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+
+    assert getattr(result, "transcript", None) is None
+    assert result.score == 0.5  # capture flag only gates the transcript, not the verdict
+
+
+def test_judge_transcript_truncation_marks_truncated(sandbox: Sandbox) -> None:
+    """raw_verdict longer than max_transcript_chars gets clipped and the flag flips."""
+    big_finding = "x" * 5000
+    raw = f'{{"score": 0.5, "rationale": "ok", "findings": ["{big_finding}"]}}'
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", max_transcript_chars=200)
+    mock_llm = _make_mock_llm(raw)
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    assert transcript.truncated is True
+    assert len(transcript.raw_verdict) < len(raw)
+
+
+def test_judge_scrubs_reference_from_findings(sandbox: Sandbox) -> None:
+    """If the model echoes the reference in findings/raw_verdict, those must be scrubbed."""
+    sentinel = "REF_LEAK_VIA_FINDINGS"
+    raw = f'{{"score": 0.5, "rationale": "ok", "findings": ["echoed {sentinel} in main.py"]}}'
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", include_reference=True)
+    mock_llm = _make_mock_llm(raw)
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion, reference_code=sentinel)
+
+    for finding in getattr(result, "findings", []) or []:
+        assert sentinel not in finding
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    assert sentinel not in transcript.raw_verdict
+
+
+def test_judge_legacy_two_field_verdict_still_parses(sandbox: Sandbox) -> None:
+    """A model that ignores the findings instructions and emits the old two-field
+    form must still parse — findings defaults empty, score/rationale stand."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    mock_llm = _make_mock_llm('{"score": 0.42, "rationale": "ok"}')
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+
+    assert result.score == 0.42
+    assert result.error is None
+    assert getattr(result, "findings", []) == []
+
+
+def test_judge_parse_failure_still_carries_transcript(sandbox: Sandbox) -> None:
+    """Even on parse failure we want the raw response captured for audit."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    mock_llm = _make_mock_llm("totally not json")
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+
+    assert result.score == 0.0
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    assert "totally not json" in transcript.raw_verdict
+
+
+# --- enabled flag (master skip) ---
+
+
+def test_judge_enabled_false_short_circuits(sandbox: Sandbox) -> None:
+    """enabled=False: no LLM call, returns a skipped result with score=1.0."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", enabled=False)
+    mock_llm = _make_mock_llm('{"score": 0.5, "rationale": "should not be called"}')
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm) as factory:
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+
+    assert result.score == 1.0
+    assert "skipped" in (result.details or "").lower()
+    assert "enabled=false" in (result.details or "").lower()
+    factory.assert_not_called()
+    mock_llm.invoke.assert_not_called()
+
+
+def test_judge_enabled_default_true(sandbox: Sandbox) -> None:
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    assert criterion.enabled is True
+
+
+# --- judge prompt + system prompt capture ---
+
+
+def test_judge_transcript_captures_prompts(sandbox: Sandbox) -> None:
+    """The rendered user message + system prompt land on the transcript so reviewers
+    can see exactly what the judge was told."""
+    criterion = LLMJudgeCriterion(description="x", prompt="rubric body XYZ")
+    mock_llm = _make_mock_llm('{"score": 0.5, "rationale": "ok"}')
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    assert "rubric body XYZ" in transcript.judge_prompt
+    assert "GRADING PROMPT:" in transcript.judge_prompt
+    assert "strict code reviewer" in transcript.judge_system_prompt.lower()
+
+
+def test_judge_prompt_capture_scrubs_reference(sandbox: Sandbox) -> None:
+    """The reference solution sits inside the judge prompt — must be scrubbed before persistence."""
+    sentinel = "REF_LEAK_VIA_PROMPT_111"
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", include_reference=True)
+    mock_llm = _make_mock_llm('{"score": 0.5, "rationale": "ok"}')
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion, reference_code=sentinel)
+
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    # Confirm the reference reached the judge but is scrubbed from persisted prompt.
+    user_msg = mock_llm.invoke.call_args.args[0][1]["content"]
+    assert sentinel in user_msg
+    assert sentinel not in transcript.judge_prompt
+    assert sentinel not in transcript.judge_system_prompt
+
+
+# --- legacy in-table tests continue ---
 
 
 def test_judge_agent_output_empty_does_not_emit_block(sandbox: Sandbox) -> None:

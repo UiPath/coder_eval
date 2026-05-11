@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC
 from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from coder_eval.models.gateway import DEFAULT_GATEWAY_MODEL
 
@@ -579,8 +579,28 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
     Score is clamped to [0.0, 1.0]. Non-numeric score -> 0.0 with error.
     """
 
+    # Strict YAML-key validation: catch typos at load time rather than silently
+    # ignoring an unknown key (e.g. ``capture_transcripts:`` instead of
+    # ``capture_transcript:``) and producing a misconfigured judge.
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal["llm_judge"] = "llm_judge"
 
+    # Override the BaseSuccessCriterion default of 0.9 — that's calibrated for binary
+    # checks like file_exists where partial = fail. Judges produce continuous scores
+    # that rarely emit 1.0 even for excellent solutions; 0.7 matches the "good enough
+    # for a strict reviewer" semantics most authors want. Override per task as needed.
+    pass_threshold: float = Field(default=0.7, ge=0.0, le=1.0, description="Minimum score to pass (default 0.7).")
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Master toggle for this criterion. When False the judge is NOT called — the criterion "
+            "returns a skipped result (score=1.0, details='(skipped: enabled=false)') with no LLM "
+            "cost. Useful for A/B comparisons across experiment variants where you want to keep the "
+            "criterion in the YAML but not run it under a specific variant."
+        ),
+    )
     prompt: str = Field(
         description=(
             "Grading instructions shown to the judge. Describe what 'good' looks like "
@@ -597,17 +617,21 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
         ),
     )
     include_reference: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "When true and task.reference is set, include the reference solution in the "
-            "judge prompt. Silently omitted if no reference is configured. Never shown to the agent."
+            "When true (default) and task.reference is set, include the reference solution in "
+            "the judge prompt. Silently omitted if no reference is configured. Never shown to "
+            "the agent. Set to false if you want the reference to drive a non-judge consumer "
+            "(e.g. ``reference_comparison``) without showing it to the LLM grader."
         ),
     )
     include_agent_output: bool = Field(
         default=False,
         description=(
             "When true, include the latest agent turn's raw output in the judge prompt. "
-            "Wrapped as UNTRUSTED DATA. No-op when turn_records is unavailable."
+            "Wrapped as UNTRUSTED DATA. No-op when turn_records is unavailable. Default false "
+            "because the agent's narration is usually redundant with the files it produced "
+            "(declared via ``files`` or visible to the agent_judge via tool access)."
         ),
     )
     include_tool_calls: bool = Field(
@@ -648,11 +672,38 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
         ),
     )
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=1000, gt=0)
+    max_tokens: int = Field(
+        default=2000,
+        gt=0,
+        description=(
+            "Output token cap. Defaults to 2000 — large enough for the verbose verdict "
+            "(score + rationale + a handful of findings) without runaway."
+        ),
+    )
     max_file_chars: int = Field(
         default=20_000,
         gt=0,
         description="Per-file content truncation applied before building the prompt.",
+    )
+    capture_transcript: bool = Field(
+        default=True,
+        description=(
+            "When true, persist a ``JudgeTranscript`` (raw verdict + rendered prompts + "
+            "token usage) to a sibling ``judge-<idx>.yaml`` file next to ``task.json``. "
+            "Set to false to drop the transcript when on-disk size matters (e.g. 1000-row "
+            "datasets). The verbose ``findings`` field on the result is persisted regardless — "
+            "only the per-call transcript file is gated by this flag."
+        ),
+    )
+    max_transcript_chars: int = Field(
+        default=100_000,
+        gt=0,
+        description=(
+            "Aggregate cap on captured transcript text (raw_verdict + judge_prompt + "
+            "judge_system_prompt, plus tool-call detail / result preview lines for "
+            "agent_judge). Budget is split 60% verdict / 30% prompt / 10% system. "
+            "Truncation marks the transcript as ``truncated=True``."
+        ),
     )
 
 
@@ -660,8 +711,16 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
     """Spawn a Claude Code SDK agent as the judge.
 
     The judge runs in an isolated copy of the sandbox with tool access (Bash, Read,
-    Write, Glob, Grep, Edit by default) and returns a JSON verdict
-    ``{"score": <float 0..1>, "rationale": "<1-2 sentences>"}``.
+    Glob, Grep by default) and returns a JSON verdict
+    ``{"score": <float 0..1>, "rationale": "<1-2 sentences>", ...}``.
+
+    File access: the judge has live access to the sandbox copy as its working
+    directory and can load files via its tools (``Read``, ``Glob``). The optional
+    ``files`` field pre-attaches selected file contents to the prompt envelope —
+    useful when you want a fast verdict (single turn, no tool calls) or want to
+    grade with the narrowest tool surface (``allowed_tools=[]``). Pre-attach and
+    tool-driven inspection compose: the judge sees the pre-attached blocks and
+    can still ``Read`` anything else.
 
     SECURITY: The judge runs with the evaluator's API credentials and can execute
     arbitrary Bash by default. Four attack surfaces:
@@ -678,29 +737,57 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
     Continuous scoring. Parse/score errors -> 0.0. Score clamped to [0.0, 1.0].
     """
 
+    # Strict YAML-key validation: catch typos at load time rather than silently
+    # ignoring an unknown key and producing a misconfigured judge.
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal["agent_judge"] = "agent_judge"
 
+    # Override the BaseSuccessCriterion default of 0.9 — that's calibrated for binary
+    # checks. Judges produce continuous scores that rarely emit 1.0; 0.7 matches the
+    # "good enough for a strict reviewer" semantics most authors want. Override per task.
+    pass_threshold: float = Field(default=0.7, ge=0.0, le=1.0, description="Minimum score to pass (default 0.7).")
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Master toggle for this criterion. When False the judge is NOT spawned — the criterion "
+            "returns a skipped result (score=1.0, details='(skipped: enabled=false)') with no LLM "
+            "cost. Useful for A/B comparisons across experiment variants where you want to keep the "
+            "criterion in the YAML but not run it under a specific variant."
+        ),
+    )
     # Prompt & context — mirrors LLMJudgeCriterion for author consistency
     prompt: str = Field(description="Evaluation instructions for the judge agent")
     files: list[str] = Field(
         default_factory=list,
         description=(
-            "Paths pre-attached to the judge prompt. Plain entries are sandbox-relative — "
-            "the judge also has live access to those via its working directory (a sandbox copy). "
-            "Entries prefixed with '$TASK_DIR/' are read from the host filesystem relative to "
-            "the task YAML's parent directory and are inlined into the prompt only."
+            "Paths whose contents are pre-attached to the judge prompt. Plain entries are "
+            "sandbox-relative; entries prefixed with '$TASK_DIR/' are read from the host "
+            "filesystem relative to the task YAML's parent directory (useful for shared rubrics "
+            "outside the sandbox). Missing files are rendered as '<file not found>' so the "
+            "rubric can penalize them. Empty by default — without entries, the judge inspects "
+            "the sandbox copy via its tools instead."
         ),
     )
     include_reference: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "When true and task.reference is set, include the reference solution in the "
-            "judge prompt. Silently omitted if no reference is configured."
+            "When true (default) and task.reference is set, mount the reference for the judge. "
+            "For ``code`` / ``file`` references, the content is inlined into the prompt. For "
+            "``directory`` references, the tree is copied into ``_reference/`` in the judge's "
+            "working dir for Read/Glob browsing. Silently omitted if no reference is configured. "
+            "Set to false if a reference is configured for ``reference_comparison`` only and "
+            "should NOT be visible to the LLM grader."
         ),
     )
     include_agent_output: bool = Field(
         default=False,
-        description="Include the latest agent turn's raw output in the judge prompt (UNTRUSTED).",
+        description=(
+            "Include the latest agent turn's raw output in the judge prompt (UNTRUSTED). "
+            "Default false because agent_judge has live tool access to the sandbox copy and "
+            "can ``Read`` the agent's files directly — inlining narration is usually redundant."
+        ),
     )
     include_tool_calls: bool = Field(
         default=False,
@@ -729,18 +816,33 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
     max_file_chars: int = Field(
         default=20_000,
         gt=0,
-        description="Per-file content truncation applied before building the prompt.",
+        description=(
+            "Per-message truncation budget for trajectory blocks (agent_output, dialog turns). "
+            "agent_judge no longer pre-attaches files — the judge reads them via its tools — so "
+            "this only applies to trajectory injection."
+        ),
     )
 
     # Judge agent config
     model: str = Field(
-        default="claude-opus-4-6",
+        default="claude-sonnet-4-6",
         description=(
-            "Claude Code SDK model ID (e.g. 'claude-opus-4-6'). Distinct from "
-            "LLMJudgeCriterion.model, which uses gateway model IDs."
+            "Claude Code SDK model ID (e.g. 'claude-sonnet-4-6'). Distinct from "
+            "LLMJudgeCriterion.model, which uses gateway model IDs. Sonnet is the default "
+            "because tool-using judges spend most of their tokens on tool I/O context — "
+            "Opus offers limited grading uplift for ~5x the cost. Override per task if needed."
         ),
     )
-    max_turns: int = Field(default=10, gt=0, description="Inner-loop turn limit for the judge agent")
+    max_turns: int = Field(
+        default=50,
+        gt=0,
+        description=(
+            "Inner-loop turn limit for the judge agent. Generous default — typical judge runs "
+            "use 5-15 turns; the cap mostly matters when grading complex multi-file solutions "
+            "where the judge needs to read across many files. ``turn_timeout`` (default 300s) "
+            "bounds wall-clock per turn, so the practical cost cap is tokens, not time."
+        ),
+    )
     turn_timeout: int = Field(
         default=300,
         ge=10,
@@ -751,10 +853,12 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
         description="Judge works on a throwaway copy, so bypassing permission prompts is fine.",
     )
     allowed_tools: list[str] = Field(
-        default_factory=lambda: ["Bash", "Read", "Write", "Glob", "Grep", "Edit"],
+        default_factory=lambda: ["Bash", "Read", "Glob", "Grep"],
         description=(
-            "Default includes Bash for CLI validation (e.g. `uip rpa get-errors`, `xmllint`). "
-            "Narrow to ['Read', 'Grep', 'Glob'] when Bash is not needed — see SECURITY note."
+            "Read-only investigation toolkit by default — judges should observe, not modify. "
+            "Bash is included for CLI validation (e.g. `uip rpa get-errors`, `xmllint`). "
+            "Add `Write` / `Edit` per task if the judge needs scratch files (rare); narrow to "
+            "['Read', 'Grep', 'Glob'] when Bash is not needed — see SECURITY note."
         ),
     )
     disallowed_tools: list[str] | None = Field(
@@ -772,8 +876,34 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
             # setting_sources=[] on the judge's AgentConfig as defense-in-depth.
             ".claude",
             ".mcp.json",
+            # SECURITY + collision: ``_reference`` is the mount point for the
+            # directory-form reference. Strip any sandbox-side ``_reference/``
+            # (template-staged or agent-planted) before the second copytree so
+            # (a) the second copytree doesn't FileExistsError, and (b) the
+            # judge sees grading material exclusively from task.reference.
+            "_reference",
         ],
         description="Patterns passed to shutil.ignore_patterns when copying the sandbox.",
+    )
+    capture_transcript: bool = Field(
+        default=True,
+        description=(
+            "When true, persist a ``JudgeTranscript`` (tool calls + token usage + raw verdict + "
+            "rendered prompts) to a sibling ``judge-<idx>.yaml`` file next to ``task.json``. "
+            "Set to false to drop the transcript when on-disk size matters (e.g. 1000-row "
+            "datasets). The verbose ``findings`` field on the result is persisted regardless — "
+            "only the trajectory log is gated by this flag."
+        ),
+    )
+    max_transcript_chars: int = Field(
+        default=100_000,
+        gt=0,
+        description=(
+            "Aggregate cap on captured transcript text (raw_verdict + judge_prompt + "
+            "judge_system_prompt + tool detail / result_preview lines). Budget is split "
+            "60% verdict / 30% prompt / 10% system, with tool calls taking priority. "
+            "Truncation marks the transcript as ``truncated=True``."
+        ),
     )
 
 

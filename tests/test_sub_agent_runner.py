@@ -72,6 +72,132 @@ def test_runner_happy_path(sandbox: Sandbox, tmp_path: Path) -> None:
     mock_agent.stop.assert_awaited()
 
 
+def test_runner_mounts_reference_dir_at_underscore_reference(sandbox: Sandbox, tmp_path: Path) -> None:
+    """When reference_dir is provided, copy it into the judge's working dir at _reference/."""
+    (tmp_path / "Main.xaml").write_text("<x/>")
+
+    # Pre-stage a reference solution outside the sandbox.
+    ref_root = tmp_path / "outside_ref"
+    ref_root.mkdir()
+    (ref_root / "Main.xaml").write_text("<reference/>")
+    (ref_root / "project.json").write_text('{"name":"reference"}')
+    (ref_root / "subdir").mkdir()
+    (ref_root / "subdir" / "Helper.xaml").write_text("<helper/>")
+
+    runner = SubAgentRunner(
+        sandbox=sandbox,
+        agent_config=_make_agent_config(),
+        ignore_patterns=[],
+        route=DirectRoute(),
+        reference_dir=ref_root,
+    )
+    mock_agent = _make_mock_agent()
+    captured: dict[str, str] = {}
+
+    async def capture_start(workdir: str) -> None:
+        captured["workdir"] = workdir
+
+    mock_agent.start.side_effect = capture_start
+    with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
+        # Capture the workdir before it's torn down by the finally block.
+        async def capture_files(_msg: str, **_kw: object) -> TurnRecord:
+            workdir = Path(captured["workdir"])
+            captured["has_reference_dir"] = str((workdir / "_reference").is_dir())
+            captured["has_main"] = str((workdir / "_reference" / "Main.xaml").is_file())
+            captured["main_content"] = (workdir / "_reference" / "Main.xaml").read_text()
+            captured["has_subdir"] = str((workdir / "_reference" / "subdir" / "Helper.xaml").is_file())
+            return _make_turn()
+
+        mock_agent.communicate.side_effect = capture_files
+        runner.run("grade", max_turns=10, turn_timeout=30.0)
+
+    assert captured["has_reference_dir"] == "True"
+    assert captured["has_main"] == "True"
+    assert captured["main_content"] == "<reference/>"
+    assert captured["has_subdir"] == "True"
+
+
+def test_runner_handles_sandbox_side_reference_collision(sandbox: Sandbox, tmp_path: Path) -> None:
+    """Regression for bug_002: when the sandbox already contains _reference/
+    (template-staged or agent-planted), the second copytree must not raise
+    FileExistsError. Default ignore_patterns includes _reference, and the
+    runner rmtree's the destination as a defense-in-depth safety net."""
+    # Pre-stage a sandbox that already contains _reference/ — typical of an
+    # agent that decided to create a directory with that exact name.
+    sandbox_ref = tmp_path / "_reference"
+    sandbox_ref.mkdir()
+    (sandbox_ref / "agent_planted.txt").write_text("PLANTED-CONTENT-FROM-AGENT")
+    (tmp_path / "Main.xaml").write_text("<x/>")
+
+    # Real reference solution lives outside the sandbox.
+    real_ref = tmp_path.parent / "real_reference"
+    real_ref.mkdir()
+    (real_ref / "Main.xaml").write_text("<reference/>")
+
+    runner = SubAgentRunner(
+        sandbox=sandbox,
+        agent_config=_make_agent_config(),
+        # Default agent_judge ignore_patterns include _reference; emulate that here.
+        ignore_patterns=["_reference"],
+        route=DirectRoute(),
+        reference_dir=real_ref,
+    )
+    mock_agent = _make_mock_agent()
+    captured: dict[str, str] = {}
+
+    async def capture_start(workdir: str) -> None:
+        captured["workdir"] = workdir
+
+    mock_agent.start.side_effect = capture_start
+    with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
+
+        async def capture_state(_msg: str, **_kw: object) -> TurnRecord:
+            workdir = Path(captured["workdir"])
+            ref_main = workdir / "_reference" / "Main.xaml"
+            captured["ref_main_content"] = ref_main.read_text()
+            captured["agent_planted_present"] = str((workdir / "_reference" / "agent_planted.txt").exists())
+            return _make_turn()
+
+        mock_agent.communicate.side_effect = capture_state
+        # Must not raise — this is the regression assertion.
+        runner.run("grade", max_turns=10, turn_timeout=30.0)
+
+    # _reference/ contains the REAL reference content, NOT the agent-planted file.
+    assert captured["ref_main_content"] == "<reference/>"
+    assert captured["agent_planted_present"] == "False"
+
+
+def test_runner_skips_reference_when_not_provided(sandbox: Sandbox, tmp_path: Path) -> None:
+    """No reference_dir → no _reference/ in the judge's working directory."""
+    (tmp_path / "Main.xaml").write_text("<x/>")
+
+    runner = SubAgentRunner(
+        sandbox=sandbox,
+        agent_config=_make_agent_config(),
+        ignore_patterns=[],
+        route=DirectRoute(),
+        # reference_dir defaults to None
+    )
+    mock_agent = _make_mock_agent()
+    captured: dict[str, str] = {}
+
+    async def capture_start(workdir: str) -> None:
+        captured["workdir"] = workdir
+
+    mock_agent.start.side_effect = capture_start
+    with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
+
+        async def capture_no_ref(_msg: str, **_kw: object) -> TurnRecord:
+            workdir = Path(captured["workdir"])
+            captured["has_reference_dir"] = str((workdir / "_reference").exists())
+            return _make_turn()
+
+        mock_agent.communicate.side_effect = capture_no_ref
+        runner.run("grade", max_turns=10, turn_timeout=30.0)
+
+    assert captured["has_reference_dir"] == "False"
+
+
 def test_runner_starts_in_temp_copy_not_original(sandbox: Sandbox, tmp_path: Path) -> None:
     (tmp_path / "Main.xaml").write_text("<x/>")
 

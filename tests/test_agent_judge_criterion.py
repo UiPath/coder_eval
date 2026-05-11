@@ -242,20 +242,44 @@ def test_success_checker_threads_route_to_check(sandbox: Sandbox) -> None:
 # --- prompt / context assembly ---
 
 
-def test_agent_judge_missing_file_marker(sandbox: Sandbox, tmp_path: Path, direct_route: DirectRoute) -> None:
-    (tmp_path / "present.py").write_text("x = 1")
-    criterion = AgentJudgeCriterion(
-        description="x",
-        prompt="grade",
-        files=["present.py", "missing.py"],
-    )
+def test_agent_judge_files_empty_default_uses_tool_only_prompt(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """When ``files`` is left at its empty default, the prompt points the judge at
+    its working directory and renders no FILE blocks — the judge inspects via tools."""
+    criterion = AgentJudgeCriterion(description="x", prompt="grade")
+    assert criterion.files == []
+
     mock_agent = _make_mock_agent('{"score": 0.5, "rationale": "partial"}')
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
         SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
 
     user_msg = mock_agent.communicate.call_args.args[0]
-    assert "--- FILE: missing.py ---\n<file not found>" in user_msg
-    assert "--- FILE: present.py ---" in user_msg
+    assert "--- FILE:" not in user_msg
+    assert "Use Read/Glob/Grep to investigate" in user_msg
+
+
+def test_agent_judge_pre_attaches_files_when_set(sandbox: Sandbox, direct_route: DirectRoute, tmp_path: Path) -> None:
+    """When ``files=[...]`` is set, the named files' contents are inlined as FILE blocks.
+
+    Pre-attachment is the fast-verdict path: with ``allowed_tools=[]`` the judge has
+    no tool surface and decides from the inlined blocks alone — used by the smoke
+    suite (``tasks/smoke_agent_judge.yaml``) and any task wanting llm_judge-style
+    grading with the agent_judge sub-agent lifecycle.
+    """
+    sandbox_path = sandbox.sandbox_dir
+    assert sandbox_path is not None
+    (sandbox_path / "greet.py").write_text("def greet(name: str) -> str:\n    return f'Hello, {name}!'\n")
+
+    criterion = AgentJudgeCriterion(description="x", prompt="grade", files=["greet.py"])
+    mock_agent = _make_mock_agent('{"score": 1.0, "rationale": "matches rubric"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+
+    user_msg = mock_agent.communicate.call_args.args[0]
+    assert "--- FILE: greet.py ---" in user_msg
+    assert "def greet(name: str) -> str:" in user_msg
+    # Working-directory guidance is replaced by the pre-attach framing.
+    assert "Use Read/Glob/Grep to investigate" not in user_msg
+    assert "pre-attached" in user_msg
 
 
 def test_agent_judge_parse_error_scrubs_reference_from_error_field(sandbox: Sandbox, direct_route: DirectRoute) -> None:
@@ -275,6 +299,36 @@ def test_agent_judge_parse_error_scrubs_reference_from_error_field(sandbox: Sand
 
     for field_value in (result.details, result.error):
         assert field_value is None or sentinel not in field_value
+
+
+def test_agent_judge_parse_error_details_scrubs_before_truncating(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """SECURITY regression: scrubbing must run BEFORE the 500-char truncation in `details`.
+
+    ``scrub_reference`` uses ``str.replace`` and only matches the secret as a contiguous
+    whole string. If we sliced to 500 chars first and then scrubbed, a reference longer
+    than the slice would survive as an unmatched prefix in the persisted details field.
+    Trigger: an agent_judge run with ``include_reference=True`` whose output begins with
+    a partial echo of the reference and is then malformed — the slice + scrub-after-slice
+    order would land a recognizable chunk of the reference into ``details``.
+    """
+    # 800-char sentinel — longer than the 500-char details slice so a slice-before-scrub
+    # path would leave the leading 500-char prefix in the persisted field.
+    sentinel = "SCRUB_BEFORE_TRUNCATE_SENTINEL_" + "Z" * 800
+    criterion = AgentJudgeCriterion(description="x", prompt="grade", include_reference=True)
+    # Non-JSON output starting with the full reference content guarantees the parse error
+    # path is hit AND that the reference sits in the first 500 chars of `agent_output`.
+    mock_agent = _make_mock_agent(f"{sentinel} — informal review, no JSON here")
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(
+            criterion, reference_code=sentinel
+        )
+
+    # No portion of the reference body (e.g. any 100-char run of 'Z') should survive
+    # in the persisted details — scrub-before-slice replaces the full sentinel with
+    # the short ``<reference redacted>`` marker before any truncation.
+    leak_payload = "Z" * 100
+    assert leak_payload not in (result.details or "")
+    assert "SCRUB_BEFORE_TRUNCATE_SENTINEL" not in (result.details or "")
 
 
 def test_agent_judge_include_reference_scrubbed_from_details(sandbox: Sandbox, direct_route: DirectRoute) -> None:
@@ -302,7 +356,9 @@ def test_agent_judge_include_reference_scrubbed_from_details(sandbox: Sandbox, d
 
 def test_agent_judge_include_reference_false_omits_reference(sandbox: Sandbox, direct_route: DirectRoute) -> None:
     sentinel = "SHOULD_NOT_APPEAR_42"
-    criterion = AgentJudgeCriterion(description="x", prompt="grade")  # include_reference defaults False
+    # include_reference defaults to True now; opt out explicitly when grading material
+    # is configured for non-judge consumers only.
+    criterion = AgentJudgeCriterion(description="x", prompt="grade", include_reference=False)
     mock_agent = _make_mock_agent('{"score": 0.5, "rationale": "ok"}')
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
         SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion, reference_code=sentinel)
@@ -407,6 +463,366 @@ def test_agent_judge_surfaces_degraded_notes_when_turn_records_missing(
     assert "duration:" in details
 
 
+# --- verbose verdict + transcript persistence ---
+
+
+def _make_turn_with_commands(
+    agent_output: str,
+    commands: list,
+    duration: float = 2.5,
+) -> TurnRecord:
+    return TurnRecord(
+        iteration=1,
+        user_input="(judge prompt)",
+        agent_output=agent_output,
+        commands=commands,
+        duration_seconds=duration,
+    )
+
+
+def test_agent_judge_persists_findings(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    criterion = AgentJudgeCriterion(description="x", prompt="grade")
+    verdict = (
+        '{"score": 0.7, "rationale": "ok", '
+        '"findings": ["main.xaml is well-formed — correct", '
+        '"missing test for happy path — minor deviation"]}'
+    )
+    mock_agent = _make_mock_agent(verdict)
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+
+    assert result.score == 0.7
+    assert getattr(result, "findings", []) == [
+        "main.xaml is well-formed — correct",
+        "missing test for happy path — minor deviation",
+    ]
+
+
+def test_agent_judge_prompt_requires_findings(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    criterion = AgentJudgeCriterion(description="x", prompt="grade")
+    mock_agent = _make_mock_agent('{"score": 0.5, "rationale": "ok"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent) as mock_cls:
+        SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+
+    # System prompt is on the AgentConfig — pull it from the construction call.
+    (agent_config,) = mock_cls.call_args.args
+    sys_prompt = agent_config.system_prompt or ""
+    user_msg: str = mock_agent.communicate.call_args.args[0]
+    # Verbose system prompt asks for findings.
+    assert "findings" in sys_prompt.lower()
+    # Analysis is gone — must NOT appear as a required JSON key in either prompt.
+    assert '"analysis"' not in sys_prompt
+    assert "findings" in user_msg.lower()
+
+
+def test_agent_judge_transcript_captures_tool_calls(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """Tool calls made by the judge sub-agent must surface on the transcript so
+    reviewers can audit the verdict."""
+    from datetime import datetime
+
+    from coder_eval.models import CommandTelemetry
+
+    cmd1 = CommandTelemetry(
+        tool_name="Bash",
+        tool_id="t1",
+        timestamp=datetime.now(),
+        parameters={"command": "xmllint --noout main.xaml"},
+        result_status="success",
+        result_summary="OK (no errors)",
+        sequence_number=0,
+    )
+    cmd2 = CommandTelemetry(
+        tool_name="Read",
+        tool_id="t2",
+        timestamp=datetime.now(),
+        parameters={"file_path": "main.xaml"},
+        result_status="success",
+        result_summary="File read: 482 bytes",
+        sequence_number=1,
+    )
+    criterion = AgentJudgeCriterion(description="x", prompt="grade")
+    mock_agent = MagicMock()
+    mock_agent.start = AsyncMock(return_value=None)
+    mock_agent.communicate = AsyncMock(
+        return_value=_make_turn_with_commands('{"score": 0.9, "rationale": "ok"}', [cmd1, cmd2])
+    )
+    mock_agent.stop = AsyncMock(return_value=None)
+    mock_agent.kill = AsyncMock(return_value=None)
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    assert len(transcript.tool_calls) == 2
+    assert transcript.tool_calls[0].tool_name == "Bash"
+    assert "xmllint" in transcript.tool_calls[0].detail
+    assert transcript.tool_calls[0].status == "success"
+    assert "OK" in transcript.tool_calls[0].result_preview
+    assert transcript.tool_calls[1].tool_name == "Read"
+    assert transcript.tool_calls[1].detail == "main.xaml"
+    assert transcript.duration_seconds == 2.5
+
+
+def test_agent_judge_capture_transcript_false_drops_transcript(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    criterion = AgentJudgeCriterion(description="x", prompt="grade", capture_transcript=False)
+    mock_agent = _make_mock_agent('{"score": 0.6, "rationale": "ok"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+
+    assert getattr(result, "transcript", None) is None
+    assert result.score == 0.6
+
+
+def test_agent_judge_scrubs_reference_from_transcript(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    sentinel = "REF_LEAK_VIA_TRANSCRIPT_777"
+    verdict = f'{{"score": 0.7, "rationale": "ok", "findings": ["saw {sentinel}"]}}'
+    criterion = AgentJudgeCriterion(description="x", prompt="grade", include_reference=True)
+    mock_agent = _make_mock_agent(verdict)
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(
+            criterion, reference_code=sentinel
+        )
+
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    assert sentinel not in transcript.raw_verdict
+    for f in getattr(result, "findings", []) or []:
+        assert sentinel not in f
+
+
+def test_agent_judge_transcript_truncation(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """A long raw verdict gets clipped and the truncated flag flips."""
+    big_verdict = '{"score": 0.5, "rationale": "ok", "findings": ["' + "y" * 4000 + '"]}'
+    criterion = AgentJudgeCriterion(description="x", prompt="grade", max_transcript_chars=200)
+    mock_agent = _make_mock_agent(big_verdict)
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    assert transcript.truncated is True
+
+
+def test_agent_judge_legacy_two_field_verdict_still_parses(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """A judge that emits the old two-field form (no findings) must still parse cleanly."""
+    criterion = AgentJudgeCriterion(description="x", prompt="grade")
+    mock_agent = _make_mock_agent('{"score": 0.42, "rationale": "ok"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+
+    assert result.score == 0.42
+    assert result.error is None
+    assert getattr(result, "findings", []) == []
+
+
+def test_agent_judge_round_trips_through_evaluation_result(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """JudgeCriterionResult fields must survive EvaluationResult.model_dump_json -> model_validate_json.
+
+    extra='allow' on CriterionResult preserves findings/transcript on reload —
+    without it, task.json would silently drop the audit data.
+    """
+    from datetime import datetime
+
+    from coder_eval.models import EvaluationResult
+
+    verdict = '{"score": 0.8, "rationale": "ok", "findings": ["finding A", "finding B"]}'
+    criterion = AgentJudgeCriterion(description="x", prompt="grade")
+    mock_agent = _make_mock_agent(verdict)
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+
+    evaluation = EvaluationResult(
+        task_id="t",
+        task_description="d",
+        variant_id="v",
+        agent_type="claude-code",
+        started_at=datetime.now(),
+        final_status="SUCCESS",
+        iteration_count=1,
+        environment_info={},
+        success_criteria_results=[result],
+    )
+    raw_json = evaluation.model_dump_json()
+    assert "finding A" in raw_json
+
+    reloaded = EvaluationResult.model_validate_json(raw_json)
+    cr = reloaded.success_criteria_results[0]
+    assert getattr(cr, "findings", []) == ["finding A", "finding B"]
+    # transcript surfaces as a dict-shaped extra after round-trip; the HTML renderer handles both.
+    transcript = getattr(cr, "transcript", None)
+    assert transcript is not None
+
+
+def test_agent_judge_timeout_uses_base_criterion_result(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """Timeout path returns a base CriterionResult (no transcript / verdict fields)
+    because no turn was produced — there's nothing to capture."""
+    from coder_eval.errors.timeout import TurnTimeoutError
+
+    criterion = AgentJudgeCriterion(description="x", prompt="grade", turn_timeout=30)
+    mock_agent = _make_mock_agent("irrelevant")
+    mock_agent.communicate.side_effect = TurnTimeoutError(30.0, task_id="t", iteration=1)
+
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+
+    assert result.score == 0.0
+    # No transcript captured — the sub-agent never produced a turn.
+    assert getattr(result, "transcript", None) is None
+
+
+# --- enabled flag (master skip) ---
+
+
+def test_agent_judge_enabled_false_short_circuits(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """enabled=False: no sub-agent spawned, returns a skipped result."""
+    criterion = AgentJudgeCriterion(description="x", prompt="grade", enabled=False)
+    with patch(_AGENT_PATCH_PATH) as mock_cls:
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+
+    assert result.score == 1.0
+    assert "skipped" in (result.details or "").lower()
+    assert "enabled=false" in (result.details or "").lower()
+    mock_cls.assert_not_called()
+
+
+def test_agent_judge_enabled_false_works_without_route(sandbox: Sandbox) -> None:
+    """A disabled agent_judge should be skippable even when no route is configured —
+    that's the point of disabling it under a variant where the backend isn't set up."""
+    criterion = AgentJudgeCriterion(description="x", prompt="grade", enabled=False)
+    with patch(_AGENT_PATCH_PATH) as mock_cls:
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+    assert result.score == 1.0
+    assert "skipped" in (result.details or "").lower()
+    mock_cls.assert_not_called()
+
+
+# --- judge prompt + system prompt capture ---
+
+
+def test_agent_judge_transcript_captures_prompts(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    criterion = AgentJudgeCriterion(description="x", prompt="rubric body ABC")
+    mock_agent = _make_mock_agent('{"score": 0.7, "rationale": "ok"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    assert "rubric body ABC" in transcript.judge_prompt
+    assert "GRADING PROMPT:" in transcript.judge_prompt
+    assert "strict code reviewer" in transcript.judge_system_prompt.lower()
+
+
+def test_agent_judge_prompt_capture_scrubs_reference(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    sentinel = "REF_LEAK_VIA_AGENT_PROMPT_222"
+    criterion = AgentJudgeCriterion(description="x", prompt="grade", include_reference=True)
+    mock_agent = _make_mock_agent('{"score": 0.7, "rationale": "ok"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(
+            criterion, reference_code=sentinel
+        )
+
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    user_msg: str = mock_agent.communicate.call_args.args[0]
+    assert sentinel in user_msg
+    assert sentinel not in transcript.judge_prompt
+    assert sentinel not in transcript.judge_system_prompt
+
+
+# --- reference directory (mounted at _reference/) ---
+
+
+def test_agent_judge_mounts_reference_dir_when_include_reference_true(
+    sandbox: Sandbox, tmp_path: Path, direct_route: DirectRoute
+) -> None:
+    """include_reference=True + reference_dir set → SubAgentRunner gets the path,
+    and the prompt envelope tells the judge to look at _reference/."""
+    ref_root = tmp_path / "ref"
+    ref_root.mkdir()
+    (ref_root / "Main.xaml").write_text("<reference/>")
+
+    criterion = AgentJudgeCriterion(description="x", prompt="grade", include_reference=True)
+    mock_agent = _make_mock_agent('{"score": 0.7, "rationale": "ok"}')
+    with (
+        patch(_AGENT_PATCH_PATH, return_value=mock_agent),
+        patch("coder_eval.criteria.agent_judge.SubAgentRunner") as mock_runner_cls,
+    ):
+        mock_runner = MagicMock()
+        mock_runner.run.return_value = _make_turn('{"score": 0.7, "rationale": "ok"}')
+        mock_runner_cls.return_value = mock_runner
+        SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion, reference_dir=ref_root)
+
+    # Runner was constructed with the reference_dir kwarg.
+    runner_kwargs = mock_runner_cls.call_args.kwargs
+    assert runner_kwargs["reference_dir"] == ref_root
+
+    # Prompt envelope points the judge at _reference/.
+    user_msg = mock_runner.run.call_args.args[0]
+    assert "_reference/" in user_msg
+    assert "Use Read / Glob / Grep to browse" in user_msg
+
+
+def test_agent_judge_skips_reference_dir_when_include_reference_false(
+    sandbox: Sandbox, tmp_path: Path, direct_route: DirectRoute
+) -> None:
+    """include_reference=False MUST zero out reference_dir so the judge can't see grading material."""
+    ref_root = tmp_path / "ref"
+    ref_root.mkdir()
+    (ref_root / "Main.xaml").write_text("<reference/>")
+
+    criterion = AgentJudgeCriterion(description="x", prompt="grade", include_reference=False)
+    mock_agent = _make_mock_agent('{"score": 0.5, "rationale": "ok"}')
+    with (
+        patch(_AGENT_PATCH_PATH, return_value=mock_agent),
+        patch("coder_eval.criteria.agent_judge.SubAgentRunner") as mock_runner_cls,
+    ):
+        mock_runner = MagicMock()
+        mock_runner.run.return_value = _make_turn('{"score": 0.5, "rationale": "ok"}')
+        mock_runner_cls.return_value = mock_runner
+        SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion, reference_dir=ref_root)
+
+    runner_kwargs = mock_runner_cls.call_args.kwargs
+    assert runner_kwargs["reference_dir"] is None
+    user_msg = mock_runner.run.call_args.args[0]
+    assert "_reference/" not in user_msg
+
+
+def test_agent_judge_directory_reference_scrubs_file_contents_from_findings(
+    sandbox: Sandbox, tmp_path: Path, direct_route: DirectRoute
+) -> None:
+    """If the judge echoes the content of any reference file in its findings/transcript,
+    that content must be scrubbed before persistence — directory reference, multi-file scrub set."""
+    ref_root = tmp_path / "ref"
+    ref_root.mkdir()
+    secret_main = "REF_DIR_SECRET_MAIN_111_AAAAAAAAAA"
+    secret_helper = "REF_DIR_SECRET_HELPER_222_BBBBBBBB"
+    (ref_root / "Main.xaml").write_text(secret_main)
+    (ref_root / "Helper.xaml").write_text(secret_helper)
+
+    # Judge's verdict echoes BOTH file contents in findings + raw_verdict.
+    verdict = (
+        '{"score": 0.7, "rationale": "ok", "findings": ['
+        f'"Main echoes: {secret_main}", '
+        f'"Helper echoes: {secret_helper}"'
+        "]}"
+    )
+    criterion = AgentJudgeCriterion(description="x", prompt="grade", include_reference=True)
+    mock_agent = _make_mock_agent(verdict)
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(
+            criterion, reference_dir=ref_root
+        )
+
+    findings = getattr(result, "findings", []) or []
+    for f in findings:
+        assert secret_main not in f
+        assert secret_helper not in f
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    assert secret_main not in transcript.raw_verdict
+    assert secret_helper not in transcript.raw_verdict
+
+
 # --- integration (opt-in, real SDK) ---
 
 
@@ -428,10 +844,9 @@ def test_agent_judge_integration_real_sdk(tmp_path: Path) -> None:
     criterion = AgentJudgeCriterion(
         description="integration smoke",
         prompt=(
-            "Check hello.txt. If it contains exactly 'Hello, world!' return score=1.0, "
-            "otherwise 0.0. Reply with ONLY the JSON verdict."
+            "Check hello.txt in your working directory. If it contains exactly "
+            "'Hello, world!' return score=1.0, otherwise 0.0. Reply with ONLY the JSON verdict."
         ),
-        files=["hello.txt"],
         model="claude-haiku-4-5-20251001",
         max_turns=6,
         turn_timeout=90,

@@ -1581,7 +1581,7 @@ async def test_evaluation_loop_breaks_on_max_turns_exhausted(tmp_path):
     )
     orchestrator.success_checker = mock_checker
 
-    with patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)):
+    with patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)):
         success = await orchestrator._evaluation_loop()
 
     # Should NOT succeed
@@ -1703,7 +1703,7 @@ async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
     orchestrator.success_checker = mock_checker
 
     with (
-        patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)),
+        patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
         patch("asyncio.sleep", new_callable=AsyncMock),
     ):
         success = await orchestrator._evaluation_loop()
@@ -1810,7 +1810,7 @@ async def test_evaluation_loop_stamps_timeout_reason_on_partial(tmp_path):
     orchestrator.success_checker = mock_checker
 
     with (
-        patch("coder_eval.orchestrator.load_reference_code", return_value=(None, None)),
+        patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
         patch("asyncio.sleep", new_callable=AsyncMock),
         # TurnTimeoutError is non-retryable, so the loop re-raises after the
         # on_attempt_error callback has already stamped + appended the partial.

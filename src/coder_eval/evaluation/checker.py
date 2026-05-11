@@ -6,6 +6,7 @@ the criteria registry.
 """
 
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..criteria import BaseCriterion, CriterionRegistry, init_criteria
@@ -84,6 +85,10 @@ class SuccessChecker:
         # Cached reference code - automatically set by check()/check_all() when provided
         # Used by subsequent check() calls that don't explicitly pass reference_code
         self._reference_code: str | None = None
+        # Cached reference directory path (resolved). Set by check()/check_all() when provided.
+        # Mutually exclusive with self._reference_code at the task level — task.reference
+        # is exactly one of code/file/directory.
+        self._reference_dir: Path | None = None
         # Cached turn records - set by check()/check_all() when provided
         self._turn_records: TurnRecords | None = None
         self.route = route
@@ -97,53 +102,66 @@ class SuccessChecker:
         criterion: SuccessCriterion,
         reference_code: str | None = None,
         turn_records: TurnRecords | None = None,
+        reference_dir: Path | None = None,
     ) -> CriterionResult:
         """Check a single criterion (backward compatibility wrapper).
 
         Args:
             criterion: Criterion definition
-            reference_code: Optional reference code for comparison
+            reference_code: Optional reference code (string form: from
+                ``task.reference.code`` or ``task.reference.file``).
             turn_records: Optional turn records for command inspection
+            reference_dir: Optional resolved path to a reference directory
+                (from ``task.reference.directory``). Only consumed by
+                ``agent_judge``; non-judge criteria ignore it.
 
         Returns:
             CriterionResult with score
         """
-        # Persist reference_code for subsequent calls (backward compat)
+        # Persist reference_code / reference_dir for subsequent calls (backward compat)
         if reference_code is not None:
             self._reference_code = reference_code
+        if reference_dir is not None:
+            self._reference_dir = reference_dir
         if turn_records is not None:
             self._turn_records = turn_records
-        # Use instance variable if no reference_code provided
         ref_code = reference_code if reference_code is not None else self._reference_code
+        ref_dir = reference_dir if reference_dir is not None else self._reference_dir
         records = turn_records if turn_records is not None else self._turn_records
-        return self._check_single(criterion, ref_code, records)
+        return self._check_single(criterion, ref_code, records, ref_dir)
 
     def check_all(
         self,
         criteria: SuccessCriteria,
         reference_code: str | None = None,
         turn_records: TurnRecords | None = None,
+        reference_dir: Path | None = None,
     ) -> CriteriaResults:
         """Check all success criteria.
 
         Args:
             criteria: List of criterion definitions
-            reference_code: Optional reference code for comparison
+            reference_code: Optional reference code (string form).
             turn_records: Optional turn records for command inspection
+            reference_dir: Optional resolved path to a reference directory.
+                Only consumed by ``agent_judge``; non-judge criteria ignore it.
 
         Returns:
             List of criterion results with scores
         """
-        # Persist reference_code for subsequent check() calls
+        # Persist for subsequent check() calls
         if reference_code is not None:
             self._reference_code = reference_code
+        if reference_dir is not None:
+            self._reference_dir = reference_dir
         if turn_records is not None:
             self._turn_records = turn_records
         ref_code = reference_code if reference_code is not None else self._reference_code
+        ref_dir = reference_dir if reference_dir is not None else self._reference_dir
         records = turn_records if turn_records is not None else self._turn_records
         results = []
         for criterion in criteria:
-            result = self._check_single(criterion, ref_code, records)
+            result = self._check_single(criterion, ref_code, records, ref_dir)
             results.append(result)
         return results
 
@@ -166,13 +184,15 @@ class SuccessChecker:
         criterion: SuccessCriterion,
         reference_code: str | None,
         turn_records: TurnRecords | None = None,
+        reference_dir: Path | None = None,
     ) -> CriterionResult:
         """Check a single criterion using registered checker.
 
         Args:
             criterion: Criterion definition (discriminated union)
-            reference_code: Optional reference code
+            reference_code: Optional reference code (string form)
             turn_records: Optional turn records for command inspection
+            reference_dir: Optional resolved path to a reference directory.
 
         Returns:
             CriterionResult with score
@@ -183,7 +203,14 @@ class SuccessChecker:
         try:
             # Get cached instance
             checker = self._get_checker_instance(criterion_type)
-            result = checker.check(criterion, self.sandbox, reference_code, turn_records=turn_records, route=self.route)
+            result = checker.check(
+                criterion,
+                self.sandbox,
+                reference_code,
+                turn_records=turn_records,
+                route=self.route,
+                reference_dir=reference_dir,
+            )
             result.pass_threshold = criterion.pass_threshold
 
             logger.debug(f"Criterion '{criterion_type}' score: {result.score:.2f}")

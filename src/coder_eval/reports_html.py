@@ -170,6 +170,18 @@ details .details-body { padding: 0 12px 10px 12px; }
 .criterion-row td:first-child { font-family: ui-monospace, SFMono-Regular,
                                  "SF Mono", Menlo, Consolas, monospace;
                                  color: var(--fg-muted); font-size: 12px; }
+.judge-section { display: flex; flex-direction: column; gap: 12px; }
+.judge-card { padding: 14px 16px; }
+.judge-card-head { display: flex; justify-content: space-between;
+                    align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.judge-card-title { font-size: 14px; line-height: 1.4; flex: 1; min-width: 0; }
+.judge-card-score { flex-shrink: 0; }
+.judge-rationale { margin-top: 10px; padding: 10px 12px;
+                   background: var(--bg-code); border-radius: 4px;
+                   font-size: 13px; line-height: 1.5; }
+.judge-findings { margin: 8px 0 0 18px; padding-left: 4px; font-size: 13px;
+                   line-height: 1.6; }
+.judge-findings li { margin: 2px 0; }
 .nav-toggle { display: inline-block; padding: 5px 10px; font-size: 12px;
               background: var(--bg-card-2); border: 1px solid var(--border);
               border-radius: 5px; color: var(--fg); cursor: pointer; }
@@ -356,6 +368,10 @@ def _render_criteria_details(cr: CriterionResult) -> str:
     exit, stdout, and stderr) render as a collapsible `<details>` block
     whose summary shows just the first line — the user expands to see the
     full captured output.
+
+    Judge criteria render their findings + transcript in a dedicated
+    "Judge Verdicts" section below the criteria table; this cell stays
+    compact and just shows the score=...\\nrationale: ... summary.
     """
     err = _esc(cr.error) if cr.error else ""
     details_raw = (cr.details or "").strip()
@@ -376,6 +392,156 @@ def _render_criteria_details(cr: CriterionResult) -> str:
         f"{prefix}"
         f'<details><summary class="mono dim">{summary}</summary>'
         f'<div class="details-body">{full_pre}</div></details>'
+    )
+
+
+def _render_judge_section(criteria: list[CriterionResult]) -> str:
+    """Render the dedicated 'Judge Verdicts' section containing per-judge cards.
+
+    Each judge result that carries verdict evidence (findings, transcript) gets
+    a card with: type + description, score badge, rationale extracted from the
+    details string, an expanded-by-default Findings list, and a collapsed
+    Judge transcript disclosure.
+
+    Returns an empty string when there's no judge result with anything to show
+    — non-judge tasks render no Judge Verdicts heading.
+    """
+    cards: list[str] = []
+    for cr in criteria:
+        # criterion_type identifies judges; details/findings/transcript may all
+        # be present (typed JudgeCriterionResult) or in model_extra (round-tripped).
+        if cr.criterion_type not in ("llm_judge", "agent_judge"):
+            continue
+        findings_raw = getattr(cr, "findings", []) or []
+        findings = [str(f).strip() for f in findings_raw if str(f).strip()]
+        transcript = getattr(cr, "transcript", None)
+        if not findings and transcript in (None, {}, []):
+            continue
+        cards.append(_render_judge_card(cr, findings, transcript))
+
+    if not cards:
+        return ""
+
+    return f'<h2>Judge Verdicts ({len(cards)})</h2><div class="judge-section">' + "".join(cards) + "</div>"
+
+
+def _extract_rationale(details: str | None) -> str:
+    """Pull the rationale line out of the standard format_details payload.
+
+    ``format_details`` writes ``score=0.750\\nrationale: ...\\nnotes: ...``.
+    Reach into the second line and strip the ``rationale: `` prefix.
+    Returns an empty string when the details aren't in this shape.
+    """
+    if not details:
+        return ""
+    for line in details.splitlines():
+        prefix = "rationale: "
+        if line.startswith(prefix):
+            return line[len(prefix) :].strip()
+    return ""
+
+
+def _render_judge_card(cr: CriterionResult, findings: list[str], transcript: Any) -> str:
+    """Render one judge result as a card (type + score + rationale + findings + transcript)."""
+    rationale = _extract_rationale(cr.details)
+    rationale_html = f'<div class="judge-rationale">{_esc(rationale)}</div>' if rationale else ""
+
+    findings_html = ""
+    if findings:
+        items = "".join(f"<li>{_esc(f)}</li>" for f in findings)
+        # Findings open by default — they're the audit highlight reviewers came for.
+        findings_html = (
+            f'<details open style="margin-top:8px">'
+            f'<summary class="mono dim">Findings ({len(findings)})</summary>'
+            f'<ul class="judge-findings">{items}</ul>'
+            f"</details>"
+        )
+
+    transcript_html = _render_judge_transcript(transcript)
+
+    return (
+        '<div class="card judge-card">'
+        + '<div class="judge-card-head">'
+        + f'<div class="judge-card-title"><span class="mono dim">{_esc(cr.criterion_type)}</span> '
+        + f"&middot; {_esc(cr.description)}</div>"
+        + f'<div class="judge-card-score">{_score_pill(cr.score)}</div>'
+        + "</div>"
+        + rationale_html
+        + findings_html
+        + transcript_html
+        + "</div>"
+    )
+
+
+def _render_judge_transcript(transcript: Any) -> str:
+    """Render a JudgeTranscript (or its dict round-trip form) as a disclosure block."""
+    if transcript is None:
+        return ""
+    # Normalize to a plain dict so dict-form (round-tripped) and model-form work the same.
+    if hasattr(transcript, "model_dump"):
+        data = transcript.model_dump()
+    elif isinstance(transcript, dict):
+        data = transcript
+    else:
+        return ""
+
+    tool_calls = data.get("tool_calls") or []
+    raw_verdict = (data.get("raw_verdict") or "").strip()
+    duration = data.get("duration_seconds") or 0.0
+    truncated = bool(data.get("truncated"))
+    token_usage = data.get("token_usage")
+
+    if not tool_calls and not raw_verdict and not token_usage:
+        return ""
+
+    rows: list[str] = []
+    for tc in tool_calls:
+        if isinstance(tc, dict):
+            tool = _esc(str(tc.get("tool_name", "")))
+            detail = _esc(str(tc.get("detail", "")))
+            status = _esc(str(tc.get("status", "")))
+            preview = _esc(str(tc.get("result_preview", "")))
+        else:
+            tool = _esc(getattr(tc, "tool_name", ""))
+            detail = _esc(getattr(tc, "detail", ""))
+            status = _esc(getattr(tc, "status", ""))
+            preview = _esc(getattr(tc, "result_preview", ""))
+        rows.append(
+            f"<tr><td class='mono'>{tool}</td><td class='mono dim'>{status}</td>"
+            + f"<td class='mono' style='white-space:pre-wrap'>{detail}</td>"
+            + f"<td class='dim' style='white-space:pre-wrap'>{preview}</td></tr>"
+        )
+    table = ""
+    if rows:
+        table = (
+            "<table style='margin-top:6px;font-size:0.9em'>"
+            "<thead><tr><th>Tool</th><th>Status</th><th>Detail</th><th>Result</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>"
+        )
+
+    raw_block = ""
+    if raw_verdict:
+        raw_block = (
+            f'<details style="margin-top:6px"><summary class="mono dim">Raw verdict</summary>'
+            f'<pre style="margin:6px 0 0 0;white-space:pre-wrap">{_esc(raw_verdict)}</pre></details>'
+        )
+
+    meta_bits: list[str] = []
+    if duration:
+        meta_bits.append(f"duration: {float(duration):.1f}s")
+    if isinstance(token_usage, dict):
+        in_tok = token_usage.get("input_tokens")
+        out_tok = token_usage.get("output_tokens")
+        if in_tok is not None or out_tok is not None:
+            meta_bits.append(f"tokens: in={in_tok or 0}, out={out_tok or 0}")
+    if truncated:
+        meta_bits.append("truncated")
+    meta = f'<div class="dim mono" style="margin-top:4px">{_esc(" • ".join(meta_bits))}</div>' if meta_bits else ""
+
+    summary_label = f"Judge transcript ({len(tool_calls)} tool calls)" if tool_calls else "Judge transcript"
+    return (
+        f'<details style="margin-top:4px"><summary class="mono dim">{_esc(summary_label)}</summary>'
+        f'<div class="details-body">{meta}{table}{raw_block}</div></details>'
     )
 
 
@@ -1268,6 +1434,7 @@ class HTMLReportGenerator:
             _render_header(result)
             + _render_simulation(result)
             + _render_criteria(result.success_criteria_results or [])
+            + _render_judge_section(result.success_criteria_results or [])
             + _render_error_details(result)
             + f"<h2>Conversation Trace ({trace_count})</h2>"
             + turns_html

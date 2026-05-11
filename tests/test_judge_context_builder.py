@@ -10,6 +10,7 @@ import pytest
 from coder_eval.evaluation.judge_context import (
     FileBlock,
     JudgeContextBuilder,
+    collect_reference_secrets,
     format_details,
     scrub_reference,
     truncate,
@@ -351,7 +352,66 @@ def test_builder_dialog_not_requested(sandbox: Sandbox) -> None:
 
 
 def test_scrub_reference_redacts_when_enabled() -> None:
-    assert scrub_reference("a REF b", "REF") == "a <reference redacted> b"
+    # Secrets shorter than 8 chars are skipped to avoid mangling unrelated common substrings;
+    # use a realistic-length sentinel here.
+    secret = "REF_SOLUTION_BLOCK_42"
+    assert scrub_reference(f"a {secret} b", secret) == "a <reference redacted> b"
+
+
+def test_scrub_reference_skips_secrets_below_min_length() -> None:
+    # 7 chars and shorter are no-op; redacting a tiny common substring would
+    # produce gibberish and isn't a realistic leak vector.
+    assert scrub_reference("a REF b", "REF") == "a REF b"
+    assert scrub_reference("hello1", "hello1") == "hello1"  # 6 chars
+
+
+def test_scrub_runs_before_clip_so_partial_secrets_dont_survive() -> None:
+    """SECURITY regression for bug_001: scrub must run BEFORE clipping, not after.
+
+    scrub_reference uses str.replace which only matches the secret as a contiguous
+    whole string. If the budget clips the prompt mid-secret, the surviving prefix
+    no longer matches the full secret string — replace finds nothing — and a
+    partial reference fragment is persisted unsanitized.
+
+    Concrete trigger: a multi-KB reference is inlined into the prompt envelope
+    by ``include_reference=True``. The transcript budget forces clipping. The
+    surviving prefix of the prompt contains the leading portion of the reference
+    content. Scrub-before-clip ensures the secret is redacted while still
+    present in full, so the post-clip prompt cannot leak any portion.
+    """
+    from coder_eval.evaluation.judge_context import build_judge_transcript
+
+    secret = "REFERENCE_SOLUTION_BLOCK_" + "A" * 5_000  # 5K-char secret
+    # Full secret inlined into the prompt, exactly as ``_render_user_message``
+    # does for ``include_reference=true`` with a code/file reference.
+    prompt_text = f"REFERENCE SOLUTION:\n```\n{secret}\n```\n\nGRADING PROMPT: ..."
+
+    transcript = build_judge_transcript(
+        raw_verdict='{"score": 0.5, "rationale": "ok"}',
+        judge_prompt=prompt_text,
+        judge_system_prompt="strict reviewer",
+        max_chars=500,  # tight budget: forces clipping of the long prompt
+        scrub_key=secret,
+    )
+
+    # The post-clip prompt MUST NOT contain any portion of the secret payload —
+    # scrub-before-clip replaced the full secret with the short marker before
+    # any character-budget truncation could fragment it.
+    assert "REFERENCE_SOLUTION_BLOCK" not in transcript.judge_prompt
+    secret_payload = "A" * 100  # any 100-char run of the secret body
+    assert secret_payload not in transcript.judge_prompt
+    # Confirm the redaction marker is what survived.
+    assert "<reference redacted>" in transcript.judge_prompt
+
+
+def test_scrub_reference_accepts_iterable_of_secrets() -> None:
+    """Directory references produce a list of secrets — every file's content."""
+    secrets = ["FIRST_SECRET_LONG_AAAAA", "SECOND_SECRET_LONG_BBBBB"]
+    text = "open FIRST_SECRET_LONG_AAAAA and also SECOND_SECRET_LONG_BBBBB"
+    out = scrub_reference(text, secrets)
+    assert "FIRST_SECRET_LONG_AAAAA" not in out
+    assert "SECOND_SECRET_LONG_BBBBB" not in out
+    assert out.count("<reference redacted>") == 2
 
 
 def test_scrub_reference_noop_when_none() -> None:
@@ -395,3 +455,55 @@ def test_format_details_with_missing_and_notes() -> None:
     out = format_details(0.5, "ok", ["foo.py"], ["note1", "note2"])
     assert "missing_files: ['foo.py']" in out
     assert "notes: note1; note2" in out
+
+
+# --- collect_reference_secrets ---
+
+
+def test_collect_reference_secrets_missing_dir_returns_empty(tmp_path: Path) -> None:
+    assert collect_reference_secrets(tmp_path / "nope") == []
+
+
+def test_collect_reference_secrets_collects_file_contents(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("contents of a", encoding="utf-8")
+    (tmp_path / "b.py").write_text("contents of b", encoding="utf-8")
+    secrets = collect_reference_secrets(tmp_path)
+    assert set(secrets) == {"contents of a", "contents of b"}
+
+
+def test_collect_reference_secrets_skips_symlinks(tmp_path: Path) -> None:
+    """SECURITY: symlinks inside the reference dir must NOT be followed.
+
+    A reference bundle that ships ``secrets -> /etc/passwd`` would otherwise
+    read the host file into the scrub-key list (and quietly grow it), and a
+    symlink loop would hang the walk. Skipping symlinks both ways closes both.
+    """
+    real = tmp_path / "real.txt"
+    real.write_text("real file contents", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    loop = tmp_path / "loop"
+    loop.symlink_to(tmp_path)  # symlinked subdir back to root — would loop on rglob if followed
+    secrets = collect_reference_secrets(tmp_path)
+    assert secrets == ["real file contents"]
+
+
+def test_collect_reference_secrets_bounded_by_file_count(tmp_path: Path) -> None:
+    """A reference dir with many files must not load all of them into memory unbounded."""
+    for i in range(500):
+        (tmp_path / f"file_{i:03d}.txt").write_text(f"content {i}", encoding="utf-8")
+    secrets = collect_reference_secrets(tmp_path)
+    # Cap is well below 500. The exact value is implementation-defined; assert
+    # we stopped *before* reading every file rather than locking in the number.
+    assert 0 < len(secrets) < 500
+
+
+def test_collect_reference_secrets_bounded_by_total_bytes(tmp_path: Path) -> None:
+    """A reference dir with a few large files must not load megabytes into memory."""
+    big = "x" * (512 * 1024)  # 512 KB per file
+    for i in range(10):  # 5 MB total, easily over any reasonable budget
+        (tmp_path / f"big_{i}.bin").write_text(big, encoding="utf-8")
+    secrets = collect_reference_secrets(tmp_path)
+    total_bytes = sum(len(s) for s in secrets)
+    # We expect the budget to clamp below the full 5 MB.
+    assert total_bytes < 5 * 1024 * 1024

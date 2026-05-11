@@ -59,12 +59,18 @@ class TestLLMJudgeCriterion:
         assert criterion.type == "llm_judge"
         assert criterion.model == DEFAULT_GATEWAY_MODEL
         assert criterion.temperature == 0.0
-        assert criterion.max_tokens == 1000
+        # Bumped from 1000 → 2000 when verbose verdict (findings) was added,
+        # so output budgets fit the bullet evidence a typical judge emits.
+        assert criterion.max_tokens == 2000
         assert criterion.max_file_chars == 20_000
         assert criterion.files == []
-        assert criterion.include_reference is False
+        assert criterion.include_reference is True  # opt-out: judge sees reference by default
         assert criterion.include_agent_output is False
         assert criterion.include_tool_calls is False
+        assert criterion.capture_transcript is True
+        assert criterion.max_transcript_chars == 100_000
+        assert criterion.enabled is True
+        assert criterion.pass_threshold == 0.7
 
     def test_llm_judge_criterion_requires_prompt(self):
         """prompt is required — Pydantic raises ValidationError when missing."""
