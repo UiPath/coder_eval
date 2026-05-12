@@ -9,6 +9,7 @@ from typing import Any, Self
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from coder_eval.models.enums import FinalStatus
+from coder_eval.models.limits import RunLimits
 from coder_eval.models.mutations import PromptMutation
 from coder_eval.models.results import ConfigLineageEntry, EvaluationResult
 from coder_eval.models.tasks import PostRunCommand, PreRunCommand, TaskDefinition
@@ -51,6 +52,13 @@ class ExperimentVariant(BaseModel):
         description=(
             "Path to a file containing a full replacement initial_prompt (relative to experiment YAML). "
             "Mutually exclusive with initial_prompt and prompt_mutations."
+        ),
+    )
+    run_limits: RunLimits | None = Field(
+        default=None,
+        description=(
+            "Per-variant override for the task's run_limits block. Whole-object replace — "
+            "the block from this variant replaces any task-level block in full."
         ),
     )
 
@@ -101,6 +109,13 @@ class ExperimentDefaults(BaseModel):
     pre_run: list[PreRunCommand] | None = Field(
         default=None,
         description="Default pre-run commands prepended before each task's own pre_run (run for every task).",
+    )
+    run_limits: RunLimits | None = Field(
+        default=None,
+        description=(
+            "Default run-time budget caps applied to tasks that don't set their own block. "
+            "Tasks and variants can override (whole-object replace)."
+        ),
     )
 
 
@@ -168,6 +183,17 @@ class VariantAggregate(BaseModel):
         default=1,
         ge=1,
         description="Replicate multiplicity (modal value across tasks).",
+    )
+    # Sub-counters of tasks_failed (NOT part of the task_count invariant).
+    tasks_token_budget_exceeded: int = Field(
+        default=0,
+        ge=0,
+        description="Subset of tasks_failed where run_limits token caps tripped.",
+    )
+    tasks_cost_budget_exceeded: int = Field(
+        default=0,
+        ge=0,
+        description="Subset of tasks_failed where run_limits cost cap tripped.",
     )
 
     @model_validator(mode="after")

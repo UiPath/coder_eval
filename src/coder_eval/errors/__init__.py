@@ -8,11 +8,13 @@ This package provides production-grade error handling with:
 """
 
 from .agent import AgentCrashError, format_timeout_reason, truncate_crash_message
+from .budget import BudgetExceededError
 from .timeout import EvaluationTimeoutError, TaskTimeoutError, TurnTimeoutError
 
 
 __all__ = [
     "AgentCrashError",
+    "BudgetExceededError",
     "EvaluationTimeoutError",
     "TaskTimeoutError",
     "TurnTimeoutError",

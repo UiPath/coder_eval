@@ -21,6 +21,7 @@ from .config import settings
 from .criteria.commands_efficiency import compute_commands_efficiency
 from .errors import (
     AgentCrashError,
+    BudgetExceededError,
     TaskTimeoutError,
     TurnTimeoutError,
 )
@@ -276,6 +277,10 @@ class Orchestrator:
         # Reference solution cache (loaded on-demand)
         self._reference_code: str | None = None
 
+        # One-shot flag: emit the "cost budget configured but no cost data" warning
+        # exactly once per task even if _check_run_limits fires every turn.
+        self._cost_budget_skipped_logged: bool = False
+
         # Canonical id shared with run_dir layout, tqdm label, and streaming events.
         self._log_task_id = format_task_log_id(variant_id, task.task_id, replicate_index)
 
@@ -396,6 +401,24 @@ class Orchestrator:
                 )
 
                 logger.error(f"Task timed out: {e}")
+            except BudgetExceededError as e:
+                # Map token-budget breaches and cost-budget breaches to distinct
+                # statuses so per-task records preserve the failure mode.
+                if e.budget_name == "usd":
+                    self.result.final_status = FinalStatus.COST_BUDGET_EXCEEDED
+                    component = "orchestrator.run_limits.cost"
+                else:
+                    self.result.final_status = FinalStatus.TOKEN_BUDGET_EXCEEDED
+                    component = "orchestrator.run_limits.tokens"
+                self.result.error_message = str(e)
+                self.result.error_details = create_error_context(
+                    error=e,
+                    task_id=self.task.task_id,
+                    attempt=max(self.result.iteration_count, 1),
+                    component=component,
+                    agent_name=self.task.agent.type.value,
+                )
+                logger.warning(f"Run limit exceeded: {e}")
             except Exception as e:
                 # Handle catastrophic errors
                 self.result.final_status = FinalStatus.ERROR
@@ -430,6 +453,8 @@ class Orchestrator:
                     FinalStatus.ERROR,
                     FinalStatus.TIMEOUT,
                     FinalStatus.FAILURE,
+                    FinalStatus.TOKEN_BUDGET_EXCEEDED,
+                    FinalStatus.COST_BUDGET_EXCEEDED,
                 }:
                     self.result.error_log_tail = log_tail.get_text() or None
                 self._finalize_result(start_time)
@@ -466,6 +491,14 @@ class Orchestrator:
 
         # Aggregate token usage
         self._aggregate_token_usage()
+
+        # Record whether per-turn cost data was available when a cost budget was set.
+        # Lets users audit whether a configured max_usd budget was actually enforceable.
+        if self.task.run_limits is not None and self.task.run_limits.max_usd is not None:
+            any_cost_reported = any(
+                t.token_usage is not None and t.token_usage.total_cost_usd is not None for t in self.result.turns
+            )
+            self.result.environment_info["cost_data_available"] = any_cost_reported
 
         if self.result.turns:
             self.result.total_assistant_turns = sum(t.assistant_turn_count for t in self.result.turns)
@@ -529,6 +562,72 @@ class Orchestrator:
         from .reports_html import write_task_html
 
         write_task_html(self.result, self.html_report_path)
+
+    def _check_run_limits(self, *, iteration: int) -> None:
+        """Raise BudgetExceededError if any RunLimits budget is exceeded.
+
+        Called after each completed turn. Aggregates across self.result.turns.
+        No-op when self.task.run_limits is None.
+        """
+        assert self.result is not None
+        limits = self.task.run_limits
+        if limits is None:
+            return
+
+        usages = [t.token_usage for t in self.result.turns if t.token_usage is not None]
+        if not usages:
+            return
+
+        input_tokens = sum(u.input_tokens for u in usages)
+        if limits.count_cached_input:
+            input_tokens += sum(u.cache_read_input_tokens for u in usages)
+        output_tokens = sum(u.output_tokens for u in usages)
+        total_tokens = input_tokens + output_tokens
+
+        if limits.max_input_tokens is not None and input_tokens > limits.max_input_tokens:
+            raise BudgetExceededError(
+                "input_tokens",
+                actual=input_tokens,
+                limit=limits.max_input_tokens,
+                task_id=self.task.task_id,
+                iteration=iteration,
+            )
+        if limits.max_output_tokens is not None and output_tokens > limits.max_output_tokens:
+            raise BudgetExceededError(
+                "output_tokens",
+                actual=output_tokens,
+                limit=limits.max_output_tokens,
+                task_id=self.task.task_id,
+                iteration=iteration,
+            )
+        if limits.max_total_tokens is not None and total_tokens > limits.max_total_tokens:
+            raise BudgetExceededError(
+                "total_tokens",
+                actual=total_tokens,
+                limit=limits.max_total_tokens,
+                task_id=self.task.task_id,
+                iteration=iteration,
+            )
+
+        if limits.max_usd is not None:
+            costs = [u.total_cost_usd for u in usages if u.total_cost_usd is not None]
+            if not costs:
+                if not self._cost_budget_skipped_logged:
+                    logger.warning(
+                        "[%s] max_usd budget configured but no turn reported cost; skipping cost check",
+                        self.task.task_id,
+                    )
+                    self._cost_budget_skipped_logged = True
+                return
+            total_cost = sum(costs)
+            if total_cost > limits.max_usd:
+                raise BudgetExceededError(
+                    "usd",
+                    actual=total_cost,
+                    limit=limits.max_usd,
+                    task_id=self.task.task_id,
+                    iteration=iteration,
+                )
 
     def _aggregate_token_usage(self) -> None:
         """Aggregate token usage from turns and proxy, storing on self.result."""
@@ -945,6 +1044,9 @@ class Orchestrator:
                 self.task.max_turns,
             )
 
+        # Budget gate runs AFTER criteria so partial-credit visibility is preserved.
+        self._check_run_limits(iteration=iteration)
+
         return all_passed
 
     async def _simulation_dialog_loop(self, initial_prompt: str | None, sandbox_dir: Path) -> bool:
@@ -1146,6 +1248,29 @@ class Orchestrator:
                         for r, c in zip(criteria_results, self.task.success_criteria, strict=True)
                     )
                     self._emit_criteria_event(criteria_results)
+
+                # Budget gate: aborts the dialog with a dedicated stop reason and
+                # ensures end-of-dialog criteria still run for partial credit.
+                try:
+                    self._check_run_limits(iteration=turns_completed)
+                except BudgetExceededError:
+                    stop_reason = DialogStopReason.RUN_LIMIT_EXCEEDED
+                    if not criteria_checked_this_turn:
+                        reference_code, reference_dir, self._reference_code = load_reference(
+                            task=self.task,
+                            task_file=self.task_file,
+                            cached_reference=self._reference_code,
+                        )
+                        criteria_results = await asyncio.to_thread(
+                            self.success_checker.check_all,
+                            self.task.success_criteria,
+                            reference_code=reference_code,
+                            reference_dir=reference_dir,
+                            turn_records=self.result.turns,
+                        )
+                        self.result.success_criteria_results = criteria_results
+                        self.result.calculate_weighted_score(self.task.success_criteria)
+                    raise
 
                 stop_decision = evaluate_stop(
                     config=sim_config,

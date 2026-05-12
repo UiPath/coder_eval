@@ -224,13 +224,16 @@ jobs:
       # dataset row count, bump these.
       EXPECTED_SMOKE_PASS_RUN: "5"
       EXPECTED_SMOKE_PASS_SUCCEEDED: "5"
-      # smoke-fail bucket: two tasks expected to fail.
+      # smoke-fail bucket: three tasks expected to fail.
       #   1. smoke_negative_path: file_contains criterion is unsatisfiable
       #      (sentinel-string regression detection for success-checker).
       #   2. smoke_task_timeout: a `sleep 300` Bash call vs task_timeout: 30
       #      (regression detection for the orchestrator's task_timeout watchdog).
-      EXPECTED_SMOKE_FAIL_RUN: "2"
-      EXPECTED_SMOKE_FAIL_FAILED: "2"
+      #   3. smoke_budget_exceeded: max_input_tokens: 1 (unsatisfiable) — guards
+      #      run_limits enforcement (regression detection: a disabled budget gate
+      #      would let the task pass criteria and land in tasks_succeeded).
+      EXPECTED_SMOKE_FAIL_RUN: "3"
+      EXPECTED_SMOKE_FAIL_FAILED: "3"
       # smoke-variants bucket: one task fanned out across 2 experiment variants
       # (experiments/smoke_variants.yaml) → tasks_run = 1 * 2.
       EXPECTED_SMOKE_VARIANTS_RUN: "2"
@@ -588,6 +591,45 @@ jobs:
           if p_settings_bedrock < 1:
               sys.exit("test_claude_settings_enforcement_live.py (BedrockRoute) reported zero PASSED tests")
           PY
+
+      - name: Run cost-budget smoke (max_usd → COST_BUDGET_EXCEEDED via ProxyRoute)
+        # Gated on the live-tests job: only runs when LLMGW secrets are present
+        # (preflight above guarantees that). Verifies the proxy-mode cost path
+        # end-to-end — a regression that broke per-turn cost reporting through
+        # the proxy would log "max_usd budget configured but no turn reported
+        # cost; skipping cost check" and the task would land in tasks_failed via
+        # the placeholder criterion instead of COST_BUDGET_EXCEEDED. The
+        # final_status assertion below catches that silently-broken case.
+        env:
+          API_BACKEND: "proxy"
+        run: |
+          # Inverted exit semantics: coder-eval exits 1 when a task fails. We want that.
+          if .venv/bin/coder-eval run tasks/smoke_cost_budget_exceeded.yaml \
+              --model claude-haiku-4-5-20251001 \
+              --run-dir runs/ci-smoke-cost-budget; then
+            echo "FATAL: cost-budget smoke succeeded — cost enforcement appears broken."
+            exit 1
+          fi
+
+      - name: Verify cost-budget smoke (COST_BUDGET_EXCEEDED, not just failed)
+        run: |
+          F=runs/ci-smoke-cost-budget/experiment.json
+          test -f "$F" || { echo "$F missing"; ls -la runs/; exit 1; }
+          RUN=$(jq '[.variant_aggregates[].tasks_run] | add' "$F")
+          FAILED=$(jq '[.variant_aggregates[].tasks_failed] | add' "$F")
+          ERRORED=$(jq '[.variant_aggregates[].tasks_error] | add' "$F")
+          echo "smoke-cost-budget: run=$RUN failed=$FAILED errored=$ERRORED"
+          test "$RUN" = "1" || { echo "smoke-cost-budget tasks_run drift: expected 1, got $RUN"; exit 1; }
+          test "$FAILED" = "1" || { echo "smoke-cost-budget expected 1 failure, got $FAILED"; exit 1; }
+          test "$ERRORED" = "0" || { echo "smoke-cost-budget unexpectedly errored"; exit 1; }
+          # Specifically assert the budget gate fired — not just that the task failed.
+          # A regression in proxy cost reporting would still produce failed=1 via the
+          # placeholder criterion, but final_status would be FAILURE, not COST_BUDGET_EXCEEDED.
+          TASK_JSON=runs/ci-smoke-cost-budget/default/smoke_cost_budget_exceeded/00/task.json
+          test -f "$TASK_JSON" || { echo "$TASK_JSON missing"; find runs/ci-smoke-cost-budget -maxdepth 5 -type f; exit 1; }
+          STATUS=$(jq -r '.final_status' "$TASK_JSON")
+          echo "final_status=$STATUS"
+          test "$STATUS" = "COST_BUDGET_EXCEEDED" || { echo "Expected final_status=COST_BUDGET_EXCEEDED, got $STATUS — cost gate may not have fired (proxy cost telemetry regression?)"; exit 1; }
 
       - name: Upload live-test artifacts on failure
         if: failure()

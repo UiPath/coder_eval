@@ -11,6 +11,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind
+from coder_eval.models.limits import RunLimits
 from coder_eval.models.sandbox import SandboxConfig
 
 
@@ -376,6 +377,13 @@ class TaskDefinition(BaseModel):
         default=None,
         ge=30,
         description="Maximum seconds for the entire evaluation loop (all iterations). None = no limit.",
+    )
+    run_limits: RunLimits | None = Field(
+        default=None,
+        description=(
+            "Budget caps (tokens/USD) that abort the task when exceeded. "
+            "Checked after each completed agent turn. See RunLimits."
+        ),
     )
     reference: ReferenceSource | None = Field(
         default=None,

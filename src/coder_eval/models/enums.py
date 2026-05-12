@@ -12,6 +12,8 @@ class FinalStatus(StrEnum):
     ERROR = "ERROR"
     TIMEOUT = "TIMEOUT"
     MAX_TURNS_EXHAUSTED = "MAX_TURNS_EXHAUSTED"
+    TOKEN_BUDGET_EXCEEDED = "TOKEN_BUDGET_EXCEEDED"
+    COST_BUDGET_EXCEEDED = "COST_BUDGET_EXCEEDED"
 
     @property
     def category(self) -> Literal["succeeded", "failed", "error"]:
@@ -34,6 +36,8 @@ _STATUS_ICONS: dict[FinalStatus, str] = {
     FinalStatus.ERROR: "!",
     FinalStatus.TIMEOUT: "T",
     FinalStatus.MAX_TURNS_EXHAUSTED: "M",
+    FinalStatus.TOKEN_BUDGET_EXCEEDED: "#",
+    FinalStatus.COST_BUDGET_EXCEEDED: "$",
 }
 
 assert set(_STATUS_ICONS) == set(FinalStatus), "Missing icon for FinalStatus member"

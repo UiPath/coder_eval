@@ -5,6 +5,7 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  merge_group:
   schedule:
     - cron: '0 6 * * 1'  # Weekly on Mondays at 6am UTC
 

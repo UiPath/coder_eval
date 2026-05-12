@@ -16,6 +16,7 @@ class DialogStopReason(StrEnum):
     MAX_TURNS = "max_turns"
     BUDGET = "budget"
     ERROR = "error"
+    RUN_LIMIT_EXCEEDED = "run_limit_exceeded"
 
 
 @dataclass(frozen=True)

@@ -249,6 +249,8 @@ def _generate_run_summary(
         tasks_succeeded=sum(1 for s in statuses if s.category == "succeeded"),
         tasks_failed=sum(1 for s in statuses if s.category == "failed"),
         tasks_error=sum(1 for s in statuses if s.category == "error"),
+        tasks_token_budget_exceeded=sum(1 for s in statuses if s == FinalStatus.TOKEN_BUDGET_EXCEEDED),
+        tasks_cost_budget_exceeded=sum(1 for s in statuses if s == FinalStatus.COST_BUDGET_EXCEEDED),
         skipped_tasks=skipped_tasks or [],
         max_parallel=max_parallel,
         task_results=[

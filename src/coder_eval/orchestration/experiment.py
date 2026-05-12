@@ -27,6 +27,7 @@ from ..models import (
     FinalStatus,
     PromptRephrase,
     ResolvedTask,
+    RunLimits,
     SimulationConfig,
     SkippedTask,
     SnapshotMode,
@@ -451,6 +452,7 @@ def resolve_task_for_variant(
     resolved_task_timeout = task.task_timeout
     resolved_turn_timeout = task.turn_timeout
     resolved_max_turns = task.max_turns
+    resolved_run_limits: RunLimits | None = task.run_limits
 
     scalar_lineage: dict[str, ConfigLineageEntry] = {}
     task_explicit = task.model_fields_set
@@ -463,6 +465,13 @@ def resolve_task_for_variant(
     ):
         resolved_task_timeout = default_experiment.defaults.task_timeout
         scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="default")
+    if (
+        default_experiment.defaults
+        and default_experiment.defaults.run_limits is not None
+        and "run_limits" not in task_explicit
+    ):
+        resolved_run_limits = default_experiment.defaults.run_limits
+        scalar_lineage["run_limits"] = ConfigLineageEntry(value=resolved_run_limits.model_dump(), source="default")
     # turn_timeout / max_turns: top-level field wins over hoisted-from-agent value
     # within the same layer (variant precedence rule, applied uniformly).
     if "turn_timeout" not in task_explicit:
@@ -488,6 +497,11 @@ def resolve_task_for_variant(
     if experiment.defaults and experiment.defaults.task_timeout is not None and "task_timeout" not in task_explicit:
         resolved_task_timeout = experiment.defaults.task_timeout
         scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="experiment-defaults")
+    if experiment.defaults and experiment.defaults.run_limits is not None and "run_limits" not in task_explicit:
+        resolved_run_limits = experiment.defaults.run_limits
+        scalar_lineage["run_limits"] = ConfigLineageEntry(
+            value=resolved_run_limits.model_dump(), source="experiment-defaults"
+        )
     if "turn_timeout" not in task_explicit:
         if experiment.defaults and experiment.defaults.turn_timeout is not None:
             resolved_turn_timeout = experiment.defaults.turn_timeout
@@ -516,6 +530,8 @@ def resolve_task_for_variant(
         scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=task.turn_timeout, source="task")
     if "max_turns" in task_explicit:
         scalar_lineage["max_turns"] = ConfigLineageEntry(value=task.max_turns, source="task")
+    if "run_limits" in task_explicit and task.run_limits is not None:
+        scalar_lineage["run_limits"] = ConfigLineageEntry(value=task.run_limits.model_dump(), source="task")
 
     # Layer 4: variant scalars (highest precedence before CLI). Top-level always
     # wins over the agent-hoisted value within the variant layer.
@@ -536,6 +552,9 @@ def resolve_task_for_variant(
     elif variant_agent_mt is not None:
         resolved_max_turns = variant_agent_mt
         scalar_lineage["max_turns"] = ConfigLineageEntry(value=resolved_max_turns, source="variant-agent-deprecated")
+    if variant.run_limits is not None:
+        resolved_run_limits = variant.run_limits
+        scalar_lineage["run_limits"] = ConfigLineageEntry(value=resolved_run_limits.model_dump(), source="variant")
 
     # Resolve template_sources: task base + experiment defaults overlays + variant overlays (append semantics)
     base_sources: list[TemplateSource] = list(task.sandbox.template_sources or [])
@@ -582,6 +601,7 @@ def resolve_task_for_variant(
             "task_timeout": resolved_task_timeout,
             "turn_timeout": resolved_turn_timeout,
             "max_turns": resolved_max_turns,
+            "run_limits": resolved_run_limits,
             "sandbox": resolved_sandbox,
             "post_run": resolved_post_run,
             "pre_run": resolved_pre_run,
@@ -1036,6 +1056,8 @@ def aggregate_results(
             tasks_succeeded=sum(1 for v in vr_list if v.final_status.category == "succeeded"),
             tasks_failed=sum(1 for v in vr_list if v.final_status.category == "failed"),
             tasks_error=sum(1 for v in vr_list if v.final_status.category == "error"),
+            tasks_token_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.TOKEN_BUDGET_EXCEEDED),
+            tasks_cost_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.COST_BUDGET_EXCEEDED),
             average_score=sum(v.weighted_score for v in vr_list) / len(vr_list),
             average_duration=sum(v.duration_seconds / v.replicate_count for v in vr_list) / len(vr_list),
             total_tokens=total_tokens,

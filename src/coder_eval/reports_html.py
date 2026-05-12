@@ -278,7 +278,7 @@ def _status_badge(status: Any) -> str:
     su = status_str.upper()
     if su == "SUCCESS":
         cls = "success"
-    elif su in ("FAILURE", "MAX_TURNS_EXHAUSTED", "TIMEOUT"):
+    elif su in ("FAILURE", "MAX_TURNS_EXHAUSTED", "TIMEOUT", "TOKEN_BUDGET_EXCEEDED", "COST_BUDGET_EXCEEDED"):
         cls = "failure"
     elif su == "ERROR":
         cls = "error"
@@ -1480,6 +1480,17 @@ class HTMLReportGenerator:
         )
         stddev_lines = _variant_stddev_lines(variant_id, result)
         rich_sections = _variant_rich_sections(variant_id, result, run_dir)
+        budget_stats = ""
+        if agg.tasks_token_budget_exceeded > 0:
+            budget_stats += (
+                f'<div class="stat"><div class="label">Token Budget</div>'
+                f'<div class="value">{agg.tasks_token_budget_exceeded}</div></div>'
+            )
+        if agg.tasks_cost_budget_exceeded > 0:
+            budget_stats += (
+                f'<div class="stat"><div class="label">Cost Budget</div>'
+                f'<div class="value">{agg.tasks_cost_budget_exceeded}</div></div>'
+            )
         body = f"""
 <div class="header-bar">
   <div class="title-group">
@@ -1497,6 +1508,7 @@ class HTMLReportGenerator:
     <div class="stat"><div class="label">Succeeded</div><div class="value">{agg.tasks_succeeded}</div></div>
     <div class="stat"><div class="label">Failed</div><div class="value">{agg.tasks_failed}</div></div>
     <div class="stat"><div class="label">Errors</div><div class="value">{agg.tasks_error}</div></div>
+    {budget_stats}
   </div>
   {stddev_lines}
 </div>

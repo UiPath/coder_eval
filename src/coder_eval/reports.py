@@ -286,6 +286,13 @@ class ReportGenerator:
         elif len(models) > 1:
             lines.append(f"**Models**: {', '.join(f'`{m}`' for m in models)}")
 
+        failed_line = f"- **Failed**: {summary.tasks_failed}"
+        if summary.tasks_token_budget_exceeded or summary.tasks_cost_budget_exceeded:
+            failed_line += (
+                f" (incl. {summary.tasks_token_budget_exceeded} token budget, "
+                f"{summary.tasks_cost_budget_exceeded} cost budget exceeded)"
+            )
+
         lines.extend(
             [
                 "",
@@ -293,7 +300,7 @@ class ReportGenerator:
                 "",
                 f"- **Total Tasks**: {summary.tasks_run}",
                 f"- **Succeeded**: {summary.tasks_succeeded}",
-                f"- **Failed**: {summary.tasks_failed}",
+                failed_line,
                 f"- **Errors**: {summary.tasks_error}",
                 f"- **Success Rate**: {success_rate:.1f}%",
             ]

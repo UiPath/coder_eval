@@ -25,6 +25,16 @@ defaults:
   # Typical range in tasks: 3-18 depending on complexity
   max_turns: 20
 
+  # Run-time budget caps (abort task when exceeded). Optional — leave commented to disable.
+  # Override per-variant via the variant's run_limits block. Per-row dataset multiplication:
+  # a 100-row task with max_usd: 0.10 permits up to $10 cumulative spend.
+  # run_limits:
+  #   max_input_tokens: 100000
+  #   max_output_tokens: 20000
+  #   max_total_tokens: 120000
+  #   max_usd: 0.50
+  #   count_cached_input: false
+
   agent:
     # Agent type (currently only "claude-code" is supported)
     type: claude-code

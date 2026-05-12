@@ -59,6 +59,9 @@ from coder_eval.models.gateway import DEFAULT_GATEWAY_MODEL
 # Judge
 from coder_eval.models.judge import JudgeVerdict
 
+# Limits
+from coder_eval.models.limits import RunLimits
+
 # Mutations
 from coder_eval.models.mutations import (
     PromptMutation,
@@ -239,6 +242,8 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "DEFAULT_GATEWAY_MODEL",
     # Judge
     "JudgeVerdict",
+    # Limits
+    "RunLimits",
     # Tasks
     "TaskDefinition",
     "DEFAULT_SIMULATION_STOP_TOKEN",

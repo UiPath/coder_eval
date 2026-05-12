@@ -298,6 +298,7 @@ class SimulationTelemetry(BaseModel):
         "max_turns",
         "budget",
         "error",
+        "run_limit_exceeded",
     ] = Field(description="Why the dialog terminated")
     simulator_input_tokens: int = Field(default=0, ge=0, description="Sum of simulator prompt tokens across turns")
     simulator_output_tokens: int = Field(default=0, ge=0, description="Sum of simulator completion tokens across turns")
@@ -607,6 +608,20 @@ class RunSummary(BaseModel):
     tasks_succeeded: int = Field(description="Number of tasks that succeeded")
     tasks_failed: int = Field(description="Number of tasks that failed")
     tasks_error: int = Field(description="Number of tasks that encountered errors")
+
+    # Informational sub-counters: subsets of tasks_failed (NOT part of the
+    # task_count invariant). Default 0 so old serialized RunSummary JSON
+    # without these fields deserialises cleanly.
+    tasks_token_budget_exceeded: int = Field(
+        default=0,
+        ge=0,
+        description="Subset of tasks_failed where run_limits token caps tripped.",
+    )
+    tasks_cost_budget_exceeded: int = Field(
+        default=0,
+        ge=0,
+        description="Subset of tasks_failed where run_limits cost cap tripped.",
+    )
 
     # Tasks excluded at load time (YAML / schema errors). Distinct from
     # tasks_error: these never reached the orchestrator. Empty for runs

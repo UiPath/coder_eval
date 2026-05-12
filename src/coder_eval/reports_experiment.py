@@ -230,6 +230,22 @@ class ExperimentReportGenerator:
             row += " | —"
         lines.append(row + " |")
 
+        # Optional sub-rows: only rendered when at least one variant has budget-exceeded tasks.
+        if any(result.variant_aggregates[vid].tasks_token_budget_exceeded > 0 for vid in result.variant_ids):
+            row = "| - Token budget"
+            for vid in result.variant_ids:
+                row += f" | {result.variant_aggregates[vid].tasks_token_budget_exceeded}"
+            if show_p_values:
+                row += " | —"
+            lines.append(row + " |")
+        if any(result.variant_aggregates[vid].tasks_cost_budget_exceeded > 0 for vid in result.variant_ids):
+            row = "| - Cost budget"
+            for vid in result.variant_ids:
+                row += f" | {result.variant_aggregates[vid].tasks_cost_budget_exceeded}"
+            if show_p_values:
+                row += " | —"
+            lines.append(row + " |")
+
         # Row: Errors
         row = "| Errors"
         for vid in result.variant_ids:
@@ -434,6 +450,13 @@ class ExperimentReportGenerator:
         success_rate = (agg.tasks_succeeded / evaluable * 100) if evaluable > 0 else 0
         tokens_str = f"{agg.total_tokens:,}" if agg.total_tokens is not None else "N/A"
 
+        failed_line = f"- **Failed**: {agg.tasks_failed}"
+        if agg.tasks_token_budget_exceeded or agg.tasks_cost_budget_exceeded:
+            failed_line += (
+                f" (incl. {agg.tasks_token_budget_exceeded} token budget, "
+                f"{agg.tasks_cost_budget_exceeded} cost budget exceeded)"
+            )
+
         lines = [
             f"# Variant Report: {variant_id}",
             "",
@@ -444,7 +467,7 @@ class ExperimentReportGenerator:
             "",
             f"- **Tasks Run**: {agg.tasks_run}",
             f"- **Succeeded**: {agg.tasks_succeeded}",
-            f"- **Failed**: {agg.tasks_failed}",
+            failed_line,
             f"- **Errors**: {agg.tasks_error}",
             f"- **Success Rate**: {success_rate:.1f}%",
             f"- **Average Score**: {agg.average_score:.3f}",

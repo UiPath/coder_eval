@@ -51,6 +51,9 @@ class ErrorCategory(Enum):
     DISK_FULL = "disk_full"  # No disk space (NOT retryable)
     OUT_OF_MEMORY = "out_of_memory"  # OOM error (NOT retryable)
 
+    # Budget governance — RunLimits caps tripped (NOT retryable — retrying compounds the breach)
+    BUDGET_EXCEEDED = "budget_exceeded"
+
     # Unknown
     UNKNOWN = "unknown"  # Uncategorized error (NOT retryable)
 
@@ -180,5 +183,9 @@ ERROR_TIPS = {
         "Claude CLI process exited unexpectedly. Common causes: insufficient API credits, "
         "invalid API key, or network issues. Run 'claude --version' to verify the CLI works, "
         "then try running your prompt directly with 'claude' to see the actual error."
+    ),
+    ErrorCategory.BUDGET_EXCEEDED: (
+        "RunLimits budget exceeded. Raise the cap in the task's run_limits block, or simplify "
+        "the prompt to use fewer tokens. See docs/features/2026-05-11-run-limits.md."
     ),
 }

@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from .agent import AgentCrashError
+from .budget import BudgetExceededError
 from .categories import ErrorCategory
 from .timeout import EvaluationTimeoutError
 
@@ -56,6 +57,10 @@ def categorize_error(
     # 1. Check custom timeout exceptions first (before generic TimeoutError)
     if isinstance(error, EvaluationTimeoutError):
         return ErrorCategory.AGENT_TIMEOUT
+
+    # RunLimits budget breach — typed, distinct from time-based exceptions.
+    if isinstance(error, BudgetExceededError):
+        return ErrorCategory.BUDGET_EXCEEDED
 
     # NB: the ``AgentCrashError`` typed check is intentionally placed at the
     # END of this function (after string-pattern matching), not here. The

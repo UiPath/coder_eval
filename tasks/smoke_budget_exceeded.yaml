@@ -1,0 +1,35 @@
+task_id: "smoke_budget_exceeded"
+description: |
+  Smoke task exercising run_limits enforcement end-to-end. The agent is
+  given a trivial prompt with max_input_tokens=1, which is unsatisfiable
+  by any real prompt (the working-directory prefix alone exceeds it).
+  The orchestrator must classify the run as TOKEN_BUDGET_EXCEEDED
+  (which maps to tasks_failed via FinalStatus.category). A regression
+  that silently disabled run_limits would let the task pass criteria and
+  land in tasks_succeeded.
+initial_prompt: |
+  Print the word "ok".
+
+# Unsatisfiable budget — any real prompt blows this in a single turn.
+run_limits:
+  max_input_tokens: 1
+
+max_turns: 2
+
+tags: [smoke-fail]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Bash"]
+
+sandbox:
+  driver: "tempdir"
+  python: {}
+
+success_criteria:
+  # The single turn runs, criteria check returns FAIL, then the budget gate
+  # short-circuits the run to TOKEN_BUDGET_EXCEEDED (a "failed"-category status).
+  - type: "file_exists"
+    path: "should_never_be_checked.txt"
+    description: "Placeholder; budget cap fires after the single turn."
