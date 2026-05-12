@@ -844,6 +844,15 @@ def resolve_all_tasks(
     for task_file in task_files:
         try:
             task, source_yaml = load_task(task_file)
+            # Honor `skip: true` before dataset expansion — quarantined tasks
+            # skip row fan-out, variant resolution, and any further I/O. The
+            # task is reported in RunSummary.skipped_tasks so the suite shows
+            # which YAMLs were intentionally excluded vs. failed to load.
+            if task.skip:
+                reason = f"skip: true (task_id={task.task_id!r})"
+                logger.info("Skipping task %s — skip: true in YAML", task.task_id)
+                skipped.append(SkippedTask(path=str(task_file), reason=reason))
+                continue
             # Dataset fan-out BEFORE variant resolution: one task per row, each
             # treated as an independent task for the 4-layer merge below. This
             # locks the invariant that variants cannot override the dataset.

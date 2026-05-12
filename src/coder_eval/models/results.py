@@ -584,15 +584,26 @@ class SuiteRollup(BaseModel):
 
 
 class SkippedTask(BaseModel):
-    """A task YAML that failed to load and was excluded from the run.
+    """A task YAML that was excluded from the run before reaching the orchestrator.
 
-    Recorded by ``resolve_all_tasks`` when ``load_task`` (YAML parse / Pydantic
-    validation) or ``expand_dataset`` raises. The run continues with the
-    remaining tasks; the suite is not aborted by a single bad file.
+    Recorded by ``resolve_all_tasks`` in two cases:
+
+    * **Load failure** — ``load_task`` (YAML parse / Pydantic validation) or
+      ``expand_dataset`` raised. ``reason`` carries the exception type + message.
+    * **Intentional opt-out** — the YAML set ``skip: true``. ``reason`` is
+      prefixed ``"skip: true"`` so consumers can distinguish opt-outs from errors.
+
+    Either way the run continues with the remaining tasks; the suite is not
+    aborted by a single bad file or quarantined task.
     """
 
-    path: str = Field(description="Absolute path to the task YAML that failed to load.")
-    reason: str = Field(description="Short failure description (exception type + message).")
+    path: str = Field(description="Absolute path to the task YAML that was excluded.")
+    reason: str = Field(
+        description=(
+            "Short reason — exception type + message for load failures, or "
+            "``'skip: true (task_id=...)'`` for intentional opt-outs."
+        ),
+    )
 
 
 class RunSummary(BaseModel):
@@ -623,12 +634,16 @@ class RunSummary(BaseModel):
         description="Subset of tasks_failed where run_limits cost cap tripped.",
     )
 
-    # Tasks excluded at load time (YAML / schema errors). Distinct from
+    # Tasks excluded at resolution time — either load failures (YAML / schema
+    # errors) or intentional opt-outs (``skip: true``). Distinct from
     # tasks_error: these never reached the orchestrator. Empty for runs
-    # where every task YAML loaded cleanly.
+    # where every task YAML loaded cleanly and none opted out.
     skipped_tasks: list[SkippedTask] = Field(
         default_factory=list,
-        description="Task YAMLs that failed schema validation and were excluded from execution.",
+        description=(
+            "Task YAMLs excluded from execution — either failed schema "
+            "validation or opted out via ``skip: true``. See SkippedTask.reason."
+        ),
     )
 
     # Configured concurrency (BatchRunConfig.max_parallel). Defaulted so existing

@@ -358,6 +358,14 @@ class TaskDefinition(BaseModel):
             "as 'key:value' where both key and value are kebab-case (e.g., 'smoke', 'lifecycle:generate')."
         ),
     )
+    skip: bool = Field(
+        default=False,
+        description=(
+            "When true, the task is recorded in RunSummary.skipped_tasks at resolution time and "
+            "never reaches the orchestrator. Use to quarantine known-blocked tasks without deleting "
+            "the YAML — pair with a comment citing the blocker (e.g. Jira link, upstream dependency)."
+        ),
+    )
     agent: AgentConfig | None = Field(
         default=None, description="Agent configuration (resolved from experiment if omitted)"
     )

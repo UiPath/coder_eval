@@ -212,6 +212,199 @@ class TestResolveAllTasks:
         assert skipped[0].path == str(bad)
         assert "ValueError" in skipped[0].reason or "ValidationError" in skipped[0].reason
 
+    def test_skip_true_excludes_task_from_resolution(self, tmp_path, run_dir, default_experiment):
+        """`skip: true` in the YAML excludes the task and records it in `skipped`.
+
+        Regression guard for MST-9675: TaskDefinition previously had no ``skip``
+        field, so authors writing ``skip: true`` to quarantine a known-blocked
+        task got a silent no-op — the task still ran (and often errored). Honor
+        the field at resolve_all_tasks time and report it via SkippedTask with
+        a ``"skip: true"`` reason prefix so consumers can distinguish opt-outs
+        from load failures.
+        """
+        blocked = _write_task_yaml(tmp_path, "task-blocked", agent={"type": "claude-code"})
+        # Mutate the loaded YAML to add `skip: true` while keeping every other
+        # field valid — this is the same shape as a real quarantine.
+        data = yaml.safe_load(blocked.read_text())
+        data["skip"] = True
+        blocked.write_text(yaml.dump(data))
+
+        live = _write_task_yaml(tmp_path, "task-live", agent={"type": "claude-code"})
+
+        experiment = ExperimentDefinition(
+            experiment_id="test-exp",
+            variants=[ExperimentVariant(variant_id="v")],
+        )
+        config = _make_config(run_dir)
+        resolved, skipped = resolve_all_tasks(
+            task_files=[blocked, live],
+            experiment=experiment,
+            default_experiment=default_experiment,
+            config=config,
+        )
+
+        # Live task still resolves; quarantined task is held back.
+        assert [rt.task.task_id for rt in resolved] == ["task-live"]
+        assert len(skipped) == 1
+        assert skipped[0].path == str(blocked)
+        assert skipped[0].reason.startswith("skip: true")
+        assert "task-blocked" in skipped[0].reason
+
+    def test_skip_true_bypasses_dataset_fanout(self, tmp_path, run_dir, default_experiment):
+        """`skip: true` on a dataset-backed task records ONE skip — no per-row fan-out.
+
+        The skip short-circuit sits before `expand_dataset`, so a quarantined
+        dataset task never reads its JSONL / inline rows. Guards against any
+        future refactor that moves the skip check past the dataset expander.
+        """
+        blocked = tmp_path / "blocked-dataset.yaml"
+        blocked.write_text(
+            yaml.safe_dump(
+                {
+                    "task_id": "blocked-dataset",
+                    "description": "Quarantined dataset task",
+                    "initial_prompt": "Prompt: ${row.prompt}",
+                    "sandbox": {"driver": "tempdir"},
+                    "success_criteria": [{"type": "file_exists", "path": "out.txt", "description": "f"}],
+                    "skip": True,
+                    "dataset": {
+                        "rows": [
+                            {"id": "row-a", "prompt": "a"},
+                            {"id": "row-b", "prompt": "b"},
+                            {"id": "row-c", "prompt": "c"},
+                        ]
+                    },
+                }
+            )
+        )
+
+        experiment = ExperimentDefinition(experiment_id="test-exp", variants=[ExperimentVariant(variant_id="v")])
+        config = _make_config(run_dir)
+        resolved, skipped = resolve_all_tasks(
+            task_files=[blocked],
+            experiment=experiment,
+            default_experiment=default_experiment,
+            config=config,
+        )
+
+        assert resolved == []
+        # Critical: one entry, not three. The dataset rows must not fan out.
+        assert len(skipped) == 1
+        assert skipped[0].reason.startswith("skip: true")
+        assert "blocked-dataset" in skipped[0].reason
+
+    def test_skip_true_bypasses_variant_resolution(self, tmp_path, run_dir, default_experiment):
+        """`skip: true` records ONE skip regardless of how many variants exist.
+
+        The skip short-circuit runs before the inner variant loop, so variant
+        resolution / file-path injection / prompt overrides / CLI overrides
+        all stay cold. Guards against any future refactor that moves the
+        skip check inside the variant loop and would inflate skip-count by
+        the variant fan-out factor.
+        """
+        blocked = _write_task_yaml(tmp_path, "blocked-multi-variant", agent={"type": "claude-code"})
+        data = yaml.safe_load(blocked.read_text())
+        data["skip"] = True
+        blocked.write_text(yaml.dump(data))
+
+        experiment = ExperimentDefinition(
+            experiment_id="three-variants",
+            variants=[
+                ExperimentVariant(variant_id="sonnet"),
+                ExperimentVariant(variant_id="opus"),
+                ExperimentVariant(variant_id="haiku"),
+            ],
+        )
+        config = _make_config(run_dir)
+        resolved, skipped = resolve_all_tasks(
+            task_files=[blocked],
+            experiment=experiment,
+            default_experiment=default_experiment,
+            config=config,
+        )
+
+        assert resolved == []
+        # Not 3 — the skip must short-circuit the variant loop, not run per-variant.
+        assert len(skipped) == 1
+
+    def test_skip_true_survives_tag_filter(self, tmp_path, run_dir, default_experiment):
+        """`skip: true` is recorded BEFORE tag filtering runs — `skipped` is preserved.
+
+        Regression guard for the false-positive concern that tag-filter logic
+        might swallow `skip: true` entries. `experiment.py` appends to `skipped`
+        at task-load time and `continue`s; tag filtering operates only on the
+        `resolved` list later, so `skipped` is never touched by tag logic.
+
+        We exercise both axes:
+          * `exclude_tags` matching the skipped task — `skipped` still has the entry.
+          * `include_tags` NOT matching the skipped task — same.
+        """
+        blocked = _write_task_yaml(tmp_path, "task-blocked-tagged", agent={"type": "claude-code"})
+        data = yaml.safe_load(blocked.read_text())
+        data["skip"] = True
+        data["tags"] = ["smoke", "blocked"]
+        blocked.write_text(yaml.dump(data))
+
+        experiment = ExperimentDefinition(experiment_id="test-exp", variants=[ExperimentVariant(variant_id="v")])
+
+        # Axis 1: exclude_tags matches the skipped task's tags.
+        resolved, skipped = resolve_all_tasks(
+            task_files=[blocked],
+            experiment=experiment,
+            default_experiment=default_experiment,
+            config=_make_config(run_dir, exclude_tags={"smoke"}),
+        )
+        assert resolved == []
+        assert len(skipped) == 1
+        assert skipped[0].reason.startswith("skip: true")
+
+        # Axis 2: include_tags doesn't match the skipped task's tags.
+        resolved, skipped = resolve_all_tasks(
+            task_files=[blocked],
+            experiment=experiment,
+            default_experiment=default_experiment,
+            config=_make_config(run_dir, include_tags={"never-matches-anything"}),
+        )
+        assert resolved == []
+        assert len(skipped) == 1
+        assert skipped[0].reason.startswith("skip: true")
+
+    def test_resolve_accumulates_skip_and_load_failures(self, tmp_path, run_dir, default_experiment):
+        """`skipped` collects both intentional skips AND load failures, distinguishable by `reason`.
+
+        Confirms the dual-purpose contract on `SkippedTask`: a single PR run
+        with one quarantined task, one malformed task, and one good task
+        produces one resolved entry and TWO skip entries with different
+        reason prefixes (`"skip: true"` vs the exception-type prefix).
+        """
+        good = _write_task_yaml(tmp_path, "task-good", agent={"type": "claude-code"})
+
+        blocked = _write_task_yaml(tmp_path, "task-blocked", agent={"type": "claude-code"})
+        data = yaml.safe_load(blocked.read_text())
+        data["skip"] = True
+        blocked.write_text(yaml.dump(data))
+
+        bad = tmp_path / "task-bad.yaml"
+        bad.write_text("description: 'malformed task'\n")
+
+        experiment = ExperimentDefinition(experiment_id="test-exp", variants=[ExperimentVariant(variant_id="v")])
+        config = _make_config(run_dir)
+        resolved, skipped = resolve_all_tasks(
+            task_files=[good, blocked, bad],
+            experiment=experiment,
+            default_experiment=default_experiment,
+            config=config,
+        )
+
+        assert [rt.task.task_id for rt in resolved] == ["task-good"]
+        assert len(skipped) == 2
+        reasons = {s.path: s.reason for s in skipped}
+        assert reasons[str(blocked)].startswith("skip: true")
+        # Load-failure reason carries the exception type, NOT the skip prefix.
+        bad_reason = reasons[str(bad)]
+        assert not bad_reason.startswith("skip: true")
+        assert "ValueError" in bad_reason or "ValidationError" in bad_reason
+
 
 class TestAggregateResults:
     def _make_eval_result(

@@ -532,8 +532,8 @@ async def _run_with_experiment(
 
     if skipped:
         console.print(
-            f"[yellow]⚠[/] {len(skipped)} task file(s) skipped due to load errors"
-            " (see run.json `skipped_tasks` for details)"
+            f"[yellow]⚠[/] {len(skipped)} task file(s) skipped "
+            + "(load errors or `skip: true` — see run.json `skipped_tasks` for reasons)"
         )
 
     # Print execution mode
