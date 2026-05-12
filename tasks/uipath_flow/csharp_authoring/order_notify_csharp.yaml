@@ -52,7 +52,6 @@ initial_prompt: |
   dotnet build
   dotnet run -- --test
   cd ..
-  ./convert-to-v2.sh OrderNotify
   ./convert-to-v1.sh OrderNotify
   ./validate.sh    OrderNotify
   ```
@@ -77,8 +76,8 @@ success_criteria:
     weight: 2.0
     pass_threshold: 1.0
   - type: file_exists
-    description: "FIL output exists"
-    path: "OrderNotify/OrderNotify.fil"
+    description: "Bindings file exists at project root"
+    path: "bindings.json"
     weight: 1.0
   - type: file_exists
     description: "v1 .flow exists"
@@ -124,6 +123,6 @@ success_criteria:
           path only?
     files:
       - "OrderNotify/Workflow.cs"
-      - "OrderNotify/OrderNotify.fil"
+      - "OrderNotify.flow"
     weight: 2.0
     pass_threshold: 0.7

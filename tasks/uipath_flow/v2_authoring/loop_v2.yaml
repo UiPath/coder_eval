@@ -50,7 +50,7 @@ initial_prompt: |
 
   ## Files to write (project root)
 
-  - `BatchProcessor.fil.ts`        FIL source
+  - `BatchProcessor.fil`        FIL source
   - `BatchProcessor.manifest.flow` Manifest
   - `bindings.json`                Empty bindings array
 
@@ -66,7 +66,7 @@ initial_prompt: |
 success_criteria:
   - type: file_exists
     description: "FIL source file exists"
-    path: "BatchProcessor.fil.ts"
+    path: "BatchProcessor.fil"
     weight: 1.0
   - type: file_exists
     description: "Manifest exists"
@@ -78,7 +78,7 @@ success_criteria:
     weight: 1.0
   - type: run_command
     description: "FIL compiles"
-    command: "./parse-fil.sh BatchProcessor.fil.ts"
+    command: "./parse-fil.sh BatchProcessor.fil"
     timeout: 30
     expected_exit_code: 0
     weight: 2.0
@@ -135,7 +135,7 @@ success_criteria:
       (d) ends after the loop?
       The FIL source and manifest are included below.
     files:
-      - "BatchProcessor.fil.ts"
+      - "BatchProcessor.fil"
       - "BatchProcessor.manifest.flow"
     weight: 2.0
     pass_threshold: 0.7

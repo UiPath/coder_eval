@@ -40,7 +40,7 @@ initial_prompt: |
 
   ## Files to write (project root, not under `example/`)
 
-  - `OrderNotify.fil.ts`        FIL source
+  - `OrderNotify.fil`        FIL source
   - `OrderNotify.manifest.flow`     Manifest
   - `bindings.json`             Connection IDs (stub UUIDs are fine)
 
@@ -66,7 +66,7 @@ success_criteria:
   # ── 1. Three v2 source files exist ───────────────────────────────────────
   - type: file_exists
     description: "FIL source file exists"
-    path: "OrderNotify.fil.ts"
+    path: "OrderNotify.fil"
     weight: 1.0
 
   - type: file_exists
@@ -82,7 +82,7 @@ success_criteria:
   # ── 2. FIL parses cleanly ────────────────────────────────────────────────
   - type: run_command
     description: "FIL compiles to WAT (parses cleanly)"
-    command: "./parse-fil.sh OrderNotify.fil.ts"
+    command: "./parse-fil.sh OrderNotify.fil"
     timeout: 30
     expected_exit_code: 0
     weight: 2.0
@@ -135,7 +135,7 @@ success_criteria:
           on the "exists" path only?
       The FIL source and manifest are included below.
     files:
-      - "OrderNotify.fil.ts"
+      - "OrderNotify.fil"
       - "OrderNotify.manifest.flow"
     weight: 2.0
     pass_threshold: 0.7

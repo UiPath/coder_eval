@@ -42,7 +42,7 @@ initial_prompt: |
 
   ## Files to write (project root)
 
-  - `EmailClassifier.fil.ts`        FIL source
+  - `EmailClassifier.fil`        FIL source
   - `EmailClassifier.manifest.flow` Manifest (mock entries with `inputs.fixture`
                                     populated)
   - `bindings.json`                 Empty bindings array
@@ -60,7 +60,7 @@ initial_prompt: |
 success_criteria:
   - type: file_exists
     description: "FIL source file exists"
-    path: "EmailClassifier.fil.ts"
+    path: "EmailClassifier.fil"
     weight: 1.0
   - type: file_exists
     description: "Manifest exists"
@@ -72,7 +72,7 @@ success_criteria:
     weight: 1.0
   - type: run_command
     description: "FIL compiles"
-    command: "./parse-fil.sh EmailClassifier.fil.ts"
+    command: "./parse-fil.sh EmailClassifier.fil"
     timeout: 30
     expected_exit_code: 0
     weight: 2.0
@@ -129,7 +129,7 @@ success_criteria:
       (c) has a separate action mock per branch?
       The FIL source and manifest are included below.
     files:
-      - "EmailClassifier.fil.ts"
+      - "EmailClassifier.fil"
       - "EmailClassifier.manifest.flow"
     weight: 2.0
     pass_threshold: 0.7

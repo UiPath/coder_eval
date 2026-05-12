@@ -1,0 +1,295 @@
+task_id: uipath-flow-v2-release-rollup
+description: >
+  Author a complex Flow v2 project (FIL + manifest + bindings) that combines a
+  free HTTP API (GitHub releases) with three connectors (Outlook, Slack,
+  Jira). Loop + nested decisions + multi-connector fan-out; the converted v1
+  .flow should have 20+ nodes.
+tags: [flow-v2, fil, generate, http, decision, loop, multi-connector, complex]
+
+task_timeout: 1800
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 120
+  turn_timeout: 1800
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-v2"
+
+initial_prompt: |
+  Author a UiPath Flow v2 project named **ReleaseRollup** in the current
+  directory. Read `SKILL.md` first.
+
+  ## Scenario
+
+  Daily rollup of new GitHub releases for a list of tracked open-source
+  projects. For each repo, fetch its latest release; if the release is less
+  than 7 days old, fan out to Outlook + Slack (and Jira if it looks
+  security-related). End with a digest email summarising counts.
+
+  ### Tracked repos (hardcoded in the FIL)
+
+  Use this list inside `main()`:
+
+  ```
+  ["nodejs/node", "python/cpython", "microsoft/typescript",
+   "kubernetes/kubernetes", "facebook/react"]
+  ```
+
+  ### Per-repo logic
+
+  1. Fetch the latest release from
+     `https://api.github.com/repos/{repo}/releases/latest` via
+     `core.action.http` (no auth needed; rate limit is 60/hr unauthenticated,
+     fine for 5 repos). The response body has `name`, `tag_name`,
+     `published_at`, `body` (release notes), `html_url`.
+  2. Parse `published_at` (ISO-8601). Compute days since publish using
+     `DateTime.now()` (host-pinned per replay) and `DateTime.fromISOString`.
+  3. Decide: is the release new (≤ 7 days old)?
+     - **No** — increment a `skipped` counter and continue.
+     - **Yes** — increment a `seen` counter, then check whether the title or
+       body contains a security keyword (case-insensitive substring match for
+       any of `"CVE"`, `"security"`, `"vulnerability"`, `"advisory"`).
+       - **Security release**: increment `securityCount`, then dispatch:
+         - `uipath.connector.uipath-atlassian-jira.create-issue` — project
+           `Maestro`, summary `"Security release: {repo} {tag_name}"`,
+           description = release notes, assignee = the current user.
+         - `uipath.connector.uipath-salesforce-slack.send-message-to-user` —
+           recipient `@Dustin Metzgar`, body = release notes URL.
+         - `uipath.connector.uipath-microsoft-outlook365.send-email` —
+           to `dustin.metzgar@uipath.com`, subject `"[SECURITY] {repo}
+           released {tag_name}"`, body = release notes.
+       - **Normal release**: increment `normalCount`, then dispatch:
+         - Slack DM to `@Dustin Metzgar` with `"{repo} released {tag_name}"`.
+         - Outlook email to `dustin.metzgar@uipath.com`, subject
+           `"{repo} released {tag_name}"`, body = release notes.
+
+  ### After the loop
+
+  Send a final Outlook email to `dustin.metzgar@uipath.com` with subject
+  `"Daily release rollup"` and a body summarising the three counters
+  (`skipped`, `normalCount`, `securityCount`).
+
+  ## Files to write (project root, not under `example/`)
+
+  - `ReleaseRollup.fil`              FIL source
+  - `ReleaseRollup.manifest.flow`    Manifest (references bindings by symbolic id)
+  - `bindings.json`                  Real connection UUIDs (no stubs); single source of truth for IDs
+
+  ## Connectors
+
+  You need three connectors — Outlook (send email), Slack (send DM to a user),
+  and Jira (create issue). Discover the exact NodeType for each action and
+  its required `inputs` shape via the SKILL.md connector workflow
+  (`uip is connections list` to find the connection + its `ConnectorKey` and
+  `FolderKey`; `uip maestro flow registry get <NodeType>` for input schemas).
+
+  Real UUIDs go in `bindings.json` only. The manifest's `binding` /
+  `folderBinding` fields hold the symbolic id of the matching `bindings.json`
+  entry (e.g. `"bOutlook"`, `"bFolderKey"`). `flow-run` resolves the symbol
+  → UUID at load time and rejects stubs (`00000000-...` or `<placeholder>`).
+
+  ## DateTime arithmetic in FIL
+
+  Use the FIL `DateTime` / `TimeSpan` API directly:
+
+  ```typescript
+  const now: DateTime = DateTime.now();
+  const published: DateTime = DateTime.fromISOString(parsed.published_at);
+  const delta: TimeSpan = now.diff(published);
+  const daysAgo: f64 = delta.totalDays();
+  if (daysAgo > 7.0) { /* skip */ }
+  ```
+
+  ## Verifying your work
+
+  ```bash
+  ./parse-fil.sh ReleaseRollup.fil          # FIL compiles
+  ./verify.sh                                # flow-run --dry-run: validates
+                                             #   bindings against your tenant,
+                                             #   resolves library entries, lists
+                                             #   what would be dispatched.
+                                             #   No connector calls.
+  ./convert.sh ReleaseRollup                 # v2 → v1
+  uip maestro flow validate ReleaseRollup.flow
+  uip maestro flow tidy ReleaseRollup.flow
+  ```
+
+  Iterate against `./verify.sh` first — its error messages are far more
+  actionable than `uip maestro flow validate` for FIL/binding issues. If
+  `verify.sh` reports `binding is a stub UUID` or `connection ... not found
+  in your tenant`, fix `bindings.json` (it suggests candidate IDs in the
+  error output).
+
+success_criteria:
+  - type: file_exists
+    description: "FIL source file exists"
+    path: "ReleaseRollup.fil"
+    weight: 1.0
+  - type: file_exists
+    description: "Manifest exists"
+    path: "ReleaseRollup.manifest.flow"
+    weight: 1.0
+  - type: file_exists
+    description: "Bindings exist"
+    path: "bindings.json"
+    weight: 1.0
+  - type: run_command
+    description: "FIL parses cleanly"
+    command: "./parse-fil.sh ReleaseRollup.fil"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "bindings.json contains no stub UUIDs (00000000-... or <placeholder>)"
+    command: |
+      python3 -c "
+      import json, re
+      b = json.load(open('bindings.json'))
+      def is_stub(v):
+          s = str(v or '').strip()
+          if not s: return True
+          if re.match(r'^0{8}-0{4}-0{4}-0{4}-0+$', s): return True
+          if s.startswith('<') and s.endswith('>'): return True
+          return False
+      stubs = [e for e in b.get('bindings', [])
+               if is_stub(e.get('resourceKey')) or is_stub(e.get('default'))]
+      assert not stubs, f'stub or empty bindings: {[e.get(\"id\") for e in stubs]}'
+      print(f'{len(b[\"bindings\"])} bindings, all populated with non-stub UUIDs')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "verify.sh (flow-run --dry-run) passes: bindings resolve against the tenant, FIL compiles, all node types found in library"
+    command: "./verify.sh"
+    timeout: 120
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "v2 → v1 conversion produces ReleaseRollup.flow"
+    command: "./convert.sh ReleaseRollup"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: file_exists
+    description: "v1 .flow exists"
+    path: "ReleaseRollup.flow"
+    weight: 1.0
+  - type: run_command
+    description: "v1 .flow validates"
+    command: "uip maestro flow validate ReleaseRollup.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "tidy succeeds"
+    command: "uip maestro flow tidy ReleaseRollup.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "v1 .flow has 20+ nodes (counting top-level + subflow bodies)"
+    command: |
+      python3 -c "
+      import json
+      f = json.load(open('ReleaseRollup.flow'))
+      top = len(f.get('nodes', []))
+      sub = sum(len(s.get('nodes', [])) for s in f.get('subflows', {}).values())
+      total = top + sub
+      assert total >= 20, f'expected 20+ nodes, got {total} ({top} top + {sub} in subflows)'
+      print(f'{total} nodes ({top} top + {sub} in subflows)')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "v1 .flow uses GitHub HTTP, Outlook, Slack, and Jira"
+    command: |
+      python3 -c "
+      import json
+      f = json.load(open('ReleaseRollup.flow'))
+      all_nodes = list(f.get('nodes', []))
+      for s in f.get('subflows', {}).values():
+          all_nodes.extend(s.get('nodes', []))
+      types = [n.get('type', '') for n in all_nodes]
+      blob = json.dumps(f)
+      assert any(t.startswith('core.action.http') for t in types), f'no HTTP node: {types}'
+      assert 'api.github.com' in blob, 'GitHub API URL not in flow'
+      assert any('uipath-microsoft-outlook365' in t for t in types), f'no Outlook node: {types}'
+      assert any('uipath-salesforce-slack' in t for t in types), f'no Slack node: {types}'
+      assert any('uipath-atlassian-jira' in t for t in types), f'no Jira node: {types}'
+      print('all four required pieces present')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "v1 .flow has iteration (loop, subflow, or unrolled repetition) + nested decisions"
+    command: |
+      python3 -c "
+      import json
+      f = json.load(open('ReleaseRollup.flow'))
+      all_nodes = list(f.get('nodes', []))
+      for s in f.get('subflows', {}).values():
+          all_nodes.extend(s.get('nodes', []))
+      types = [n.get('type', '') for n in all_nodes]
+      loops = sum(1 for t in types if t == 'core.logic.loop')
+      subflow_calls = sum(1 for t in types if t == 'core.subflow')
+      http_nodes = sum(1 for t in types if t.startswith('core.action.http'))
+      decisions = sum(1 for t in types if t == 'core.logic.decision')
+      # Iteration evidence: loop, ≥3 subflow calls, OR ≥3 HTTP nodes (5 repos
+      # unrolled inline). All three are valid ways to express the rollup.
+      iterates = loops > 0 or subflow_calls >= 3 or http_nodes >= 3
+      assert iterates, f'no iteration evidence: types={types}'
+      assert decisions >= 2, f'expected ≥2 decision nodes (new-release + security), got {decisions}'
+      print(f'iter: {loops} loop(s), {subflow_calls} subflow(s), {http_nodes} http; {decisions} decision(s)')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: llm_judge
+    description: "Flow implements the rollup logic end-to-end"
+    prompt: |
+      Did the agent author a v2 Flow that:
+      (a) iterates over a hardcoded list of GitHub repos (FIL `for-of`);
+      (b) fetches each repo's latest release via `core.action.http` against
+          `api.github.com/repos/<repo>/releases/latest`;
+      (c) decides whether the release is "new" (within 7 days of
+          DateTime.now());
+      (d) if new, decides whether it looks security-related (CVE/security
+          /vulnerability/advisory keyword in the title or body);
+      (e) on the security branch, dispatches all three of: Jira create-issue
+          (project = Maestro, summary mentions the repo+tag),
+          Slack send-message-to-user (DM to Dustin), and
+          Outlook send-email (to dustin.metzgar@uipath.com);
+      (f) on the non-security new-release branch, dispatches Slack +
+          Outlook (no Jira);
+      (g) maintains counters (skipped / normalCount / securityCount) updated
+          across iterations (FIL `let` variables incremented in branches);
+      (h) sends a final Outlook digest email summarising the counters.
+
+      Score 1.0 if all eight pieces are present and structurally correct.
+      Subtract 0.1 per missing piece; floor at 0.
+    files:
+      - "ReleaseRollup.fil"
+      - "ReleaseRollup.manifest.flow"
+      - "bindings.json"
+      - "ReleaseRollup.flow"
+    weight: 3.0
+    pass_threshold: 0.7

@@ -1,6 +1,6 @@
 ---
 name: uipath-flow-csharp
-description: "UiPath Flow workflow as a C# project. Author in C# with full IDE/Roslyn-analyzer feedback, build and test in-process via TestConnector, then convert to Flow v2 (FIL + manifest + bindings) and on to v1 .flow for the deploy gate."
+description: "UiPath Flow workflow as a C# project. Author in C# with full IDE/Roslyn-analyzer feedback, build and test in-process via TestConnector, then convert directly to a Flow v1 project (`<Name>.flow` + `bindings.json`) for the deploy gate."
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
 
@@ -12,18 +12,23 @@ analyzers (CS2FIL001–021) flag every FIL incompatibility at edit time — your
 inner loop is `dotnet build` and `dotnet run -- --test`, not the FIL
 converter.
 
-## Five phases
+## Four phases
 
 ```
-1. Scaffold       dotnet new csflow --name <Name>
-2. Author + test  edit Workflow.cs (analyzers gate); dotnet build; dotnet run -- --test
-3. Convert to v2  ./convert-to-v2.sh <Name>     → <Name>.fil, .manifest.flow, .bindings.flow
-4. Convert to v1  ./convert-to-v1.sh <Name>     → <Name>.flow
-5. Validate       uip maestro flow validate <Name>.flow && uip maestro flow tidy <Name>.flow
+1. Scaffold        dotnet new csflow --name <Name>
+2. Author + test   edit Workflow.cs (analyzers gate); dotnet build; dotnet run -- --test
+3. Convert to v1   ./convert-to-v1.sh <Name>     → <Name>.flow + bindings.json
+4. Validate        uip maestro flow validate <Name>.flow && uip maestro flow tidy <Name>.flow
 ```
 
 The `csflow` template is pre-installed in this environment — go straight to
 phase 1.
+
+The intermediate Flow v2 artifacts (`<Name>.fil`, `<Name>.manifest.flow`) are
+generated under `<Name>/.cs2v1/` during conversion and are not part of the
+developer's mental model — you don't manipulate them. The C# project is the
+source of truth; the v1 `<Name>.flow` + `bindings.json` are the deployable
+output.
 
 ## Phase 1 — scaffold
 
@@ -124,32 +129,26 @@ CS2FIL019 = "this method call has no FIL equivalent" — typically means you
 need to switch to the connector-class API (e.g. `SendEmail.Execute(...)`)
 or pick something from the supported stdlib.
 
-## Phase 3 — convert to v2 (FIL + manifest + bindings)
+## Phase 3 — convert to v1 .flow
 
 ```bash
-./convert-to-v2.sh <Name>
-ls <Name>.fil <Name>.manifest.flow <Name>.bindings.flow
+./convert-to-v1.sh <Name>
+ls <Name>.flow bindings.json
 ```
 
 `<Name>` is your project name (matches the directory `dotnet new csflow`
-created). The script invokes `cs2fil cs-to-fil` against the project and writes
-all three files.
+created). The script:
 
-The emitted `<Name>.bindings.flow` is a **stub** — same shape as
-`appsettings.json`'s `Bindings` section but `resourceKey` and `default` blank.
-For `flow-run` or production, the user's `appsettings.json` (with secrets
-filled in via `dotnet user-secrets`) is the authoritative version; copy
-those values into `<Name>.bindings.flow` before deploying.
+1. Compiles C# → FIL via `cs2fil cs-to-fil` (analyzer + FIL emit errors abort here).
+2. Runs the project with `--emit-bindings` to resolve `bindings.json` from the
+   merged configuration (appsettings.json + user-secrets + env).
+3. Runs `v2-to-v1` against the FIL + manifest + bindings, writing
+   `<Name>.flow` and `bindings.json` at the project root.
 
-## Phase 4 — convert to v1 .flow
+The intermediate FIL/manifest live under `<Name>/.cs2v1/` — useful for
+debugging conversion errors but not part of the deployable artifact set.
 
-```bash
-./convert-to-v1.sh <Name>      # writes <Name>.flow
-```
-
-Wraps the `v2-to-v1` CLI. Reads the three v2 files; produces the v1 JSON.
-
-## Phase 5 — validate + tidy
+## Phase 4 — validate + tidy
 
 ```bash
 uip maestro flow validate <Name>.flow
@@ -174,7 +173,9 @@ so the file opens cleanly in the designer. Both must succeed before deploy.
 
 - **`dotnet build` fails with NU1101 (package not found)** → the project's
   `.nuget/` dir is missing — re-scaffold with `dotnet new csflow`.
-- **`./convert-to-v2.sh` succeeds but `<Name>.fil` is empty** → check stderr
-  for analyzer errors. `cs2fil to-fil` runs the analyzers before emission.
+- **`./convert-to-v1.sh` fails during the FIL compile step** → analyzer
+  diagnostics are printed to stderr; fix `Workflow.cs` and re-run.
 - **`uip maestro flow validate` complains about a missing binding** → fill
-  the `resourceKey`/`default` UUIDs in `<Name>.bindings.flow`.
+  the `resourceKey`/`default` UUIDs in `appsettings.json` (or via
+  `dotnet user-secrets set Bindings:N:resourceKey <uuid>`) and re-run
+  `convert-to-v1.sh`.

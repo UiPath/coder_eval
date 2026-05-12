@@ -19,9 +19,9 @@ initial_prompt: |
 
   ## Files to write (project root, not under `example/`)
 
-  - `WeatherAlert.fil.ts`        FIL source
-  - `WeatherAlert.flow.json`     Manifest
-  - `bindings.json`              Connection IDs (stub UUIDs are fine)
+  - `WeatherAlert.fil`             FIL source
+  - `WeatherAlert.manifest.flow`   Manifest
+  - `bindings.json`                Connection IDs (stub UUIDs are fine)
 
   Use these node types:
     - `core.action.http`                                 (fetch the API)
@@ -32,7 +32,7 @@ initial_prompt: |
   ## Verifying your work
 
   ```bash
-  ./parse-fil.sh WeatherAlert.fil.ts            # FIL parses
+  ./parse-fil.sh WeatherAlert.fil            # FIL parses
   ./convert.sh WeatherAlert                     # produces WeatherAlert.flow
   uip maestro flow validate WeatherAlert.flow   # must print "Result": "Success"
   ```
@@ -61,12 +61,12 @@ success_criteria:
   # ── Three v2 source files exist ──────────────────────────────────────────
   - type: file_exists
     description: "FIL source file exists"
-    path: "WeatherAlert.fil.ts"
+    path: "WeatherAlert.fil"
     weight: 1.0
 
   - type: file_exists
     description: "Manifest exists"
-    path: "WeatherAlert.flow.json"
+    path: "WeatherAlert.manifest.flow"
     weight: 1.0
 
   - type: file_exists
@@ -77,7 +77,7 @@ success_criteria:
   # ── FIL parses cleanly ───────────────────────────────────────────────────
   - type: run_command
     description: "FIL compiles to WAT (parses cleanly)"
-    command: "./parse-fil.sh WeatherAlert.fil.ts"
+    command: "./parse-fil.sh WeatherAlert.fil"
     timeout: 30
     expected_exit_code: 0
     weight: 2.0
@@ -153,7 +153,7 @@ success_criteria:
       (b) branches on whether the temperature is greater than 60°F,
       (c) sends a Slack message containing "its warm" on the warm branch and
           "its cold" on the cold branch?
-      Look at `WeatherAlert.fil.ts` for the logic, `WeatherAlert.flow.json`
+      Look at `WeatherAlert.fil` for the logic, `WeatherAlert.manifest.flow`
       for the node wiring, and `WeatherAlert.flow` for the converted output.
     include_agent_output: true
     include_tool_calls: true

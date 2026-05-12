@@ -49,7 +49,7 @@ initial_prompt: |
 
   ## Files to write (project root)
 
-  - `SlackNotifier.fil.ts`        FIL source
+  - `SlackNotifier.fil`        FIL source
   - `SlackNotifier.manifest.flow` Manifest
   - `bindings.json`               Bindings (folder + Slack connection)
 
@@ -70,7 +70,7 @@ initial_prompt: |
 success_criteria:
   - type: file_exists
     description: "FIL source file exists"
-    path: "SlackNotifier.fil.ts"
+    path: "SlackNotifier.fil"
     weight: 1.0
   - type: file_exists
     description: "Manifest exists"
@@ -82,7 +82,7 @@ success_criteria:
     weight: 1.0
   - type: run_command
     description: "FIL compiles"
-    command: "./parse-fil.sh SlackNotifier.fil.ts"
+    command: "./parse-fil.sh SlackNotifier.fil"
     timeout: 30
     expected_exit_code: 0
     weight: 2.0
@@ -143,7 +143,7 @@ success_criteria:
           UUIDs?
       The FIL source, manifest, and bindings file are included below.
     files:
-      - "SlackNotifier.fil.ts"
+      - "SlackNotifier.fil"
       - "SlackNotifier.manifest.flow"
       - "bindings.json"
     weight: 3.0

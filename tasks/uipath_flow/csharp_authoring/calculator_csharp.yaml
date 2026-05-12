@@ -54,7 +54,6 @@ initial_prompt: |
   dotnet build
   dotnet run -- --test
   cd ..
-  ./convert-to-v2.sh Calculator
   ./convert-to-v1.sh Calculator
   ./validate.sh    Calculator
   ```
@@ -78,23 +77,23 @@ success_criteria:
     expected_exit_code: 0
     weight: 2.0
     pass_threshold: 1.0
-  - type: file_exists
-    description: "FIL output exists"
-    path: "Calculator/Calculator.fil"
-    weight: 1.0
   - type: run_command
-    description: "FIL contains a multiplication and references a, b"
+    description: "Workflow.cs contains a multiplication and references a, b"
     command: |
       python3 -c "
-      src = open('Calculator/Calculator.fil').read()
-      assert '*' in src, f'expected multiplication operator, FIL was:\n{src}'
-      assert 'a' in src and 'b' in src, f'expected a, b in FIL'
+      src = open('Calculator/Workflow.cs').read()
+      assert '*' in src, f'expected multiplication operator, Workflow.cs was:\n{src}'
+      assert 'a' in src and 'b' in src, f'expected a, b in Workflow.cs'
       print('multiplication present')
       "
     timeout: 10
     expected_exit_code: 0
     weight: 2.0
     pass_threshold: 1.0
+  - type: file_exists
+    description: "Bindings file exists at project root"
+    path: "bindings.json"
+    weight: 1.0
   - type: file_exists
     description: "v1 .flow exists"
     path: "Calculator.flow"
@@ -131,6 +130,6 @@ success_criteria:
       Score 0 if no multiplication appears.
     files:
       - "Calculator/Workflow.cs"
-      - "Calculator/Calculator.fil"
+      - "Calculator.flow"
     weight: 2.0
     pass_threshold: 0.7

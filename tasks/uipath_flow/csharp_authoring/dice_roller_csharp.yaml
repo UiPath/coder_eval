@@ -23,9 +23,8 @@ sandbox:
 
 initial_prompt: |
   Author a UiPath C# Flow workflow named **DiceRoller** in the current
-  directory. Read `SKILL.md` first — it describes the five-phase lifecycle
-  (scaffold → author + test in C# → convert to v2 → convert to v1 → validate
-  + tidy).
+  directory. Read `SKILL.md` first — it describes the four-phase lifecycle
+  (scaffold → author + test in C# → convert to v1 → validate + tidy).
 
   ## Scenario
 
@@ -59,7 +58,6 @@ initial_prompt: |
   dotnet build
   dotnet run -- --test
   cd ..
-  ./convert-to-v2.sh DiceRoller
   ./convert-to-v1.sh DiceRoller
   ./validate.sh    DiceRoller
   ```
@@ -84,35 +82,30 @@ success_criteria:
     weight: 2.0
     pass_threshold: 1.0
   - type: file_exists
-    description: "FIL output exists"
-    path: "DiceRoller/DiceRoller.fil"
+    description: "Bindings file exists at project root"
+    path: "bindings.json"
     weight: 1.0
   - type: file_exists
-    description: "Manifest exists"
-    path: "DiceRoller/DiceRoller.manifest.flow"
+    description: "v1 .flow exists"
+    path: "DiceRoller.flow"
     weight: 1.0
   - type: run_command
-    description: "FIL invokes a script node via executeNode (not an inlined __script_ helper)"
+    description: "v1 .flow contains a script node with random expression (replay-safe pattern)"
     command: |
       python3 -c "
-      import json, re
-      fil = open('DiceRoller/DiceRoller.fil').read()
-      manifest = json.load(open('DiceRoller/DiceRoller.manifest.flow'))
-      assert 'random' in fil.lower(), 'expected random expression in the script body'
-      script_ids = [nid for nid, n in manifest['nodes'].items() if n['type'].startswith('core.action.script')]
-      assert script_ids, f'no script node in manifest: {list(manifest[\"nodes\"])}'
-      assert any(re.search(rf'executeNode\(\"{re.escape(sid)}\"', fil) for sid in script_ids), \
-        f'no executeNode call to a script-typed nodeId. script ids={script_ids}, FIL=\n{fil}'
-      print(f'script node {script_ids[0]} invoked via executeNode')
+      import json
+      f = json.load(open('DiceRoller.flow'))
+      script_nodes = [n for n in f.get('nodes', []) if n.get('type', '').startswith('core.action.script')]
+      assert script_nodes, f'no script node in v1 flow: types={[n.get(\"type\",\"\") for n in f.get(\"nodes\", [])]}'
+      bodies = [json.dumps(n.get('inputs', {})).lower() for n in script_nodes]
+      assert any('random' in b for b in bodies), \
+        f'no script node body contains a random expression. bodies={bodies}'
+      print(f'found {len(script_nodes)} script node(s); at least one uses random')
       "
     timeout: 10
     expected_exit_code: 0
     weight: 3.0
     pass_threshold: 1.0
-  - type: file_exists
-    description: "v1 .flow exists"
-    path: "DiceRoller.flow"
-    weight: 1.0
   - type: run_command
     description: "v1 .flow validates"
     command: "uip maestro flow validate DiceRoller.flow"
@@ -151,7 +144,6 @@ success_criteria:
         • 0   if no random output at all.
     files:
       - "DiceRoller/Workflow.cs"
-      - "DiceRoller/DiceRoller.fil"
-      - "DiceRoller/DiceRoller.manifest.flow"
+      - "DiceRoller.flow"
     weight: 2.0
     pass_threshold: 0.7

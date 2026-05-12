@@ -6,7 +6,7 @@
 # error message otherwise.
 set -euo pipefail
 
-FILE="${1:?usage: parse-fil.sh <file.fil.ts>}"
+FILE="${1:?usage: parse-fil.sh <file.fil>}"
 FLOW_V2="${FLOW_V2:-$HOME/src/flow-v2}"
 NODE_BIN="${NODE_BIN:-$HOME/.asdf/installs/nodejs/22.22.1/bin/node}"
 

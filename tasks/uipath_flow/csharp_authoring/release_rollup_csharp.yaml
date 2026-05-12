@@ -1,0 +1,305 @@
+task_id: uipath-flow-csharp-release-rollup
+description: >
+  Complex C# Flow workflow that combines a free HTTP API (GitHub releases) with
+  three connectors (Outlook, Slack, Jira). Tests an agent's ability to compose
+  loops, nested decisions, multiple connector calls, and a final aggregation
+  pass. The converted v1 .flow should have 20+ nodes.
+tags: [flow-csharp, csharp, generate, http, decision, loop, multi-connector, complex]
+
+task_timeout: 1800
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+  max_turns: 120
+  turn_timeout: 1800
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-csharp"
+
+initial_prompt: |
+  Author a UiPath C# Flow workflow named **ReleaseRollup** in the current
+  directory. Read `SKILL.md` first.
+
+  ## Scenario
+
+  Daily rollup of new GitHub releases for a list of tracked open-source
+  projects. For each repo, fetch its latest release; if the release is less
+  than 7 days old, fan out to Outlook + Slack (and Jira if it looks
+  security-related). End with a digest email summarising counts.
+
+  ### Tracked repos (hardcoded in the workflow)
+
+  ```csharp
+  List<string> repos = new() {
+      "nodejs/node",
+      "python/cpython",
+      "microsoft/typescript",
+      "kubernetes/kubernetes",
+      "facebook/react",
+  };
+  ```
+
+  ### Per-repo logic
+
+  1. Fetch the latest release from
+     `https://api.github.com/repos/{repo}/releases/latest` via
+     `core.action.http` (no auth needed; rate limit is 60/hr unauthenticated,
+     fine for 5 repos). The response body has `name`, `tag_name`,
+     `published_at`, `body` (release notes), `html_url`.
+  2. Parse `published_at` (ISO-8601). Compute `daysAgo = (DateTime.UtcNow -
+     publishedAt).TotalDays`.
+  3. Decide: is the release new (≤ 7 days old)?
+     - **No** — increment a `skipped` counter and continue.
+     - **Yes** — increment a `seen` counter, then check whether the title or
+       body contains a security keyword (case-insensitive substring match for
+       any of `"CVE"`, `"security"`, `"vulnerability"`, `"advisory"`).
+       - **Security release**: increment `securityCount`, then:
+         - Create a Jira issue in project `Maestro`, summary
+           `"Security release: {repo} {tag_name}"`, description = release
+           notes, assignee = the current user (use the connector's "assign to
+           me" idiom or look up by your own email).
+         - DM the user on Slack (recipient: `@Dustin Metzgar`) with the
+           release notes URL.
+         - Send an Outlook email to `dustin.metzgar@uipath.com` with subject
+           `"[SECURITY] {repo} released {tag_name}"` and the release notes in
+           the body.
+       - **Normal release**: increment `normalCount`, then:
+         - DM the user on Slack with `"{repo} released {tag_name}"`.
+         - Send an Outlook email to `dustin.metzgar@uipath.com` with subject
+           `"{repo} released {tag_name}"` and the release notes in the body.
+
+  ### After the loop
+
+  Send a final Outlook digest email to `dustin.metzgar@uipath.com` with
+  subject `"Daily release rollup"` and a body summarising the three counters
+  (`skipped`, `normalCount`, `securityCount`).
+
+  ## Connectors
+
+  You need three connectors — Outlook (send email), Slack (send DM to a user),
+  and Jira (create issue). Discover their generated C# classes by looking
+  under `~/src/flow-v2/csharp/generated/`: each connector key is a directory
+  containing one `.cs` file per action with a typed `Inputs` record and a
+  static `Execute(IConnector, nodeId, inputs)` wrapper. The `Workflow`
+  example in SKILL.md shows the call shape.
+
+  ## DateTime arithmetic (must use `Subtract`, not the `-` operator)
+
+  Use the `Subtract`+`.TotalDays` pattern — it maps to FIL's
+  `dt.diff(other).totalDays()`:
+
+  ```csharp
+  DateTime now = DateTime.UtcNow;
+  DateTime published = DateTime.Parse(parsed.published_at);
+  TimeSpan delta = now.Subtract(published);
+  double daysAgo = delta.TotalDays;
+  if (daysAgo > 7.0) { /* skip */ }
+  ```
+
+  Do NOT use the `-` operator on DateTimes — the analyzer/emitter doesn't
+  handle that path.
+
+  ## HTTP & script-node idiom (synthetic node types — no generated wrapper)
+
+  `core.action.http` and `core.action.script` are synthetic node types — no
+  generated `CoreHttp` / `CoreScript` class exists, and the analyzer rejects
+  user-defined wrapper records (CS2FIL020). Call them with the raw
+  `connector.ExecuteNodeAsync(...)` API and a JSON-string input. The cs2fil
+  analyzer resolves `string` locals built from `+`-concat and propagates
+  variable references as `{name}` placeholders, so the natural pattern works:
+
+  ```csharp
+  // HTTP: build the URL via string concat, build the JSON input the same way,
+  // then pass it as the 4th arg to ExecuteNodeAsync. cs2fil captures the
+  // resolved JSON template into the manifest's rawInputs.
+  string url = "https://api.github.com/repos/" + repo + "/releases/latest";
+  string httpInput = "{\"url\":\"" + url + "\",\"method\":\"GET\"}";
+  string responseJson = await connector.ExecuteNodeAsync(
+      "core.action.http", "fetchRelease", "", httpInput);
+
+  // Script: pass `{"script": "<JS body>"}`. The script body uses v1's `=js:`
+  // runtime — `Date.now()`, `JSON.parse(...)`, etc. all work.
+  string scriptBody = "return { ok: true };";
+  string scriptInput = "{\"script\":\"" + scriptBody.Replace("\"", "\\\"") + "\"}";
+  string scriptOut = await connector.ExecuteNodeAsync(
+      "core.action.script", "computeAge", "", scriptInput);
+  ```
+
+  Do NOT define your own `record CoreHttp { record Inputs(...); }` etc. — the
+  analyzer rejects those (they aren't real `IResource` connectors) and the
+  inline-JSON pattern above is the supported idiom.
+
+  ## Bindings
+
+  The template's `appsettings.json` ships an example Slack binding plus a
+  `folderkey`. You'll need to add bindings for Outlook and Jira too — pick
+  symbolic ids like `outlook` and `jira` and pass them as the `bindingId`
+  argument when calling `Execute(...)`.
+
+  ## Phases
+
+  ```bash
+  dotnet new csflow --name ReleaseRollup
+  cd ReleaseRollup
+  # author Workflow.cs against the analyzers
+  dotnet build
+  dotnet run -- --test           # TestConnector returns canned JSON
+  cd ..
+  ./convert-to-v1.sh ReleaseRollup
+  ./validate.sh    ReleaseRollup
+  ```
+
+success_criteria:
+  - type: file_exists
+    description: "C# project Workflow.cs exists"
+    path: "ReleaseRollup/Workflow.cs"
+    weight: 1.0
+  - type: run_command
+    description: "C# project builds (analyzers pass)"
+    command: "dotnet build ReleaseRollup/ReleaseRollup.csproj"
+    timeout: 120
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "C# project runs in test mode"
+    command: "dotnet run --project ReleaseRollup -- --test"
+    timeout: 180
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: file_exists
+    description: "Bindings file exists at project root"
+    path: "bindings.json"
+    weight: 1.0
+  - type: file_exists
+    description: "v1 .flow exists"
+    path: "ReleaseRollup.flow"
+    weight: 1.0
+  - type: run_command
+    description: "v1 .flow validates"
+    command: "uip maestro flow validate ReleaseRollup.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "tidy succeeds"
+    command: "uip maestro flow tidy ReleaseRollup.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "v1 .flow has 20+ nodes (counting top-level + subflow bodies)"
+    command: |
+      python3 -c "
+      import json
+      f = json.load(open('ReleaseRollup.flow'))
+      top = len(f.get('nodes', []))
+      sub = sum(len(s.get('nodes', [])) for s in f.get('subflows', {}).values())
+      total = top + sub
+      assert total >= 20, f'expected 20+ nodes, got {total} ({top} top + {sub} in subflows)'
+      print(f'{total} nodes ({top} top + {sub} in subflows)')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "v1 .flow uses GitHub HTTP, Outlook, Slack, and Jira"
+    command: |
+      python3 -c "
+      import json
+      f = json.load(open('ReleaseRollup.flow'))
+      all_nodes = list(f.get('nodes', []))
+      for s in f.get('subflows', {}).values():
+          all_nodes.extend(s.get('nodes', []))
+      types = [n.get('type', '') for n in all_nodes]
+      blob = json.dumps(f)
+      assert any(t.startswith('core.action.http') for t in types), f'no HTTP node: {types}'
+      assert 'api.github.com' in blob, 'GitHub API URL not in flow'
+      assert any('uipath-microsoft-outlook365' in t for t in types), f'no Outlook node: {types}'
+      assert any('uipath-salesforce-slack' in t for t in types), f'no Slack node: {types}'
+      assert any('uipath-atlassian-jira' in t for t in types), f'no Jira node: {types}'
+      print('all four required pieces present')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "v1 .flow has iteration (loop, subflow, or unrolled repetition) + nested decisions"
+    command: |
+      python3 -c "
+      import json
+      f = json.load(open('ReleaseRollup.flow'))
+      all_nodes = list(f.get('nodes', []))
+      for s in f.get('subflows', {}).values():
+          all_nodes.extend(s.get('nodes', []))
+      types = [n.get('type', '') for n in all_nodes]
+      loops = sum(1 for t in types if t == 'core.logic.loop')
+      subflow_calls = sum(1 for t in types if t == 'core.subflow')
+      http_nodes = sum(1 for t in types if t.startswith('core.action.http'))
+      decisions = sum(1 for t in types if t == 'core.logic.decision')
+      iterates = loops > 0 or subflow_calls >= 3 or http_nodes >= 3
+      assert iterates, f'no iteration evidence: types={types}'
+      assert decisions >= 2, f'expected ≥2 decision nodes (new-release + security), got {decisions}'
+      print(f'iter: {loops} loop(s), {subflow_calls} subflow(s), {http_nodes} http; {decisions} decision(s)')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "appsettings.json includes bindings for outlook + slack + jira + folderkey"
+    command: |
+      python3 -c "
+      import json
+      a = json.load(open('ReleaseRollup/appsettings.json'))
+      ids = {b.get('id', '') for b in a.get('Bindings', [])}
+      missing = [k for k in ('folderkey',) if k not in ids]
+      assert not missing, f'missing folderkey binding: have {ids}'
+      # The agent gets to pick names for the connector bindings — just check there
+      # are at least 4 entries (folderkey + 3 connection ids).
+      assert len(ids) >= 4, f'expected ≥4 binding entries (folderkey + 3 connections), got {len(ids)}: {ids}'
+      print(f'binding ids: {sorted(ids)}')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: llm_judge
+    description: "Workflow implements the rollup logic end-to-end"
+    prompt: |
+      Did the agent author a C# workflow that:
+      (a) iterates over a hardcoded list of GitHub repos (foreach);
+      (b) fetches each repo's latest release via `core.action.http` against
+          `api.github.com/repos/<repo>/releases/latest`;
+      (c) decides whether the release is "new" (within 7 days of UtcNow);
+      (d) if new, decides whether it looks security-related (CVE/security
+          /vulnerability/advisory keyword in the title or body);
+      (e) on the security branch, calls all three of: Jira CreateIssue
+          (project = Maestro, summary mentions the repo+tag),
+          Slack SendMessageToUser (DM to Dustin), and
+          Outlook SendEmail (to dustin.metzgar@uipath.com);
+      (f) on the non-security new-release branch, calls Slack + Outlook
+          (no Jira);
+      (g) maintains counters (skipped / normalCount / securityCount) updated
+          across iterations;
+      (h) sends a final Outlook digest email summarising the counters.
+
+      Score 1.0 if all eight pieces are present and structurally correct.
+      Subtract 0.1 per missing piece; floor at 0.
+    files:
+      - "ReleaseRollup/Workflow.cs"
+      - "ReleaseRollup/appsettings.json"
+      - "ReleaseRollup.flow"
+    weight: 3.0
+    pass_threshold: 0.7

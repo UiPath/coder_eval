@@ -48,7 +48,7 @@ initial_prompt: |
 
   ## Files to write (project root)
 
-  - `Calculator.fil.ts`        FIL source
+  - `Calculator.fil`        FIL source
   - `Calculator.manifest.flow` Manifest
   - `bindings.json`            Empty bindings array
 
@@ -64,7 +64,7 @@ initial_prompt: |
 success_criteria:
   - type: file_exists
     description: "FIL source file exists"
-    path: "Calculator.fil.ts"
+    path: "Calculator.fil"
     weight: 1.0
   - type: file_exists
     description: "Manifest exists"
@@ -76,7 +76,7 @@ success_criteria:
     weight: 1.0
   - type: run_command
     description: "FIL compiles"
-    command: "./parse-fil.sh Calculator.fil.ts"
+    command: "./parse-fil.sh Calculator.fil"
     timeout: 30
     expected_exit_code: 0
     weight: 2.0
@@ -150,7 +150,7 @@ success_criteria:
 
       The FIL source and manifest are included below.
     files:
-      - "Calculator.fil.ts"
+      - "Calculator.fil"
       - "Calculator.manifest.flow"
     weight: 2.0
     pass_threshold: 0.7

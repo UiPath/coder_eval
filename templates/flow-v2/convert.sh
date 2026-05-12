@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # convert.sh <BaseName>
 #
-# Converts a v2 project (3 files: <BaseName>.fil.ts + <BaseName>.manifest.flow +
-# bindings.json) into a v1 .flow file via the v2-to-v1 CLI.
+# Converts a v2 project (3 files: <BaseName>.fil + <BaseName>.manifest.flow +
+# bindings.json) into the v1 artifact set (<BaseName>.flow + bindings.json)
+# via the v2-to-v1 CLI.
 #
-# Output: <BaseName>.flow in the same directory.
+# Output: <BaseName>.flow + bindings.json in the same directory.
 set -euo pipefail
 
 NAME="${1:?usage: convert.sh <BaseName>}"

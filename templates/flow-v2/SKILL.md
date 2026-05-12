@@ -10,7 +10,7 @@ A v2 flow project is **three files**:
 
 | File                | Role                                                                                  |
 | ------------------- | ------------------------------------------------------------------------------------- |
-| `<Name>.fil.ts`     | FIL source — async TypeScript-subset describing the flow's logic and call sequence    |
+| `<Name>.fil`     | FIL source — async TypeScript-subset describing the flow's logic and call sequence    |
 | `<Name>.manifest.flow`  | Manifest — per-node config (typeRef, label, connector inputs)                         |
 | `bindings.json`     | Connection IDs (folder, connector, agent process keys) referenced by the manifest     |
 
@@ -22,7 +22,7 @@ A v2 flow project is **three files**:
 
 1. Decide what the flow does. Sketch the node sequence on paper (or in a comment block).
 2. Look up the connector node types you need with `uip maestro flow registry search "<keyword>"` — returns matching `NodeType + DisplayName + Description`. Filter to `NodeType` starting with `uipath.connector.` (other matches are agent-tool wrappers you don't want). See "Looking up connectors" below.
-3. Write the FIL source (`<Name>.fil.ts`).
+3. Write the FIL source (`<Name>.fil`).
 4. Write the manifest (`<Name>.manifest.flow`) with one entry per FIL `executeNode` call plus the trigger/end/control-flow nodes.
 5. Write `bindings.json`. Stub UUIDs (`00000000-…`) are fine for the first pass; flow-run's pre-flight will tell you which need real values and offer candidates from your tenant.
 6. **Verify with `./verify.sh`** (the inner authoring loop):
@@ -143,20 +143,18 @@ Minimum shape:
   "nodes": {
     "start": {
       "type": "core.trigger.manual@1.0.0",
-      "ui": { "position": { "x": 256, "y": 144 } },
       "label": "Start",
       "rawInputs": {}
     },
     "getEmails": {
       "type": "uipath.connector.uipath-microsoft-outlook365.get-email-list@1.0.0",
-      "ui": { "position": { "x": 432, "y": 144 } },
       "label": "Get Emails",
-      "binding": "outlookConn",
+      "binding": "bOutlook",
+      "folderBinding": "bFolderKey",
       "configuration": {}
     },
     "end1": {
       "type": "core.control.end@1.0.0",
-      "ui": { "position": { "x": 800, "y": 144 } },
       "label": "End",
       "rawInputs": {}
     }
@@ -172,8 +170,8 @@ Minimum shape:
 | `ui.position`     | no       | `{x, y}` for layout (auto-laid-out if absent)                                                                              |
 | `label`           | no       | Display name; defaults to library label for integration nodes                                                              |
 | `rawInputs`       | for non-integration nodes | Raw v1 `inputs` blob (control-flow, script, agent nodes carry this verbatim)                                  |
-| `binding`         | for integration nodes | UUID the connector uses as its `ConnectionId` — also referenced (verbatim) in `bindings.json`                              |
-| `folderBinding`   | for integration nodes | UUID for the connector's `FolderKey` — required even when stubbed                                                          |
+| `binding`         | for integration nodes | Symbolic id of a `bindings.json` entry whose `propertyAttribute` is `ConnectionId`. `flow-run` resolves it to the real UUID. |
+| `folderBinding`   | for integration nodes | Symbolic id of a `bindings.json` entry whose `propertyAttribute` is `FolderKey`. Required.                                  |
 | `configuration`   | for integration nodes | Per-instance field values (anything not deterministically known from the canonical library)                                |
 | `inputs`          | sometimes | Top-level inputs (`queryParameters`, etc.) the connector expects but that aren't in the configuration blob                 |
 | `outputs`         | no       | Override the library's default output schema                                                                               |
@@ -186,12 +184,29 @@ For **script nodes** (`core.action.script@1.0.0`), set `rawInputs: { "script": "
 
 ## Bindings — `bindings.json`
 
-`bindings.json` lists the connection-related UUIDs the manifest's `binding` and `folderBinding` fields point at. Validation requires:
+`bindings.json` is the **single source of truth for connection UUIDs**. The manifest references each binding by symbolic `id` (e.g. `"bOutlook"`); `flow-run` resolves the id against `bindings.json` at load time to find the real UUID. Storing UUIDs in one place keeps the flow portable: ship the FIL + manifest as-is and the next person just fills in their own `bindings.json`.
 
-1. Every connector node MUST have BOTH a `binding` (its `ConnectionId`) AND a `folderBinding` (a folder-key UUID). Connector validation fails with `FolderKey is required for the connection binding` otherwise.
-2. Every binding entry MUST have an `id` (any short string), `name`, `type: "string"`, `resource`, `resourceKey`, `default`, and `propertyAttribute`. Missing fields trigger `Schema validation failed`.
+Required structure:
 
-Worked example for two connectors sharing a folder:
+1. Every connector node has BOTH a `binding` (symbolic id pointing to a `propertyAttribute: "ConnectionId"` entry) AND a `folderBinding` (symbolic id pointing to a `propertyAttribute: "FolderKey"` entry).
+2. Every binding entry has `id` (short symbolic name), `name`, `type: "string"`, `resource`, `resourceKey`, `default`, and `propertyAttribute`. Missing fields trigger `Schema validation failed`.
+
+### Where each UUID comes from
+
+Run once at the start of authoring:
+
+```bash
+uip is connections list --output json
+```
+
+Each `Data[]` entry has two fields you need:
+
+| `uip` output field | bindings.json field          | What it identifies         |
+| ------------------ | ---------------------------- | -------------------------- |
+| `Id`               | `resourceKey` + `default` on a `propertyAttribute: "ConnectionId"` entry | A specific connector connection |
+| `FolderKey`        | `resourceKey` + `default` on the `propertyAttribute: "FolderKey"` entry  | The folder all your connections live in (usually one per project) |
+
+### Template
 
 ```json
 {
@@ -202,43 +217,52 @@ Worked example for two connectors sharing a folder:
       "name": "FolderKey",
       "type": "string",
       "resource": "Connection",
-      "resourceKey": "00000000-0000-0000-0000-00000000000F",
-      "default": "00000000-0000-0000-0000-00000000000F",
+      "resourceKey": "<folder-key>",
+      "default": "<folder-key>",
       "propertyAttribute": "FolderKey"
     },
     {
-      "id": "b00000001",
+      "id": "bOutlook",
       "name": "Outlook connection",
       "type": "string",
       "resource": "Connection",
-      "resourceKey": "00000000-0000-0000-0000-000000000001",
-      "default": "00000000-0000-0000-0000-000000000001",
+      "resourceKey": "<outlook-connection-id>",
+      "default": "<outlook-connection-id>",
       "propertyAttribute": "ConnectionId"
     }
   ]
 }
 ```
 
-The manifest then references these UUIDs:
+`flow-run` rejects entries where `resourceKey`/`default` is still in `<...>` placeholder form (or the legacy `00000000-...` stub).
+
+### Manifest references bindings by id, not UUID
 
 ```json
 "getEmails": {
   "type": "uipath.connector.uipath-microsoft-outlook365.get-email-list@1.0.0",
-  "binding": "00000000-0000-0000-0000-000000000001",
-  "folderBinding": "00000000-0000-0000-0000-00000000000F",
+  "binding": "bOutlook",
+  "folderBinding": "bFolderKey",
   "configuration": {}
 }
 ```
 
-For first-iteration authoring, **stub UUIDs are fine** (`00000000-0000-0000-0000-000000000000`). The validation pass cares about structure, not whether the connection actually exists. Real deployment fills these in.
+The manifest never holds real UUIDs — that's exclusively `bindings.json`. If `flow-run` reports `binding "bOutlook" is not declared in bindings.json`, you have a typo or missing entry in `bindings.json`.
 
 ## Definitions — handled automatically
 
 `v2-to-v1` ships a built-in catalog of v1 `definitions[]` entries for the standard control-flow types (`core.trigger.manual`, `core.control.end`, `core.logic.decision`, `core.logic.merge`, `core.action.script`, `core.subflow`, …). You don't need to ship `embeddedDefinitions` for these — the converter fills them in. Connector definitions come from the canonical library on disk (`integrations/library/<connector>/<action>@<version>.v1def.json`). Add `embeddedDefinitions` to your manifest only if you reference a custom node type the canonical library doesn't carry (e.g. a tenant-specific `uipath.core.agent.<uuid>`).
 
-## Worked example
+## Worked examples
 
-See `example/OrderConfirm.fil.ts`, `example/OrderConfirm.manifest.flow`, `example/bindings.json` in this directory. It's a 5-node flow that lists emails and sends a Slack DM. Read it before authoring.
+Two reference flows ship in `example/`. **Read them before authoring** — they're the fastest way to pattern-match the structure you need.
+
+| File | Shows |
+| ---- | ----- |
+| `example/OrderConfirm.{fil,manifest.flow}` | Minimal 2-connector flow: list emails, branch on count, send a Slack DM. Good for first reading. |
+| `example/CommitMonitor.{fil,manifest.flow}` | **Multi-connector + HTTP + loop + decision + counter + digest.** Closely mirrors the structure of most real flows: hardcoded array, for-of, HTTP fetch with string-concat URL, JSON.parse double-pattern for the HTTP response, string-contains decision, two connector calls in different branches, final digest email with `"count: " + i32` string-concat. Adapt this when you need any of these patterns. |
+
+Both share `example/bindings.json` (Outlook, Slack, FolderKey).
 
 ## Verifying with flow-run
 
@@ -259,11 +283,21 @@ What flow-run catches that convert+validate doesn't:
 
 | Symptom | flow-run output |
 | --- | --- |
-| FIL syntax error | `file.fil.ts:12:34: [parse] <message>` with the offending source line and a caret |
+| FIL syntax error | `file.fil:12:34: [parse] <message>` with the offending source line and a caret |
 | stub UUID in `bindings.json` | `binding is a stub UUID (00000000-...). Replace with a real ConnectionId from \`uip is connections list\`.` |
 | binding UUID not in your tenant | error names the binding + lists candidate real connection IDs for that connector |
 | connector returned an error | full provider envelope preserved in `decisions.json` (e.g. Slack `channel_not_found`, Outlook `Id is malformed`, etc.) |
 | node type not recognized | error names the node id and the missing connector library entry |
+
+### STOP on WASM runtime errors — do not work around
+
+If `verify.sh` reports a `WebAssembly.RuntimeError` (typically `memory access out of bounds` or `unreachable executed`), that is a **FIL compiler bug**, not an authoring mistake. **Stop immediately**:
+
+1. Copy the offending FIL file to `WASM_BUG_REPRO.fil` (verbatim, no edits).
+2. Write a one-paragraph `WASM_BUG_NOTE.md` describing: the source pattern you used, the exact runtime error, and the line of the FIL the error points at.
+3. Stop. Do not rewrite the pattern, do not switch to a `__script_` helper, do not work around with `JSON.stringify`, do not change types. The compiler should be fixed, not the workflow.
+
+Working around a compiler bug burns iterations and hides the root cause. The maintainers prefer one halted run with a clean repro over twelve "successful" runs that each hit a different workaround for the same underlying bug. Compile errors and binding errors are normal authoring feedback — iterate on those. WASM runtime errors are not — halt and report.
 
 flow-run dispatches:
 
@@ -310,119 +344,78 @@ uip maestro flow registry search "send email" --output json \
   | jq '.Data[] | select(.NodeType | startswith("uipath.connector.")) | {NodeType, DisplayName, Description}'
 ```
 
-If you also need the input schema for a specific node (parameter names, required/optional, types), `uip maestro flow registry get <NodeType> --output json` returns the full Data.Node — `connectorMethodInfo.parameters[]` is the parameter list.
+### Getting the input schema for a node — use `--output-filter`
+
+`uip maestro flow registry get <NodeType> --output json` ships ~11–40 KB per call: BPMN model, designer form schema, telemetry, icon URLs — none of which you need when authoring a flow. Use the CLI's built-in **`--output-filter`** (a JMESPath expression applied to the `Data` field) to slice out just the part you actually use. Four filters cover almost every authoring need; **start with #1** to see the call shape, then drill in as needed:
+
+```bash
+# 1. The call shape — query vs body vs path parameters. Run this FIRST.
+#    If you see {name: "body", type: "body", dataType: "object"} that
+#    connector takes a freeform JSON body — see the note below.
+uip maestro flow registry get <NodeType> --output json \
+  --output-filter 'Node.connectorMethodInfo.parameters[*].{name: name, type: type, dataType: dataType, required: required}'
+
+# 2. Required input fields only — the designer-curated "must fill in" list.
+uip maestro flow registry get <NodeType> --output json \
+  --output-filter 'Node.inputDefinition.fields[?required==`true`].{name: name, type: type, description: description}'
+
+# 3. All input fields (required + optional) when you need optional flags too.
+uip maestro flow registry get <NodeType> --output json \
+  --output-filter 'Node.inputDefinition.fields[*].{name: name, type: type, required: required, description: description}'
+
+# 4. Response shape — the fields the connector returns. Useful for downstream consumers.
+uip maestro flow registry get <NodeType> --output json \
+  --output-filter 'Node.outputResponseDefinition.fields[*].{name: name, type: type, description: description}'
+```
+
+Typical reductions: full response ~11–40 KB → required-only filter ~300–500 B (95–99% smaller). Don't pipe the full response through `jq` to filter client-side — `--output-filter` runs server-side and only that goes over the wire.
+
+**`type: "body"` is special.** When filter #1 returns a single parameter `{name: "body", type: "body", dataType: "object"}` (Jira `create-issue`, GitHub create-pr, most "Create X" REST connectors), the connector forwards your JSON body **verbatim to the upstream API**. `inputDefinition.fields[]` only lists the 3–10 fields the designer surfaces; the full accepted shape comes from the upstream API docs (e.g. Jira's `POST /rest/api/3/issue` accepts ~50 fields under `fields`). Build the body yourself and pass it as the input:
+
+```typescript
+await executeNode("createIssue", "{\"fields\":{\"project\":{\"key\":\"Maestro\"},\"summary\":\"...\",\"description\":\"...\",\"issuetype\":{\"name\":\"Task\"}}}");
+```
+
+Don't burn time looking for `summary`/`description` in the registry — they're not there because the connector doesn't curate them.
+
+Fields you usually do NOT need (and should not request): `Node.model` (BPMN engine config), `Node.form` (designer UI form), `Node.handleConfiguration` (BPMN handle positions), `Node.display` (icon URLs), `Node.connectorMethodInfo.design` (designer-only rules). If you ever do need the whole thing, drop `--output-filter` — but try the slim filters first.
 
 ## Common authoring patterns
 
-**Pattern: HTTP request (no connector).**
-
-Use `core.action.http` for raw API calls — no connector needed. The node has 12+ verbose fields; copy this template and edit `url`/`method`/`body`. The `headers` and `queryParams` accept either an object literal in the manifest's `rawInputs`, or a JSON-stringified empty object inside the FIL `executeNode` argument.
-
-FIL:
+**HTTP request (no connector).** `core.action.http` only needs `url` (and `method`); other fields default. Put the static fields in the manifest's `rawInputs` and the dynamic bits in the FIL `executeNode` call — the dispatcher merges them (headers/queryParams deep-merge; body/scalars FIL-wins).
 
 ```typescript
-await executeNode("fetchTemperature", JSON.stringify({
-  mode: "manual",
-  method: "GET",
-  url: "https://api.open-meteo.com/v1/forecast?latitude=39.7392&longitude=-104.9903&current=temperature_2m&temperature_unit=fahrenheit",
-  swaggerDefinition: null,
-  authenticationType: "manual",
-  application: "",
-  connection: "",
-  headers: JSON.stringify("{}"),
-  queryParams: JSON.stringify("{}"),
-  body: "",
-  contentType: "application/json",
-  timeout: "PT15M",
-  retryCount: 0,
-  branches: JSON.stringify("[]"),
-}));
+const url: string = ("https://api.open-meteo.com/v1/forecast?latitude=" + lat);
+const raw = await executeNode("fetchWeather", JSON.stringify({ url: url }));
+const body = JSON.parse(raw).body;  // HTTP response shape: { body, headers, statusCode }
 ```
 
-Manifest entry:
-
 ```json
-"fetchTemperature": {
+"fetchWeather": {
   "type": "core.action.http@1.0.0",
-  "ui": { "position": { "x": 432, "y": 144 } },
-  "label": "Fetch Denver Temperature",
-  "rawInputs": {
-    "mode": "manual",
-    "method": "GET",
-    "url": "https://api.open-meteo.com/v1/forecast?latitude=39.7392&longitude=-104.9903&current=temperature_2m&temperature_unit=fahrenheit",
-    "swaggerDefinition": null,
-    "authenticationType": "manual",
-    "application": "",
-    "connection": "",
-    "headers": {},
-    "queryParams": {},
-    "body": "",
-    "contentType": "application/json",
-    "timeout": "PT15M",
-    "retryCount": 0,
-    "branches": []
-  }
+  "rawInputs": { "method": "GET", "timeout": "PT15M" }
 }
 ```
 
-The HTTP node's response lands at `vars.<nodeId>.output.body.<…>`. Read it from a downstream script node (`return $vars.fetchTemperature.output.body.current.temperature_2m;`) or from another node's input expression.
-
-**Pattern: script node — extract a value from a previous node's output.**
-
-A `function __script_<id>(): json { return …; }` declared as a sync helper at the top of the FIL file becomes a `core.action.script` node when called via `__script_<id>()`. The body uses v1's `=js:` runtime — `$vars.X.output.Y` walks the previous node's output.
+**Output downstream.**
 
 ```typescript
-function __script_extractTemperature(): json {
-  return { temp: $vars.fetchTemperature.output.body.current.temperature_2m };
-}
-
-async function main(): Promise<void> {
-  await executeNode("fetchTemperature", JSON.stringify({ /* … */ }));
-  const tempData: json = __script_extractTemperature();
-  if ((JSON.parse(tempData).temp > 60)) {
-    /* … */
-  }
-}
-```
-
-Manifest entry for the script node (the converter assigns the id `extractTemperature` from `__script_extractTemperature`):
-
-```json
-"extractTemperature": {
-  "type": "core.action.script@1.0.0",
-  "ui": { "position": { "x": 600, "y": 144 } },
-  "label": "Extract Temperature",
-  "rawInputs": {
-    "script": "return { temp: $vars.fetchTemperature.output.body.current.temperature_2m };"
-  }
-}
-```
-
-The `rawInputs.script` body MUST match the FIL helper's body verbatim — that's how the round-trip is preserved.
-
-**Pattern: use a node's output downstream.**
-
-```typescript
-const emailsRaw = await executeNode("uipath.connector.uipath-microsoft-outlook365.get-email-list", "{}");
+const emailsRaw = await executeNode("getEmails", "{}");
 const emails = JSON.parse(emailsRaw);
 const subject = (emails[0].subject ?? "(no subject)");
-await executeNode("uipath.connector.uipath-salesforce-slack.send-message-to-channel",
-  JSON.stringify({ channel: "#alerts", messageToSend: ("New: " + subject) }));
+await executeNode("slackPost", JSON.stringify({ channel: "#alerts", messageToSend: ("New: " + subject) }));
 ```
 
-**Pattern: branch on a node's output.**
+**Branch on output, counters with `+`.** Binary `+` between a string and any numeric/json value coerces the non-string side automatically:
 
 ```typescript
-const raw = await executeNode("getStatus", "{}");
-const status = JSON.parse(raw);
-if (status.healthy) {
-  await executeNode("ok", "{}");
-} else {
-  await executeNode("alert", "{}");
-}
+let seen: i32 = 0;
+const raw = await executeNode("check", "{}");
+if (JSON.parse(raw).healthy) { seen++; await executeNode("ok", "{}"); }
+await executeNode("log", "seen: " + seen);   // → "seen: 1"
 ```
 
-**Pattern: variables that the user/runtime supplies.**
+**Flow input parameter.** A `main` parameter becomes a v1 flow `in` variable.
 
 ```typescript
 async function main(customerId: string): Promise<void> {
@@ -430,120 +423,45 @@ async function main(customerId: string): Promise<void> {
 }
 ```
 
-`customerId` becomes a v1 flow `in` variable.
+**Script node — extract from prior output.** A top-level `function __script_<id>(): json { return <expr>; }` becomes a `core.action.script` node when called via `__script_<id>()`. The body uses v1's `=js:` runtime (`$vars.X.output.Y`); the manifest's `rawInputs.script` must match the helper body verbatim.
+
+```typescript
+function __script_extractTemp(): json {
+  return { temp: $vars.fetchWeather.output.body.current.temperature_2m };
+}
+```
+
+Read the bundled `example/OrderConfirm.{fil,manifest.flow}` for a runnable 2-connector example.
 
 ## Pitfalls
 
-- The string passed to `executeNode("…", …)` is the manifest's NODE ID (the key in `manifest.nodes`). It can be a short id (`getEmails`) or the full nodeType (`uipath.connector.uipath-microsoft-outlook365.get-email-list`); whichever you choose must match the manifest key. The manifest entry's `type` field is always the full `<nodeType>@<version>`.
-- Trigger and end nodes still need manifest entries — even if FIL doesn't mention them by name.
-- Control-flow ids (`decision1`, `merge1`, `end1`, `setvar_<name>_1`) are generated by the converter; you don't author manifest entries for them. The converter handles their definitions automatically.
-- Connector nodes need BOTH `binding` and `folderBinding` UUIDs, even when stubbed. Validation rejects connectors missing the FolderKey binding.
-- Every entry in `bindings.json` needs an `id` field (any short string). Missing it triggers schema validation failure.
-- `await` outside an async function won't parse; every async helper needs `Promise<void>` (or `Promise<json>`, etc.) as its return type.
-- Mutating an object's field (`obj.foo = 1`) doesn't survive v1 conversion — replace with `obj = { ...obj, foo: 1 }`.
+- **Node id vs type.** The string in `executeNode("…", …)` is the manifest key (e.g. `getEmails`), not the full type. The manifest entry's `type` field carries `<nodeType>@<version>`.
+- **Trigger + end nodes need manifest entries** even when FIL doesn't name them.
+- **Control-flow ids are auto-generated.** Don't author manifest entries for `decision1` / `merge1` / `setvar_<name>_1` — the converter handles them.
+- **Connectors need both `binding` and `folderBinding`** — validation rejects missing FolderKey.
+- **No object-field mutation.** `obj.foo = 1` doesn't survive v1 conversion — use `obj = { ...obj, foo: 1 }`.
+- **No `await` outside async.** Every async helper needs `Promise<void>` (or `Promise<json>`, etc.) as its return type.
 
-### Script-helper restrictions
+### Replay safety: non-deterministic calls go through `executeNode`
 
-`__script_<id>` sync helpers must be **single-expression value returners**. The body should be a single `return <expr>;` — typically with a ternary if you need conditional values:
-
-```typescript
-// ✓ OK
-function __script_buildResult(): json {
-  return ($vars.fetchWeather.output.body.current.temperature_2m > 60)
-    ? ({ message: "nice day" })
-    : ({ message: "bring a jacket" });
-}
-
-// ✗ Don't do this — if/else inside a script helper hits a known FIL emitter bug
-function __script_buildResult(): json {
-  if ($vars.fetchWeather.output.body.current.temperature_2m > 60) {
-    return { message: "nice day" };
-  } else {
-    return { message: "bring a jacket" };
-  }
-}
-```
-
-For real branching, use FIL's `if`/`else` in `main()` between awaits — and put a separate `executeNode("...")` call (or a separate script helper) in each branch:
+`__script_<id>` sync helpers run on **every** FIL replay, so anything depending on `Math.random()`, `Date.now()`, an entropy source, or env state drifts each run and breaks replay. Wrap non-determinism in an `executeNode` call against a `core.action.script` node — the host runs it once, captures the result in history, and replays read the recorded value:
 
 ```typescript
-async function main(): Promise<void> {
-  await executeNode("fetchWeather", JSON.stringify({ /* … */ }));
-  if (JSON.parse(<output>).temp > 60) {
-    await executeNode("nice", "{}");      // each branch awaits something
-  } else {
-    await executeNode("jacket", "{}");
-  }
-}
+// ✗ replay-broken — every replay rolls a different number
+function __script_roll(): json { return { value: Math.floor(Math.random() * 6) + 1 }; }
+
+// ✓ replay-safe — manifest "roll" is core.action.script with the body in rawInputs.script
+const rolled: string = await executeNode("roll", "{}");
 ```
 
-A FIL `if`/`else` in `main()` whose branches contain *only assignments* (no awaits, no executeNode) currently also hits the emitter bug. If your branches don't await, collapse to a ternary in a single script helper.
+`DateTime.now()` (the FIL builtin) is the exception — host-imported and pinned per run.
 
-### Non-deterministic calls must go through `executeNode`
+### Known FIL compiler bugs — write around these patterns
 
-`__script_<id>` helpers run on **every** FIL replay. If a script body returns a value that depends on `Math.random()`, `Date.now()`, an entropy source, or any environment state, replay drifts: each run gets a different value, downstream branches diverge, and the host's history no longer matches what the WASM emits.
+The patterns below currently emit malformed WAT. **Do not work around them silently — if `verify.sh` reports a `WebAssembly.RuntimeError`, halt and report per the "STOP on WASM" section above.** These are listed so you can recognize the patterns and pick an alternative shape from the start.
 
-```typescript
-// ✗ Replay-broken: each replay rolls a different number
-function __script_roll(): json {
-  return { value: Math.floor(Math.random() * 6) + 1 };
-}
+- **`if`/`else` inside `__script_<id>` helpers.** Use a single `return <ternary>;` instead. For real branching, use `if`/`else` in `main()` with an `executeNode` (or separate script helper) per branch.
+- **`if`/`else` in `main()` where both branches only do assignments.** Either give each branch an `await executeNode(...)`, or push the conditional value into a script helper using a ternary.
+- **Object literals as call arguments where a property value is a member access or needs conversion** — e.g. `JSON.stringify({ id: item.id })` inside `executeNode(...)`. Workarounds: pass the json field directly (`JSON.stringify(item)`), string-concat (`"{\"id\":" + item.id + "}"`), or stash the object in a `const` first.
 
-async function main(): Promise<void> {
-  const r: json = __script_roll();
-}
-```
-
-```typescript
-// ✓ Replay-safe: the host runs the script once, captures the result in
-//   history, and subsequent replays read the captured value.
-async function main(): Promise<void> {
-  const rolledRaw: string = await executeNode("roll", "{}");
-  // rolledRaw is preserved in .flow-run/history.yaml
-}
-```
-
-In the manifest, the `roll` node is a `core.action.script@1.0.0` whose `rawInputs.script` body contains the non-deterministic expression:
-
-```json
-"roll": {
-  "type": "core.action.script@1.0.0",
-  "label": "Roll Die",
-  "rawInputs": {
-    "script": "return Math.floor(Math.random() * 6) + 1;"
-  }
-}
-```
-
-`DateTime.now()` (the FIL builtin) is the exception — it's host-imported and pinned for the run, so it's safe inside script helpers.
-
-### Object literals with non-trivial values fail inside calls
-
-A `JSON.stringify({...})` whose object literal contains a value that's a multi-instruction expression — a `Member` access (`item.id`), a function call, or a non-string identifier that needs conversion (`i32` → string) — emits malformed WAT and fails to compile. The literal is fine when its values are simple string literals or already-string identifiers.
-
-```typescript
-// ✗ Object literal value is a member access — fails
-await executeNode("a", JSON.stringify({ id: item.id }));
-
-// ✗ Object literal value is an i32 that needs conversion — fails
-for (const item of items) {
-  await executeNode("a", JSON.stringify({ x: item.id }));
-}
-
-// ✓ Pass the json field directly (it's already serialized)
-for (const item of items) {
-  await executeNode("a", JSON.stringify(item));
-}
-
-// ✓ Concat strings if you only need a few fields
-for (const item of items) {
-  await executeNode("a", "{\"id\":" + item.id + "}");
-}
-
-// ✓ Constant input when the value isn't required
-for (const item of items) {
-  await executeNode("a", "{}");
-}
-```
-
-Object literals with simple string-valued properties (`{ id: "abc" }`) work fine anywhere.
+The authoritative list lives in `~/src/flow-v2/fil/known-issues.md`. If you hit something not there, that's a new compiler bug — halt + report.

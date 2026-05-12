@@ -48,7 +48,6 @@ initial_prompt: |
   cd BatchProcessor
   dotnet build && dotnet run -- --test
   cd ..
-  ./convert-to-v2.sh BatchProcessor
   ./convert-to-v1.sh BatchProcessor
   ./validate.sh    BatchProcessor
   ```
@@ -72,6 +71,10 @@ success_criteria:
     expected_exit_code: 0
     weight: 2.0
     pass_threshold: 1.0
+  - type: file_exists
+    description: "Bindings file exists at project root"
+    path: "bindings.json"
+    weight: 1.0
   - type: file_exists
     description: "v1 .flow exists"
     path: "BatchProcessor.flow"
@@ -115,6 +118,6 @@ success_criteria:
       (d) ends after the loop completes?
     files:
       - "BatchProcessor/Workflow.cs"
-      - "BatchProcessor/BatchProcessor.fil"
+      - "BatchProcessor.flow"
     weight: 2.0
     pass_threshold: 0.7

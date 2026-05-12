@@ -51,7 +51,7 @@ initial_prompt: |
 
   ## Files to write (project root)
 
-  - `CalendarReminder.fil.ts`        FIL source
+  - `CalendarReminder.fil`        FIL source
   - `CalendarReminder.manifest.flow` Manifest (mock fixture populated; the
                                      create-event node's `binding` and
                                      `folderBinding` can be stub UUIDs —
@@ -72,7 +72,7 @@ initial_prompt: |
 success_criteria:
   - type: file_exists
     description: "FIL source file exists"
-    path: "CalendarReminder.fil.ts"
+    path: "CalendarReminder.fil"
     weight: 1.0
   - type: file_exists
     description: "Manifest exists"
@@ -84,7 +84,7 @@ success_criteria:
     weight: 1.0
   - type: run_command
     description: "FIL compiles"
-    command: "./parse-fil.sh CalendarReminder.fil.ts"
+    command: "./parse-fil.sh CalendarReminder.fil"
     timeout: 30
     expected_exit_code: 0
     weight: 2.0
@@ -129,7 +129,7 @@ success_criteria:
     description: "FIL passes the registry-defined input fields (subject + start.dateTime + end.dateTime + timezone)"
     command: |
       python3 -c "
-      src = open('CalendarReminder.fil.ts').read()
+      src = open('CalendarReminder.fil').read()
       # The registry's required fields for create-event-calendar-event are:
       # subject, start.dateTime, end.dateTime, timezone. The agent's executeNode
       # call should pass all four. We accept either the dotted form

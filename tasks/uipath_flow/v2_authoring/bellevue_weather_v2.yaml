@@ -37,7 +37,7 @@ initial_prompt: |
 
   ## Files to write (project root)
 
-  - `BellevueWeather.fil.ts`       FIL source
+  - `BellevueWeather.fil`       FIL source
   - `BellevueWeather.manifest.flow` Manifest
   - `bindings.json`                Connection IDs (this flow has no
                                    connectors, so an empty bindings array is fine)
@@ -59,7 +59,7 @@ initial_prompt: |
 success_criteria:
   - type: file_exists
     description: "FIL source file exists"
-    path: "BellevueWeather.fil.ts"
+    path: "BellevueWeather.fil"
     weight: 1.0
 
   - type: file_exists
@@ -74,7 +74,7 @@ success_criteria:
 
   - type: run_command
     description: "FIL compiles to WAT"
-    command: "./parse-fil.sh BellevueWeather.fil.ts"
+    command: "./parse-fil.sh BellevueWeather.fil"
     timeout: 30
     expected_exit_code: 0
     weight: 2.0
@@ -148,7 +148,7 @@ success_criteria:
       Score the FIL source and manifest below. Behavior is what's being
       graded; the chosen branching idiom is not.
     files:
-      - "BellevueWeather.fil.ts"
+      - "BellevueWeather.fil"
       - "BellevueWeather.manifest.flow"
     weight: 2.0
     pass_threshold: 0.7

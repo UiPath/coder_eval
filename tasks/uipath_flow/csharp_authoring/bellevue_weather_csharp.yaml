@@ -70,7 +70,6 @@ initial_prompt: |
   cd BellevueWeather
   dotnet build && dotnet run -- --test
   cd ..
-  ./convert-to-v2.sh BellevueWeather
   ./convert-to-v1.sh BellevueWeather
   ./validate.sh    BellevueWeather
   ```
@@ -95,8 +94,8 @@ success_criteria:
     weight: 2.0
     pass_threshold: 1.0
   - type: file_exists
-    description: "FIL output exists"
-    path: "BellevueWeather/BellevueWeather.fil"
+    description: "Bindings file exists at project root"
+    path: "bindings.json"
     weight: 1.0
   - type: file_exists
     description: "v1 .flow exists"
@@ -145,6 +144,6 @@ success_criteria:
       equivalent are all fine.
     files:
       - "BellevueWeather/Workflow.cs"
-      - "BellevueWeather/BellevueWeather.fil"
+      - "BellevueWeather.flow"
     weight: 2.0
     pass_threshold: 0.7

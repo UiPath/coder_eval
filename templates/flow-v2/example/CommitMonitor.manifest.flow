@@ -1,0 +1,40 @@
+{
+  "schemaVersion": "1",
+  "flowId": "commit-monitor",
+  "flowName": "Commit Monitor",
+  "flowVersion": "1.0.0",
+  "nodes": {
+    "start": {
+      "type": "core.trigger.manual@1.0.0",
+      "label": "Start",
+      "rawInputs": {}
+    },
+    "fetchCommits": {
+      "type": "core.action.http@1.0.0",
+      "label": "Fetch latest commit",
+      "rawInputs": {
+        "method": "GET",
+        "timeout": "PT30S"
+      }
+    },
+    "slackAlert": {
+      "type": "uipath.connector.uipath-salesforce-slack.send-message-to-user@1.0.0",
+      "label": "Slack DM: bug-fix alert",
+      "binding": "bSlack",
+      "folderBinding": "bFolderKey",
+      "configuration": {
+        "send_as": "bot",
+        "channel": "<your slack user id, e.g. @Your Name>"
+      }
+    },
+    "sendDigest": {
+      "type": "uipath.connector.uipath-microsoft-outlook365.send-email@1.0.0",
+      "label": "Outlook: daily digest",
+      "binding": "bOutlook",
+      "folderBinding": "bFolderKey",
+      "configuration": {
+        "message.toRecipients": "<your email>"
+      }
+    }
+  }
+}

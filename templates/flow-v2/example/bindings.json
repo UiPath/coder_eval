@@ -6,26 +6,26 @@
       "name": "FolderKey",
       "type": "string",
       "resource": "Connection",
-      "resourceKey": "00000000-0000-0000-0000-00000000000F",
-      "default": "00000000-0000-0000-0000-00000000000F",
+      "resourceKey": "<folder-key from `uip is connections list --output json`>",
+      "default": "<folder-key from `uip is connections list --output json`>",
       "propertyAttribute": "FolderKey"
     },
     {
-      "id": "b00000001",
+      "id": "bOutlook",
       "name": "Outlook connection",
       "type": "string",
       "resource": "Connection",
-      "resourceKey": "00000000-0000-0000-0000-000000000001",
-      "default": "00000000-0000-0000-0000-000000000001",
+      "resourceKey": "<outlook-connection-id from `uip is connections list --output json`>",
+      "default": "<outlook-connection-id from `uip is connections list --output json`>",
       "propertyAttribute": "ConnectionId"
     },
     {
-      "id": "b00000002",
+      "id": "bSlack",
       "name": "Slack connection",
       "type": "string",
       "resource": "Connection",
-      "resourceKey": "00000000-0000-0000-0000-000000000002",
-      "default": "00000000-0000-0000-0000-000000000002",
+      "resourceKey": "<slack-connection-id from `uip is connections list --output json`>",
+      "default": "<slack-connection-id from `uip is connections list --output json`>",
       "propertyAttribute": "ConnectionId"
     }
   ]

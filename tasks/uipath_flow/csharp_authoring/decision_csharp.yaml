@@ -54,7 +54,6 @@ initial_prompt: |
   cd EmailClassifier
   dotnet build && dotnet run -- --test
   cd ..
-  ./convert-to-v2.sh EmailClassifier
   ./convert-to-v1.sh EmailClassifier
   ./validate.sh    EmailClassifier
   ```
@@ -78,6 +77,10 @@ success_criteria:
     expected_exit_code: 0
     weight: 2.0
     pass_threshold: 1.0
+  - type: file_exists
+    description: "Bindings file exists at project root"
+    path: "bindings.json"
+    weight: 1.0
   - type: file_exists
     description: "v1 .flow exists"
     path: "EmailClassifier.flow"
@@ -119,6 +122,6 @@ success_criteria:
       (c) has a separate `core.logic.mock` action per branch?
     files:
       - "EmailClassifier/Workflow.cs"
-      - "EmailClassifier/EmailClassifier.fil"
+      - "EmailClassifier.flow"
     weight: 2.0
     pass_threshold: 0.7
