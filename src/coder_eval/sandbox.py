@@ -125,6 +125,10 @@ class Sandbox:
             # Install Node.js packages
             if self.config.node and self.config.node.env_packages:
                 self._install_node_packages()
+
+            # MST-9674: report (without remediating) parent-dir node_modules
+            # contamination that could perturb Node module resolution.
+            self._check_parent_node_modules_contamination()
         except Exception:
             # Clean up directory if setup fails partway through
             shutil.rmtree(self.sandbox_dir, ignore_errors=True)
@@ -457,6 +461,98 @@ class Sandbox:
                         exc,
                     )
 
+    def _build_run_command_env(self) -> dict[str, str]:
+        """Build the environment for ``run_command``.
+
+        Each layer is independent — none breaks if another is absent:
+
+        1. Inherit parent env (so agent tools / credentials remain reachable).
+        2. Activate the sandbox virtualenv (if present).
+        3. Prepend ``<sandbox>/node_modules/.bin`` to PATH (if present).
+        4. Pin ``NODE_PATH=""`` so Node's fallback search paths cannot pick
+           up contaminated parent-dir installs (MST-9674). Note: this does
+           NOT disable parent-walking from cwd — that is hard-wired in
+           Node — but it eliminates ``NODE_PATH``-mediated leaks.
+        5. Pin ``NPM_CONFIG_PREFIX`` to a sandbox-scoped directory so any
+           ``npm install`` / ``bun add`` from inside the sandbox writes
+           into the sandbox, not into ``$HOME/node_modules`` where
+           concurrent sandboxes would shadow each other.
+        6. Expose ``TASK_DIR`` for criterion scripts.
+        """
+        assert self.sandbox_dir is not None
+        env = os.environ.copy()
+        if self.venv_dir:
+            env["VIRTUAL_ENV"] = str(self.venv_dir)
+            env["PATH"] = f"{self._venv_scripts_dir}{os.pathsep}{env['PATH']}"
+        node_bin = self.sandbox_dir / "node_modules" / ".bin"
+        if node_bin.exists():
+            env["PATH"] = f"{node_bin}{os.pathsep}{env['PATH']}"
+        # MST-9674: keep Node and npm resolution sandbox-local so concurrent
+        # tasks cannot poison each other through shared parent-dir node_modules.
+        env["NODE_PATH"] = ""
+        env["NPM_CONFIG_PREFIX"] = str(self.sandbox_dir / ".npm-prefix")
+        if self.task_dir:
+            env["TASK_DIR"] = str(self.task_dir)
+        return env
+
+    def _check_parent_node_modules_contamination(self) -> list[Path]:
+        """Walk up from ``sandbox_dir`` and report any ancestor that has a
+        populated ``node_modules/`` directory.
+
+        Concurrent tasks (or anything else on the host that runs
+        ``cd <ancestor> && npm install ... --save``) drop packages into
+        shared parent dirs. Node's parent-walking module resolver finds
+        those before the sandbox-local install, which is the proximate
+        cause of MST-9674's ``unknown command 'run'`` failure — but the
+        failure mode is generic to Node module resolution, not specific
+        to any one npm scope. The check therefore stays
+        scope-agnostic: ``coder_eval`` is a generic evaluation framework
+        and should not single out one ecosystem's namespace. Operators
+        read the logged entry list to decide whether the contamination
+        actually matters for their agent's toolchain.
+
+        This is a *detection-only* helper. It returns the list of
+        ancestor ``node_modules`` dirs found and logs a single warning
+        per dir. Auto-remediation is intentionally avoided — those dirs
+        may legitimately belong to the user and silently deleting them
+        would be destructive.
+        """
+        if self.sandbox_dir is None:
+            return []
+        offenders: list[Path] = []
+        seen: set[Path] = set()
+        # Walk strictly upward; do not include the sandbox itself (its
+        # node_modules is intentional).
+        for parent in self.sandbox_dir.resolve().parents:
+            if parent in seen:
+                continue
+            seen.add(parent)
+            node_modules_dir = parent / "node_modules"
+            if not node_modules_dir.is_dir():
+                continue
+            try:
+                # Skip dot-entries (``.bin``, ``.cache``, …) — they are
+                # package-manager bookkeeping, not installed packages
+                # that would shadow a sandbox-local install.
+                entries = sorted(p.name for p in node_modules_dir.iterdir() if not p.name.startswith("."))
+            except OSError:
+                # Permission denied / race-with-delete — skip silently.
+                continue
+            if not entries:
+                continue
+            offenders.append(node_modules_dir)
+            sample = ", ".join(entries[:5])
+            more = f" (+{len(entries) - 5} more)" if len(entries) > 5 else ""
+            logger.warning(
+                "Parent-dir node_modules contamination detected at %s — "
+                + "Node's parent-walking resolver may pick this up before the "
+                + "sandbox-local install (see MST-9674). Contents: %s%s",
+                node_modules_dir,
+                sample,
+                more,
+            )
+        return offenders
+
     def run_command(self, command: str, timeout: float | int | None = None) -> tuple[int, str, str]:
         """Run a command in the sandbox environment.
 
@@ -478,18 +574,7 @@ class Sandbox:
         if timeout is None:
             timeout = self.config.limits.timeout
 
-        # Prepare environment with virtual environment activated
-        env = os.environ.copy()
-        if self.venv_dir:
-            env["VIRTUAL_ENV"] = str(self.venv_dir)
-            env["PATH"] = f"{self._venv_scripts_dir}{os.pathsep}{env['PATH']}"
-        # Add node_modules/.bin to PATH if it exists
-        node_bin = self.sandbox_dir / "node_modules" / ".bin"
-        if node_bin.exists():
-            env["PATH"] = f"{node_bin}{os.pathsep}{env['PATH']}"
-
-        if self.task_dir:
-            env["TASK_DIR"] = str(self.task_dir)
+        env = self._build_run_command_env()
 
         try:
             # Shell execution is intentional for sandbox - allows pipes, redirects, and complex commands

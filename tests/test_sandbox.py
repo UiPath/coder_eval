@@ -840,3 +840,133 @@ def test_mock_path_dirs_resolved_order_matches_config():
         assert resolved == [(sandbox_dir / "b").resolve(), (sandbox_dir / "a").resolve()]
     finally:
         sandbox.cleanup()
+
+
+# ── MST-9674: Node / npm resolution isolation ────────────────────────────
+
+
+def test_run_command_env_isolates_node_resolution():
+    """NODE_PATH and NPM_CONFIG_PREFIX are pinned to the sandbox."""
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_node_isolation")
+    try:
+        sandbox_dir = sandbox.setup()
+        env = sandbox._build_run_command_env()
+        assert env["NODE_PATH"] == ""
+        assert env["NPM_CONFIG_PREFIX"] == str(sandbox_dir / ".npm-prefix")
+        # Parent env should still flow through so the agent's tools remain reachable.
+        assert "PATH" in env
+    finally:
+        sandbox.cleanup()
+
+
+def test_check_parent_node_modules_contamination_reports_scoped_offender(tmp_path, caplog):
+    """An ancestor with any populated node_modules/ is reported but not removed.
+
+    Uses a scoped package (``@some-org/some-tool``) to mirror the original
+    MST-9674 contamination shape; the check itself is now scope-agnostic.
+    """
+    parent = tmp_path / "fake-home"
+    contam = parent / "node_modules" / "@some-org" / "some-tool"
+    contam.mkdir(parents=True)
+    (contam / "package.json").write_text('{"name":"@some-org/some-tool","version":"0.9.0"}')
+
+    inner = parent / "evals" / "skills" / "sandbox-xyz"
+    inner.mkdir(parents=True)
+
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_contam_detect")
+    sandbox.sandbox_dir = inner
+
+    import logging as _logging
+
+    with caplog.at_level(_logging.WARNING, logger="coder_eval.sandbox"):
+        offenders = sandbox._check_parent_node_modules_contamination()
+
+    expected = (parent / "node_modules").resolve()
+    assert expected in [o.resolve() for o in offenders]
+    # Auto-remediation is intentionally off — the install must still exist.
+    assert contam.exists()
+    # Logged message names the contaminated dir and lists what's inside.
+    matching = [r for r in caplog.records if "Parent-dir node_modules contamination" in r.message]
+    assert matching
+    assert "@some-org" in matching[0].message
+
+
+def test_check_parent_node_modules_contamination_reports_unscoped_offender(tmp_path, caplog):
+    """An ancestor node_modules/ holding any installed package is reported.
+
+    Locks in the generic check: previously the helper only caught
+    ``@uipath/*`` and would have missed unscoped packages, leaving
+    coder_eval consumers in other ecosystems uncovered.
+    """
+    parent = tmp_path / "fake-home"
+    contam = parent / "node_modules" / "lodash"
+    contam.mkdir(parents=True)
+    (contam / "package.json").write_text('{"name":"lodash","version":"4.0.0"}')
+
+    inner = parent / "evals" / "sandbox-abc"
+    inner.mkdir(parents=True)
+
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_unscoped_detect")
+    sandbox.sandbox_dir = inner
+
+    import logging as _logging
+
+    with caplog.at_level(_logging.WARNING, logger="coder_eval.sandbox"):
+        offenders = sandbox._check_parent_node_modules_contamination()
+
+    expected = (parent / "node_modules").resolve()
+    assert expected in [o.resolve() for o in offenders]
+    matching = [r for r in caplog.records if "lodash" in r.message]
+    assert matching, "warning should list the contaminating package name"
+
+
+def test_check_parent_node_modules_contamination_ignores_dot_entries(tmp_path):
+    """``node_modules`` with only ``.bin`` / ``.cache`` does not trigger a warning.
+
+    Those entries are package-manager bookkeeping, not installed packages
+    that would shadow a sandbox-local install via parent-walking
+    resolution.
+    """
+    parent = tmp_path / "fake-home"
+    (parent / "node_modules" / ".bin").mkdir(parents=True)
+    (parent / "node_modules" / ".cache").mkdir(parents=True)
+
+    inner = parent / "sandbox-abc"
+    inner.mkdir(parents=True)
+
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_dot_only")
+    sandbox.sandbox_dir = inner
+
+    assert sandbox._check_parent_node_modules_contamination() == []
+
+
+def test_check_parent_node_modules_contamination_clean_tree(tmp_path):
+    """No ancestor has a node_modules/ — returns empty list, logs nothing."""
+    parent = tmp_path / "clean-tree"
+    inner = parent / "sandbox-abc"
+    inner.mkdir(parents=True)
+
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_clean_tree")
+    sandbox.sandbox_dir = inner
+
+    assert sandbox._check_parent_node_modules_contamination() == []
+
+
+def test_run_command_npm_prefix_visible_to_subprocess():
+    """End-to-end: NPM_CONFIG_PREFIX shows up in the actual command env."""
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_npm_prefix_e2e")
+    try:
+        sandbox_dir = sandbox.setup()
+        exit_code, stdout, _stderr = sandbox.run_command(
+            "python -c \"import os; print(os.environ.get('NPM_CONFIG_PREFIX', ''))\""
+        )
+        assert exit_code == 0
+        assert stdout.strip() == str(sandbox_dir / ".npm-prefix")
+    finally:
+        sandbox.cleanup()
