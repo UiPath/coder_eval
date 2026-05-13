@@ -72,6 +72,7 @@ class SubAgentRunner:
         ignore_patterns: list[str],
         route: ApiRoute,
         reference_dir: Path | None = None,
+        reference_ignore_patterns: list[str] | None = None,
     ) -> None:
         # SECURITY: setting_sources=[] is enforced by the caller — it's the caller's
         # responsibility to build the AgentConfig correctly because the field is part of
@@ -93,6 +94,14 @@ class SubAgentRunner:
         # callers MUST set this to None when the criterion has ``include_reference=False``
         # so the judge can't see grading material it was opted out of.
         self._reference_dir = reference_dir
+        # Separate ignore set for the reference-side copytree. Defaults to ``[]``
+        # so we DON'T silently strip a nested ``_reference/`` inside the user's
+        # reference dir — the sandbox-side ignore set legitimately contains
+        # ``_reference`` (defense-in-depth against agent-planted collisions at
+        # the mount point), but reusing it here would silently drop a customer
+        # subdir of the same name. Symlinks are stripped unconditionally by
+        # ``_ignore_patterns_and_symlinks([])``.
+        self._reference_ignore_patterns = reference_ignore_patterns or []
 
     def run(self, user_msg: str, *, max_turns: int | None, turn_timeout: float) -> TurnRecord:
         """Copy sandbox → start agent → communicate → stop. Kill on any exception.
@@ -119,15 +128,20 @@ class SubAgentRunner:
             )
 
             # Mount the reference solution at ``_reference/`` for the judge to browse.
-            # Same symlink-stripping ignore rules apply — a hostile symlink in the
-            # reference (unlikely but possible) shouldn't escape into the judge's reach.
+            # Symlinks are stripped unconditionally by the helper. Pattern-based
+            # ignores use a SEPARATE list (``_reference_ignore_patterns``, default
+            # ``[]``) so we don't reuse the sandbox-side ``ignore_patterns`` which
+            # includes ``_reference`` as defense-in-depth — applying that here would
+            # silently strip a nested ``_reference/`` subdir inside the user's
+            # reference, dropping grading material the user explicitly chose to
+            # include.
             #
-            # Defense-in-depth: ``AgentJudgeCriterion.ignore_patterns`` includes
-            # ``_reference`` so the first copytree above strips any sandbox-side
-            # ``_reference/`` (agent-planted or template-staged). If a caller
-            # overrides ignore_patterns and removes ``_reference``, the second
-            # copytree would FileExistsError; rmtree is the safety net AND ensures
-            # the judge sees grading material exclusively from ``task.reference``.
+            # Defense-in-depth on the sandbox side: ``AgentJudgeCriterion.ignore_patterns``
+            # includes ``_reference`` so the first copytree above strips any
+            # sandbox-side ``_reference/`` (agent-planted or template-staged). If a
+            # caller overrides ignore_patterns and removes ``_reference``, the second
+            # copytree would FileExistsError; rmtree is the safety net AND ensures the
+            # judge sees grading material exclusively from ``task.reference``.
             if self._reference_dir is not None:
                 ref_dest = judge_dir / "_reference"
                 if ref_dest.exists():
@@ -143,7 +157,7 @@ class SubAgentRunner:
                     self._reference_dir,
                     ref_dest,
                     symlinks=True,
-                    ignore=_ignore_patterns_and_symlinks(self._ignore_patterns),
+                    ignore=_ignore_patterns_and_symlinks(self._reference_ignore_patterns),
                 )
 
             agent = ClaudeCodeAgent(self._agent_config, route=self._route)

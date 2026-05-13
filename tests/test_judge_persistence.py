@@ -11,6 +11,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from coder_eval.evaluation.judge_persistence import (
     load_judge_transcripts,
     spill_judge_transcripts,
@@ -192,14 +194,17 @@ def test_load_reads_sibling_and_attaches_transcript(tmp_path: Path) -> None:
 
     reloaded = EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8"))
     cr = reloaded.success_criteria_results[0]
-    # transcript_path survives via extra='allow', transcript is gone.
-    assert getattr(cr, "transcript_path", None) == "judge-0.yaml"
-    assert getattr(cr, "transcript", None) is None
+    # The discriminated union restores the concrete subclass on reload, so
+    # cr is a JudgeCriterionResult with typed fields (not a base CriterionResult
+    # with the field in __pydantic_extra__).
+    assert isinstance(cr, JudgeCriterionResult)
+    assert cr.transcript_path == "judge-0.yaml"
+    assert cr.transcript is None
 
     n = load_judge_transcripts(reloaded, tmp_path)
 
     assert n == 1
-    transcript = getattr(cr, "transcript", None)
+    transcript = cr.transcript
     assert transcript is not None
     # Loader prefers the typed JudgeTranscript so renderer/aggregator code that
     # switches on isinstance(transcript, JudgeTranscript) sees the same shape it
@@ -310,6 +315,80 @@ def test_load_rejects_subdir_path(tmp_path: Path) -> None:
     n = load_judge_transcripts(result, tmp_path)
 
     assert n == 0
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "CON",
+        "con",
+        "CON.yaml",
+        "con.yaml",
+        "NUL",
+        "NUL.txt",
+        "AUX.yaml",
+        "PRN",
+        "COM1",
+        "COM5.yaml",
+        "COM9",
+        "LPT1",
+        "LPT9.json",
+    ],
+)
+def test_load_rejects_windows_reserved_basename(tmp_path: Path, name: str) -> None:
+    """SECURITY: Windows device basenames (CON, NUL, COM1-9, LPT1-9) are rejected.
+
+    On Windows the Win32 API opens these as character devices regardless of any
+    extension or directory placement: ``open("CON.yaml")`` opens the console.
+    The guard is platform-independent so a task.json minted on Linux carrying a
+    tampered ``transcript_path: "CON"`` is rejected before it ever travels.
+
+    Even though we plant a real file at that name on POSIX (where these are
+    just regular filenames), the loader must refuse to read it.
+    """
+    import yaml
+
+    transcript = _make_transcript()
+    staged = tmp_path / name
+    staged.write_text(yaml.safe_dump(transcript.model_dump()), encoding="utf-8")
+    judge = _make_judge_result(transcript=None)
+    judge.transcript_path = name
+    result = _make_evaluation_result(criteria=[judge])
+
+    n = load_judge_transcripts(result, tmp_path)
+
+    assert n == 0
+    assert judge.transcript is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # COM10 / LPT10+ are NOT reserved — only COM1..9 / LPT1..9 are device names.
+        "COM10.yaml",
+        "LPT10.yaml",
+        # Reserved stem must match exactly; CON-INSIDE-A-NAME is fine.
+        "judge-CON.yaml",
+        "console.yaml",
+        "auxiliary.yaml",
+        # Multi-segment stems are not reserved.
+        "judge.CON.yaml",
+    ],
+)
+def test_load_accepts_non_reserved_basenames(tmp_path: Path, name: str) -> None:
+    """Names that *look* like reserved devices but aren't must pass the guard."""
+    import yaml
+
+    transcript = _make_transcript()
+    staged = tmp_path / name
+    staged.write_text(yaml.safe_dump(transcript.model_dump()), encoding="utf-8")
+    judge = _make_judge_result(transcript=None)
+    judge.transcript_path = name
+    result = _make_evaluation_result(criteria=[judge])
+
+    n = load_judge_transcripts(result, tmp_path)
+
+    assert n == 1
 
 
 def test_load_rejects_backslash_separator_path(tmp_path: Path) -> None:

@@ -73,7 +73,7 @@ class ReferenceComparisonChecker(BaseCriterion[ReferenceComparisonCriterion]):
             )
 
         try:
-            agent_code = agent_path.read_text()
+            agent_code = agent_path.read_text(encoding="utf-8")
         except Exception as e:
             return CriterionResult(
                 criterion_type="reference_comparison",

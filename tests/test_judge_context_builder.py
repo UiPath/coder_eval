@@ -507,3 +507,111 @@ def test_collect_reference_secrets_bounded_by_total_bytes(tmp_path: Path) -> Non
     total_bytes = sum(len(s) for s in secrets)
     # We expect the budget to clamp below the full 5 MB.
     assert total_bytes < 5 * 1024 * 1024
+
+
+def test_collect_reference_secrets_skips_oversized_file_without_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single file larger than the remaining budget is rejected before ``read_text``.
+
+    Regression guard for the latent OOM where ``read_text`` ran unconditionally
+    on every file and the size check fired only on the *next* iteration — a
+    single 100 MB file in an otherwise small reference dir would be loaded in
+    full before the loop noticed the budget was blown.
+    """
+    monkeypatch.setattr("coder_eval.evaluation.judge_context._MAX_REFERENCE_BYTES", 1024)
+    big = tmp_path / "huge.bin"
+    big.write_text("y" * 4096, encoding="utf-8")  # 4 KB — exceeds the patched 1 KB budget
+    small = tmp_path / "small.txt"
+    small.write_text("small content here", encoding="utf-8")
+
+    # Mock read_text to track that it WAS NOT called on the oversized file.
+    real_read_text = Path.read_text
+    read_calls: list[Path] = []
+
+    def tracking_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        read_calls.append(self)
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", tracking_read_text)
+    secrets = collect_reference_secrets(tmp_path)
+    # The 4 KB file must NOT have been opened (the pre-check rejects it).
+    assert big not in read_calls
+    # The small file may or may not have been read depending on rglob order;
+    # what matters is the budget was not silently blown.
+    assert all(len(s) <= 4096 for s in secrets)
+    # And the result list never carries the 4 KB content.
+    assert not any(len(s) > 1024 for s in secrets)
+
+
+def test_collect_reference_secrets_exact_fit_single_file_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single file sized at exactly ``_MAX_REFERENCE_BYTES`` is accepted.
+
+    Locks in the ``file_size > remaining`` (strict gt) boundary — a regression
+    flipping to ``>=`` would reject the exact-fit file and this test fails.
+    """
+    monkeypatch.setattr("coder_eval.evaluation.judge_context._MAX_REFERENCE_BYTES", 10)
+    (tmp_path / "exact.txt").write_text("a" * 10, encoding="utf-8")
+    secrets = collect_reference_secrets(tmp_path)
+    assert secrets == ["a" * 10]
+
+
+def test_collect_reference_secrets_one_byte_over_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A single file one byte larger than the budget is rejected before read."""
+    monkeypatch.setattr("coder_eval.evaluation.judge_context._MAX_REFERENCE_BYTES", 10)
+    (tmp_path / "oversize.txt").write_text("a" * 11, encoding="utf-8")
+    secrets = collect_reference_secrets(tmp_path)
+    assert secrets == []
+
+
+def test_collect_reference_secrets_stat_oserror_is_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``Path.stat`` raising OSError on the size-check (file disappeared mid-walk) → skip.
+
+    ``stat()`` is called by ``is_symlink()`` / ``is_file()`` internally with
+    ``follow_symlinks=False``; the explicit size-check call passes no kwargs.
+    Raise only on the latter so the pre-checks succeed and the OSError lands on
+    the path we're guarding.
+    """
+    (tmp_path / "real.txt").write_text("real content", encoding="utf-8")
+    (tmp_path / "ghost.txt").write_text("ghost content", encoding="utf-8")
+
+    real_stat = Path.stat
+
+    def flaky_stat(self: Path, *args: object, **kwargs: object) -> object:
+        # is_symlink / is_file go through stat with follow_symlinks kwarg; let
+        # those through. Only fail on the explicit no-arg call used for size.
+        if self.name == "ghost.txt" and not args and not kwargs:
+            raise OSError("file vanished")
+        return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+    secrets = collect_reference_secrets(tmp_path)
+    assert "real content" in secrets
+    assert "ghost content" not in secrets
+
+
+def test_collect_host_file_reads_utf8(tmp_path: Path) -> None:
+    """Host-side file reads pass ``encoding='utf-8'`` so non-ASCII content survives.
+
+    Without the explicit encoding, ``read_text()`` falls back to the platform
+    locale — ``cp1252`` on Windows — and a ``é`` mojibakes. This test plants a
+    UTF-8 file containing a non-ASCII character and reads it through the
+    ``$TASK_DIR`` host-file path.
+    """
+    from coder_eval.models import SandboxConfig
+
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    host_file = task_dir / "rubric.md"
+    host_file.write_text("Café — rationale\nμ test", encoding="utf-8")
+
+    sb_dir = tmp_path / "sandbox"
+    sb_dir.mkdir()
+    sb = Sandbox(SandboxConfig(driver="tempdir"), task_id="utf8_test", task_dir=task_dir)
+    sb.sandbox_dir = sb_dir
+
+    builder = _make_builder(files=["$TASK_DIR/rubric.md"], include_reference=False, max_file_chars=200)
+    ctx = builder.build(sb, reference_code=None, turn_records=None)
+    assert ctx.files[0].content == "Café — rationale\nμ test"

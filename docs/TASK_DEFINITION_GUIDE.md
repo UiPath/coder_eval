@@ -546,7 +546,17 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
 | `max_tokens` | `1000` | Maximum tokens in the judge's response |
 | `max_file_chars` | `20000` | Per-file (and agent_output) truncation applied before building the prompt |
 
-**Requires** UiPath LLM Gateway access (see `.env.example` for configuration).
+**Transport selection.** The judge call is routed by the active `API_BACKEND`:
+
+| `API_BACKEND` | Credentials | Judge transport |
+|---|---|---|
+| `direct` | `ANTHROPIC_API_KEY` set | Anthropic SDK → api.anthropic.com |
+| `direct` | `ANTHROPIC_API_KEY` unset, full `LLMGW_*` set | LLM Gateway (LangChain client) |
+| `direct` | neither set | run starts; this criterion fails fast at dispatch with a clear error |
+| `proxy` | `LLMGW_*` (proxy is running) | Anthropic SDK → local proxy → LLM Gateway |
+| `bedrock` | `AWS_BEARER_TOKEN_BEDROCK` | AWS Bedrock |
+
+The `direct`-mode transport is resolved once at startup, logged on the `API routing:` line (`anthropic_direct (judge transport: anthropic|llmgw|none)`), and recorded in `EvaluationResult.environment_info.judge_transport`. Adding or removing `ANTHROPIC_API_KEY` between runs flips the transport, so check the startup log to confirm which path is in use.
 
 **Security**
 

@@ -5,11 +5,95 @@ from pathlib import Path
 
 import pytest
 
-from coder_eval.models import DirectRoute
+from coder_eval.models import BedrockRoute, DirectRoute, ProxyRoute
 from coder_eval.orchestration.evaluation import create_iteration_snapshot
 from coder_eval.orchestration.task_loader import load_task
-from coder_eval.orchestrator import Orchestrator
+from coder_eval.orchestrator import Orchestrator, _format_routing
 from coder_eval.utils import get_version_info
+
+
+def test_format_routing_direct_includes_judge_transport_anthropic():
+    assert _format_routing(DirectRoute(judge_transport="anthropic")) == (
+        "anthropic_direct (judge transport: anthropic)"
+    )
+
+
+def test_format_routing_direct_includes_judge_transport_llmgw():
+    assert _format_routing(DirectRoute(judge_transport="llmgw")) == "anthropic_direct (judge transport: llmgw)"
+
+
+def test_format_routing_direct_judge_transport_none_renders_as_none():
+    """Unset transport prints 'none' so log readers don't see a confusing 'None' literal."""
+    assert _format_routing(DirectRoute(judge_transport=None)) == "anthropic_direct (judge transport: none)"
+
+
+def test_format_routing_non_direct_routes_unchanged():
+    """ProxyRoute / BedrockRoute keep the original bare-name format — judge transport is a Direct-only concern."""
+    assert _format_routing(ProxyRoute(port=9999)) == "llmgw_proxy"
+    assert _format_routing(BedrockRoute(bearer_token="t", region="us-east-1")) == "aws_bedrock"
+
+
+def _make_orchestrator_with_route(tmp_path: Path, route) -> Orchestrator:
+    """Build a minimal Orchestrator pre-populated with a route + EvaluationResult.
+
+    Bypasses ``_setup`` so unit tests can exercise ``_record_route_environment_info``
+    in isolation across both run modes.
+    """
+    from coder_eval.models import EvaluationResult, FinalStatus
+
+    task_file = Path("tasks/hello_date.yaml")
+    task, _ = load_task(task_file)
+    orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="t")
+    orchestrator.route = route
+    assert task.agent is not None
+    orchestrator.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        agent_type=task.agent.type,
+        started_at=0.0,
+        final_status=FinalStatus.FAILURE,
+        iteration_count=0,
+        environment_info={},
+    )
+    return orchestrator
+
+
+def test_record_route_environment_info_direct_writes_judge_transport(tmp_path):
+    orchestrator = _make_orchestrator_with_route(tmp_path, DirectRoute(judge_transport="llmgw"))
+    orchestrator._record_route_environment_info()
+    assert orchestrator.result is not None
+    assert orchestrator.result.environment_info["api_routing"] == "anthropic_direct"
+    assert orchestrator.result.environment_info["judge_transport"] == "llmgw"
+
+
+def test_record_route_environment_info_direct_none_serialized_as_string(tmp_path):
+    """judge_transport=None must surface as the string 'none' (audit-readable, never a literal None)."""
+    orchestrator = _make_orchestrator_with_route(tmp_path, DirectRoute(judge_transport=None))
+    orchestrator._record_route_environment_info()
+    assert orchestrator.result is not None
+    assert orchestrator.result.environment_info["judge_transport"] == "none"
+
+
+def test_record_route_environment_info_bedrock(tmp_path):
+    orchestrator = _make_orchestrator_with_route(
+        tmp_path, BedrockRoute(bearer_token="t", region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
+    )
+    orchestrator._record_route_environment_info()
+    assert orchestrator.result is not None
+    info = orchestrator.result.environment_info
+    assert info["api_routing"] == "aws_bedrock"
+    assert info["aws_region"] == "eu-north-1"
+    assert info["bedrock_model"] == "eu.anthropic.claude-sonnet-4-6"
+    assert "judge_transport" not in info  # Direct-only field
+
+
+def test_record_route_environment_info_proxy(tmp_path):
+    orchestrator = _make_orchestrator_with_route(tmp_path, ProxyRoute(port=12345))
+    orchestrator._record_route_environment_info()
+    assert orchestrator.result is not None
+    info = orchestrator.result.environment_info
+    assert info["api_routing"] == "llmgw_proxy"
+    assert "judge_transport" not in info  # Direct-only field
 
 
 def test_orchestrator_load_task():

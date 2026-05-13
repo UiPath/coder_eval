@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
 
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind, FinalStatus
@@ -64,6 +64,13 @@ class CriterionResult(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    result_kind: Literal["basic"] = Field(
+        default="basic",
+        description=(
+            "Discriminator for ``CriterionResultUnion`` so subclasses round-trip through "
+            "``model_dump_json`` → ``model_validate_json`` with their concrete type preserved."
+        ),
+    )
     criterion_type: str = Field(description="Type of criterion")
     description: str = Field(description="Description of what was checked")
     score: float = Field(
@@ -88,6 +95,7 @@ class ClassificationCriterionResult(CriterionResult):
     for non-classification criteria don't carry dead label fields.
     """
 
+    result_kind: Literal["classification"] = "classification"  # type: ignore[assignment]
     observed_label: str = Field(
         description="Observed label emitted by the criterion (sentinels like '(none)' / '(other)' allowed)."
     )
@@ -163,6 +171,7 @@ class JudgeCriterionResult(CriterionResult):
     than base fields) keeps non-judge results lean.
     """
 
+    result_kind: Literal["judge"] = "judge"  # type: ignore[assignment]
     findings: list[str] = Field(
         default_factory=list,
         description="Bullet observations the judge cited from the artifacts. Scrubbed before persistence.",
@@ -187,6 +196,59 @@ class JudgeCriterionResult(CriterionResult):
             "``load_judge_transcripts`` for re-rendering. None when no transcript was captured."
         ),
     )
+
+
+# Criterion types whose results are ``JudgeCriterionResult`` / ``ClassificationCriterionResult``.
+# Used by ``_criterion_result_discriminator`` to type-infer legacy ``task.json`` records that
+# lack the ``result_kind`` field. Listed here (not on each criterion class) because
+# ``model_validate_json`` runs without the criteria registry loaded — e.g. the dashboard
+# ingest pipeline imports ``coder_eval.models`` to deserialize ``task.json`` but does NOT
+# import ``coder_eval.criteria.*`` (which is where checkers self-register). Putting the
+# inference rule on criterion classes would force importing every checker just to deserialize
+# a row record, and would create a circular dependency since ``criteria/*.py`` already imports
+# from this module.
+#
+# Convention: when a new criterion type needs a non-``"basic"`` result class, add its
+# ``criterion_type`` value to the matching frozenset in the same PR that introduces the
+# criterion.
+_JUDGE_CRITERION_TYPES = frozenset({"llm_judge", "agent_judge"})
+_CLASSIFICATION_CRITERION_TYPES = frozenset({"classification_match", "skill_triggered"})
+
+
+def _criterion_result_discriminator(v: Any) -> str:
+    """Dispatch ``CriterionResult`` subclasses for serialization and validation.
+
+    Prefers explicit ``result_kind`` (written by current code); falls back to
+    inference from ``criterion_type`` for legacy task.json files written before
+    this field existed. Unknown criterion_types fall through to ``"basic"``.
+
+    Explicit ``result_kind`` wins over ``criterion_type`` inference: a dict
+    carrying ``result_kind="basic"`` with ``criterion_type="llm_judge"`` is
+    routed to the base class. This matters for forward-compat experiments where
+    a writer deliberately downgrades a result shape.
+    """
+    if isinstance(v, dict):
+        kind = v.get("result_kind")
+        if kind:
+            return str(kind)
+        ct = v.get("criterion_type", "")
+        if ct in _JUDGE_CRITERION_TYPES:
+            return "judge"
+        if ct in _CLASSIFICATION_CRITERION_TYPES:
+            return "classification"
+        return "basic"
+    # Pydantic instance — read the discriminator field.
+    return getattr(v, "result_kind", "basic")
+
+
+CriterionResultUnion = Annotated[
+    (
+        Annotated[CriterionResult, Tag("basic")]
+        | Annotated[JudgeCriterionResult, Tag("judge")]
+        | Annotated[ClassificationCriterionResult, Tag("classification")]
+    ),
+    Discriminator(_criterion_result_discriminator),
+]
 
 
 class FileChange(BaseModel):
@@ -334,14 +396,14 @@ class EvaluationResult(BaseModel):
         default=None, ge=0.0, le=1.0, description="Weighted average of criterion scores (0.0 to 1.0)"
     )
     iteration_count: int = Field(description="Number of iterations completed")
-    success_criteria_results: list[SerializeAsAny[CriterionResult]] = Field(
+    success_criteria_results: list[CriterionResultUnion] = Field(
         default_factory=list,
         description=(
-            "Results of all success criteria checks. ``SerializeAsAny`` is required so that "
-            "subclass-specific fields (e.g. ``JudgeCriterionResult.analysis`` / ``transcript``, "
-            "``ClassificationCriterionResult.observed_label``) are emitted by ``model_dump`` — "
-            "without it, pydantic serializes against the declared base type and silently drops "
-            "subclass fields, losing the audit data on disk."
+            "Results of all success criteria checks. Typed as the ``CriterionResultUnion`` "
+            "discriminated union so subclass-specific fields (``JudgeCriterionResult.findings`` / "
+            "``transcript``, ``ClassificationCriterionResult.observed_label``) round-trip "
+            "concretely through ``model_dump_json`` → ``model_validate_json``. Legacy task.json "
+            "files without ``result_kind`` are inferred from ``criterion_type``."
         ),
     )
 

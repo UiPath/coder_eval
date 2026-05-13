@@ -133,7 +133,7 @@ def load_reference(
         ref_path = task_file.parent / task.reference.file
         if not ref_path.exists():
             raise FileNotFoundError(f"Reference file not found: {ref_path} (specified in {task_file})")
-        reference_code = ref_path.read_text()
+        reference_code = ref_path.read_text(encoding="utf-8")
     elif task.reference.directory:
         if not task_file:
             raise ValueError("task_file not set, cannot resolve reference directory path")

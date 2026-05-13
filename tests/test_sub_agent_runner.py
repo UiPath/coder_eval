@@ -475,3 +475,93 @@ def test_runner_excludes_nested_claude_and_mcp(sandbox: Sandbox, tmp_path: Path)
     assert ".claude" not in captured["sub_entries"]
     assert ".mcp.json" not in captured["sub_entries"]
     assert captured["main_present"] == "True"
+
+
+# --- reference_ignore_patterns split (Phase 4 / finding #9) ---
+
+
+def test_runner_reference_dir_with_nested_underscore_reference_preserved(sandbox: Sandbox, tmp_path: Path) -> None:
+    """A nested ``_reference/`` inside the user's reference dir is NOT stripped.
+
+    Regression for finding #9: the pre-fix code reused the sandbox-side
+    ``ignore_patterns`` (which includes ``_reference``) for the reference-side
+    copytree, so a customer who happened to have a nested ``_reference/`` subdir
+    in their reference bundle would silently lose it.
+    """
+    (tmp_path / "Main.xaml").write_text("<x/>")
+
+    real_ref = tmp_path / "real_reference_nested"
+    real_ref.mkdir()
+    nested = real_ref / "nested" / "_reference"
+    nested.mkdir(parents=True)
+    (nested / "inner.txt").write_text("CUSTOMER-CONTENT")
+
+    runner = SubAgentRunner(
+        sandbox=sandbox,
+        agent_config=_make_agent_config(),
+        # Emulate the agent_judge default: sandbox-side ignores include _reference.
+        ignore_patterns=["_reference"],
+        route=DirectRoute(),
+        reference_dir=real_ref,
+        # reference_ignore_patterns omitted → defaults to []
+    )
+    mock_agent = _make_mock_agent()
+    captured: dict[str, str] = {}
+
+    async def capture_start(workdir: str) -> None:
+        captured["workdir"] = workdir
+
+    mock_agent.start.side_effect = capture_start
+    with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
+
+        async def capture_state(_msg: str, **_kw: object) -> TurnRecord:
+            workdir = Path(captured["workdir"])
+            inner = workdir / "_reference" / "nested" / "_reference" / "inner.txt"
+            captured["inner_present"] = str(inner.exists())
+            captured["inner_content"] = inner.read_text(encoding="utf-8") if inner.exists() else ""
+            return _make_turn()
+
+        mock_agent.communicate.side_effect = capture_state
+        runner.run("grade", max_turns=10, turn_timeout=30.0)
+
+    assert captured["inner_present"] == "True"
+    assert captured["inner_content"] == "CUSTOMER-CONTENT"
+
+
+def test_runner_reference_ignore_patterns_explicit(sandbox: Sandbox, tmp_path: Path) -> None:
+    """Explicit reference_ignore_patterns are honored on the reference-side copy."""
+    (tmp_path / "Main.xaml").write_text("<x/>")
+
+    real_ref = tmp_path / "real_reference_ignore"
+    real_ref.mkdir()
+    (real_ref / "keep.txt").write_text("keep me")
+    (real_ref / "drop.log").write_text("noisy log")
+
+    runner = SubAgentRunner(
+        sandbox=sandbox,
+        agent_config=_make_agent_config(),
+        ignore_patterns=[],
+        route=DirectRoute(),
+        reference_dir=real_ref,
+        reference_ignore_patterns=["*.log"],
+    )
+    mock_agent = _make_mock_agent()
+    captured: dict[str, str] = {}
+
+    async def capture_start(workdir: str) -> None:
+        captured["workdir"] = workdir
+
+    mock_agent.start.side_effect = capture_start
+    with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
+
+        async def capture_state(_msg: str, **_kw: object) -> TurnRecord:
+            workdir = Path(captured["workdir"])
+            captured["keep_present"] = str((workdir / "_reference" / "keep.txt").exists())
+            captured["log_present"] = str((workdir / "_reference" / "drop.log").exists())
+            return _make_turn()
+
+        mock_agent.communicate.side_effect = capture_state
+        runner.run("grade", max_turns=10, turn_timeout=30.0)
+
+    assert captured["keep_present"] == "True"
+    assert captured["log_present"] == "False"

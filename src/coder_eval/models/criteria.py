@@ -22,7 +22,15 @@ class BaseSuccessCriterion(BaseModel, ABC):
     - Easier testing with mocked sandboxes
     - Better separation of concerns
     - No circular dependency with Sandbox class
+
+    ``extra='forbid'`` here propagates to every concrete criterion subclass via
+    pydantic's model_config inheritance. A typo in any criterion-specific field
+    in a task YAML (e.g. ``patten:`` instead of ``pattern:``) surfaces as an
+    explicit ``Extra inputs are not permitted`` error rather than being silently
+    dropped on the floor.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     description: str = Field(description="Human-readable description of what this criterion checks")
 
@@ -159,6 +167,8 @@ class FileMatchesRegexCriterion(BaseSuccessCriterion):
 class RegexPattern(BaseModel):
     """A single regex pattern check within FileCheckCriterion."""
 
+    model_config = ConfigDict(extra="forbid")
+
     pattern: str = Field(description="Regex pattern to match against file content")
     must_match: bool = Field(default=True, description="If True, pattern must match; if False, pattern must NOT match")
     flags: int = Field(default=0, description="Regex flags (e.g., re.IGNORECASE=2, re.MULTILINE=8, re.DOTALL=16)")
@@ -185,6 +195,8 @@ _MIN_CONTAINS_LITERAL_LEN = 8
 
 class JMESPathAssertion(BaseModel):
     """A single JMESPath assertion within JsonCheckCriterion."""
+
+    model_config = ConfigDict(extra="forbid")
 
     expression: str = Field(description="JMESPath expression to evaluate against the parsed JSON")
     operator: Literal["equals", "not_equals", "contains", "gt", "gte", "lt", "lte", "type", "regex", "exists"] = Field(
@@ -877,10 +889,13 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
             ".claude",
             ".mcp.json",
             # SECURITY + collision: ``_reference`` is the mount point for the
-            # directory-form reference. Strip any sandbox-side ``_reference/``
-            # (template-staged or agent-planted) before the second copytree so
-            # (a) the second copytree doesn't FileExistsError, and (b) the
-            # judge sees grading material exclusively from task.reference.
+            # directory-form reference. Stripped from the SANDBOX side only so
+            # (a) the second copytree doesn't FileExistsError on a template-staged
+            # or agent-planted ``_reference/``, and (b) the judge sees grading
+            # material exclusively from task.reference. The reference-side
+            # copytree uses a SEPARATE ignore set (``reference_ignore_patterns``,
+            # default ``[]`` in SubAgentRunner) so a nested ``_reference/`` inside
+            # the user's reference dir is NOT silently dropped.
             "_reference",
         ],
         description="Patterns passed to shutil.ignore_patterns when copying the sandbox.",

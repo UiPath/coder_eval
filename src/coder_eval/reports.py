@@ -538,7 +538,7 @@ class ReportGenerator:
             if "artifacts" in report_path.parts or ".git" in report_path.parts:
                 continue
             try:
-                result = EvaluationResult.model_validate_json(report_path.read_text())
+                result = EvaluationResult.model_validate_json(report_path.read_text(encoding="utf-8"))
                 all_turns.extend(result.turns)
             except Exception:
                 logger.warning("Failed to load report %s for command statistics", report_path, exc_info=True)
@@ -576,12 +576,12 @@ class ReportGenerator:
             summary_json_path = run_dir / json_name
 
             if report_md_path.exists():
-                return report_md_path.read_text(), report_md_path
+                return report_md_path.read_text(encoding="utf-8"), report_md_path
 
             if summary_json_path.exists():
                 from .models import RunSummary
 
-                summary = RunSummary.model_validate_json(summary_json_path.read_text())
+                summary = RunSummary.model_validate_json(summary_json_path.read_text(encoding="utf-8"))
                 report_md = ReportGenerator.generate_markdown(summary, run_dir=run_dir)
                 return report_md, summary_json_path
 

@@ -64,7 +64,15 @@ class JudgeVerdict(BaseModel):
         #      silently truncated in the Judge Verdicts card.
         # The schema asks for "1-2 sentence headline summary"; collapsing whitespace
         # makes that contract explicit.
-        return " ".join(v.split())
+        collapsed = " ".join(v.split())
+        if not collapsed:
+            # Whitespace-only / empty input surfaces as a parse error so the judge
+            # result records the error string instead of silently emitting a blank
+            # ``rationale: `` line in ``format_details``. ``parse_judge_verdict``
+            # catches the ValidationError and the checker returns a
+            # ``JudgeCriterionResult(score=0.0, error=...)`` — uniform shape.
+            raise ValueError("rationale is empty after whitespace collapse")
+        return collapsed
 
     @field_validator("findings", mode="before")
     @classmethod

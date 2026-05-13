@@ -224,6 +224,8 @@ class ReferenceSource(BaseModel):
     Security: reference solutions must never leak into agent prompts or logs.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     code: str | None = Field(default=None, description="Inline reference code (for simple, short solutions)")
     file: str | None = Field(default=None, description="Path to file containing reference code (relative to task YAML)")
     directory: str | None = Field(
@@ -335,10 +337,23 @@ class PreRunCommand(BaseModel):
     )
 
 
-class TaskDefinition(BaseModel):
-    """Complete definition of an evaluation task."""
+class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unknown_fields below
+    """Complete definition of an evaluation task.
 
-    model_config = ConfigDict(extra="forbid")
+    Unlike ``ReferenceSource`` / ``BaseSuccessCriterion`` / sibling models in
+    this file, ``TaskDefinition`` does NOT declare ``extra='forbid'``: this is
+    the top-level user-facing input and downstream consumers (notably the
+    ``~/src/skills/tests/tasks/`` repo) carry a long tail of stale fields
+    (``max_iterations``, ``llm_reviewer``, …) that used to be silently
+    dropped. Flipping to forbid would break those task YAMLs in lockstep,
+    which is too disruptive to ship in a single PR.
+
+    Instead, ``_warn_on_unknown_fields`` (below) logs a ``DeprecationWarning``
+    naming each unknown top-level key, surfacing the typo to authors without
+    blocking the run. Once the downstream backlog is cleared, this can be
+    tightened to ``extra='forbid'`` and the ``# noqa: CE009`` suppression
+    removed.
+    """
 
     task_id: str = Field(description="Unique identifier for this task")
     description: str = Field(description="Human-readable description of what the task is testing")
@@ -433,20 +448,50 @@ class TaskDefinition(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _hoist_legacy_agent_timing(cls, data: Any) -> Any:
-        """Back-compat shim for legacy task-YAML shapes.
+    def _warn_on_unknown_fields(cls, data: Any) -> Any:
+        """Soft replacement for ``extra='forbid'`` — log a warning per unknown key.
 
-        Three jobs, all scheduled for removal on 2026-05-20:
+        ``TaskDefinition`` cannot flip to strict mode in this PR without breaking
+        the downstream ``~/src/skills/tests/tasks/`` task repo, which carries a
+        long tail of stale top-level fields (``max_iterations``, ``llm_reviewer``,
+        …) that used to be silently dropped. This validator surfaces each unknown
+        key as a ``DeprecationWarning`` so authors see the typo at load time,
+        without blocking the run.
+
+        Skips computed / writer-only fields that ``model_dump`` round-trips but
+        loaders typically omit. The known-fields set is derived from
+        ``cls.model_fields`` so it stays in sync if the model grows.
+        """
+        if not isinstance(data, dict):
+            return data
+        known = set(cls.model_fields)
+        # Also accept the deprecated agent-nested timing fields handled below.
+        unknown = [k for k in data if k not in known]
+        for key in unknown:
+            warnings.warn(
+                f"TaskDefinition: unknown top-level field {key!r} will be ignored. "
+                "If this is a typo, fix it; if the field is stale from a previous "
+                "schema, remove it. Future versions may reject unknown fields.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _hoist_legacy_agent_timing(cls, data: Any) -> Any:
+        """Back-compat shim for legacy task-YAML timing shapes.
+
+        Two jobs, both scheduled for removal on 2026-05-20:
 
         1. Lift ``max_turns`` / ``turn_timeout`` from ``agent:`` to
            ``run_limits:`` (the original c/2026-05-07 migration).
         2. Lift top-level ``task_timeout`` / ``max_turns`` / ``turn_timeout``
            into ``run_limits.*`` (the c/2026-05-12 unify-run-limits migration).
-        3. Silently drop ``max_iterations`` / ``llm_reviewer`` from older
-           test-harness YAML formats (both removed in PR #191). Each emits a
-           DeprecationWarning so the drop is visible. (``skip`` is now a
-           real field on ``TaskDefinition`` per #242 and is no longer
-           dropped here.)
+
+        Other stale fields (``max_iterations``, ``llm_reviewer``, …) are now
+        surfaced generically by ``_warn_on_unknown_fields`` above — no
+        special-cased silent-drop branch is needed here.
 
         See plan c/2026-05-12-unify-run-limits.md.
         """
@@ -518,18 +563,6 @@ class TaskDefinition(BaseModel):
                 warnings.warn(
                     f"Top-level {field!r} on TaskDefinition is deprecated and will be removed on "
                     + f"2026-05-20; move it to run_limits.{field}.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-
-        # Job 3: drop ``max_iterations`` / ``llm_reviewer`` (both removed
-        # in PR #191). ``skip`` is now a real field per #242 — not dropped.
-        for field in ("max_iterations", "llm_reviewer"):
-            if field in data:
-                data.pop(field)
-                warnings.warn(
-                    f"{field!r} on TaskDefinition is not honoured by coder_eval and will be "
-                    + "rejected outright on 2026-05-20; remove it from the YAML.",
                     DeprecationWarning,
                     stacklevel=2,
                 )

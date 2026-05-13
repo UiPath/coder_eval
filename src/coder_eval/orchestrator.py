@@ -36,6 +36,7 @@ from .models import (
     BedrockRoute,
     ConfigLineageEntry,
     CriterionResult,
+    DirectRoute,
     EvaluationResult,
     FinalStatus,
     PostRunCommand,
@@ -113,6 +114,19 @@ async def _pump_stream(
 # bracketed words (e.g. "[NOTE]", "[TODO]", pylint error codes, markdown-style
 # footnotes) are intentionally NOT matched — they must pass through as content.
 _UTTERANCE_TAG_RE = re.compile(r"^\[(ASSISTANT|RESULT - SUCCESS|RESULT - ERROR|TOOL USE)\](?: (.*))?$")
+
+
+def _format_routing(route: ApiRoute) -> str:
+    """Format the route name for the ``API routing:`` log line.
+
+    For ``DirectRoute`` the resolved judge transport is appended so the choice
+    (anthropic / llmgw / none) is visible on every run, not only in the
+    persisted ``environment_info`` record.
+    """
+    name = ROUTE_NAMES[type(route)]
+    if isinstance(route, DirectRoute):
+        return f"{name} (judge transport: {route.judge_transport or 'none'})"
+    return name
 
 
 def _extract_utterance(raw: str) -> str:
@@ -686,8 +700,9 @@ class Orchestrator:
                 logger.info("LLM Gateway proxy started on port %d (evaluate-only mode)", proxy_port)
             else:
                 self.route = resolve_route(settings)
-            logger.info("API routing: %s", ROUTE_NAMES[type(self.route)])
+            logger.info("API routing: %s", _format_routing(self.route))
             self.success_checker = SuccessChecker(self.sandbox, route=self.route)
+            self._record_route_environment_info()
             return
 
         # Validate API keys (agent guaranteed non-None after experiment resolution)
@@ -734,7 +749,7 @@ class Orchestrator:
             logger.info("LLM Gateway proxy started on port %d", proxy_port)
         else:
             self.route = resolve_route(settings)
-        logger.info("API routing: %s", ROUTE_NAMES[type(self.route)])
+        logger.info("API routing: %s", _format_routing(self.route))
         self.success_checker = SuccessChecker(self.sandbox, route=self.route)
 
         # Create and start agent with retry logic
@@ -760,7 +775,21 @@ class Orchestrator:
             sandbox_path=Path(self.result.sandbox_path) if self.result.sandbox_path else None,
         )
 
-        # Record API routing mode
+        # Record API routing mode (shared between normal + evaluate-only paths)
+        self._record_route_environment_info()
+
+        # Add installed tool versions (from npm packages etc.)
+        if self.sandbox and self.sandbox.installed_tool_versions:
+            self.result.environment_info["installed_tools"] = self.sandbox.installed_tool_versions
+
+    def _record_route_environment_info(self) -> None:
+        """Persist resolved route + judge transport into ``result.environment_info``.
+
+        Called from both the normal and evaluate-only setup paths so audit
+        tooling sees identical keys regardless of run mode (catches the
+        evaluate-only short-circuit before the recording block).
+        """
+        assert self.result is not None
         assert self.route is not None
         self.result.environment_info["api_routing"] = ROUTE_NAMES[type(self.route)]
         if isinstance(self.route, BedrockRoute):
@@ -769,10 +798,10 @@ class Orchestrator:
                 self.result.environment_info["bedrock_model"] = self.route.model
         elif isinstance(self.route, ProxyRoute):
             self.result.environment_info["llmgw_url"] = settings.llmgw_url or ""
-
-        # Add installed tool versions (from npm packages etc.)
-        if self.sandbox and self.sandbox.installed_tool_versions:
-            self.result.environment_info["installed_tools"] = self.sandbox.installed_tool_versions
+        elif isinstance(self.route, DirectRoute):
+            # Record which transport llm_judge will use under DirectRoute so the
+            # choice is visible in run artifacts (and not just the startup log).
+            self.result.environment_info["judge_transport"] = self.route.judge_transport or "none"
 
     async def _create_agent(self) -> Agent:
         """Create the appropriate agent based on task configuration.

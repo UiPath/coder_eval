@@ -203,12 +203,12 @@ def _discover_skills(plugin_dir: Path) -> list[Path]:
 
 def _collect_skill_content(skill_dir: Path) -> str:
     """Return SKILL.md + all references for a single skill as one string."""
-    parts: list[str] = [skill_dir.name, "\n\n", (skill_dir / "SKILL.md").read_text(), "\n"]
+    parts: list[str] = [skill_dir.name, "\n\n", (skill_dir / "SKILL.md").read_text(encoding="utf-8"), "\n"]
 
     refs_dir = skill_dir / "references"
     if refs_dir.is_dir():
         for ref_file in sorted(refs_dir.glob("*.md")):
-            content = ref_file.read_text()
+            content = ref_file.read_text(encoding="utf-8")
             if len(content) > _MAX_REF_CHARS:
                 content = content[:_MAX_REF_CHARS] + "\n\n[...truncated...]\n"
             parts.append(f"\n### Reference: {ref_file.name}\n\n{content}\n")
@@ -218,7 +218,7 @@ def _collect_skill_content(skill_dir: Path) -> str:
 
 def _parse_allowed_tools(skill_dir: Path) -> list[str]:
     """Extract allowed-tools from SKILL.md YAML frontmatter (excludes 'Skill' itself)."""
-    skill_md = (skill_dir / "SKILL.md").read_text()
+    skill_md = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
     if not skill_md.startswith("---"):
         logger.debug("No YAML frontmatter in %s", skill_dir / "SKILL.md")
         return []
@@ -245,7 +245,7 @@ def _collect_existing_task_ids(output_dir: Path) -> list[str]:
     ids: list[str] = []
     for yaml_file in sorted(output_dir.glob("*.yaml")):
         try:
-            data = yaml.safe_load(yaml_file.read_text())
+            data = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
             if isinstance(data, dict) and "task_id" in data:
                 ids.append(str(data["task_id"]))
         except (yaml.YAMLError, OSError) as exc:
@@ -404,7 +404,7 @@ def generate_tasks(
         raise ValueError(f"No skills with SKILL.md found under {plugin_dir / 'skills'}")
 
     readme_path = plugin_dir / "README.md"
-    plugin_readme = readme_path.read_text() if readme_path.exists() else ""
+    plugin_readme = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
 
     # Seed with tasks already on disk; grows as we generate to prevent cross-skill ID collisions
     seen_ids = _collect_existing_task_ids(output_dir) if output_dir else []

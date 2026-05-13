@@ -152,7 +152,14 @@ def _verdict_shaped_error(data: dict[str, Any]) -> str | None:
         return f"score field is not a finite number: {raw!r}"
     # Score is valid — then rationale must be the problem.
     rationale = data.get("rationale")
-    if rationale is None or isinstance(rationale, str):
-        # Shouldn't happen: model_validate should have succeeded.
+    if rationale is None:
+        # None coerces to "" in the validator; should have succeeded.
+        return "Failed to parse JSON verdict: unknown validation failure"
+    if isinstance(rationale, str):
+        # The validator rejects whitespace-only strings (collapses to "" then raises)
+        # so a single-line ``rationale: `` invariant isn't broken downstream.
+        if not " ".join(rationale.split()):
+            return "rationale field is empty after whitespace collapse"
+        # Shouldn't happen: a non-empty string passes the validator.
         return "Failed to parse JSON verdict: unknown validation failure"
     return f"rationale field must be a string, got {type(rationale).__name__}"

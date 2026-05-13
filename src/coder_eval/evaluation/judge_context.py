@@ -152,13 +152,12 @@ def collect_reference_secrets(reference_dir: Path) -> list[str]:
     secrets: list[str] = []
     total_bytes = 0
     for path in reference_dir.rglob("*"):
-        if len(secrets) >= _MAX_REFERENCE_FILES or total_bytes >= _MAX_REFERENCE_BYTES:
+        if len(secrets) >= _MAX_REFERENCE_FILES:
             logger.warning(
-                "collect_reference_secrets: reference directory %s exceeds budget "
-                "(>%d files or >%d bytes) — remaining files left unscrubbed",
+                "collect_reference_secrets: reference directory %s exceeds file count budget "
+                "(>%d files) — remaining files left unscrubbed",
                 reference_dir,
                 _MAX_REFERENCE_FILES,
-                _MAX_REFERENCE_BYTES,
             )
             break
         # ``is_symlink()`` is checked BEFORE ``is_file()`` so symlinked regular
@@ -167,13 +166,34 @@ def collect_reference_secrets(reference_dir: Path) -> list[str]:
             continue
         if not path.is_file():
             continue
+        # Size pre-check BEFORE read_text: a single 100 MB file in an otherwise
+        # small reference dir would otherwise be pulled into memory in full before
+        # the per-iteration budget check fires. Using stat() bytes (rather than
+        # char count post-read) also keeps the accounting unit consistent with the
+        # ``_MAX_REFERENCE_BYTES`` constant name. OSError on stat (race with delete,
+        # permission edge cases) → skip silently.
+        try:
+            file_size = path.stat().st_size
+        except OSError:
+            continue
+        remaining = _MAX_REFERENCE_BYTES - total_bytes
+        if file_size > remaining:
+            logger.warning(
+                "collect_reference_secrets: reference directory %s exceeds byte budget "
+                "(file %s is %d bytes, remaining %d) — stopping",
+                reference_dir,
+                path,
+                file_size,
+                remaining,
+            )
+            break
         try:
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
         if text:
             secrets.append(text)
-            total_bytes += len(text)
+            total_bytes += file_size
     return secrets
 
 
@@ -259,7 +279,7 @@ class JudgeContextBuilder:
             ctx.files.append(FileBlock(path=original_path, content=None))
             return
         try:
-            content = host_path.read_text()
+            content = host_path.read_text(encoding="utf-8")
         except Exception as e:
             logger.debug("judge_context: failed to read host file %s (%s): %s", original_path, host_path, e)
             # File existed, read failed — not tracked as "missing".

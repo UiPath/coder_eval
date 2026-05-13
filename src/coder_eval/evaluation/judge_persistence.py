@@ -57,6 +57,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Windows reserved device basenames. The Win32 API maps these to character
+# devices regardless of the directory they sit in — opening ``CON`` or ``NUL.yaml``
+# inside ``task_dir`` resolves to the console or the null device, not a file.
+# Case-insensitive; the trailing extension (if any) is ignored by Win32 too,
+# so ``con``, ``CON``, ``CON.yaml``, ``nul.txt`` all map to devices.
+# Only COM1-9 / LPT1-9 are device names; COM10 and beyond are regular files.
+_WINDOWS_RESERVED_BASENAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
 # Field order in the YAML output: lead with the human-readable summary fields
 # (durations, token counts, prompts), then the long body fields. Verdict-shape
 # (raw_verdict) goes last because it's the bulkiest.
@@ -200,6 +211,15 @@ def load_judge_transcripts(result: EvaluationResult, task_dir: Path) -> int:
         if PurePosixPath(path).name != path or PureWindowsPath(path).name != path:
             logger.warning("Refusing to load judge transcript with non-basename path: %s", path)
             continue
+        # Reject Windows reserved device basenames. On Windows, ``CON.yaml`` /
+        # ``NUL`` / ``COM1`` open the console / null device / serial port
+        # regardless of where they sit in the directory tree. The check is
+        # platform-independent so a task.json minted on Linux that ships such a
+        # transcript_path is rejected before it travels to Windows.
+        stem_upper = path.split(".", 1)[0].upper()
+        if stem_upper in _WINDOWS_RESERVED_BASENAMES:
+            logger.warning("Refusing to load judge transcript with reserved Windows device name: %s", path)
+            continue
         sibling = task_dir / path
         # Defense-in-depth: even with the basename guard above, resolve and verify
         # containment before reading — symlinks inside ``task_dir`` could redirect
@@ -255,6 +275,11 @@ def load_judge_transcripts(result: EvaluationResult, task_dir: Path) -> int:
         # which (depending on model_config of the loaded subclass) might
         # validate or reject. The HTML renderer accepts both typed
         # JudgeTranscript and dict-shape so either shape works downstream.
+        # NOTE: With the ``CriterionResultUnion`` discriminator on
+        # ``EvaluationResult.success_criteria_results``, ``cr`` is now a
+        # properly-typed ``JudgeCriterionResult`` after reload (not a base
+        # ``CriterionResult`` with the field in ``__pydantic_extra__``), so
+        # the assignment lands on the declared field directly.
         try:
             object.__setattr__(cr, "transcript", attached)
         except Exception as e:

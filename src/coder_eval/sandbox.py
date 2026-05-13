@@ -446,7 +446,7 @@ class Sandbox:
             pkg_json = pkg_dir / "package.json"
             if pkg_json.exists():
                 try:
-                    data = json.loads(pkg_json.read_text())
+                    data = json.loads(pkg_json.read_text(encoding="utf-8"))
                     version = data.get("version", "unknown")
                     self.installed_tool_versions[name] = version
                 except (json.JSONDecodeError, OSError) as exc:
@@ -545,7 +545,7 @@ class Sandbox:
             raise RuntimeError("Sandbox not set up")
 
         file_path = self.sandbox_dir / path
-        return file_path.read_text()
+        return file_path.read_text(encoding="utf-8")
 
     def file_exists(self, path: str) -> bool:
         """Check if a file exists in the sandbox.

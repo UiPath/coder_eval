@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from coder_eval.models.enums import ApiBackend
 
@@ -11,6 +11,13 @@ from coder_eval.models.enums import ApiBackend
 if TYPE_CHECKING:
     from coder_eval.config import Settings
     from coder_eval.proxy.config import ProxyConfig
+
+
+# Resolved-at-startup transport for the `llm_judge` criterion under DirectRoute.
+# - "anthropic": call api.anthropic.com via the Anthropic SDK (needs ANTHROPIC_API_KEY).
+# - "llmgw": route through the LangChain LLM Gateway client (needs the LLMGW_* set).
+# - None: no judge credentials configured; any enabled `llm_judge` fails at dispatch.
+JudgeTransport = Literal["anthropic", "llmgw"]
 
 
 # Bedrock cross-region inference profile prefixes.
@@ -62,7 +69,26 @@ def to_bedrock_inference_profile(model: str | None, region: str | None) -> str |
 
 @dataclass(frozen=True)
 class DirectRoute:
-    """Route directly to Anthropic API (uses ANTHROPIC_API_KEY from environment)."""
+    """Route directly to Anthropic API for the agent.
+
+    The agent inherits parent-env auth and lets the Claude Agent SDK pick its
+    credential (API key / OAuth token / cached `claude login`). The
+    ``judge_transport`` field separately controls which transport the
+    ``llm_judge`` criterion uses, since the bare ``anthropic`` SDK can only
+    authenticate via ``ANTHROPIC_API_KEY``:
+
+    - ``"anthropic"``: judge calls api.anthropic.com (requires ANTHROPIC_API_KEY).
+    - ``"llmgw"``: judge falls back to the LangChain LLM Gateway client
+      (requires the LLMGW_* settings). Activated when ANTHROPIC_API_KEY is
+      absent but full LLMGW creds are present.
+    - ``None``: neither credential set; ``llm_judge`` fails fast at dispatch
+      with a clear error. Non-judge runs are unaffected.
+
+    Resolution happens once in ``resolve_route`` so the choice is deterministic
+    across criteria and recorded in ``EvaluationResult.environment_info``.
+    """
+
+    judge_transport: JudgeTransport | None = "anthropic"
 
 
 @dataclass(frozen=True)
@@ -129,7 +155,38 @@ def resolve_route(settings: Settings) -> ApiRoute:
             )
             raise ValueError(msg)
         case ApiBackend.DIRECT:
-            return DirectRoute()
+            return DirectRoute(judge_transport=_resolve_direct_judge_transport(settings))
+
+
+def _resolve_direct_judge_transport(settings: Settings) -> JudgeTransport | None:
+    """Pick the judge transport for ``DirectRoute`` based on which creds are configured.
+
+    Precedence: ``ANTHROPIC_API_KEY`` first, then the LLMGW credential set as a
+    fallback. Returns ``None`` if neither is configured — the run still starts,
+    but any enabled ``llm_judge`` criterion will fail at dispatch with a clear
+    error. The choice is made once at startup so it is deterministic across
+    criteria, audit-loggable, and recordable in ``environment_info``.
+    """
+    if settings.anthropic_api_key:
+        return "anthropic"
+    if _has_llmgw_credentials(settings):
+        return "llmgw"
+    return None
+
+
+def _has_llmgw_credentials(settings: Settings) -> bool:
+    """True iff the full LLMGW credential set required to build a chat model is present.
+
+    Mirrors the fields checked by ``Settings._validate_llmgw_settings``. Kept
+    in sync with that method — if one grows a field, so should the other.
+    """
+    return bool(
+        settings.llmgw_url
+        and settings.llmgw_client_id
+        and settings.llmgw_client_secret
+        and settings.llmgw_semantic_org_id
+        and settings.llmgw_semantic_tenant_id
+    )
 
 
 def proxy_config_from_settings(settings: Settings, *, task_id: str) -> ProxyConfig:

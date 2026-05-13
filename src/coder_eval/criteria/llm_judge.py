@@ -96,6 +96,35 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
                     temperature=criterion.temperature,
                     max_tokens=criterion.max_tokens,
                 )
+            case DirectRoute(judge_transport="llmgw"):
+                # Direct backend with no ANTHROPIC_API_KEY but LLMGW creds present.
+                # The agent uses its own auth (OAuth token / cached login); only the
+                # judge falls back here. Resolved once in ``resolve_route`` so the
+                # choice is deterministic and surfaced in environment_info.
+                content = _invoke_llmgw_judge(
+                    model=criterion.model,
+                    system=system_msg,
+                    user=user_msg,
+                    temperature=criterion.temperature,
+                    max_tokens=criterion.max_tokens,
+                )
+            case DirectRoute(judge_transport=None):
+                # Neither ANTHROPIC_API_KEY nor LLMGW creds were configured at startup.
+                # Return a properly-typed JudgeCriterionResult so renderers / aggregators
+                # that switch on ``isinstance(cr, JudgeCriterionResult)`` see the uniform
+                # shape — mirrors the TurnTimeoutError arm in agent_judge.py.
+                logger.error("llm_judge unreachable: no ANTHROPIC_API_KEY and no LLMGW_* credentials configured")
+                return JudgeCriterionResult(
+                    criterion_type=criterion.type,
+                    description=criterion.description,
+                    score=0.0,
+                    details="(judge transport unconfigured)",
+                    error=(
+                        "llm_judge requires ANTHROPIC_API_KEY or the LLMGW_* credential set; "
+                        "neither is configured. Set one in your environment, or remove/"
+                        "disable the llm_judge criterion."
+                    ),
+                )
             case DirectRoute() | ProxyRoute():
                 content = invoke_anthropic_judge(
                     route=route,
@@ -107,18 +136,13 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
                 )
             case _:
                 # route is None or a future ApiRoute variant — keep LLMGW as the safe default.
-                llm = get_llmgw_chat_model(
+                content = _invoke_llmgw_judge(
                     model=criterion.model,
+                    system=system_msg,
+                    user=user_msg,
                     temperature=criterion.temperature,
                     max_tokens=criterion.max_tokens,
                 )
-                response = llm.invoke(
-                    [
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": user_msg},
-                    ]
-                )
-                content = response.content if isinstance(response.content, str) else str(response.content)
 
         # Sanitize any raw model text we persist to CriterionResult.details. A misbehaving
         # model could echo the reference back in an unparseable response, so we scrub it.
@@ -160,6 +184,22 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
             findings=[scrub_reference(f, scrub_key) for f in verdict.findings],
             transcript=_maybe_transcript(),  # type: ignore[arg-type]
         )
+
+
+def _invoke_llmgw_judge(*, model: str, system: str, user: str, temperature: float, max_tokens: int) -> str:
+    """Single-completion call through the LangChain LLM Gateway chat model.
+
+    Shared by the ``DirectRoute(judge_transport="llmgw")`` arm and the generic
+    no-route fallback so both paths use the same client construction.
+    """
+    llm = get_llmgw_chat_model(model=model, temperature=temperature, max_tokens=max_tokens)
+    response = llm.invoke(
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+    )
+    return response.content if isinstance(response.content, str) else str(response.content)
 
 
 def _render_user_message(prompt: str, context: JudgeContext) -> str:

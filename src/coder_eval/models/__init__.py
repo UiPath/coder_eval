@@ -82,6 +82,7 @@ from coder_eval.models.results import (
     ConfusionEntry,
     CriterionAggregate,
     CriterionResult,
+    CriterionResultUnion,
     CriterionStats,
     EvaluationResult,
     FailedRowSummary,
@@ -106,6 +107,7 @@ from coder_eval.models.routing import (
     ApiRoute,
     BedrockRoute,
     DirectRoute,
+    JudgeTransport,
     ProxyRoute,
     proxy_config_from_settings,
     resolve_route,
@@ -192,6 +194,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "DirectRoute",
     "ProxyRoute",
     "BedrockRoute",
+    "JudgeTransport",
     "resolve_route",
     "proxy_config_from_settings",
     "to_bedrock_inference_profile",
@@ -222,6 +225,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "ConfusionEntry",
     "CriterionAggregate",
     "CriterionResult",
+    "CriterionResultUnion",
     "CriterionStats",
     "FailedRowSummary",
     "ThresholdCheck",
@@ -276,7 +280,12 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
 ]
 
 # Type aliases (forward compatible)
-type CriteriaResults = list[CriterionResult]
+# Typed as the discriminated union so callers that iterate the result list
+# and use ``isinstance(cr, JudgeCriterionResult)`` get the precise variant
+# membership. The runtime objects are concrete subclasses regardless; the
+# alias change is purely a type-checking precision fix that mirrors the
+# ``EvaluationResult.success_criteria_results`` field type.
+type CriteriaResults = list[CriterionResultUnion]
 type SuccessCriteria = list[SuccessCriterion]
 type FileTree = dict[str, float]  # path -> modification time
 type FileChanges = list[FileChange]

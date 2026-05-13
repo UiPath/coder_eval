@@ -268,3 +268,110 @@ def test_ce006_allows_criterion_max_turns(write_py):
     path = write_py(source)
     violations = check_file(path, rules=[NoAgentTimingAccess])
     assert violations == []
+
+
+# ---------- CE008 read_text explicit encoding ----------
+
+
+def test_ce008_flags_read_text_without_encoding(write_py):
+    from tests.lint.rules.read_text_explicit_encoding import ReadTextExplicitEncoding
+
+    source = "from pathlib import Path\n\ndef f(p: Path):\n    return p.read_text()\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[ReadTextExplicitEncoding])
+    assert len(violations) == 1
+    assert violations[0].rule_id == "CE008"
+
+
+def test_ce008_allows_read_text_with_encoding(write_py):
+    from tests.lint.rules.read_text_explicit_encoding import ReadTextExplicitEncoding
+
+    source = "from pathlib import Path\n\ndef f(p: Path):\n    return p.read_text(encoding='utf-8')\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[ReadTextExplicitEncoding])
+    assert violations == []
+
+
+def test_ce008_flags_chained_read_text(write_py):
+    """Chained call like ``(skill_dir / "SKILL.md").read_text()`` is also flagged."""
+    from tests.lint.rules.read_text_explicit_encoding import ReadTextExplicitEncoding
+
+    source = "from pathlib import Path\n\ndef f(p: Path):\n    return (p / 'a').read_text()\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[ReadTextExplicitEncoding])
+    assert len(violations) == 1
+    assert violations[0].rule_id == "CE008"
+
+
+def test_ce008_noqa_suppresses(write_py):
+    from tests.lint.rules.read_text_explicit_encoding import ReadTextExplicitEncoding
+
+    source = "from pathlib import Path\n\ndef f(p: Path):\n    return p.read_text()  # noqa: CE008 -- intentional\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[ReadTextExplicitEncoding])
+    assert violations == []
+
+
+# ---------- CE009 yaml models forbid extras ----------
+
+
+def test_ce009_flags_basemodel_without_forbid(tmp_path: Path) -> None:
+    """A BaseModel subclass in tasks.py without extra='forbid' is flagged."""
+    from tests.lint.rules.yaml_models_forbid_extras import YamlModelsForbidExtras
+
+    sub = tmp_path / "src" / "coder_eval" / "models"
+    sub.mkdir(parents=True)
+    path = sub / "tasks.py"
+    path.write_text(
+        "from pydantic import BaseModel\n\nclass Lax(BaseModel):\n    x: int\n",
+        encoding="utf-8",
+    )
+    violations = check_file(path, rules=[YamlModelsForbidExtras])
+    assert len(violations) == 1
+    assert violations[0].rule_id == "CE009"
+
+
+def test_ce009_allows_basemodel_with_forbid(tmp_path: Path) -> None:
+    from tests.lint.rules.yaml_models_forbid_extras import YamlModelsForbidExtras
+
+    sub = tmp_path / "src" / "coder_eval" / "models"
+    sub.mkdir(parents=True)
+    path = sub / "tasks.py"
+    path.write_text(
+        "from pydantic import BaseModel, ConfigDict\n\nclass Strict(BaseModel):\n"
+        '    model_config = ConfigDict(extra="forbid")\n    x: int\n',
+        encoding="utf-8",
+    )
+    violations = check_file(path, rules=[YamlModelsForbidExtras])
+    assert violations == []
+
+
+def test_ce009_allows_subclass_inheriting_forbid_from_same_file(tmp_path: Path) -> None:
+    """Subclass of a same-file class that declares extra='forbid' inherits compliance."""
+    from tests.lint.rules.yaml_models_forbid_extras import YamlModelsForbidExtras
+
+    sub = tmp_path / "src" / "coder_eval" / "models"
+    sub.mkdir(parents=True)
+    path = sub / "criteria.py"
+    path.write_text(
+        "from pydantic import BaseModel, ConfigDict\n\nclass Base(BaseModel):\n"
+        '    model_config = ConfigDict(extra="forbid")\n\nclass Sub(Base):\n    x: int\n',
+        encoding="utf-8",
+    )
+    violations = check_file(path, rules=[YamlModelsForbidExtras])
+    assert violations == []
+
+
+def test_ce008_skips_files_outside_scope(tmp_path: Path) -> None:
+    """Files outside tasks.py / criteria.py are not flagged (results.py uses extra='allow')."""
+    from tests.lint.rules.yaml_models_forbid_extras import YamlModelsForbidExtras
+
+    sub = tmp_path / "src" / "coder_eval" / "models"
+    sub.mkdir(parents=True)
+    path = sub / "results.py"
+    path.write_text(
+        "from pydantic import BaseModel\n\nclass Lax(BaseModel):\n    x: int\n",
+        encoding="utf-8",
+    )
+    violations = check_file(path, rules=[YamlModelsForbidExtras])
+    assert violations == []

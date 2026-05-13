@@ -194,7 +194,7 @@ def load_variant_eval_results(
             task_json = rep_subdir / "task.json"
             if task_json.exists():
                 try:
-                    results.append(EvaluationResult.model_validate_json(task_json.read_text()))
+                    results.append(EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8")))
                 except Exception:
                     logger.warning("Failed to load %s for variant report", task_json, exc_info=True)
 

@@ -133,6 +133,36 @@ def test_verdict_collapses_runs_of_whitespace() -> None:
     assert v.rationale == "a b c d"
 
 
+def test_rationale_rejects_whitespace_only() -> None:
+    """Whitespace-only input collapses to ``""`` and surfaces a parse error.
+
+    The pre-fix code silently emitted a blank ``rationale: `` line in
+    ``format_details`` — invisible to authors. Now the validator raises so
+    the judge result records an explicit error string.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as excinfo:
+        JudgeVerdict(score=0.5, rationale="   \n  \t")
+    assert "empty after whitespace collapse" in str(excinfo.value)
+
+
+def test_rationale_rejects_empty_string() -> None:
+    """An explicit ``rationale: ""`` is rejected for the same reason."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        JudgeVerdict(score=0.5, rationale="")
+
+
+def test_parse_judge_verdict_propagates_empty_rationale_error() -> None:
+    """The parser surfaces the validator's ValueError to the caller."""
+    v, err = parse_judge_verdict('{"score": 0.5, "rationale": "  "}')
+    assert v is None
+    assert err is not None
+    assert "empty" in err.lower()
+
+
 def test_verdict_model_rejects_bool_directly() -> None:
     from pydantic import ValidationError
 

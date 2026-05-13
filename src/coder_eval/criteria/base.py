@@ -109,6 +109,12 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
     # added when directory references were introduced) without forcing every
     # subclass to declare them. Filled lazily in ``check()``.
     _impl_accepted_params: ClassVar[set[str] | None] = None
+    # Identity (id()) of the ``_check_impl`` callable that produced the cache.
+    # When the bound method is replaced — e.g. ``monkeypatch.setattr(Cls,
+    # "_check_impl", new_fn)`` in tests, or a hot reload that re-binds the
+    # method — the new callable has a different id and the cache refreshes on
+    # the next ``check()`` call.
+    _impl_signature_owner: ClassVar[int | None] = None
 
     @handle_criterion_errors
     def check(
@@ -144,9 +150,15 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         # Forward only the kwargs the subclass's _check_impl actually accepts.
         # Older checkers haven't been updated to take ``reference_dir`` and would
         # raise TypeError; the filter keeps them oblivious to the new field.
+        # Cache identity-keyed on the method's id() so monkeypatched _check_impl
+        # callables (tests, hot reload) refresh on the next call instead of
+        # silently reusing the previous signature.
         cls = type(self)
-        if cls._impl_accepted_params is None:
-            cls._impl_accepted_params = set(inspect.signature(cls._check_impl).parameters)
+        impl = cls._check_impl
+        impl_id = id(impl)
+        if cls._impl_accepted_params is None or cls._impl_signature_owner != impl_id:
+            cls._impl_accepted_params = set(inspect.signature(impl).parameters)
+            cls._impl_signature_owner = impl_id
         accepted = cls._impl_accepted_params
 
         kwargs: dict[str, Any] = {"turn_records": turn_records, "route": route}

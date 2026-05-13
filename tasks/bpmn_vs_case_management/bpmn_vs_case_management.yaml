@@ -17,7 +17,7 @@ sandbox:
       path: "template"
 
 dataset:
-  path: "bpmn_vs_case_management.jsonl"
+  paths: ["bpmn_vs_case_management.jsonl"]
 
 initial_prompt: |
   You are classifying an automation requirement for the UiPath Maestro platform.

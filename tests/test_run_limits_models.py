@@ -152,14 +152,14 @@ class TestRunLimitsOnTaskDefinition:
             _minimal_task(max_turns=20, run_limits={"max_turns": 5})
 
     def test_max_iterations_dropped_with_warning(self):
-        """max_iterations was removed in PR #191; shim drops it with a warning."""
-        with pytest.warns(DeprecationWarning, match=r"max_iterations.*2026-05-20"):
+        """max_iterations was removed in PR #191; the soft-launch hook flags it."""
+        with pytest.warns(DeprecationWarning, match=r"unknown top-level field 'max_iterations'"):
             task = _minimal_task(max_iterations=2)
         assert not hasattr(task, "max_iterations")
 
     def test_llm_reviewer_dropped_with_warning(self):
-        """llm_reviewer was removed in PR #191; shim drops it with a warning."""
-        with pytest.warns(DeprecationWarning, match=r"llm_reviewer.*2026-05-20"):
+        """llm_reviewer was removed in PR #191; the soft-launch hook flags it."""
+        with pytest.warns(DeprecationWarning, match=r"unknown top-level field 'llm_reviewer'"):
             task = _minimal_task(llm_reviewer={"enabled": False})
         assert not hasattr(task, "llm_reviewer")
 

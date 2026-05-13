@@ -571,6 +571,83 @@ def test_judge_anthropic_invoke_runtime_error_maps_to_score_zero(sandbox: Sandbo
     assert "connection refused" in result.error
 
 
+def test_judge_direct_route_with_llmgw_transport_uses_llmgw_client(sandbox: Sandbox) -> None:
+    """DirectRoute(judge_transport='llmgw') routes the judge through LLMGW, not the Anthropic SDK.
+
+    Triggered when ``ANTHROPIC_API_KEY`` is absent but the LLMGW_* credential set is
+    configured — the agent uses its own auth (OAuth / cached login) while the judge
+    falls back to the LangChain LLM Gateway client.
+    """
+    from coder_eval.models.routing import DirectRoute
+
+    route = DirectRoute(judge_transport="llmgw")
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    mock_llm = _make_mock_llm('{"score":0.6,"rationale":"ok"}')
+    with (
+        patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm) as m_llmgw,
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge") as m_anthropic,
+        patch("coder_eval.criteria.llm_judge.invoke_bedrock_judge") as m_bedrock,
+    ):
+        result = SuccessChecker(sandbox, init_registry=False, route=route).check(criterion)
+    assert result.score == 0.6
+    m_llmgw.assert_called_once()
+    assert m_anthropic.call_count == 0
+    assert m_bedrock.call_count == 0
+
+
+def test_judge_direct_route_with_no_transport_fails_with_clear_error(sandbox: Sandbox) -> None:
+    """DirectRoute(judge_transport=None) → typed JudgeCriterionResult, no LLM calls.
+
+    Covers the 'neither ANTHROPIC_API_KEY nor LLMGW creds set' configuration. The
+    early return must land as ``JudgeCriterionResult`` (not a base ``CriterionResult``
+    from ``@handle_criterion_errors``) so renderers / aggregators that switch on
+    ``isinstance(cr, JudgeCriterionResult)`` see the uniform shape.
+    """
+    from coder_eval.models import JudgeCriterionResult
+    from coder_eval.models.routing import DirectRoute
+
+    route = DirectRoute(judge_transport=None)
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    with (
+        patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model") as m_llmgw,
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge") as m_anthropic,
+    ):
+        result = SuccessChecker(sandbox, init_registry=False, route=route).check(criterion)
+    assert isinstance(result, JudgeCriterionResult)
+    assert result.score == 0.0
+    assert result.error is not None
+    assert "ANTHROPIC_API_KEY" in result.error
+    assert "LLMGW" in result.error
+    assert result.findings == []
+    assert result.transcript is None
+    assert m_llmgw.call_count == 0
+    assert m_anthropic.call_count == 0
+
+
+def test_judge_direct_route_no_transport_does_not_log_decorator_warning(
+    sandbox: Sandbox, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The early return path bypasses ``@handle_criterion_errors``.
+
+    Regression guard: the decorator's ``except Exception`` block logs at ERROR
+    when it catches an exception. The early-return arm must not trip that — it
+    returns the result directly, so the only log entry should be the criterion's
+    own ``logger.error`` describing the missing credentials.
+    """
+    import logging
+
+    from coder_eval.models.routing import DirectRoute
+
+    route = DirectRoute(judge_transport=None)
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    with caplog.at_level(logging.ERROR, logger="coder_eval.criteria.base"):
+        SuccessChecker(sandbox, init_registry=False, route=route).check(criterion)
+    # The decorator logs from coder_eval.criteria.base; the criterion logs from
+    # coder_eval.criteria.llm_judge. The decorator path must NOT have fired.
+    decorator_records = [r for r in caplog.records if r.name == "coder_eval.criteria.base"]
+    assert decorator_records == [], f"unexpected decorator log records: {decorator_records}"
+
+
 def test_judge_bedrock_route_threads_model_unchanged(sandbox: Sandbox) -> None:
     """Translation happens INSIDE the helper, not at the dispatch site."""
     from coder_eval.models.routing import BedrockRoute
@@ -586,6 +663,25 @@ def test_judge_bedrock_route_threads_model_unchanged(sandbox: Sandbox) -> None:
 
 
 # --- verbose verdict + transcript persistence ---
+
+
+def test_judge_empty_rationale_returns_judge_result_with_error(sandbox: Sandbox) -> None:
+    """A model that emits whitespace-only rationale → JudgeCriterionResult(error=...).
+
+    Locks in the ValidationError → parse_judge_verdict → JudgeCriterionResult(score=0.0)
+    chain — the pre-fix code would silently emit ``rationale: `` (blank) in details.
+    """
+    from coder_eval.models import JudgeCriterionResult
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    mock_llm = _make_mock_llm('{"score": 0.5, "rationale": "  "}')
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+
+    assert isinstance(result, JudgeCriterionResult)
+    assert result.score == 0.0
+    assert result.error is not None
+    assert "empty" in result.error.lower()
 
 
 def test_judge_persists_findings(sandbox: Sandbox) -> None:

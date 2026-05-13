@@ -81,7 +81,17 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
-external = ["CE001", "CE002", "CE003", "CE004", "CE005"]  # custom architectural lint rules (tests/lint/)
+external = [
+    "CE001",
+    "CE002",
+    "CE003",
+    "CE004",
+    "CE005",
+    "CE006",
+    "CE007",
+    "CE008",
+    "CE009",
+]  # custom architectural lint rules (tests/lint/)
 
 [tool.ruff.lint.per-file-ignores]
 "tests/lint/**" = ["N802"]  # visit_* methods must match AST node class names (PascalCase required by ast.NodeVisitor)

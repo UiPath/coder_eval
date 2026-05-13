@@ -38,6 +38,37 @@ class TestReferenceSource:
         with pytest.raises(ValidationError, match="One of"):
             ReferenceSource()
 
+    def test_reference_source_forbids_extras(self):
+        """A typo like ``directry`` raises ValidationError before model_validator runs.
+
+        Without ``extra='forbid'`` the typo would land in ``__pydantic_extra__`` and
+        the check_exclusive_source validator would then raise its generic 'One of'
+        message — concealing the actual mistake. With strict mode the user sees the
+        misspelled field name directly.
+        """
+        with pytest.raises(ValidationError) as excinfo:
+            ReferenceSource(code="x", directry="foo/")  # type: ignore[call-arg]
+        assert "directry" in str(excinfo.value)
+        assert "extra" in str(excinfo.value).lower()
+
+    def test_reference_source_typo_in_yaml_load(self, tmp_path):
+        """Loading a task YAML with ``directry:`` surfaces the typo with the actual key.
+
+        End-to-end check that the strict mode triggers when the field comes from
+        the loader path, not just direct kwargs.
+        """
+        import yaml
+
+        bad_yaml = tmp_path / "bad.yaml"
+        bad_yaml.write_text(
+            "code: null\ndirectry: foo/\n",
+            encoding="utf-8",
+        )
+        data = yaml.safe_load(bad_yaml.read_text(encoding="utf-8"))
+        with pytest.raises(ValidationError) as excinfo:
+            ReferenceSource(**data)
+        assert "directry" in str(excinfo.value)
+
 
 class TestTaskDefinition:
     """Tests for TaskDefinition with reference field."""

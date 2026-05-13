@@ -358,6 +358,87 @@ def test_resolve_route_direct():
     assert isinstance(route, DirectRoute)
 
 
+def _direct_settings(**overrides):
+    """Build a DIRECT-backend Settings with all credential fields explicitly cleared.
+
+    The shared helper makes the judge-transport precedence tests independent of
+    the developer's shell env (pydantic-settings would otherwise pick up real
+    LLMGW_* / ANTHROPIC_API_KEY values from the parent process).
+    """
+    from coder_eval.config import Settings
+    from coder_eval.models.enums import ApiBackend
+
+    base = {
+        "api_backend": ApiBackend.DIRECT,
+        "anthropic_api_key": None,
+        "llmgw_url": None,
+        "llmgw_client_id": None,
+        "llmgw_client_secret": None,
+        "llmgw_semantic_org_id": None,
+        "llmgw_semantic_tenant_id": None,
+    }
+    base.update(overrides)
+    return Settings(**base)
+
+
+def test_resolve_route_direct_judge_transport_anthropic_when_api_key_set():
+    """ANTHROPIC_API_KEY present → judge_transport='anthropic' (takes precedence over LLMGW)."""
+    from coder_eval.models import DirectRoute, resolve_route
+
+    s = _direct_settings(
+        anthropic_api_key="sk-test",
+        llmgw_url="https://gw.example.com/",
+        llmgw_client_id="cid",
+        llmgw_client_secret="secret",
+        llmgw_semantic_org_id="org",
+        llmgw_semantic_tenant_id="tenant",
+    )
+    route = resolve_route(s)
+    assert isinstance(route, DirectRoute)
+    assert route.judge_transport == "anthropic"
+
+
+def test_resolve_route_direct_judge_transport_llmgw_when_only_llmgw_set():
+    """No ANTHROPIC_API_KEY but full LLMGW creds → judge_transport='llmgw'."""
+    from coder_eval.models import DirectRoute, resolve_route
+
+    s = _direct_settings(
+        llmgw_url="https://gw.example.com/",
+        llmgw_client_id="cid",
+        llmgw_client_secret="secret",
+        llmgw_semantic_org_id="org",
+        llmgw_semantic_tenant_id="tenant",
+    )
+    route = resolve_route(s)
+    assert isinstance(route, DirectRoute)
+    assert route.judge_transport == "llmgw"
+
+
+def test_resolve_route_direct_judge_transport_none_when_neither_set():
+    """No ANTHROPIC_API_KEY and no LLMGW creds → judge_transport=None (run starts; llm_judge fails at dispatch)."""
+    from coder_eval.models import DirectRoute, resolve_route
+
+    route = resolve_route(_direct_settings())
+    assert isinstance(route, DirectRoute)
+    assert route.judge_transport is None
+
+
+def test_resolve_route_direct_judge_transport_none_when_partial_llmgw():
+    """Incomplete LLMGW credential set is not enough — must be all five fields."""
+    from coder_eval.models import DirectRoute, resolve_route
+
+    s = _direct_settings(
+        llmgw_url="https://gw.example.com/",
+        llmgw_client_id="cid",
+        llmgw_client_secret="secret",
+        llmgw_semantic_org_id="org",
+        # llmgw_semantic_tenant_id intentionally omitted
+    )
+    route = resolve_route(s)
+    assert isinstance(route, DirectRoute)
+    assert route.judge_transport is None
+
+
 def test_resolve_route_bedrock():
     """resolve_route with BEDROCK returns BedrockRoute."""
     from coder_eval.config import Settings
