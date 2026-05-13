@@ -40,6 +40,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Checkout UiPath/skills @ main (cross-repo context for reviewer)
+        # Pulls skills into ./skills so the reviewer can grep for downstream
+        # usages of TaskDefinition / loader fields it sees changing in the
+        # diff. UiPath/skills is public — no PAT needed.
+        uses: actions/checkout@v6
+        with:
+          repository: UiPath/skills
+          ref: main
+          path: skills
+          fetch-depth: 1
+
       - name: Set up Python 3.13
         uses: actions/setup-python@v5
         with:
@@ -70,5 +81,7 @@ jobs:
             4. Run `gh pr view ${{ github.event.pull_request.number || github.event.issue.number }} --comments` to read existing PR conversation.
             5. For each changed file, read the FULL file (not just the diff hunk) so you see surrounding context.
             6. Follow the cross-file consistency checks, "what's missing" analysis, and design-level scrutiny sections from code_review.md. Do not skip these.
+
+            Cross-repo check: the UiPath/skills repo is checked out at ./skills/ and is a primary downstream consumer (226 task YAMLs under skills/tests/tasks/). Decide whether the diff has plausible cross-repo blast radius based on what it changes, not which files it touches — pydantic schema or field changes, validator logic, loader/orchestration code, experiment defaults, success-criterion shapes, agent-config surface, or dependency bumps that affect YAML parsing all qualify regardless of file path. If yes, grep ./skills/tests/tasks/ for usages of the changed surface and flag any skills task YAML that would break. When you need ground truth on a specific suspicious YAML, run `.venv/bin/coder-eval plan ./skills/tests/tasks/<file>` — the same deterministic validator the validate-skills-yamls CI job uses. The validate-skills-yamls CI job catches schema-load failures, but it won't catch semantic drift (e.g. a field renamed AND added back as an alias) — that's your job. If the diff has no plausible consumer impact (docs, dashboard, evalboard, tests for unrelated subsystems, autogen tooling), skip this check.
 
             Follow the output format specified in code_review.md. Include the "What's Missing" section even if empty.

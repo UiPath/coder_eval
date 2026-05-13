@@ -640,3 +640,78 @@ jobs:
             tmp/
             runs/
           retention-days: 7
+
+  validate-skills-yamls:
+    name: Validate Skills Task YAMLs
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    # Soft gate: failures show red in the checks UI for visibility but the
+    # workflow's overall conclusion stays "success", so merge isn't blocked.
+    # Skills main currently carries pre-existing schema breaks (max_count on
+    # CommandExecutedCriterion) that the skills team owns fixing — until
+    # then, this gate is advisory. Flip to hard-fail by removing this line
+    # once those are resolved.
+    continue-on-error: true
+    # Skip on fork PRs where the UV_INDEX secrets for the UiPath pypi feed
+    # aren't available (matches e2e-smoke / live-tests). The skills checkout
+    # itself works fine on forks since UiPath/skills is public.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    env:
+      UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+
+    steps:
+      - name: Checkout coder_eval
+        uses: actions/checkout@v6
+
+      - name: Checkout UiPath/skills @ main
+        uses: actions/checkout@v6
+        with:
+          repository: UiPath/skills
+          ref: main
+          path: skills
+          fetch-depth: 1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Cache dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.cache/pip
+            .venv
+          key: ${{ runner.os }}-py3.13-validate-skills-${{ hashFiles('**/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-py3.13-validate-skills-
+            ${{ runner.os }}-py3.13-
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+
+      - name: Install project dependencies
+        run: |
+          uv venv .venv --clear
+          uv pip install --python .venv/bin/python -e ".[dev]"
+
+      - name: Validate every skills task YAML loads under current TaskDefinition schema
+        # Hard gate. Catches the class of bug where a coder_eval PR renames or
+        # removes a TaskDefinition / loader field that skills task YAMLs still
+        # reference. Historically this only surfaced in the nightly skills
+        # suite on the VM — by then the change was already on main.
+        #
+        # Uses `coder-eval plan` (the existing dry-run validator) over every
+        # *.yaml under skills/tests/tasks/. Variant resolution against the
+        # default experiment may print noise for tasks not designed for it,
+        # but only schema-loader failures flip the exit code.
+        run: |
+          set -euo pipefail
+          mapfile -t YAMLS < <(find skills/tests/tasks -type f -name '*.yaml' | sort)
+          echo "Discovered ${#YAMLS[@]} task YAMLs under skills/tests/tasks/"
+          test "${#YAMLS[@]}" -gt 0 || { echo "No skills task YAMLs found — checkout layout drift?"; exit 1; }
+          .venv/bin/coder-eval plan "${YAMLS[@]}"

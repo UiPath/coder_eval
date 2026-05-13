@@ -15,6 +15,15 @@ from coder_eval.models.limits import RunLimits
 from coder_eval.models.sandbox import SandboxConfig
 
 
+class UnknownTaskFieldWarning(DeprecationWarning):
+    """Emitted by TaskDefinition for unknown top-level fields under the soft-launch
+    policy in ``_warn_on_unknown_fields``. Dedicated subclass so callers (e.g.
+    ``coder-eval plan``) can match by ``issubclass`` instead of substring-matching
+    the message text — and so other ``DeprecationWarning``s emitted during load
+    don't get conflated with stale-field signal.
+    """
+
+
 class AgentConfig(BaseModel):
     """Configuration for the coding agent."""
 
@@ -472,7 +481,7 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
                 f"TaskDefinition: unknown top-level field {key!r} will be ignored. "
                 "If this is a typo, fix it; if the field is stale from a previous "
                 "schema, remove it. Future versions may reject unknown fields.",
-                DeprecationWarning,
+                UnknownTaskFieldWarning,
                 stacklevel=2,
             )
         return data

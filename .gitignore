@@ -61,5 +61,8 @@ reports/
 .DS_Store
 tmp/
 refs/
+# Cross-repo checkouts created by claude-pr-review.yml / validate-skills-yamls jobs
+# (CI clones UiPath/skills into ./skills/; ignored locally to prevent accidental commits)
+skills/
 # added by flow-run
 .flow-run/

@@ -1,9 +1,11 @@
 """Plan command - validate task files without executing."""
 
+import warnings
 from pathlib import Path
 
 import typer
 
+from ..models.tasks import UnknownTaskFieldWarning
 from ..orchestration.task_loader import load_task
 from .console import console
 from .run_helpers import discover_default_tasks
@@ -34,6 +36,10 @@ def plan_command(
 
     When an experiment is provided (or experiments/default.yaml exists),
     also shows experiment info and resolved agent configs per variant.
+
+    Unknown top-level fields on TaskDefinition currently soft-warn
+    (see _warn_on_unknown_fields in models/tasks.py) — those warnings
+    surface inline under each task as ⚠ notices, without failing the run.
 
     Examples:
         coder-eval plan
@@ -85,7 +91,17 @@ def plan_command(
     all_valid = True
     for task_file in resolved_task_files:
         try:
-            task, _source_yaml = load_task(task_file)
+            # Capture warnings so unknown-field UnknownTaskFieldWarnings
+            # (emitted by TaskDefinition._warn_on_unknown_fields while the
+            # top-level schema stays in soft-launch mode) surface inline
+            # below \u2014 they don't fail the run, but they're visible to the
+            # author and to any CI log scraper. Other DeprecationWarnings
+            # raised during load (legacy-timing migrations, pydantic,
+            # transitive libs) are re-emitted through warnings.showwarning
+            # so they still reach stderr instead of getting swallowed.
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", DeprecationWarning)
+                task, _source_yaml = load_task(task_file)
 
             console.print(f"[green]\u2713[/green] {task_file.name}")
             console.print(f"  [dim]Task ID: {task.task_id}[/dim]")
@@ -100,6 +116,18 @@ def plan_command(
                 console.print(f"  [dim]Agent: {task.agent.type.value}[/dim]")
 
             console.print(f"  [dim]Success criteria: {len(task.success_criteria)}[/dim]")
+
+            # Surface unknown-field warnings as inline notices (non-blocking;
+            # catches stale top-level fields like max_iterations / llm_reviewer
+            # that the soft-launch validator otherwise drops silently). Match
+            # by category, not message text, so a reworded warning string
+            # doesn't silently break this rendering. Anything else captured
+            # gets re-emitted to stderr so non-target deprecations stay visible.
+            for w in caught:
+                if issubclass(w.category, UnknownTaskFieldWarning):
+                    console.print(f"  [yellow]⚠[/yellow] [yellow]{w.message}[/yellow]")
+                else:
+                    warnings.showwarning(w.message, w.category, w.filename, w.lineno)
 
             # Show resolved agent per variant
             for variant in exp_def.variants:
