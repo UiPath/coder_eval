@@ -1,0 +1,46 @@
+task_id: n8n-reading-list-filter
+description: >
+  Create an n8n workflow JSON that exposes a POST webhook taking a list of books,
+  filters to difficulty > 5 AND pages < 600, and returns {title, author} for each
+  match. Pure JSON authoring — no n8n CLI, no MCP.
+tags: [n8n, workflow-json, filter-map, no-cli]
+
+run_limits:
+  max_turns: 30
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+initial_prompt: |
+  Write an n8n workflow JSON at `ReadingList.json`. It should expose a POST webhook
+  taking a body of the form:
+
+      { "books": [ { "title": str, "author": str, "difficulty": int, "pages": int }, ... ] }
+
+  Filter to books with `difficulty > 5` AND `pages < 600`, and respond with:
+
+      { "books": [ { "title": str, "author": str }, ... ] }
+
+  containing only the title and author of matching books (order doesn't matter).
+
+  No CLI involved — just the workflow file.
+
+success_criteria:
+  - type: file_exists
+    description: "ReadingList.json exists"
+    path: "ReadingList.json"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Deploy to live n8n, invoke webhook, verify filtered+mapped books"
+    command: "python3 $TASK_DIR/check_reading_list_e2e.py ReadingList.json"
+    timeout: 60
+    score_from_stdout: true
+    weight: 8.0
+    pass_threshold: 1.0

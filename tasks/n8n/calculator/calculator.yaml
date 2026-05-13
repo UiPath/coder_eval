@@ -1,0 +1,43 @@
+task_id: n8n-calculator-multiply
+description: >
+  Create an n8n workflow JSON that exposes a POST webhook taking two numbers `a` and `b`
+  and returns their product. Pure JSON authoring — no n8n CLI, no MCP.
+tags: [n8n, workflow-json, generate, no-cli]
+
+run_limits:
+  max_turns: 30
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+initial_prompt: |
+  Write an n8n workflow JSON at `Calculator.json`. It should expose a POST
+  webhook that takes two numbers `a` and `b` in the request body and responds
+  with their product.
+
+  No CLI involved — just the workflow file.
+
+success_criteria:
+  - type: file_exists
+    description: "Calculator.json exists"
+    path: "Calculator.json"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  # End-to-end check: deploys the agent's workflow to a live n8n via the public
+  # REST API (which itself validates the JSON), activates it, POSTs random
+  # inputs to the webhook, and verifies the multiplication. Requires N8N_API_URL
+  # (default http://localhost:5678) and N8N_API_KEY in the env when the eval
+  # runs. The check script cleans up the deployed workflow before exiting.
+  - type: run_command
+    description: "Deploy to live n8n, invoke webhook, verify a*b response"
+    command: "python3 $TASK_DIR/check_calculator_e2e.py Calculator.json"
+    timeout: 60
+    score_from_stdout: true
+    weight: 8.0
+    pass_threshold: 1.0

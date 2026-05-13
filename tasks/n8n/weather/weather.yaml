@@ -1,0 +1,42 @@
+task_id: n8n-weather-decision
+description: >
+  Create an n8n workflow JSON that exposes a POST webhook taking latitude/longitude,
+  fetches the current temperature from open-meteo, and returns a verdict based on a
+  60°F threshold. Pure JSON authoring — no n8n CLI, no MCP.
+tags: [n8n, workflow-json, http, branching, no-cli]
+
+run_limits:
+  max_turns: 30
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+initial_prompt: |
+  Write an n8n workflow JSON at `Weather.json`. It should expose a POST webhook
+  taking `latitude` and `longitude` in the body, fetch the current temperature
+  from open-meteo
+  (`https://api.open-meteo.com/v1/forecast?latitude=...&longitude=...&current=temperature_2m`,
+  which returns Celsius), and respond with `{"verdict": "warm"}` if the temperature
+  is above 60°F, otherwise `{"verdict": "cool"}`.
+
+  No CLI involved — just the workflow file.
+
+success_criteria:
+  - type: file_exists
+    description: "Weather.json exists"
+    path: "Weather.json"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Deploy to live n8n, invoke webhook, verify warm/cool verdict"
+    command: "python3 $TASK_DIR/check_weather_e2e.py Weather.json"
+    timeout: 60
+    score_from_stdout: true
+    weight: 8.0
+    pass_threshold: 1.0

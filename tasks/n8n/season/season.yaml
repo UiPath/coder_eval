@@ -1,0 +1,40 @@
+task_id: n8n-quarter-season
+description: >
+  Create an n8n workflow JSON that exposes a POST webhook taking a quarter (1-4)
+  and returns the corresponding season name. Pure JSON authoring — no n8n CLI,
+  no MCP.
+tags: [n8n, workflow-json, switch, no-cli]
+
+run_limits:
+  max_turns: 30
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+initial_prompt: |
+  Write an n8n workflow JSON at `Season.json`. It should expose a POST webhook
+  taking `quarter` (an integer 1-4) in the body and respond with
+  `{"season": "Spring"|"Summer"|"Fall"|"Winter"}`. Mapping: 1→Spring, 2→Summer,
+  3→Fall, 4→Winter.
+
+  No CLI involved — just the workflow file.
+
+success_criteria:
+  - type: file_exists
+    description: "Season.json exists"
+    path: "Season.json"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Deploy to live n8n, invoke webhook for each quarter, verify season"
+    command: "python3 $TASK_DIR/check_season_e2e.py Season.json"
+    timeout: 60
+    score_from_stdout: true
+    weight: 8.0
+    pass_threshold: 1.0

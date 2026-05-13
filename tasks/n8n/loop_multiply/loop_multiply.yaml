@@ -1,0 +1,38 @@
+task_id: n8n-loop-multiply
+description: >
+  Create an n8n workflow JSON that exposes a POST webhook taking an array of numbers
+  and returns their product. Pure JSON authoring — no n8n CLI, no MCP.
+tags: [n8n, workflow-json, loop, no-cli]
+
+run_limits:
+  max_turns: 30
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+initial_prompt: |
+  Write an n8n workflow JSON at `LoopMultiply.json`. It should expose a POST webhook
+  taking `{"numbers": [int, ...]}` in the body and respond with `{"product": int}` —
+  the product of all numbers in the array.
+
+  No CLI involved — just the workflow file.
+
+success_criteria:
+  - type: file_exists
+    description: "LoopMultiply.json exists"
+    path: "LoopMultiply.json"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Deploy to live n8n, invoke webhook, verify product of array"
+    command: "python3 $TASK_DIR/check_loop_multiply_e2e.py LoopMultiply.json"
+    timeout: 60
+    score_from_stdout: true
+    weight: 8.0
+    pass_threshold: 1.0
