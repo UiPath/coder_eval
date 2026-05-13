@@ -434,7 +434,7 @@ class CommandExecutedCriterion(BaseSuccessCriterion):
 
     Pure data model - checking logic in CommandExecutedChecker._check_impl()
 
-    Example YAML:
+    Example YAML (positive — must run at least once):
         success_criteria:
           - type: "command_executed"
             description: "Agent used curl to fetch weather"
@@ -442,6 +442,24 @@ class CommandExecutedCriterion(BaseSuccessCriterion):
             command_pattern: "curl.*wttr\\.in"
             min_count: 1
             require_success: true
+
+    Example YAML (negative — must NOT run; uses ``min_count: 0`` + ``max_count: 0``):
+        success_criteria:
+          - type: "command_executed"
+            description: "Agent did NOT call the retired endpoint"
+            tool_name: "Bash"
+            command_pattern: "uip\\s+or\\s+users\\s+list"
+            min_count: 0
+            max_count: 0
+
+    Example YAML (bounded range — between 3 and 5 calls):
+        success_criteria:
+          - type: "command_executed"
+            description: "Agent retried the right number of times"
+            tool_name: "Bash"
+            command_pattern: "curl.*api\\.example\\.com"
+            min_count: 3
+            max_count: 5
     """
 
     requires_agent: ClassVar[bool] = True
@@ -451,7 +469,24 @@ class CommandExecutedCriterion(BaseSuccessCriterion):
     command_pattern: str | None = Field(
         default=None, description="Regex to match command parameters. None = any command."
     )
-    min_count: int = Field(default=1, ge=1, description="Minimum matching commands required.")
+    min_count: int = Field(
+        default=1,
+        ge=0,
+        description=(
+            "Minimum matching commands required. ``0`` allows the criterion to "
+            "pass when no commands match (combine with ``max_count: 0`` to "
+            "express ``must NOT match``)."
+        ),
+    )
+    max_count: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Optional maximum matching commands allowed (inclusive). ``None`` "
+            "means no upper bound — the current default. When set, the criterion "
+            "passes iff ``min_count <= match_count <= max_count``."
+        ),
+    )
     require_success: bool = Field(default=False, description="If True, only count successful commands.")
     exclude_pattern: str | None = Field(
         default=None,
@@ -459,6 +494,13 @@ class CommandExecutedCriterion(BaseSuccessCriterion):
             "Regex that must NOT match. Commands matching both command_pattern and exclude_pattern are skipped."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_count_bounds(self) -> CommandExecutedCriterion:
+        """Reject impossible ranges where ``max_count < min_count``."""
+        if self.max_count is not None and self.max_count < self.min_count:
+            raise ValueError(f"max_count ({self.max_count}) must be >= min_count ({self.min_count})")
+        return self
 
 
 class UiPathEvalCriterion(BaseSuccessCriterion):

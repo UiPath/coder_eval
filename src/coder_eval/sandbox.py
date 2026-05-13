@@ -48,6 +48,7 @@ class Sandbox:
         self.venv_dir: Path | None = None
         self._cleanup_on_exit = True
         self.installed_tool_versions: dict[str, str] = {}
+        self._command_base_path: str | None = None
 
     @property
     def _venv_scripts_dir(self) -> Path | None:
@@ -461,26 +462,59 @@ class Sandbox:
                         exc,
                     )
 
+    def set_command_base_path(self, path: str | None) -> None:
+        """Set the parent PATH used by sandbox command checks.
+
+        The orchestrator uses this to align success-criteria commands with the
+        PATH passed to the agent SDK. Sandbox-local venv and node bin entries
+        are still prepended by ``run_command``.
+        """
+        self._command_base_path = path or None
+
+    @property
+    def command_base_path(self) -> str | None:
+        """Read-only view of the configured base PATH (or ``None`` when unset).
+
+        Tests can observe orchestrator-set overrides without touching the
+        underlying private slot. Mutate via :meth:`set_command_base_path`.
+        """
+        return self._command_base_path
+
     def _build_run_command_env(self) -> dict[str, str]:
         """Build the environment for ``run_command``.
 
         Each layer is independent — none breaks if another is absent:
 
         1. Inherit parent env (so agent tools / credentials remain reachable).
-        2. Activate the sandbox virtualenv (if present).
-        3. Prepend ``<sandbox>/node_modules/.bin`` to PATH (if present).
-        4. Pin ``NODE_PATH=""`` so Node's fallback search paths cannot pick
-           up contaminated parent-dir installs (MST-9674). Note: this does
-           NOT disable parent-walking from cwd — that is hard-wired in
-           Node — but it eliminates ``NODE_PATH``-mediated leaks.
-        5. Pin ``NPM_CONFIG_PREFIX`` to a sandbox-scoped directory so any
-           ``npm install`` / ``bun add`` from inside the sandbox writes
-           into the sandbox, not into ``$HOME/node_modules`` where
-           concurrent sandboxes would shadow each other.
-        6. Expose ``TASK_DIR`` for criterion scripts.
+        2. (MST-9265) If the orchestrator has captured the agent's SDK PATH
+           via :meth:`set_command_base_path`, **prepend** it ahead of the
+           host PATH (not replace) — the agent's PATH only needs to win
+           the lookup race for its bundled toolchain, but system binaries
+           (``python``, ``node``, ``/usr/bin/*``) must remain reachable to
+           criteria. Prepend semantics also stay symmetric with the venv /
+           node_bin prepends below.
+        3. Activate the sandbox virtualenv (if present). First-hit-wins:
+           if the agent's PATH already contains the venv scripts dir
+           (likely, since the agent inherits this process's env), this
+           prepend duplicates the entry. Harmless on every OS we target;
+           left explicit so the order stays independent of what the agent
+           SDK happens to inject.
+        4. Prepend ``<sandbox>/node_modules/.bin`` to PATH (if present).
+        5. (MST-9674) Pin ``NODE_PATH=""`` so Node's fallback search paths
+           cannot pick up contaminated parent-dir installs. Note: this
+           does NOT disable parent-walking from cwd — that is hard-wired
+           in Node — but it eliminates ``NODE_PATH``-mediated leaks.
+        6. (MST-9674) Pin ``NPM_CONFIG_PREFIX`` to a sandbox-scoped
+           directory so any ``npm install`` / ``bun add`` from inside the
+           sandbox writes into the sandbox, not into
+           ``$HOME/node_modules`` where concurrent sandboxes would shadow
+           each other.
+        7. Expose ``TASK_DIR`` for criterion scripts.
         """
         assert self.sandbox_dir is not None
         env = os.environ.copy()
+        if self._command_base_path:
+            env["PATH"] = f"{self._command_base_path}{os.pathsep}{env['PATH']}"
         if self.venv_dir:
             env["VIRTUAL_ENV"] = str(self.venv_dir)
             env["PATH"] = f"{self._venv_scripts_dir}{os.pathsep}{env['PATH']}"

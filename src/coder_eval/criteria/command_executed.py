@@ -62,13 +62,11 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
 
         all_commands = [cmd for turn in turn_records for cmd in turn.commands]
 
-        if not all_commands:
-            return CriterionResult(
-                criterion_type=criterion.type,
-                description=criterion.description,
-                score=0.0,
-                details="No commands found in turn records",
-            )
+        # Note: do NOT short-circuit when ``all_commands`` is empty. A
+        # negative-assertion criterion (``min_count: 0`` + ``max_count: 0``)
+        # SHOULD pass here — zero commands trivially satisfies "must not
+        # call X". Falling through into the matching loop sets
+        # ``match_count = 0`` and the scoring branch handles both shapes.
 
         # Compile regex patterns if provided.
         # re.DOTALL so `.` matches newlines — agents commonly write multi-line bash
@@ -137,7 +135,20 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
             matching_commands.append(label)
 
         match_count = len(matching_commands)
-        score = min(1.0, match_count / criterion.min_count)
+
+        # Score model:
+        #   max_count is None  →  fractional towards min_count (legacy behavior).
+        #                         When min_count == 0, the criterion is trivially
+        #                         satisfied (no minimum to hit) and scores 1.0.
+        #   max_count is set   →  binary in-range. Pass iff
+        #                         min_count <= match_count <= max_count.
+        # The "negative assertion" pattern (min_count: 0, max_count: 0) drops
+        # naturally out of the binary branch — it now expresses "must NOT match"
+        # exactly. The model validator already rejects max_count < min_count.
+        if criterion.max_count is None:
+            score = 1.0 if criterion.min_count == 0 else min(1.0, match_count / criterion.min_count)
+        else:
+            score = 1.0 if criterion.min_count <= match_count <= criterion.max_count else 0.0
 
         # Build details
         filters = []
@@ -151,7 +162,11 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
             filters.append(f"exclude=/{criterion.exclude_pattern}/")
         filter_text = ", ".join(filters) if filters else "none"
 
-        details = f"Matched {match_count}/{criterion.min_count} required commands (filters: {filter_text})"
+        if criterion.max_count is None:
+            range_text = f"{match_count}/{criterion.min_count} required"
+        else:
+            range_text = f"{match_count} matches (allowed range {criterion.min_count}..{criterion.max_count})"
+        details = f"Matched {range_text} commands (filters: {filter_text})"
         if matching_commands:
             # Show up to 3 example matches
             examples = matching_commands[:3]

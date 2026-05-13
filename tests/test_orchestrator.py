@@ -1,15 +1,18 @@
 """Tests for the orchestrator."""
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
 
-from coder_eval.models import BedrockRoute, DirectRoute, ProxyRoute
+from coder_eval.models import BedrockRoute, DirectRoute, ProxyRoute, SandboxConfig
 from coder_eval.orchestration.evaluation import create_iteration_snapshot
 from coder_eval.orchestration.task_loader import load_task
 from coder_eval.orchestrator import Orchestrator, _format_routing
+from coder_eval.sandbox import Sandbox
 from coder_eval.utils import get_version_info
+from tests.fixtures.mock_agent import MockAgent
 
 
 def test_format_routing_direct_includes_judge_transport_anthropic():
@@ -94,6 +97,142 @@ def test_record_route_environment_info_proxy(tmp_path):
     info = orchestrator.result.environment_info
     assert info["api_routing"] == "llmgw_proxy"
     assert "judge_transport" not in info  # Direct-only field
+
+
+class _SdkOptionsAgent(MockAgent):
+    """``MockAgent`` subclass that returns a configurable ``get_sdk_options``.
+
+    Used by the PATH-sync tests so the dummy agent satisfies the full
+    ``Agent`` ABC (``start`` / ``communicate`` / ``stop`` / ``get_state``)
+    rather than only the one method ``_sync_…`` happens to call today —
+    keeps the test surface aligned with the production contract.
+    """
+
+    def __init__(self, task, sdk_options):
+        super().__init__(task)
+        self._sdk_options = sdk_options
+
+    def get_sdk_options(self):
+        return self._sdk_options
+
+
+class _AsyncSdkOptionsAgent(MockAgent):
+    """Returns a fresh coroutine every call — mimics ``AsyncMock`` leakage."""
+
+    def get_sdk_options(self):
+        async def _coro():
+            return {"env": {"PATH": "/agent/bin"}}
+
+        return _coro()
+
+
+@pytest.fixture
+def path_sync_orchestrator(tmp_path):
+    """Yield ``(orchestrator, task)`` ready for PATH-sync helper tests.
+
+    Removes the boilerplate (load task, build orchestrator, setup sandbox,
+    cleanup in finally) that the per-test body would otherwise repeat.
+    """
+    task_file = Path("tasks/hello_date.yaml")
+    task, _ = load_task(task_file)
+    task.sandbox = SandboxConfig(driver="tempdir", python=None)
+    orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="t")
+    orchestrator.sandbox = Sandbox(task.sandbox, task_id=task.task_id)
+    orchestrator.sandbox.setup()
+    try:
+        yield orchestrator, task
+    finally:
+        orchestrator.sandbox.cleanup()
+
+
+def test_sync_sandbox_command_path_from_agent_sdk_options(path_sync_orchestrator, monkeypatch, tmp_path):
+    """Happy path: agent SDK PATH wins for criteria ``run_command`` resolution."""
+    from tests._path_helpers import write_uip_shim
+
+    orchestrator, task = path_sync_orchestrator
+    stale_bin = tmp_path / "stale"
+    agent_bin = tmp_path / "agent"
+    stale_bin.mkdir()
+    agent_bin.mkdir()
+    write_uip_shim(stale_bin, "stale")
+    write_uip_shim(agent_bin, "agent")
+    monkeypatch.setenv("PATH", str(stale_bin))
+
+    orchestrator.agent = _SdkOptionsAgent(task, {"env": {"PATH": f"{agent_bin}{os.pathsep}{stale_bin}"}})
+    orchestrator._sync_sandbox_command_path_with_agent()
+
+    exit_code, stdout, _stderr = orchestrator.sandbox.run_command("uip")
+    assert exit_code == 0
+    assert stdout.strip() == "agent"
+
+
+def test_sync_sandbox_command_path_preserves_host_path_for_system_bins(path_sync_orchestrator, monkeypatch, tmp_path):
+    """The agent's narrow PATH must not clobber the host PATH for system bins.
+
+    Locks in the prepend (not replace) semantics flagged HIGH in the
+    multi-model review (PR #249 thread). If a future refactor accidentally
+    re-introduces ``env['PATH'] = base_path`` (replace), this fails because
+    the host's ``/usr/bin``-style binary becomes unreachable.
+    """
+    from tests._path_helpers import write_uip_shim
+
+    orchestrator, task = path_sync_orchestrator
+    # Host PATH carries a `uip` named "host". Agent PATH carries no `uip`.
+    host_bin = tmp_path / "host"
+    agent_bin = tmp_path / "agent"  # intentionally empty
+    host_bin.mkdir()
+    agent_bin.mkdir()
+    write_uip_shim(host_bin, "host")
+    monkeypatch.setenv("PATH", str(host_bin))
+
+    orchestrator.agent = _SdkOptionsAgent(task, {"env": {"PATH": str(agent_bin)}})
+    orchestrator._sync_sandbox_command_path_with_agent()
+
+    # Agent PATH wins for binaries it provides; falls through to host PATH
+    # for binaries it does not. A replace-style implementation would return
+    # exit_code == 1 with the "not found" message.
+    exit_code, stdout, _stderr = orchestrator.sandbox.run_command("uip")
+    assert exit_code == 0
+    assert stdout.strip() == "host"
+
+
+def test_sync_sandbox_command_path_awaitable_sdk_options_is_closed_and_noops(path_sync_orchestrator, caplog):
+    """AsyncMock-style coroutine returns: close, do not leak warnings."""
+    orchestrator, task = path_sync_orchestrator
+    orchestrator.agent = _AsyncSdkOptionsAgent(task)
+    with caplog.at_level("DEBUG", logger="coder_eval.orchestrator"):
+        orchestrator._sync_sandbox_command_path_with_agent()
+    assert orchestrator.sandbox.command_base_path is None
+    # Logged at DEBUG (test-fixture concern), not WARNING.
+    debug_records = [r for r in caplog.records if r.levelname == "DEBUG"]
+    assert any("awaitable" in r.message for r in debug_records)
+    assert not any(r.levelname == "WARNING" for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "sdk_options, warn_substring",
+    [
+        pytest.param(None, None, id="none-sdk-options"),
+        pytest.param(["unexpected"], "non-dict", id="non-dict-sdk-options"),
+        pytest.param({"env": {"HOME": "/tmp"}}, None, id="missing-path-key"),
+        pytest.param({"env": "not-a-dict"}, None, id="env-not-a-dict"),
+    ],
+)
+def test_sync_sandbox_command_path_contract_edge_cases_are_noops(
+    path_sync_orchestrator, caplog, sdk_options, warn_substring
+):
+    """Edge inputs leave ``command_base_path`` unset, with the right log level."""
+    orchestrator, task = path_sync_orchestrator
+    orchestrator.agent = _SdkOptionsAgent(task, sdk_options)
+    with caplog.at_level("WARNING", logger="coder_eval.orchestrator"):
+        orchestrator._sync_sandbox_command_path_with_agent()
+    assert orchestrator.sandbox.command_base_path is None
+    if warn_substring is None:
+        # Silent no-op — these are valid pre-communicate / sparse-env states.
+        assert not any(r.levelname == "WARNING" for r in caplog.records)
+    else:
+        # Contract violation — must be visible at WARNING.
+        assert any(r.levelname == "WARNING" and warn_substring in r.message for r in caplog.records)
 
 
 def test_orchestrator_load_task():

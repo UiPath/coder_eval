@@ -121,7 +121,14 @@ class TestCommandExecutedCriterion:
         assert "turn_records" in result.error
 
     def test_empty_commands(self):
-        """Test when turns exist but have no commands."""
+        """Turns exist but have no commands ⇒ score by the same ``min_count`` math.
+
+        Used to short-circuit on a separate ``"No commands found"`` branch, but
+        that branch returned ``0.0`` even when ``min_count=0`` (the negative-
+        assertion pattern), which was wrong. Now the empty case falls through
+        to the normal scoring math: with ``min_count=1`` and zero matches, the
+        score is ``0/1 = 0.0`` and the details mirror the positive shape.
+        """
         sandbox = MockSandbox()
         turn_records = [_make_turn(commands=[])]
 
@@ -134,7 +141,7 @@ class TestCommandExecutedCriterion:
         result = checker.check(criterion, turn_records=turn_records)
 
         assert result.score == 0.0
-        assert "No commands found" in result.details
+        assert "0/1 required" in result.details
 
     def test_tool_name_filter(self):
         """Test that tool_name filter only counts matching tools."""
@@ -593,3 +600,153 @@ class TestCommandExecutedCriterion:
 
         assert result.score == 1.0
         assert "1/1" in result.details
+
+    # ------------------------------------------------------------------
+    # max_count + min_count=0 negative-assertion patterns.
+    # Skills task YAMLs (uipath-skills) use these to express "must NOT call
+    # the retired command". Before max_count landed, those YAMLs failed
+    # pydantic validation in the `Validate Skills Task YAMLs` CI gate.
+    # ------------------------------------------------------------------
+
+    def test_negative_assertion_passes_when_no_match(self):
+        """min_count=0, max_count=0 ⇒ pass iff the pattern never matched."""
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(
+                        tool_name="Bash",
+                        parameters={"command": "uip admin users list --search alice"},
+                        tool_id="t-ok-1",
+                    ),
+                ]
+            ),
+        ]
+
+        criterion = CommandExecutedCriterion(
+            description="Agent did NOT use the retired `uip or users list` path",
+            tool_name="Bash",
+            command_pattern=r"uip\s+or\s+users\s+list",
+            min_count=0,
+            max_count=0,
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion, turn_records=turn_records)
+
+        assert result.score == 1.0
+        assert "allowed range 0..0" in result.details
+
+    def test_negative_assertion_fails_when_pattern_matched(self):
+        """min_count=0, max_count=0 ⇒ a single retired-call match fails the gate."""
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(
+                        tool_name="Bash",
+                        parameters={"command": "uip or users list"},
+                        tool_id="t-retired-1",
+                    ),
+                ]
+            ),
+        ]
+
+        criterion = CommandExecutedCriterion(
+            description="Agent did NOT use the retired `uip or users list` path",
+            tool_name="Bash",
+            command_pattern=r"uip\s+or\s+users\s+list",
+            min_count=0,
+            max_count=0,
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion, turn_records=turn_records)
+
+        assert result.score == 0.0
+        assert "allowed range 0..0" in result.details
+
+    def test_bounded_range_pass_inside(self):
+        """min_count=2, max_count=4 ⇒ 3 matches sits inside the range."""
+        sandbox = MockSandbox()
+        commands = [
+            _make_command(
+                tool_name="Bash",
+                parameters={"command": "curl https://api/x"},
+                tool_id=f"t-{i}",
+            )
+            for i in range(3)
+        ]
+        turn_records = [_make_turn(commands)]
+
+        criterion = CommandExecutedCriterion(
+            description="Agent retried within bounds",
+            tool_name="Bash",
+            command_pattern=r"curl",
+            min_count=2,
+            max_count=4,
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion, turn_records=turn_records)
+
+        assert result.score == 1.0
+        assert "allowed range 2..4" in result.details
+
+    def test_bounded_range_fails_when_over_cap(self):
+        """min_count=2, max_count=4 ⇒ 5 matches busts the cap (score 0.0)."""
+        sandbox = MockSandbox()
+        commands = [
+            _make_command(
+                tool_name="Bash",
+                parameters={"command": "curl https://api/x"},
+                tool_id=f"t-{i}",
+            )
+            for i in range(5)
+        ]
+        turn_records = [_make_turn(commands)]
+
+        criterion = CommandExecutedCriterion(
+            description="Agent must not retry more than 4 times",
+            tool_name="Bash",
+            command_pattern=r"curl",
+            min_count=2,
+            max_count=4,
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion, turn_records=turn_records)
+
+        assert result.score == 0.0
+
+    def test_min_count_zero_no_max_is_trivially_satisfied(self):
+        """min_count=0 with no max_count ⇒ score 1.0 even when no commands match."""
+        sandbox = MockSandbox()
+        turn_records = [_make_turn([])]
+
+        criterion = CommandExecutedCriterion(
+            description="Optional command (passes vacuously)",
+            tool_name="Bash",
+            command_pattern=r"never-matches",
+            min_count=0,
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion, turn_records=turn_records)
+
+        # No turn-records-empty short-circuit: turns exist but commands is [].
+        # Score should be 1.0 by the min_count==0 rule, not 0/0 ZeroDivisionError.
+        assert result.score == 1.0
+
+    def test_invalid_range_rejected_at_model_level(self):
+        """max_count < min_count must be rejected by the Pydantic validator."""
+        import pytest as _pytest
+        from pydantic import ValidationError
+
+        with _pytest.raises(ValidationError, match=r"max_count.*must be >= min_count"):
+            CommandExecutedCriterion(
+                description="impossible range",
+                command_pattern="x",
+                min_count=5,
+                max_count=2,
+            )

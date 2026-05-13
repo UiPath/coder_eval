@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import datetime
+from inspect import isawaitable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -782,6 +783,71 @@ class Orchestrator:
         if self.sandbox and self.sandbox.installed_tool_versions:
             self.result.environment_info["installed_tools"] = self.sandbox.installed_tool_versions
 
+    def _sync_sandbox_command_path_with_agent(self) -> None:
+        """Align criteria command PATH with the PATH used for the last agent query.
+
+        Scope: called from the per-turn happy path in ``run_iteration`` /
+        ``run_simulation`` *after* a successful ``_communicate_with_retry``.
+        That means three pre-existing gaps remain (none introduced by this
+        change):
+
+        - **Agent crash / turn timeout** — the sync is skipped because the
+          method never returns; criteria fall back to ambient
+          ``os.environ['PATH']``. Acceptable: a crashed agent's SDK PATH may
+          itself be unreliable.
+        - **Evaluate-only mode** (``orchestrator.run_evaluation_only``) — no
+          agent turn runs, so no sync. Criteria use ambient PATH, same as
+          before this change.
+        - **Before the first turn** — same reason; first criterion check
+          always runs after at least one turn under the normal flow.
+
+        Sandbox-setup-time sync (using ``SandboxConfig.mock_path_dirs``) was
+        considered but rejected: the agent SDK's effective PATH is only
+        knowable after the SDK initializes, so a setup-time sync would
+        capture only the configured prepends, not the full agent env.
+
+        ``Agent.get_sdk_options()`` is declared synchronous on the ABC
+        (``dict[str, Any] | None``). ``AsyncMock``-based test fixtures
+        return a coroutine for *any* attribute access regardless of the
+        declared signature; ``isawaitable`` plus ``coroutine.close()``
+        prevents leaking ``RuntimeWarning: coroutine was never awaited``
+        from those fixtures into unrelated tests. That is a test-fixture
+        concern, not a production contract violation — logged at DEBUG.
+        Returning a non-dict-and-non-None *is* a production contract
+        violation and is logged at WARNING.
+        """
+        if self.agent is None or self.sandbox is None:
+            return
+        sdk_options = self.agent.get_sdk_options()
+        if sdk_options is None:
+            return
+        if isawaitable(sdk_options):
+            close = getattr(sdk_options, "close", None)
+            if callable(close):
+                # ``coroutine.close()`` only documents ``RuntimeError``
+                # (raised when invoked on a currently-running coroutine,
+                # which cannot apply here). Narrow the suppress accordingly
+                # so genuine unexpected exceptions still propagate.
+                with suppress(RuntimeError):
+                    close()
+            logger.debug(
+                "Agent.get_sdk_options() returned an awaitable; skipping PATH sync."
+                + " (Typical when tests stub the agent with AsyncMock.)"
+            )
+            return
+        if not isinstance(sdk_options, dict):
+            logger.warning(
+                "Agent.get_sdk_options() returned non-dict %r; skipping PATH sync.",
+                type(sdk_options).__name__,
+            )
+            return
+        sdk_env = sdk_options.get("env")
+        if not isinstance(sdk_env, dict):
+            return
+        path = sdk_env.get("PATH")
+        if isinstance(path, str) and path:
+            self.sandbox.set_command_base_path(path)
+
     def _record_route_environment_info(self) -> None:
         """Persist resolved route + judge transport into ``result.environment_info``.
 
@@ -1013,6 +1079,7 @@ class Orchestrator:
             operation_label="Agent communication",
         )
         self.result.turns.append(turn_record)
+        self._sync_sandbox_command_path_with_agent()
 
         safe_emit(
             self.stream_callback,
@@ -1212,6 +1279,7 @@ class Orchestrator:
                     operation_label=f"Agent communication (sim turn {turns_completed})",
                 )
                 self.result.turns.append(turn_record)
+                self._sync_sandbox_command_path_with_agent()
                 dialog_pairs.append((current_prompt, turn_record.agent_output or ""))
                 agent_meta_parts = []
                 if turn_record.duration_seconds is not None:

@@ -118,6 +118,46 @@ def test_sandbox_run_command_task_dir_absent():
         sandbox.cleanup()
 
 
+def test_sandbox_run_command_uses_agent_command_base_path(monkeypatch, tmp_path):
+    """Criteria commands can be pinned to the PATH seen by the agent."""
+    from tests._path_helpers import write_uip_shim
+
+    stale_bin = tmp_path / "stale"
+    agent_bin = tmp_path / "agent"
+    stale_bin.mkdir()
+    agent_bin.mkdir()
+    write_uip_shim(stale_bin, "stale")
+    write_uip_shim(agent_bin, "agent")
+    monkeypatch.setenv("PATH", str(stale_bin))
+
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_agent_path")
+
+    try:
+        sandbox.setup()
+        sandbox.set_command_base_path(f"{agent_bin}{os.pathsep}{stale_bin}")
+
+        exit_code, stdout, _stderr = sandbox.run_command("uip")
+        assert exit_code == 0
+        assert stdout.strip() == "agent"
+        # Read-only view exposes the same value `set_…` accepts.
+        assert sandbox.command_base_path == f"{agent_bin}{os.pathsep}{stale_bin}"
+    finally:
+        sandbox.cleanup()
+
+
+def test_write_uip_shim_rejects_unsafe_labels(tmp_path):
+    """Foot-gun guard: labels are restricted to a safe ASCII alphabet."""
+    import pytest as _pytest
+
+    from tests._path_helpers import write_uip_shim
+
+    with _pytest.raises(ValueError, match="label must match"):
+        write_uip_shim(tmp_path, "; rm -rf /")
+    with _pytest.raises(ValueError, match="label must match"):
+        write_uip_shim(tmp_path, "$(whoami)")
+
+
 def test_sandbox_with_packages():
     """Test sandbox with package installation."""
     from coder_eval.models import PythonEnvConfig
