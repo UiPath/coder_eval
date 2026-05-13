@@ -1,16 +1,16 @@
-"""Tests for timeout-related model fields."""
+"""Tests for timeout-related model fields (now under RunLimits)."""
 
 import pytest
 from pydantic import ValidationError
 
-from coder_eval.models import TaskDefinition
+from coder_eval.models import RunLimits, TaskDefinition
 from coder_eval.orchestration.config import BatchRunConfig
 
 
-class TestTaskDefinitionTurnTimeout:
-    """Test turn_timeout on TaskDefinition (moved from AgentConfig in 2026-05)."""
+class TestRunLimitsTurnTimeout:
+    """Test turn_timeout on RunLimits (relocated from TaskDefinition in 2026-05-12)."""
 
-    def _minimal_task(self, **overrides):
+    def _minimal_task(self, turn_timeout=None):
         defaults = {
             "task_id": "test",
             "description": "test task",
@@ -19,40 +19,37 @@ class TestTaskDefinitionTurnTimeout:
             "sandbox": {"driver": "tempdir"},
             "success_criteria": [{"type": "file_exists", "path": "test.py", "description": "test.py must exist"}],
         }
-        defaults.update(overrides)
+        if turn_timeout is not None:
+            defaults["run_limits"] = RunLimits(turn_timeout=turn_timeout)
         return TaskDefinition(**defaults)
 
     def test_default_is_none(self):
-        """turn_timeout defaults to None (disabled)."""
+        """run_limits defaults to None when no caps are set."""
         task = self._minimal_task()
-        assert task.turn_timeout is None
+        assert task.run_limits is None
 
     def test_valid_value(self):
         """Accepts valid turn_timeout >= 10."""
         task = self._minimal_task(turn_timeout=60)
-        assert task.turn_timeout == 60
+        assert task.run_limits is not None
+        assert task.run_limits.turn_timeout == 60
 
     def test_minimum_value(self):
         """Accepts minimum valid value of 10."""
         task = self._minimal_task(turn_timeout=10)
-        assert task.turn_timeout == 10
+        assert task.run_limits is not None
+        assert task.run_limits.turn_timeout == 10
 
     def test_below_minimum_rejected(self):
         """Rejects turn_timeout < 10."""
         with pytest.raises(ValidationError, match="greater than or equal to 10"):
-            self._minimal_task(turn_timeout=5)
-
-    def test_none_accepted(self):
-        """Explicitly passing None is accepted."""
-        task = self._minimal_task(turn_timeout=None)
-        assert task.turn_timeout is None
+            RunLimits(turn_timeout=5)
 
 
-class TestTaskDefinitionTaskTimeout:
-    """Test task_timeout on TaskDefinition."""
+class TestRunLimitsTaskTimeout:
+    """Test task_timeout on RunLimits."""
 
-    def _minimal_task(self, **overrides):
-        """Create a minimal valid TaskDefinition."""
+    def _minimal_task(self, task_timeout=None):
         defaults = {
             "task_id": "test",
             "description": "test task",
@@ -61,37 +58,35 @@ class TestTaskDefinitionTaskTimeout:
             "sandbox": {"driver": "tempdir"},
             "success_criteria": [{"type": "file_exists", "path": "test.py", "description": "test.py must exist"}],
         }
-        defaults.update(overrides)
+        if task_timeout is not None:
+            defaults["run_limits"] = RunLimits(task_timeout=task_timeout)
         return TaskDefinition(**defaults)
 
     def test_default_is_none(self):
-        """task_timeout defaults to None (disabled)."""
+        """run_limits defaults to None when no caps are set."""
         task = self._minimal_task()
-        assert task.task_timeout is None
+        assert task.run_limits is None
 
     def test_valid_value(self):
         """Accepts valid task_timeout >= 30."""
         task = self._minimal_task(task_timeout=300)
-        assert task.task_timeout == 300
+        assert task.run_limits is not None
+        assert task.run_limits.task_timeout == 300
 
     def test_minimum_value(self):
         """Accepts minimum valid value of 30."""
         task = self._minimal_task(task_timeout=30)
-        assert task.task_timeout == 30
+        assert task.run_limits is not None
+        assert task.run_limits.task_timeout == 30
 
     def test_below_minimum_rejected(self):
         """Rejects task_timeout < 30."""
         with pytest.raises(ValidationError, match="greater than or equal to 30"):
-            self._minimal_task(task_timeout=10)
-
-    def test_none_accepted(self):
-        """Explicitly passing None is accepted."""
-        task = self._minimal_task(task_timeout=None)
-        assert task.task_timeout is None
+            RunLimits(task_timeout=10)
 
 
 class TestBatchRunConfigTimeouts:
-    """Test timeout fields on BatchRunConfig."""
+    """Test timeout override fields on BatchRunConfig (CLI flags)."""
 
     def test_defaults_are_none(self):
         """Both timeout overrides default to None."""

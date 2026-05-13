@@ -33,7 +33,8 @@ description: >
   per model variant. All 5 tasks run in parallel for maximum throughput.
 
 defaults:
-  task_timeout: 2400
+  run_limits:
+    task_timeout: 2400
 
   agent:
     type: claude-code
@@ -43,24 +44,27 @@ defaults:
 variants:
   # ── Sonnet (fast, cost-effective baseline) ──────────────────────────────
   - variant_id: plugin_cli
-    max_turns: 1000
-    turn_timeout: 1200
+    run_limits:
+      max_turns: 1000
+      turn_timeout: 1200
     agent:
       plugins:
         - type: "local"
           path: "$CLI_PLUGIN_PATH"
 
   - variant_id: plugin_json
-    max_turns: 1000
-    turn_timeout: 1200
+    run_limits:
+      max_turns: 1000
+      turn_timeout: 1200
     agent:
       plugins:
         - type: "local"
           path: "$JSON_PLUGIN_PATH"
 
   - variant_id: plugin_refactored
-    max_turns: 1000
-    turn_timeout: 1200
+    run_limits:
+      max_turns: 1000
+      turn_timeout: 1200
     agent:
       plugins:
         - type: "local"

@@ -6,7 +6,8 @@ description: >
   .flow should have 20+ nodes.
 tags: [flow-v2, fil, generate, http, decision, loop, multi-connector, complex]
 
-task_timeout: 1800
+run_limits:
+  task_timeout: 1800
 
 agent:
   type: claude-code

@@ -42,9 +42,6 @@ def _make_task(*, run_limits: RunLimits | None = None) -> TaskDefinition:
         agent=agent,
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(type="file_exists", path="x", description="x must exist")],
-        max_turns=None,
-        turn_timeout=None,
-        task_timeout=None,
         run_limits=run_limits,
         reference=None,
     )

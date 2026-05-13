@@ -2,7 +2,7 @@
 
 Mirrors `test_task_definition_hoist_shim.py` but for `ExperimentDefaults.agent`
 and `ExperimentVariant.agent` dicts (typed `dict[str, Any]`, bypass Pydantic
-validation). Scheduled removal: 2026-05-15.
+validation). Hoisted values land in `run_limits.*`. Scheduled removal: 2026-05-20.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from coder_eval.models import (
     ExperimentDefinition,
     ExperimentVariant,
     FileExistsCriterion,
+    RunLimits,
     SandboxConfig,
     TaskDefinition,
 )
@@ -39,7 +40,7 @@ def _empty_default_experiment() -> ExperimentDefinition:
 
 
 def test_default_experiment_agent_max_turns_hoisted() -> None:
-    """Hoisted `default_experiment.defaults.agent.max_turns` reaches `resolved_task.max_turns`."""
+    """Hoisted `default_experiment.defaults.agent.max_turns` lands in `resolved_task.run_limits.max_turns`."""
     default_exp = ExperimentDefinition(
         experiment_id="default",
         defaults=ExperimentDefaults(agent={"type": "claude-code", "max_turns": 30}),
@@ -54,14 +55,15 @@ def test_default_experiment_agent_max_turns_hoisted() -> None:
         warnings.simplefilter("always")
         resolved, lineage, _ = resolve_task_for_variant(default_exp, _make_task(), experiment, experiment.variants[0])
 
-    assert resolved.max_turns == 30
-    assert lineage["max_turns"].source == "default-agent-deprecated"
+    assert resolved.run_limits is not None
+    assert resolved.run_limits.max_turns == 30
+    assert lineage["run_limits.max_turns"].source == "default-agent-deprecated"
     deps = [w for w in captured if issubclass(w.category, DeprecationWarning)]
     assert any("max_turns" in str(w.message) for w in deps)
 
 
 def test_variant_agent_turn_timeout_hoisted() -> None:
-    """Hoisted `variant.agent.turn_timeout` reaches `resolved_task.turn_timeout`."""
+    """Hoisted `variant.agent.turn_timeout` lands in `resolved_task.run_limits.turn_timeout`."""
     default_exp = _empty_default_experiment()
     experiment = ExperimentDefinition(
         experiment_id="test",
@@ -72,17 +74,21 @@ def test_variant_agent_turn_timeout_hoisted() -> None:
         warnings.simplefilter("always")
         resolved, lineage, _ = resolve_task_for_variant(default_exp, _make_task(), experiment, experiment.variants[0])
 
-    assert resolved.turn_timeout == 60
-    assert lineage["turn_timeout"].source == "variant-agent-deprecated"
+    assert resolved.run_limits is not None
+    assert resolved.run_limits.turn_timeout == 60
+    assert lineage["run_limits.turn_timeout"].source == "variant-agent-deprecated"
     deps = [w for w in captured if issubclass(w.category, DeprecationWarning)]
     assert any("turn_timeout" in str(w.message) for w in deps)
 
 
-def test_top_level_wins_over_agent_hoisted_within_same_layer() -> None:
-    """When both `defaults.max_turns` and `defaults.agent.max_turns` are set, top-level wins."""
+def test_run_limits_wins_over_agent_hoisted_within_same_layer() -> None:
+    """When both `defaults.run_limits.max_turns` and `defaults.agent.max_turns` are set, run_limits wins."""
     default_exp = ExperimentDefinition(
         experiment_id="default",
-        defaults=ExperimentDefaults(agent={"type": "claude-code", "max_turns": 99}, max_turns=20),
+        defaults=ExperimentDefaults(
+            agent={"type": "claude-code", "max_turns": 99},
+            run_limits=RunLimits(max_turns=20),
+        ),
         variants=[ExperimentVariant(variant_id="default")],
     )
     experiment = ExperimentDefinition(
@@ -94,21 +100,20 @@ def test_top_level_wins_over_agent_hoisted_within_same_layer() -> None:
         warnings.simplefilter("always")
         resolved, lineage, _ = resolve_task_for_variant(default_exp, _make_task(), experiment, experiment.variants[0])
 
-    # The top-level max_turns=20 wins; the under-agent value is silently dropped
-    # (but still emitted a DeprecationWarning at hoist time).
-    assert resolved.max_turns == 20
-    assert lineage["max_turns"].source == "default"
+    assert resolved.run_limits is not None
+    assert resolved.run_limits.max_turns == 20
+    assert lineage["run_limits.max_turns"].source == "default"
 
 
-def test_variant_top_level_wins_over_variant_agent_hoisted() -> None:
-    """Variant top-level `max_turns` always wins over variant `agent.max_turns`."""
+def test_variant_run_limits_wins_over_variant_agent_hoisted() -> None:
+    """Variant `run_limits.max_turns` always wins over variant `agent.max_turns` in the same layer."""
     default_exp = _empty_default_experiment()
     experiment = ExperimentDefinition(
         experiment_id="test",
         variants=[
             ExperimentVariant(
                 variant_id="v1",
-                max_turns=15,
+                run_limits=RunLimits(max_turns=15),
                 agent={"max_turns": 999},
             )
         ],
@@ -118,15 +123,16 @@ def test_variant_top_level_wins_over_variant_agent_hoisted() -> None:
         warnings.simplefilter("always")
         resolved, lineage, _ = resolve_task_for_variant(default_exp, _make_task(), experiment, experiment.variants[0])
 
-    assert resolved.max_turns == 15
-    assert lineage["max_turns"].source == "variant"
+    assert resolved.run_limits is not None
+    assert resolved.run_limits.max_turns == 15
+    assert lineage["run_limits.max_turns"].source == "variant"
 
 
 def test_4_layer_precedence_max_turns() -> None:
-    """default < experiment-defaults < task < variant for `max_turns`."""
+    """default < experiment-defaults < task < variant for `run_limits.max_turns`."""
     default_exp = ExperimentDefinition(
         experiment_id="default",
-        defaults=ExperimentDefaults(agent={"type": "claude-code"}, max_turns=10),
+        defaults=ExperimentDefaults(agent={"type": "claude-code"}, run_limits=RunLimits(max_turns=10)),
         variants=[ExperimentVariant(variant_id="default")],
     )
     task = TaskDefinition(
@@ -135,26 +141,29 @@ def test_4_layer_precedence_max_turns() -> None:
         initial_prompt="x",
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(type="file_exists", path="x.py", description="x.py exists")],
-        max_turns=30,
+        run_limits=RunLimits(max_turns=30),
     )
-    # Variant overrides task (highest pre-CLI layer).
     experiment = ExperimentDefinition(
         experiment_id="test",
-        defaults=ExperimentDefaults(max_turns=20),
-        variants=[ExperimentVariant(variant_id="v1", max_turns=40)],
+        defaults=ExperimentDefaults(run_limits=RunLimits(max_turns=20)),
+        variants=[ExperimentVariant(variant_id="v1", run_limits=RunLimits(max_turns=40))],
     )
 
     resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
 
-    assert resolved.max_turns == 40
-    assert lineage["max_turns"].source == "variant"
+    assert resolved.run_limits is not None
+    assert resolved.run_limits.max_turns == 40
+    assert lineage["run_limits.max_turns"].source == "variant"
 
 
 def test_no_legacy_shape_anywhere_emits_no_warning() -> None:
-    """Pure new-shape resolution emits no DeprecationWarning."""
+    """Pure run_limits-based resolution emits no DeprecationWarning."""
     default_exp = ExperimentDefinition(
         experiment_id="default",
-        defaults=ExperimentDefaults(agent={"type": "claude-code"}, max_turns=20, turn_timeout=300),
+        defaults=ExperimentDefaults(
+            agent={"type": "claude-code"},
+            run_limits=RunLimits(max_turns=20, turn_timeout=300),
+        ),
         variants=[ExperimentVariant(variant_id="default")],
     )
     experiment = ExperimentDefinition(

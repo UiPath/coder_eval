@@ -86,6 +86,8 @@ agent:
   type: "claude-code"
   permission_mode: "acceptEdits"
   allowed_tools: ["Bash", "Read", "Write"]  # Minimal set needed
+
+run_limits:
   max_turns: 15                              # Estimate: ~2x expected commands
 ```
 

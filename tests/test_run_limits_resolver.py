@@ -1,4 +1,4 @@
-"""Tests for run_limits 4-layer config resolution (no CLI layer)."""
+"""Tests for run_limits 4-layer config resolution with field-merge semantics."""
 
 from __future__ import annotations
 
@@ -43,7 +43,16 @@ class TestRunLimitsResolver:
         resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
         assert resolved.run_limits is not None
         assert resolved.run_limits.max_usd == 1.0
-        assert lineage["run_limits"].source == "default"
+        assert lineage["run_limits.max_usd"].source == "default"
+
+    def test_resolve_max_turns_from_default(self):
+        default_exp = _default_exp(RunLimits(max_turns=20))
+        task = _make_task()
+        exp = ExperimentDefinition(experiment_id="e", variants=[ExperimentVariant(variant_id="v")])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
+        assert resolved.run_limits is not None
+        assert resolved.run_limits.max_turns == 20
+        assert lineage["run_limits.max_turns"].source == "default"
 
     def test_experiment_defaults_overrides_default(self):
         default_exp = _default_exp(RunLimits(max_usd=1.0))
@@ -56,7 +65,7 @@ class TestRunLimitsResolver:
         resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
         assert resolved.run_limits is not None
         assert resolved.run_limits.max_usd == 2.0
-        assert lineage["run_limits"].source == "experiment-defaults"
+        assert lineage["run_limits.max_usd"].source == "experiment-defaults"
 
     def test_task_overrides_experiment_defaults(self):
         default_exp = _default_exp(RunLimits(max_usd=1.0))
@@ -69,7 +78,17 @@ class TestRunLimitsResolver:
         resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
         assert resolved.run_limits is not None
         assert resolved.run_limits.max_usd == 5.0
-        assert lineage["run_limits"].source == "task"
+        assert lineage["run_limits.max_usd"].source == "task"
+
+    def test_task_run_limits_overrides_default_per_key(self):
+        """Task setting one key keeps the default for other keys (field merge)."""
+        default_exp = _default_exp(RunLimits(max_turns=20, task_timeout=600))
+        task = _make_task(run_limits={"max_turns": 5})
+        exp = ExperimentDefinition(experiment_id="e", variants=[ExperimentVariant(variant_id="v")])
+        resolved, _, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
+        assert resolved.run_limits is not None
+        assert resolved.run_limits.max_turns == 5
+        assert resolved.run_limits.task_timeout == 600
 
     def test_variant_overrides_task(self):
         default_exp = _default_exp()
@@ -81,22 +100,23 @@ class TestRunLimitsResolver:
         resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
         assert resolved.run_limits is not None
         assert resolved.run_limits.max_usd == 10.0
-        assert lineage["run_limits"].source == "variant"
+        assert lineage["run_limits.max_usd"].source == "variant"
 
-    def test_variant_whole_object_replace(self):
-        """Variant run_limits REPLACES task's block in full, not field-merge."""
+    def test_variant_run_limits_field_merges_with_task(self):
+        """Variant override of one key leaves other task-set keys intact (field-merge tell-tale)."""
         default_exp = _default_exp()
-        task = _make_task(run_limits={"max_input_tokens": 1000, "max_usd": 5.0})
+        task = _make_task(run_limits={"max_turns": 5, "max_usd": 0.5})
         exp = ExperimentDefinition(
             experiment_id="e",
-            variants=[ExperimentVariant(variant_id="v", run_limits=RunLimits(max_output_tokens=500))],
+            variants=[ExperimentVariant(variant_id="v", run_limits=RunLimits(max_usd=1.0))],
         )
-        resolved, _, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
         assert resolved.run_limits is not None
-        # task's max_input_tokens and max_usd are gone; only variant's max_output_tokens remains.
-        assert resolved.run_limits.max_input_tokens is None
-        assert resolved.run_limits.max_usd is None
-        assert resolved.run_limits.max_output_tokens == 500
+        # Variant only overrides max_usd; task's max_turns survives.
+        assert resolved.run_limits.max_turns == 5
+        assert resolved.run_limits.max_usd == 1.0
+        assert lineage["run_limits.max_turns"].source == "task"
+        assert lineage["run_limits.max_usd"].source == "variant"
 
     def test_variant_unset_does_not_clear_task_block(self):
         """When variant.run_limits is None (default), task's block is preserved."""
@@ -110,24 +130,103 @@ class TestRunLimitsResolver:
         assert resolved.run_limits is not None
         assert resolved.run_limits.max_usd == 5.0
 
+    def test_legacy_agent_max_turns_field_merges(self):
+        """Legacy variant.agent.max_turns hoists into run_limits.max_turns and field-merges."""
+        default_exp = _default_exp()
+        task = _make_task()
+        with pytest.warns(DeprecationWarning):
+            exp = ExperimentDefinition(
+                experiment_id="e",
+                variants=[
+                    ExperimentVariant(
+                        variant_id="v",
+                        agent={"type": "claude-code", "max_turns": 7},
+                        run_limits=RunLimits(max_usd=0.5),
+                    )
+                ],
+            )
+            resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
+        assert resolved.run_limits is not None
+        assert resolved.run_limits.max_turns == 7
+        assert resolved.run_limits.max_usd == 0.5
+        assert lineage["run_limits.max_turns"].source == "variant-agent-deprecated"
+
     def test_no_run_limits_anywhere(self):
         default_exp = _default_exp()
         task = _make_task()
         exp = ExperimentDefinition(experiment_id="e", variants=[ExperimentVariant(variant_id="v")])
         resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
         assert resolved.run_limits is None
-        assert "run_limits" not in lineage
+        # No lineage entries under run_limits.* either.
+        assert not any(k.startswith("run_limits") for k in lineage)
+
+    def test_lineage_uses_dotted_keys(self):
+        """Lineage keys are dotted (run_limits.max_turns), not the bare 'max_turns'."""
+        default_exp = _default_exp()
+        task = _make_task(run_limits={"max_turns": 5})
+        exp = ExperimentDefinition(experiment_id="e", variants=[ExperimentVariant(variant_id="v")])
+        _, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
+        assert "run_limits.max_turns" in lineage
+        assert "max_turns" not in lineage
 
     def test_lineage_value_is_serializable(self):
-        """lineage.value must be JSON-serializable (model_dump'd, not the Pydantic obj)."""
+        """lineage.value must be JSON-serializable (scalar from dotted key)."""
         import json
 
         default_exp = _default_exp()
         task = _make_task(run_limits={"max_usd": 5.0})
         exp = ExperimentDefinition(experiment_id="e", variants=[ExperimentVariant(variant_id="v")])
         _, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
-        # Must be JSON-serializable.
-        json.dumps(lineage["run_limits"].value)
+        json.dumps(lineage["run_limits.max_usd"].value)
+
+    def test_unset_non_optional_field_does_not_clobber_lower_layer(self):
+        """A variant patch must not wipe ``count_cached_input`` set by the task.
+
+        Regression guard: ``RunLimits.count_cached_input`` is ``bool = False``
+        (not Optional). ``model_dump(exclude_none=True)`` would always include
+        the default ``False`` and overwrite a ``True`` set in a lower-precedence
+        layer. The resolver uses ``exclude_unset=True`` precisely so a layer
+        that didn't mention the field leaves earlier values intact.
+        """
+        default_exp = _default_exp()
+        task = _make_task(run_limits={"count_cached_input": True, "max_turns": 10})
+        # Variant overrides ONLY max_usd — must not touch count_cached_input.
+        exp = ExperimentDefinition(
+            experiment_id="e",
+            variants=[ExperimentVariant(variant_id="v", run_limits=RunLimits(max_usd=1.0))],
+        )
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
+        assert resolved.run_limits is not None
+        assert resolved.run_limits.count_cached_input is True, (
+            "variant's default count_cached_input=False clobbered the task-level True"
+        )
+        assert resolved.run_limits.max_turns == 10
+        assert resolved.run_limits.max_usd == 1.0
+        # Lineage should only credit fields the variant actually set.
+        assert "run_limits.count_cached_input" not in lineage or (
+            lineage["run_limits.count_cached_input"].source == "task"
+        )
+
+    def test_hoist_shim_preserves_unset_marker_on_runlimits_instance(self):
+        """Programmatic ``TaskDefinition(run_limits=RunLimits())`` must not leak defaults.
+
+        Regression guard: the hoist shim normalizes a ``RunLimits`` instance back
+        into a dict so the three legacy-shape jobs can append into it. If that
+        dump uses ``exclude_none=True`` instead of ``exclude_unset=True``, the
+        default ``count_cached_input=False`` is written into the dict, then
+        Pydantic re-validates and marks it as explicit on the rebuilt model.
+        ``_merge_rl(task.run_limits, "task")`` then clobbers a True set in
+        the default-experiment layer.
+        """
+        default_exp = _default_exp(RunLimits(count_cached_input=True))
+        # Task constructed with an empty RunLimits instance — no user-set fields.
+        task = _make_task(run_limits=RunLimits())
+        exp = ExperimentDefinition(experiment_id="e", variants=[ExperimentVariant(variant_id="v")])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
+        assert resolved.run_limits is not None
+        assert resolved.run_limits.count_cached_input is True, (
+            "empty RunLimits() at the task layer clobbered default-experiment count_cached_input=True"
+        )
 
 
 class TestSubCounterAggregates:
@@ -152,8 +251,6 @@ class TestSubCounterAggregates:
             task_results=[],
             framework_version="0.1.0",
         )
-        # Sub-counters are slices of tasks_failed (3), not additional buckets.
-        # Invariant: 2 + 3 + 0 == 5 still holds even though sub-counters are 2 + 1.
         assert rs.tasks_token_budget_exceeded + rs.tasks_cost_budget_exceeded <= rs.tasks_failed
 
     def test_run_summary_subcounters_default_zero(self):
@@ -238,7 +335,6 @@ class TestReportRendering:
             framework_version="0.1.0",
         )
         md = ReportGenerator.generate_markdown(rs)
-        # No parenthetical breakdown.
         assert "incl." not in md
         assert "**Failed**: 1\n" in md
 

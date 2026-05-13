@@ -11,7 +11,8 @@ initial_prompt: |
   must be exactly 2 lines (one newline between them, no trailing blank line).
 tags: [smoke, smoke-pass, judge]
 
-max_turns: 2
+run_limits:
+  max_turns: 2
 
 agent:
   type: "claude-code"

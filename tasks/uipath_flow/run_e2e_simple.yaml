@@ -5,7 +5,8 @@ description: >
   with no step-by-step guidance.
 tags: [flow, uipcli, simple, e2e]
 
-max_turns: 15
+run_limits:
+  max_turns: 15
 agent:
   type: claude-code
   permission_mode: acceptEdits

@@ -8,7 +8,8 @@ description: >
   apples-to-apples cross-tool comparison.
 tags: [n8n, generate, http, decision, loop, multi-connector, complex]
 
-task_timeout: 1800
+run_limits:
+  task_timeout: 1800
 
 agent:
   type: claude-code

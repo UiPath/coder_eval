@@ -4,7 +4,8 @@ description: >
   using uip CLI with no step-by-step guidance.
 tags: [flow, uipcli, simple]
 
-max_turns: 12
+run_limits:
+  max_turns: 12
 agent:
   type: claude-code
   permission_mode: acceptEdits

@@ -39,9 +39,14 @@ def _write_task_yaml(path: Path, task_id: str, agent: dict | None = None, **extr
 
 
 def _make_default_experiment() -> ExperimentDefinition:
+    from coder_eval.models import RunLimits
+
     return ExperimentDefinition(
         experiment_id="default",
-        defaults=ExperimentDefaults(agent={"type": "claude-code", "permission_mode": "acceptEdits", "max_turns": 3}),
+        defaults=ExperimentDefaults(
+            agent={"type": "claude-code", "permission_mode": "acceptEdits"},
+            run_limits=RunLimits(max_turns=3),
+        ),
         variants=[ExperimentVariant(variant_id="default")],
     )
 
@@ -88,7 +93,7 @@ class TestScalarLineage:
         )
 
     def test_task_only(self):
-        from coder_eval.models import TaskDefinition
+        from coder_eval.models import RunLimits, TaskDefinition
 
         task = TaskDefinition(
             task_id="test",
@@ -96,7 +101,7 @@ class TestScalarLineage:
             initial_prompt="do",
             sandbox={"driver": "tempdir"},
             success_criteria=[{"type": "file_exists", "path": "t.py", "description": "x"}],
-            task_timeout=600,
+            run_limits=RunLimits(task_timeout=600),
         )
         experiment = ExperimentDefinition(
             experiment_id="test",
@@ -105,11 +110,11 @@ class TestScalarLineage:
         _resolved, lineage, _ = resolve_task_for_variant(
             self._no_scalars_default_experiment(), task, experiment, experiment.variants[0]
         )
-        assert lineage["task_timeout"].source == "task"
-        assert lineage["task_timeout"].value == 600
+        assert lineage["run_limits.task_timeout"].source == "task"
+        assert lineage["run_limits.task_timeout"].value == 600
 
     def test_variant_overrides_experiment_base(self):
-        from coder_eval.models import TaskDefinition
+        from coder_eval.models import RunLimits, TaskDefinition
 
         task = TaskDefinition(
             task_id="test",
@@ -120,16 +125,16 @@ class TestScalarLineage:
         )
         experiment = ExperimentDefinition(
             experiment_id="test",
-            defaults=ExperimentDefaults(task_timeout=300, turn_timeout=60),
-            variants=[ExperimentVariant(variant_id="v1", task_timeout=120)],
+            defaults=ExperimentDefaults(run_limits=RunLimits(task_timeout=300, turn_timeout=60)),
+            variants=[ExperimentVariant(variant_id="v1", run_limits=RunLimits(task_timeout=120))],
         )
         _resolved, lineage, _ = resolve_task_for_variant(
             self._no_scalars_default_experiment(), task, experiment, experiment.variants[0]
         )
-        assert lineage["task_timeout"].source == "variant"
-        assert lineage["task_timeout"].value == 120
-        assert lineage["turn_timeout"].source == "experiment-defaults"
-        assert lineage["turn_timeout"].value == 60
+        assert lineage["run_limits.task_timeout"].source == "variant"
+        assert lineage["run_limits.task_timeout"].value == 120
+        assert lineage["run_limits.turn_timeout"].source == "experiment-defaults"
+        assert lineage["run_limits.turn_timeout"].value == 60
 
     def test_pydantic_default_not_tracked(self):
         """Scalars using Pydantic defaults (not explicitly set) should not appear in lineage."""
@@ -149,38 +154,12 @@ class TestScalarLineage:
         _resolved, lineage, _ = resolve_task_for_variant(
             self._no_scalars_default_experiment(), task, experiment, experiment.variants[0]
         )
-        assert "task_timeout" not in lineage
-        assert "turn_timeout" not in lineage
-
-    def test_explicit_null_task_timeout_tracked(self):
-        """Explicitly setting task_timeout to null should appear in lineage, overriding default."""
-        from coder_eval.models import TaskDefinition
-
-        task = TaskDefinition(
-            task_id="test",
-            description="test",
-            initial_prompt="do",
-            sandbox={"driver": "tempdir"},
-            success_criteria=[{"type": "file_exists", "path": "t.py", "description": "x"}],
-            task_timeout=None,
-        )
-        default_exp = ExperimentDefinition(
-            experiment_id="default",
-            defaults=ExperimentDefaults(agent={"type": "claude-code"}, task_timeout=600),
-            variants=[ExperimentVariant(variant_id="default")],
-        )
-        experiment = ExperimentDefinition(
-            experiment_id="test",
-            variants=[ExperimentVariant(variant_id="v1")],
-        )
-        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.task_timeout is None
-        assert lineage["task_timeout"].source == "task"
-        assert lineage["task_timeout"].value is None
+        assert "run_limits.task_timeout" not in lineage
+        assert "run_limits.turn_timeout" not in lineage
 
     def test_default_experiment_scalars_tracked(self):
         """Default experiment scalar overrides appear in lineage as source='default'."""
-        from coder_eval.models import TaskDefinition
+        from coder_eval.models import RunLimits, TaskDefinition
 
         task = TaskDefinition(
             task_id="test",
@@ -191,7 +170,9 @@ class TestScalarLineage:
         )
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            defaults=ExperimentDefaults(agent={"type": "claude-code"}, task_timeout=600, turn_timeout=300),
+            defaults=ExperimentDefaults(
+                agent={"type": "claude-code"}, run_limits=RunLimits(task_timeout=600, turn_timeout=300)
+            ),
             variants=[ExperimentVariant(variant_id="default")],
         )
         experiment = ExperimentDefinition(
@@ -199,14 +180,14 @@ class TestScalarLineage:
             variants=[ExperimentVariant(variant_id="v1")],
         )
         _resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert lineage["task_timeout"].source == "default"
-        assert lineage["task_timeout"].value == 600
-        assert lineage["turn_timeout"].source == "default"
-        assert lineage["turn_timeout"].value == 300
+        assert lineage["run_limits.task_timeout"].source == "default"
+        assert lineage["run_limits.task_timeout"].value == 600
+        assert lineage["run_limits.turn_timeout"].source == "default"
+        assert lineage["run_limits.turn_timeout"].value == 300
 
     def test_task_overrides_default_experiment(self):
         """Explicitly-set task scalars override default experiment scalars."""
-        from coder_eval.models import TaskDefinition
+        from coder_eval.models import RunLimits, TaskDefinition
 
         task = TaskDefinition(
             task_id="test",
@@ -214,11 +195,11 @@ class TestScalarLineage:
             initial_prompt="do",
             sandbox={"driver": "tempdir"},
             success_criteria=[{"type": "file_exists", "path": "t.py", "description": "x"}],
-            task_timeout=900,
+            run_limits=RunLimits(task_timeout=900),
         )
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            defaults=ExperimentDefaults(agent={"type": "claude-code"}, task_timeout=600),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, run_limits=RunLimits(task_timeout=600)),
             variants=[ExperimentVariant(variant_id="default")],
         )
         experiment = ExperimentDefinition(
@@ -226,8 +207,8 @@ class TestScalarLineage:
             variants=[ExperimentVariant(variant_id="v1")],
         )
         _resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert lineage["task_timeout"].source == "task"
-        assert lineage["task_timeout"].value == 900
+        assert lineage["run_limits.task_timeout"].source == "task"
+        assert lineage["run_limits.task_timeout"].value == 900
 
 
 class TestResolveTaskForVariantLineage:

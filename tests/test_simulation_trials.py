@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 from coder_eval.models import (
-    ConfigLineageEntry,
     ExperimentDefaults,
     ExperimentDefinition,
     ExperimentVariant,
@@ -14,7 +13,7 @@ from coder_eval.models import (
     TaskDefinition,
 )
 from coder_eval.orchestration.config import BatchRunConfig
-from coder_eval.orchestration.experiment import _expand_trials, resolve_all_tasks, resolve_task_for_variant
+from coder_eval.orchestration.experiment import resolve_all_tasks, resolve_task_for_variant
 
 
 def _base_task_kwargs() -> dict[str, Any]:
@@ -38,90 +37,6 @@ def _sim_block(**overrides: Any) -> SimulationConfig:
     }
     base.update(overrides)
     return SimulationConfig(**base)
-
-
-class TestExpandTrials:
-    def test_single_trial_uses_zero_padded_subdir(self, tmp_path: Path):
-        task = TaskDefinition(**_base_task_kwargs(), simulation=_sim_block(n_trials=1))
-        out = _expand_trials(
-            resolved_task=task,
-            task_file=tmp_path / "task.yaml",
-            variant_id="default",
-            source_yaml="",
-            lineage={},
-            base_run_dir=tmp_path / "runs",
-        )
-        assert len(out) == 1
-        # task_id is NOT suffixed — replicate_index disambiguates siblings via path.
-        assert out[0].task.task_id == "chat-task"
-        assert out[0].replicate_index == 0
-        # Layout uses the shared build_task_run_dir helper: <task>/NN
-        assert out[0].run_dir == tmp_path / "runs" / "default" / "chat-task" / "00"
-
-    def test_multi_trial_expansion(self, tmp_path: Path):
-        task = TaskDefinition(**_base_task_kwargs(), simulation=_sim_block(n_trials=3))
-        out = _expand_trials(
-            resolved_task=task,
-            task_file=tmp_path / "task.yaml",
-            variant_id="v1",
-            source_yaml="",
-            lineage={},
-            base_run_dir=tmp_path / "runs",
-        )
-        assert len(out) == 3
-        # All replicates share the same task_id — disambiguation is by
-        # replicate_index + path, uniform with the single-shot n=1 case.
-        assert [r.task.task_id for r in out] == ["chat-task", "chat-task", "chat-task"]
-        assert [r.replicate_index for r in out] == [0, 1, 2]
-        run_dirs = [r.run_dir for r in out]
-        assert run_dirs == [
-            tmp_path / "runs" / "v1" / "chat-task" / "00",
-            tmp_path / "runs" / "v1" / "chat-task" / "01",
-            tmp_path / "runs" / "v1" / "chat-task" / "02",
-        ]
-
-    def test_simulation_disabled_treated_as_single(self, tmp_path: Path):
-        """If simulation.enabled=False, n_trials is ignored — it's a single-shot task."""
-        task = TaskDefinition(**_base_task_kwargs(), simulation=_sim_block(enabled=False, n_trials=5))
-        out = _expand_trials(
-            resolved_task=task,
-            task_file=tmp_path / "task.yaml",
-            variant_id="default",
-            source_yaml="",
-            lineage={},
-            base_run_dir=tmp_path / "runs",
-        )
-        assert len(out) == 1
-        assert out[0].replicate_index == 0
-        assert out[0].task.task_id == "chat-task"
-
-    def test_no_simulation_block_single(self, tmp_path: Path):
-        task = TaskDefinition(**_base_task_kwargs())
-        out = _expand_trials(
-            resolved_task=task,
-            task_file=tmp_path / "task.yaml",
-            variant_id="default",
-            source_yaml="",
-            lineage={},
-            base_run_dir=tmp_path / "runs",
-        )
-        assert len(out) == 1
-        assert out[0].replicate_index == 0
-
-    def test_trials_have_independent_lineage_dicts(self, tmp_path: Path):
-        task = TaskDefinition(**_base_task_kwargs(), simulation=_sim_block(n_trials=2))
-        shared_lineage = {"marker": ConfigLineageEntry(value="original", source="default")}
-        out = _expand_trials(
-            resolved_task=task,
-            task_file=tmp_path / "task.yaml",
-            variant_id="v",
-            source_yaml="",
-            lineage=shared_lineage,
-            base_run_dir=tmp_path / "runs",
-        )
-        # Mutating one trial's lineage must not affect siblings
-        out[0].config_lineage["touched_by_trial_0"] = ConfigLineageEntry(value=1, source="task")
-        assert "touched_by_trial_0" not in out[1].config_lineage
 
 
 class TestSimulationMergeAcrossLayers:

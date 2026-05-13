@@ -9,7 +9,8 @@ description: >
   handling across all integration points.
 tags: [flow, uipcli, generate, complexity-analysis, 100-nodes]
 
-turn_timeout: 1200
+run_limits:
+  turn_timeout: 1200
 agent:
   type: claude-code
   permission_mode: acceptEdits

@@ -131,8 +131,8 @@ def _hoist_agent_timing_dict(
     agent_dict: dict[str, Any] | None,
     *,
     layer_label: str,
-) -> tuple[dict[str, Any] | None, int | None, int | None]:
-    """Pop legacy ``max_turns``/``turn_timeout`` out of an agent dict and return them as scalars.
+) -> tuple[dict[str, Any] | None, dict[str, int]]:
+    """Pop legacy ``max_turns``/``turn_timeout`` out of an agent dict.
 
     Mirrors ``TaskDefinition._hoist_legacy_agent_timing`` for experiment-side
     agent dicts (``ExperimentDefaults.agent``, ``ExperimentVariant.agent``)
@@ -141,27 +141,31 @@ def _hoist_agent_timing_dict(
     Emits a single ``DeprecationWarning`` per hoisted field. ``layer_label``
     is included in the warning text so users can pinpoint which layer is on
     the legacy shape (e.g. ``"experiment defaults"``, ``"variant 'sonnet'"``).
-    Scheduled removal: 2026-05-15.
+    Scheduled removal: 2026-05-20.
 
     Returns:
-        Tuple of ``(cleaned_dict_or_None, max_turns, turn_timeout)``. The
-        cleaned dict is ``None`` when the input was ``None`` or when removing
-        the timing keys leaves it empty.
+        Tuple of ``(cleaned_dict_or_None, run_limits_patch)``. The cleaned
+        dict is ``None`` when the input was ``None`` or when removing the
+        timing keys leaves it empty. ``run_limits_patch`` is a partial dict
+        keyed by ``RunLimits`` field names; empty when no hoisting occurred.
     """
     if agent_dict is None:
-        return None, None, None
+        return None, {}
     cleaned = dict(agent_dict)
-    max_turns = cleaned.pop("max_turns", None)
-    turn_timeout = cleaned.pop("turn_timeout", None)
-    for name, val in (("max_turns", max_turns), ("turn_timeout", turn_timeout)):
-        if val is not None:
+    patch: dict[str, int] = {}
+    for name in ("max_turns", "turn_timeout"):
+        if name in cleaned:
+            val = cleaned.pop(name)
+            if val is None:
+                continue
+            patch[name] = val
             warnings.warn(
                 f"{name!r} under {layer_label} agent: is deprecated and will be removed on "
-                + "2026-05-15; move it to the experiment defaults / variant top level.",
+                + f"2026-05-20; move it to run_limits.{name}.",
                 DeprecationWarning,
                 stacklevel=3,
             )
-    return (cleaned or None), max_turns, turn_timeout
+    return (cleaned or None), patch
 
 
 def _merge_agent_dicts(*layers: dict[str, Any] | None) -> dict[str, Any]:
@@ -413,17 +417,18 @@ def resolve_task_for_variant(
     """
     # Layer 1-4 raw agent dicts. Hoist legacy max_turns/turn_timeout out of the
     # experiment-side dicts up front (task.agent is already pre-hoisted by
-    # TaskDefinition._hoist_legacy_agent_timing). The hoisted values feed into
-    # the unified scalar resolution below alongside the canonical top-level fields.
-    default_agent, default_agent_mt, default_agent_tt = _hoist_agent_timing_dict(
+    # TaskDefinition._hoist_legacy_agent_timing into task.run_limits). The
+    # hoisted patches feed into the field-merge accumulator below alongside
+    # the canonical RunLimits blocks.
+    default_agent, default_agent_rl_patch = _hoist_agent_timing_dict(
         default_experiment.defaults.agent if default_experiment.defaults else None,
         layer_label="default experiment defaults",
     )
-    exp_defaults_agent, exp_defaults_agent_mt, exp_defaults_agent_tt = _hoist_agent_timing_dict(
+    exp_defaults_agent, exp_defaults_agent_rl_patch = _hoist_agent_timing_dict(
         experiment.defaults.agent if experiment.defaults else None,
         layer_label="experiment defaults",
     )
-    variant_agent_clean, variant_agent_mt, variant_agent_tt = _hoist_agent_timing_dict(
+    variant_agent_clean, variant_agent_rl_patch = _hoist_agent_timing_dict(
         variant.agent,
         layer_label=f"variant '{variant.variant_id}'",
     )
@@ -447,114 +452,53 @@ def resolve_task_for_variant(
         ]
     )
 
-    # Resolve scalar overrides and track lineage simultaneously (4-layer precedence)
-    # Order: default → experiment-defaults → task → variant (task wins over experiment defaults)
-    resolved_task_timeout = task.task_timeout
-    resolved_turn_timeout = task.turn_timeout
-    resolved_max_turns = task.max_turns
-    resolved_run_limits: RunLimits | None = task.run_limits
-
+    # Resolve run_limits via field-merge across all 4 layers. Later layers
+    # overwrite individual keys; absent keys leave earlier values intact.
     scalar_lineage: dict[str, ConfigLineageEntry] = {}
-    task_explicit = task.model_fields_set
+    rl_accum: dict[str, Any] = {}
+    rl_lineage: dict[str, ConfigSource] = {}
 
-    # Layer 1: default experiment defaults scalars
-    if (
-        default_experiment.defaults
-        and default_experiment.defaults.task_timeout is not None
-        and "task_timeout" not in task_explicit
-    ):
-        resolved_task_timeout = default_experiment.defaults.task_timeout
-        scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="default")
-    if (
-        default_experiment.defaults
-        and default_experiment.defaults.run_limits is not None
-        and "run_limits" not in task_explicit
-    ):
-        resolved_run_limits = default_experiment.defaults.run_limits
-        scalar_lineage["run_limits"] = ConfigLineageEntry(value=resolved_run_limits.model_dump(), source="default")
-    # turn_timeout / max_turns: top-level field wins over hoisted-from-agent value
-    # within the same layer (variant precedence rule, applied uniformly).
-    if "turn_timeout" not in task_explicit:
-        if default_experiment.defaults and default_experiment.defaults.turn_timeout is not None:
-            resolved_turn_timeout = default_experiment.defaults.turn_timeout
-            scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=resolved_turn_timeout, source="default")
-        elif default_agent_tt is not None:
-            resolved_turn_timeout = default_agent_tt
-            scalar_lineage["turn_timeout"] = ConfigLineageEntry(
-                value=resolved_turn_timeout, source="default-agent-deprecated"
-            )
-    if "max_turns" not in task_explicit:
-        if default_experiment.defaults and default_experiment.defaults.max_turns is not None:
-            resolved_max_turns = default_experiment.defaults.max_turns
-            scalar_lineage["max_turns"] = ConfigLineageEntry(value=resolved_max_turns, source="default")
-        elif default_agent_mt is not None:
-            resolved_max_turns = default_agent_mt
-            scalar_lineage["max_turns"] = ConfigLineageEntry(
-                value=resolved_max_turns, source="default-agent-deprecated"
-            )
+    def _merge_rl(
+        layer_rl: RunLimits | dict[str, Any] | None,
+        source: ConfigSource,
+    ) -> None:
+        if layer_rl is None:
+            return
+        if isinstance(layer_rl, RunLimits):
+            # exclude_unset (not exclude_none): non-Optional fields like
+            # count_cached_input have a default of False, so exclude_none
+            # would always include them in the patch, clobbering a True from
+            # a lower-precedence layer that DID set it. exclude_unset emits
+            # only the fields the caller explicitly provided.
+            patch = layer_rl.model_dump(exclude_unset=True)
+        else:
+            patch = {k: v for k, v in layer_rl.items() if v is not None}
+        for k, v in patch.items():
+            rl_accum[k] = v
+            rl_lineage[k] = source
 
-    # Layer 2: experiment defaults scalars (overrides default, but task can still override these)
-    if experiment.defaults and experiment.defaults.task_timeout is not None and "task_timeout" not in task_explicit:
-        resolved_task_timeout = experiment.defaults.task_timeout
-        scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="experiment-defaults")
-    if experiment.defaults and experiment.defaults.run_limits is not None and "run_limits" not in task_explicit:
-        resolved_run_limits = experiment.defaults.run_limits
-        scalar_lineage["run_limits"] = ConfigLineageEntry(
-            value=resolved_run_limits.model_dump(), source="experiment-defaults"
-        )
-    if "turn_timeout" not in task_explicit:
-        if experiment.defaults and experiment.defaults.turn_timeout is not None:
-            resolved_turn_timeout = experiment.defaults.turn_timeout
-            scalar_lineage["turn_timeout"] = ConfigLineageEntry(
-                value=resolved_turn_timeout, source="experiment-defaults"
-            )
-        elif exp_defaults_agent_tt is not None:
-            resolved_turn_timeout = exp_defaults_agent_tt
-            scalar_lineage["turn_timeout"] = ConfigLineageEntry(
-                value=resolved_turn_timeout, source="experiment-defaults-agent-deprecated"
-            )
-    if "max_turns" not in task_explicit:
-        if experiment.defaults and experiment.defaults.max_turns is not None:
-            resolved_max_turns = experiment.defaults.max_turns
-            scalar_lineage["max_turns"] = ConfigLineageEntry(value=resolved_max_turns, source="experiment-defaults")
-        elif exp_defaults_agent_mt is not None:
-            resolved_max_turns = exp_defaults_agent_mt
-            scalar_lineage["max_turns"] = ConfigLineageEntry(
-                value=resolved_max_turns, source="experiment-defaults-agent-deprecated"
-            )
+    # Within each layer, merge the legacy agent-hoisted patch FIRST so the
+    # canonical run_limits block wins on conflict (preserves the existing
+    # "top-level wins over agent-hoisted in the same layer" precedence rule).
+    # Layer 1: default experiment defaults
+    _merge_rl(default_agent_rl_patch, "default-agent-deprecated")
+    if default_experiment.defaults:
+        _merge_rl(default_experiment.defaults.run_limits, "default")
+    # Layer 2: experiment defaults
+    _merge_rl(exp_defaults_agent_rl_patch, "experiment-defaults-agent-deprecated")
+    if experiment.defaults:
+        _merge_rl(experiment.defaults.run_limits, "experiment-defaults")
+    # Layer 3: task (its own agent-level hoist already happened inside
+    # TaskDefinition._hoist_legacy_agent_timing).
+    _merge_rl(task.run_limits, "task")
+    # Layer 4: variant
+    _merge_rl(variant_agent_rl_patch, "variant-agent-deprecated")
+    _merge_rl(variant.run_limits, "variant")
 
-    # Layer 3: task-explicit scalars (override experiment defaults)
-    if "task_timeout" in task_explicit:
-        scalar_lineage["task_timeout"] = ConfigLineageEntry(value=task.task_timeout, source="task")
-    if "turn_timeout" in task_explicit:
-        scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=task.turn_timeout, source="task")
-    if "max_turns" in task_explicit:
-        scalar_lineage["max_turns"] = ConfigLineageEntry(value=task.max_turns, source="task")
-    if "run_limits" in task_explicit and task.run_limits is not None:
-        scalar_lineage["run_limits"] = ConfigLineageEntry(value=task.run_limits.model_dump(), source="task")
+    resolved_run_limits = RunLimits(**rl_accum) if rl_accum else None
 
-    # Layer 4: variant scalars (highest precedence before CLI). Top-level always
-    # wins over the agent-hoisted value within the variant layer.
-    if variant.task_timeout is not None:
-        resolved_task_timeout = variant.task_timeout
-        scalar_lineage["task_timeout"] = ConfigLineageEntry(value=resolved_task_timeout, source="variant")
-    if variant.turn_timeout is not None:
-        resolved_turn_timeout = variant.turn_timeout
-        scalar_lineage["turn_timeout"] = ConfigLineageEntry(value=resolved_turn_timeout, source="variant")
-    elif variant_agent_tt is not None:
-        resolved_turn_timeout = variant_agent_tt
-        scalar_lineage["turn_timeout"] = ConfigLineageEntry(
-            value=resolved_turn_timeout, source="variant-agent-deprecated"
-        )
-    if variant.max_turns is not None:
-        resolved_max_turns = variant.max_turns
-        scalar_lineage["max_turns"] = ConfigLineageEntry(value=resolved_max_turns, source="variant")
-    elif variant_agent_mt is not None:
-        resolved_max_turns = variant_agent_mt
-        scalar_lineage["max_turns"] = ConfigLineageEntry(value=resolved_max_turns, source="variant-agent-deprecated")
-    if variant.run_limits is not None:
-        resolved_run_limits = variant.run_limits
-        scalar_lineage["run_limits"] = ConfigLineageEntry(value=resolved_run_limits.model_dump(), source="variant")
+    for k, source in rl_lineage.items():
+        scalar_lineage[f"run_limits.{k}"] = ConfigLineageEntry(value=rl_accum[k], source=source)
 
     # Resolve template_sources: task base + experiment defaults overlays + variant overlays (append semantics)
     base_sources: list[TemplateSource] = list(task.sandbox.template_sources or [])
@@ -598,9 +542,6 @@ def resolve_task_for_variant(
     resolved_task = task.model_copy(
         update={
             "agent": resolved_agent,
-            "task_timeout": resolved_task_timeout,
-            "turn_timeout": resolved_turn_timeout,
-            "max_turns": resolved_max_turns,
             "run_limits": resolved_run_limits,
             "sandbox": resolved_sandbox,
             "post_run": resolved_post_run,
@@ -667,19 +608,26 @@ def _apply_cli_overrides(
         detail = "--permission-mode" if config.permission_mode is not None else ".env DEFAULT_PERMISSION_MODE"
         _record("agent.permission_mode", effective_perm, detail)
 
+    # Run-limits overrides (CLI > .env > task YAML). Field-merge into the
+    # existing run_limits block so a CLI flag for one key doesn't drop others.
+    # exclude_unset preserves user-set Booleans like count_cached_input
+    # without polluting rl_base with default-False values that would survive
+    # the {**rl_base, **rl_patch} merge below.
+    rl_base = task.run_limits.model_dump(exclude_unset=True) if task.run_limits else {}
+    rl_patch: dict[str, Any] = {}
     effective_max_turns = config.max_turns if config.max_turns is not None else app_settings.default_max_turns
     if effective_max_turns is not None:
-        task.max_turns = effective_max_turns
+        rl_patch["max_turns"] = effective_max_turns
         detail = "--max-turns" if config.max_turns is not None else ".env DEFAULT_MAX_TURNS"
-        _record("max_turns", effective_max_turns, detail)
-
-    # Timeout overrides (CLI > task YAML)
+        _record("run_limits.max_turns", effective_max_turns, detail)
     if config.task_timeout is not None:
-        task.task_timeout = config.task_timeout
-        _record("task_timeout", config.task_timeout, "--task-timeout")
+        rl_patch["task_timeout"] = config.task_timeout
+        _record("run_limits.task_timeout", config.task_timeout, "--task-timeout")
     if config.turn_timeout is not None:
-        task.turn_timeout = config.turn_timeout
-        _record("turn_timeout", config.turn_timeout, "--turn-timeout")
+        rl_patch["turn_timeout"] = config.turn_timeout
+        _record("run_limits.turn_timeout", config.turn_timeout, "--turn-timeout")
+    if rl_patch:
+        task.run_limits = RunLimits(**{**rl_base, **rl_patch})
 
     # Tool/plugin overrides
     if config.allowed_tools is not None:
@@ -741,51 +689,6 @@ def resolve_task_files(
     # Resolve relative template_sources paths
     if task.sandbox.template_sources:
         resolve_template_source_paths(task.sandbox.template_sources, exp_dir)
-
-
-def _expand_trials(
-    resolved_task: TaskDefinition,
-    task_file: Path,
-    variant_id: str,
-    source_yaml: str,
-    lineage: dict[str, ConfigLineageEntry],
-    base_run_dir: Path,
-) -> list[ResolvedTask]:
-    """Expand a single resolved (task, variant) into one ResolvedTask per replicate.
-
-    When the task has ``simulation.enabled`` and ``simulation.n_trials > 1``,
-    each trial becomes an independent ResolvedTask whose ``replicate_index``
-    runs 0..n_trials-1. The run_dir for each replicate is built via
-    ``build_task_run_dir``, so the layout matches the single-shot path shape
-    (``<base>/<variant>/<task>/NN``) uniformly — no asymmetry between n=1 and
-    n>1 cases.
-
-    For single-trial tasks (including all single-shot tasks), this returns
-    exactly one ResolvedTask with ``replicate_index=0``.
-    """
-    sim = resolved_task.simulation
-    n_trials = sim.n_trials if (sim is not None and sim.enabled) else 1
-
-    expanded: list[ResolvedTask] = []
-    for replicate_index in range(n_trials):
-        expanded.append(
-            ResolvedTask(
-                task=resolved_task,
-                task_file=task_file,
-                run_dir=build_task_run_dir(
-                    base_run_dir,
-                    variant_id,
-                    resolved_task.task_id,
-                    replicate_index=replicate_index,
-                ),
-                variant_id=variant_id,
-                source_yaml=source_yaml,
-                # Shallow-copy lineage so sibling replicates don't share a mutable dict
-                config_lineage=dict(lineage) if n_trials > 1 else lineage,
-                replicate_index=replicate_index,
-            )
-        )
-    return expanded
 
 
 def resolve_all_tasks(

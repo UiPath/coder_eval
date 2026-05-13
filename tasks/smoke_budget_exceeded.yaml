@@ -13,8 +13,8 @@ initial_prompt: |
 # Unsatisfiable budget — any real prompt blows this in a single turn.
 run_limits:
   max_input_tokens: 1
+  max_turns: 2
 
-max_turns: 2
 
 tags: [smoke-fail]
 

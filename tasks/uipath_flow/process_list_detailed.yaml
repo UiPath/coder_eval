@@ -4,7 +4,8 @@ description: >
   UiPath flow processes using uip CLI with various options and formats.
 tags: [flow, uipcli, detailed]
 
-max_turns: 12
+run_limits:
+  max_turns: 12
 agent:
   type: claude-code
   permission_mode: acceptEdits

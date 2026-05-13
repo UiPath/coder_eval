@@ -341,7 +341,7 @@ class Orchestrator:
                 # task. The threaded approach is immune to anyio cancel
                 # scopes that were silently swallowing asyncio.wait_for
                 # cancellations during long rate-limited API calls.
-                task_timeout = self.task.task_timeout
+                task_timeout = self.task.run_limits.task_timeout if self.task.run_limits else None
 
                 def _kill_agent_subprocess_sync() -> None:
                     if self.agent is not None:
@@ -816,8 +816,9 @@ class Orchestrator:
         agent = self.agent
         # Local rebind: pyright doesn't carry "is not None" narrowing into closures.
         result = self.result
-        turn_timeout = self.task.turn_timeout
-        max_turns = self.task.max_turns
+        run_limits = self.task.run_limits
+        turn_timeout = run_limits.turn_timeout if run_limits else None
+        max_turns = run_limits.max_turns if run_limits else None
 
         agent_callback: StreamCallback | None = None
         if self.stream_callback is not None:
@@ -1041,7 +1042,7 @@ class Orchestrator:
             self.result.max_turns_exhausted = True
             logger.warning(
                 "Agent exhausted max_turns (%s) without passing criteria.",
-                self.task.max_turns,
+                self.task.run_limits.max_turns if self.task.run_limits else None,
             )
 
         # Budget gate runs AFTER criteria so partial-credit visibility is preserved.

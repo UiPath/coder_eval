@@ -7,10 +7,11 @@ description: >
 initial_prompt: |
   Create a UiPath flow that does a weekly risk scan of open Salesforce opportunities. An agent should review each opportunity and score the risk level. High-risk deals get escalated to a Slack sales channel with a follow-up task created, medium-risk deals notify the owner via Slack DM, and all deals get their risk level written back to Salesforce.
 tags: [flow, integration, complex, agent]
-task_timeout: 2400
+run_limits:
+  max_turns: 100
+  task_timeout: 2400
+  turn_timeout: 1200
 
-max_turns: 100
-turn_timeout: 1200
 agent:
   type: "claude-code"
   permission_mode: "acceptEdits"

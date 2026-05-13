@@ -9,8 +9,10 @@ description: |
 variants:
   - variant_id: turns-low
     description: "Variant overriding max_turns to a lower value."
-    max_turns: 1
+    run_limits:
+      max_turns: 1
 
   - variant_id: turns-mid
     description: "Variant overriding max_turns to a higher value."
-    max_turns: 2
+    run_limits:
+      max_turns: 2

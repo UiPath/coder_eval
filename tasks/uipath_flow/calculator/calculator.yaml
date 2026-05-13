@@ -4,7 +4,8 @@ description: >
   skill — no CLI, pure JSON authoring with bundled schemas.
 tags: [flow, flow-json, generate, no-cli]
 
-max_turns: 30
+run_limits:
+  max_turns: 30
 agent:
   type: claude-code
   permission_mode: acceptEdits

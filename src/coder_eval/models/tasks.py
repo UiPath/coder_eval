@@ -338,6 +338,8 @@ class PreRunCommand(BaseModel):
 class TaskDefinition(BaseModel):
     """Complete definition of an evaluation task."""
 
+    model_config = ConfigDict(extra="forbid")
+
     task_id: str = Field(description="Unique identifier for this task")
     description: str = Field(description="Human-readable description of what the task is testing")
     initial_prompt: str | None = Field(
@@ -371,26 +373,10 @@ class TaskDefinition(BaseModel):
     )
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
     success_criteria: list[SuccessCriterion] = Field(description="List of criteria that must all pass for task success")
-    max_turns: int | None = Field(
-        default=None,
-        gt=0,
-        description="Maximum agent inner-loop turns per iteration. None = SDK default.",
-    )
-    turn_timeout: int | None = Field(
-        default=None,
-        ge=10,
-        description="Maximum seconds per agent communicate() call. None = no limit.",
-    )
-    task_timeout: int | None = Field(
-        default=None,
-        ge=30,
-        description="Maximum seconds for the entire evaluation loop (all iterations). None = no limit.",
-    )
     run_limits: RunLimits | None = Field(
         default=None,
         description=(
-            "Budget caps (tokens/USD) that abort the task when exceeded. "
-            "Checked after each completed agent turn. See RunLimits."
+            "Run-time caps (turns, wall-clock, tokens, USD) that abort the task when exceeded. See RunLimits."
         ),
     )
     reference: ReferenceSource | None = Field(
@@ -448,30 +434,108 @@ class TaskDefinition(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _hoist_legacy_agent_timing(cls, data: Any) -> Any:
-        """Back-compat: lift max_turns/turn_timeout from agent: to top level.
+        """Back-compat shim for legacy task-YAML shapes.
 
-        Scheduled removal: 2026-05-15. See plan
-        c/2026-05-07-move-agent-timing-to-task.md.
+        Three jobs, all scheduled for removal on 2026-05-20:
+
+        1. Lift ``max_turns`` / ``turn_timeout`` from ``agent:`` to
+           ``run_limits:`` (the original c/2026-05-07 migration).
+        2. Lift top-level ``task_timeout`` / ``max_turns`` / ``turn_timeout``
+           into ``run_limits.*`` (the c/2026-05-12 unify-run-limits migration).
+        3. Silently drop ``max_iterations`` / ``llm_reviewer`` from older
+           test-harness YAML formats (both removed in PR #191). Each emits a
+           DeprecationWarning so the drop is visible. (``skip`` is now a
+           real field on ``TaskDefinition`` per #242 and is no longer
+           dropped here.)
+
+        See plan c/2026-05-12-unify-run-limits.md.
         """
         if not isinstance(data, dict):
             return data
-        agent = data.get("agent")
-        if not isinstance(agent, dict):
+
+        # Normalize the optional run_limits sub-block so all three jobs below
+        # can append into the same dict regardless of input shape.
+        run_limits = data.get("run_limits")
+        if run_limits is None:
+            run_limits = {}
+        elif isinstance(run_limits, RunLimits):
+            # exclude_unset (not exclude_none): non-Optional fields like
+            # count_cached_input default to False; exclude_none would write
+            # that default back into the dict, marking it explicit on the
+            # rebuilt RunLimits and clobbering a True set in a lower layer
+            # via _merge_rl's exclude_unset dump.
+            run_limits = run_limits.model_dump(exclude_unset=True)
+        elif isinstance(run_limits, dict):
+            run_limits = dict(run_limits)
+        else:
+            # Unrecognized type — leave it to Pydantic to reject downstream.
             return data
-        for field in ("max_turns", "turn_timeout"):
-            if field in agent:
-                if data.get(field) is not None:
+
+        # Track which keys came from a user-written run_limits: block vs.
+        # were hoisted from a deprecated location — drives the precise error
+        # message when Job 2 detects a conflict (top-level vs agent: vs run_limits:).
+        canonical_keys = set(run_limits)
+        agent_hoisted_keys: set[str] = set()
+
+        # Job 1: hoist legacy agent.{max_turns,turn_timeout}.
+        agent = data.get("agent")
+        if isinstance(agent, dict) and any(f in agent for f in ("max_turns", "turn_timeout")):
+            # Defensive: don't mutate the caller's agent dict — a programmatic
+            # caller may reuse kwargs across multiple TaskDefinition(**kw) calls.
+            agent = dict(agent)
+            for field in ("max_turns", "turn_timeout"):
+                if field in agent:
+                    if field in canonical_keys:
+                        raise ValueError(
+                            f"{field!r} set both under agent: and in run_limits: — "
+                            + "remove the one under agent: (deprecated location)."
+                        )
+                    run_limits[field] = agent.pop(field)
+                    agent_hoisted_keys.add(field)
+                    warnings.warn(
+                        f"{field!r} under agent: is deprecated and will be removed on 2026-05-20; "
+                        + f"move it to run_limits.{field}.",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
+            data["agent"] = agent
+
+        # Job 2: hoist top-level task_timeout / max_turns / turn_timeout
+        # (their pre-2026-05-12 home on TaskDefinition).
+        for field in ("task_timeout", "max_turns", "turn_timeout"):
+            if field in data:
+                if field in agent_hoisted_keys:
                     raise ValueError(
                         f"{field!r} set both at top level and under agent: — "
-                        + "remove the one under agent: (deprecated location)."
+                        + "both are deprecated locations; pick one (preferably move into run_limits:)."
                     )
-                data[field] = agent.pop(field)
+                if field in canonical_keys:
+                    raise ValueError(
+                        f"{field!r} set both at top level and in run_limits: — "
+                        + "remove the top-level entry (deprecated location)."
+                    )
+                run_limits[field] = data.pop(field)
                 warnings.warn(
-                    f"{field!r} under agent: is deprecated and will be removed on 2026-05-15; "
-                    + "move it to the top level of the task definition.",
+                    f"Top-level {field!r} on TaskDefinition is deprecated and will be removed on "
+                    + f"2026-05-20; move it to run_limits.{field}.",
                     DeprecationWarning,
                     stacklevel=2,
                 )
+
+        # Job 3: drop ``max_iterations`` / ``llm_reviewer`` (both removed
+        # in PR #191). ``skip`` is now a real field per #242 — not dropped.
+        for field in ("max_iterations", "llm_reviewer"):
+            if field in data:
+                data.pop(field)
+                warnings.warn(
+                    f"{field!r} on TaskDefinition is not honoured by coder_eval and will be "
+                    + "rejected outright on 2026-05-20; remove it from the YAML.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+
+        if run_limits:
+            data["run_limits"] = run_limits
         return data
 
     @model_validator(mode="after")

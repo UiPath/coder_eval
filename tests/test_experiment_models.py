@@ -31,13 +31,15 @@ class TestExperimentVariant:
         assert variant.agent == {"model": "claude-opus-4-20250514"}
 
     def test_variant_with_all_fields(self):
+        from coder_eval.models import RunLimits
+
         variant = ExperimentVariant(
             variant_id="fast",
-            agent={"model": "claude-sonnet-4-20250514", "max_turns": 5},
-            task_timeout=120,
-            turn_timeout=30,
+            agent={"model": "claude-sonnet-4-20250514"},
+            run_limits=RunLimits(max_turns=5, task_timeout=120, turn_timeout=30),
         )
-        assert variant.task_timeout == 120
+        assert variant.run_limits is not None
+        assert variant.run_limits.task_timeout == 120
 
 
 class TestExperimentDefaults:
@@ -46,12 +48,14 @@ class TestExperimentDefaults:
         assert base.agent is None
 
     def test_base_with_all_fields(self):
+        from coder_eval.models import RunLimits
+
         base = ExperimentDefaults(
-            task_timeout=300,
-            turn_timeout=120,
+            run_limits=RunLimits(task_timeout=300, turn_timeout=120),
             agent={"permission_mode": "bypassPermissions"},
         )
-        assert base.task_timeout == 300
+        assert base.run_limits is not None
+        assert base.run_limits.task_timeout == 300
         assert base.agent == {"permission_mode": "bypassPermissions"}
 
 
@@ -67,17 +71,24 @@ class TestExperimentDefinition:
         assert len(exp.variants) == 1
 
     def test_full_experiment(self):
+        from coder_eval.models import RunLimits
+
         exp = ExperimentDefinition(
             experiment_id="model-comparison",
             description="Compare Sonnet vs Opus",
-            defaults=ExperimentDefaults(task_timeout=300, agent={"permission_mode": "bypassPermissions"}),
+            defaults=ExperimentDefaults(
+                run_limits=RunLimits(task_timeout=300),
+                agent={"permission_mode": "bypassPermissions"},
+            ),
             variants=[
                 ExperimentVariant(variant_id="sonnet", agent={"model": "claude-sonnet-4-20250514"}),
                 ExperimentVariant(variant_id="opus", agent={"model": "claude-opus-4-20250514"}),
             ],
         )
         assert len(exp.variants) == 2
-        assert exp.defaults.task_timeout == 300
+        assert exp.defaults is not None
+        assert exp.defaults.run_limits is not None
+        assert exp.defaults.run_limits.task_timeout == 300
 
     def test_no_variants_raises(self):
         with pytest.raises(ValueError, match="at least 1"):

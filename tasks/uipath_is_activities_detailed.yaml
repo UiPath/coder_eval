@@ -4,7 +4,8 @@ description: >
   Integration Service activities using uip CLI.
 tags: [is, uipcli, detailed]
 
-max_turns: 6
+run_limits:
+  max_turns: 6
 agent:
   type: claude-code
   permission_mode: acceptEdits

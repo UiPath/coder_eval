@@ -6,7 +6,8 @@ description: >
   pass. The converted v1 .flow should have 20+ nodes.
 tags: [flow-csharp, csharp, generate, http, decision, loop, multi-connector, complex]
 
-task_timeout: 1800
+run_limits:
+  task_timeout: 1800
 
 agent:
   type: claude-code

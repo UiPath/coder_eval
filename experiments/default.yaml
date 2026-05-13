@@ -13,27 +13,24 @@ defaults:
   # Overridable per-variant or via --repeats on the CLI.
   # repeats: 1
 
-  # Default max iterations for the evaluation loop (task-level overrides this)
-
-  # Maximum total seconds for the entire task evaluation (all iterations combined)
-  task_timeout: 600
-
-  # Maximum seconds per agent turn / communicate call (null = no limit)
-  turn_timeout: 300
-
-  # Maximum agent inner-loop turns per iteration (null = SDK default)
-  # Typical range in tasks: 3-18 depending on complexity
-  max_turns: 20
-
-  # Run-time budget caps (abort task when exceeded). Optional — leave commented to disable.
-  # Override per-variant via the variant's run_limits block. Per-row dataset multiplication:
-  # a 100-row task with max_usd: 0.10 permits up to $10 cumulative spend.
-  # run_limits:
-  #   max_input_tokens: 100000
-  #   max_output_tokens: 20000
-  #   max_total_tokens: 120000
-  #   max_usd: 0.50
-  #   count_cached_input: false
+  # Run-time caps (turns, wall-clock, tokens, USD). Override per-variant or per-task via
+  # field-merge — a task or variant can set a single key without replacing the whole block.
+  # Per-row dataset multiplication: a 100-row task with max_usd: 0.10 permits up to
+  # $10 cumulative spend.
+  run_limits:
+    # Maximum agent inner-loop turns per iteration (null = SDK default).
+    # Typical range in tasks: 3-18 depending on complexity.
+    max_turns: 20
+    # Maximum total seconds for the entire task evaluation (all iterations combined).
+    task_timeout: 600
+    # Maximum seconds per agent turn / communicate call (null = no limit).
+    turn_timeout: 300
+    # Optional token / cost caps (leave commented to disable).
+    # max_input_tokens: 100000
+    # max_output_tokens: 20000
+    # max_total_tokens: 120000
+    # max_usd: 0.50
+    # count_cached_input: false
 
   agent:
     # Agent type (currently only "claude-code" is supported)

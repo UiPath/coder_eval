@@ -14,7 +14,8 @@ tags: [smoke, smoke-fail]
 # Set to 2 (not 1) so a model that narrates before calling Write still gets a
 # chance to produce out.txt — keeps the failure shape "agent succeeded at the
 # prompt but the unsatisfiable criterion fired" rather than MAX_TURNS_EXHAUSTED.
-max_turns: 2
+run_limits:
+  max_turns: 2
 
 agent:
   type: "claude-code"

@@ -4,7 +4,8 @@ description: >
   directly to a new End node — edit flow JSON directly, no CLI.
 tags: [flow, flow-json, modify, no-cli]
 
-max_turns: 30
+run_limits:
+  max_turns: 30
 agent:
   type: claude-code
   permission_mode: acceptEdits

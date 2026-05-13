@@ -4,10 +4,11 @@ description: >
   who withholds requirements until asked. Tests the agent's ability to
   clarify ambiguous asks before building.
 tags: [flow, cli, generate, simulation, tier-2]
-task_timeout: 2400
+run_limits:
+  max_turns: 40
+  task_timeout: 2400
+  turn_timeout: 1200
 
-max_turns: 40
-turn_timeout: 1200
 agent:
   type: claude-code
   permission_mode: acceptEdits

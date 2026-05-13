@@ -27,12 +27,19 @@ def _make_task(*, turn_timeout: float | None = None, task_timeout: float | None 
     Uses model_construct() to bypass Pydantic's ge= validators when setting
     sub-minimum timeout values needed for fast tests.
     """
+    from coder_eval.models import RunLimits
+
     agent = AgentConfig.model_construct(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
         allowed_tools=None,
         model=None,
         ignore_patterns=[],
+    )
+    run_limits = RunLimits.model_construct(
+        max_turns=None,
+        turn_timeout=turn_timeout,
+        task_timeout=task_timeout,
     )
     task = TaskDefinition.model_construct(
         task_id="timeout_test",
@@ -42,9 +49,7 @@ def _make_task(*, turn_timeout: float | None = None, task_timeout: float | None 
         agent=agent,
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(type="file_exists", path="test.py", description="test.py must exist")],
-        max_turns=None,
-        turn_timeout=turn_timeout,
-        task_timeout=task_timeout,
+        run_limits=run_limits,
         reference=None,
     )
     return task

@@ -4,7 +4,8 @@ description: >
   "use uip commands" — should use uip maestro flow init or uip maestro flow node add.
 tags: [flow, mode-selection, cli]
 
-max_turns: 50
+run_limits:
+  max_turns: 50
 agent:
   type: claude-code
   permission_mode: acceptEdits

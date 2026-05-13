@@ -1,7 +1,6 @@
 # Test task to verify LLM Gateway integration - intentionally fails first iteration
 task_id: test_llmgw_fail
-name: Test LLM Gateway Integration with Failure
-description: Create a specific file to test LLM Gateway reviewer when criteria fail
+description: Test LLM Gateway Integration with Failure — create a specific file to test LLM Gateway reviewer when criteria fail
 tags: [integration, llm-review, network]
 
 agent:

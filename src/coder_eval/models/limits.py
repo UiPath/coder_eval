@@ -2,21 +2,38 @@
 
 from __future__ import annotations
 
-from typing import Self
-
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RunLimits(BaseModel):
-    """Mid-run budget caps that abort a task when exceeded.
+    """Run-time caps that abort a task when exceeded.
 
-    Checked after each completed agent turn. Cumulative across all turns
-    of a single task. Applies to the subject agent only — judge and
-    simulator token spend are not counted.
+    Unifies structural caps (max_turns, task_timeout, turn_timeout) and
+    budget caps (tokens, USD). Budget caps are checked after each completed
+    agent turn and are cumulative across all turns of a single task; they
+    apply to the subject agent only — judge and simulator token spend are
+    not counted.
+
+    Any subset of fields is valid; an empty block is legal.
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    max_turns: int | None = Field(
+        default=None,
+        gt=0,
+        description="Max agent inner-loop turns per iteration. None = SDK default.",
+    )
+    task_timeout: int | None = Field(
+        default=None,
+        ge=30,
+        description="Max seconds for the entire evaluation loop (all iterations). None = no limit.",
+    )
+    turn_timeout: int | None = Field(
+        default=None,
+        ge=10,
+        description="Max seconds per agent communicate() call. None = no limit.",
+    )
     max_input_tokens: int | None = Field(
         default=None,
         ge=1,
@@ -48,22 +65,3 @@ class RunLimits(BaseModel):
             "budgets. Default False — cached reads are typically free."
         ),
     )
-
-    @model_validator(mode="after")
-    def at_least_one_budget(self) -> Self:
-        # Explicit None check (not truthiness) — field constraints already reject
-        # 0 / 0.0, but reading `any((self.max_input_tokens, ...))` invites the
-        # "is 0 falsy here?" question every time. Spell out the intent.
-        if not any(
-            v is not None
-            for v in (
-                self.max_input_tokens,
-                self.max_output_tokens,
-                self.max_total_tokens,
-                self.max_usd,
-            )
-        ):
-            raise ValueError(
-                "run_limits requires at least one of: max_input_tokens, max_output_tokens, max_total_tokens, max_usd"
-            )
-        return self

@@ -22,7 +22,9 @@ class ConfigLineageEntry(BaseModel):
 
     The ``-agent-deprecated`` suffixes mark values that came from the legacy
     location (``agent.max_turns`` / ``agent.turn_timeout`` inside the experiment
-    or task YAML). Removed alongside the hoist shim on 2026-05-15.
+    or task YAML) before the hoist shim deposits them into
+    ``run_limits.max_turns`` / ``run_limits.turn_timeout``. Removed alongside
+    the hoist shim on 2026-05-20.
     """
 
     value: Any

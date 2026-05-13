@@ -4,7 +4,8 @@ description: >
   skill's resource node guides and the uip registry CLI.
 tags: [flow, flow-json, generate, dynamic, tier-3, integration]
 
-max_turns: 50
+run_limits:
+  max_turns: 50
 agent:
   type: claude-code
   permission_mode: acceptEdits

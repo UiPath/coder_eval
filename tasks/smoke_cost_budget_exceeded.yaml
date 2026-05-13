@@ -19,8 +19,8 @@ initial_prompt: |
 
 run_limits:
   max_usd: 0.0001
+  max_turns: 2
 
-max_turns: 2
 
 tags: [smoke-cost-budget]
 

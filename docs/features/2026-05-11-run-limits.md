@@ -1,23 +1,26 @@
-# Run Limits — Token & Cost Budget Enforcement
+# Run Limits — Unified Run-time Caps
 
-Per-task budget caps that abort an evaluation when the subject agent's
-cumulative token usage or USD cost exceeds a declared limit. Distinct
-from `task_timeout` / `turn_timeout` (time-based) and from criteria
-(post-hoc scoring) — this is mid-run resource governance.
+Per-task caps that bound an evaluation along four dimensions: agent
+turns (`max_turns`), wall-clock (`task_timeout` / `turn_timeout`),
+cumulative subject-agent tokens, and USD cost. One conceptual block —
+`run_limits:` — covers all of them.
 
 ## What it does
 
-When a task declares a `run_limits:` block, the orchestrator checks
-cumulative subject-agent token and cost usage **after each completed
-turn**. If any configured cap is exceeded, the task is aborted with one
-of two new final statuses:
+When a task declares a `run_limits:` block, the orchestrator enforces
+caps in two ways:
 
-- `FinalStatus.TOKEN_BUDGET_EXCEEDED` — token cap tripped
-  (`max_input_tokens`, `max_output_tokens`, or `max_total_tokens`).
-- `FinalStatus.COST_BUDGET_EXCEEDED` — cost cap tripped (`max_usd`).
+- **Structural caps** (`max_turns`, `task_timeout`, `turn_timeout`)
+  bound the loop shape and wall-clock. Breaches surface as
+  `FinalStatus.MAX_TURNS_EXHAUSTED` / `FinalStatus.TIMEOUT`.
+- **Budget caps** (`max_input_tokens`, `max_output_tokens`,
+  `max_total_tokens`, `max_usd`) are checked **after each completed
+  turn**. A breach aborts the task with one of two new final statuses:
+  - `FinalStatus.TOKEN_BUDGET_EXCEEDED` — token cap tripped.
+  - `FinalStatus.COST_BUDGET_EXCEEDED` — cost cap tripped.
 
-Both statuses fall through to `FinalStatus.category == "failed"`, so
-they roll up into `tasks_failed` for backward-compatible reporting.
+The budget statuses fall through to `FinalStatus.category == "failed"`,
+so they roll up into `tasks_failed` for backward-compatible reporting.
 Informational sub-counters (`tasks_token_budget_exceeded`,
 `tasks_cost_budget_exceeded`) on `RunSummary` and `VariantAggregate`
 let consumers separate budget breaches from criterion failures without
@@ -25,18 +28,44 @@ post-hoc parsing.
 
 ## How to configure
 
-Budgets are **YAML-only** — there are no CLI flag overrides (a
-deliberate design decision to avoid CLI bloat). The block can live at
-any of three layers and follows the same precedence chain as
-`task_timeout`:
+The block can live at any of four layers and follows the standard
+5-layer precedence chain:
 
 ```
-default experiment defaults → experiment defaults → task → variant
+default experiment defaults → experiment defaults → task → variant → CLI
 ```
 
-The merge is **whole-object replace**, not field-wise — a variant's
-`run_limits:` block replaces the task's block in full. Set it once at
-the appropriate layer.
+### Migration (2026-05-12)
+
+`max_turns`, `task_timeout`, and `turn_timeout` previously lived at
+the top level of `TaskDefinition`, `ExperimentDefaults`, and
+`ExperimentVariant`. They now live inside the `run_limits` block.
+A deprecation shim accepts the old shapes until **2026-05-20**:
+
+- top-level `max_turns:` / `task_timeout:` / `turn_timeout:` on a task
+  → hoisted into `run_limits.<field>` with a `DeprecationWarning`.
+- legacy `agent.max_turns:` / `agent.turn_timeout:` → hoisted into
+  `run_limits.<field>` with a `DeprecationWarning`.
+- `max_iterations:` / `llm_reviewer:` (removed in PR #191) are silently
+  dropped with a `DeprecationWarning` so external tasks still load.
+
+Canonical location is `run_limits.<field>`.
+
+### Field-merge semantics
+
+The merge is **field-wise**: each layer contributes a partial dict;
+later layers overwrite specific keys, leaving keys they don't mention
+intact. A variant that sets `run_limits: {max_usd: 1.0}` overrides
+only `max_usd` — the task's `max_turns` and `task_timeout` survive.
+(This is a behavioral change from the original PR #238 design, which
+did whole-object replace.)
+
+### CLI overrides
+
+The structural caps additionally accept CLI flags:
+`--max-turns` / `--task-timeout` / `--turn-timeout`. They patch into
+`run_limits.*` via the same field merge. Budget caps (tokens, USD)
+remain YAML-only by design.
 
 ### Task-level
 
@@ -45,6 +74,9 @@ the appropriate layer.
 task_id: my_task
 # ...
 run_limits:
+  max_turns: 20              # structural: inner-loop turn cap
+  task_timeout: 600          # structural: wall-clock cap (seconds)
+  turn_timeout: 300          # structural: per-turn cap (seconds)
   max_input_tokens: 50000
   max_output_tokens: 10000
   max_total_tokens: 60000   # cumulative cap (input + output)
@@ -58,31 +90,34 @@ run_limits:
 # experiments/my_experiment.yaml
 defaults:
   run_limits:
+    max_turns: 20
+    task_timeout: 600
+    turn_timeout: 300
     max_usd: 1.0   # ceiling for every task in this experiment
 ```
 
-### Per-variant override
+### Per-variant override (field merge)
 
 ```yaml
 # experiments/my_experiment.yaml
 variants:
   - variant_id: opus
     run_limits:
-      max_usd: 5.0  # opus gets a higher cap (whole-object replace)
+      max_usd: 5.0  # opus gets a higher cap; other keys inherit from the task
 ```
 
-At least one of the four budget fields (`max_input_tokens`,
-`max_output_tokens`, `max_total_tokens`, `max_usd`) is required when
-the block is present — an empty `run_limits: {}` is a load-time error.
+All `run_limits` fields are optional. An empty block (`run_limits: {}`)
+is now legal and produces a `RunLimits()` with all-None fields.
 
 ## Enforcement boundary
 
-Budgets are checked **between turns**, not mid-turn. The Claude Code
-SDK does not expose per-tool-call token deltas, so a single very long
-turn can still exceed the budget before the check fires. For single-shot
-tasks this means the limit catches overruns **after** the only turn has
-finished; pair `run_limits` with `turn_timeout` and `max_turns` for
-hard upper bounds on wall-clock and turn count.
+Token / cost caps are checked **between turns**, not mid-turn. The
+Claude Code SDK does not expose per-tool-call token deltas, so a
+single very long turn can still exceed the budget before the check
+fires. For single-shot tasks this means the limit catches overruns
+**after** the only turn has finished; pair the budget caps with
+`run_limits.turn_timeout` and `run_limits.max_turns` for hard upper
+bounds on wall-clock and turn count — both live in the same block.
 
 Mid-turn preemption is out of scope.
 

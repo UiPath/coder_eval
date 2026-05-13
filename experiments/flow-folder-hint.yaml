@@ -16,11 +16,13 @@ defaults:
     permission_mode: bypassPermissions
     disallowed_tools:
       - TodoWrite
-  turn_timeout: 600
+  run_limits:
+    turn_timeout: 600
 
 variants:
   - variant_id: with-folder-hint
-    max_turns: 30
+    run_limits:
+      max_turns: 30
     template_sources:
       - type: starter_files
         files:

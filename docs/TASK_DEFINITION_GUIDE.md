@@ -91,9 +91,11 @@ coder-eval run tasks/*.yaml --exclude-tags example # Skip example tasks
 ## Agent Configuration
 
 ```yaml
-# Top-level scenario knobs (live on the task, not on agent)
-max_turns: 20                         # Optional: cap on inner-loop turns per iteration
-turn_timeout: 300                     # Optional: per-communicate() timeout in seconds
+# Run-time caps (turns, wall-clock, tokens, USD) live under run_limits
+run_limits:
+  max_turns: 20                       # Optional: cap on inner-loop turns per iteration
+  turn_timeout: 300                   # Optional: per-communicate() timeout in seconds
+  task_timeout: 600                   # Optional: wall-clock cap across all iterations
 
 agent:
   type: "claude-code"                 # Agent type — optional if supplied via experiment / --type
@@ -111,16 +113,18 @@ agent:
 - `plan` — Agent proposes changes, waits for approval
 - `bypassPermissions` — No permission checks (use with caution)
 
-### `max_turns` and `turn_timeout` location
+### `max_turns`, `task_timeout`, `turn_timeout` location
 
-These live at the **top level** of the task (alongside `task_timeout`), not under
-`agent:`. They are scenario constraints — the agent identity (type, model, etc.)
-is conceptually separate.
+These live under `run_limits:` on the task — alongside the token / USD
+budget caps. They are scenario constraints; the agent identity (type,
+model, etc.) is conceptually separate. See
+[`docs/features/2026-05-11-run-limits.md`](features/2026-05-11-run-limits.md)
+for the full reference.
 
-> **Migration callout:** Setting `max_turns` or `turn_timeout` under `agent:`
-> still works via a deprecation shim that hoists them to the top level and emits
-> a `DeprecationWarning`. **The shim is removed on 2026-05-15.** Move both fields
-> out of `agent:` before that date.
+> **Migration callout:** Setting `max_turns` or `turn_timeout` under
+> `agent:` still works via a deprecation shim that hoists them into
+> `run_limits.*` and emits a `DeprecationWarning`. **The shim is removed
+> on 2026-05-20.** Move both fields out of `agent:` before that date.
 
 ## Sandbox Configuration
 

@@ -6,7 +6,8 @@ description: >
   CLI or JSON — the skill should default to JSON for OOTB flows.
 tags: [flow, flow-json, generate, mode-default, no-cli-expected]
 
-max_turns: 50
+run_limits:
+  max_turns: 50
 agent:
   type: claude-code
   permission_mode: acceptEdits

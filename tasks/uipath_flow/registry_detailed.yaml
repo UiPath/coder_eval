@@ -4,7 +4,8 @@ description: >
   Flow nodes using uip CLI registry commands including pull, list, search, and get.
 tags: [flow, uipcli, detailed]
 
-max_turns: 14
+run_limits:
+  max_turns: 14
 agent:
   type: claude-code
   permission_mode: acceptEdits

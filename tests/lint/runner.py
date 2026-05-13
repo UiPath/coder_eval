@@ -14,6 +14,7 @@ from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
 from tests.lint.rules.no_silent_except import NoSilentExcept
 from tests.lint.rules.no_submodule_model_imports import NoSubmoduleModelImports
+from tests.lint.rules.no_top_level_run_limits_access import NoTopLevelRunLimitsAccess
 from tests.lint.rules.register_criterion_required import RegisterCriterionRequired
 from tests.lint.violation import Violation
 
@@ -27,6 +28,7 @@ ALL_RULES: list[RuleClass] = [
     NoCliImportsInCore,
     NoSilentExcept,
     NoAgentTimingAccess,
+    NoTopLevelRunLimitsAccess,
 ]
 
 _NOQA_ALL = re.compile(r"#\s*noqa\s*$")

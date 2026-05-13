@@ -2,7 +2,8 @@ task_id: "test_snapshot_example"
 description: "Example task demonstrating snapshot configuration"
 tags: [example, basic]
 
-max_turns: 3
+run_limits:
+  max_turns: 3
 agent:
   type: "claude-code"
   permission_mode: acceptEdits

@@ -6,7 +6,8 @@ description: >
   baseline for benchmarking agent flow-generation capability.
 tags: [flow, uipcli, generate, complexity-analysis, 5-nodes]
 
-turn_timeout: 1200
+run_limits:
+  turn_timeout: 1200
 agent:
   type: claude-code
   permission_mode: acceptEdits

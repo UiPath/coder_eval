@@ -8,7 +8,8 @@ description: >
   Tests registry discovery, output filtering, and planning documentation.
 tags: [flow, uipcli, output-filter, jmespath, planning, registry, intermediate]
 
-max_turns: 50
+run_limits:
+  max_turns: 50
 agent:
   type: claude-code
   permission_mode: acceptEdits

@@ -201,19 +201,24 @@ class TestResolveTaskForVariant:
         assert lineage["agent.disallowed_tools"].source == "task"
 
     def test_scalar_overrides(self):
-        """Scalar fields (task_timeout, turn_timeout) resolve through precedence."""
+        """Scalar fields (task_timeout, turn_timeout) resolve through precedence under run_limits."""
+        from coder_eval.models import RunLimits
+
         default_exp = _make_default_experiment()
-        task = _make_task(agent={"type": "claude-code"}, task_timeout=900)
+        task = _make_task(agent={"type": "claude-code"}, run_limits=RunLimits(task_timeout=900))
         experiment = ExperimentDefinition(
             experiment_id="test",
-            defaults=ExperimentDefaults(task_timeout=300, turn_timeout=60),
-            variants=[ExperimentVariant(variant_id="fast", task_timeout=120, turn_timeout=30)],
+            defaults=ExperimentDefaults(run_limits=RunLimits(task_timeout=300, turn_timeout=60)),
+            variants=[
+                ExperimentVariant(variant_id="fast", run_limits=RunLimits(task_timeout=120, turn_timeout=30)),
+            ],
         )
 
         resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.task_timeout == 120  # variant wins
-        assert lineage["task_timeout"].source == "variant"
-        assert lineage["turn_timeout"].source == "variant"
+        assert resolved.run_limits is not None
+        assert resolved.run_limits.task_timeout == 120  # variant wins
+        assert lineage["run_limits.task_timeout"].source == "variant"
+        assert lineage["run_limits.turn_timeout"].source == "variant"
 
     def test_resolved_task_preserves_non_agent_fields(self):
         """Resolution should not alter task_id, description, criteria, sandbox, etc."""
@@ -231,13 +236,15 @@ class TestResolveTaskForVariant:
 
 
 class TestDefaultExperimentScalarOverrides:
-    """Tests for layer-1 default experiment scalar resolution."""
+    """Tests for layer-1 default experiment scalar resolution under run_limits."""
 
     def test_default_experiment_task_timeout_applied(self):
-        """default.yaml base.task_timeout should be applied when task has no explicit timeout."""
+        """default.yaml base.run_limits.task_timeout should be applied when task has no override."""
+        from coder_eval.models import RunLimits
+
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            defaults=ExperimentDefaults(agent={"type": "claude-code"}, task_timeout=600),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, run_limits=RunLimits(task_timeout=600)),
             variants=[ExperimentVariant(variant_id="default")],
         )
         task = _make_task(agent=None)
@@ -248,13 +255,16 @@ class TestDefaultExperimentScalarOverrides:
         )
 
         resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.task_timeout == 600
+        assert resolved.run_limits is not None
+        assert resolved.run_limits.task_timeout == 600
 
     def test_default_experiment_turn_timeout_applied(self):
-        """default.yaml base.turn_timeout should be applied."""
+        """default.yaml base.run_limits.turn_timeout should be applied."""
+        from coder_eval.models import RunLimits
+
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            defaults=ExperimentDefaults(agent={"type": "claude-code"}, turn_timeout=60),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, run_limits=RunLimits(turn_timeout=60)),
             variants=[ExperimentVariant(variant_id="default")],
         )
         task = _make_task(agent=None)
@@ -265,34 +275,40 @@ class TestDefaultExperimentScalarOverrides:
         )
 
         resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.turn_timeout == 60
+        assert resolved.run_limits is not None
+        assert resolved.run_limits.turn_timeout == 60
 
     def test_experiment_base_overrides_default_experiment_scalars(self):
-        """experiment.defaults scalars (layer 2) should override default_experiment.defaults (layer 1)."""
+        """experiment.defaults run_limits (layer 2) should override default_experiment.defaults (layer 1)."""
+        from coder_eval.models import RunLimits
+
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            defaults=ExperimentDefaults(agent={"type": "claude-code"}, task_timeout=300),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, run_limits=RunLimits(task_timeout=300)),
             variants=[ExperimentVariant(variant_id="default")],
         )
         task = _make_task(agent=None)
 
         experiment = ExperimentDefinition(
             experiment_id="test",
-            defaults=ExperimentDefaults(task_timeout=600),
+            defaults=ExperimentDefaults(run_limits=RunLimits(task_timeout=600)),
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
         resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.task_timeout == 600
+        assert resolved.run_limits is not None
+        assert resolved.run_limits.task_timeout == 600
 
     def test_explicit_task_timeout_not_overwritten_by_default_experiment(self):
         """Task that explicitly sets task_timeout should NOT be overwritten by default experiment."""
+        from coder_eval.models import RunLimits
+
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            defaults=ExperimentDefaults(agent={"type": "claude-code"}, task_timeout=600),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, run_limits=RunLimits(task_timeout=600)),
             variants=[ExperimentVariant(variant_id="default")],
         )
-        task = _make_task(agent=None, task_timeout=900)
+        task = _make_task(agent=None, run_limits=RunLimits(task_timeout=900))
 
         experiment = ExperimentDefinition(
             experiment_id="test",
@@ -300,36 +316,35 @@ class TestDefaultExperimentScalarOverrides:
         )
 
         resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.task_timeout == 900
+        assert resolved.run_limits is not None
+        assert resolved.run_limits.task_timeout == 900
 
     def test_variant_overrides_default_experiment_scalars(self):
         """variant scalars (layer 4) should override default_experiment.defaults (layer 1)."""
+        from coder_eval.models import RunLimits
+
         default_exp = ExperimentDefinition(
             experiment_id="default",
-            defaults=ExperimentDefaults(agent={"type": "claude-code"}, task_timeout=300),
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}, run_limits=RunLimits(task_timeout=300)),
             variants=[ExperimentVariant(variant_id="default")],
         )
         task = _make_task(agent=None)
 
         experiment = ExperimentDefinition(
             experiment_id="test",
-            variants=[ExperimentVariant(variant_id="v1", task_timeout=120)],
+            variants=[ExperimentVariant(variant_id="v1", run_limits=RunLimits(task_timeout=120))],
         )
 
         resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.task_timeout == 120
+        assert resolved.run_limits is not None
+        assert resolved.run_limits.task_timeout == 120
 
 
 class TestTurnTimeoutResolution:
-    """Regression tests for turn_timeout not being clobbered by scalar path."""
+    """Regression tests for turn_timeout flowing through the field-merge resolver."""
 
-    def test_turn_timeout_in_agent_dict_survives_resolution(self):
-        """turn_timeout set inside defaults.agent dict must not be clobbered by scalar path.
-
-        Regression: the scalar override path would unconditionally overwrite
-        resolved_agent.turn_timeout with None when turn_timeout was only in the
-        agent dict (not at the defaults level).
-        """
+    def test_turn_timeout_in_agent_dict_hoists_to_run_limits(self):
+        """Legacy turn_timeout inside the agent dict hoists into run_limits.turn_timeout."""
         default_exp = ExperimentDefinition(
             experiment_id="default",
             defaults=ExperimentDefaults(agent={"type": "claude-code", "turn_timeout": 300}),
@@ -341,16 +356,19 @@ class TestTurnTimeoutResolution:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.turn_timeout == 300, f"Expected 300, got {resolved.turn_timeout}"
+        with pytest.warns(DeprecationWarning):
+            resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.run_limits is not None
+        assert resolved.run_limits.turn_timeout == 300
 
     def test_default_yaml_turn_timeout_preserved(self):
         """Regression: turn_timeout from actual default.yaml must survive resolution."""
         from coder_eval.orchestration.experiment import DEFAULT_EXPERIMENT_PATH, load_experiment
 
         default_exp = load_experiment(DEFAULT_EXPERIMENT_PATH)
-        expected_timeout = default_exp.defaults.turn_timeout
-        assert expected_timeout is not None, "default.yaml should define turn_timeout"
+        assert default_exp.defaults is not None and default_exp.defaults.run_limits is not None
+        expected_timeout = default_exp.defaults.run_limits.turn_timeout
+        assert expected_timeout is not None, "default.yaml should define run_limits.turn_timeout"
 
         task = _make_task(agent=None)
         experiment = ExperimentDefinition(
@@ -359,15 +377,18 @@ class TestTurnTimeoutResolution:
         )
 
         resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.turn_timeout == expected_timeout
+        assert resolved.run_limits is not None
+        assert resolved.run_limits.turn_timeout == expected_timeout
 
-    def test_scalar_turn_timeout_overrides_agent_dict(self):
-        """When turn_timeout is set at both defaults level AND in agent dict, scalar wins."""
+    def test_run_limits_turn_timeout_overrides_agent_dict_in_same_layer(self):
+        """run_limits.turn_timeout merged after agent-hoist within the same layer wins."""
+        from coder_eval.models import RunLimits
+
         default_exp = ExperimentDefinition(
             experiment_id="default",
             defaults=ExperimentDefaults(
                 agent={"type": "claude-code", "turn_timeout": 200},
-                turn_timeout=400,
+                run_limits=RunLimits(turn_timeout=400),
             ),
             variants=[ExperimentVariant(variant_id="default")],
         )
@@ -377,8 +398,11 @@ class TestTurnTimeoutResolution:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.turn_timeout == 400
+        with pytest.warns(DeprecationWarning):
+            resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        assert resolved.run_limits is not None
+        # agent-deprecated is merged BEFORE run_limits within the same layer, so run_limits wins.
+        assert resolved.run_limits.turn_timeout == 400
 
 
 class TestTemplateSourcesOverlay:

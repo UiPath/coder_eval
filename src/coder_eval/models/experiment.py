@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Self
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from coder_eval.models.enums import FinalStatus
 from coder_eval.models.limits import RunLimits
@@ -19,11 +19,11 @@ from coder_eval.models.templates import TemplateSource
 class ExperimentVariant(BaseModel):
     """A named configuration variant within an experiment."""
 
+    model_config = ConfigDict(extra="forbid")
+
     variant_id: str = Field(description="Unique identifier for this variant (e.g., 'sonnet', 'opus')")
+    description: str = Field(default="", description="Human-readable description of what this variant tests")
     agent: dict[str, Any] | None = Field(default=None, description="Partial agent config overrides")
-    task_timeout: int | None = Field(default=None, ge=30, description="Override task timeout (seconds)")
-    turn_timeout: int | None = Field(default=None, ge=10, description="Override turn timeout (seconds)")
-    max_turns: int | None = Field(default=None, gt=0, description="Override max agent turns per iteration")
     simulation: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -57,8 +57,9 @@ class ExperimentVariant(BaseModel):
     run_limits: RunLimits | None = Field(
         default=None,
         description=(
-            "Per-variant override for the task's run_limits block. Whole-object replace — "
-            "the block from this variant replaces any task-level block in full."
+            "Per-variant overrides for the task's run_limits block. Field-merge — "
+            "per-key precedence inside the block; keys absent here leave the task-level "
+            "value intact."
         ),
     )
 
@@ -80,9 +81,8 @@ class ExperimentVariant(BaseModel):
 class ExperimentDefaults(BaseModel):
     """Default settings applied to all variants (overridable per-variant and per-task)."""
 
-    task_timeout: int | None = Field(default=None, ge=30, description="Default task timeout (seconds)")
-    turn_timeout: int | None = Field(default=None, ge=10, description="Default turn timeout (seconds)")
-    max_turns: int | None = Field(default=None, gt=0, description="Default max agent turns per iteration")
+    model_config = ConfigDict(extra="forbid")
+
     repeats: int | None = Field(
         default=None,
         ge=1,
@@ -113,8 +113,8 @@ class ExperimentDefaults(BaseModel):
     run_limits: RunLimits | None = Field(
         default=None,
         description=(
-            "Default run-time budget caps applied to tasks that don't set their own block. "
-            "Tasks and variants can override (whole-object replace)."
+            "Default run-time caps (turns, wall-clock, tokens, USD). "
+            "Field-merge — task and variant layers override individual keys without replacing the block."
         ),
     )
 

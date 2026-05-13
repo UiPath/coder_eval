@@ -273,7 +273,7 @@ def test_agent_override_precedence_cli_over_env_over_yaml():
     Verifies that BatchRunConfig fields (CLI) take priority over
     Settings fields (.env), which take priority over task YAML values.
     """
-    from coder_eval.models import AgentConfig, AgentKind, SandboxConfig, TaskDefinition
+    from coder_eval.models import AgentConfig, AgentKind, RunLimits, SandboxConfig, TaskDefinition
     from coder_eval.orchestration.config import BatchRunConfig
 
     # Simulate a task with YAML-defined values
@@ -282,7 +282,7 @@ def test_agent_override_precedence_cli_over_env_over_yaml():
         description="Test precedence",
         initial_prompt="test",
         agent=AgentConfig(type=AgentKind.CLAUDE_CODE, model="yaml-model", permission_mode="default"),
-        max_turns=10,
+        run_limits=RunLimits(max_turns=10),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[{"type": "file_exists", "path": "test.py", "description": "test"}],
     )
@@ -306,11 +306,14 @@ def test_agent_override_precedence_cli_over_env_over_yaml():
 
     effective_max_turns = config.max_turns if config.max_turns is not None else None
     if effective_max_turns is not None:
-        task.max_turns = effective_max_turns
+        base = task.run_limits.model_dump(exclude_none=True) if task.run_limits else {}
+        base["max_turns"] = effective_max_turns
+        task.run_limits = RunLimits(**base)
 
     assert task.agent.model == "cli-model"
     assert task.agent.permission_mode == "bypassPermissions"
-    assert task.max_turns == 99
+    assert task.run_limits is not None
+    assert task.run_limits.max_turns == 99
 
 
 def test_api_backend_enum_values():

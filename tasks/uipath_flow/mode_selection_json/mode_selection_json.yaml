@@ -5,7 +5,8 @@ description: >
   Bash is excluded from allowed_tools to enforce JSON-only mode.
 tags: [flow, mode-selection, flow-json, no-cli]
 
-max_turns: 30
+run_limits:
+  max_turns: 30
 agent:
   type: claude-code
   permission_mode: acceptEdits

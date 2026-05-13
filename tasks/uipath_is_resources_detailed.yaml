@@ -6,7 +6,8 @@ description: >
   reference fields, and executing a create operation with a properly constructed body.
 tags: [is, uipcli, detailed]
 
-max_turns: 22
+run_limits:
+  max_turns: 22
 agent:
   type: claude-code
   permission_mode: acceptEdits

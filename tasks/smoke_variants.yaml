@@ -10,7 +10,8 @@ initial_prompt: |
   Use the Write tool to create out.txt containing the single character: x
 tags: [smoke-variants]
 
-max_turns: 4
+run_limits:
+  max_turns: 4
 
 agent:
   type: "claude-code"

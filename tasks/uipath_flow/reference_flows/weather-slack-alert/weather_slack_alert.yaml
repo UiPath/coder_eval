@@ -13,7 +13,8 @@ initial_prompt: |
   After creating it, validate the JSON syntax and structure.
 tags: [flow, integration, intermediate]
 
-max_turns: 30
+run_limits:
+  max_turns: 30
 agent:
   type: "claude-code"
   permission_mode: "acceptEdits"

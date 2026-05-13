@@ -27,9 +27,16 @@ def _minimal_task(**overrides) -> TaskDefinition:
 
 
 class TestRunLimitsValidation:
-    def test_empty_block_rejected(self):
-        with pytest.raises(ValidationError, match="run_limits requires at least one of"):
-            RunLimits()
+    def test_empty_block_is_valid(self):
+        """Empty run_limits constructs (all-None fields)."""
+        rl = RunLimits()
+        assert rl.max_turns is None
+        assert rl.task_timeout is None
+        assert rl.turn_timeout is None
+        assert rl.max_input_tokens is None
+        assert rl.max_output_tokens is None
+        assert rl.max_total_tokens is None
+        assert rl.max_usd is None
 
     def test_only_max_input_tokens_ok(self):
         assert RunLimits(max_input_tokens=1).max_input_tokens == 1
@@ -42,6 +49,30 @@ class TestRunLimitsValidation:
 
     def test_only_max_usd_ok(self):
         assert RunLimits(max_usd=0.01).max_usd == 0.01
+
+    def test_only_max_turns_ok(self):
+        assert RunLimits(max_turns=20).max_turns == 20
+
+    def test_only_task_timeout_ok(self):
+        assert RunLimits(task_timeout=600).task_timeout == 600
+
+    def test_only_turn_timeout_ok(self):
+        assert RunLimits(turn_timeout=120).turn_timeout == 120
+
+    def test_max_turns_validation(self):
+        with pytest.raises(ValidationError, match="greater than 0"):
+            RunLimits(max_turns=0)
+        RunLimits(max_turns=1)
+
+    def test_task_timeout_validation(self):
+        with pytest.raises(ValidationError, match="greater than or equal to 30"):
+            RunLimits(task_timeout=29)
+        RunLimits(task_timeout=30)
+
+    def test_turn_timeout_validation(self):
+        with pytest.raises(ValidationError, match="greater than or equal to 10"):
+            RunLimits(turn_timeout=9)
+        RunLimits(turn_timeout=10)
 
     def test_token_lower_bound(self):
         with pytest.raises(ValidationError, match="greater than or equal to 1"):
@@ -61,6 +92,21 @@ class TestRunLimitsValidation:
         with pytest.raises(ValidationError):
             RunLimits.model_validate({"max_input_tokens": 10, "unknown_field": 1})
 
+    def test_all_fields_roundtrip(self):
+        rl = RunLimits(
+            max_turns=20,
+            task_timeout=600,
+            turn_timeout=120,
+            max_input_tokens=1000,
+            max_output_tokens=2000,
+            max_total_tokens=3000,
+            max_usd=1.5,
+            count_cached_input=True,
+        )
+        dumped = rl.model_dump()
+        rebuilt = RunLimits.model_validate(dumped)
+        assert rebuilt == rl
+
 
 class TestRunLimitsOnTaskDefinition:
     def test_default_is_none(self):
@@ -76,9 +122,46 @@ class TestRunLimitsOnTaskDefinition:
         rebuilt = TaskDefinition.model_validate(dumped)
         assert rebuilt.run_limits == task.run_limits
 
-    def test_empty_run_limits_on_task_rejected(self):
-        with pytest.raises(ValidationError, match="run_limits requires at least one of"):
-            _minimal_task(run_limits={})
+    def test_empty_run_limits_on_task_is_valid(self):
+        task = _minimal_task(run_limits={})
+        assert task.run_limits is not None
+        assert task.run_limits.max_turns is None
+
+    def test_top_level_max_turns_hoisted_with_warning(self):
+        """Top-level max_turns was removed in 2026-05-12 — hoist shim lifts it into run_limits."""
+        with pytest.warns(DeprecationWarning, match=r"Top-level 'max_turns'.*2026-05-20"):
+            task = _minimal_task(max_turns=20)
+        assert task.run_limits is not None
+        assert task.run_limits.max_turns == 20
+
+    def test_top_level_task_timeout_hoisted_with_warning(self):
+        with pytest.warns(DeprecationWarning, match=r"Top-level 'task_timeout'.*2026-05-20"):
+            task = _minimal_task(task_timeout=600)
+        assert task.run_limits is not None
+        assert task.run_limits.task_timeout == 600
+
+    def test_top_level_turn_timeout_hoisted_with_warning(self):
+        with pytest.warns(DeprecationWarning, match=r"Top-level 'turn_timeout'.*2026-05-20"):
+            task = _minimal_task(turn_timeout=120)
+        assert task.run_limits is not None
+        assert task.run_limits.turn_timeout == 120
+
+    def test_top_level_and_run_limits_conflict_raises(self):
+        """Setting same key both top-level and in run_limits is an error."""
+        with pytest.raises(ValidationError, match=r"max_turns.*both at top level"):
+            _minimal_task(max_turns=20, run_limits={"max_turns": 5})
+
+    def test_max_iterations_dropped_with_warning(self):
+        """max_iterations was removed in PR #191; shim drops it with a warning."""
+        with pytest.warns(DeprecationWarning, match=r"max_iterations.*2026-05-20"):
+            task = _minimal_task(max_iterations=2)
+        assert not hasattr(task, "max_iterations")
+
+    def test_llm_reviewer_dropped_with_warning(self):
+        """llm_reviewer was removed in PR #191; shim drops it with a warning."""
+        with pytest.warns(DeprecationWarning, match=r"llm_reviewer.*2026-05-20"):
+            task = _minimal_task(llm_reviewer={"enabled": False})
+        assert not hasattr(task, "llm_reviewer")
 
 
 class TestRunLimitsOnExperimentLayers:

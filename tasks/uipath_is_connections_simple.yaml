@@ -4,7 +4,8 @@ description: >
   Integration Service connections using uip CLI with no step-by-step guidance.
 tags: [is, uipcli, simple]
 
-max_turns: 15
+run_limits:
+  max_turns: 15
 agent:
   type: claude-code
   permission_mode: acceptEdits

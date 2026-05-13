@@ -1441,13 +1441,18 @@ async def test_run_batch_applies_max_turns_override(tmp_path):
     )
 
     task, _ = load_task(task_file)
-    assert task.max_turns is None  # Default
+    assert task.run_limits is None  # Default
+
+    from coder_eval.models import RunLimits
 
     effective_max_turns = config.max_turns if config.max_turns is not None else None
     if effective_max_turns is not None:
-        task.max_turns = effective_max_turns
+        base = task.run_limits.model_dump(exclude_none=True) if task.run_limits else {}
+        base["max_turns"] = effective_max_turns
+        task.run_limits = RunLimits(**base)
 
-    assert task.max_turns == 42
+    assert task.run_limits is not None
+    assert task.run_limits.max_turns == 42
 
 
 # ==================== Duplicate Task ID Validation Tests ====================

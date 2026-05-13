@@ -4,7 +4,8 @@ description: >
   correct tier from the 4-tier decision ladder.
 tags: [flow, connector, discovery, tier-4, integration]
 
-max_turns: 30
+run_limits:
+  max_turns: 30
 agent:
   type: claude-code
   permission_mode: acceptEdits

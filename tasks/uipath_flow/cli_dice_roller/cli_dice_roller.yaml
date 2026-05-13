@@ -4,7 +4,8 @@ description: >
   edge add, and validate. Agent should follow cli/workflow-guide.md.
 tags: [flow, cli, generate, tier-2]
 
-max_turns: 40
+run_limits:
+  max_turns: 40
 agent:
   type: claude-code
   permission_mode: acceptEdits

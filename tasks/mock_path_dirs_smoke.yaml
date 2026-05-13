@@ -1,7 +1,6 @@
 task_id: "mock_path_dirs_smoke"
 description: "Verify SandboxConfig.mock_path_dirs: a sandbox-placed mock binary is invoked by name from PATH."
 tags: [mock]
-max_iterations: 1
 
 agent:
   type: "claude-code"

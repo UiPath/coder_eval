@@ -7,10 +7,11 @@ description: >
   experiments/pdd-interview-personas.yaml (5 personas x 3 scenarios = 15 variants).
 
 tags: [pdd, interview, simulation, wealth-management, docx]
-task_timeout: 2400
+run_limits:
+  max_turns: 80
+  task_timeout: 2400
+  turn_timeout: 600
 
-max_turns: 80
-turn_timeout: 600
 agent:
   type: claude-code
   permission_mode: acceptEdits

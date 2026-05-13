@@ -6,7 +6,8 @@ description: >
   and editing connections.
 tags: [is, uipcli, detailed]
 
-max_turns: 25
+run_limits:
+  max_turns: 25
 agent:
   type: claude-code
   permission_mode: acceptEdits

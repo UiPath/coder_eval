@@ -8,7 +8,8 @@ description: >
   v2_authoring versions of the same scenario for cross-flavor comparison.
 tags: [flow, flow-json, generate, http, decision, loop, multi-connector, complex]
 
-task_timeout: 1800
+run_limits:
+  task_timeout: 1800
 
 agent:
   type: claude-code

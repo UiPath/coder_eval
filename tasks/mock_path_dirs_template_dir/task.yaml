@@ -4,7 +4,6 @@ description: >
   shell-script mocks is copied wholesale into the sandbox, marked +x, and prepended
   to PATH. The agent invokes them by bare name and the mock implementations win.
 tags: [mock, template-dir]
-max_iterations: 1
 
 agent:
   type: "claude-code"

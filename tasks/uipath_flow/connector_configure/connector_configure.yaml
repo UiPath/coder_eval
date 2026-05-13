@@ -4,7 +4,8 @@ description: >
   connection, describe resource, and configure a connector node in a flow.
 tags: [flow, connector, configure, tier-4, integration]
 
-max_turns: 50
+run_limits:
+  max_turns: 50
 agent:
   type: claude-code
   permission_mode: acceptEdits
