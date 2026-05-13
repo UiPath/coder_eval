@@ -780,6 +780,20 @@ post_run:
 
 Commands run sequentially with `cwd` set to the sandbox directory. stdout and stderr are captured on the `post_run_results` field of the evaluation result (truncated to 100KB each).
 
+**Experiment-level defaults:**
+
+Set `defaults.post_run` in an experiment YAML to run cleanup or extraction after every task.
+Experiment defaults are **appended** after the task's own `post_run` (task-specific work first, then defaults):
+
+```yaml
+defaults:
+  post_run:
+    - command: "rm -rf node_modules .npm-prefix"
+      timeout: 30
+```
+
+The shipped `experiments/*.yaml` use this to drop sandbox-scoped npm dirs (introduced by [PR #250](https://github.com/UiPath/coder_eval/pull/250) for MST-9674) so preserved-sandbox artifacts stay small.
+
 ## Simulation (Multi-Turn User Dialog)
 
 Optional `simulation` block. When present and enabled, the orchestrator replaces the single-shot iteration loop with a multi-turn dialog between the coding agent and a simulated user (a second LLM with a persona and goal). Use this for tasks where the real usage pattern is conversational — clarifying questions, incremental requirements, mid-task corrections — rather than a single fire-and-forget prompt.

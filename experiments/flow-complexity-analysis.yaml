@@ -41,6 +41,11 @@ defaults:
     permission_mode: acceptEdits
     allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
 
+  # Drop <sandbox>/{node_modules,.npm-prefix} so preserved artifacts stay slim (MST-9674).
+  post_run:
+    - command: "rm -rf node_modules .npm-prefix"
+      timeout: 30
+
 variants:
   # ── Sonnet (fast, cost-effective baseline) ──────────────────────────────
   - variant_id: plugin_cli

@@ -60,5 +60,13 @@ defaults:
     # Example: ["*.log", "__pycache__"]
     ignore_patterns: []
 
+  # Sandbox-internal cleanup appended after each task's own post_run (MST-9674).
+  # PR #250 sandbox-scopes Node/npm installs to <sandbox>/{node_modules,.npm-prefix};
+  # removing them keeps preserved-sandbox artifacts small and is a no-op in normal
+  # (non-preserved) runs where the tempdir is rmtree'd anyway.
+  post_run:
+    - command: "rm -rf node_modules .npm-prefix"
+      timeout: 30
+
 variants:
   - variant_id: default

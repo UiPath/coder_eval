@@ -14,6 +14,11 @@ defaults:
           - "Read(/Users/**)"
           - "Bash(* /Users/*)"
 
+  # Drop <sandbox>/{node_modules,.npm-prefix} so preserved artifacts stay slim (MST-9674).
+  post_run:
+    - command: "rm -rf node_modules .npm-prefix"
+      timeout: 30
+
 variants:
   - variant_id: with-deny
     description: "Agent cannot read host home dirs"

@@ -12,6 +12,11 @@ defaults:
     type: claude-code
     permission_mode: bypassPermissions
 
+  # Drop <sandbox>/{node_modules,.npm-prefix} so preserved artifacts stay slim (MST-9674).
+  post_run:
+    - command: "rm -rf node_modules .npm-prefix"
+      timeout: 30
+
 variants:
   - variant_id: sonnet
     agent:
