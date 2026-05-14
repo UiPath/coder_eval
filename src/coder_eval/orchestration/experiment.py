@@ -511,9 +511,34 @@ def resolve_task_for_variant(
 
     combined_sources = base_sources + exp_defaults_sources + variant_sources
     resolved_sandbox = task.sandbox
+    sandbox_updates: dict[str, Any] = {}
     if exp_defaults_sources or variant_sources:
         validate_template_sources_list(combined_sources)
-        resolved_sandbox = task.sandbox.model_copy(update={"template_sources": combined_sources})
+        sandbox_updates["template_sources"] = combined_sources
+
+    # Driver resolution: layer 2 (experiment defaults) → layer 3 (task) → layer 4 (variant).
+    # Layer 1 (default experiment defaults) and layer 5 (CLI) are handled elsewhere —
+    # the default experiment never sets driver today, and CLI runs in _apply_cli_overrides.
+    # task already supplied via task.sandbox.driver; only layers 2 and 4 need plumbing here.
+    if experiment.defaults and experiment.defaults.driver is not None:
+        sandbox_updates["driver"] = experiment.defaults.driver
+        scalar_lineage["sandbox.driver"] = ConfigLineageEntry(
+            value=experiment.defaults.driver, source="experiment-defaults"
+        )
+    # task layer wins over experiment-defaults; record only if task explicitly set it.
+    # (Pydantic gives us task.sandbox.driver = "tempdir" by default, so we can't tell
+    # "user wrote tempdir" from "took the default" without model_fields_set inspection.)
+    if "driver" in task.sandbox.model_fields_set:
+        sandbox_updates["driver"] = task.sandbox.driver
+        scalar_lineage["sandbox.driver"] = ConfigLineageEntry(value=task.sandbox.driver, source="task")
+    if variant.driver is not None:
+        sandbox_updates["driver"] = variant.driver
+        scalar_lineage["sandbox.driver"] = ConfigLineageEntry(
+            value=variant.driver, source="variant", source_detail=variant.variant_id
+        )
+
+    if sandbox_updates:
+        resolved_sandbox = task.sandbox.model_copy(update=sandbox_updates)
 
     # Resolve post_run: task-level commands first, experiment defaults appended after.
     # Experiment defaults are typically tenant/sandbox cleanup that should run last,
@@ -642,6 +667,14 @@ def _apply_cli_overrides(
     if config.ignore_patterns is not None:
         task.agent.ignore_patterns = config.ignore_patterns
         _record("agent.ignore_patterns", config.ignore_patterns, "--ignore-patterns")
+
+    # Sandbox driver override (CLI > task YAML). Driver value is already
+    # Literal-validated upstream via BatchRunConfig; nothing to re-check.
+    if config.driver is not None:
+        if task.sandbox is None:
+            raise ValueError(f"Task '{task.task_id}' has no sandbox config; cannot apply --driver override.")
+        task.sandbox.driver = config.driver
+        _record("sandbox.driver", config.driver, "--driver")
 
     # Snapshot overrides
     if config.snapshot_mode or config.snapshot_checkpoint_freq:

@@ -1,9 +1,10 @@
 """Configuration models for orchestration."""
 
 from pathlib import Path
+from typing import Literal
 
 from claude_agent_sdk import SdkPluginConfig
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class BatchRunConfig(BaseModel):
@@ -12,6 +13,8 @@ class BatchRunConfig(BaseModel):
     This configuration object encapsulates all parameters needed to run
     multiple tasks in batch mode with optional parallelism.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     run_dir: Path = Field(description="Directory for this batch run")
     max_parallel: int = Field(default=1, ge=1, description="Max concurrent tasks")
@@ -52,4 +55,10 @@ class BatchRunConfig(BaseModel):
         default=None,
         ge=1,
         description="CLI override for replicates per (task, variant). None = defer to experiment layers.",
+    )
+
+    # Sandbox driver override (CLI > task YAML)
+    driver: Literal["tempdir", "docker"] | None = Field(
+        default=None,
+        description="Override sandbox driver for all tasks.",
     )

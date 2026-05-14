@@ -216,6 +216,16 @@ def run_command(
         help="Run each (task, variant) N times. Overrides experiment/variant `repeats:`. Must be >=1.",
         min=1,
     ),
+    # typer types this as str|None at signature level; click.Choice narrows
+    # the runtime value to {"tempdir","docker"}. BatchRunConfig.driver
+    # expects the Literal; the field validator accepts any str and the
+    # Choice constraint plus the experiment-layer Literal hint keep us safe.
+    driver: str | None = typer.Option(
+        None,
+        "--driver",
+        click_type=click.Choice(["tempdir", "docker"], case_sensitive=False),
+        help="Override sandbox driver for all tasks. 'docker' runs each task in a fresh container.",
+    ),
 ) -> None:
     """Run evaluation tasks (optionally in parallel).
 
@@ -317,6 +327,7 @@ def run_command(
                 experiment_path=resolved_experiment,
                 max_rows=sample,
                 repeats=repeats,
+                driver=driver,
             )
         )
     except KeyboardInterrupt:
@@ -347,6 +358,7 @@ async def _run_all_tasks(
     experiment_path: Path | None = None,
     max_rows: int | None = None,
     repeats: int | None = None,
+    driver: str | None = None,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -406,6 +418,7 @@ async def _run_all_tasks(
         turn_timeout=turn_timeout,
         max_rows=max_rows,
         repeats=repeats,
+        driver=driver,  # type: ignore[arg-type]  # narrowed at runtime by click.Choice
     )
 
     # Always run through experiment layer (defaults to experiments/default.yaml)

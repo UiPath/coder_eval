@@ -559,7 +559,14 @@ class Orchestrator:
 
         spill_judge_transcripts(self.result, self.report_path.parent)
 
-        self.report_path.write_text(  # noqa: CE002 — small JSON write at end of run
+        # Atomic write: tmp file + os.replace. A SIGKILL mid-write (e.g. the
+        # docker-driver host-heartbeat watchdog firing) would otherwise leave
+        # a truncated task.json that the host parses as malformed-JSON rather
+        # than as "no result", conflating two distinct failure modes.
+        import os as _os
+
+        report_tmp = self.report_path.with_suffix(self.report_path.suffix + ".tmp")
+        report_tmp.write_text(  # noqa: CE002 — small JSON write at end of run
             self.result.model_dump_json(
                 indent=2,
                 # Strip inline transcripts: they live in sibling judge-<idx>.yaml
@@ -570,6 +577,7 @@ class Orchestrator:
             ),
             encoding="utf-8",
         )
+        _os.replace(report_tmp, self.report_path)
 
         # Also emit an HTML trace/report alongside task.json. HTML failure must
         # never mask the underlying run outcome — write_task_html logs and

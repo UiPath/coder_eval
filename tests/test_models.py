@@ -250,6 +250,86 @@ class TestConfigLineageModels:
         assert result.task_config is None
 
 
+class TestCriterionResultDiscriminator:
+    """JSON round-trip must preserve ClassificationCriterionResult subclass."""
+
+    def test_legacy_task_json_without_result_kind_migrates(self):
+        """Historical task.json files (no `result_kind` tag) must still rehydrate as the right subclass."""
+        import json
+        from datetime import datetime
+
+        from coder_eval.models import ClassificationCriterionResult, CriterionResult, EvaluationResult
+
+        # Simulate a pre-discriminator task.json: a classification result
+        # carries label fields but no result_kind, and a plain result has
+        # neither. Without the migration validator, both would resolve to
+        # base CriterionResult and the labels would be dropped.
+        legacy = {
+            "task_id": "t",
+            "task_description": "d",
+            "variant_id": "default",
+            "agent_type": "claude-code",
+            "started_at": datetime.now().isoformat(),
+            "final_status": "SUCCESS",
+            "iteration_count": 1,
+            "environment_info": {},
+            "success_criteria_results": [
+                {"criterion_type": "file_exists", "description": "x", "score": 1.0},
+                {
+                    "criterion_type": "classification_match",
+                    "description": "y",
+                    "score": 1.0,
+                    "observed_label": "POS",
+                    "expected_label": "POS",
+                },
+            ],
+        }
+        result = EvaluationResult.model_validate_json(json.dumps(legacy))
+        kinds = [type(r).__name__ for r in result.success_criteria_results]
+        assert kinds == ["CriterionResult", "ClassificationCriterionResult"]
+        assert isinstance(result.success_criteria_results[0], CriterionResult)
+        cls_result = result.success_criteria_results[1]
+        assert isinstance(cls_result, ClassificationCriterionResult)
+        assert cls_result.observed_label == "POS"
+        assert cls_result.expected_label == "POS"
+
+    def test_mixed_results_roundtrip_preserves_subclass(self):
+        from datetime import datetime
+
+        from coder_eval.models import (
+            ClassificationCriterionResult,
+            CriterionResult,
+            EvaluationResult,
+        )
+
+        result = EvaluationResult(
+            task_id="t",
+            task_description="d",
+            agent_type="claude-code",
+            started_at=datetime.now(),
+            final_status="SUCCESS",
+            iteration_count=1,
+            environment_info={},
+            success_criteria_results=[
+                CriterionResult(criterion_type="file_exists", description="x", score=1.0),
+                ClassificationCriterionResult(
+                    criterion_type="classification_match",
+                    description="y",
+                    score=1.0,
+                    observed_label="A",
+                    expected_label="A",
+                ),
+            ],
+        )
+        roundtripped = EvaluationResult.model_validate_json(result.model_dump_json())
+        kinds = [type(r).__name__ for r in roundtripped.success_criteria_results]
+        assert kinds == ["CriterionResult", "ClassificationCriterionResult"]
+        cls_result = roundtripped.success_criteria_results[1]
+        assert isinstance(cls_result, ClassificationCriterionResult)
+        assert cls_result.observed_label == "A"
+        assert cls_result.expected_label == "A"
+
+
 class TestSandboxConfigValidation:
     """Tests for SandboxConfig validation logic."""
 

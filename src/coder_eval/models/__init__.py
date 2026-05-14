@@ -116,6 +116,7 @@ from coder_eval.models.routing import (
 
 # Sandbox
 from coder_eval.models.sandbox import (
+    DockerDriverConfig,
     NodeEnvConfig,
     PythonEnvConfig,
     ResourceLimits,
@@ -206,6 +207,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "StarterFile",
     "TemplateSource",
     # Sandbox
+    "DockerDriverConfig",
     "NodeEnvConfig",
     "PythonEnvConfig",
     "SandboxConfig",

@@ -15,21 +15,35 @@ from coder_eval.models.templates import TemplateSource
 class ResourceLimits(BaseModel):
     """Resource limits for sandbox execution.
 
-    Note: The sandbox uses a temporary directory on the host filesystem with no
-    containerisation or cgroup enforcement.  Only ``timeout`` is actively enforced
-    (via ``subprocess.run(timeout=...)``).  ``max_memory_mb`` and ``max_disk_mb``
-    are reserved for future use and are **not** enforced today -- agent commands
-    can consume arbitrary host memory and disk.
+    Under ``driver: tempdir`` only ``timeout`` is actively enforced (via
+    ``subprocess.run(timeout=...)``); other fields are accepted but not
+    enforced -- the agent can consume arbitrary host memory/CPU/PIDs/disk.
+
+    Under ``driver: docker`` ``max_memory_mb``, ``max_cpus``, and
+    ``max_pids`` translate to ``--memory``, ``--cpus``, and ``--pids-limit``
+    respectively. ``max_disk_mb`` remains reserved (no portable docker knob).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     timeout: int = Field(default=300, description="Maximum execution time in seconds")
     max_memory_mb: int | None = Field(
         default=None,
-        description="Maximum memory in MB (reserved -- not enforced today)",
+        description="Maximum memory in MB. Mapped to `docker run --memory` under driver:docker; reserved otherwise.",
+    )
+    max_cpus: float | None = Field(
+        default=None,
+        gt=0,
+        description="Max CPU shares (fractional). Mapped to `docker --cpus` under driver:docker; reserved otherwise.",
+    )
+    max_pids: int | None = Field(
+        default=None,
+        gt=0,
+        description="Max PID count. Mapped to `docker run --pids-limit` under driver:docker; reserved otherwise.",
     )
     max_disk_mb: int | None = Field(
         default=None,
-        description="Maximum disk usage in MB (reserved -- not enforced today)",
+        description="Maximum disk usage in MB (reserved -- no portable docker knob).",
     )
 
 
@@ -39,6 +53,8 @@ class SnapshotConfig(BaseModel):
     Note: No 'enabled' flag - use mode=DISABLED to disable snapshots.
     This avoids redundant state (e.g., enabled=False, mode=FULL).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     mode: SnapshotMode = Field(
         default=SnapshotMode.DISABLED, description="Snapshot mode (default: disabled for backward compatibility)"
@@ -57,6 +73,8 @@ class SnapshotManifest(BaseModel):
     Stored as manifest.json in each snapshot directory.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     created_at: datetime = Field(description="When this snapshot was created")
     iteration: int = Field(description="Iteration number (0-indexed)")
     mode: SnapshotMode = Field(description="Snapshot mode used (full/incremental)")
@@ -74,11 +92,15 @@ class SnapshotManifest(BaseModel):
 class PythonEnvConfig(BaseModel):
     """Configuration for the Python virtual environment in the sandbox."""
 
+    model_config = ConfigDict(extra="forbid")
+
     env_packages: list[str] = Field(default_factory=list, description="Packages to install")
 
 
 class NodeEnvConfig(BaseModel):
     """Configuration for Node.js environment in the sandbox."""
+
+    model_config = ConfigDict(extra="forbid")
 
     env_packages: list[str] = Field(
         default_factory=list, description="npm packages to install (e.g., '@uipath/cli@0.1.5')"
@@ -118,19 +140,99 @@ def validate_template_sources_list(sources: list[TemplateSource]) -> None:
         )
 
 
+class DockerDriverConfig(BaseModel):
+    """Per-task overrides for ``driver: docker``.
+
+    Only consulted when ``SandboxConfig.driver == "docker"``. The
+    ``env_passthrough`` allowlist is the **only** source of host env vars
+    visible inside the container -- nothing else leaks from ``os.environ``.
+    Default list covers the credentials the in-container Orchestrator needs
+    to stand up its own LLM Gateway proxy.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    image: str | None = Field(
+        default=None,
+        description="Container image. Defaults to coder-eval-agent:<pkg-version> (built via `make docker-image`).",
+    )
+    network: Literal["bridge", "none"] = Field(
+        default="bridge",
+        description="Container network. 'bridge' for tasks needing LLM/pkg access; 'none' for fully sealed runs.",
+    )
+    env_passthrough: list[str] = Field(
+        default_factory=lambda: [
+            "ANTHROPIC_API_KEY",
+            # Selects routing: direct Anthropic vs. LLM Gateway proxy vs. Bedrock.
+            "API_BACKEND",
+            # LLM Gateway proxy credentials -- forwarded so the container's
+            # Orchestrator can stand up its own in-container proxy.
+            "LLMGW_PROXY_ENABLED",
+            "LLMGW_URL",
+            "LLMGW_CLIENT_ID",
+            "LLMGW_CLIENT_SECRET",
+            "LLMGW_SEMANTIC_ORG_ID",
+            "LLMGW_SEMANTIC_TENANT_ID",
+            "LLMGW_SEMANTIC_USER_ID",
+            "LLMGW_REQUESTING_PRODUCT",
+            "LLMGW_REQUESTING_FEATURE",
+            "LLMGW_TIMEOUT_SECONDS",
+            "UIPATH_LLM_BACKEND",
+            "UIPATH_ACCESS_TOKEN",
+            "UIPATH_URL",
+            "UIPATH_TENANT_ID",
+            "UIPATH_ORGANIZATION_ID",
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "AWS_REGION",
+            # Claude Code SDK Bedrock toggle + optional model override; required
+            # alongside AWS_BEARER_TOKEN_BEDROCK to route the in-container SDK
+            # through Bedrock instead of falling back to ~/.claude OAuth.
+            "CLAUDE_CODE_USE_BEDROCK",
+            "ANTHROPIC_MODEL",
+            # User HOME used to keep ~/.claude resolution symmetric with the host.
+            # See docs/DOCKER_ISOLATION.md "HOME is forwarded by default" for the
+            # contract. tl;dr: Path.home() inside the container returns the
+            # host's HOME (the dir is auto-created by the ~/.claude bind mount);
+            # writes outside ~/.claude land in the container's ephemeral rootfs.
+            # Remove this entry if you don't want host HOME leakage.
+            "HOME",
+        ],
+        description=(
+            "Explicit allowlist of host env vars to forward into the container. "
+            "This is the ONLY source of forwarded env -- nothing else from os.environ leaks in. "
+            "Extend per-task to expose extra credentials/config. "
+            "Note: HOME forwarding is intentional (keeps ~/.claude path symmetric with host); "
+            "see docs/DOCKER_ISOLATION.md for the contract."
+        ),
+    )
+    extra_mounts: list[str] = Field(
+        default_factory=list,
+        description="Extra `-v src:dst[:ro]` mount specs forwarded to `docker run`. Validated for basic syntax.",
+    )
+
+
 class SandboxConfig(BaseModel):
     """Configuration for the sandboxed execution environment.
 
-    The only supported driver is ``tempdir``, which creates a plain temporary
-    directory on the host.  There is no container or VM isolation -- commands
-    executed inside the sandbox share the host's network, process table, and
-    filesystem (outside the temp directory).  See :class:`ResourceLimits` for
-    details on which limits are enforced.
+    ``driver: tempdir`` (default) runs the agent in a plain temp directory on
+    the host with no container isolation -- agent commands share the host's
+    network, process table, and filesystem outside the temp dir.
+    ``driver: docker`` runs each task inside its own container; see
+    :class:`DockerDriverConfig` for knobs. ``ResourceLimits.timeout`` is the
+    only limit enforced in tempdir mode; under docker, ``max_memory_mb`` also
+    maps to ``--memory`` when set.
     """
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
-    driver: Literal["tempdir"] = Field(default="tempdir", description="Sandbox driver type (only tempdir supported)")
+    driver: Literal["tempdir", "docker"] = Field(
+        default="tempdir",
+        description="Sandbox driver: 'tempdir' = in-process on host; 'docker' = one container per task.",
+    )
+    docker: DockerDriverConfig = Field(
+        default_factory=DockerDriverConfig,
+        description="Docker-driver overrides; ignored unless driver == 'docker'.",
+    )
     python: PythonEnvConfig | None = Field(
         default_factory=PythonEnvConfig,
         description="Python environment config; set to null in YAML (or None in Python) to skip venv creation",

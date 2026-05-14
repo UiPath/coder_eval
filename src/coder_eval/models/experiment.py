@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -62,6 +62,14 @@ class ExperimentVariant(BaseModel):
             "value intact."
         ),
     )
+    driver: Literal["tempdir", "docker"] | None = Field(
+        default=None,
+        description=(
+            "Override the sandbox driver for this variant. Slots into layer 4 of the "
+            "5-layer config merge; None inherits from task/experiment-defaults. "
+            "Enables variant-A=tempdir vs variant-B=docker comparisons."
+        ),
+    )
 
     @model_validator(mode="after")
     def check_prompt_exclusivity(self) -> Self:
@@ -115,6 +123,13 @@ class ExperimentDefaults(BaseModel):
         description=(
             "Default run-time caps (turns, wall-clock, tokens, USD). "
             "Field-merge — task and variant layers override individual keys without replacing the block."
+        ),
+    )
+    driver: Literal["tempdir", "docker"] | None = Field(
+        default=None,
+        description=(
+            "Default sandbox driver applied to all tasks under this experiment. Slots into "
+            "layer 2 of the 5-layer merge; variant- and task-level driver fields override it."
         ),
     )
 

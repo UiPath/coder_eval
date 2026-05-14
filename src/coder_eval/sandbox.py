@@ -86,8 +86,16 @@ class Sandbox:
         """
         if self.config.driver == "tempdir":
             return self._setup_tempdir(target_dir=target_dir)
-        else:
-            raise ValueError(f"Unsupported sandbox driver: {self.config.driver}")
+        if self.config.driver == "docker":
+            # Docker isolation is dispatched at the orchestrator-entry boundary
+            # (coder_eval.isolation.docker_runner). Inside the container, the
+            # task is re-run with driver=tempdir, so this branch is never
+            # reached on a correctly routed call.
+            raise RuntimeError(
+                "Sandbox.setup() called with driver='docker' -- Docker tasks must be "
+                + "dispatched via DockerRunner from the host. This indicates a routing bug."
+            )
+        raise ValueError(f"Unsupported sandbox driver: {self.config.driver}")
 
     def _setup_tempdir(self, target_dir: Path | None = None) -> Path:
         """Set up a sandbox directory.

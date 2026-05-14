@@ -1,10 +1,10 @@
-task_id: flow-json-bellevue-weather
+task_id: flow-json-bellevue-weather-docker
 description: >
-  Medium-complexity flow: HTTP + Script + Decision + 2 End nodes.
-  Tests whether the agent defaults to JSON authoring mode (no CLI
-  node add) when no mode is specified. The prompt does not mention
-  CLI or JSON — the skill should default to JSON for OOTB flows.
-tags: [flow, flow-json, generate, mode-default, no-cli-expected]
+  Docker-isolation variant of flow-json-bellevue-weather. Same agent task
+  and success criteria; each run executes inside a fresh coder-eval-agent
+  container. Requires `make docker-image` once and an LLM backend reachable
+  from the container (set API_BACKEND=bedrock|proxy in your env).
+tags: [flow, flow-json, generate, mode-default, no-cli-expected, docker]
 
 run_limits:
   max_turns: 50
@@ -14,7 +14,7 @@ agent:
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
 
 sandbox:
-  driver: tempdir
+  driver: docker
   python: {}
   node:
     env_packages:
@@ -30,7 +30,6 @@ initial_prompt: |
   Before starting, load the uipath-maestro-flow skill. Read and follow its workflow steps exactly.
 
 success_criteria:
-  # --- Flow correctness ---
   - type: run_command
     description: "Flow file exists and is valid JSON with required structure"
     command: "python3 -c \"import json,glob; flows=glob.glob('**/BellevueWeather*.flow',recursive=True); assert flows, 'No flow found'; f=json.load(open(flows[0])); nn=len(f['nodes']); ne=len(f['edges']); nd=len(f['definitions']); assert nn>=5, 'Expected 5+ nodes, got %d'%nn; print('OK: %d nodes, %d edges, %d defs'%(nn,ne,nd))\""
@@ -63,9 +62,6 @@ success_criteria:
     weight: 2.0
     pass_threshold: 1.0
 
-  # --- Mode detection: agent should NOT use uip maestro flow node add ---
-  # The skill should default to JSON authoring for OOTB-only flows.
-  # Use run_command to check turn records since command_executed has no max_count.
   - type: run_command
     description: "Agent did NOT use uip maestro flow node add (defaulted to JSON authoring)"
     command: "echo 'OK: mode detection requires turn records — checked via eval logs'"

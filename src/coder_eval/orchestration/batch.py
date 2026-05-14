@@ -78,18 +78,33 @@ async def run_batch(
         async with semaphore:
             try:
                 rt.run_dir.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
-                orchestrator = Orchestrator(
-                    task=rt.task,
-                    run_dir=rt.run_dir,
-                    preserve_sandbox=config.preserve_sandbox,
-                    task_file=rt.task_file,
-                    stream_callback=task_callback,
-                    variant_id=rt.variant_id,
-                    source_yaml=rt.source_yaml,
-                    config_lineage=rt.config_lineage,
-                    replicate_index=rt.replicate_index,
-                )
-                result = await orchestrator.run()
+                sandbox_cfg = rt.task.sandbox
+                if sandbox_cfg is not None and sandbox_cfg.driver == "docker":
+                    # Docker isolation: spawn one container per task, parse
+                    # its task.json on completion. The in-container CLI
+                    # serializes stream events as NDJSON on stdout; we
+                    # forward them to the host callback so --stream
+                    # renders identically to the in-process path.
+                    from ..isolation.docker_runner import DockerRunner
+
+                    result = await DockerRunner(
+                        rt,
+                        preserve_sandbox=config.preserve_sandbox,
+                        stream_callback=task_callback,
+                    ).run()
+                else:
+                    orchestrator = Orchestrator(
+                        task=rt.task,
+                        run_dir=rt.run_dir,
+                        preserve_sandbox=config.preserve_sandbox,
+                        task_file=rt.task_file,
+                        stream_callback=task_callback,
+                        variant_id=rt.variant_id,
+                        source_yaml=rt.source_yaml,
+                        config_lineage=rt.config_lineage,
+                        replicate_index=rt.replicate_index,
+                    )
+                    result = await orchestrator.run()
                 tr = TaskResult(
                     task_id=rt.task.task_id,
                     variant_id=rt.variant_id,
@@ -240,6 +255,21 @@ def _generate_run_summary(
     statuses = [r.result.final_status for r in task_results]
 
     version_info = get_version_info()
+    host_coder_eval = version_info.get("coder_eval", "unknown")
+    # Surface host↔container version drift: under --driver docker the agent
+    # ran against the image's version, not the host's. Without this warning
+    # framework_version silently mis-attributes the runtime.
+    container_versions = {
+        (r.result.environment_info or {}).get("coder_eval") for r in task_results if r.result.environment_info
+    }
+    container_versions.discard(None)
+    container_versions.discard(host_coder_eval)
+    if container_versions:
+        logger.warning(
+            "Container coder_eval %s != host %s; framework_version is host. Per-task versions in task.json.",
+            sorted(v for v in container_versions if v),
+            host_coder_eval,
+        )
     summary = RunSummary(
         run_id=run_dir.name,
         start_time=start_time,

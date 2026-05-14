@@ -10,6 +10,7 @@ from .plan_command import plan_command
 from .proxy_command import proxy_command
 from .report_command import report_command
 from .run_command import run_command
+from .run_task_internal_command import run_task_internal_command
 
 
 # Create the Typer app
@@ -54,6 +55,8 @@ app.command(name="plan")(plan_command)
 app.command(name="evaluate")(evaluate_command)
 app.command(name="report")(report_command)
 app.command(name="proxy")(proxy_command)
+# Hidden internal command invoked inside the Docker container only.
+app.command(name="_run-task-internal", hidden=True)(run_task_internal_command)
 
 # Register tools subcommands
 tools_app.command(name="autogen")(autogen_command)
