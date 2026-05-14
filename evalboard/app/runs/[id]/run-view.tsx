@@ -11,6 +11,17 @@ import { TaskGrid } from "./task-grid";
 
 const TOP_N_TAGS = 10;
 
+function percentile(values: number[], p: number): number | null {
+    if (values.length === 0) return null;
+    const sorted = [...values].sort((a, b) => a - b);
+    // Linear interpolation between closest ranks.
+    const idx = (sorted.length - 1) * p;
+    const lo = Math.floor(idx);
+    const hi = Math.ceil(idx);
+    if (lo === hi) return sorted[lo];
+    return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+}
+
 function parseTagsParam(raw: string | null): string[] {
     if (!raw) return [];
     return raw
@@ -190,8 +201,8 @@ export function RunView({
         let errored = 0;
         let cost = 0;
         let durationSum = 0;
-        let costKnown = false;
-        let durKnown = false;
+        const costSamples: number[] = [];
+        const durSamples: number[] = [];
         for (const t of filtered) {
             const cat = statusCategory(t.status);
             if (cat === "passed") passed++;
@@ -199,11 +210,11 @@ export function RunView({
             else failed++;
             if (t.totalCostUsd != null) {
                 cost += t.totalCostUsd;
-                costKnown = true;
+                costSamples.push(t.totalCostUsd);
             }
             if (t.durationSeconds != null) {
                 durationSum += t.durationSeconds;
-                durKnown = true;
+                durSamples.push(t.durationSeconds);
             }
         }
         return {
@@ -213,8 +224,12 @@ export function RunView({
             errored,
             failedTotal: failed + errored,
             pct: total ? (passed / total) * 100 : 0,
-            cost: costKnown ? cost : null,
-            duration: durKnown ? durationSum : null,
+            cost: costSamples.length ? cost : null,
+            costP50: percentile(costSamples, 0.5),
+            costP90: percentile(costSamples, 0.9),
+            duration: durSamples.length ? durationSum : null,
+            durationP50: percentile(durSamples, 0.5),
+            durationP90: percentile(durSamples, 0.9),
         };
     }, [filtered]);
 
@@ -290,10 +305,21 @@ export function RunView({
                             ? `$${metrics.cost.toFixed(2)}`
                             : "—"
                     }
+                    sub={
+                        metrics.costP50 != null && metrics.costP90 != null
+                            ? `p50 $${metrics.costP50.toFixed(2)} · p90 $${metrics.costP90.toFixed(2)}`
+                            : undefined
+                    }
                 />
                 <Metric
                     label="Time"
                     value={fmtDuration(metrics.duration)}
+                    sub={
+                        metrics.durationP50 != null &&
+                        metrics.durationP90 != null
+                            ? `p50 ${fmtDuration(metrics.durationP50)} · p90 ${fmtDuration(metrics.durationP90)}`
+                            : undefined
+                    }
                 />
             </div>
 
