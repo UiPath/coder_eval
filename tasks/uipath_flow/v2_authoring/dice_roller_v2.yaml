@@ -5,12 +5,14 @@ description: >
   inlining (__script_<id> sync helper).
 tags: [flow-v2, fil, generate, script]
 
+run_limits:
+  max_turns: 50
+  turn_timeout: 900
+
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 50
-  turn_timeout: 900
 
 sandbox:
   driver: tempdir
@@ -22,8 +24,9 @@ sandbox:
 initial_prompt: |
   Author a UiPath Flow v2 project named **DiceRoller** in the current
   directory. Read `SKILL.md` first — it describes the v2 file shape, FIL
-  syntax, the manifest envelope, and the authoring loop using `verify.sh`.
-  There is a worked example in `example/`.
+  syntax (including the top-level `flow`/`action`/`trigger` declarations),
+  and the authoring loop using `verify.sh`. There is a worked example in
+  `example/`.
 
   ## Scenario
 
@@ -32,28 +35,36 @@ initial_prompt: |
   **Important — replay safety:** `Math.random()` is non-deterministic, so
   it cannot live in an inlined `__script_<id>` helper (those run on every
   FIL replay; each replay would roll a different number and break the
-  history). Instead, invoke a script node via `await executeNode(...)`,
-  whose result is captured in history and reused on subsequent replays.
-  See SKILL.md → "Non-deterministic calls must go through executeNode."
+  history). Instead, declare an `action roll: script { … };` whose
+  `rawInputs.script` carries the random expression, and dispatch through
+  `executeNode(roll, "{}")`. The host runs the script once, captures the
+  result in history, and replays read the captured value. See SKILL.md →
+  "Non-deterministic calls must go through executeNode."
 
   Pattern:
 
   ```typescript
+  flow dice-roller {
+    name: "Dice Roller",
+    version: "1.0.0",
+  };
+
+  trigger manualStart: start;
+
+  action roll: script {
+    rawInputs: { script: "return Math.floor(Math.random() * 6) + 1;" },
+  };
+
   async function main(): Promise<void> {
-    const rolledRaw: string = await executeNode("roll", "{}");
+    const rolledRaw: string = await executeNode(roll, "{}");
     // rolledRaw is preserved in history; replays see the same value.
   }
   ```
 
-  In the manifest, `roll` is a `core.action.script@1.0.0` node whose
-  `rawInputs.script` body is the random expression
-  (e.g. `return Math.floor(Math.random() * 6) + 1;`).
-
   ## Files to write (project root)
 
-  - `DiceRoller.fil`         FIL source
-  - `DiceRoller.manifest.flow`  Manifest
-  - `bindings.json`             Connection IDs (empty array — no connectors)
+  - `DiceRoller.fil`         FIL source (carries the action declarations)
+  - `bindings.json`          Connection IDs (empty array — no connectors)
 
   ## Authoring loop
 
@@ -71,10 +82,6 @@ success_criteria:
   - type: file_exists
     description: "FIL source file exists"
     path: "DiceRoller.fil"
-    weight: 1.0
-  - type: file_exists
-    description: "Manifest exists"
-    path: "DiceRoller.manifest.flow"
     weight: 1.0
   - type: file_exists
     description: "Bindings file exists"
@@ -126,19 +133,20 @@ success_criteria:
          `Math.ceil(Math.random() * 6)`, etc.). Don't penalize stylistic
          choices.
 
-      2. **Replay safety**: the random call lives in a script node
-         invoked via `await executeNode("...", ...)`, NOT inside an
-         inlined `__script_<id>` helper. The FIL must look like:
+      2. **Replay safety**: the random call lives in an `action … : script`
+         whose `rawInputs.script` is the random expression, dispatched via
+         `await executeNode(<actionRef>, ...)`. NOT inside an inlined
+         `__script_<id>` helper. The FIL must look like:
 
          ```typescript
+         action roll: script {
+           rawInputs: { script: "return Math.floor(Math.random() * 6) + 1;" },
+         };
+
          async function main(): Promise<void> {
-           const rolledRaw: string = await executeNode("roll", "{}");
+           const rolledRaw: string = await executeNode(roll, "{}");
          }
          ```
-
-         and the manifest's `roll` node has `type:
-         core.action.script@1.0.0` with `rawInputs.script` containing the
-         random expression.
 
          If `Math.random()` is inside a `function __script_<id>():
          json { ... }` helper that is *called* (not awaited) from main(),
@@ -151,9 +159,8 @@ success_criteria:
         • 0.3 if the die range is wrong but at least the structure is right.
         • 0   if no random output at all.
 
-      The FIL source and manifest are included below.
+      The FIL source is included below.
     files:
       - "DiceRoller.fil"
-      - "DiceRoller.manifest.flow"
     weight: 2.0
     pass_threshold: 0.7

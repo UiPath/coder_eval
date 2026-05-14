@@ -4,12 +4,14 @@ description: >
   iteration emitting v1 core.logic.loop nodes with proper loopBack wiring.
 tags: [flow-v2, fil, generate, loop, mock]
 
+run_limits:
+  max_turns: 50
+  turn_timeout: 1200
+
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 50
-  turn_timeout: 1200
 
 sandbox:
   driver: tempdir
@@ -21,8 +23,9 @@ sandbox:
 initial_prompt: |
   Author a UiPath Flow v2 project named **BatchProcessor** in the current
   directory. Read `SKILL.md` first — it describes the v2 file shape, FIL
-  syntax (including `for`/`for-of` loops), the manifest envelope, and the
-  authoring loop using `verify.sh`. Worked example in `example/`.
+  syntax (including `for`/`for-of` loops and the top-level
+  `flow`/`action`/`trigger` declarations), and the authoring loop using
+  `verify.sh`. Worked example in `example/`.
 
   ## Scenario
 
@@ -50,9 +53,10 @@ initial_prompt: |
 
   ## Files to write (project root)
 
-  - `BatchProcessor.fil`        FIL source
-  - `BatchProcessor.manifest.flow` Manifest
-  - `bindings.json`                Empty bindings array
+  - `BatchProcessor.fil`   FIL source (declare the two mock actions with a
+                            top-level `fixture: { … }` body field for
+                            offline replay)
+  - `bindings.json`        Empty bindings array
 
   ## Authoring loop
 
@@ -67,10 +71,6 @@ success_criteria:
   - type: file_exists
     description: "FIL source file exists"
     path: "BatchProcessor.fil"
-    weight: 1.0
-  - type: file_exists
-    description: "Manifest exists"
-    path: "BatchProcessor.manifest.flow"
     weight: 1.0
   - type: file_exists
     description: "Bindings file exists"
@@ -133,9 +133,8 @@ success_criteria:
       (b) iterates over the batch with a FIL for/for-of loop,
       (c) processes each item via another mock placeholder inside the loop body,
       (d) ends after the loop?
-      The FIL source and manifest are included below.
+      The FIL source is included below.
     files:
       - "BatchProcessor.fil"
-      - "BatchProcessor.manifest.flow"
     weight: 2.0
     pass_threshold: 0.7

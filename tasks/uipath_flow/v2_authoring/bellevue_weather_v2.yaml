@@ -1,17 +1,20 @@
 task_id: uipath-flow-v2-bellevue-weather
 description: >
   v2 port of the medium-complexity weather flow: HTTP + Script + Decision +
-  branched outputs. Authored as FIL + manifest + bindings instead of
-  hand-written .flow JSON. Tests whether the v2 authoring loop reaches the
-  same v1-validated outcome with the same scenario.
+  branched outputs. Authored as FIL + bindings instead of hand-written
+  .flow JSON. Tests whether the v2 authoring loop reaches the same
+  v1-validated outcome with the same scenario.
 tags: [flow-v2, fil, generate, http, decision]
+
+run_limits:
+  max_turns: 50
+  turn_timeout: 1200
+  task_timeout: 1200
 
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 50
-  turn_timeout: 1200
 
 sandbox:
   driver: tempdir
@@ -23,8 +26,9 @@ sandbox:
 initial_prompt: |
   Author a UiPath Flow v2 project named **BellevueWeather** in the current
   directory. Read `SKILL.md` first — it describes the v2 file shape, FIL
-  syntax, the manifest envelope, the binding requirements, and the
-  authoring loop using `verify.sh`. There is a worked example in `example/`.
+  syntax (including the top-level `flow`/`action`/`trigger` declarations),
+  the binding requirements, and the authoring loop using `verify.sh`.
+  There is a worked example in `example/`.
 
   ## Scenario
 
@@ -37,10 +41,9 @@ initial_prompt: |
 
   ## Files to write (project root)
 
-  - `BellevueWeather.fil`       FIL source
-  - `BellevueWeather.manifest.flow` Manifest
-  - `bindings.json`                Connection IDs (this flow has no
-                                   connectors, so an empty bindings array is fine)
+  - `BellevueWeather.fil`   FIL source (carries the flow/action declarations)
+  - `bindings.json`         Connection IDs (this flow has no connectors, so an
+                            empty bindings array is fine)
 
   ## Authoring loop
 
@@ -60,11 +63,6 @@ success_criteria:
   - type: file_exists
     description: "FIL source file exists"
     path: "BellevueWeather.fil"
-    weight: 1.0
-
-  - type: file_exists
-    description: "Manifest exists"
-    path: "BellevueWeather.manifest.flow"
     weight: 1.0
 
   - type: file_exists
@@ -145,10 +143,9 @@ success_criteria:
           be single-expression returns; see the "Script-helper restrictions"
           subsection in SKILL.md).
 
-      Score the FIL source and manifest below. Behavior is what's being
+      Score the FIL source below. Behavior is what's being
       graded; the chosen branching idiom is not.
     files:
       - "BellevueWeather.fil"
-      - "BellevueWeather.manifest.flow"
     weight: 2.0
     pass_threshold: 0.7

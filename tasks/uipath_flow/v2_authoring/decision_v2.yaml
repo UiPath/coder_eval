@@ -5,12 +5,14 @@ description: >
   pattern and core.logic.mock dispatch.
 tags: [flow-v2, fil, generate, decision, mock]
 
+run_limits:
+  max_turns: 50
+  turn_timeout: 1200
+
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 50
-  turn_timeout: 1200
 
 sandbox:
   driver: tempdir
@@ -22,8 +24,9 @@ sandbox:
 initial_prompt: |
   Author a UiPath Flow v2 project named **EmailClassifier** in the current
   directory. Read `SKILL.md` first — it describes the v2 file shape, FIL
-  syntax, the manifest envelope, the authoring loop using `verify.sh`,
-  and how to use mock nodes (`core.logic.mock`) for offline placeholders.
+  syntax (including the top-level `flow`/`action`/`trigger` declarations),
+  the authoring loop using `verify.sh`, and how to use mock nodes
+  (`core.logic.mock`) for offline placeholders.
   There is a worked example in `example/`.
 
   ## Scenario
@@ -42,10 +45,10 @@ initial_prompt: |
 
   ## Files to write (project root)
 
-  - `EmailClassifier.fil`        FIL source
-  - `EmailClassifier.manifest.flow` Manifest (mock entries with `inputs.fixture`
-                                    populated)
-  - `bindings.json`                 Empty bindings array
+  - `EmailClassifier.fil`   FIL source (declare each mock action with a
+                            top-level `fixture: { … }` body field for
+                            offline replay)
+  - `bindings.json`         Empty bindings array
 
   ## Authoring loop
 
@@ -61,10 +64,6 @@ success_criteria:
   - type: file_exists
     description: "FIL source file exists"
     path: "EmailClassifier.fil"
-    weight: 1.0
-  - type: file_exists
-    description: "Manifest exists"
-    path: "EmailClassifier.manifest.flow"
     weight: 1.0
   - type: file_exists
     description: "Bindings file exists"
@@ -127,9 +126,8 @@ success_criteria:
       (b) branches three ways on the email's category (needs-response,
           take-action, other) using FIL if/else if/else,
       (c) has a separate action mock per branch?
-      The FIL source and manifest are included below.
+      The FIL source is included below.
     files:
       - "EmailClassifier.fil"
-      - "EmailClassifier.manifest.flow"
     weight: 2.0
     pass_threshold: 0.7

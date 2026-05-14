@@ -1,16 +1,18 @@
 task_id: uipath-flow-v2-connector-configure
 description: >
   v2 port of the connector-configure task: a real Slack-notify flow with a
-  configured connector node. Tests the v2 binding model end-to-end (manifest
-  binding → bindings.json resourceKey → real connection UUID).
+  configured connector node. Tests the v2 binding model end-to-end (FIL
+  action's binding ref → bindings.json resourceKey → real connection UUID).
 tags: [flow-v2, fil, generate, connector, slack]
+
+run_limits:
+  max_turns: 50
+  turn_timeout: 1500
 
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 50
-  turn_timeout: 1500
 
 sandbox:
   driver: tempdir
@@ -23,8 +25,8 @@ initial_prompt: |
   Author a UiPath Flow v2 project named **SlackNotifier** in the current
   directory. Read `SKILL.md` first — pay particular attention to the
   binding model: `bindings.json` declares named bindings with
-  `resourceKey` (a real connection UUID); the manifest's connector node
-  references the binding's `id`. Worked example in `example/`.
+  `resourceKey` (a real connection UUID); the FIL action's `binding`
+  field references the binding's `id`. Worked example in `example/`.
 
   ## Scenario
 
@@ -41,17 +43,17 @@ initial_prompt: |
 
   Author the v2 project:
   - Manual trigger → Slack send-message → End.
-  - The connector node's `binding` in the manifest is the connection UUID
-    (verbatim, not a binding-id reference).
-  - `folderBinding` is the FolderKey UUID.
-  - `bindings.json` must include both bindings (Slack connection and
-    FolderKey) so v2-to-v1 produces a valid v1 bindings array.
+  - The Slack `action` declaration's `binding` field is a SYMBOLIC id
+    (e.g. `"bSlack"`) that points at a `bindings.json` entry.
+  - Same for `folderBinding` (e.g. `"bFolderKey"`).
+  - `bindings.json` must include both entries with their `resourceKey`
+    set to the real Slack ConnectionId / FolderKey UUIDs.
 
   ## Files to write (project root)
 
-  - `SlackNotifier.fil`        FIL source
-  - `SlackNotifier.manifest.flow` Manifest
-  - `bindings.json`               Bindings (folder + Slack connection)
+  - `SlackNotifier.fil`     FIL source (carries the Slack action declaration
+                            with `binding` / `folderBinding`)
+  - `bindings.json`         Bindings (folder + Slack connection, real UUIDs)
 
   ## Authoring loop
 
@@ -71,10 +73,6 @@ success_criteria:
   - type: file_exists
     description: "FIL source file exists"
     path: "SlackNotifier.fil"
-    weight: 1.0
-  - type: file_exists
-    description: "Manifest exists"
-    path: "SlackNotifier.manifest.flow"
     weight: 1.0
   - type: file_exists
     description: "Bindings file exists"
@@ -109,22 +107,24 @@ success_criteria:
     weight: 1.0
     pass_threshold: 1.0
   - type: run_command
-    description: "Manifest references the Slack connector"
-    command: "grep -E 'uipath\\.connector\\.uipath-salesforce-slack\\.' SlackNotifier.manifest.flow"
+    description: "FIL declares a Slack-connector action"
+    command: "grep -E 'action\\s+\\w+\\s*:\\s*uipath\\.connector\\.uipath-salesforce-slack\\.' SlackNotifier.fil"
     timeout: 5
     expected_exit_code: 0
     weight: 1.0
     pass_threshold: 1.0
   - type: run_command
-    description: "Manifest has both binding and folderBinding"
+    description: "Slack action has both binding and folderBinding"
     command: |
       python3 -c "
-      import json, sys
-      m = json.load(open('SlackNotifier.manifest.flow'))
-      slack = [n for n in m['nodes'].values() if 'salesforce-slack' in n.get('type','')]
-      assert slack, 'no slack node in manifest'
-      n = slack[0]
-      assert n.get('binding') and n.get('folderBinding'), f'missing binding/folderBinding: {n}'
+      import re
+      src = open('SlackNotifier.fil').read()
+      # Find the slack action block and check it has binding and folderBinding fields.
+      m = re.search(r'action\\s+(\\w+)\\s*:\\s*uipath\\.connector\\.uipath-salesforce-slack\\.[\\w\\-.@]+\\s*\\{([^}]*)\\}', src, re.S)
+      assert m, 'no Slack action block found'
+      body = m.group(2)
+      assert 'binding' in body, f'Slack action missing binding: {body!r}'
+      assert 'folderBinding' in body, f'Slack action missing folderBinding: {body!r}'
       print('OK')
       "
     timeout: 10
@@ -135,16 +135,16 @@ success_criteria:
     description: "Flow uses a real Slack connection binding via v2 binding model"
     prompt: |
       Did the agent author a v2 Flow that:
-      (a) uses a Slack send-message connector node,
-      (b) has a manifest entry whose `binding` is a real ConnectionId UUID
-          (not a stub like 00000000-...),
-      (c) has a `folderBinding` that's also a real FolderKey UUID,
-      (d) includes corresponding entries in bindings.json that match those
-          UUIDs?
-      The FIL source, manifest, and bindings file are included below.
+      (a) declares a Slack send-message action,
+      (b) the action's `binding` field is a symbolic id referencing a
+          `bindings.json` entry whose `resourceKey` is a real ConnectionId
+          UUID (not a stub like 00000000-...),
+      (c) the action also has a `folderBinding` symbolic id pointing at
+          a real FolderKey UUID,
+      (d) bindings.json carries both entries with the real UUIDs?
+      The FIL source and bindings file are included below.
     files:
       - "SlackNotifier.fil"
-      - "SlackNotifier.manifest.flow"
       - "bindings.json"
     weight: 3.0
     pass_threshold: 0.7

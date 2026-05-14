@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # convert.sh <BaseName>
 #
-# Converts a v2 project (3 files: <BaseName>.fil + <BaseName>.manifest.flow +
-# bindings.json) into the v1 artifact set (<BaseName>.flow + bindings.json)
-# via the v2-to-v1 CLI.
+# Converts a v2 project (2 files: <BaseName>.fil + bindings.json) into the v1
+# artifact set (<BaseName>.flow + bindings.json) via the v2-to-v1 CLI.
 #
 # Output: <BaseName>.flow + bindings.json in the same directory.
 set -euo pipefail
@@ -17,4 +16,4 @@ if [[ ! -d "$FLOW_V2/v2-to-v1/dist" ]]; then
   exit 2
 fi
 
-"$NODE_BIN" "$FLOW_V2/v2-to-v1/dist/cli.js" "${NAME}.manifest.flow" --out "${NAME}.flow"
+"$NODE_BIN" "$FLOW_V2/v2-to-v1/dist/cli.js" "${NAME}.fil" --out "${NAME}.flow"

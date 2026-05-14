@@ -1,20 +1,21 @@
 task_id: uipath-flow-v2-release-rollup
 description: >
-  Author a complex Flow v2 project (FIL + manifest + bindings) that combines a
+  Author a complex Flow v2 project (FIL + bindings) that combines a
   free HTTP API (GitHub releases) with three connectors (Outlook, Slack,
   Jira). Loop + nested decisions + multi-connector fan-out; the converted v1
-  .flow should have 20+ nodes.
+  .flow should have 12+ nodes (a for-of loop with 3 connector fan-outs and
+  nested decisions compiles to roughly that, post-coalescing).
 tags: [flow-v2, fil, generate, http, decision, loop, multi-connector, complex]
 
 run_limits:
   task_timeout: 1800
+  max_turns: 120
+  turn_timeout: 1800
 
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 120
-  turn_timeout: 1800
 
 sandbox:
   driver: tempdir
@@ -79,9 +80,10 @@ initial_prompt: |
 
   ## Files to write (project root, not under `example/`)
 
-  - `ReleaseRollup.fil`              FIL source
-  - `ReleaseRollup.manifest.flow`    Manifest (references bindings by symbolic id)
-  - `bindings.json`                  Real connection UUIDs (no stubs); single source of truth for IDs
+  - `ReleaseRollup.fil`     FIL source (action declarations reference
+                            bindings by symbolic id)
+  - `bindings.json`         Real connection UUIDs (no stubs); single
+                            source of truth for IDs
 
   ## Connectors
 
@@ -91,10 +93,11 @@ initial_prompt: |
   (`uip is connections list` to find the connection + its `ConnectorKey` and
   `FolderKey`; `uip maestro flow registry get <NodeType>` for input schemas).
 
-  Real UUIDs go in `bindings.json` only. The manifest's `binding` /
-  `folderBinding` fields hold the symbolic id of the matching `bindings.json`
-  entry (e.g. `"bOutlook"`, `"bFolderKey"`). `flow-run` resolves the symbol
-  → UUID at load time and rejects stubs (`00000000-...` or `<placeholder>`).
+  Real UUIDs go in `bindings.json` only. The FIL `action` declarations'
+  `binding` / `folderBinding` fields hold the symbolic id of the matching
+  `bindings.json` entry (e.g. `"bOutlook"`, `"bFolderKey"`). `flow-run`
+  resolves the symbol → UUID at load time and rejects stubs
+  (`00000000-...` or `<placeholder>`).
 
   ## DateTime arithmetic in FIL
 
@@ -132,10 +135,6 @@ success_criteria:
   - type: file_exists
     description: "FIL source file exists"
     path: "ReleaseRollup.fil"
-    weight: 1.0
-  - type: file_exists
-    description: "Manifest exists"
-    path: "ReleaseRollup.manifest.flow"
     weight: 1.0
   - type: file_exists
     description: "Bindings exist"
@@ -202,7 +201,7 @@ success_criteria:
     weight: 1.0
     pass_threshold: 1.0
   - type: run_command
-    description: "v1 .flow has 20+ nodes (counting top-level + subflow bodies)"
+    description: "v1 .flow has 12+ nodes (counting top-level + subflow bodies)"
     command: |
       python3 -c "
       import json
@@ -210,7 +209,10 @@ success_criteria:
       top = len(f.get('nodes', []))
       sub = sum(len(s.get('nodes', [])) for s in f.get('subflows', {}).values())
       total = top + sub
-      assert total >= 20, f'expected 20+ nodes, got {total} ({top} top + {sub} in subflows)'
+      # Threshold sized for the post-coalescing converter: a for-of loop
+      # with 3 connector fan-outs and nested decisions compiles to ~12-17
+      # nodes. An empty / one-connector flow still fails.
+      assert total >= 12, f'expected 12+ nodes, got {total} ({top} top + {sub} in subflows)'
       print(f'{total} nodes ({top} top + {sub} in subflows)')
       "
     timeout: 10
@@ -289,7 +291,6 @@ success_criteria:
       Subtract 0.1 per missing piece; floor at 0.
     files:
       - "ReleaseRollup.fil"
-      - "ReleaseRollup.manifest.flow"
       - "bindings.json"
       - "ReleaseRollup.flow"
     weight: 3.0

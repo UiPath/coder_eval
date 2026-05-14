@@ -5,12 +5,14 @@ description: >
   discover the input parameter schema rather than guessing.
 tags: [flow-v2, fil, generate, connector, registry]
 
+run_limits:
+  max_turns: 50
+  turn_timeout: 1200
+
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 50
-  turn_timeout: 1200
 
 sandbox:
   driver: tempdir
@@ -22,8 +24,8 @@ sandbox:
 initial_prompt: |
   Author a UiPath Flow v2 project named **CalendarReminder** in the current
   directory. Read `SKILL.md` first — it describes the v2 file shape, FIL
-  syntax, the manifest envelope, the authoring loop using `verify.sh`,
-  and how to look up connector schemas with
+  syntax (including the top-level `flow`/`action`/`trigger` declarations),
+  the authoring loop using `verify.sh`, and how to look up connector schemas with
   `uip maestro flow registry search` / `get`.
 
   The example in `example/` (OrderConfirm) shows a flow that uses
@@ -51,12 +53,12 @@ initial_prompt: |
 
   ## Files to write (project root)
 
-  - `CalendarReminder.fil`        FIL source
-  - `CalendarReminder.manifest.flow` Manifest (mock fixture populated; the
-                                     create-event node's `binding` and
-                                     `folderBinding` can be stub UUIDs —
-                                     this task is dry-run only)
-  - `bindings.json`                  Empty bindings array
+  - `CalendarReminder.fil`  FIL source (declare the fetch mock with a
+                            top-level `fixture: { … }` body field; the
+                            create-event action's `binding` and
+                            `folderBinding` can be stub bindings.json
+                            ids — this task is dry-run only)
+  - `bindings.json`         Empty bindings array
 
   ## Authoring loop
 
@@ -73,10 +75,6 @@ success_criteria:
   - type: file_exists
     description: "FIL source file exists"
     path: "CalendarReminder.fil"
-    weight: 1.0
-  - type: file_exists
-    description: "Manifest exists"
-    path: "CalendarReminder.manifest.flow"
     weight: 1.0
   - type: file_exists
     description: "Bindings file exists"
@@ -99,7 +97,7 @@ success_criteria:
   - type: run_command
     description: "Converted .flow validates"
     command: "uip maestro flow validate CalendarReminder.flow"
-    timeout: 30
+    timeout: 60
     expected_exit_code: 0
     weight: 3.0
     pass_threshold: 1.0
@@ -111,15 +109,20 @@ success_criteria:
     weight: 1.0
     pass_threshold: 1.0
   - type: run_command
-    description: "Manifest references the create-event-calendar node type"
+    description: "FIL declares an action for the create-event-calendar node type"
     command: |
       python3 -c "
-      import json
-      m = json.load(open('CalendarReminder.manifest.flow'))
-      types = [n.get('type', '') for n in m.get('nodes', {}).values()]
-      hits = [t for t in types if 'create-event' in t and 'calendar' in t.lower()]
-      assert hits, f'expected a create-event-calendar node, got types={types}'
-      print(f'create-event node type: {hits[0]}')
+      import re
+      src = open('CalendarReminder.fil').read()
+      # Look for `action <name>: <type>` where <type> contains both
+      # 'create-event' and 'calendar' (covers
+      # uipath.connector.uipath-microsoft-outlook365.create-event-calendar-event
+      # and similar canonical names).
+      pat = re.compile(r'action\s+\w+\s*:\s*([\w\-.@]+)')
+      hits = [m.group(1) for m in pat.finditer(src)
+              if 'create-event' in m.group(1) and 'calendar' in m.group(1).lower()]
+      assert hits, f'expected an action declaring create-event-calendar type, got actions={[m.group(1) for m in pat.finditer(src)]}'
+      print(f'create-event action type: {hits[0]}')
       "
     timeout: 10
     expected_exit_code: 0

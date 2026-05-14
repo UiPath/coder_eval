@@ -8,12 +8,14 @@ description: >
   and the report should mention how to bind it in `bindings.json`.
 tags: [flow-v2, connector, discovery, no-build]
 
+run_limits:
+  max_turns: 50
+  turn_timeout: 900
+
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 50
-  turn_timeout: 900
 
 sandbox:
   driver: tempdir
@@ -25,8 +27,8 @@ sandbox:
 initial_prompt: |
   Read `SKILL.md` first — it covers the v2 file shape, the connector
   binding model, and the authoring loop. There is a worked example in
-  `example/` showing how the manifest references connector nodes and how
-  bindings.json maps named bindings to connection UUIDs.
+  `example/` showing how FIL action declarations reference connector
+  nodes and how bindings.json maps named bindings to connection UUIDs.
 
   ## Scenario
 
@@ -45,8 +47,9 @@ initial_prompt: |
   - Connection status (Enabled / Disabled / not configured).
   - The connection's `Id` UUID (or note if no connection exists).
   - The `FolderKey` UUID for that connection.
-  - A short snippet showing what the manifest entry would look like with
-    `binding` and `folderBinding` filled in.
+  - A short snippet showing what the FIL `action` declaration would look
+    like with `binding` and `folderBinding` filled in (referencing
+    bindings.json entries by symbolic id).
 
 success_criteria:
   - type: file_exists
@@ -82,7 +85,8 @@ success_criteria:
       (1) Does the Slack connector exist?
       (2) Which activity sends a message? (gives the v2 typeRef with @version)
       (3) Is a connection configured? (Id + FolderKey if yes)
-      (4) How would the v2 manifest reference it (binding / folderBinding)?
+      (4) How would a v2 FIL `action` declaration reference it
+          (binding / folderBinding pointing at bindings.json entries)?
     files:
       - "connector-discovery-report.md"
     weight: 3.0

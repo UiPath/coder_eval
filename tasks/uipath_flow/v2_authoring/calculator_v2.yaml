@@ -6,12 +6,14 @@ description: >
   plus script multiplication.
 tags: [flow-v2, fil, generate, script, variables]
 
+run_limits:
+  max_turns: 50
+  turn_timeout: 900
+
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 50
-  turn_timeout: 900
 
 sandbox:
   driver: tempdir
@@ -23,8 +25,9 @@ sandbox:
 initial_prompt: |
   Author a UiPath Flow v2 project named **Calculator** in the current
   directory. Read `SKILL.md` first — it describes the v2 file shape, FIL
-  syntax, the manifest envelope, and the authoring loop using `verify.sh`.
-  There is a worked example in `example/`.
+  syntax (including the top-level `flow`/`action`/`trigger` declarations),
+  and the authoring loop using `verify.sh`. There is a worked example in
+  `example/`.
 
   ## Scenario
 
@@ -48,9 +51,8 @@ initial_prompt: |
 
   ## Files to write (project root)
 
-  - `Calculator.fil`        FIL source
-  - `Calculator.manifest.flow` Manifest
-  - `bindings.json`            Empty bindings array
+  - `Calculator.fil`        FIL source (carries the flow/action declarations)
+  - `bindings.json`         Empty bindings array
 
   ## Authoring loop
 
@@ -65,10 +67,6 @@ success_criteria:
   - type: file_exists
     description: "FIL source file exists"
     path: "Calculator.fil"
-    weight: 1.0
-  - type: file_exists
-    description: "Manifest exists"
-    path: "Calculator.manifest.flow"
     weight: 1.0
   - type: file_exists
     description: "Bindings file exists"
@@ -148,9 +146,8 @@ success_criteria:
 
       Score 0 if the flow doesn't multiply.
 
-      The FIL source and manifest are included below.
+      The FIL source is included below.
     files:
       - "Calculator.fil"
-      - "Calculator.manifest.flow"
     weight: 2.0
     pass_threshold: 0.7
