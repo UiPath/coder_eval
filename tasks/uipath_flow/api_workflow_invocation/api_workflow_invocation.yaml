@@ -1,0 +1,235 @@
+task_id: flow-json-api-workflow-invocation
+description: >
+  Author a Flow v1 (.flow JSON) project that invokes a published API Workflow
+  process resource, branches on the returned age, and validates with the v1
+  schema. V1 counterpart to v2_authoring/api_workflow_invocation_v2.
+tags: [flow, flow-json, generate, api-workflow, decision, mock, non-is-node]
+
+run_limits:
+  max_turns: 80
+  turn_timeout: 1200
+  task_timeout: 1800
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: tempdir
+  python: {}
+  node:
+    env_packages:
+      - "@uipath/cli@0.1.21"
+
+initial_prompt: |
+  Before starting, load the `uipath-maestro-flow` skill and read its
+  SKILL.md. Author the flow as v1 JSON. Do NOT use Flow v2, FIL, or C#.
+  Do NOT ask for approval, confirmation, or feedback. Build the complete
+  flow end-to-end in a single pass.
+
+  Create a UiPath Flow project named **ApiAgeLookup**.
+
+  ## Scenario
+
+  The flow invokes a published API Workflow that maps a name to an age, then
+  branches on the returned age.
+
+  Use this published API Workflow resource exactly:
+
+  - Node type: `uipath.core.api-workflow.346b8959-c126-48d3-9c46-942abcf944d7`
+  - Node typeVersion: `1.0.0`
+  - Node id: `nameToAge`
+  - Display label: `Name To Age`
+  - Resource key: `Shared/test-darwin-apis.API Workflow`
+  - API Workflow name binding id: `bApiName`
+  - API Workflow name binding default: `API Workflow`
+  - API Workflow folderPath binding id: `bApiFolder`
+  - API Workflow folderPath binding default: `Shared/test-darwin-apis`
+  - Runtime service type: `Orchestrator.ExecuteApiWorkflowAsync`
+  - Resource sub type: `Api`
+  - Orchestrator type: `api`
+  - Section: `Published`
+
+  ## Flow behavior
+
+  1. Start with a manual trigger.
+  2. Invoke `nameToAge` with an input equivalent to:
+
+     ```json
+     { "name": "tomasz" }
+     ```
+
+  3. Treat the API Workflow output shape as:
+
+     ```json
+     { "response": { "age": 42 } }
+     ```
+
+  4. Add a decision that checks whether the returned age is greater than or
+     equal to 18.
+  5. If age >= 18, call a mock node named `adultRoute`.
+  6. Otherwise, call a mock node named `minorRoute`.
+  7. End the flow.
+
+  ## Files to write
+
+  Save the flow as:
+
+  - `ApiAgeLookup/project.uiproj`
+  - `ApiAgeLookup/flow_files/ApiAgeLookup.flow`
+
+  ## Required API Workflow node shape
+
+  The API Workflow node must have:
+
+  - `type: "uipath.core.api-workflow.346b8959-c126-48d3-9c46-942abcf944d7"`
+  - `typeVersion: "1.0.0"`
+  - `inputs.name: "tomasz"`
+  - `model.serviceType: "Orchestrator.ExecuteApiWorkflowAsync"`
+  - `model.section: "Published"`
+  - `model.bindings.resource: "process"`
+  - `model.bindings.resourceSubType: "Api"`
+  - `model.bindings.resourceKey: "Shared/test-darwin-apis.API Workflow"`
+  - `model.bindings.orchestratorType: "api"`
+  - `model.bindings.values.name: "API Workflow"`
+  - `model.bindings.values.folderPath: "Shared/test-darwin-apis"`
+  - `model.context` entries for `name`, `folderPath`, and `_label`, where
+    `name` references `=bindings.bApiName` and `folderPath` references
+    `=bindings.bApiFolder`.
+  - `outputs.error.source: "=Error"`
+
+  Put this `model` object directly on the `nameToAge` node, not only on the
+  matching definition:
+
+  ```json
+  {
+    "type": "bpmn:ServiceTask",
+    "serviceType": "Orchestrator.ExecuteApiWorkflowAsync",
+    "version": "v2",
+    "section": "Published",
+    "bindings": {
+      "resource": "process",
+      "resourceSubType": "Api",
+      "resourceKey": "Shared/test-darwin-apis.API Workflow",
+      "orchestratorType": "api",
+      "values": {
+        "name": "API Workflow",
+        "folderPath": "Shared/test-darwin-apis"
+      }
+    },
+    "context": [
+      {
+        "name": "name",
+        "type": "string",
+        "value": "=bindings.bApiName",
+        "default": "API Workflow"
+      },
+      {
+        "name": "folderPath",
+        "type": "string",
+        "value": "=bindings.bApiFolder",
+        "default": "Shared/test-darwin-apis"
+      },
+      {
+        "name": "_label",
+        "type": "string",
+        "value": "Name To Age"
+      }
+    ]
+  }
+  ```
+
+  ## Required bindings
+
+  The top-level `.flow` `bindings` array must include:
+
+  - `bApiName`: `resource: "process"`, `resourceSubType: "Api"`,
+    `resourceKey: "Shared/test-darwin-apis.API Workflow"`,
+    `propertyAttribute: "name"`, `default: "API Workflow"`
+  - `bApiFolder`: `resource: "process"`, `resourceSubType: "Api"`,
+    `resourceKey: "Shared/test-darwin-apis.API Workflow"`,
+    `propertyAttribute: "folderPath"`,
+    `default: "Shared/test-darwin-apis"`
+
+  ## Required definitions
+
+  Include a matching `definitions[]` entry for every node type used in the
+  flow, including this API Workflow node, manual trigger, decision, mock
+  nodes, and end node. The API Workflow definition must include
+  `model.serviceType: "Orchestrator.ExecuteApiWorkflowAsync"`.
+
+  ## Verifying your work
+
+  ```bash
+  uip maestro flow validate ApiAgeLookup/flow_files/ApiAgeLookup.flow
+  uip maestro flow format ApiAgeLookup/flow_files/ApiAgeLookup.flow
+  ```
+
+  Iterate until validation succeeds. Do not substitute a mock node for the
+  API Workflow resource node.
+
+success_criteria:
+  - type: file_exists
+    description: "project.uiproj exists"
+    path: "ApiAgeLookup/project.uiproj"
+    weight: 1.0
+
+  - type: file_exists
+    description: "Flow file exists"
+    path: "ApiAgeLookup/flow_files/ApiAgeLookup.flow"
+    weight: 1.0
+
+  - type: run_command
+    description: "Flow contains the required API Workflow process-resource shape"
+    command: "python3 $TASK_DIR/../shared/check_process_resource_flow.py --kind api --v1-flow ApiAgeLookup/flow_files/ApiAgeLookup.flow"
+    timeout: 10
+    expected_exit_code: 0
+    weight: 5.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "v1 .flow validates"
+    command: "uip maestro flow validate ApiAgeLookup/flow_files/ApiAgeLookup.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "format succeeds"
+    command: "uip maestro flow format ApiAgeLookup/flow_files/ApiAgeLookup.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: llm_judge
+    description: "Flow invokes the API Workflow and branches on response.age"
+    prompt: |
+      Did the agent author a v1 .flow JSON that:
+      (a) invokes the exact published API Workflow node `nameToAge` with
+          input `name = "tomasz"`;
+      (b) models it as an Orchestrator `ExecuteApiWorkflowAsync` process
+          resource with `resourceSubType: "Api"` and folder/name bindings;
+      (c) branches on `response.age >= 18`;
+      (d) routes the true branch to `adultRoute` and the false branch to
+          `minorRoute`;
+      (e) includes definitions and bindings needed for v1 validation?
+
+      Score 1.0 if all five pieces are present and structurally connected.
+      Subtract 0.2 for each missing piece. If the API Workflow node is
+      replaced by a mock or connector, cap the score at 0.3.
+    files:
+      - "ApiAgeLookup/flow_files/ApiAgeLookup.flow"
+    weight: 3.0
+    pass_threshold: 0.7
+
+  - type: command_executed
+    description: "Agent attempted v1 validation"
+    tool_name: "Bash"
+    command_pattern: "uip.*maestro.*flow.*validate.*ApiAgeLookup"
+    min_count: 1
+    require_success: false
+    weight: 1.0
+    pass_threshold: 1.0
