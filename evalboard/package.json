@@ -1,6 +1,7 @@
 {
     "name": "evalboard",
     "private": true,
+    "packageManager": "pnpm@10.9.0",
     "scripts": {
         "dev": "next dev -p 3030",
         "dev:local": "EVALBOARD_LOCAL_RUNS_DIR=../runs next dev -p 3030",

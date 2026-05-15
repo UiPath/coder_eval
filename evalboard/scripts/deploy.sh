@@ -1,27 +1,34 @@
 #!/usr/bin/env bash
-# Build + deploy coder-evalboard to Azure App Service via Run From Package.
+# Build + deploy coder-evalboard to Azure App Service via OneDeploy (zip deploy).
 # (App Service is still named `flow-evalboard` in Azure — see ../DEPLOYMENT.md.)
 # Context / why this shape: see ../DEPLOYMENT.md.
 #
 # Usage:
-#   scripts/deploy.sh           # build + upload + restart
-#   scripts/deploy.sh --skip-build   # reuse existing /tmp/fe-deploy
+#   scripts/deploy.sh                # build + deploy
+#   scripts/deploy.sh --skip-build   # reuse existing /tmp/fe-deploy.zip
+#   scripts/deploy.sh --build-only   # build the zip only, no deploy (used by CI)
 #
-# Pre-reqs on your workstation:
+# Pre-reqs on your workstation (manual deploys only):
 #   - pnpm (matches pnpm-lock.yaml)
 #   - npm (for the flat node_modules workaround)
 #   - az CLI, logged in (`az login`) to the UiPath tenant
-#   - A PIM-activated role that can read storage keys on rg-coder-eval-tests
-#     (mgmt-plane Contributor inherited from DevTest-ML-EA-mgmt is enough)
+#   - A role that can deploy to the App Service (e.g. Website Contributor on
+#     rg-coder-eval-tests; PIM-activate via DevTest-ML-EA-mgmt)
+#
+# CI uses --build-only and hands the resulting zip to `azure/webapps-deploy@v3`,
+# which deploys via the App Service publish profile. See
+# .github/workflows/deploy-evalboard.yml.
 
 set -euo pipefail
 
 SKIP_BUILD=0
+BUILD_ONLY=0
 for arg in "$@"; do
   case "$arg" in
     --skip-build) SKIP_BUILD=1 ;;
+    --build-only) BUILD_ONLY=1 ;;
     -h|--help)
-      sed -n '2,14p' "$0"
+      sed -n '2,20p' "$0"
       exit 0 ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
@@ -29,9 +36,6 @@ done
 
 APP=flow-evalboard
 RG=rg-coder-eval-tests
-STORAGE=coderevaltests
-CONTAINER=runs
-BLOB=deploys/flow-evalboard.zip
 DEPLOY_DIR=/tmp/fe-deploy
 ZIP=/tmp/fe-deploy.zip
 
@@ -58,23 +62,29 @@ if [[ $SKIP_BUILD -eq 0 ]]; then
   cp package.json "$DEPLOY_DIR/package.json"
   ( cd "$DEPLOY_DIR" && npm install --omit=dev --no-audit --no-fund >/dev/null )
 
-  echo "==> local smoke test (node server.js on :8765)"
-  (
-    cd "$DEPLOY_DIR"
-    PORT=8765 node server.js &
-    SERVER_PID=$!
-    trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
-    # Wait for it to come up
-    for _ in $(seq 1 20); do
-      sleep 0.5
-      if curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://localhost:8765/ 2>/dev/null | grep -q "^200$"; then
-        echo "    local HTTP 200 ✓"
-        exit 0
-      fi
-    done
-    echo "    local server did not return 200 — aborting deploy" >&2
-    exit 1
-  )
+  # Skip the local smoke test under --build-only. The smoke test boots Next.js
+  # and hits /, which fetches from blob storage via DefaultAzureCredential —
+  # that needs an interactive az login, which CI runners don't have. CI's next
+  # step (azure/webapps-deploy@v3) is the real deploy gate.
+  if [[ $BUILD_ONLY -eq 0 ]]; then
+    echo "==> local smoke test (node server.js on :8765)"
+    (
+      cd "$DEPLOY_DIR"
+      PORT=8765 node server.js &
+      SERVER_PID=$!
+      trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+      # Wait for it to come up
+      for _ in $(seq 1 20); do
+        sleep 0.5
+        if curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://localhost:8765/ 2>/dev/null | grep -q "^200$"; then
+          echo "    local HTTP 200 ✓"
+          exit 0
+        fi
+      done
+      echo "    local server did not return 200 — aborting deploy" >&2
+      exit 1
+    )
+  fi
 
   echo "==> zipping $ZIP"
   rm -f "$ZIP"
@@ -83,23 +93,16 @@ fi
 
 [[ -f "$ZIP" ]] || { echo "no zip at $ZIP (run without --skip-build)" >&2; exit 1; }
 
-echo "==> uploading $(du -h "$ZIP" | cut -f1) to blob $CONTAINER/$BLOB"
-KEY=$(az storage account keys list --account-name "$STORAGE" --resource-group "$RG" --query "[0].value" -o tsv)
-az storage blob upload \
-  --account-name "$STORAGE" --account-key "$KEY" \
-  --container-name "$CONTAINER" --name "$BLOB" \
-  --file "$ZIP" --overwrite --only-show-errors >/dev/null
+if [[ $BUILD_ONLY -eq 1 ]]; then
+  echo "==> --build-only: zip ready at $ZIP, skipping deploy"
+  exit 0
+fi
 
-echo "==> restarting $APP (container re-pulls the zip)"
-az webapp restart --name "$APP" --resource-group "$RG"
-
-# `az webapp restart` returns once the restart is queued — the old container is
-# still serving requests for another ~30-60s while the new one pulls the zip
-# and starts. Without this sleep the poll below can get a 200 from the stale
-# container and exit claiming success on unchanged code. Proper fix is a
-# build-version marker + polling endpoint; this sleep is the bandaid.
-echo "==> sleeping 25s so the old container steps down before we poll"
-sleep 25
+echo "==> deploying $(du -h "$ZIP" | cut -f1) to $APP via OneDeploy"
+az webapp deploy \
+  --name "$APP" --resource-group "$RG" \
+  --src-path "$ZIP" --type zip \
+  --only-show-errors >/dev/null
 
 echo "==> waiting for HTTP 200 (container healthy)"
 URL="https://coder-evalboard.uipath-dev.com/"

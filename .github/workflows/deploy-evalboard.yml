@@ -1,0 +1,56 @@
+name: Deploy evalboard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'evalboard/**'
+      - '.github/workflows/deploy-evalboard.yml'
+  workflow_dispatch:
+
+# Only one deploy in flight at a time. Don't cancel in-progress runs — let them
+# finish so we don't end up with a half-uploaded zip + restarted container.
+concurrency:
+  group: deploy-evalboard
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build + deploy to Azure App Service
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: evalboard
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.9.0
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: evalboard/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build deploy zip
+        run: bash scripts/deploy.sh --build-only
+
+      - name: Deploy to App Service
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: flow-evalboard
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: /tmp/fe-deploy.zip
