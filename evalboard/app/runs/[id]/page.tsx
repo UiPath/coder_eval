@@ -5,7 +5,6 @@ import { readRunReviewIndex, indexByTask, tagCountsForRun } from "@/lib/reviews"
 import { fmtRunTime } from "@/lib/format";
 import { AnalysisPanel } from "./analysis-panel";
 import { RunView } from "./run-view";
-import { SearchBox } from "./search-box";
 
 export const dynamic = "force-dynamic";
 
@@ -28,15 +27,7 @@ export default async function RunPage({
     return (
         <div className="space-y-5">
             <div className="space-y-1">
-                <div className="grid grid-cols-3 items-center gap-4">
-                    <h1 className="text-xl font-semibold text-gray-900">
-                        Run
-                    </h1>
-                    <div className="flex justify-center">
-                        <SearchBox className="w-full max-w-md" />
-                    </div>
-                    <div />
-                </div>
+                <h1 className="text-xl font-semibold text-gray-900">Run</h1>
                 <div className="text-xs text-gray-500 tabular-nums font-mono">
                     {id} · {fmtRunTime(id)}
                 </div>

@@ -236,6 +236,62 @@ export async function readRunTasks(
         .map(toTaskRow);
 }
 
+// Minimal per-task / per-run projection used by the front-page overview
+// (daily success chart + tag rails). Per-task detail is needed so that a
+// tag filter can scope success rate to only matching tasks within a run.
+export interface RunOverviewTask {
+    taskId: string;
+    status: string | null;
+    tags: string[];
+    totalCostUsd: number | null;
+    durationSeconds: number | null;
+}
+
+export interface RunOverview {
+    id: string;
+    tasks: RunOverviewTask[];
+    // Whole-run aggregates (mirrors readRunSummary). Carried here so the
+    // front-page table and the chart can be built from a single read.
+    totalCostUsd: number | null;
+    taskDurationSeconds: number | null;
+}
+
+export async function readRunOverview(
+    id: string,
+): Promise<RunOverview | null> {
+    const data = await readRunJson(id);
+    if (!data) return null;
+    const taskResults = data.task_results ?? [];
+    const tasks: RunOverviewTask[] = taskResults
+        .filter((t) => t.task_id)
+        .map((t) => ({
+            taskId: t.task_id ?? "",
+            status: t.status ?? null,
+            tags: t.tags ?? [],
+            totalCostUsd: t.total_cost_usd ?? null,
+            durationSeconds: t.duration ?? null,
+        }));
+    const totalCost = taskResults.reduce(
+        (a, t) => a + (t.total_cost_usd ?? 0),
+        0,
+    );
+    const taskDurationSum = taskResults.reduce(
+        (a, t) => a + (t.duration ?? 0),
+        0,
+    );
+    const allHaveDuration =
+        taskResults.length > 0 &&
+        taskResults.every((t) => t.duration != null);
+    return {
+        id,
+        tasks,
+        totalCostUsd: taskResults.length ? totalCost : null,
+        taskDurationSeconds: allHaveDuration
+            ? taskDurationSum
+            : (data.total_duration_seconds ?? null),
+    };
+}
+
 export async function recentRunSummaries(limit = 20): Promise<RunSummary[]> {
     const ids = (await listRunIds()).slice(0, limit);
     const results = await Promise.all(ids.map((id) => readRunSummary(id)));

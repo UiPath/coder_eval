@@ -2,44 +2,14 @@
 
 import Link from "next/link";
 import { useCallback, useState, useTransition } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
     type TaskAggregate,
     type TaskRunHit,
     type Window,
-    WINDOWS,
 } from "@/lib/reviews-types";
 import { fmtRunTime, humanizeTaskId } from "@/lib/format";
+import { WindowSelector } from "@/app/_components/window-selector";
 import { fetchTaskDrilldownAction } from "./actions";
-
-function WindowSelector({ current }: { current: Window }) {
-    const router = useRouter();
-    const pathname = usePathname();
-    const searchParams = useSearchParams();
-    const set = (w: Window) => {
-        const p = new URLSearchParams(searchParams.toString());
-        p.set("window", w);
-        router.replace(`${pathname}?${p.toString()}`, { scroll: false });
-    };
-    return (
-        <div className="inline-flex border border-gray-200 rounded-md overflow-hidden text-sm">
-            {WINDOWS.map((w) => {
-                const active = w === current;
-                return (
-                    <button
-                        key={w}
-                        type="button"
-                        onClick={() => set(w)}
-                        aria-pressed={active}
-                        className={`px-3 py-1 ${active ? "bg-studio-blue text-white" : "bg-white text-gray-700 hover:bg-gray-50"}`}
-                    >
-                        {w}
-                    </button>
-                );
-            })}
-        </div>
-    );
-}
 
 function TagChip({ tag, count }: { tag: string; count: number }) {
     return (
@@ -163,9 +133,13 @@ function TaskRow({
 export function HotspotsView({
     window,
     tasks,
+    q,
+    totalCount,
 }: {
     window: Window;
     tasks: TaskAggregate[];
+    q: string | null;
+    totalCount: number;
 }) {
     const [openTaskId, setOpenTaskId] = useState<string | null>(null);
     const [drill, setDrill] = useState<Record<string, TaskRunHit[]>>({});
@@ -193,6 +167,13 @@ export function HotspotsView({
                     <p className="text-xs text-gray-500 mt-0.5">
                         Tasks with the most failed reviews in the window. Click
                         a row to see the runs and tags behind it.
+                        {q && (
+                            <>
+                                {" "}
+                                · {tasks.length} of {totalCount} matching{" "}
+                                <span className="font-mono">{q}</span>
+                            </>
+                        )}
                     </p>
                 </div>
                 <WindowSelector current={window} />
@@ -200,7 +181,15 @@ export function HotspotsView({
 
             {tasks.length === 0 ? (
                 <div className="bg-white border border-gray-200 rounded-lg p-6 text-center text-sm text-gray-500">
-                    No review data in the last {window}.
+                    {q ? (
+                        <>
+                            No tasks match{" "}
+                            <span className="font-mono">{q}</span> in the last{" "}
+                            {window}.
+                        </>
+                    ) : (
+                        <>No review data in the last {window}.</>
+                    )}
                 </div>
             ) : (
                 <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
