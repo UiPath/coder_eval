@@ -1,0 +1,7 @@
+[Unit]
+Description=Periodic uip access-token refresh (prevents concurrent-refresh race)
+Documentation=https://github.com/UiPath/coder_eval/blob/main/dashboard/CI_DESIGN.md
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c "echo \"[$(date -u +%%FT%%TZ)] refreshing\" >> %h/refresh.log && /usr/local/bin/uip login refresh --login-validity 60 --output json >> %h/refresh.log 2>&1"

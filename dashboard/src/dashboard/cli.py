@@ -53,7 +53,7 @@ def _build_skills_suite(skills_dir: str) -> Suite:
         task_patterns=[f"{skills_dir}/tests/tasks/**/*.yaml"],
         exclude_patterns=[f"{skills_dir}/tests/tasks/activation/**/*.yaml"],
         experiment=f"{skills_dir}/tests/experiments/e2e.yaml",
-        concurrency=10,
+        concurrency=20,
         uip_login=True,
         env={"SKILLS_REPO_PATH": skills_dir},
     )

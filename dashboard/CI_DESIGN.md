@@ -6,7 +6,7 @@ _Last verified: 2026-04-29_ · _Owner: bai.li@uipath.com_
 
 ## Overview
 
-Every weeknight at 04:00 UTC (21:00 PT prev day / 07:00 Romania) a `systemd --user` timer on a long-lived Azure VM kicks off `daily.sh`. The slot is chosen to finish ~06:00 UTC — fresh before Romania's 9 AM standup, after Bellevue's workday. The wrapper pulls `main` for `coder_eval`, `skills`, and `cli`, syncs deps, runs the `skills` suite at 10x parallel via `dashboard run`, uploads the run directory to Azure Blob, ingests it into ADX, and posts a mechanical metrics summary to Slack. Auth to UiPath is via a **dedicated bot user** (`coder-eval-bot@uipath-qa.com`) signed in once interactively and refreshed in place; auth to Azure Blob and ADX is via `bai.li@uipath.com`'s `az login` plus RBAC roles. A 4-hour systemd timeout and a `flock` on `/var/lock/uip-daily.lock` prevent runaway / overlapping runs.
+Every weeknight at 04:00 UTC (21:00 PT prev day / 07:00 Romania) a `systemd --user` timer on a long-lived Azure VM kicks off `daily.sh`. The slot is chosen to finish ~06:00 UTC — fresh before Romania's 9 AM standup, after Bellevue's workday. The wrapper pulls `main` for `coder_eval`, `skills`, and `cli`, syncs deps, runs the `skills` suite at 20x parallel via `dashboard run`, uploads the run directory to Azure Blob, ingests it into ADX, and posts a mechanical metrics summary to Slack. Auth to UiPath is via a **dedicated bot user** (`coder-eval-bot@uipath-qa.com`) signed in once interactively and refreshed in place; auth to Azure Blob and ADX is via `bai.li@uipath.com`'s `az login` plus RBAC roles. A 4-hour systemd timeout and a `flock` on `/var/lock/uip-daily.lock` prevent runaway / overlapping runs.
 
 ## Where things live
 
@@ -22,7 +22,7 @@ Every weeknight at 04:00 UTC (21:00 PT prev day / 07:00 Romania) a `systemd --us
 | ADX | cluster `kvc-6xx4u3sa8nz1hq7dxn.southcentralus.kusto.windows.net` · db `coder-eval-runs-db` |
 | Dashboard UI | `https://coder-evalboard.uipath-dev.com/runs/<run-id>` |
 | Slack | `#flow-skill-sandbox` (sandbox webhook). |
-| Versioned units | `dashboard/scripts/ci/{daily.sh, slack_summary.py, coder-eval-daily.service, coder-eval-daily.timer}` |
+| Versioned units | `dashboard/scripts/ci/{daily.sh, slack_summary.py, coder-eval-daily.service, coder-eval-daily.timer, uip-token-refresh.service, uip-token-refresh.timer}` |
 | UiPath env | `https://alpha.uipath.com` · org `codereval` · tenant `DefaultTenant` |
 
 ## What runs nightly
@@ -33,11 +33,11 @@ The systemd timer fires the `coder-eval-daily.service` oneshot, which `ExecStart
 2. **Source `.env` files** — `~/uipath/coder_eval/.env` (bedrock keys, LLMGW, GH PAT, UV index password, optional Slack webhook) and `~/uipath/coder_eval/dashboard/.env` (ADX, Azure storage, optional storage key fallback). Done after the pull so newly-added keys upstream get picked up.
 3. **Rebuild `uip` CLI** — `bun install && bun run dev:cli:install` in `~/uipath/cli`. Idempotent; recreates the bun-managed symlink chain (which can rot if a `bun install` elsewhere cleans up the global node_modules dir).
 4. **Sync Python deps** — `uv pip install -e ".[dev]"` and `-e "./dashboard"` against the in-tree `.venv`.
-5. **`dashboard run --suite skills`** under `flock -n -E 75`. Skills suite is 153 tasks × `claude-sonnet-4-6` × bedrock backend × `concurrency=10`. Tasks run in sandboxed tempdirs, each calling the bot-authenticated `uip` CLI for flow validation/debug.
+5. **`dashboard run --suite skills`** under `flock -n -E 75`. Skills suite is 153 tasks × `claude-sonnet-4-6` × bedrock backend × `concurrency=20`. Tasks run in sandboxed tempdirs, each calling the bot-authenticated `uip` CLI for flow validation/debug.
 6. **Blob upload + ADX ingest** — both wrapped in try/except inside `cli.py`. A failure prints a traceback and continues, so the Slack post still fires with metrics from `runs/latest/run.json`.
 7. **Slack post** — `slack_summary.py` reads `runs/latest/run.json` and emits a JSON payload with pass/fail counts, total cost, wall duration, configured parallelism, repo SHAs, and the dashboard URL. `daily.sh` curl-POSTs to `$SLACK_WEBHOOK_URL` (no-ops if empty).
 
-Total wall time: ~1–2 hours at 10x parallel. Peak memory: ~8 GB out of 16 GB (D4s_v3 has comfortable headroom).
+Total wall time: ~1–2 hours at 20x parallel. Peak memory: ~8 GB out of 16 GB (D4s_v3 has comfortable headroom).
 
 ## VM setup
 
@@ -81,6 +81,7 @@ The working path. We use a **dedicated bot user** that has gone through the one-
 - `RefreshTokenUsage: 1` (one-time): each refresh issues a new RT and invalidates the old one. Hence `flock` — concurrent `uip` invocations on the box can race and burn the RT.
 - **Re-login required ≈ every 25 days.** Procedure in [Operate](#operate).
 - The `uip login refresh` command (cli#1057, Apr 2026) gives an explicit side-effect-free refresh; useful if you want to avoid relying on incidental refresh during real work.
+- A `systemd --user` timer (`uip-token-refresh.timer`) fires `uip login refresh --login-validity 60` every 50 min — comfortably ahead of the ~1h access-token TTL, so the cached AT in `~/.uipath/.auth` is always fresh. This prevents the real race: without it, the AT eventually expires mid-eval and the 20x parallel uip invocations each try to refresh the (one-time-use) RT in parallel, burning the chain. With the timer, no eval-time uip call ever needs to refresh — it just reads the up-to-date AT. Units versioned at `dashboard/scripts/ci/uip-token-refresh.{service,timer}`; install steps in [Operate](#operate).
 
 #### One-time bot provisioning (already done; reproduce only on a fresh tenant)
 
@@ -179,12 +180,15 @@ After provisioning the VM, installing tools (uv, bun, azure-cli, gh), cloning th
 sudo loginctl enable-linger azureuser
 
 mkdir -p ~/.config/systemd/user
-cp ~/uipath/coder_eval/dashboard/scripts/ci/coder-eval-daily.service ~/.config/systemd/user/
-cp ~/uipath/coder_eval/dashboard/scripts/ci/coder-eval-daily.timer   ~/.config/systemd/user/
+cp ~/uipath/coder_eval/dashboard/scripts/ci/coder-eval-daily.service    ~/.config/systemd/user/
+cp ~/uipath/coder_eval/dashboard/scripts/ci/coder-eval-daily.timer      ~/.config/systemd/user/
+cp ~/uipath/coder_eval/dashboard/scripts/ci/uip-token-refresh.service   ~/.config/systemd/user/
+cp ~/uipath/coder_eval/dashboard/scripts/ci/uip-token-refresh.timer     ~/.config/systemd/user/
 
 systemctl --user daemon-reload
 systemctl --user enable --now coder-eval-daily.timer
-systemctl --user list-timers coder-eval-daily.timer
+systemctl --user enable --now uip-token-refresh.timer
+systemctl --user list-timers coder-eval-daily.timer uip-token-refresh.timer
 ```
 
 ### Re-login (~every 25 days)

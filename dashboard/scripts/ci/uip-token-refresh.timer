@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh uip access token every 50 minutes
+Documentation=https://github.com/UiPath/coder_eval/blob/main/dashboard/CI_DESIGN.md
+
+[Timer]
+OnActiveSec=50min
+OnUnitActiveSec=50min
+Unit=uip-token-refresh.service
+
+[Install]
+WantedBy=timers.target

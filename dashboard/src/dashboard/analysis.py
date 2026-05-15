@@ -35,7 +35,7 @@ def generate_analysis(run_path: Path) -> Path:
         cwd=str(CODER_EVAL_DIR),
         env=_env_without_claudecode(),
         check=True,
-        timeout=900,
+        timeout=1800,
     )
 
     if not analysis_path.exists():
