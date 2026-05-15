@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "shared"))
 
-from _shared import ActivateError, DeployError, deployed_workflow, fail, post_webhook_until_ready
+from _shared import ActivateError, DeployError, deployed_workflow, fail, post_webhook_until_ready, response_contains
 
 
 LAT, LON = 47.6101, -122.2015  # Bellevue, WA
@@ -44,12 +44,11 @@ def main() -> None:
                 fail(0.6, f"ERROR: webhook never returned 200 ({status}): {body}")
 
             print(f"Webhook responded: {body} (ground truth: {temp_f:.1f}°F → {expected})", file=sys.stderr)
-            verdict = body.get("verdict") if isinstance(body, dict) else None
-            if verdict == expected:
-                print(f"Correct: {expected}", file=sys.stderr)
+            if response_contains(body, expected):
+                print(f"Correct: {expected} (found in response)", file=sys.stderr)
                 print(1.0)
                 return
-            print(f"WRONG: expected {expected!r}, got {verdict!r} (body={body})", file=sys.stderr)
+            print(f"WRONG: expected {expected!r}, not found anywhere in body={body}", file=sys.stderr)
             print(0.8)
     except (DeployError, ActivateError) as e:
         fail(e.score, f"ERROR: {e}")

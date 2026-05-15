@@ -1,0 +1,101 @@
+task_id: customer-escalation-n8n
+description: >
+  n8n version of `skill-flow-customer-escalation`: inbox-escalation pipeline
+  that triggers on new Outlook emails, classifies urgency and VIP-status in
+  Code nodes, decides on the combined result, and fans out to Slack + Outlook
+  reply on the high-touch branch and Outlook reply only on the standard branch.
+  Structural checks only (no live execution). Agent has the n8n-mcp
+  read+validate subset, paralleling flow's `uip maestro flow registry` +
+  `uip maestro flow validate` loop.
+tags: [n8n, workflow-json, trigger, decision, multi-connector, mcp, flow-parallel]
+
+run_limits:
+  max_turns: 60
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools:
+    - "Read"
+    - "Write"
+    - "Edit"
+    - "Glob"
+    - "Grep"
+    - "mcp__n8n-mcp__search_nodes"
+    - "mcp__n8n-mcp__get_node"
+    - "mcp__n8n-mcp__validate_workflow"
+    - "mcp__n8n-mcp__validate_node"
+    - "mcp__n8n-mcp__tools_documentation"
+  claude_settings:
+    mcpServers:
+      n8n-mcp:
+        type: stdio
+        command: npx
+        args: ["-y", "n8n-mcp"]
+        env:
+          MCP_MODE: stdio
+          LOG_LEVEL: error
+          DISABLE_CONSOLE_OUTPUT: "true"
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+initial_prompt: |
+  Write an n8n workflow JSON at `CustomerEscalation.json`. It should:
+
+  1. Trigger on new Outlook inbox emails (use
+     `n8n-nodes-base.microsoftOutlookTrigger`).
+  2. Classify urgency in a Code node — flag the email as urgent if its
+     subject or body contains any of: "urgent", "asap", "immediately",
+     "critical" (case-insensitive). Pick a slightly different keyword
+     set if you prefer; just keep it case-insensitive.
+  3. Classify VIP status in a second Code node — flag the sender as VIP
+     if the From address ends in one of `@bigcustomer.com`,
+     `@partnercorp.com`, `@vipclient.io`. Pick your own allow-list if
+     you prefer.
+  4. Use an IF node to decide on the combined signal (urgent AND VIP).
+     - True branch (high-touch): send a Slack message to channel
+       `#escalations` AND reply to the sender via Outlook
+       (`n8n-nodes-base.microsoftOutlook` send-email) with a
+       fast-response acknowledgment.
+     - False branch (standard): reply to the sender via Outlook only,
+       with a standard acknowledgment.
+
+  Credentials don't need to be wired to real accounts — only the workflow
+  structure is being checked.
+
+success_criteria:
+  - type: file_exists
+    description: "CustomerEscalation.json exists"
+    path: "CustomerEscalation.json"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  # Informational: n8n-mcp's validate is stronger than flow's, so we surface
+  # the signal but don't gate on it (pass_threshold 0.0). Parity with the
+  # `uip maestro flow validate` self-check available to the flow agent.
+  - type: run_command
+    description: "n8n-mcp validate_workflow (informational, never fails)"
+    command: "python3 $TASK_DIR/../shared/validate_workflow_mcp.py CustomerEscalation.json"
+    timeout: 180
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 0.0
+
+  - type: run_command
+    description: "Required node types present (Outlook trigger, IF, Slack, Outlook send, code-like)"
+    command: |
+      python3 -c "
+      import json
+      types = {n['type'] for n in json.load(open('CustomerEscalation.json')).get('nodes', [])}
+      required = {'n8n-nodes-base.microsoftOutlookTrigger', 'n8n-nodes-base.if', 'n8n-nodes-base.slack', 'n8n-nodes-base.microsoftOutlook'}
+      missing = required - types
+      assert not missing, f'missing: {missing}'
+      assert types & {'n8n-nodes-base.code', 'n8n-nodes-base.function'}, f'no Code/Function classifier: {types}'
+      print('OK')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0

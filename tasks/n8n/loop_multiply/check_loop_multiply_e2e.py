@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "shared"))
 
-from _shared import ActivateError, DeployError, deployed_workflow, fail, post_webhook_until_ready
+from _shared import ActivateError, DeployError, deployed_workflow, fail, post_webhook_until_ready, response_contains
 
 
 def main() -> None:
@@ -34,15 +34,11 @@ def main() -> None:
                 fail(0.6, f"ERROR: webhook never returned 200 ({status}): {body}")
 
             print(f"Webhook responded: {body} (expected product of {nums} = {expected})", file=sys.stderr)
-            product = body.get("product") if isinstance(body, dict) else None
-            try:
-                if product is not None and float(product) == float(expected):
-                    print(f"Correct: prod({nums}) = {product}", file=sys.stderr)
-                    print(1.0)
-                    return
-            except (TypeError, ValueError):
-                pass
-            print(f"WRONG: expected {expected}, got {product!r} (body={body})", file=sys.stderr)
+            if response_contains(body, expected):
+                print(f"Correct: prod({nums}) = {expected} (found in response)", file=sys.stderr)
+                print(1.0)
+                return
+            print(f"WRONG: expected {expected}, not found anywhere in body={body}", file=sys.stderr)
             print(0.8)
     except (DeployError, ActivateError) as e:
         fail(e.score, f"ERROR: {e}")

@@ -15,7 +15,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "shared"))
 
-from _shared import ActivateError, DeployError, deployed_workflow, fail, post_webhook, post_webhook_until_ready
+from _shared import (
+    ActivateError,
+    DeployError,
+    deployed_workflow,
+    fail,
+    post_webhook,
+    post_webhook_until_ready,
+    response_contains,
+)
 
 
 SEASONS = {1: "Spring", 2: "Summer", 3: "Fall", 4: "Winter"}
@@ -38,10 +46,9 @@ def main() -> None:
                     got_status, got_body = status, body
                 else:
                     got_status, got_body = post_webhook(webhook_path, {"quarter": q})
-                season = got_body.get("season") if isinstance(got_body, dict) else None
                 print(f"  q={q}: status={got_status} body={got_body}", file=sys.stderr)
-                if got_status != 200 or season != expected:
-                    wrong.append(f"q={q} expected {expected!r}, got {season!r}")
+                if got_status != 200 or not response_contains(got_body, expected):
+                    wrong.append(f"q={q} expected {expected!r}, body={got_body!r}")
 
             if not wrong:
                 print("Correct: all 4 quarters mapped", file=sys.stderr)

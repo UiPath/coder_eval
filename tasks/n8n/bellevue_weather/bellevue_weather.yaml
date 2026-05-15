@@ -1,11 +1,11 @@
-task_id: loop-multiply-n8n
+task_id: bellevue-weather-n8n
 description: >
-  n8n version of `skill-flow-loop-multiply`: POST webhook takes an array of
-  numbers, returns their product. Exercises iteration over an inline array
-  with a running accumulator. Agent has the n8n-mcp read+validate subset,
-  paralleling flow's `uip maestro flow registry` + `uip maestro flow validate`
-  loop.
-tags: [n8n, workflow-json, loop, mcp, flow-parallel]
+  n8n version of `skill-flow-bellevue-weather`: take latitude/longitude via POST
+  webhook, fetch the current temperature from open-meteo, return a `warm`/`cool`
+  verdict on a 60°F threshold. Same shape as the Maestro flow task — HTTP +
+  decision. Agent has the n8n-mcp read+validate subset, paralleling flow's
+  `uip maestro flow registry` + `uip maestro flow validate` loop.
+tags: [n8n, workflow-json, http, branching, mcp, flow-parallel]
 
 run_limits:
   max_turns: 30
@@ -39,14 +39,17 @@ sandbox:
   python: {}
 
 initial_prompt: |
-  Write an n8n workflow JSON at `LoopMultiply.json`. It should expose a POST
-  webhook taking `{"numbers": [int, ...]}` in the body and respond with
-  `{"product": int}` — the product of all numbers in the array.
+  Write an n8n workflow JSON at `BellevueWeather.json`. It should expose a POST
+  webhook taking `latitude` and `longitude` in the body, fetch the current
+  temperature from open-meteo
+  (`https://api.open-meteo.com/v1/forecast?latitude=...&longitude=...&current=temperature_2m`,
+  which returns Celsius), and respond with `{"verdict": "warm"}` if the
+  temperature is above 60°F, otherwise `{"verdict": "cool"}`.
 
 success_criteria:
   - type: file_exists
-    description: "LoopMultiply.json exists"
-    path: "LoopMultiply.json"
+    description: "BellevueWeather.json exists"
+    path: "BellevueWeather.json"
     weight: 1.0
     pass_threshold: 1.0
 
@@ -55,15 +58,15 @@ success_criteria:
   # `uip maestro flow validate` self-check available to the flow agent.
   - type: run_command
     description: "n8n-mcp validate_workflow (informational, never fails)"
-    command: "python3 $TASK_DIR/../shared/validate_workflow_mcp.py LoopMultiply.json"
+    command: "python3 $TASK_DIR/../shared/validate_workflow_mcp.py BellevueWeather.json"
     timeout: 180
     expected_exit_code: 0
     weight: 1.0
     pass_threshold: 0.0
 
   - type: run_command
-    description: "Deploy to live n8n, invoke webhook, verify product of array"
-    command: "python3 $TASK_DIR/check_loop_multiply_e2e.py LoopMultiply.json"
+    description: "Deploy to live n8n, invoke webhook, verify warm/cool verdict"
+    command: "python3 $TASK_DIR/check_bellevue_weather_e2e.py BellevueWeather.json"
     timeout: 60
     score_from_stdout: true
     weight: 8.0

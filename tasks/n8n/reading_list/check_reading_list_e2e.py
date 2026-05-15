@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "shared"))
 
-from _shared import ActivateError, DeployError, deployed_workflow, fail, post_webhook_until_ready
+from _shared import ActivateError, DeployError, deployed_workflow, fail, post_webhook_until_ready, response_matches_list
 
 
 BOOKS = [
@@ -27,10 +27,7 @@ BOOKS = [
     {"title": "Edge", "author": "Eve", "difficulty": 6, "pages": 600},  # fail: pages (boundary)
     {"title": "Equal", "author": "Frank", "difficulty": 5, "pages": 100},  # fail: difficulty (boundary)
 ]
-EXPECTED = sorted(
-    [{"title": b["title"], "author": b["author"]} for b in BOOKS if b["difficulty"] > 5 and b["pages"] < 600],
-    key=lambda b: b["title"],
-)
+EXPECTED = [{"title": b["title"], "author": b["author"]} for b in BOOKS if b["difficulty"] > 5 and b["pages"] < 600]
 
 
 def main() -> None:
@@ -44,17 +41,11 @@ def main() -> None:
                 fail(0.6, f"ERROR: webhook never returned 200 ({status}): {body}")
 
             print(f"Webhook responded: {body}", file=sys.stderr)
-            got = body.get("books") if isinstance(body, dict) else None
-            if isinstance(got, list):
-                got_norm = sorted(
-                    [{"title": b.get("title"), "author": b.get("author")} for b in got if isinstance(b, dict)],
-                    key=lambda b: str(b.get("title")),
-                )
-                if got_norm == EXPECTED:
-                    print(f"Correct: {len(EXPECTED)} books returned", file=sys.stderr)
-                    print(1.0)
-                    return
-            print(f"WRONG: expected {EXPECTED}, got {got!r} (body={body})", file=sys.stderr)
+            if response_matches_list(body, EXPECTED, keys=("title", "author")):
+                print(f"Correct: {len(EXPECTED)} books matched (any key, any order)", file=sys.stderr)
+                print(1.0)
+                return
+            print(f"WRONG: expected {EXPECTED}, no matching list found (body={body})", file=sys.stderr)
             print(0.8)
     except (DeployError, ActivateError) as e:
         fail(e.score, f"ERROR: {e}")

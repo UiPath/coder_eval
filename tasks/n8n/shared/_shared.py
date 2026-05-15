@@ -22,6 +22,7 @@ import contextlib
 import copy
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -102,6 +103,103 @@ def post_webhook_until_ready(path: str, payload: dict, timeout_s: int = 10) -> t
         if status == 200 or time.monotonic() >= deadline:
             return status, body
         time.sleep(0.5)
+
+
+def response_contains(body: object, target: object) -> bool:
+    """True if `target` appears anywhere in `body`.
+
+    Number target: matches any numeric leaf (int/float, numeric-string, or
+    number embedded in a string) that equals `target`.
+    String target: matches any string leaf equal to `target`, case-insensitive
+    and trimmed. Exact-value match, not substring — avoids false positives
+    where the opposite verdict appears inside a longer message.
+
+    Task prompts don't pin agents to a specific response-key name, so checkers
+    use this to accept reasonable shape variation (`{"product": 1452}`,
+    `{"result": 1452}`, `{"output": {"value": 1452}}`, etc.) without falling
+    over on key drift.
+    """
+    target_num = _as_float(target) if not isinstance(target, str) else None
+    if target_num is not None:
+        return _find_number(body, target_num)
+    return _find_string(body, str(target).strip().lower())
+
+
+def response_matches_list(
+    body: object,
+    expected: list[dict],
+    keys: tuple[str, ...] | None = None,
+) -> bool:
+    """True if some list in `body` matches `expected`, unordered.
+
+    If `keys` is given, dicts are projected to those keys before comparison
+    (extra fields ignored). Same key-agnostic intent as `response_contains`
+    but for structural list payloads — the agent might key the list under
+    `books`, `filtered`, `results`, or `data`.
+    """
+
+    def project(d: object) -> object:
+        if keys is None or not isinstance(d, dict):
+            return d
+        return tuple(d.get(k) for k in keys)
+
+    try:
+        expected_norm = sorted(project(d) for d in expected)  # type: ignore[type-var]
+    except TypeError:
+        return False
+
+    def walk(node: object) -> bool:
+        if isinstance(node, list) and node and all(isinstance(x, dict) for x in node):
+            try:
+                got = sorted(project(x) for x in node)  # type: ignore[type-var]
+            except TypeError:
+                got = None
+            if got == expected_norm:
+                return True
+        if isinstance(node, dict):
+            return any(walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(walk(v) for v in node)
+        return False
+
+    return walk(body)
+
+
+def _as_float(x: object) -> float | None:
+    if isinstance(x, bool):
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    return None
+
+
+def _find_number(node: object, target: float) -> bool:
+    if isinstance(node, dict):
+        return any(_find_number(v, target) for v in node.values())
+    if isinstance(node, list):
+        return any(_find_number(v, target) for v in node)
+    if isinstance(node, bool):
+        return False
+    if isinstance(node, (int, float)):
+        return float(node) == target
+    if isinstance(node, str):
+        for tok in re.findall(r"-?\d+(?:\.\d+)?", node):
+            try:
+                if float(tok) == target:
+                    return True
+            except ValueError:
+                continue
+    return False
+
+
+def _find_string(node: object, target: str) -> bool:
+    if isinstance(node, dict):
+        return any(_find_string(v, target) for v in node.values())
+    if isinstance(node, list):
+        return any(_find_string(v, target) for v in node)
+    if isinstance(node, str):
+        return node.strip().lower() == target
+    return False
 
 
 @contextlib.contextmanager

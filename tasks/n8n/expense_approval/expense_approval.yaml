@@ -1,0 +1,105 @@
+task_id: expense-approval-n8n
+description: >
+  n8n version of `skill-flow-e2e-devcon-expense-approval`: a developer gives a
+  vague expense-approval requirement. Agent must build the full workflow —
+  incoming expense (webhook or Outlook trigger), classify amount, pause for
+  human approval on large amounts via the Wait node ("wait for webhook"
+  mode), branch on the approval verdict, and notify the submitter. Structural
+  checks only (no live execution). Agent has the n8n-mcp read+validate
+  subset, paralleling flow's `uip maestro flow registry` + `uip maestro flow
+  validate` loop.
+tags: [n8n, workflow-json, trigger, decision, wait, multi-connector, mcp, flow-parallel]
+
+run_limits:
+  max_turns: 60
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools:
+    - "Read"
+    - "Write"
+    - "Edit"
+    - "Glob"
+    - "Grep"
+    - "mcp__n8n-mcp__search_nodes"
+    - "mcp__n8n-mcp__get_node"
+    - "mcp__n8n-mcp__validate_workflow"
+    - "mcp__n8n-mcp__validate_node"
+    - "mcp__n8n-mcp__tools_documentation"
+  claude_settings:
+    mcpServers:
+      n8n-mcp:
+        type: stdio
+        command: npx
+        args: ["-y", "n8n-mcp"]
+        env:
+          MCP_MODE: stdio
+          LOG_LEVEL: error
+          DISABLE_CONSOLE_OUTPUT: "true"
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+initial_prompt: |
+  Write an n8n workflow JSON at `ExpenseApproval.json` that handles employee
+  expense submissions with a human-in-the-loop approval gate for larger
+  amounts.
+
+  Requirements:
+
+  1. Trigger: a POST webhook (`n8n-nodes-base.webhook`) that accepts JSON
+     body with `submitter` (string), `amount` (number), and `description`
+     (string).
+  2. Classify in a Code node — needs_approval = (amount > 500).
+  3. IF node branch on `needs_approval`:
+     - **True** (large expense): pause for human approval using the Wait
+       node (`n8n-nodes-base.wait`) in `webhook` resume mode so an approver
+       can POST back the verdict. The resumed payload carries `approved`
+       (boolean). After the Wait, use another IF node:
+       - approved → Outlook send-email
+         (`n8n-nodes-base.microsoftOutlook`) to the submitter confirming
+         approval.
+       - rejected → Outlook send-email to the submitter notifying
+         rejection.
+     - **False** (auto-approve): Outlook send-email confirming
+       auto-approval.
+
+  Credentials don't need to be wired to real accounts — only the workflow
+  structure is being checked.
+
+success_criteria:
+  - type: file_exists
+    description: "ExpenseApproval.json exists"
+    path: "ExpenseApproval.json"
+    weight: 1.0
+    pass_threshold: 1.0
+
+  # Informational: n8n-mcp's validate is stronger than flow's, so we surface
+  # the signal but don't gate on it (pass_threshold 0.0). Parity with the
+  # `uip maestro flow validate` self-check available to the flow agent.
+  - type: run_command
+    description: "n8n-mcp validate_workflow (informational, never fails)"
+    command: "python3 $TASK_DIR/../shared/validate_workflow_mcp.py ExpenseApproval.json"
+    timeout: 180
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 0.0
+
+  - type: run_command
+    description: "Required node types present (Webhook, Wait, IF, Outlook send, code-like)"
+    command: |
+      python3 -c "
+      import json
+      types = {n['type'] for n in json.load(open('ExpenseApproval.json')).get('nodes', [])}
+      required = {'n8n-nodes-base.webhook', 'n8n-nodes-base.wait', 'n8n-nodes-base.if', 'n8n-nodes-base.microsoftOutlook'}
+      missing = required - types
+      assert not missing, f'missing: {missing} (have {types})'
+      assert types & {'n8n-nodes-base.code', 'n8n-nodes-base.function'}, f'no Code/Function classifier: {types}'
+      print('OK')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
