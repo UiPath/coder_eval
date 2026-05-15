@@ -7,12 +7,10 @@
 set -euo pipefail
 
 FILE="${1:?usage: parse-fil.sh <file.fil>}"
-FLOW_V2="${FLOW_V2:-$HOME/src/flow-v2}"
-NODE_BIN="${NODE_BIN:-$HOME/.asdf/installs/nodejs/22.22.1/bin/node}"
 
-if [[ ! -d "$FLOW_V2/fil/dist" ]]; then
-  echo "error: fil dist not built; run \`npm run build\` in $FLOW_V2/fil" >&2
-  exit 2
-fi
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$HERE/flow-v2-env.sh"
+"$HERE/check-tools.sh"
 
-"$NODE_BIN" "$FLOW_V2/fil/dist/index.js" "$FILE" -o /tmp/.fil-parse-check.wat >/dev/null
+node "$FLOW_V2_FIL" "$FILE" -o /tmp/.fil-parse-check.wat >/dev/null

@@ -78,6 +78,9 @@ uipath-llmgw-client = { index = "uipath" }
 [tool.ruff]
 line-length = 120
 target-version = "py313"
+# templates/flow-v2-shared/ vendors scripts from the flow-v2 repo; we
+# don't own their style and want easy re-sync, so exclude them from lint.
+extend-exclude = ["templates/flow-v2-shared/generate_connectors.py", "templates/flow-v2-shared/convert_library_to_md.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]

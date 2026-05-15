@@ -1,0 +1,1 @@
+{"version":3,"file":"bindings.js","sourceRoot":"","sources":["../src/bindings.ts"],"names":[],"mappings":";AAAA;;;;;;;;;;;;;;GAcG;;AAoBH,sCAKC;AALD,SAAgB,aAAa,CAAC,WAAsB;IAClD,OAAO;QACL,aAAa,EAAE,GAAG;QAClB,QAAQ,EAAE,CAAC,WAAW,IAAI,EAAE,CAAC,CAAC,GAAG,CAAC,CAAC,CAAC,EAAE,EAAE,CAAC,CAAiB,CAAC;KAC5D,CAAC;AACJ,CAAC"}

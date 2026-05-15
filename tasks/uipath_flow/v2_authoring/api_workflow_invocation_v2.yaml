@@ -21,6 +21,8 @@ sandbox:
   template_sources:
     - type: template_dir
       path: "../../../templates/flow-v2-process-resources"
+    - type: template_dir
+      path: "../../../templates/flow-v2-shared"
 
 initial_prompt: |
   Author a UiPath Flow v2 project named **ApiAgeLookup** in the current

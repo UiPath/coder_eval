@@ -23,6 +23,8 @@ sandbox:
   template_sources:
     - type: template_dir
       path: "../../../templates/flow-v2"
+    - type: template_dir
+      path: "../../../templates/flow-v2-shared"
 
 initial_prompt: |
   Read `SKILL.md` first — it covers the v2 file shape, the connector
@@ -38,7 +40,8 @@ initial_prompt: |
   1. Does a Slack connector exist? (search the registry with
      `uip maestro flow registry search "slack"`).
   2. Does it have a send-message activity?
-  3. Is there a healthy connection available (`uip is connections list`)?
+  3. Is there a healthy Slack connection? Filter the list directly:
+     `uip is connections list --output-filter "[?ConnectorKey=='uipath-salesforce-slack']"` (the `--output-filter` JMESPath applies to `.Data`, so `[*]` / `[?…]`, not `Data[*]`).
 
   Write your findings to `connector-discovery-report.md` including:
   - The connector key (e.g. `uipath-salesforce-slack`).

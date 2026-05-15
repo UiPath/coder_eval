@@ -20,6 +20,8 @@ sandbox:
   template_sources:
     - type: template_dir
       path: "../../../templates/flow-v2"
+    - type: template_dir
+      path: "../../../templates/flow-v2-shared"
 
 initial_prompt: |
   Author a UiPath Flow v2 project named **SlackNotifier** in the current
@@ -33,8 +35,12 @@ initial_prompt: |
   A flow that sends a Slack message to a configured channel.
 
   Discover the Slack connection:
-  1. `uip is connections list` — find a Slack connection (`ConnectorKey:
-     uipath-salesforce-slack`). Note its `Id` and `FolderKey`.
+  1. Look up the Slack connection's `Id` and `FolderKey`:
+     ```bash
+     uip is connections list --output-filter "[?ConnectorKey=='uipath-salesforce-slack'].{Id:Id,FolderKey:FolderKey,Name:Name}"
+     ```
+     `--output-filter` applies a JMESPath expression directly to the
+     `.Data` array (so `[*]` / `[?…]`, not `Data[*]`).
   2. Look up the send-message activity with
      `uip maestro flow registry search "slack"`. The full v2 typeRef will
      look like

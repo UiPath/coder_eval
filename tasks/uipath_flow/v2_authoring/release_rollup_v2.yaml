@@ -23,6 +23,8 @@ sandbox:
   template_sources:
     - type: template_dir
       path: "../../../templates/flow-v2"
+    - type: template_dir
+      path: "../../../templates/flow-v2-shared"
 
 initial_prompt: |
   Author a UiPath Flow v2 project named **ReleaseRollup** in the current
@@ -89,9 +91,15 @@ initial_prompt: |
 
   You need three connectors — Outlook (send email), Slack (send DM to a user),
   and Jira (create issue). Discover the exact NodeType for each action and
-  its required `inputs` shape via the SKILL.md connector workflow
-  (`uip is connections list` to find the connection + its `ConnectorKey` and
-  `FolderKey`; `uip maestro flow registry get <NodeType>` for input schemas).
+  its required `inputs` shape via the SKILL.md connector workflow.
+
+  Look up the real `Id` / `FolderKey` for each connector upfront:
+  ```bash
+  uip is connections list --output-filter "[*].{Id:Id,ConnectorKey:ConnectorKey,FolderKey:FolderKey,Name:Name}"
+  ```
+  `--output-filter` is a JMESPath applied directly to `.Data` (so `[*]` /
+  `[?…]`, not `Data[*]`). Use `uip maestro flow registry get <NodeType>`
+  for input schemas.
 
   Real UUIDs go in `bindings.json` only. The FIL `action` declarations'
   `binding` / `folderBinding` fields hold the symbolic id of the matching

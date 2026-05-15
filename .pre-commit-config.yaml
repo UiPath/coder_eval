@@ -1,3 +1,7 @@
+# Vendored flow-v2 toolchain — never touched by hooks; refresh via
+# templates/flow-v2-shared/sync-tools.sh.
+exclude: ^templates/flow-v2-shared/tools/
+
 repos:
   # Ruff for formatting and linting
   - repo: https://github.com/astral-sh/ruff-pre-commit

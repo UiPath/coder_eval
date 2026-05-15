@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
+# verify.sh [--live] [-- <extra flow-run args>]
+#
+# Runs flow-run against this v2 project for the inner authoring loop.
+#
+#   --dry-run (default): compile + binding check, no connector calls
+#   --live:              actually executes nodes against your tenant
+#
+# Outputs (under .flow-run/):
+#   history.yaml      — replay log; consumed by flow-run --resume
+#   decisions.json    — one record per dispatched node, with parsed
+#                       input + output. **Read this to debug.**
 set -euo pipefail
 
-if [[ -z "${FLOW_V2:-}" ]]; then
-  if [[ -d "$HOME/root/flow-v2" ]]; then
-    FLOW_V2="$HOME/root/flow-v2"
-  else
-    FLOW_V2="$HOME/src/flow-v2"
-  fi
-fi
-NODE_BIN="${NODE_BIN:-$(command -v node)}"
-
-if [[ ! -d "$FLOW_V2/flow-run/dist" ]]; then
-  echo "error: flow-run dist not built; run \`npm run build\` in $FLOW_V2/flow-run" >&2
-  exit 2
-fi
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$HERE/flow-v2-env.sh"
+"$HERE/check-tools.sh"
+"$HERE/check-library.sh" --json
 
 ARGS=()
 LIVE=0
@@ -29,7 +32,7 @@ if [[ "$LIVE" == "0" ]]; then
   ARGS+=("--dry-run")
 fi
 
-"$NODE_BIN" "$FLOW_V2/flow-run/dist/cli.js" \
+node "$FLOW_V2_FLOW_RUN" \
   . \
-  --library "$FLOW_V2/integrations/library" \
+  --library "$FLOW_V2_LIBRARY_JSON" \
   ${ARGS[@]+"${ARGS[@]}"}

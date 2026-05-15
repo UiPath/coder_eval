@@ -1,0 +1,80 @@
+// CommitMonitor — multi-connector demo: HTTP fetch per repo, decision,
+// Slack DM on hits, Outlook digest at the end.
+//
+// Patterns demonstrated:
+//   - Action declarations with rawInputs, binding, folderBinding, label
+//   - HTTP node with dynamic URL built via string concat
+//   - JSON.parse(rawResponse) → JSON.parse(response.body) double-parse
+//   - json field → string via a typed initializer (`const s: string = json.field`)
+//   - String `.toLowerCase()` + `.includes()` for case-insensitive substring
+//   - Decision in an iteration body, with counter increment
+//   - Connector inputs built as `const cfg: json = ({...})` then JSON.stringify
+//   - String + i32 concat in the digest body (auto-coerces)
+
+flow commit-monitor {
+  name: "Commit Monitor",
+  version: "1.0.0",
+};
+
+trigger manualStart: start;
+
+action fetchCommits: http {
+  label: "Fetch latest commit",
+  rawInputs: {
+    method: "GET",
+    timeout: "PT30S",
+  },
+};
+
+action slackAlert: uipath.connector.uipath-salesforce-slack.send-message-to-user@1.0.0 {
+  label: "Slack DM: bug-fix alert",
+  binding: "bSlack",
+  folderBinding: "bFolderKey",
+  configuration: {
+    send_as: "bot",
+    channel: "<your slack user id, e.g. @Your Name>",
+  },
+};
+
+action sendDigest: uipath.connector.uipath-microsoft-outlook365.send-email@1.0.0 {
+  label: "Outlook: daily digest",
+  binding: "bOutlook",
+  folderBinding: "bFolderKey",
+  configuration: {
+    "message.toRecipients": "<your email>",
+  },
+};
+
+async function main(): Promise<void> {
+  const repos: json = (["nodejs/node", "facebook/react"]);
+  let fixCount: i32 = 0;
+  let totalCount: i32 = 0;
+
+  for (const repo of repos) {
+    const repoStr: string = repo;
+    const url: string = ("https://api.github.com/repos/" + repoStr + "/commits?per_page=1");
+    const fetchInputs: json = ({ url: url });
+    const rawResponse: string = await executeNode(fetchCommits, JSON.stringify(fetchInputs));
+    const response: json = JSON.parse(rawResponse);
+    // HTTP response shape: { body, headers, statusCode }. body is itself JSON.
+    // `response.body` is `json`, so hoist into a typed local before parsing.
+    const responseBody: string = response.body;
+    const commits: json = JSON.parse(responseBody);
+    const commitMsg: string = commits[0].commit.message;
+
+    totalCount++;
+    const msgLower: string = commitMsg.toLowerCase();
+    const isBugFix: bool = (msgLower.includes("fix") || msgLower.includes("bug"));
+
+    if (isBugFix) {
+      fixCount++;
+      const slackMsg: string = ("Bug fix in " + repoStr + ": " + commitMsg);
+      const slackInputs: json = ({ messageToSend: slackMsg });
+      await executeNode(slackAlert, JSON.stringify(slackInputs));
+    }
+  }
+
+  const digestBody: string = ("Total commits: " + totalCount + ", bug fixes: " + fixCount);
+  const digestInputs: json = ({ "message.subject": "Daily commit digest", "message.body.content": digestBody });
+  await executeNode(sendDigest, JSON.stringify(digestInputs));
+}

@@ -1,0 +1,70 @@
+task_id: uipath-flow-v2-setup-library
+description: >
+  One-shot setup task that builds the shared flow-v2 connector library
+  cache (JSON + markdown). Run this once before running any flow-v2,
+  flow-v2-library, or flow-v2-process-resources task — those tasks fail
+  fast with a pointer back to this task when the cache is missing.
+
+  The cache lives under $FLOW_V2_LIBRARY_CACHE_DIR (default
+  $HOME/.cache/coder-eval/flow-v2) and is shared across every flow-v2
+  task on the host. Building hits `uip flow registry get` ~1200 times,
+  which is why it is split out of the per-task measurement.
+
+  Re-running is a no-op once the cache exists. To rebuild from scratch,
+  invoke `bash setup-library.sh --force` directly, or delete the cache
+  directory before re-running this task.
+tags: [flow-v2, setup, infrastructure]
+
+run_limits:
+  max_turns: 2
+  turn_timeout: 60
+  task_timeout: 1800     # JSON-library build can take 10+ minutes on a cold cache
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash"]
+
+sandbox:
+  driver: tempdir
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-v2-shared"
+
+pre_run:
+  - command: "bash setup-library.sh"
+    timeout: 1800
+    fail_on_error: true
+
+initial_prompt: |
+  The flow-v2 library cache has already been built by the pre_run step
+  (`setup-library.sh`). Your only job is to confirm the cache exists by
+  running:
+
+      bash check-library.sh --both
+
+  Then stop. Do not edit any files. Do not invoke the build script
+  again — it is idempotent but slow.
+
+success_criteria:
+  - type: run_command
+    description: "JSON library index exists"
+    command: 'test -f "${FLOW_V2_LIBRARY_JSON:-$HOME/.cache/coder-eval/flow-v2/library-json}/index.json"'
+    timeout: 5
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Markdown library index exists"
+    command: 'test -f "${FLOW_V2_LIBRARY_MD:-$HOME/.cache/coder-eval/flow-v2/library-md}/index.json"'
+    timeout: 5
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "check-library.sh reports both caches healthy"
+    command: "bash check-library.sh --both"
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0

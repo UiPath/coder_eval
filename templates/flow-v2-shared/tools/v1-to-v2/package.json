@@ -1,0 +1,12 @@
+{
+  "name": "v1-to-v2",
+  "version": "0.1.0",
+  "description": "Convert UiPath Flow v1 files to the Flow v2 (FIL + bindings) format",
+  "main": "dist/index.js",
+  "bin": {
+    "v1tov2": "dist/cli.js"
+  },
+  "dependencies": {
+    "fil-compiler": "file:../fil"
+  }
+}

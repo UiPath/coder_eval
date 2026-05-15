@@ -26,7 +26,15 @@ A v2 flow project is **two files**:
    - One `trigger <name>: <type>;` declaration per entry point (usually one).
    - One `action <name>: <type> { … };` declaration per node you'll call.
    - An `async function main()` body that wires the actions together via `await executeNode(<name>, …)`.
-4. Write `bindings.json`. Stub UUIDs (`00000000-…`) are fine for the first pass; verify.sh's pre-flight will tell you which need real values and offer candidates from your tenant.
+4. Write `bindings.json`. Look up the real ConnectionId / FolderKey upfront — `verify.sh` refuses to dispatch while any binding is a stub UUID. **Use `--output-filter` (JMESPath, built into the uip CLI) — NOT a pipe to `jq` or hand-written Python.** It filters in-process, returns smaller output, and applies the expression directly to `.Data` (so write `[*]` or `[?…]`, not `Data[*]`):
+   ```bash
+   # All connections, projected to the fields you need
+   uip is connections list --output-filter "[*].{Id:Id,ConnectorKey:ConnectorKey,FolderKey:FolderKey,Name:Name}"
+
+   # One connector
+   uip is connections list --output-filter "[?ConnectorKey=='uipath-microsoft-outlook365'].{Id:Id,FolderKey:FolderKey}"
+   ```
+   Each result has `Id` (the ConnectionId UUID), `ConnectorKey`, `FolderKey`, and `Name`. Match each `bindings.json` binding's `propertyAttribute` (`ConnectionId` or `FolderKey`) to the corresponding field. Stub UUIDs (`00000000-…`) survive `parse-fil.sh` and the static converter but verify.sh blocks them before dispatch, so wiring up reals on the first write saves a round trip.
 5. **Verify with `./verify.sh`** (the inner authoring loop):
    - `./verify.sh` — parses FIL, resolves bindings, lists what would be dispatched. No connector calls. Surfaces compile errors with file:line:col, missing/stub bindings, unknown node types.
    - Replace stub UUIDs with real connection IDs from `verify.sh`'s "candidates for X:" hints (or from `uip is connections list` directly).
@@ -137,9 +145,7 @@ const count: string = parsed.count;     // works for numbers, bools, null, etc.
 const n: i32 = parsed.count;            // json → i32 also auto-coerces (truncates)
 ```
 
-The same coercion is also available as the explicit `"" + jsonExpr` form (older code uses it; both compile to the same runtime call). Inside a function-argument position where there's no annotation target — e.g. `JSON.parse(response.body)` where `response.body` is `json` — keep the explicit `"" +` form (or hoist into a typed local first).
-
-**`json → f64` is not yet supported.** The runtime coercion returns `i32`, so `const x: f64 = parsed.value` fails to compile with `local.set expected type f64, found call of type i32`. For numeric comparisons today, use `i32` (truncates the fractional part — fine for "above 60" / loop-counter style checks), or hoist the float arithmetic into a script node.
+The same coercion is also available as the explicit `"" + jsonExpr` form (older code uses it; both compile to the same runtime call). Inside a function-argument position where there's no annotation target — e.g. `JSON.parse(response.body)` where `response.body` is `json` — keep the explicit `"" +` form (or hoist into a typed local first). `f64` works the same way: `const t: f64 = parsed.temperature` coerces a json number to a float.
 
 Do **not** use `as string` for json fields — it's a compile-time-only assertion and emits no conversion, so non-string tags produce garbage at runtime.
 
@@ -258,7 +264,7 @@ Worked example for two connectors sharing a folder:
 
 The FIL action declarations reference the symbolic ids (`"bOutlook"`, `"bFolderKey"`); `verify.sh` / `convert.sh` resolve them to the real UUIDs at load time.
 
-For first-iteration authoring, **stub UUIDs are fine** (`00000000-0000-0000-0000-000000000000`). The validation pass cares about structure, not whether the connection actually exists. Real deployment fills these in.
+**Stub UUIDs vs real ones.** `parse-fil.sh` and the v2-to-v1 static converter don't care whether a UUID resolves — they just want structural well-formedness. **`verify.sh` (flow-run) DOES care** and refuses to dispatch with stubs. The deploy-gate `uip maestro flow validate` also doesn't dispatch and accepts stubs. So stubs are a write-time scaffolding tool only; before running `verify.sh`, fill them in with `uip is connections list --output-filter "[*].{Id:Id,ConnectorKey:ConnectorKey,FolderKey:FolderKey,Name:Name}"` (`--output-filter` is JMESPath applied directly to `.Data` — write `[*]` / `[?…]`, not `Data[*]`).
 
 ## Worked example
 
@@ -421,6 +427,8 @@ async function main(customerId: string): Promise<void> {
 
 ## Pitfalls
 
+### Authoring
+
 - The first argument to `executeNode(…)` is an **action identifier**, not a string. Add an `action <name>: <type>;` declaration for it. String-literal first-args are a typecheck error.
 - The action's identifier must be a valid JS identifier (camelCase). Use the `id` field in the body if you need a non-identifier node id at the protocol layer: `action sendMail: … { id: "send-mail" };`.
 - Trigger nodes live in a top-level `trigger <name>: <type>;` declaration. End nodes are auto-emitted from FIL `return` statements; you don't declare them.
@@ -430,56 +438,10 @@ async function main(customerId: string): Promise<void> {
 - `await` outside an async function won't parse; every async helper needs `Promise<void>` (or `Promise<json>`, etc.) as its return type.
 - Mutating an object's field (`obj.foo = 1`) doesn't survive v1 conversion — replace with `obj = { ...obj, foo: 1 }`.
 
-### Script-helper restrictions
+### Non-determinism in `__script_<id>` helpers is a typechecker error
 
-`__script_<id>` sync helpers must be **single-expression value returners**. The body should be a single `return <expr>;` — typically with a ternary if you need conditional values. If/else inside a sync helper hits a known FIL emitter bug; use FIL's `if`/`else` in `main()` between awaits instead.
+`__script_<id>` sync helpers run on **every** FIL replay, so referencing `Math.random()`, `Date.now()`, or other entropy sources inside one would silently drift on replay. The typechecker rejects these calls with a clear error message. The fix is to declare an `action … : script { rawInputs: { script: "<body>" } };` and dispatch through `executeNode` — the host runs it once per real execution and captures the result in history, so replays read the recorded value. `DateTime.now()` (the FIL builtin) is the exception — it's host-imported and pinned for the run, so it's safe inside script helpers.
 
-### Non-deterministic calls must go through `executeNode`
+### If `verify.sh` reports a `WebAssembly.compile()` error in compiler-generated `$__*` locals
 
-`__script_<id>` helpers run on **every** FIL replay. If a script body returns a value that depends on `Math.random()`, `Date.now()`, an entropy source, or any environment state, replay drifts. For non-deterministic values, declare an `action … : script { rawInputs: { script: "<body>" } };` and dispatch through `executeNode` — the host captures the result in history and replays read the captured value. `DateTime.now()` (the FIL builtin) is the exception — it's host-imported and pinned for the run, so it's safe inside script helpers.
-
-### Object literals with json/numeric values fail inside calls
-
-A `JSON.stringify({...})` whose object literal carries a **json-typed member access** (`item.id` from `JSON.parse(...)`) **or a non-string typed identifier** (`i32`, `f64`, or `bool` *variable*) crashes at runtime with `memory access out of bounds`. **Literals of every type are fine** — string literals, number literals, and bool literals (`true`/`false`) all work; so do already-typed `string` identifiers and nested object/array literals. The failure mode is specifically *typed identifiers whose runtime representation isn't a string*, not the type itself.
-
-**Canonical fix — hoist non-string values into typed `string` locals first.** The typed-initializer auto-coercion (`const s: string = jsonOrI32Expr`) does the runtime conversion; the resulting local is a clean `string`:
-
-```typescript
-// ✓ Hoist json fields to typed string locals, then use them as values.
-const raw: string = await executeNode(fetch, "{}");
-const data: json = JSON.parse(raw);
-const id: string = data.id;
-const count: string = data.count;
-await executeNode(send, JSON.stringify({ id: id, count: count }));
-```
-
-Shapes that **do not** need hoisting:
-
-```typescript
-// ✓ String literals as values
-await executeNode(a, JSON.stringify({ method: "POST", url: "https://x" }));
-
-// ✓ Already-string identifier as value
-const url: string = "https://x";
-await executeNode(a, JSON.stringify({ url: url }));
-
-// ✓ Bool / number literals — fine as values
-await executeNode(a, JSON.stringify({ unreadOnly: true, top: 50 }));
-
-// ✓ Pass the json field directly (already serialized)
-for (const item of items) {
-  await executeNode(a, JSON.stringify(item));
-}
-```
-
-Shapes that **still break** (use the hoist-to-string workaround):
-
-```typescript
-// ✗ json member access as the value
-await executeNode(a, JSON.stringify({ id: item.id }));
-
-// ✗ i32 value as the value
-for (const item of items) {
-  await executeNode(a, JSON.stringify({ x: item.id }));    // if item.id is i32
-}
-```
+This means a FIL emitter bug, not a logic error in your flow. All known cases were fixed; if you hit a new one, the wat output is in `.flow-run/` and the error message names the failing local. Surface the FIL + the error rather than thrashing on rewrites — the bug won't be cleared by reshaping the surrounding code.

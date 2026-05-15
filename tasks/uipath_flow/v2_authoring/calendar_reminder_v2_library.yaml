@@ -1,0 +1,158 @@
+task_id: uipath-flow-v2-calendar-reminder-library
+description: >
+  Library-template variant of calendar_reminder_v2 (paired A/B test).
+  Tests whether the agent uses the shared markdown library at `$FLOW_V2_LIBRARY_MD` to discover the
+  calendar-event action's input schema, instead of `uip maestro flow
+  registry search` / `get`.
+tags: [flow-v2, fil, library, generate, connector]
+
+run_limits:
+  max_turns: 50
+  turn_timeout: 1200
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-v2-library"
+    - type: template_dir
+      path: "../../../templates/flow-v2-shared"
+
+initial_prompt: |
+  Author a UiPath Flow v2 project named **CalendarReminder** in the current
+  directory. Read `SKILL.md` first — it describes the v2 file shape, FIL
+  syntax (including the top-level `flow`/`action`/`trigger` declarations),
+  the authoring loop using `verify.sh`, and how to look up connector
+  schemas from the **shared markdown library at `$FLOW_V2_LIBRARY_MD` directory** (do NOT call
+  `uip maestro flow registry`).
+
+  The example in `example/` (OrderConfirm) shows a flow that uses
+  `outlook365.get-email-list` and `salesforce-slack.send-message-to-channel`.
+  Your task uses a DIFFERENT outlook365 action whose input schema is NOT
+  in the example — look it up in `$FLOW_V2_LIBRARY_MD` rather than guessing.
+
+  ## Scenario
+
+  A flow that schedules a calendar event in Outlook 365.
+
+  1. Manual trigger.
+  2. A `core.logic.mock` placeholder for "fetchMeetingRequest" — configure
+     its fixture to return something like
+     `{ "subject": "Team sync", "start": "2026-06-01T15:00:00", "end": "2026-06-01T16:00:00", "tz": "UTC" }`.
+  3. A connector node that creates a calendar event in Outlook 365. The
+     node type lives under `uipath.connector.uipath-microsoft-outlook365.*`
+     — find the exact name with:
+     ```bash
+     jq '.entries[] | select(.connectorKey == "uipath-microsoft-outlook365" and (.label | test("calendar"; "i"))) | {nodeType, label, path}' "$FLOW_V2_LIBRARY_MD/index.json"
+     ```
+     Then read the input schema from `"$FLOW_V2_LIBRARY_MD/<key>/<op>@<ver>.md"`'s
+     `inputSchema.fields[]` and use the parameter names it lists in your
+     `executeNode` call. Pay attention to the REQUIRED fields and any
+     nested-field names (e.g. `start.dateTime` vs `start`).
+  4. End.
+
+  ## Files to write (project root)
+
+  - `CalendarReminder.fil`  FIL source (declare the fetch mock with a
+                            top-level `fixture: { … }` body field; the
+                            create-event action's `binding` and
+                            `folderBinding` can be stub bindings.json
+                            ids — this task is dry-run only)
+  - `bindings.json`         Empty bindings array
+
+  ## Authoring loop
+
+  ```bash
+  ./verify.sh           # compile + dispatch the mock; the create-event
+                        #   node will be flagged as having a stub binding
+                        #   (that's OK for this task)
+  ./convert.sh CalendarReminder
+  uip maestro flow validate CalendarReminder.flow
+  uip maestro flow tidy CalendarReminder.flow
+  ```
+
+success_criteria:
+  - type: file_exists
+    description: "FIL source file exists"
+    path: "CalendarReminder.fil"
+    weight: 1.0
+  - type: file_exists
+    description: "Bindings file exists"
+    path: "bindings.json"
+    weight: 1.0
+  - type: run_command
+    description: "FIL compiles"
+    command: "./parse-fil.sh CalendarReminder.fil"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "v2 → v1 conversion succeeds"
+    command: "./convert.sh CalendarReminder"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Converted .flow validates"
+    command: "uip maestro flow validate CalendarReminder.flow"
+    timeout: 60
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "tidy succeeds"
+    command: "uip maestro flow tidy CalendarReminder.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "FIL declares an action for the create-event-calendar node type"
+    command: |
+      python3 -c "
+      import re
+      src = open('CalendarReminder.fil').read()
+      # Look for `action <name>: <type>` where <type> contains both
+      # 'create-event' and 'calendar' (covers
+      # uipath.connector.uipath-microsoft-outlook365.create-event-calendar-event
+      # and similar canonical names).
+      pat = re.compile(r'action\s+\w+\s*:\s*([\w\-.@]+)')
+      hits = [m.group(1) for m in pat.finditer(src)
+              if 'create-event' in m.group(1) and 'calendar' in m.group(1).lower()]
+      assert hits, f'expected an action declaring create-event-calendar type, got actions={[m.group(1) for m in pat.finditer(src)]}'
+      print(f'create-event action type: {hits[0]}')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "FIL passes the registry-defined input fields (subject + start.dateTime + end.dateTime + timezone)"
+    command: |
+      python3 -c "
+      src = open('CalendarReminder.fil').read()
+      # The registry's required fields for create-event-calendar-event are:
+      # subject, start.dateTime, end.dateTime, timezone. The agent's executeNode
+      # call should pass all four. We accept either the dotted form
+      # ('start.dateTime') or the nested object form ('start: { dateTime: ... }').
+      missing = []
+      if 'subject' not in src: missing.append('subject')
+      if 'dateTime' not in src: missing.append('dateTime (start.dateTime / end.dateTime)')
+      if 'timezone' not in src: missing.append('timezone')
+      if 'start' not in src: missing.append('start')
+      if 'end' not in src: missing.append('end')
+      assert not missing, f'FIL missing required parameter names: {missing}'
+      print('All required parameter names present')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0

@@ -1,0 +1,13 @@
+{
+  "name": "v2-to-v1",
+  "version": "0.1.0",
+  "description": "Reconstruct UiPath Flow v1 files from a Flow v2 (FIL + bindings) project",
+  "main": "dist/index.js",
+  "bin": {
+    "v2tov1": "dist/cli.js"
+  },
+  "dependencies": {
+    "fil-compiler": "file:../fil",
+    "v1-to-v2": "file:../v1-to-v2"
+  }
+}

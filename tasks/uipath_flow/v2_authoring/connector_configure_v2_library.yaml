@@ -1,0 +1,160 @@
+task_id: uipath-flow-v2-connector-configure-library
+description: >
+  Library-template variant of connector_configure_v2 (paired A/B test).
+  Same Slack-notify scenario; the connector lookup goes through the
+  shared markdown library at `$FLOW_V2_LIBRARY_MD` instead of `uip maestro flow registry`.
+tags: [flow-v2, fil, library, generate, connector, slack]
+
+run_limits:
+  max_turns: 50
+  turn_timeout: 1500
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-v2-library"
+    - type: template_dir
+      path: "../../../templates/flow-v2-shared"
+
+initial_prompt: |
+  Author a UiPath Flow v2 project named **SlackNotifier** in the current
+  directory. Read `SKILL.md` first — pay particular attention to the
+  binding model: `bindings.json` declares named bindings with
+  `resourceKey` (a real connection UUID); the FIL action's `binding`
+  field references the binding's `id`. Worked example in `example/`.
+
+  ## Scenario
+
+  A flow that sends a Slack message to a configured channel.
+
+  Discover the Slack connection:
+  1. Look up the Slack connection's `Id` and `FolderKey`:
+     ```bash
+     uip is connections list --output-filter "[?ConnectorKey=='uipath-salesforce-slack'].{Id:Id,FolderKey:FolderKey,Name:Name}"
+     ```
+     `--output-filter` applies a JMESPath expression directly to the
+     `.Data` array (so `[*]` / `[?…]`, not `Data[*]`).
+  2. Look up the send-message activity in the bundled library (NOT via
+     `uip maestro flow registry`):
+     ```bash
+     jq '.entries[] | select(.connectorKey == "uipath-salesforce-slack" and (.label | test("send message"; "i"))) | {nodeType, label, path}' "$FLOW_V2_LIBRARY_MD/index.json"
+     ```
+     Then read the input schema from `"$FLOW_V2_LIBRARY_MD/<path>"` for any required
+     fields. The full v2 typeRef will look like
+     `uipath.connector.uipath-salesforce-slack.send-message-to-channel@1.0.0`
+     (or `send-message-to-user@1.0.0` if you prefer DMs).
+
+  Author the v2 project:
+  - Manual trigger → Slack send-message → End.
+  - The Slack `action` declaration's `binding` field is a SYMBOLIC id
+    (e.g. `"bSlack"`) that points at a `bindings.json` entry.
+  - Same for `folderBinding` (e.g. `"bFolderKey"`).
+  - `bindings.json` must include both entries with their `resourceKey`
+    set to the real Slack ConnectionId / FolderKey UUIDs.
+
+  ## Files to write (project root)
+
+  - `SlackNotifier.fil`     FIL source (carries the Slack action declaration
+                            with `binding` / `folderBinding`)
+  - `bindings.json`         Bindings (folder + Slack connection, real UUIDs)
+
+  ## Authoring loop
+
+  ```bash
+  ./verify.sh           # compile + binding check; flow-run validates the
+                        # binding UUIDs against your real `uip is connections list`
+  ./convert.sh SlackNotifier
+  uip maestro flow validate SlackNotifier.flow
+  uip maestro flow tidy SlackNotifier.flow
+  ```
+
+  Iterate against `verify.sh` first. If it complains about a stub UUID or
+  a binding that's not in your tenant, it will list candidate connection
+  IDs from your tenant — paste the right one in.
+
+success_criteria:
+  - type: file_exists
+    description: "FIL source file exists"
+    path: "SlackNotifier.fil"
+    weight: 1.0
+  - type: file_exists
+    description: "Bindings file exists"
+    path: "bindings.json"
+    weight: 1.0
+  - type: run_command
+    description: "FIL compiles"
+    command: "./parse-fil.sh SlackNotifier.fil"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "v2 → v1 conversion succeeds"
+    command: "./convert.sh SlackNotifier"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Converted .flow validates"
+    command: "uip maestro flow validate SlackNotifier.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "tidy succeeds"
+    command: "uip maestro flow tidy SlackNotifier.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "FIL declares a Slack-connector action"
+    command: "grep -E 'action\\s+\\w+\\s*:\\s*uipath\\.connector\\.uipath-salesforce-slack\\.' SlackNotifier.fil"
+    timeout: 5
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "Slack action has both binding and folderBinding"
+    command: |
+      python3 -c "
+      import re
+      src = open('SlackNotifier.fil').read()
+      # Find the slack action block and check it has binding and folderBinding fields.
+      m = re.search(r'action\\s+(\\w+)\\s*:\\s*uipath\\.connector\\.uipath-salesforce-slack\\.[\\w\\-.@]+\\s*\\{([^}]*)\\}', src, re.S)
+      assert m, 'no Slack action block found'
+      body = m.group(2)
+      assert 'binding' in body, f'Slack action missing binding: {body!r}'
+      assert 'folderBinding' in body, f'Slack action missing folderBinding: {body!r}'
+      print('OK')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: llm_judge
+    description: "Flow uses a real Slack connection binding via v2 binding model"
+    prompt: |
+      Did the agent author a v2 Flow that:
+      (a) declares a Slack send-message action,
+      (b) the action's `binding` field is a symbolic id referencing a
+          `bindings.json` entry whose `resourceKey` is a real ConnectionId
+          UUID (not a stub like 00000000-...),
+      (c) the action also has a `folderBinding` symbolic id pointing at
+          a real FolderKey UUID,
+      (d) bindings.json carries both entries with the real UUIDs?
+      The FIL source and bindings file are included below.
+    files:
+      - "SlackNotifier.fil"
+      - "bindings.json"
+    weight: 3.0
+    pass_threshold: 0.7
