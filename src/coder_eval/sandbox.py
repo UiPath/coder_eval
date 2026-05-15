@@ -926,5 +926,5 @@ class Sandbox:
     async def _read_manifest(self, snapshot_dir: Path) -> SnapshotManifest:
         """Read manifest.json from snapshot directory."""
         manifest_path = snapshot_dir / "manifest.json"
-        manifest_text = await asyncio.to_thread(manifest_path.read_text)
+        manifest_text = await asyncio.to_thread(manifest_path.read_text, encoding="utf-8")
         return SnapshotManifest.model_validate_json(manifest_text)

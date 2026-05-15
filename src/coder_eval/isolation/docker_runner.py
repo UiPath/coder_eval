@@ -90,7 +90,7 @@ async def _heartbeat_loop(heartbeat_path: Path) -> None:
         while True:
             counter += 1
             try:
-                await asyncio.to_thread(heartbeat_path.write_text, str(counter))
+                await asyncio.to_thread(heartbeat_path.write_text, str(counter), encoding="utf-8")
             except OSError as exc:
                 logger.warning("Heartbeat write failed: %s", exc)
             await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
@@ -324,7 +324,7 @@ class DockerRunner:
                 return yaml.safe_dump(self.rt.task.model_dump(mode="json"), sort_keys=False)
 
             task_yaml_text = await asyncio.to_thread(_dump_task_yaml)
-            await asyncio.to_thread(task_yaml_in.write_text, task_yaml_text)
+            await asyncio.to_thread(task_yaml_in.write_text, task_yaml_text, encoding="utf-8")
             # Lineage + variant metadata so the in-container Orchestrator
             # reconstructs the same context (variant_id is load-bearing for
             # report grouping). source_yaml carries the *raw* on-disk text
@@ -339,7 +339,7 @@ class DockerRunner:
                     "source_yaml": self.rt.source_yaml,
                 }
             )
-            await asyncio.to_thread((input_dir / "context.json").write_text, context_payload)
+            await asyncio.to_thread((input_dir / "context.json").write_text, context_payload, encoding="utf-8")
 
             # Give the container a stable, *unique* name so cancellation can
             # target it. PID alone collides under --max-parallel >1 (same
@@ -458,7 +458,7 @@ class DockerRunner:
                 )
 
             # output_dir IS rt.run_dir -- no copy needed.
-            task_json_text = await asyncio.to_thread(task_json.read_text)
+            task_json_text = await asyncio.to_thread(task_json.read_text, encoding="utf-8")
             result = EvaluationResult.model_validate_json(task_json_text)
             self._warn_on_version_mismatch(result)
             return result

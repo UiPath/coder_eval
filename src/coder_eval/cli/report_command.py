@@ -65,7 +65,7 @@ def report_command(
 
     # Output report
     if output_file:
-        output_file.write_text(report_md)
+        output_file.write_text(report_md, encoding="utf-8")
         console.print(f"[green][OK]Report saved to {output_file}[/green]")
     else:
         console.print(Markdown(report_md))

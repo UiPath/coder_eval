@@ -943,8 +943,8 @@ def write_suite_rollups(
         suite_dir.mkdir(parents=True, exist_ok=True)
         task_criteria = criteria_by_group.get((variant_id, suite_id))
         rollup = _compute_suite_rollup(suite_id, variant_id, rows, run_dir, task_criteria=task_criteria)
-        (suite_dir / "suite.json").write_text(rollup.model_dump_json(indent=2))
-        (suite_dir / "suite.md").write_text(_render_suite_markdown(rollup))
+        (suite_dir / "suite.json").write_text(rollup.model_dump_json(indent=2), encoding="utf-8")
+        (suite_dir / "suite.md").write_text(_render_suite_markdown(rollup), encoding="utf-8")
         rollups.append(rollup)
         logger.info(
             "Wrote suite rollup: variant=%s suite=%s pass_rate=%.1f%% (%d/%d) gate=%s",

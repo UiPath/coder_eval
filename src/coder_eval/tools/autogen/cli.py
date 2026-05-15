@@ -196,7 +196,7 @@ async def _run_autogen(
             continue
 
         out_dict = task.model_dump(mode="json", exclude_none=True)
-        out_path.write_text(task_to_yaml(out_dict))  # noqa: CE002 — small YAML file
+        out_path.write_text(task_to_yaml(out_dict), encoding="utf-8")  # noqa: CE002 — small YAML file
         console.print(f"  [green]✓[/green]  {filename}")
         written += 1
 
@@ -217,7 +217,7 @@ async def _run_autogen(
 
         experiment_id = experiment_dict["experiment_id"]
         experiment_path = experiments_dir / f"{experiment_id}.yaml"
-        experiment_path.write_text(task_to_yaml(experiment_dict))  # noqa: CE002 — small YAML file
+        experiment_path.write_text(task_to_yaml(experiment_dict), encoding="utf-8")  # noqa: CE002 — small YAML file
         console.print(f"\n[green]✓[/green]  Experiment: {experiment_path}")
         console.print("\nRun generated tasks:")
         console.print(f"  [cyan]coder-eval run {tasks_dir}/*.yaml -e {experiment_path}[/cyan]")

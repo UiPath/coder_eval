@@ -374,7 +374,7 @@ def aggregate_task_logs(run_dir: Path) -> None:
 
     if not task_log_paths:
         # No task logs found - create empty experiment.log
-        run_log_path.write_text("No task logs found.\n")
+        run_log_path.write_text("No task logs found.\n", encoding="utf-8")
         return
 
     with open(run_log_path, "w", encoding="utf-8") as outfile:
