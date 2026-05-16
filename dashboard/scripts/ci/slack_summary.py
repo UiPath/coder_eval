@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -39,6 +40,74 @@ def load_run(run_dir: Path) -> dict | None:
 
 def total_cost(run: dict) -> float:
     return sum(float(t.get("total_cost_usd") or 0) for t in run.get("task_results", []))
+
+
+_TASK_PATH_SKILL_RE = re.compile(r"(?:^|/)tasks/([^/]+)/")
+
+
+def derive_skill(task: dict) -> str | None:
+    """Resolve the skill (primary group) for a task result.
+
+    Mirrors evalboard's deriveSkill: prefer task_path's "tasks/<skill>/"
+    segment (persisted starting with the task_path PR); fall back to the
+    first "activation" or "uipath-*" tag for older runs. Returns None when
+    neither signal yields anything — callers should drop the task from the
+    skill breakdown rather than bucketing it under a fake group.
+    """
+    tp = task.get("task_path")
+    if isinstance(tp, str) and tp:
+        m = _TASK_PATH_SKILL_RE.search(tp)
+        if m:
+            return m.group(1)
+    for tag in task.get("tags") or []:
+        if not isinstance(tag, str):
+            continue
+        if tag == "activation" or tag.startswith("uipath-"):
+            return tag
+    return None
+
+
+def _pct_dot(pct: float) -> str:
+    """Traffic-light dot. Anything >= 85% reads green, <50% red, else yellow."""
+    if pct < 50:
+        return ":red_circle:"
+    if pct < 85:
+        return ":large_yellow_circle:"
+    return ":large_green_circle:"
+
+
+def skill_breakdown(run: dict, min_tasks: int = 4) -> str:
+    """Format a per-skill leaderboard for Slack.
+
+    Lists every skill with at least ``min_tasks`` tasks in this run, sorted
+    worst → best so the channel's eye lands on regressions first. Each row is
+    prefixed with a traffic-light dot keyed off pass rate. Returns the empty
+    string when no skill qualifies, so daily.sh can append unconditionally
+    without producing a dangling header.
+    """
+    by_skill: dict[str, list[dict]] = {}
+    for task in run.get("task_results") or []:
+        skill = derive_skill(task)
+        if skill is None:
+            continue
+        by_skill.setdefault(skill, []).append(task)
+
+    rows: list[tuple[str, int, int, float]] = []  # (skill, passed, total, pct)
+    for skill, tasks in by_skill.items():
+        total = len(tasks)
+        if total < min_tasks:
+            continue
+        passed = sum(1 for t in tasks if t.get("status") == "SUCCESS")
+        rows.append((skill, passed, total, passed / total * 100))
+
+    if not rows:
+        return ""
+
+    rows.sort(key=lambda r: (r[3], -r[2], r[0]))
+    lines = [f":dart: Skills (>={min_tasks} tasks, worst → best):"]
+    for skill, passed, total, pct in rows:
+        lines.append(f"{_pct_dot(pct)} {skill}: {passed}/{total} ({pct:.0f}%)")
+    return "\n".join(lines)
 
 
 def configured_parallelism(run: dict) -> int | None:
@@ -75,17 +144,19 @@ def build_metrics(cur: dict, suite: str, model: str, backend: str) -> str:
     label = " / ".join(filter(None, [model, backend])) or "unknown config"
 
     fail_total = n_fail + n_err
-    skipped_line = f" · :wastebasket: {n_skip} skipped (load error)" if n_skip else ""
-    return "\n".join(
-        [
-            f":chart_with_upwards_trend: {suite or 'eval'} suite — {run_id} ({label})",
-            f":white_check_mark: {n_pass}/{n_run} passed ({pct:.0f}%) · "
-            f":x: {fail_total} failed ({n_fail} fail + {n_err} error){skipped_line}",
-            f":moneybag: ${cost:.2f} · :stopwatch: {duration}{parallel_str}",
-            f":package: coder_eval @ {coder} · skills @ {skills_sha} · cli @ {cli}",
-            f":bar_chart: {DASHBOARD_BASE}/{run_id}",
-        ]
-    )
+    skipped_line = f" · :wastebasket: {n_skip} skipped" if n_skip else ""
+    lines = [
+        f":chart_with_upwards_trend: {suite or 'eval'} suite — {run_id} ({label})",
+        f":white_check_mark: {n_pass}/{n_run} passed ({pct:.0f}%) · "
+        f":x: {fail_total} failed ({n_fail} fail + {n_err} error){skipped_line}",
+        f":moneybag: ${cost:.2f} · :stopwatch: {duration}{parallel_str}",
+        f":package: coder_eval @ {coder} · skills @ {skills_sha} · cli @ {cli}",
+        f":bar_chart: {DASHBOARD_BASE}/{run_id}",
+    ]
+    skills_section = skill_breakdown(cur)
+    if skills_section:
+        lines.append(skills_section)
+    return "\n".join(lines)
 
 
 def main() -> int:

@@ -7,7 +7,7 @@ import type { ReviewIndexEntry } from "@/lib/reviews-types";
 import { humanizeTaskId } from "@/lib/format";
 import { StatusPill } from "@/lib/pills";
 import { statusSortRank } from "@/lib/status";
-import { ReviewChips } from "./review-chips";
+import { ChipButton } from "./chips";
 
 type SortKey = "task" | "status" | "score" | "duration" | "cost" | "tools";
 
@@ -188,46 +188,81 @@ export function TaskGrid({
                                     >
                                         {humanizeTaskId(t.taskId)}
                                     </Link>
-                                    {t.tags.length > 0 && (
+                                    {(t.skill ||
+                                        t.tags.length > 0 ||
+                                        (review && review.tags.length > 0)) && (
                                         <div className="flex flex-wrap gap-1 mt-0.5">
-                                            {t.tags.map((tag) => {
-                                                const active =
-                                                    selectedSet?.has(tag) ??
-                                                    false;
-                                                const cls = active
-                                                    ? "bg-studio-blue/10 text-studio-blue border-studio-blue/30"
-                                                    : "bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100";
-                                                const baseCls = `text-[10px] leading-none px-1.5 py-0.5 rounded border transition-colors ${cls}`;
-                                                return onToggleTag ? (
-                                                    <button
-                                                        key={tag}
-                                                        type="button"
-                                                        onClick={() =>
-                                                            onToggleTag(tag)
+                                            {t.skill && (
+                                                <ChipButton
+                                                    key={`s:${t.skill}`}
+                                                    tag={t.skill}
+                                                    variant="skill"
+                                                    size="sm"
+                                                    active={
+                                                        selectedSet?.has(
+                                                            t.skill,
+                                                        ) ?? false
+                                                    }
+                                                    onClick={
+                                                        onToggleTag
+                                                            ? () =>
+                                                                  onToggleTag(
+                                                                      t.skill!,
+                                                                  )
+                                                            : undefined
+                                                    }
+                                                />
+                                            )}
+                                            {review?.tags.map((tag) => (
+                                                <ChipButton
+                                                    key={`r:${tag}`}
+                                                    tag={tag}
+                                                    variant="review"
+                                                    size="sm"
+                                                    active={
+                                                        reviewSelectedSet?.has(
+                                                            tag,
+                                                        ) ?? false
+                                                    }
+                                                    onClick={
+                                                        onToggleReviewTag
+                                                            ? () =>
+                                                                  onToggleReviewTag(
+                                                                      tag,
+                                                                  )
+                                                            : undefined
+                                                    }
+                                                    title={
+                                                        review.summary_excerpt
+                                                    }
+                                                />
+                                            ))}
+                                            {t.tags
+                                                .filter(
+                                                    (tag) => tag !== t.skill,
+                                                )
+                                                .map((tag) => (
+                                                    <ChipButton
+                                                        key={`t:${tag}`}
+                                                        tag={tag}
+                                                        variant="tag"
+                                                        size="sm"
+                                                        active={
+                                                            selectedSet?.has(
+                                                                tag,
+                                                            ) ?? false
                                                         }
-                                                        aria-pressed={active}
-                                                        className={baseCls}
-                                                    >
-                                                        {tag}
-                                                    </button>
-                                                ) : (
-                                                    <span
-                                                        key={tag}
-                                                        className={baseCls}
-                                                    >
-                                                        {tag}
-                                                    </span>
-                                                );
-                                            })}
+                                                        onClick={
+                                                            onToggleTag
+                                                                ? () =>
+                                                                      onToggleTag(
+                                                                          tag,
+                                                                      )
+                                                                : undefined
+                                                        }
+                                                    />
+                                                ))}
                                         </div>
-                                    )}
-                                    {review && review.tags.length > 0 && (
-                                        <ReviewChips
-                                            tags={review.tags}
-                                            title={review.summary_excerpt}
-                                            selectedSet={reviewSelectedSet}
-                                            onToggleTag={onToggleReviewTag}
-                                        />
                                     )}
                                 </div>
                             </td>

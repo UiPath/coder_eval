@@ -9,10 +9,10 @@ import { humanizeTaskId } from "./format";
 import { mapWithConcurrency } from "./concurrency";
 import type { Window } from "./reviews-types";
 
-export interface DailyPoint {
-    date: string; // YYYY-MM-DD (UTC)
-    avgSuccessRate: number | null;
-    runCount: number;
+export interface RunPoint {
+    runId: string;
+    timestamp: number; // ms since epoch (UTC); used as the chart x-coordinate
+    successRate: number | null;
 }
 
 export interface TagCount {
@@ -21,10 +21,12 @@ export interface TagCount {
 }
 
 export interface OverviewData {
-    daily: DailyPoint[];
+    runs: RunPoint[]; // one point per run, no daily aggregation
+    windowStart: number; // ms — chart x-domain start
+    windowEnd: number; // ms — chart x-domain end
+    skills: TagCount[];
     taskTags: TagCount[];
     reviewTags: TagCount[];
-    runCount: number; // runs contributing to the chart in the window
     activeTag: string | null;
 }
 
@@ -46,42 +48,12 @@ export interface RunListing {
 
 const FETCH_CONCURRENCY = 16;
 
-function toUtcDateKey(d: Date): string {
-    const y = d.getUTCFullYear();
-    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-    const day = String(d.getUTCDate()).padStart(2, "0");
-    return `${y}-${m}-${day}`;
-}
-
-function* dateRange(start: Date, end: Date): Generator<string> {
-    const cur = new Date(
-        Date.UTC(
-            start.getUTCFullYear(),
-            start.getUTCMonth(),
-            start.getUTCDate(),
-        ),
-    );
-    const last = new Date(
-        Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate()),
-    );
-    while (cur <= last) {
-        yield toUtcDateKey(cur);
-        cur.setUTCDate(cur.getUTCDate() + 1);
-    }
-}
-
 const WINDOW_DAYS: Record<Window, number> = {
     "1d": 1,
     "7d": 7,
     "14d": 14,
     "30d": 30,
 };
-
-function sortTagCounts(m: Map<string, number>): TagCount[] {
-    return [...m.entries()]
-        .map(([tag, count]) => ({ tag, count }))
-        .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
-}
 
 // Projected per-run snapshot: only the fields needed downstream. Keeps the
 // cached payload small (the raw ReviewIndex can be MBs for busy runs).
@@ -144,6 +116,7 @@ function taskMatchesTag(
     reviewTagsByTask: Record<string, string[]>,
     tag: string,
 ): boolean {
+    if (task.skill === tag) return true;
     if (task.tags.includes(tag)) return true;
     const rt = reviewTagsByTask[task.taskId];
     return rt ? rt.includes(tag) : false;
@@ -156,6 +129,7 @@ function taskMatchesQuery(
 ): boolean {
     if (task.taskId.toLowerCase().includes(needle)) return true;
     if (humanizeTaskId(task.taskId).toLowerCase().includes(needle)) return true;
+    if (task.skill && task.skill.toLowerCase().includes(needle)) return true;
     if (task.tags.some((tag) => tag.toLowerCase().includes(needle))) return true;
     const rt = reviewTagsByTask[task.taskId];
     if (rt) {
@@ -176,12 +150,10 @@ export async function getOverview(
     const perRun = await loadWindowData(window);
     const needle = q?.trim().toLowerCase() || null;
 
-    // ---- Daily bucketing ----
-    // Per-day average of per-run success rates (matches ADX "avg_success_rate").
+    // ---- Per-run chart points ----
+    // One point per run plotted at its own timestamp, no daily averaging.
     // When tag or q is active, scope each run's rate to only matching tasks.
-    type DayBucket = { rateSum: number; rateCount: number };
-    const byDay = new Map<string, DayBucket>();
-    let contributingRuns = 0;
+    const runPoints: RunPoint[] = [];
 
     for (const { id, overview, reviewTagsByTask } of perRun) {
         if (!overview || overview.tasks.length === 0) continue;
@@ -205,49 +177,66 @@ export async function getOverview(
             (t) => t.status === "SUCCESS",
         ).length;
         const rate = (succeeded / matching.length) * 100;
-
-        const key = toUtcDateKey(date);
-        const b = byDay.get(key) ?? { rateSum: 0, rateCount: 0 };
-        b.rateSum += rate;
-        b.rateCount += 1;
-        byDay.set(key, b);
-        contributingRuns += 1;
-    }
-
-    const now = new Date();
-    const start = new Date(now.getTime() - WINDOW_DAYS[window] * 86400_000);
-    const daily: DailyPoint[] = [];
-    for (const key of dateRange(start, now)) {
-        const b = byDay.get(key);
-        daily.push({
-            date: key,
-            avgSuccessRate: b ? b.rateSum / b.rateCount : null,
-            runCount: b ? b.rateCount : 0,
+        runPoints.push({
+            runId: id,
+            timestamp: date.getTime(),
+            successRate: rate,
         });
     }
+    runPoints.sort((a, b) => a.timestamp - b.timestamp);
+
+    const nowMs = Date.now();
+    const windowStart = nowMs - WINDOW_DAYS[window] * 86400_000;
+    const windowEnd = nowMs;
 
     // ---- Tag aggregation (over full window, regardless of filter) ----
-    const taskTagCounts = new Map<string, number>();
-    const reviewTagCounts = new Map<string, number>();
+    // Counts are *runs containing the tag* — one increment per run regardless
+    // of how many tasks in that run carry it. So a tag that appears in every
+    // daily run for the window scores up to the run count. The task's own
+    // skill is filtered out of the secondary rail so it doesn't double-count.
+    const skillRunIds = new Map<string, Set<string>>();
+    const taskTagRunIds = new Map<string, Set<string>>();
+    const reviewTagRunIds = new Map<string, Set<string>>();
 
-    for (const { overview, reviewTagCounts: rtc } of perRun) {
+    function add(m: Map<string, Set<string>>, key: string, runId: string) {
+        let s = m.get(key);
+        if (!s) {
+            s = new Set();
+            m.set(key, s);
+        }
+        s.add(runId);
+    }
+
+    for (const { id, overview, reviewTagsByTask } of perRun) {
         if (overview) {
             for (const t of overview.tasks) {
+                if (t.skill) add(skillRunIds, t.skill, id);
                 for (const tg of t.tags) {
-                    taskTagCounts.set(tg, (taskTagCounts.get(tg) ?? 0) + 1);
+                    if (tg === t.skill) continue;
+                    add(taskTagRunIds, tg, id);
                 }
             }
         }
-        for (const [tg, c] of Object.entries(rtc)) {
-            reviewTagCounts.set(tg, (reviewTagCounts.get(tg) ?? 0) + c);
+        for (const tags of Object.values(reviewTagsByTask)) {
+            for (const tag of tags) {
+                add(reviewTagRunIds, tag, id);
+            }
         }
     }
 
+    function toCounts(m: Map<string, Set<string>>): TagCount[] {
+        return [...m.entries()]
+            .map(([tag, ids]) => ({ tag, count: ids.size }))
+            .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+    }
+
     return {
-        daily,
-        taskTags: sortTagCounts(taskTagCounts),
-        reviewTags: sortTagCounts(reviewTagCounts),
-        runCount: contributingRuns,
+        runs: runPoints,
+        windowStart,
+        windowEnd,
+        skills: toCounts(skillRunIds),
+        taskTags: toCounts(taskTagRunIds),
+        reviewTags: toCounts(reviewTagRunIds),
         activeTag: tag,
     };
 }

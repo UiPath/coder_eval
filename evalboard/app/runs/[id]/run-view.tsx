@@ -6,10 +6,12 @@ import type { TaskResultSummary } from "@/lib/runs";
 import type { ReviewIndexEntry } from "@/lib/reviews-types";
 import { fmtDuration, humanizeTaskId } from "@/lib/format";
 import { statusCategory } from "@/lib/status";
-import { ReviewTagFilterRow } from "./review-chips";
+import { ChipLegend } from "@/app/_overview/tag-rail";
+import { ChipButton } from "./chips";
 import { TaskGrid } from "./task-grid";
 
 const TOP_N_TAGS = 10;
+const TOP_N_SKILLS = 20;
 
 function percentile(values: number[], p: number): number | null {
     if (values.length === 0) return null;
@@ -141,10 +143,24 @@ export function RunView({
         router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
     }, [pathname, router]);
 
+    // Skill is the primary group; everything else is a secondary tag. The
+    // secondary "Tags" rail excludes the per-task skill so it doesn't echo
+    // chips already shown in the Skills row above.
+    const allSkills = useMemo(() => {
+        const counts = new Map<string, number>();
+        for (const t of tasks) {
+            if (t.skill) counts.set(t.skill, (counts.get(t.skill) ?? 0) + 1);
+        }
+        return [...counts.entries()].sort(
+            ([a, ac], [b, bc]) => bc - ac || a.localeCompare(b),
+        );
+    }, [tasks]);
+
     const allTags = useMemo(() => {
         const counts = new Map<string, number>();
         for (const t of tasks) {
             for (const tag of t.tags) {
+                if (tag === t.skill) continue;
                 counts.set(tag, (counts.get(tag) ?? 0) + 1);
             }
         }
@@ -159,8 +175,13 @@ export function RunView({
     const filtered = useMemo(() => {
         let arr = tasks;
         if (selectedTags.length > 0) {
+            // Match on either real tags or the derived skill, so the same
+            // `tags` URL param works for both rails. Robust to new runs where
+            // the skill comes from task_path but is missing from task.tags.
             arr = arr.filter((t) =>
-                selectedTags.every((tag) => t.tags.includes(tag)),
+                selectedTags.every(
+                    (tag) => t.tags.includes(tag) || t.skill === tag,
+                ),
             );
         }
         if (selectedReviewTags.length > 0) {
@@ -175,6 +196,8 @@ export function RunView({
                 if (
                     humanizeTaskId(t.taskId).toLowerCase().includes(qLower)
                 )
+                    return true;
+                if (t.skill && t.skill.toLowerCase().includes(qLower))
                     return true;
                 if (t.tags.some((tag) => tag.toLowerCase().includes(qLower)))
                     return true;
@@ -244,6 +267,17 @@ export function RunView({
         return [...top, ...sticky];
     }, [allTags, showAllTags, selectedSet]);
     const hiddenCount = allTags.length - visibleTags.length;
+
+    // Skills cap is generous (20) since the universe is finite and rarely
+    // exceeds that; selection stickiness still applies in case it ever does.
+    const visibleSkills = useMemo(() => {
+        const top = allSkills.slice(0, TOP_N_SKILLS);
+        const topNames = new Set(top.map(([t]) => t));
+        const sticky = allSkills.filter(
+            ([t]) => selectedSet.has(t) && !topNames.has(t),
+        );
+        return [...top, ...sticky];
+    }, [allSkills, selectedSet]);
 
     const emptyHint = (() => {
         const allFilterTags = [...selectedTags, ...selectedReviewTags];
@@ -323,35 +357,45 @@ export function RunView({
                 />
             </div>
 
-            <div className="flex flex-col md:flex-row md:flex-wrap md:items-start gap-x-3 gap-y-2">
-                {allTags.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-1.5 md:flex-1 md:min-w-0">
-                        <span className="text-xs text-gray-500 mr-1">
-                            Tags
-                            {selectedTags.length > 1 ? " (all match)" : ""}:
-                        </span>
-                        {visibleTags.map(([tag, count]) => {
-                            const active = selectedSet.has(tag);
-                            const cls = active
-                                ? "bg-studio-blue text-white border-studio-blue"
-                                : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50";
-                            return (
-                                <button
-                                    key={tag}
-                                    type="button"
-                                    onClick={() => toggleTag(tag)}
-                                    aria-pressed={active}
-                                    className={`text-xs px-2 py-0.5 rounded border transition-colors ${cls}`}
-                                >
-                                    {tag}
-                                    <span
-                                        className={`ml-1 tabular-nums ${active ? "text-white/80" : "text-gray-400"}`}
-                                    >
-                                        {count}
-                                    </span>
-                                </button>
-                            );
-                        })}
+            {(allSkills.length > 0 ||
+                allTags.length > 0 ||
+                (reviewTagCounts && reviewTagCounts.length > 0)) && (
+                <div className="space-y-1.5">
+                    <ChipLegend />
+                    <div className="flex flex-wrap items-center gap-1.5">
+                        {visibleSkills.map(([tag, count]) => (
+                            <ChipButton
+                                key={`s:${tag}`}
+                                tag={tag}
+                                count={count}
+                                variant="skill"
+                                size="md"
+                                active={selectedSet.has(tag)}
+                                onClick={() => toggleTag(tag)}
+                            />
+                        ))}
+                        {(reviewTagCounts ?? []).map(({ tag, count }) => (
+                            <ChipButton
+                                key={`r:${tag}`}
+                                tag={tag}
+                                count={count}
+                                variant="review"
+                                size="md"
+                                active={selectedReviewSet.has(tag)}
+                                onClick={() => toggleReviewTag(tag)}
+                            />
+                        ))}
+                        {visibleTags.map(([tag, count]) => (
+                            <ChipButton
+                                key={`t:${tag}`}
+                                tag={tag}
+                                count={count}
+                                variant="tag"
+                                size="md"
+                                active={selectedSet.has(tag)}
+                                onClick={() => toggleTag(tag)}
+                            />
+                        ))}
                         {!showAllTags && hiddenCount > 0 && (
                             <button
                                 type="button"
@@ -371,15 +415,7 @@ export function RunView({
                             </button>
                         )}
                     </div>
-                )}
-            </div>
-
-            {reviewTagCounts && reviewTagCounts.length > 0 && (
-                <ReviewTagFilterRow
-                    counts={reviewTagCounts}
-                    selectedSet={selectedReviewSet}
-                    onToggleTag={toggleReviewTag}
-                />
+                </div>
             )}
 
             <div className="flex items-baseline gap-3 pt-1">

@@ -1314,6 +1314,93 @@ def test_generate_run_summary_agent_config_none(tmp_path):
     assert summary.task_results[0]["agent_config"] is None
 
 
+def test_generate_run_summary_includes_task_path(tmp_path):
+    """task_paths kwarg flows into task_results so evalboard can derive skill from path."""
+    from datetime import datetime
+
+    from coder_eval.models import AgentKind, EvaluationResult, TaskResult
+    from coder_eval.orchestration.batch import _generate_run_summary
+
+    results = [
+        TaskResult(
+            task_id="task1",
+            variant_id="test-variant",
+            result=EvaluationResult(
+                task_id="task1",
+                task_description="Test",
+                variant_id="test-variant",
+                agent_type=AgentKind.CLAUDE_CODE,
+                started_at=datetime.now(),
+                final_status="SUCCESS",
+                iteration_count=1,
+            ),
+            duration=10.0,
+        ),
+        TaskResult(
+            task_id="task2",
+            variant_id="test-variant",
+            result=EvaluationResult(
+                task_id="task2",
+                task_description="Test",
+                variant_id="test-variant",
+                agent_type=AgentKind.CLAUDE_CODE,
+                started_at=datetime.now(),
+                final_status="SUCCESS",
+                iteration_count=1,
+            ),
+            duration=10.0,
+        ),
+    ]
+
+    summary = _generate_run_summary(
+        run_dir=tmp_path,
+        task_results=results,
+        start_time=datetime.now(),
+        end_time=datetime.now(),
+        task_paths={"task1": "tests/tasks/uipath-maestro-flow/smoke/init_validate.yaml"},
+    )
+
+    by_id = {t["task_id"]: t for t in summary.task_results}
+    assert by_id["task1"]["task_path"] == "tests/tasks/uipath-maestro-flow/smoke/init_validate.yaml"
+    # Tasks without a path entry get None — preserves backward-compat for callers
+    # that don't pass task_paths at all.
+    assert by_id["task2"]["task_path"] is None
+
+
+def test_generate_run_summary_task_path_omitted(tmp_path):
+    """When task_paths kwarg isn't passed, every task_result has task_path=None."""
+    from datetime import datetime
+
+    from coder_eval.models import AgentKind, EvaluationResult, TaskResult
+    from coder_eval.orchestration.batch import _generate_run_summary
+
+    results = [
+        TaskResult(
+            task_id="task1",
+            variant_id="test-variant",
+            result=EvaluationResult(
+                task_id="task1",
+                task_description="Test",
+                variant_id="test-variant",
+                agent_type=AgentKind.CLAUDE_CODE,
+                started_at=datetime.now(),
+                final_status="SUCCESS",
+                iteration_count=1,
+            ),
+            duration=10.0,
+        ),
+    ]
+
+    summary = _generate_run_summary(
+        run_dir=tmp_path,
+        task_results=results,
+        start_time=datetime.now(),
+        end_time=datetime.now(),
+    )
+
+    assert summary.task_results[0]["task_path"] is None
+
+
 # ==================== SDK Options Dump Tests ====================
 
 

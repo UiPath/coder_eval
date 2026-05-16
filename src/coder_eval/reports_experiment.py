@@ -44,6 +44,7 @@ def eval_result_to_task_dict(
     *,
     variant_id: str | None = None,
     tags: list[str] | None = None,
+    task_path: str | None = None,
     duration_override: float | None = None,
 ) -> dict[str, Any]:
     """Convert an EvaluationResult to the task_result dict format used by ReportGenerator.
@@ -52,6 +53,9 @@ def eval_result_to_task_dict(
         result: The evaluation result to convert.
         variant_id: Optional variant ID to include in the dict.
         tags: Optional tags list (defaults to []).
+        task_path: Optional path of the task YAML (as supplied to the runner) —
+            lets downstream consumers (evalboard) derive groupings like skill
+            from the source folder structure instead of guessing from tags.
         duration_override: Optional duration value (defaults to result.duration_seconds).
     """
     ref_similarity: float | None = None
@@ -67,6 +71,7 @@ def eval_result_to_task_dict(
         "duration": duration_override if duration_override is not None else result.duration_seconds,
         "iteration_count": result.iteration_count,
         "tags": tags if tags is not None else [],
+        "task_path": task_path,
         "turns": [
             {
                 "iteration": t.iteration,

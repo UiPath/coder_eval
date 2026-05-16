@@ -70,6 +70,7 @@ async def run_batch(
 
     semaphore = asyncio.Semaphore(config.max_parallel)
     task_tags: dict[str, list[str]] = {rt.task.task_id: rt.task.tags for rt in resolved_tasks}
+    task_paths: dict[str, str] = {rt.task.task_id: str(rt.task_file) for rt in resolved_tasks}
 
     async def run_single(rt: ResolvedTask) -> TaskResult:
         """Run a single resolved task with semaphore for concurrency control."""
@@ -162,6 +163,7 @@ async def run_batch(
         start_time,
         end_time,
         task_tags,
+        task_paths=task_paths,
         max_parallel=config.max_parallel,
         skipped_tasks=skipped_tasks or [],
     )
@@ -231,6 +233,8 @@ def _generate_run_summary(
     start_time: datetime,
     end_time: datetime,
     task_tags: dict[str, list[str]] | None = None,
+    *,
+    task_paths: dict[str, str] | None = None,
     max_parallel: int = 1,
     skipped_tasks: list[SkippedTask] | None = None,
 ) -> RunSummary:
@@ -242,6 +246,7 @@ def _generate_run_summary(
         start_time: Batch start time.
         end_time: Batch end time.
         task_tags: Optional mapping of task_id -> tags.
+        task_paths: Optional mapping of task_id -> source YAML path (string).
         skipped_tasks: Task YAMLs that failed to load upstream.
 
     Returns:
@@ -288,6 +293,7 @@ def _generate_run_summary(
                 r.result,
                 variant_id=r.variant_id,
                 tags=(task_tags or {}).get(r.task_id, []),
+                task_path=(task_paths or {}).get(r.task_id),
                 duration_override=r.duration,
             )
             for r in task_results

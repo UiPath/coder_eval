@@ -5,7 +5,7 @@ import { ADX_URL } from "@/lib/config";
 import { WindowSelector } from "./_components/window-selector";
 import { WINDOWS, type Window } from "@/lib/reviews-types";
 import { DailySuccessChart } from "./_overview/daily-chart";
-import { TagRail } from "./_overview/tag-rail";
+import { ChipLegend, MergedTagRail } from "./_overview/tag-rail";
 
 export const dynamic = "force-dynamic";
 
@@ -98,6 +98,7 @@ export default async function Page({
         getRunListing(window, activeTag, q, limit),
     ]);
 
+    const skills = filterTagsByQuery(overview.skills, q);
     const taskTags = filterTagsByQuery(overview.taskTags, q);
     const reviewTags = filterTagsByQuery(overview.reviewTags, q);
 
@@ -166,8 +167,8 @@ export default async function Page({
                                         </>
                                     )}{" "}
                                     over the last {window} ·{" "}
-                                    {overview.runCount} run
-                                    {overview.runCount === 1 ? "" : "s"}
+                                    {overview.runs.length} run
+                                    {overview.runs.length === 1 ? "" : "s"}
                                     {" · "}
                                     <Link
                                         href={buildHref({ window })}
@@ -179,39 +180,36 @@ export default async function Page({
                                 </>
                             ) : (
                                 <>
-                                    Avg of per-run success rates across the
-                                    last {window} · {overview.runCount} run
-                                    {overview.runCount === 1 ? "" : "s"}
+                                    Success rate per run across the last{" "}
+                                    {window} · {overview.runs.length} run
+                                    {overview.runs.length === 1 ? "" : "s"}
                                 </>
                             )}
                         </p>
                     </div>
                     <WindowSelector current={window} />
                 </div>
-                <DailySuccessChart data={overview.daily} />
-                <div className="space-y-2 pt-2 border-t border-gray-100">
-                    <TagRail
-                        label="Tags:"
-                        tags={taskTags}
-                        variant="neutral"
-                        activeTag={activeTag}
-                        window={window}
-                        q={q}
-                        limit={24}
-                    />
-                    <TagRail
-                        label="Review tags:"
-                        tags={reviewTags}
-                        variant="rose"
+                <DailySuccessChart
+                    data={overview.runs}
+                    windowStart={overview.windowStart}
+                    windowEnd={overview.windowEnd}
+                />
+                <div className="pt-2 border-t border-gray-100 space-y-2">
+                    <ChipLegend />
+                    <MergedTagRail
+                        skills={skills}
+                        taskTags={taskTags}
+                        reviewTags={reviewTags}
                         activeTag={activeTag}
                         window={window}
                         q={q}
                         limit={24}
                     />
                     {q &&
+                        skills.length === 0 &&
                         taskTags.length === 0 &&
                         reviewTags.length === 0 && (
-                            <p className="text-xs text-gray-500 pl-24">
+                            <p className="text-xs text-gray-500">
                                 No tags match{" "}
                                 <span className="font-mono">{q}</span>.
                             </p>

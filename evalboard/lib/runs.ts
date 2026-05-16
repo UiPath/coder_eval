@@ -53,6 +53,9 @@ export interface TaskResultSummary {
     totalCostUsd: number | null;
     actualCommands: number | null;
     tags: string[];
+    // Derived primary group. See deriveSkill below for the resolution chain
+    // (new runs use task_path; older runs fall back to a tag heuristic).
+    skill: string | null;
 }
 
 export interface CriterionResult {
@@ -113,6 +116,9 @@ interface RawTaskResult {
     total_cost_usd?: number;
     actual_commands?: number;
     tags?: string[];
+    // Source YAML path. Persisted by coder-eval starting with the
+    // task_path PR; absent on older runs (deriveSkill falls back to tags).
+    task_path?: string | null;
 }
 
 interface RawRunJson {
@@ -178,7 +184,33 @@ async function readRunJson(id: string): Promise<RawRunJson | null> {
     return readJson<RawRunJson>(path.join(RUNS_DIR, id, "run.json"));
 }
 
+// Resolve the skill (primary grouping axis) for a task. Two-stage fallback:
+//   1. New runs: parse "tasks/<skill>/..." from task_path — the folder a task
+//      lives under in the skills repo is the authoritative skill name.
+//   2. Older runs (or any task without a recognisable task_path): pick the
+//      first skill-shaped tag. Convention in the skills repo: every task
+//      lists its folder name as the first tag, and skill folders are
+//      either "activation" or "uipath-*". The prefix check filters out
+//      generic tags like "smoke"/"e2e" that may appear if a task is
+//      missing the convention.
+// Returns null when neither signal yields anything; the UI buckets these
+// under an "unknown" group.
+export function deriveSkill(
+    taskPath: string | null | undefined,
+    tags: string[] | null | undefined,
+): string | null {
+    if (taskPath) {
+        const m = taskPath.match(/(?:^|\/)tasks\/([^/]+)\//);
+        if (m) return m[1];
+    }
+    for (const t of tags ?? []) {
+        if (t === "activation" || t.startsWith("uipath-")) return t;
+    }
+    return null;
+}
+
 function toTaskRow(t: RawTaskResult): TaskResultSummary {
+    const tags = t.tags ?? [];
     return {
         taskId: t.task_id ?? "",
         status: t.status ?? null,
@@ -186,7 +218,8 @@ function toTaskRow(t: RawTaskResult): TaskResultSummary {
         durationSeconds: t.duration ?? null,
         totalCostUsd: t.total_cost_usd ?? null,
         actualCommands: t.actual_commands ?? null,
-        tags: t.tags ?? [],
+        tags,
+        skill: deriveSkill(t.task_path, tags),
     };
 }
 
@@ -243,6 +276,7 @@ export interface RunOverviewTask {
     taskId: string;
     status: string | null;
     tags: string[];
+    skill: string | null;
     totalCostUsd: number | null;
     durationSeconds: number | null;
 }
@@ -264,13 +298,17 @@ export async function readRunOverview(
     const taskResults = data.task_results ?? [];
     const tasks: RunOverviewTask[] = taskResults
         .filter((t) => t.task_id)
-        .map((t) => ({
-            taskId: t.task_id ?? "",
-            status: t.status ?? null,
-            tags: t.tags ?? [],
-            totalCostUsd: t.total_cost_usd ?? null,
-            durationSeconds: t.duration ?? null,
-        }));
+        .map((t) => {
+            const tags = t.tags ?? [];
+            return {
+                taskId: t.task_id ?? "",
+                status: t.status ?? null,
+                tags,
+                skill: deriveSkill(t.task_path, tags),
+                totalCostUsd: t.total_cost_usd ?? null,
+                durationSeconds: t.duration ?? null,
+            };
+        });
     const totalCost = taskResults.reduce(
         (a, t) => a + (t.total_cost_usd ?? 0),
         0,
