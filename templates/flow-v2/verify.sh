@@ -3,13 +3,23 @@
 #
 # Runs flow-run against this v2 project for the inner authoring loop.
 #
-#   --dry-run (default): compile + binding check, no connector calls
-#   --live:              actually executes nodes against your tenant
+#   --dry-run (default): compile + binding check, no live connector/HTTP calls
+#   --live:              executes supported live nodes against your tenant
+#                        (fails explicitly for published/inline Agent nodes)
 #
 # Outputs (under .flow-run/):
 #   history.yaml      — replay log; consumed by flow-run --resume
 #   decisions.json    — one record per dispatched node, with parsed
 #                       input + output. **Read this to debug.**
+#
+# flow-run surfaces:
+#   FIL compile errors as file:line:col with the offending source line
+#   stub UUIDs in bindings.json (00000000-...) with a fix message
+#   bindings that don't match a real connection in `uip is connections list`,
+#     plus candidate IDs for that connector key
+#   published Agent resource bindings with missing/wrong process metadata
+#   inline Agent rawInputs.source/prompt/model/variable placeholder issues
+#   non-CRUD or unrecognized node types
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

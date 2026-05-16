@@ -1,6 +1,6 @@
 ---
 name: uipath-flow-v2
-description: "UiPath Flow v2 — author flows as FIL (a TypeScript subset) plus a small bindings file. Inverse of `.flow` JSON: program logic AND per-node config in FIL, connection IDs in bindings. Verify locally with `./verify.sh` (parses the FIL, checks bindings against your tenant, executes nodes against real connectors); use `./convert.sh + uip maestro flow validate` only as a final compatibility check before deploy."
+description: "UiPath Flow v2 — author flows as FIL (a TypeScript subset) plus a small bindings file. Inverse of `.flow` JSON: program logic AND per-node config in FIL, connection IDs and process resource bindings in bindings. Verify locally with `./verify.sh`; use `./convert.sh + uip maestro flow validate` only as a final compatibility check before deploy."
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
 
@@ -13,7 +13,7 @@ A v2 flow project is **two files**:
 | `<Name>.fil`     | FIL source — async TypeScript-subset describing the flow's logic, the flow identity, and the nodes (actions + triggers) it uses   |
 | `bindings.json`  | Connection IDs (folder, connector, agent process keys) referenced by the FIL action/trigger declarations                          |
 
-**Primary verifier:** `./verify.sh` parses the FIL, validates every connector binding against your tenant (via `uip is connections list`), and (in `--live` mode) executes each pending node decision via `uip is resources execute`. It records every dispatch in `decisions.json` so you can see what was sent to each connector and what came back. Use it as the inner loop while authoring.
+**Primary verifier:** `./verify.sh` parses the FIL, validates connector bindings against your tenant (via `uip is connections list`), validates process-resource bindings from `bindings.json`, validates inline Agent `rawInputs` shape, and executes supported node decisions. Connector calls go through `uip is resources execute`; Agent nodes are validated and dry-run only until live Agent dispatch is wired. It records every dispatch in `decisions.json` so you can see what was sent and what came back. Use it as the inner loop while authoring.
 
 **Final compatibility check (deploy gate):** `./convert.sh <Name>` produces `<Name>.flow` (the v1 form), then `uip maestro flow validate <Name>.flow` cross-checks against the v1 schema. Run this before declaring the flow shippable, but don't depend on it for iteration — `./verify.sh`'s errors are far more actionable than `convert + validate`'s output.
 
@@ -38,7 +38,7 @@ A v2 flow project is **two files**:
 5. **Verify with `./verify.sh`** (the inner authoring loop):
    - `./verify.sh` — parses FIL, resolves bindings, lists what would be dispatched. No connector calls. Surfaces compile errors with file:line:col, missing/stub bindings, unknown node types.
    - Replace stub UUIDs with real connection IDs from `verify.sh`'s "candidates for X:" hints (or from `uip is connections list` directly).
-   - `./verify.sh --live` — runs for real. Each connector call goes through `uip is resources execute`; HTTP nodes via `fetch()`. After completion, read `.flow-run/decisions.json` to see exact inputs and outputs per node.
+   - `./verify.sh --live` — runs supported live nodes for real. Each connector call goes through `uip is resources execute`; HTTP nodes via `fetch()`. Do not use `--live` for Agent-bearing flows yet; live Agent dispatch fails explicitly. After completion, read `.flow-run/decisions.json` to see exact inputs and outputs per node.
    - Iterate. Compile errors → fix the FIL. Connector failures → adjust the `inputs` you pass via `executeNode(...)` or the action's `rawInputs` (the failure envelope is preserved in `decisions.json`).
 6. **Final compatibility check** (only when the flow is otherwise done):
    - `./convert.sh <Name>` → writes `<Name>.flow`.
@@ -112,12 +112,14 @@ The `{ … }` block on an `action` or `trigger` declaration accepts these fields
 | `label`                | Display name; defaults to the canonical-library label for integration nodes                                                |
 | `binding`              | Symbolic id of a `bindings.json` entry whose `propertyAttribute` is `ConnectionId`. Required for connector nodes.          |
 | `folderBinding`        | Symbolic id of a `bindings.json` entry whose `propertyAttribute` is `FolderKey`. Required for connector nodes.             |
+| `resource`             | Process-resource metadata for published Agent/API/RPA-style nodes                                                          |
+| `resourceBindings`     | Maps process-resource properties such as `name` and `folderPath` to `bindings.json` ids                                    |
 | `rawInputs`            | Static defaults baked into the v1 node's `inputs`. Merged with the `executeNode` call's input at runtime; call wins on key collisions. |
 | `inputs`               | Top-level inputs that aren't in `rawInputs` (rare; mostly for legacy round-trips)                                          |
 | `configuration`        | Distilled `inputs.detail.configuration` payload for integration nodes (per-instance field values)                           |
 | `configurationExtras`  | Catch-all for fields that diverge from canonical-library defaults                                                          |
 | `outputs`              | Override the library's default output schema (the v1 node's output-port → flow-variable bindings — NOT the value the node returns at runtime) |
-| `fixture`              | Dry-run value returned by fixture-aware nodes such as `core.logic.mock` and HITL quickform. Any JSON shape is allowed.        |
+| `fixture`              | Dry-run value returned by fixture-aware nodes such as `core.logic.mock`, published Agents, inline Agents, and HITL quickform. Any JSON shape is allowed. |
 
 Fields are constant-folded — literals, nested objects/arrays, and untagged template literals survive into the runtime manifest. Identifiers or arithmetic in a body field are dropped (use the runtime path via `executeNode` arguments for computed values).
 
@@ -273,9 +275,67 @@ async function main(orderId: string): Promise<void> {
 }
 ```
 
+## Process-resource actions: published and inline Agents
+
+Published and inline Agent nodes are declared directly in FIL action bodies. Do not create a `<Name>.manifest.flow` sidecar and do not add `embeddedDefinitions`; `v2-to-v1` synthesizes the v1 definitions from the action metadata.
+
+For **published/in-solution Agent nodes** (`uipath.core.agent.<key>@1.0.0`), declare the Agent as an action, call the action identifier, and put process-resource metadata in `resource` / `resourceBindings`:
+
+```typescript
+action classifyIntent: uipath.core.agent.93f09b44-e635-40f9-8cab-44ca29e748ed@1.0.0 {
+  label: "Classify Intent",
+  resource: {
+    resource: "process",
+    resourceSubType: "Agent",
+    resourceKey: "93f09b44-e635-40f9-8cab-44ca29e748ed",
+    orchestratorType: "agent",
+    serviceType: "Orchestrator.StartAgentJob",
+    section: "Published",
+  },
+  resourceBindings: {
+    name: "bAgentName",
+    folderPath: "bAgentFolder",
+  },
+  fixture: { response: { intent: "billing" } },
+};
+
+async function main(): Promise<void> {
+  const raw: string = await executeNode(classifyIntent, JSON.stringify({ in_text: "Customer asked for pricing" }));
+  const result: json = JSON.parse(raw);
+  const response: json = result.response;
+  const intent: string = response.intent;
+  // branch on intent
+}
+```
+
+`fixture` is optional, but recommended for eval tasks and local dry-runs. `./verify.sh` returns it as the Agent output because it runs `flow-run --dry-run` by default. Live `flow-run` rejects published Agent dispatch for now because the supported direct `Orchestrator.StartAgentJob` CLI/API path is not confirmed.
+
+For **inline low-code Agent nodes** (`uipath.agent.autonomous@1.0`), keep the existing CLI-compatible sidecar layout next to the v2 files: `<source>/agent.json` plus any inline-agent `resources/` or `features/` folders. The action body keeps `source` and the validator mirror fields under `rawInputs`; it does not use published-Agent `resourceBindings`:
+
+```typescript
+action draftReplyAgent: uipath.agent.autonomous@1.0 {
+  label: "Draft Reply Agent",
+  rawInputs: {
+    source: "11111111-2222-3333-4444-555555555555",
+    systemPrompt: "You write concise customer email replies.",
+    userPrompt: "Draft a reply for the provided email.",
+    model: "gpt-4o-2024-11-20",
+    agentInputVariables: [
+      { id: "emailText", type: "string", binding: "=js:$vars.manualTrigger1.output.emailText" },
+    ],
+    agentOutputVariables: [
+      { id: "content", type: "string" },
+    ],
+  },
+  fixture: { response: { content: "Draft reply text" } },
+};
+```
+
+`./verify.sh` validates `rawInputs.source`, prompt/model placeholders, and input/output variable arrays, then returns `fixture`. Live inline Agent dispatch is intentionally unsupported.
+
 ## Bindings — `bindings.json`
 
-`bindings.json` lists the connection-related UUIDs the FIL's `binding` and `folderBinding` fields point at. Validation requires:
+`bindings.json` lists the connection-related UUIDs and process resource values the FIL's `binding`, `folderBinding`, and `resourceBindings` fields point at. Validation requires:
 
 1. Every connector node MUST have BOTH a `binding` (its `ConnectionId`) AND a `folderBinding` (a folder-key UUID). Connector validation fails with `FolderKey is required for the connection binding` otherwise.
 2. Every binding entry MUST have an `id` (any short string), `name`, `type: "string"`, `resource`, `resourceKey`, `default`, and `propertyAttribute`. Missing fields trigger `Schema validation failed`.
@@ -312,6 +372,25 @@ The FIL action declarations reference the symbolic ids (`"bOutlook"`, `"bFolderK
 
 **Stub UUIDs vs real ones.** `parse-fil.sh` and the v2-to-v1 static converter don't care whether a UUID resolves — they just want structural well-formedness. **`verify.sh` (flow-run) DOES care** and refuses to dispatch with stubs. The deploy-gate `uip maestro flow validate` also doesn't dispatch and accepts stubs. So stubs are a write-time scaffolding tool only; before running `verify.sh`, fill them in with `uip is connections list --output-filter "[*].{Id:Id,ConnectorKey:ConnectorKey,FolderKey:FolderKey,Name:Name}"` (`--output-filter` is JMESPath applied directly to `.Data` — write `[*]` / `[?…]`, not `Data[*]`).
 
+For connector nodes, the FIL action body never holds real connection UUIDs — that's exclusively `bindings.json`. If `verify.sh` reports `binding "bOutlook" is not declared in bindings.json`, you have a typo or missing entry in `bindings.json`. Agent `resource.resourceKey` is a process resource key and intentionally stays in the action body so v2 can rebuild the v1 Agent model.
+
+Published Agent bindings are process resource bindings, not connector bindings. They must use `resource: "process"`, `resourceSubType: "Agent"`, and `propertyAttribute` values `name` and `folderPath`:
+
+```json
+{
+  "id": "bAgentName",
+  "name": "name",
+  "type": "string",
+  "resource": "process",
+  "resourceKey": "93f09b44-e635-40f9-8cab-44ca29e748ed",
+  "default": "ClassifyIntent",
+  "propertyAttribute": "name",
+  "resourceSubType": "Agent"
+}
+```
+
+`v2-to-v1` ships a built-in catalog of v1 `definitions[]` entries for the standard control-flow types (`core.trigger.manual`, `core.control.end`, `core.logic.decision`, `core.logic.merge`, `core.action.script`, `core.subflow`, …). You don't need to ship `embeddedDefinitions` for these — the converter fills them in. Connector definitions come from the canonical library cache. Published Agent definitions are synthesized from `resource` / `resourceBindings`; inline Agent definitions are synthesized from the `uipath.agent.autonomous` node shape. Embedded Agent definitions from a v1 conversion are still preserved and take precedence. Add `embeddedDefinitions` only for custom node types the converter cannot synthesize.
+
 ## Worked example
 
 | File | What it shows |
@@ -322,7 +401,7 @@ The FIL action declarations reference the symbolic ids (`"bOutlook"`, `"bFolderK
 
 ## Verifying with `./verify.sh`
 
-`./verify.sh` is the primary local verifier. It does what convert+validate can't: catches FIL compile errors with line numbers, validates bindings against the connections actually in your tenant, and executes each connector call so you see real success/failure.
+`./verify.sh` is the primary local verifier. It does what convert+validate can't: catches FIL compile errors with line numbers, validates bindings against the connections actually in your tenant, validates process-resource bindings, and executes supported connector/HTTP calls so you see real success/failure.
 
 ```bash
 ./verify.sh          # dry-run: parses, verifies, no connector calls
@@ -348,11 +427,13 @@ verify.sh dispatches:
 - **Connector nodes** (CRUD: `Retrieve`/`Create`/`Update`/`Delete`/`Replace`/`List`) via `uip is resources execute`.
 - **HTTP nodes** (`core.action.http`, `core.action.http.v2`) via Node `fetch()`. Output: `{ body, headers, statusCode }`.
 - **Mock nodes** (`core.logic.mock`) — return the action's `fixture` body field, or `{}` if unconfigured. Example: `action fetchUser: mock { fixture: { id: 1, name: "Alice" } };`
+- **Published Agent nodes** (`uipath.core.agent.<key>`) — validate `process`/`Agent` resource bindings and return the action's `fixture` in dry-run. Live Agent dispatch is intentionally unsupported for now.
+- **Inline Agent nodes** (`uipath.agent.autonomous`) — validate `rawInputs.source`, prompt/model placeholders, and variable arrays; return the action's `fixture` in dry-run. Keep `<source>/agent.json` beside the v2 files for conversion/package compatibility.
 - **Timer decisions** (`executeTimer`) — record the deadline immediately. Pass `--real-time` to actually sleep.
 - **Promise.all** — every entry dispatched concurrently, all must complete; results recorded in entry order.
 - **Promise.any** (race) — entries dispatched concurrently, first to resolve wins.
 
-Not yet supported: the 21 connector activities whose `operation.name` is `Download` or `Upload`. verify.sh aborts on these with a specific message and points you at `convert.sh + uip maestro flow validate` until support lands.
+Not yet supported: the 21 connector activities whose `operation.name` is `Download` or `Upload`, and live published/inline Agent dispatch. verify.sh aborts on these with a specific message and points you at `convert.sh + uip maestro flow validate` or the Flow/Studio Web debug path until support lands.
 
 ## Final compatibility check (deploy gate)
 
