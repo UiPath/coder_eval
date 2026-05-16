@@ -48,7 +48,18 @@ sandbox:
 >
 > Linux hosts where Claude Code stores creds under `~/.claude` already work because that directory is bind-mounted into the container.
 
-Credentials are forwarded via `--env VAR` (name-only, never embedded in argv) for these vars when set on the host: `ANTHROPIC_API_KEY`, `API_BACKEND`, `LLMGW_*`, `UIPATH_*`, `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION`, `CLAUDE_CODE_USE_BEDROCK`, `ANTHROPIC_MODEL`. Override the list per task:
+Credentials are forwarded via `--env VAR` (name-only, never embedded in argv) for these vars when set on the host: `ANTHROPIC_API_KEY`, `API_BACKEND`, `LLMGW_*`, `UIPATH_*`, `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION`, `CLAUDE_CODE_USE_BEDROCK`, `ANTHROPIC_MODEL`.
+
+**To add one or two custom vars to the defaults (recommended)**, use `env_passthrough_extra`:
+
+```yaml
+sandbox:
+  driver: docker
+  docker:
+    env_passthrough_extra: ["MY_CUSTOM_TOKEN", "DEBUG_FLAG"]  # Keeps all defaults + these
+```
+
+**To completely replace the list**, use `env_passthrough`:
 
 ```yaml
 sandbox:

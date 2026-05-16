@@ -895,3 +895,73 @@ class TestRepeatsPrecedence:
         config = BatchRunConfig(run_dir=tmp_path, repeats=100)
         with pytest.raises(ValueError, match="repeats must be <= 99"):
             resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0], config)
+
+
+class TestSandboxFieldMerge:
+    """Tests for sandbox config field-merge across experiment layers."""
+
+    @staticmethod
+    def _make_default_experiment() -> ExperimentDefinition:
+        return ExperimentDefinition(
+            experiment_id="default",
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+
+    @staticmethod
+    def _make_task(**kwargs) -> TaskDefinition:
+        from coder_eval.models import FileExistsCriterion, SandboxConfig
+
+        defaults = {
+            "task_id": "test-task",
+            "description": "Test task",
+            "initial_prompt": "Do something",
+            "sandbox": SandboxConfig(driver="tempdir"),
+            "success_criteria": [FileExistsCriterion(path="test.py", description="File exists")],
+        }
+        defaults.update(kwargs)
+        return TaskDefinition(**defaults)
+
+    def test_experiment_defaults_sandbox_merges_with_task(self, tmp_path):
+        """env_passthrough_extra from experiment defaults appends to task values."""
+        from coder_eval.models import DockerDriverConfig, SandboxConfig
+        from coder_eval.orchestration.config import BatchRunConfig
+
+        default_exp = self._make_default_experiment()
+        task = self._make_task(
+            sandbox=SandboxConfig(
+                driver="docker",
+                docker=DockerDriverConfig(env_passthrough_extra=["TASK_VAR"]),
+            )
+        )
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            defaults=ExperimentDefaults(
+                sandbox=SandboxConfig(docker=DockerDriverConfig(env_passthrough_extra=["EXP_VAR"]))
+            ),
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+        config = BatchRunConfig(run_dir=tmp_path)
+        resolved_task, _, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0], config)
+        # Both experiment and task extras should be present
+        assert "EXP_VAR" in resolved_task.sandbox.docker.env_passthrough_extra
+        assert "TASK_VAR" in resolved_task.sandbox.docker.env_passthrough_extra
+        # Experiment defaults come first, then task
+        assert resolved_task.sandbox.docker.env_passthrough_extra == ["EXP_VAR", "TASK_VAR"]
+
+    def test_task_sandbox_overrides_experiment_other_fields(self, tmp_path):
+        """Task-level sandbox fields override experiment defaults."""
+        from coder_eval.models import ResourceLimits, SandboxConfig
+        from coder_eval.orchestration.config import BatchRunConfig
+
+        default_exp = self._make_default_experiment()
+        task = self._make_task(sandbox=SandboxConfig(driver="docker", limits=ResourceLimits(timeout=200)))
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            defaults=ExperimentDefaults(sandbox=SandboxConfig(limits=ResourceLimits(timeout=100))),
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+        config = BatchRunConfig(run_dir=tmp_path)
+        resolved_task, _, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0], config)
+        # Task timeout wins over experiment default
+        assert resolved_task.sandbox.limits.timeout == 200

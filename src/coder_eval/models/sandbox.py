@@ -143,11 +143,13 @@ def validate_template_sources_list(sources: list[TemplateSource]) -> None:
 class DockerDriverConfig(BaseModel):
     """Per-task overrides for ``driver: docker``.
 
-    Only consulted when ``SandboxConfig.driver == "docker"``. The
-    ``env_passthrough`` allowlist is the **only** source of host env vars
-    visible inside the container -- nothing else leaks from ``os.environ``.
-    Default list covers the credentials the in-container Orchestrator needs
-    to stand up its own LLM Gateway proxy.
+    Only consulted when ``SandboxConfig.driver == "docker"``. Controls which
+    host environment variables are forwarded to the container via an explicit
+    allowlist. Use ``env_passthrough_extra`` to add vars to the default allowlist
+    without replacing it.
+
+    Default allowlist covers credentials the in-container Orchestrator needs
+    (Anthropic API keys, LLM Gateway proxy config, etc.).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -198,11 +200,18 @@ class DockerDriverConfig(BaseModel):
             "HOME",
         ],
         description=(
-            "Explicit allowlist of host env vars to forward into the container. "
-            "This is the ONLY source of forwarded env -- nothing else from os.environ leaks in. "
-            "Extend per-task to expose extra credentials/config. "
-            "Note: HOME forwarding is intentional (keeps ~/.claude path symmetric with host); "
-            "see docs/DOCKER_ISOLATION.md for the contract."
+            "Allowlist of host environment variables to forward to the container. Only vars that exist in the host "
+            "environment are forwarded. To extend the default with custom vars (e.g., MY_API_TOKEN), use "
+            "env_passthrough_extra instead of replacing this field. Note: HOME is intentional in default "
+            "(keeps ~/.claude path symmetric with host); see docs/DOCKER_ISOLATION.md for details."
+        ),
+    )
+    env_passthrough_extra: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Additional environment variables to forward beyond the default allowlist. Merged with env_passthrough "
+            "at runtime. Use this to add one or two custom vars (e.g., MY_API_TOKEN) without replacing the defaults. "
+            "Example: env_passthrough_extra: ['MY_CUSTOM_TOKEN', 'DEBUG_MODE']"
         ),
     )
     extra_mounts: list[str] = Field(

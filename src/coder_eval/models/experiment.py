@@ -12,6 +12,7 @@ from coder_eval.models.enums import FinalStatus
 from coder_eval.models.limits import RunLimits
 from coder_eval.models.mutations import PromptMutation
 from coder_eval.models.results import ConfigLineageEntry, EvaluationResult
+from coder_eval.models.sandbox import SandboxConfig
 from coder_eval.models.tasks import PostRunCommand, PreRunCommand, TaskDefinition
 from coder_eval.models.templates import TemplateSource
 
@@ -130,6 +131,13 @@ class ExperimentDefaults(BaseModel):
         description=(
             "Default sandbox driver applied to all tasks under this experiment. Slots into "
             "layer 2 of the 5-layer merge; variant- and task-level driver fields override it."
+        ),
+    )
+    sandbox: SandboxConfig | None = Field(
+        default=None,
+        description=(
+            "Default sandbox config applied to all tasks under this experiment. "
+            "Field-merge — task and variant layers override individual keys without replacing the block."
         ),
     )
 

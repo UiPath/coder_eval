@@ -28,6 +28,7 @@ from ..models import (
     PromptRephrase,
     ResolvedTask,
     RunLimits,
+    SandboxConfig,
     SimulationConfig,
     SkippedTask,
     SnapshotMode,
@@ -500,7 +501,45 @@ def resolve_task_for_variant(
     for k, source in rl_lineage.items():
         scalar_lineage[f"run_limits.{k}"] = ConfigLineageEntry(value=rl_accum[k], source=source)
 
-    # Resolve template_sources: task base + experiment defaults overlays + variant overlays (append semantics)
+    # Resolve sandbox via field-merge across all 4 layers (default → exp-defaults → task → variant).
+    # Later layers overwrite individual keys; absent keys leave earlier values intact.
+    # Special case: env_passthrough_extra lists are appended (not overridden).
+    sandbox_accum: dict[str, Any] = {}
+    sandbox_docker_extras: list[str] = []
+
+    def _merge_sandbox(layer_sandbox: SandboxConfig | None) -> None:
+        nonlocal sandbox_docker_extras
+        if layer_sandbox is None:
+            return
+        # Extract only explicitly-set fields using exclude_unset
+        patch = layer_sandbox.model_dump(exclude_unset=True)
+        # Handle env_passthrough_extra specially: append instead of override
+        if "docker" in patch and patch["docker"] and "env_passthrough_extra" in patch["docker"]:
+            sandbox_docker_extras.extend(patch["docker"]["env_passthrough_extra"])
+            del patch["docker"]["env_passthrough_extra"]
+        # Merge remaining fields (later layers win)
+        for k, v in patch.items():
+            sandbox_accum[k] = v
+
+    # Layer 1: default experiment defaults
+    if default_experiment.defaults and default_experiment.defaults.sandbox:
+        _merge_sandbox(default_experiment.defaults.sandbox)
+    # Layer 2: experiment defaults
+    if experiment.defaults and experiment.defaults.sandbox:
+        _merge_sandbox(experiment.defaults.sandbox)
+    # Layer 3: task
+    _merge_sandbox(task.sandbox)
+    # Layer 4: variant (variant.sandbox is not yet a field, but future-proofing)
+    # For now, variant overrides come via driver and template_sources only.
+
+    # If env_passthrough_extra was accumulated, merge it into docker config
+    if sandbox_docker_extras:
+        docker_config = sandbox_accum.get("docker") or {}
+        existing_extras = docker_config.get("env_passthrough_extra") or []
+        docker_config["env_passthrough_extra"] = existing_extras + sandbox_docker_extras
+        sandbox_accum["docker"] = docker_config
+
+    # Resolve template_sources: task base + experiment defaults + variant (append semantics)
     base_sources: list[TemplateSource] = list(task.sandbox.template_sources or [])
     exp_defaults_sources: list[TemplateSource] = (
         list(experiment.defaults.template_sources)
@@ -508,37 +547,31 @@ def resolve_task_for_variant(
         else []
     )
     variant_sources: list[TemplateSource] = list(variant.template_sources) if variant.template_sources else []
-
     combined_sources = base_sources + exp_defaults_sources + variant_sources
-    resolved_sandbox = task.sandbox
-    sandbox_updates: dict[str, Any] = {}
     if exp_defaults_sources or variant_sources:
         validate_template_sources_list(combined_sources)
-        sandbox_updates["template_sources"] = combined_sources
+        sandbox_accum["template_sources"] = combined_sources
 
     # Driver resolution: layer 2 (experiment defaults) → layer 3 (task) → layer 4 (variant).
-    # Layer 1 (default experiment defaults) and layer 5 (CLI) are handled elsewhere —
-    # the default experiment never sets driver today, and CLI runs in _apply_cli_overrides.
-    # task already supplied via task.sandbox.driver; only layers 2 and 4 need plumbing here.
     if experiment.defaults and experiment.defaults.driver is not None:
-        sandbox_updates["driver"] = experiment.defaults.driver
+        sandbox_accum["driver"] = experiment.defaults.driver
         scalar_lineage["sandbox.driver"] = ConfigLineageEntry(
             value=experiment.defaults.driver, source="experiment-defaults"
         )
-    # task layer wins over experiment-defaults; record only if task explicitly set it.
-    # (Pydantic gives us task.sandbox.driver = "tempdir" by default, so we can't tell
-    # "user wrote tempdir" from "took the default" without model_fields_set inspection.)
     if "driver" in task.sandbox.model_fields_set:
-        sandbox_updates["driver"] = task.sandbox.driver
+        sandbox_accum["driver"] = task.sandbox.driver
         scalar_lineage["sandbox.driver"] = ConfigLineageEntry(value=task.sandbox.driver, source="task")
     if variant.driver is not None:
-        sandbox_updates["driver"] = variant.driver
+        sandbox_accum["driver"] = variant.driver
         scalar_lineage["sandbox.driver"] = ConfigLineageEntry(
             value=variant.driver, source="variant", source_detail=variant.variant_id
         )
 
-    if sandbox_updates:
-        resolved_sandbox = task.sandbox.model_copy(update=sandbox_updates)
+    # Reconstruct sandbox with proper model validation to handle nested objects
+    if sandbox_accum:
+        resolved_sandbox = SandboxConfig(**{**task.sandbox.model_dump(), **sandbox_accum})
+    else:
+        resolved_sandbox = task.sandbox
 
     # Resolve post_run: task-level commands first, experiment defaults appended after.
     # Experiment defaults are typically tenant/sandbox cleanup that should run last,

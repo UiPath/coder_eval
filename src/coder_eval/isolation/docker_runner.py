@@ -546,11 +546,11 @@ class DockerRunner:
         if self._limits.max_pids is not None:
             argv += ["--pids-limit", str(self._limits.max_pids)]
 
-        # Strict allowlist: ONLY env vars listed in `cfg.env_passthrough`
-        # cross the boundary. `--env VAR` (name-only) tells docker to copy
-        # the value from our current env at run time, so secrets stay out
-        # of the rendered argv list that we log.
-        for env_var in cfg.env_passthrough:
+        # Forward environment variables: explicit allowlist (optionally extended via env_passthrough_extra).
+        # `--env VAR` (name-only) tells docker to copy the value from our current env at
+        # run time, so secrets stay out of the rendered argv list that we log.
+        merged_allowlist = set(cfg.env_passthrough) | set(cfg.env_passthrough_extra)
+        for env_var in merged_allowlist:
             if env_var in os.environ:
                 argv += ["--env", env_var]
 
