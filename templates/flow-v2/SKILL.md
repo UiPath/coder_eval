@@ -117,9 +117,55 @@ The `{ … }` block on an `action` or `trigger` declaration accepts these fields
 | `configuration`        | Distilled `inputs.detail.configuration` payload for integration nodes (per-instance field values)                           |
 | `configurationExtras`  | Catch-all for fields that diverge from canonical-library defaults                                                          |
 | `outputs`              | Override the library's default output schema (the v1 node's output-port → flow-variable bindings — NOT the value the node returns at runtime) |
-| `fixture`              | For `core.logic.mock` nodes: the JSON value the dispatcher returns when the mock fires. Any shape (object, array, primitive). |
+| `fixture`              | Dry-run value returned by fixture-aware nodes such as `core.logic.mock` and HITL quickform. Any JSON shape is allowed.        |
 
 Fields are constant-folded — literals, nested objects/arrays, and untagged template literals survive into the runtime manifest. Identifiers or arithmetic in a body field are dropped (use the runtime path via `executeNode` arguments for computed values).
+
+## OOTB Non-IS actions: HITL quickform
+
+HITL quickform is an OOTB node, not a connector. It does not use
+`binding`/`folderBinding`; put the quickform metadata directly in the action
+body and include a `fixture` for dry-run verification:
+
+```typescript
+action reviewExpense: uipath.human-in-the-loop@1.0 {
+  label: "Review Expense",
+  rawInputs: {
+    type: "quick",
+    schema: {
+      schemaId: "11111111-2222-3333-4444-555555555555",
+      fields: [
+        { id: "amount", label: "Amount", type: "number", direction: "input", binding: "vars.manualStart.output.amount" },
+        { id: "approved", label: "Approved", type: "boolean", direction: "output", variable: "vars.approved" },
+        { id: "comments", label: "Comments", type: "text", direction: "output", variable: "vars.comments" },
+      ],
+      outcomes: [
+        { id: "approve", name: "Approve", type: "string", isPrimary: true, action: "Continue" },
+        { id: "reject", name: "Reject", type: "string", isPrimary: false, action: "Continue" },
+      ],
+    },
+    recipient: { channels: ["ActionCenter"], connections: {}, assignee: { type: "group" } },
+    priority: "Low",
+  },
+  outputs: {
+    output: {
+      type: "object",
+      source: "=result",
+      var: "output",
+      properties: {
+        approved: { type: "boolean" },
+        comments: { type: "string" },
+        Action: { type: "string", enum: ["Approve", "Reject"], default: "Approve" },
+      },
+    },
+    status: { type: "string", source: "=result.Action", var: "status" },
+  },
+  fixture: { approved: true, comments: "Looks good", Action: "Approve" },
+};
+```
+
+`./verify.sh` supports HITL quickform in dry-run only. Live Action Center
+dispatch must use the product debug/runtime path.
 
 ### Types
 
