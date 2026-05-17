@@ -26,7 +26,13 @@ class Agent(ABC):
     """
 
     @abstractmethod
-    async def start(self, working_directory: str, *, env_path_prepend: list[str] | None = None) -> None:
+    async def start(
+        self,
+        working_directory: str,
+        *,
+        env_path_prepend: list[str] | None = None,
+        plugin_tools_dir: str | None = None,
+    ) -> None:
         """Initialize and start the agent.
 
         Args:
@@ -34,6 +40,11 @@ class Agent(ABC):
             env_path_prepend: Optional absolute directories to prepend to PATH for any
                 subprocess the agent spawns (typically resolved sandbox mock dirs).
                 Implementations that don't shell out may ignore this argument.
+            plugin_tools_dir: Optional canonical ``node_modules/@uipath`` to export as
+                ``PLUGIN_TOOLS_DIR`` so the agent's UiPath CLI pins plugin discovery
+                instead of walking up from CWD. An external ``PLUGIN_TOOLS_DIR`` in
+                the process environment still wins. Implementations that don't shell
+                out may ignore this argument.
         """
         pass
 

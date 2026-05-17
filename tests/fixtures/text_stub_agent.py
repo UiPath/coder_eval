@@ -25,7 +25,9 @@ class TextStubAgent(Agent):
         self.started = False
         self.stopped = False
 
-    async def start(self, working_directory: str, *, env_path_prepend: list[str] | None = None) -> None:
+    async def start(
+        self, working_directory: str, *, env_path_prepend: list[str] | None = None, plugin_tools_dir: str | None = None
+    ) -> None:
         self.working_directory = Path(working_directory)
         self._state = AgentState.WORKING
         self.started = True

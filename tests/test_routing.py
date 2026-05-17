@@ -78,6 +78,45 @@ class TestBuildSdkEnv:
         assert model is None
         assert "ANTHROPIC_MODEL" not in env
 
+    def test_propagates_plugin_tools_dir_when_set(self, monkeypatch):
+        """MST-9795: pin the CLI's plugin discovery in the SDK subprocess so
+        authoring `uip` calls load the same `@uipath/flow-tool` (and
+        transitively `@uipath/flow-schema`) as the criterion subprocess.
+        """
+        monkeypatch.setenv("PLUGIN_TOOLS_DIR", "/canonical/node_modules/@uipath")
+        env, _ = ClaudeCodeAgent._build_sdk_env(DirectRoute())
+        assert env["PLUGIN_TOOLS_DIR"] == "/canonical/node_modules/@uipath"
+
+    def test_propagates_plugin_tools_dir_on_proxy_route(self, monkeypatch):
+        """Pin must reach the SDK regardless of routing — proxy edition."""
+        monkeypatch.setenv("PLUGIN_TOOLS_DIR", "/pinned/tools/@uipath")
+        env, _ = ClaudeCodeAgent._build_sdk_env(ProxyRoute(port=1234))
+        assert env["PLUGIN_TOOLS_DIR"] == "/pinned/tools/@uipath"
+
+    def test_propagates_plugin_tools_dir_on_bedrock_route(self, monkeypatch):
+        """Pin must reach the SDK regardless of routing — bedrock edition."""
+        monkeypatch.setenv("PLUGIN_TOOLS_DIR", "/pinned/tools/@uipath")
+        env, _ = ClaudeCodeAgent._build_sdk_env(BedrockRoute(bearer_token="t", region="r"))
+        assert env["PLUGIN_TOOLS_DIR"] == "/pinned/tools/@uipath"
+
+    def test_omits_plugin_tools_dir_when_unset(self, monkeypatch):
+        """Unset env var → not propagated (CLI falls back to walk-based discovery)."""
+        monkeypatch.delenv("PLUGIN_TOOLS_DIR", raising=False)
+        env, _ = ClaudeCodeAgent._build_sdk_env(DirectRoute())
+        assert "PLUGIN_TOOLS_DIR" not in env
+
+    def test_plugin_tools_dir_fallback_applied_when_env_unset(self, monkeypatch):
+        """Sandbox-derived fallback pin is used when the process env is unset."""
+        monkeypatch.delenv("PLUGIN_TOOLS_DIR", raising=False)
+        env, _ = ClaudeCodeAgent._build_sdk_env(DirectRoute(), plugin_tools_dir="/sandbox/derived/@uipath")
+        assert env["PLUGIN_TOOLS_DIR"] == "/sandbox/derived/@uipath"
+
+    def test_external_plugin_tools_dir_beats_fallback(self, monkeypatch):
+        """External operator pin overrides the sandbox-derived fallback."""
+        monkeypatch.setenv("PLUGIN_TOOLS_DIR", "/operator/override/@uipath")
+        env, _ = ClaudeCodeAgent._build_sdk_env(DirectRoute(), plugin_tools_dir="/sandbox/derived/@uipath")
+        assert env["PLUGIN_TOOLS_DIR"] == "/operator/override/@uipath"
+
     def test_bedrock_default_disables_attribution_header(self):
         """Default BedrockRoute (no explicit disable_attribution_header) sets CLAUDE_CODE_ATTRIBUTION_HEADER=0."""
         route = BedrockRoute(bearer_token="t", region="r")

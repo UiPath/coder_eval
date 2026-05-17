@@ -33,6 +33,9 @@ class Sandbox:
     environments with virtual environments and resource limits.
     """
 
+    REMEDIATE_HOME_PLUGINS_ENV = "CODER_EVAL_REMEDIATE_HOME_PLUGINS"
+    """Env-var flag gating destructive ``$HOME/node_modules/@uipath`` cleanup."""
+
     def __init__(self, config: SandboxConfig, task_id: str, task_dir: Path | None = None):
         """Initialize the sandbox.
 
@@ -49,6 +52,9 @@ class Sandbox:
         self._cleanup_on_exit = True
         self.installed_tool_versions: dict[str, str] = {}
         self._command_base_path: str | None = None
+        # Cached canonical `node_modules/@uipath`; pins UiPath CLI plugin discovery
+        # via PLUGIN_TOOLS_DIR to bypass CWD-walk contamination.
+        self._plugin_tools_dir: str | None = None
 
     @property
     def _venv_scripts_dir(self) -> Path | None:
@@ -138,6 +144,10 @@ class Sandbox:
             # MST-9674: report (without remediating) parent-dir node_modules
             # contamination that could perturb Node module resolution.
             self._check_parent_node_modules_contamination()
+            # Opt-in destructive cleanup of $HOME/node_modules/@uipath (eval-host-only).
+            self._maybe_remediate_home_plugins_pollution()
+            # Cache canonical @uipath dir for PLUGIN_TOOLS_DIR pin; no-op if `uip` absent.
+            self._refresh_plugin_tools_dir()
         except Exception:
             # Clean up directory if setup fails partway through
             shutil.rmtree(self.sandbox_dir, ignore_errors=True)
@@ -476,8 +486,14 @@ class Sandbox:
         The orchestrator uses this to align success-criteria commands with the
         PATH passed to the agent SDK. Sandbox-local venv and node bin entries
         are still prepended by ``run_command``.
+
+        Also re-derives the canonical ``PLUGIN_TOOLS_DIR`` (MST-9795): the
+        resolved ``uip`` binary depends on PATH, and the path-aligned criterion
+        is the canonical lookup. Failures are swallowed — the env var simply
+        stays unset and the CLI falls back to its walk-based discovery.
         """
         self._command_base_path = path or None
+        self._refresh_plugin_tools_dir()
 
     @property
     def command_base_path(self) -> str | None:
@@ -487,6 +503,137 @@ class Sandbox:
         underlying private slot. Mutate via :meth:`set_command_base_path`.
         """
         return self._command_base_path
+
+    @property
+    def plugin_tools_dir(self) -> str | None:
+        """Canonical ``node_modules/@uipath`` derived from the resolved ``uip``.
+
+        Populated by :meth:`_refresh_plugin_tools_dir` after the agent's PATH
+        is captured. When non-None, ``_build_run_command_env`` exports it as
+        ``PLUGIN_TOOLS_DIR`` so the UiPath CLI pins plugin discovery instead
+        of walking up from CWD — eliminating MST-9795's host-pollution
+        asymmetry between authoring-time and criterion-time validation.
+
+        Returns ``None`` when ``uip`` is not on PATH or the resolved binary
+        does not live inside a recognizable ``node_modules/@uipath`` tree
+        (e.g. development monorepo runs).
+        """
+        return self._plugin_tools_dir
+
+    def _refresh_plugin_tools_dir(self) -> None:
+        """Resolve the canonical ``node_modules/@uipath`` for the current PATH.
+
+        Algorithm:
+
+        1. ``shutil.which("uip")`` against ``command_base_path + os.environ['PATH']``
+           — the same PATH ``run_command`` and the agent SDK will see.
+        2. ``Path.resolve()`` follows symlinks (Bun installs ``uip`` as a
+           symlink from ``~/.bun/bin/uip`` into the actual package dist).
+        3. Walk up looking for ``<dir>/node_modules/@uipath`` (any path
+           segment named ``@uipath`` whose parent is ``node_modules``).
+           Stops at the filesystem root.
+
+        Stores the result on ``self._plugin_tools_dir`` (or ``None`` if no
+        usable ``uip`` is on PATH). Idempotent across calls; safe to call
+        from both ``setup`` (initial value when no command_base_path yet)
+        and ``set_command_base_path`` (re-derive after PATH alignment).
+        """
+        self._plugin_tools_dir = None
+        # Build the same PATH the criterion subprocess and SDK env see, so the
+        # binary we resolve here is the same one they will execute.
+        search_path = os.environ.get("PATH", "")
+        if self._command_base_path:
+            search_path = f"{self._command_base_path}{os.pathsep}{search_path}"
+        resolved = shutil.which("uip", path=search_path)
+        if not resolved:
+            return
+        try:
+            real = Path(resolved).resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            logger.debug("Failed to resolve `uip` symlink %s: %s", resolved, exc)
+            return
+        # Walk up looking for `.../node_modules/@uipath`. We accept the first
+        # @uipath dir whose parent is named `node_modules` — the cli is
+        # always inside one, e.g.
+        # `~/.bun/install/global/node_modules/@uipath/cli/dist/index.js`.
+        for ancestor in real.parents:
+            if ancestor.name == "@uipath" and ancestor.parent.name == "node_modules":
+                self._plugin_tools_dir = str(ancestor)
+                logger.debug(
+                    "Resolved PLUGIN_TOOLS_DIR=%s from `uip` at %s",
+                    self._plugin_tools_dir,
+                    real,
+                )
+                return
+        logger.debug(
+            "`uip` at %s is not inside a recognizable node_modules/@uipath tree; PLUGIN_TOOLS_DIR pin disabled",
+            real,
+        )
+
+    def _maybe_remediate_home_plugins_pollution(self) -> Path | None:
+        """Optionally delete ``$HOME/node_modules/@uipath`` before the task runs.
+
+        Gated on the ``CODER_EVAL_REMEDIATE_HOME_PLUGINS`` env var being a
+        truthy string (``"1"``/``"true"``/``"yes"``, case-insensitive). Off
+        by default — silent deletion of a user-owned directory is
+        destructive and a generic eval framework should not own that
+        decision. Operators of dedicated eval runners (Azure) flip the flag
+        on at host-bring-up time because every task there is poisoned by
+        sibling tasks leaking installs into ``$HOME`` (MST-9674 / MST-9795).
+
+        Returns the deleted directory on success, ``None`` when no action
+        was taken (flag off, dir absent, or under-test ``$HOME`` mismatch).
+        """
+        flag = os.environ.get(self.REMEDIATE_HOME_PLUGINS_ENV, "").strip().lower()
+        if flag not in {"1", "true", "yes"}:
+            return None
+        home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+        if not home:
+            return None
+        target = Path(home) / "node_modules" / "@uipath"
+        if not target.is_dir():
+            return None
+        # Refuse to touch anything outside the configured HOME — if HOME
+        # somehow points at root or a system dir, bail out loudly rather
+        # than rm-rf'ing it. The check is belt-and-suspenders: the path
+        # construction above already anchors at $HOME.
+        try:
+            resolved_target = target.resolve(strict=True)
+            resolved_home = Path(home).resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            logger.warning(
+                "Cannot resolve %s for remediation: %s",
+                target,
+                exc,
+            )
+            return None
+        if resolved_home == Path(resolved_home.anchor):
+            logger.warning(
+                "Refusing to remediate %s: HOME=%s resolves to the filesystem root",
+                target,
+                resolved_home,
+            )
+            return None
+        if resolved_home not in resolved_target.parents:
+            logger.warning(
+                "Refusing to remediate %s: resolved target %s is not under HOME %s",
+                target,
+                resolved_target,
+                resolved_home,
+            )
+            return None
+        logger.warning(
+            "MST-9795 remediation: removing host-pollution dir %s (gated on %s; sibling tasks leaked installs)",
+            resolved_target,
+            self.REMEDIATE_HOME_PLUGINS_ENV,
+        )
+        shutil.rmtree(resolved_target, ignore_errors=True)
+        if resolved_target.exists():
+            logger.warning(
+                "MST-9795 remediation: %s still present after rmtree (partial delete; check fs busy/locked files)",
+                resolved_target,
+            )
+        return resolved_target
 
     def _build_run_command_env(self) -> dict[str, str]:
         """Build the environment for ``run_command``.
@@ -533,6 +680,10 @@ class Sandbox:
         # tasks cannot poison each other through shared parent-dir node_modules.
         env["NODE_PATH"] = ""
         env["NPM_CONFIG_PREFIX"] = str(self.sandbox_dir / ".npm-prefix")
+        # Pin UiPath CLI plugin discovery so the criterion subprocess uses the
+        # same @uipath tools the agent authored against (defers to an external pin).
+        if self._plugin_tools_dir and "PLUGIN_TOOLS_DIR" not in env:
+            env["PLUGIN_TOOLS_DIR"] = self._plugin_tools_dir
         if self.task_dir:
             env["TASK_DIR"] = str(self.task_dir)
         return env

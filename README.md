@@ -524,6 +524,8 @@ Installed automatically by `make install`. Includes ruff format/lint, trailing w
 | `BEDROCK_MODEL`                 | No                    | Cross-region Bedrock model ID (e.g., `eu.anthropic.claude-sonnet-4-5-20250929-v1:0`)                         |
 | `BEDROCK_SMALL_MODEL`           | No                    | Cross-region Bedrock small/fast model ID                                                                     |
 | `UIPATH_PLUGIN_MARKETPLACE_DIR` | No                    | Base directory for Claude Code plugins (used to substitute `$UIPATH_PLUGIN_MARKETPLACE_DIR` in plugin paths) |
+| `PLUGIN_TOOLS_DIR`              | No                    | Canonical `node_modules/@uipath` to pin UiPath CLI plugin discovery. When unset, the sandbox auto-derives it from the resolved `uip` binary. Operators can override on dedicated eval hosts. Honored by both the agent SDK and criterion subprocesses (MST-9795). |
+| `CODER_EVAL_REMEDIATE_HOME_PLUGINS` | No                | **DESTRUCTIVE.** Truthy (`1`/`true`/`yes`, case-insensitive) deletes `$HOME/node_modules/@uipath` at sandbox setup to clear sibling-task pollution on dedicated eval hosts. Off by default; do **not** enable on developer workstations. Refuses to act if `$HOME` resolves to filesystem root or the target escapes `$HOME` (MST-9795). |
 | `LOG_LEVEL`                     | No                    | Logging level (default: INFO)                                                                                |
 | `LOG_TO_FILE`                   | No                    | Enable file logging (default: false)                                                                         |
 

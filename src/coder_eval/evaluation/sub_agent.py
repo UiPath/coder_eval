@@ -170,7 +170,16 @@ class SubAgentRunner:
             # Safe because callers run check_all via asyncio.to_thread, so this
             # invocation is on a worker thread with no active event loop. A direct
             # async caller would get RuntimeError — acceptable for the architecture.
-            turn = asyncio.run(self._run_agent(agent, judge_dir, user_msg, max_turns, turn_timeout))
+            turn = asyncio.run(
+                self._run_agent(
+                    agent,
+                    judge_dir,
+                    user_msg,
+                    max_turns,
+                    turn_timeout,
+                    plugin_tools_dir=self._sandbox.plugin_tools_dir,
+                )
+            )
             logger.info(
                 "sub_agent: finished (duration=%.1fs, tokens=%s)",
                 turn.duration_seconds,
@@ -187,6 +196,8 @@ class SubAgentRunner:
         user_msg: str,
         max_turns: int | None,
         turn_timeout: float,
+        *,
+        plugin_tools_dir: str | None = None,
     ) -> TurnRecord:
         """Run the sub-agent. Hard-kill on any exit path.
 
@@ -194,7 +205,7 @@ class SubAgentRunner:
         cancellation, so ``kill()`` is required to guarantee the subprocess dies.
         """
         try:
-            await agent.start(str(judge_dir))
+            await agent.start(str(judge_dir), plugin_tools_dir=plugin_tools_dir)
             return await agent.communicate(user_msg, timeout=turn_timeout, max_turns=max_turns)
         except BaseException:
             with contextlib.suppress(Exception):

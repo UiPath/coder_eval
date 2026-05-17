@@ -94,7 +94,7 @@ def test_runner_mounts_reference_dir_at_underscore_reference(sandbox: Sandbox, t
     mock_agent = _make_mock_agent()
     captured: dict[str, str] = {}
 
-    async def capture_start(workdir: str) -> None:
+    async def capture_start(workdir: str, **_kwargs: object) -> None:
         captured["workdir"] = workdir
 
     mock_agent.start.side_effect = capture_start
@@ -145,7 +145,7 @@ def test_runner_handles_sandbox_side_reference_collision(sandbox: Sandbox, tmp_p
     mock_agent = _make_mock_agent()
     captured: dict[str, str] = {}
 
-    async def capture_start(workdir: str) -> None:
+    async def capture_start(workdir: str, **_kwargs: object) -> None:
         captured["workdir"] = workdir
 
     mock_agent.start.side_effect = capture_start
@@ -181,7 +181,7 @@ def test_runner_skips_reference_when_not_provided(sandbox: Sandbox, tmp_path: Pa
     mock_agent = _make_mock_agent()
     captured: dict[str, str] = {}
 
-    async def capture_start(workdir: str) -> None:
+    async def capture_start(workdir: str, **_kwargs: object) -> None:
         captured["workdir"] = workdir
 
     mock_agent.start.side_effect = capture_start
@@ -226,7 +226,7 @@ def test_runner_cleans_up_on_success(sandbox: Sandbox) -> None:
     mock_agent = _make_mock_agent()
     captured: dict[str, str] = {}
 
-    async def capture_start(path: str) -> None:
+    async def capture_start(path: str, **_kwargs: object) -> None:
         captured["path"] = path
 
     mock_agent.start.side_effect = capture_start
@@ -248,7 +248,7 @@ def test_runner_cleans_up_on_communicate_exception(sandbox: Sandbox) -> None:
     mock_agent.communicate.side_effect = RuntimeError("boom")
     captured: dict[str, str] = {}
 
-    async def capture_start(path: str) -> None:
+    async def capture_start(path: str, **_kwargs: object) -> None:
         captured["path"] = path
 
     mock_agent.start.side_effect = capture_start
@@ -294,7 +294,7 @@ def test_runner_propagates_turn_timeout(sandbox: Sandbox) -> None:
     mock_agent.communicate.side_effect = TurnTimeoutError(30.0, task_id="t", iteration=1)
     captured: dict[str, str] = {}
 
-    async def capture_start(path: str) -> None:
+    async def capture_start(path: str, **_kwargs: object) -> None:
         captured["path"] = path
 
     mock_agent.start.side_effect = capture_start
@@ -378,7 +378,7 @@ def test_runner_copytree_drops_top_level_symlinks(sandbox: Sandbox, tmp_path: Pa
     mock_agent = _make_mock_agent()
     captured: dict[str, str] = {}
 
-    async def capture_start(path: str) -> None:
+    async def capture_start(path: str, **_kwargs: object) -> None:
         captured["entries"] = ",".join(sorted(os.listdir(path)))
 
     mock_agent.start.side_effect = capture_start
@@ -407,7 +407,7 @@ def test_runner_copytree_drops_nested_symlinks(sandbox: Sandbox, tmp_path: Path)
     mock_agent = _make_mock_agent()
     captured: dict[str, str] = {}
 
-    async def capture_start(path: str) -> None:
+    async def capture_start(path: str, **_kwargs: object) -> None:
         captured["sub_entries"] = ",".join(sorted(os.listdir(Path(path, "sub"))))
 
     mock_agent.start.side_effect = capture_start
@@ -432,7 +432,7 @@ def test_runner_copytree_honors_patterns(sandbox: Sandbox, tmp_path: Path) -> No
     mock_agent = _make_mock_agent()
     captured: dict[str, str] = {}
 
-    async def capture_start(path: str) -> None:
+    async def capture_start(path: str, **_kwargs: object) -> None:
         captured["has_git"] = str(Path(path, ".git").exists())
         captured["has_main"] = str(Path(path, "Main.xaml").exists())
 
@@ -464,7 +464,7 @@ def test_runner_excludes_nested_claude_and_mcp(sandbox: Sandbox, tmp_path: Path)
     mock_agent = _make_mock_agent()
     captured: dict[str, str] = {}
 
-    async def capture_start(path: str) -> None:
+    async def capture_start(path: str, **_kwargs: object) -> None:
         captured["sub_entries"] = ",".join(sorted(os.listdir(Path(path, "sub"))))
         captured["main_present"] = str(Path(path, "Main.xaml").exists())
 
@@ -508,7 +508,7 @@ def test_runner_reference_dir_with_nested_underscore_reference_preserved(sandbox
     mock_agent = _make_mock_agent()
     captured: dict[str, str] = {}
 
-    async def capture_start(workdir: str) -> None:
+    async def capture_start(workdir: str, **_kwargs: object) -> None:
         captured["workdir"] = workdir
 
     mock_agent.start.side_effect = capture_start
@@ -548,7 +548,7 @@ def test_runner_reference_ignore_patterns_explicit(sandbox: Sandbox, tmp_path: P
     mock_agent = _make_mock_agent()
     captured: dict[str, str] = {}
 
-    async def capture_start(workdir: str) -> None:
+    async def capture_start(workdir: str, **_kwargs: object) -> None:
         captured["workdir"] = workdir
 
     mock_agent.start.side_effect = capture_start

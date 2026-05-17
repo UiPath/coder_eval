@@ -208,24 +208,38 @@ class ClaudeCodeAgent(Agent):
         # asyncio cancellation.
         self._active_transport: SubprocessCLITransport | None = None
         self._env_path_prepend: list[str] = []
+        self._plugin_tools_dir: str | None = None
         self._log = _PrefixedAdapter(logger, {"prefix": instance_name})
         self.pending_turn: TurnRecord | None = None
 
-    async def start(self, working_directory: str, *, env_path_prepend: list[str] | None = None) -> None:
+    async def start(
+        self,
+        working_directory: str,
+        *,
+        env_path_prepend: list[str] | None = None,
+        plugin_tools_dir: str | None = None,
+    ) -> None:
         """Initialize and start the Claude Code agent.
 
         Args:
             working_directory: Path to the working directory
             env_path_prepend: Absolute directories to prepend to PATH for the SDK
                 subprocess (typically the resolved ``SandboxConfig.mock_path_dirs``).
+            plugin_tools_dir: Canonical ``node_modules/@uipath`` to export as
+                ``PLUGIN_TOOLS_DIR``. An external env-var pin still wins.
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
+        self._plugin_tools_dir = plugin_tools_dir
         self._state = AgentState.WORKING
         # Note: Client is created per-communication to avoid transport issues
 
     @staticmethod
-    def _build_sdk_env(route: ApiRoute, path_prepend: list[str] | None = None) -> tuple[dict[str, str], str | None]:
+    def _build_sdk_env(
+        route: ApiRoute,
+        path_prepend: list[str] | None = None,
+        plugin_tools_dir: str | None = None,
+    ) -> tuple[dict[str, str], str | None]:
         """Build SDK environment variables and resolve effective model for the given route.
 
         Args:
@@ -234,6 +248,9 @@ class ClaudeCodeAgent(Agent):
                 contents shadow same-named binaries in the parent PATH. Resolved by the
                 sandbox manager from ``SandboxConfig.mock_path_dirs``; the agent does no
                 filesystem inspection of its own.
+            plugin_tools_dir: Fallback canonical ``node_modules/@uipath`` to export as
+                ``PLUGIN_TOOLS_DIR`` when the process environment doesn't already
+                provide one. An external ``PLUGIN_TOOLS_DIR`` always wins.
 
         Returns:
             Tuple of (env_vars_dict, model_override_or_None).
@@ -245,6 +262,13 @@ class ClaudeCodeAgent(Agent):
         if path_prepend:
             prefix = os.pathsep.join(path_prepend)
             base_env["PATH"] = f"{prefix}{os.pathsep}{base_env.get('PATH', '')}"
+
+        # Pin UiPath CLI plugin discovery for the agent SDK subprocess. External
+        # env wins over sandbox-derived fallback so operators can override.
+        if tools_dir := os.environ.get("PLUGIN_TOOLS_DIR"):
+            base_env["PLUGIN_TOOLS_DIR"] = tools_dir
+        elif plugin_tools_dir:
+            base_env["PLUGIN_TOOLS_DIR"] = plugin_tools_dir
 
         match route:
             case BedrockRoute() as br:
@@ -408,7 +432,11 @@ class ClaudeCodeAgent(Agent):
 
             # Build env overrides and resolve model for the configured API route.
             # Precedence: task/CLI agent.model > route default (e.g. BEDROCK_MODEL).
-            env, route_model = self._build_sdk_env(self.route, path_prepend=self._env_path_prepend)
+            env, route_model = self._build_sdk_env(
+                self.route,
+                path_prepend=self._env_path_prepend,
+                plugin_tools_dir=self._plugin_tools_dir,
+            )
             effective_model = self._resolve_effective_model(self.config.model, env, route_model)
 
             disallowed_tools = list(self.config.disallowed_tools or [])

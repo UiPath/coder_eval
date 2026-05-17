@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -144,6 +145,286 @@ def test_sandbox_run_command_uses_agent_command_base_path(monkeypatch, tmp_path)
         assert sandbox.command_base_path == f"{agent_bin}{os.pathsep}{stale_bin}"
     finally:
         sandbox.cleanup()
+
+
+def _install_fake_uip_tree(root: Path) -> Path:
+    """Create a realistic ``node_modules/@uipath/cli/dist/`` install under ``root``.
+
+    Returns the `bin/` dir containing a `uip` symlink that resolves into the
+    fake cli dist. Used by MST-9795 PLUGIN_TOOLS_DIR-pin tests so the
+    canonical tools dir is at a known, isolated tmp path.
+    """
+    tools_dir = root / "node_modules" / "@uipath"
+    cli_dist = tools_dir / "cli" / "dist"
+    cli_dist.mkdir(parents=True)
+    real_uip = cli_dist / "index.js"
+    real_uip.write_text("#!/usr/bin/env node\nconsole.log('1.1.0');\n")
+    real_uip.chmod(0o755)
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    # Symlink mirrors how `bun install -g @uipath/cli` materializes the
+    # binary in production (~/.bun/bin/uip -> install/global/node_modules/...).
+    (bin_dir / "uip").symlink_to(real_uip)
+    return bin_dir
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Fixture uses POSIX symlink + extensionless `uip`; `shutil.which` on Windows needs PATHEXT match.",
+)
+def test_refresh_plugin_tools_dir_resolves_canonical_at_symlink_target(monkeypatch, tmp_path):
+    """MST-9795: discovery follows the `uip` symlink and walks up to @uipath."""
+    bin_dir = _install_fake_uip_tree(tmp_path)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_plugin_tools_dir_resolve")
+    try:
+        sandbox.setup()
+        # `setup()` already called `_refresh_plugin_tools_dir()` for us.
+        expected = str((tmp_path / "node_modules" / "@uipath").resolve(strict=True))
+        assert sandbox.plugin_tools_dir == expected
+    finally:
+        sandbox.cleanup()
+
+
+def test_refresh_plugin_tools_dir_returns_none_when_uip_absent(monkeypatch, tmp_path):
+    """No `uip` on PATH → pin stays unset; CLI falls back to walk-based discovery."""
+    empty_bin = tmp_path / "emptybin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_plugin_tools_dir_absent")
+    try:
+        sandbox.setup()
+        assert sandbox.plugin_tools_dir is None
+    finally:
+        sandbox.cleanup()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Fixture uses POSIX symlink + extensionless `uip`; `shutil.which` on Windows needs PATHEXT match.",
+)
+def test_refresh_plugin_tools_dir_none_when_uip_outside_uipath_tree(monkeypatch, tmp_path):
+    """`uip` resolves but is NOT under `.../node_modules/@uipath` → pin stays unset.
+
+    Covers development monorepo runs where the on-PATH `uip` is a wrapper
+    script or globally-installed shim that doesn't live inside an `@uipath`
+    package tree.
+    """
+    # Install `uip` directly under tmp_path/bin pointing at a sibling JS file —
+    # no `node_modules/@uipath` anywhere in the parent chain.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    standalone = tmp_path / "uip-standalone.js"
+    standalone.write_text("#!/usr/bin/env node\nconsole.log('1.1.0');\n")
+    standalone.chmod(0o755)
+    (bin_dir / "uip").symlink_to(standalone)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_plugin_tools_dir_outside_tree")
+    try:
+        sandbox.setup()
+        assert sandbox.plugin_tools_dir is None
+    finally:
+        sandbox.cleanup()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Fixture uses POSIX symlink + extensionless `uip`; `shutil.which` on Windows needs PATHEXT match.",
+)
+def test_set_command_base_path_refreshes_plugin_tools_dir(monkeypatch, tmp_path):
+    """PATH alignment from the agent should re-derive the canonical tools dir.
+
+    Without this, criterion subprocesses might pin to a tools dir derived from
+    a `uip` that the agent never resolved to.
+    """
+    pre_root = tmp_path / "pre"
+    pre_root.mkdir()
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    pre_bin = _install_fake_uip_tree(pre_root)
+    agent_bin = _install_fake_uip_tree(agent_root)
+    # Initial PATH points at the "pre" tools tree; agent PATH override (later)
+    # points at a different "agent" tree. `set_command_base_path` must
+    # re-resolve and update.
+    monkeypatch.setenv("PATH", str(pre_bin))
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_plugin_tools_dir_refresh")
+    try:
+        sandbox.setup()
+        pre_expected = str((pre_root / "node_modules" / "@uipath").resolve(strict=True))
+        assert sandbox.plugin_tools_dir == pre_expected
+        sandbox.set_command_base_path(str(agent_bin))
+        agent_expected = str((agent_root / "node_modules" / "@uipath").resolve(strict=True))
+        assert sandbox.plugin_tools_dir == agent_expected
+    finally:
+        sandbox.cleanup()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Fixture uses POSIX symlink + extensionless `uip`; `shutil.which` on Windows needs PATHEXT match.",
+)
+def test_build_run_command_env_exports_plugin_tools_dir(monkeypatch, tmp_path):
+    """`PLUGIN_TOOLS_DIR` env var must reach criterion subprocesses."""
+    bin_dir = _install_fake_uip_tree(tmp_path)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_plugin_tools_dir_env")
+    try:
+        sandbox.setup()
+        env = sandbox._build_run_command_env()
+        expected = str((tmp_path / "node_modules" / "@uipath").resolve(strict=True))
+        assert env["PLUGIN_TOOLS_DIR"] == expected
+    finally:
+        sandbox.cleanup()
+
+
+def test_build_run_command_env_omits_plugin_tools_dir_when_uip_absent(monkeypatch, tmp_path):
+    """No `uip` on PATH → no `PLUGIN_TOOLS_DIR` exported (CLI uses default walks)."""
+    empty_bin = tmp_path / "emptybin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    monkeypatch.delenv("PLUGIN_TOOLS_DIR", raising=False)
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_plugin_tools_dir_env_absent")
+    try:
+        sandbox.setup()
+        env = sandbox._build_run_command_env()
+        assert "PLUGIN_TOOLS_DIR" not in env
+    finally:
+        sandbox.cleanup()
+
+
+def test_build_run_command_env_preserves_external_plugin_tools_dir(monkeypatch, tmp_path):
+    """Parent-process pin wins over the auto-derived one — operators can override."""
+    bin_dir = _install_fake_uip_tree(tmp_path)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("PLUGIN_TOOLS_DIR", "/override/node_modules/@uipath")
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_plugin_tools_dir_external_override")
+    try:
+        sandbox.setup()
+        env = sandbox._build_run_command_env()
+        assert env["PLUGIN_TOOLS_DIR"] == "/override/node_modules/@uipath"
+    finally:
+        sandbox.cleanup()
+
+
+def test_maybe_remediate_home_plugins_pollution_off_by_default(monkeypatch, tmp_path):
+    """No flag → never delete. The dir is a user-owned resource."""
+    fake_home = tmp_path / "home"
+    pollution = fake_home / "node_modules" / "@uipath"
+    pollution.mkdir(parents=True)
+    (pollution / "marker").write_text("STILL HERE")
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv(Sandbox.REMEDIATE_HOME_PLUGINS_ENV, raising=False)
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_remediate_off")
+    try:
+        sandbox.setup()
+        assert pollution.is_dir()
+        assert (pollution / "marker").read_text() == "STILL HERE"
+    finally:
+        sandbox.cleanup()
+
+
+def test_maybe_remediate_home_plugins_pollution_deletes_when_enabled(monkeypatch, tmp_path, caplog):
+    """Flag on AND dir present AND under HOME → delete with WARNING log."""
+    import logging as _logging
+
+    fake_home = tmp_path / "home"
+    pollution = fake_home / "node_modules" / "@uipath"
+    pollution.mkdir(parents=True)
+    (pollution / "marker").write_text("STALE")
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv(Sandbox.REMEDIATE_HOME_PLUGINS_ENV, "1")
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_remediate_on")
+    caplog.set_level(_logging.WARNING, logger="coder_eval.sandbox")
+    try:
+        sandbox.setup()
+        assert not pollution.exists()
+        assert any("MST-9795 remediation" in rec.message for rec in caplog.records)
+    finally:
+        sandbox.cleanup()
+
+
+def test_maybe_remediate_home_plugins_pollution_no_op_when_dir_absent(monkeypatch, tmp_path):
+    """Flag on but nothing to remediate → silent no-op (no crash)."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()  # No node_modules/@uipath created.
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv(Sandbox.REMEDIATE_HOME_PLUGINS_ENV, "1")
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_remediate_absent")
+    try:
+        sandbox.setup()  # Must not raise.
+    finally:
+        sandbox.cleanup()
+
+
+def test_maybe_remediate_home_plugins_pollution_refuses_when_home_is_root(monkeypatch, caplog):
+    """Defense-in-depth: HOME=/ must NOT cause /node_modules/@uipath deletion."""
+    import logging as _logging
+    import shutil as _shutil
+    from pathlib import Path as _Path
+
+    monkeypatch.setenv("HOME", "/")
+    monkeypatch.setenv(Sandbox.REMEDIATE_HOME_PLUGINS_ENV, "1")
+
+    real_is_dir = _Path.is_dir
+    real_resolve = _Path.resolve
+    fake_root = _Path("/")
+    fake_target = _Path("/node_modules/@uipath")
+
+    def fake_is_dir(self):
+        if self == fake_target:
+            return True
+        return real_is_dir(self)
+
+    def fake_resolve(self, strict=False):
+        if self == fake_target:
+            return fake_target
+        if self == fake_root:
+            return fake_root
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(_Path, "is_dir", fake_is_dir)
+    monkeypatch.setattr(_Path, "resolve", fake_resolve)
+
+    # `sandbox.py` does `import shutil` — patching the global module's rmtree
+    # reaches the same callable the sandbox sees, no dual-import needed.
+    rmtree_calls: list[object] = []
+    monkeypatch.setattr(_shutil, "rmtree", lambda *args, **_: rmtree_calls.append(args))
+
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_remediate_home_root")
+    caplog.set_level(_logging.WARNING, logger="coder_eval.sandbox")
+
+    result = sandbox._maybe_remediate_home_plugins_pollution()
+    assert result is None
+    assert rmtree_calls == [], "rmtree must NOT be called when HOME resolves to filesystem root"
+    assert any("filesystem root" in rec.message for rec in caplog.records)
+
+
+def test_maybe_remediate_home_plugins_pollution_accepts_truthy_strings(monkeypatch, tmp_path):
+    """Documented truthy strings (`true`, `yes`, case-insensitive) trigger."""
+    for raw in ("true", "True", "YES", "1"):
+        fake_home = tmp_path / f"home_{raw}"
+        pollution = fake_home / "node_modules" / "@uipath"
+        pollution.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv(Sandbox.REMEDIATE_HOME_PLUGINS_ENV, raw)
+        config = SandboxConfig(driver="tempdir", python=None)
+        sandbox = Sandbox(config, task_id=f"test_remediate_{raw}")
+        try:
+            sandbox.setup()
+            assert not pollution.exists(), f"Did not remediate for flag={raw!r}"
+        finally:
+            sandbox.cleanup()
 
 
 def test_write_uip_shim_rejects_unsafe_labels(tmp_path):
