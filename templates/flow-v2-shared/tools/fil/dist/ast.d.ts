@@ -1,3 +1,5 @@
+import { Comment } from './trivia';
+export { Comment } from './trivia';
 export type FILType = 'i32' | 'i64' | 'f64' | 'bool' | 'string' | 'json' | 'DateTime' | 'TimeSpan' | 'void' | {
     kind: 'Promise';
     inner: FILType;
@@ -18,6 +20,18 @@ export declare function unwrapPromise(t: FILType): FILType;
 export interface BaseNode {
     kind: string;
     filType?: FILType;
+    /**
+     * Comments attached to this node by the parser. Plain comments preserve
+     * developer-intent free-form text through round-trips; magic comments
+     * (`// key: value`) carry node metadata (`script_id`, `description`,
+     * `label`) that survives FIL ↔ v1 .flow conversion.
+     *
+     * Only the parser populates this field, and only for statement /
+     * declaration / function-level nodes. Mid-expression comments are
+     * captured by the lexer but currently have no attachment point — see
+     * the trivia design notes for details.
+     */
+    leadingComments?: Comment[];
 }
 export interface Program extends BaseNode {
     kind: 'Program';

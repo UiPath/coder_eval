@@ -53,14 +53,62 @@ exports.convertFILExprToFlowExpr = convertFILExprToFlowExpr;
 const AST = __importStar(require("fil-compiler/dist/ast"));
 const v1_to_v2_1 = require("v1-to-v2");
 const expression_1 = require("./expression");
+const KNOWN_SCRIPT_KEYS = new Set(['script_id', 'description', 'label']);
+/**
+ * Extract magic-comment metadata from a statement's leadingComments. Returns
+ * `undefined` (cheap) when the statement carries no magic comments at all.
+ */
+function readScriptMeta(stmt) {
+    const cs = stmt.leadingComments;
+    if (!cs)
+        return undefined;
+    let meta;
+    for (const c of cs) {
+        if (!c.isMagic || !c.key || !KNOWN_SCRIPT_KEYS.has(c.key))
+            continue;
+        if (!meta)
+            meta = {};
+        switch (c.key) {
+            case 'script_id':
+                meta.scriptId = c.value;
+                break;
+            case 'description':
+                meta.description = c.value;
+                break;
+            case 'label':
+                meta.label = c.value;
+                break;
+        }
+    }
+    return meta;
+}
+/** True iff the statement carries any magic comment — used by the
+ *  coalesce-pass opt-out. */
+function hasAnyMagic(stmt) {
+    if (!stmt)
+        return false;
+    const cs = stmt.leadingComments;
+    if (!cs)
+        return false;
+    return cs.some(c => c.isMagic && c.key && KNOWN_SCRIPT_KEYS.has(c.key));
+}
+/** Non-magic comments on a statement, in source order. */
+function plainComments(stmt) {
+    if (!stmt)
+        return [];
+    const cs = stmt.leadingComments;
+    if (!cs)
+        return [];
+    return cs.filter(c => !c.isMagic);
+}
 const NODE_WIDTH = 96;
 const NODE_HEIGHT = 96;
 const X_SPACING = 176;
 const Y_SPACING = 176;
 const START_X = 250;
 const START_Y = 150;
-function filToFlow(program, flowId, defFlow) {
-    const converter = new FilToFlowConverter(program, flowId, defFlow);
+function filToFlow(program, flowId, overrides) {
+    const converter = new FilToFlowConverter(program, flowId, overrides);
     return converter.convert();
 }
 /**
@@ -68,13 +116,13 @@ function filToFlow(program, flowId, defFlow) {
  * when a caller wants to wire FIL expressions back into v1 expressions
  * (Phase A) using the same name-to-path mapping the converter used.
  */
-function filToFlowWithScope(program, flowId, defFlow) {
-    const converter = new FilToFlowConverter(program, flowId, defFlow);
+function filToFlowWithScope(program, flowId, overrides) {
+    const converter = new FilToFlowConverter(program, flowId, overrides);
     const flow = converter.convert();
     return { flow, scope: converter.getScope() };
 }
 class FilToFlowConverter {
-    constructor(program, flowId, defFlow) {
+    constructor(program, flowId, overrides) {
         this.subflows = {};
         /**
          * Map from `action <name>` declared at top level → effective protocol id
@@ -101,8 +149,8 @@ class FilToFlowConverter {
          */
         this.namesRequiringFlowVar = new Set();
         this.program = program;
-        this.flowId = defFlow?.flowId || flowId || 'converted-flow';
-        this.defFlow = defFlow;
+        this.flowId = overrides?.flowId || flowId || 'converted-flow';
+        this.overrides = overrides;
         this.helperFunctions = new Map();
         this.scriptHelpers = new Map();
         for (const fn of program.functions) {
@@ -161,28 +209,28 @@ class FilToFlowConverter {
         this.rewriteLoopOutputToSuccess(ctx);
         const flow = {
             id: this.flowId,
-            version: this.defFlow?.flowVersion || '1.0.0',
-            name: this.defFlow?.flowName || this.flowId,
+            version: this.overrides?.flowVersion || '1.0.0',
+            name: this.overrides?.flowName || this.flowId,
             nodes: ctx.nodes,
             edges: ctx.edges,
-            variables: this.defFlow?.variableOverrides || variables,
-            metadata: this.defFlow?.metadata || {
+            variables: this.overrides?.variableOverrides || variables,
+            metadata: this.overrides?.metadata || {
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
             },
         };
-        // Restore definitions and bindings from .def.flow
-        if (this.defFlow?.definitions && this.defFlow.definitions.length > 0) {
-            flow.definitions = this.defFlow.definitions;
+        // Restore definitions and bindings from FlowOverrides
+        if (this.overrides?.definitions && this.overrides.definitions.length > 0) {
+            flow.definitions = this.overrides.definitions;
         }
-        if (this.defFlow?.bindings && this.defFlow.bindings.length > 0) {
-            flow.bindings = this.defFlow.bindings;
+        if (this.overrides?.bindings && this.overrides.bindings.length > 0) {
+            flow.bindings = this.overrides.bindings;
         }
         // Restore extra identity fields
-        if (this.defFlow?.solutionId)
-            flow.solutionId = this.defFlow.solutionId;
-        if (this.defFlow?.projectId)
-            flow.projectId = this.defFlow.projectId;
+        if (this.overrides?.solutionId)
+            flow.solutionId = this.overrides.solutionId;
+        if (this.overrides?.projectId)
+            flow.projectId = this.overrides.projectId;
         if (Object.keys(this.subflows).length > 0) {
             flow.subflows = this.subflows;
         }
@@ -312,6 +360,7 @@ class FilToFlowConverter {
             const { nodeId, fn } = scriptCall;
             const body = recoverScriptBody(fn);
             const node = makeScriptNode(nodeId, body, ctx.nextX(), ctx.currentY());
+            applyScriptMeta(node, readScriptMeta(fn));
             this.applyNodeOverride(node);
             ctx.addNode(node);
             ctx.addEdge(prevNodeId, 'output', nodeId, 'input');
@@ -334,7 +383,7 @@ class FilToFlowConverter {
         // a sandbox); the framework writes the variable from the script's
         // output via the variableUpdate.
         if (expr.kind === 'AssignmentExpression' || expr.kind === 'UpdateExpression') {
-            return this.emitMutation(expr, ctx, prevNodeId, globals, variableUpdates, scope);
+            return this.emitMutation(expr, stmt, ctx, prevNodeId, globals, variableUpdates, scope);
         }
         return prevNodeId;
     }
@@ -393,7 +442,7 @@ class FilToFlowConverter {
      * Emit a setvar script node + variableUpdate for a mutation expression.
      * Throws with a clear error if the mutation can't survive in v1.
      */
-    emitMutation(expr, ctx, prevNodeId, globals, variableUpdates, scope) {
+    emitMutation(expr, sourceStmt, ctx, prevNodeId, globals, variableUpdates, scope) {
         // Resolve the target identifier and the right-hand side.
         let varName;
         let rhs;
@@ -449,12 +498,18 @@ class FilToFlowConverter {
         // the v1 path — `vars.<name>` either way.
         if (!scope.has(varName))
             scope.set(varName, `vars.${varName}`);
-        // Emit the script node.
-        const scriptNodeId = ctx.generateId(`setvar_${varName}_`);
+        // Emit the script node. If the source statement carries a magic
+        // `// script_id: <name>` comment, honor it; otherwise auto-generate.
+        const meta = readScriptMeta(sourceStmt);
+        const scriptNodeId = meta?.scriptId
+            ? ctx.claimId(meta.scriptId)
+            : ctx.generateId(`setvar_${varName}_`);
         const body = `return ${(0, v1_to_v2_1.emitExpression)(rhs)};`;
         const node = makeScriptNode(scriptNodeId, body, ctx.nextX(), ctx.currentY());
+        applyScriptMeta(node, meta);
         this.applyNodeOverride(node);
         ctx.addNode(node);
+        ctx.stmtForNode.set(scriptNodeId, sourceStmt);
         ctx.addEdge(prevNodeId, 'output', scriptNodeId, 'input');
         // After the script runs, copy its result.response back into the named
         // variable. The expression is `=js:result.response` — evaluated in the
@@ -551,6 +606,7 @@ class FilToFlowConverter {
             const { nodeId, fn } = scriptCall;
             const body = recoverScriptBody(fn);
             const node = makeScriptNode(nodeId, body, ctx.nextX(), ctx.currentY());
+            applyScriptMeta(node, readScriptMeta(fn));
             this.applyNodeOverride(node);
             ctx.addNode(node);
             ctx.addEdge(prevNodeId, 'output', nodeId, 'input');
@@ -622,6 +678,10 @@ class FilToFlowConverter {
                     `own statement (\`const x = await ...;\`) so the engine can ` +
                     `execute it as an action node.`);
             }
+            // Magic comments (`// script_id: …`, `// description: …`, `// label: …`)
+            // signal "this declaration should materialize as a named v1 node."
+            // Skip path (a) when present so the metadata has a node to attach to.
+            const meta = readScriptMeta(stmt);
             // (a) Inline as an expression alias if the local is never mutated and
             // never referenced as a bare identifier from a context that needs a
             // real flow variable (decision test, loop collection, etc.). The
@@ -630,7 +690,7 @@ class FilToFlowConverter {
             // both cases; typed `let X: T = …` is preemptively kept as a flow
             // var (see collectNamesRequiringFlowVar) to preserve the
             // output-variable convention.
-            if (!this.isLocalMutatedOrUsedAsBareIdentifier(stmt.name)) {
+            if (!meta && !this.isLocalMutatedOrUsedAsBareIdentifier(stmt.name)) {
                 const emitted = (0, expression_1.tryEmitV1Expression)(stmt.initializer, scope, { bare: true });
                 if (emitted) {
                     // tryEmitV1Expression already wraps composite expressions in
@@ -640,11 +700,15 @@ class FilToFlowConverter {
                 }
             }
             // (b) Fallback: materialize as a setvar script node + flow variable.
-            const scriptNodeId = ctx.generateId(`setvar_${stmt.name}_`);
+            const scriptNodeId = meta?.scriptId
+                ? ctx.claimId(meta.scriptId)
+                : ctx.generateId(`setvar_${stmt.name}_`);
             const body = `return ${(0, v1_to_v2_1.emitExpression)(stmt.initializer)};`;
             const node = makeScriptNode(scriptNodeId, body, ctx.nextX(), ctx.currentY());
+            applyScriptMeta(node, meta);
             this.applyNodeOverride(node);
             ctx.addNode(node);
+            ctx.stmtForNode.set(scriptNodeId, stmt);
             ctx.addEdge(prevNodeId, 'output', scriptNodeId, 'input');
             // Register the variable: use the explicit type annotation if present,
             // otherwise leave as 'object' (the framework infers from the script
@@ -762,8 +826,18 @@ class FilToFlowConverter {
     }
     walkReturnStatement(stmt, ctx, prevNodeId, globals, nodeVars) {
         if (!stmt.argument) {
-            // Void return or terminate
-            return prevNodeId;
+            const endId = ctx.generateId('end');
+            const endNode = {
+                id: endId,
+                type: v1_to_v2_1.NODE_TYPES.END,
+                typeVersion: '1.0.0',
+                ui: { position: { x: ctx.nextX(), y: ctx.currentY() } },
+                display: { label: 'End', icon: 'circle-check', shape: 'circle' },
+            };
+            this.applyNodeOverride(endNode);
+            ctx.addNode(endNode);
+            ctx.addEdge(prevNodeId, 'output', endId, 'input');
+            return endId;
         }
         // Create end node with outputs
         const endId = ctx.generateId('end');
@@ -894,13 +968,13 @@ class FilToFlowConverter {
         }
     }
     /**
-     * Apply node overrides from .def.flow to a generated node.
+     * Apply node overrides from FlowOverrides to a generated node.
      * Replaces auto-generated display, ui, model, type, and inputs with the original values.
      */
     applyNodeOverride(node) {
-        if (!this.defFlow)
+        if (!this.overrides)
             return;
-        const override = this.defFlow.nodeOverrides[node.id];
+        const override = this.overrides.nodeOverrides[node.id];
         if (!override)
             return;
         if (override.type)
@@ -949,6 +1023,14 @@ class ConversionContext {
         this.emittedNodeIds = new Set();
         /** Mirror for edges so we don't emit `edge_A-output-B-input` twice. */
         this.emittedEdgeIds = new Set();
+        /**
+         * For every node we minted from a FIL statement, remember the statement so
+         * downstream passes (coalesce, trivia emission) can read its
+         * `leadingComments` without re-walking the AST.
+         */
+        this.stmtForNode = new Map();
+        /** Ids reserved via `claimId` — prevents duplicate `script_id` magic comments. */
+        this.claimedIds = new Set();
     }
     nextX() {
         const cur = this.x;
@@ -987,6 +1069,26 @@ class ConversionContext {
         const count = (this.idCounters.get(prefix) || 0) + 1;
         this.idCounters.set(prefix, count);
         return `${prefix}${count}`;
+    }
+    /**
+     * Reserve a specific node id — used when a `// script_id: <name>` magic
+     * comment names the node explicitly. Throws on duplicate so two FIL
+     * statements can't fight over the same v1 id. If the requested id matches
+     * the `setvar_<base>_<n>` shape, bump the corresponding counter so a later
+     * `generateId('setvar_<base>_')` doesn't recycle the same name.
+     */
+    claimId(id) {
+        if (this.claimedIds.has(id)) {
+            throw new Error(`Duplicate script_id "${id}": two FIL statements claim the same v1 node id.`);
+        }
+        this.claimedIds.add(id);
+        const m = /^setvar_(.+)_(\d+)$/.exec(id);
+        if (m) {
+            const key = `setvar_${m[1]}_`;
+            const n = Number(m[2]);
+            this.idCounters.set(key, Math.max(this.idCounters.get(key) ?? 0, n));
+        }
+        return id;
     }
 }
 // ─── Helper functions ─────────────────────────────────────────────────────────
@@ -1412,6 +1514,19 @@ function makeScriptNode(id, body, x, y) {
     };
 }
 /**
+ * Apply `// label: …` and `// description: …` magic-comment metadata to a
+ * freshly-minted node. `script_id` is consumed at id-generation time
+ * (caller's responsibility); this function only touches the display fields.
+ */
+function applyScriptMeta(node, meta) {
+    if (!meta)
+        return;
+    if (meta.label)
+        node.display.label = meta.label;
+    if (meta.description)
+        node.display.subLabel = meta.description;
+}
+/**
  * Post-walk pass: merge contiguous `setvar_X` const-init script nodes into a
  * single `core.action.script` that returns an object literal, with one
  * `variableUpdate` per combined var. Mutation setvars (which carry a
@@ -1452,6 +1567,11 @@ function coalesceConstScriptChains(ctx, nodeVars, variableUpdates) {
             return null;
         const nv = nodeVars.find((n) => n.binding?.nodeId === node.id);
         if (!nv)
+            return null;
+        // Magic-comment opt-out: a `// script_id: …` / `// description: …` /
+        // `// label: …` on the source statement means "treat this node as a
+        // singleton" — don't absorb it into a coalesced multi-assignment block.
+        if (hasAnyMagic(ctx.stmtForNode.get(node.id)))
             return null;
         const body = node.inputs?.script;
         if (typeof body !== 'string')
@@ -1502,7 +1622,17 @@ function coalesceConstScriptChains(ctx, nodeVars, variableUpdates) {
         if (chain.length < 2)
             continue;
         const headNode = nodeById.get(chain[0].id);
-        const lines = chain.map((c) => `const ${c.varName} = ${c.expr};`);
+        const lines = [];
+        for (const c of chain) {
+            // Preserve any plain (non-magic) leading comments from the source
+            // statement so developer-intent commentary survives into the v1
+            // script body. Magic comments don't appear here — magic-bearing
+            // statements opt out of coalescing entirely (see `inspect` above).
+            for (const com of plainComments(ctx.stmtForNode.get(c.id))) {
+                lines.push(com.raw);
+            }
+            lines.push(`const ${c.varName} = ${c.expr};`);
+        }
         lines.push(`return { ${chain.map((c) => c.varName).join(', ')} };`);
         headNode.inputs.script = lines.join('\n');
         // Drop per-var nodeVars bindings; the combined script's `output` port now

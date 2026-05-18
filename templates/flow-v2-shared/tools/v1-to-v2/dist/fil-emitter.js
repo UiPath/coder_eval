@@ -18,22 +18,35 @@ function emitProgram(program) {
         parts.push(emitFunction(fn));
     return parts.join('\n\n') + '\n';
 }
+/**
+ * Emit any leadingComments attached to a node, one per line, with the
+ * provided indent. Returns an empty string when there are no comments so
+ * callers can prepend it unconditionally.
+ */
+function emitLeadingComments(node, indent) {
+    const cs = node.leadingComments;
+    if (!cs || cs.length === 0)
+        return '';
+    return cs.map((c) => `${ind(indent)}${c.raw}\n`).join('');
+}
 function emitFlowDeclaration(flow) {
-    return `flow ${flow.id} ${emitObjectLiteral(flow.fields)};`;
+    return `${emitLeadingComments(flow, 0)}flow ${flow.id} ${emitObjectLiteral(flow.fields)};`;
 }
 function emitActionDeclaration(action) {
+    const prefix = emitLeadingComments(action, 0);
     const head = `action ${action.name}: ${emitTypeRef(action.typeRef)}`;
     if (action.fields && action.fields.properties.length > 0) {
-        return `${head} ${emitObjectLiteral(action.fields)};`;
+        return `${prefix}${head} ${emitObjectLiteral(action.fields)};`;
     }
-    return `${head};`;
+    return `${prefix}${head};`;
 }
 function emitTriggerDeclaration(trigger) {
+    const prefix = emitLeadingComments(trigger, 0);
     const head = `trigger ${trigger.name}: ${emitTypeRef(trigger.typeRef)}`;
     if (trigger.fields && trigger.fields.properties.length > 0) {
-        return `${head} ${emitObjectLiteral(trigger.fields)};`;
+        return `${prefix}${head} ${emitObjectLiteral(trigger.fields)};`;
     }
-    return `${head};`;
+    return `${prefix}${head};`;
 }
 function emitTypeRef(ref) {
     return ref.version ? `${ref.name}@${ref.version}` : ref.name;
@@ -54,11 +67,12 @@ function emitPropertyKey(key) {
     return JSON.stringify(key);
 }
 function emitFunction(fn) {
+    const prefix = emitLeadingComments(fn, 0);
     const async = fn.isAsync ? 'async ' : '';
     const params = fn.params.map(p => `${p.name}: ${emitType(p.type)}`).join(', ');
     const ret = emitType(fn.returnType);
     const body = emitBlock(fn.body, 1);
-    return `${async}function ${fn.name}(${params}): ${ret} {\n${body}}`;
+    return `${prefix}${async}function ${fn.name}(${params}): ${ret} {\n${body}}`;
 }
 function emitType(t) {
     if (typeof t === 'string')
@@ -76,6 +90,10 @@ function ind(level) {
     return '  '.repeat(level);
 }
 function emitStatement(stmt, indent) {
+    const prefix = emitLeadingComments(stmt, indent);
+    return prefix + emitStatementBody(stmt, indent);
+}
+function emitStatementBody(stmt, indent) {
     switch (stmt.kind) {
         case 'BlockStatement':
             return `${ind(indent)}{\n${emitBlock(stmt, indent + 1)}${ind(indent)}}\n`;

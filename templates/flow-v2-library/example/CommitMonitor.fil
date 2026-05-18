@@ -10,6 +10,9 @@
 //   - Decision in an iteration body, with counter increment
 //   - Connector inputs built as `const cfg: json = ({...})` then JSON.stringify
 //   - String + i32 concat in the digest body (auto-coerces)
+//   - `// script_id:` magic comments naming the synthesized setvar nodes
+//     so the v1 canvas shows readable names (otherwise `setvar_totalCount_1`,
+//     `setvar_isBugFix_1`, etc.)
 
 flow commit-monitor {
   name: "Commit Monitor",
@@ -62,11 +65,16 @@ async function main(): Promise<void> {
     const commits: json = JSON.parse(responseBody);
     const commitMsg: string = commits[0].commit.message;
 
+    // script_id: incrementTotal
+    // description: count every commit we inspect
     totalCount++;
     const msgLower: string = commitMsg.toLowerCase();
+    // script_id: detectBugFix
+    // description: case-insensitive substring check for fix/bug keywords
     const isBugFix: bool = (msgLower.includes("fix") || msgLower.includes("bug"));
 
     if (isBugFix) {
+      // script_id: incrementFixes
       fixCount++;
       const slackMsg: string = ("Bug fix in " + repoStr + ": " + commitMsg);
       const slackInputs: json = ({ messageToSend: slackMsg });

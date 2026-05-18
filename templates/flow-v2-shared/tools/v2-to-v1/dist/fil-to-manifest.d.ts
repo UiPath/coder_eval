@@ -1,10 +1,7 @@
 /**
  * Derive a `ManifestFile` from a FIL `Program`'s top-level `flow`/`action`/
- * `trigger` declarations.
- *
- * Phase 2 of the manifest-removal work: v2 projects can drop the
- * `<Name>.manifest.flow` sidecar entirely and let `v2-to-v1` synthesize
- * the equivalent manifest from FIL itself. The synthesizer reads:
+ * `trigger` declarations. The FIL is the single source of truth — there is
+ * no separate manifest file. The synthesizer reads:
  *
  *   - `flow <id> { name, version, … };`  → ManifestFile header
  *   - `action <name>: <type> { … };`     → ManifestFile.nodes[<id>]

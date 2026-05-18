@@ -1,5 +1,5 @@
 /**
- * Build the in-memory Flow v2 manifest from a v1 .flow file's nodeOverrides
+ * Build the in-memory Flow v2 manifest from collected FlowOverrides
  * + the canonical connector library.
  *
  * The manifest is now an intermediate: it carries the varying parts of each
@@ -7,7 +7,7 @@
  * (BPMN model, output schema, icons, descriptions) to the library. The
  * converter then bakes this data into FIL action/trigger declarations.
  */
-import { FlowDefinitionFile, WorkflowVariables } from './flow-types';
+import { FlowOverrides, WorkflowVariables } from './flow-types';
 import { Library } from './library';
 import { FieldsContainerCache } from './configuration';
 export interface ManifestFile {
@@ -126,5 +126,5 @@ export interface BuildResult {
     /** Nodes whose nodeType@version had no canonical library entry. */
     unresolvedTypes: string[];
 }
-export declare function buildManifest(defFlow: FlowDefinitionFile, library: Library, opts?: BuildOptions): BuildResult;
+export declare function buildManifest(overrides: FlowOverrides, library: Library, opts?: BuildOptions): BuildResult;
 //# sourceMappingURL=manifest.d.ts.map

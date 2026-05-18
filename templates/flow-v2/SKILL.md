@@ -275,6 +275,43 @@ async function main(orderId: string): Promise<void> {
 }
 ```
 
+### Comments
+
+FIL accepts standard `// line` and `/* block */` comments. They survive the v2↔v1 round-trip — attaching to the next statement or declaration — so use them liberally to explain non-obvious logic.
+
+**Magic comments** are line comments of the form `// <key>: <value>` (lowercase snake_case key, value runs to end of line). They carry per-node metadata that lands on the rebuilt v1 node:
+
+| Key            | Lands on                                                                         |
+| -------------- | -------------------------------------------------------------------------------- |
+| `script_id`    | v1 node id — overrides the synthesized `setvar_<lhs>_<n>` default                 |
+| `label`        | v1 node's `display.label`                                                        |
+| `description`  | v1 node's `display.subLabel`                                                     |
+
+Use these to name the script nodes the v2-to-v1 converter synthesizes from mutations (`x++`, `x = expr`) and computed declarations (`let y: T = expr`). Without them the v1 canvas shows generic ids like `setvar_skipped_1` / `setvar_releaseName_1`. With them you can name the operation:
+
+```typescript
+let skipped: i32 = 0;
+let seen: i32 = 0;
+
+// script_id: incrementSkipped
+// description: bump the skipped counter for stale releases
+skipped++;
+
+// script_id: incrementSeen
+seen++;
+```
+
+Naming guidance — pick a name that describes the **operation**, not the variable. The variable name is already in the FIL; the script-node name is what shows in the canvas:
+
+| Good                    | Avoid                       |
+| ----------------------- | --------------------------- |
+| `incrementSkipped`      | `setSkipped`                |
+| `parseReleaseName`      | `releaseName`               |
+| `buildDigestBody`       | `digestBody`                |
+| `extractSecurityFlags`  | `isSecurity`                |
+
+Magic comments on a `const X: T = expr;` declaration also **force materialization** — without them the converter often inlines such declarations as v1 `=js:` aliases (no node emitted). So adding `// description:` to a chain of typed `const` decls guarantees they each become a real, individually-named script node in v1.
+
 ## Process-resource actions: published and inline Agents
 
 Published and inline Agent nodes are declared directly in FIL action bodies. Do not create a `<Name>.manifest.flow` sidecar and do not add `embeddedDefinitions`; `v2-to-v1` synthesizes the v1 definitions from the action metadata.

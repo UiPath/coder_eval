@@ -1,10 +1,11 @@
 /**
- * Public API for converting a Flow v2 project (FIL + manifest + bindings)
- * back to a Flow v1 .flow file.
+ * Public API for converting a Flow v2 project (FIL + bindings) back to a
+ * Flow v1 .flow file.
  *
  * The hard part — turning sequential FIL `await` calls into a node graph
  * with edges, variables, and subflows — lives in `./fil-to-flow`. v2-to-v1
- * rehydrates a FlowDefinitionFile for it from the manifest + bindings.
+ * derives the in-memory manifest from the FIL's `flow`/`action`/`trigger`
+ * declarations, then hands the per-node overrides + bindings to filToFlow.
  */
 import type { FlowFile } from 'v1-to-v2';
 import { Library, FieldsContainerCache } from 'v1-to-v2';

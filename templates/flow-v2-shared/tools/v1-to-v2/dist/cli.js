@@ -4,18 +4,13 @@
  * v1tov2 — CLI wrapper around convertV1ToV2.
  *
  * Usage:
- *   v1tov2 <input.flow> [--out-dir DIR] [--library DIR] [--write-manifest]
+ *   v1tov2 <input.flow> [--out-dir DIR] [--library DIR]
  *
- * Writes by default:
- *   <out-dir>/<basename>.fil           (self-contained — embeds the
- *                                       per-node data that used to live in
- *                                       the manifest sidecar)
+ * Writes:
+ *   <out-dir>/<basename>.fil           (self-contained — embeds per-node
+ *                                       data in FIL action/trigger
+ *                                       declaration bodies)
  *   <out-dir>/bindings.json
- *
- * The `--write-manifest` flag additionally emits the legacy
- * `<basename>.manifest.flow` sidecar. Kept for incremental migration; new
- * v2 projects should not need it (`v2-to-v1` derives the equivalent
- * manifest from the FIL declarations).
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -63,15 +58,12 @@ function parseArgs(argv) {
     let input;
     let outDir;
     let libraryDir;
-    let writeManifest = false;
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         if (a === '--out-dir')
             outDir = argv[++i];
         else if (a === '--library')
             libraryDir = argv[++i];
-        else if (a === '--write-manifest')
-            writeManifest = true;
         else if (a.startsWith('--'))
             fail(`unknown flag: ${a}`);
         else if (!input)
@@ -85,11 +77,10 @@ function parseArgs(argv) {
         input: input,
         outDir: outDir ?? path.dirname(input),
         libraryDir,
-        writeManifest,
     };
 }
 function main() {
-    const { input, outDir, libraryDir, writeManifest } = parseArgs(process.argv.slice(2));
+    const { input, outDir, libraryDir } = parseArgs(process.argv.slice(2));
     if (!fs.existsSync(input))
         fail(`input not found: ${input}`);
     const raw = fs.readFileSync(input, 'utf8');
@@ -110,11 +101,6 @@ function main() {
     fs.writeFileSync(bindingsPath, JSON.stringify(result.bindings, null, 2) + '\n');
     process.stdout.write(`Wrote ${filPath}\n`);
     process.stdout.write(`Wrote ${bindingsPath}\n`);
-    if (writeManifest) {
-        const manifestPath = path.join(outDir, `${base}.manifest.flow`);
-        fs.writeFileSync(manifestPath, JSON.stringify(result.manifest, null, 2) + '\n');
-        process.stdout.write(`Wrote ${manifestPath}\n`);
-    }
     process.stdout.write(`Library entries referenced: ${result.referencedEntries.length}\n`);
     if (result.unresolvedTypes.length > 0) {
         process.stderr.write(`WARN: ${result.unresolvedTypes.length} integration node type(s) not found in the library:\n`);

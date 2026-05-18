@@ -13,20 +13,20 @@
  * 4. Auto-layout positions on a grid
  */
 import * as AST from 'fil-compiler/dist/ast';
-import { FlowFile, FlowDefinitionFile } from 'v1-to-v2';
+import { FlowFile, FlowOverrides } from 'v1-to-v2';
 /**
  * FIL name → v1 expression path. E.g. `userId → 'vars.userId'` for a flow
  * global, or `item → 'iterator.item'` for a for-of iterator. Phase A's
  * v1 expression emitter consumes this to resolve identifiers.
  */
 export type Scope = Map<string, string>;
-export declare function filToFlow(program: AST.Program, flowId?: string, defFlow?: FlowDefinitionFile): FlowFile;
+export declare function filToFlow(program: AST.Program, flowId?: string, overrides?: FlowOverrides): FlowFile;
 /**
  * Like `filToFlow`, but also returns the scope built for `main()`. Useful
  * when a caller wants to wire FIL expressions back into v1 expressions
  * (Phase A) using the same name-to-path mapping the converter used.
  */
-export declare function filToFlowWithScope(program: AST.Program, flowId?: string, defFlow?: FlowDefinitionFile): {
+export declare function filToFlowWithScope(program: AST.Program, flowId?: string, overrides?: FlowOverrides): {
     flow: FlowFile;
     scope: Scope;
 };

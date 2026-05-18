@@ -71,6 +71,16 @@ export declare class Library {
     /** All known nodeType@version keys. Useful for diagnostics. */
     keys(): string[];
 }
-/** Convenience: load the library from the default sibling location. */
+/** Convenience: load the library from the default sibling location.
+ *
+ * Resolution order:
+ *   1. `$FLOW_V2_LIBRARY` env var (used by tests + by callers that keep
+ *      the library in a shared cache outside the repo).
+ *   2. `../integrations/library/` relative to the package root (legacy).
+ */
 export declare function loadDefaultLibrary(): Library;
+/** The directory `loadDefaultLibrary` resolves to. Exposed so callers
+ * (e.g. `v2-to-v1.convertV2ToV1`) can use the same resolution rule for
+ * the libraryDir option without re-implementing it. */
+export declare function defaultLibraryDir(): string;
 //# sourceMappingURL=library.d.ts.map

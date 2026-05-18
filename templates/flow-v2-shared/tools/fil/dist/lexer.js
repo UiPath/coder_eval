@@ -2,6 +2,7 @@
 // Lexer (tokenizer) for the FIL compiler
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Lexer = exports.TokenKind = void 0;
+const trivia_1 = require("./trivia");
 var TokenKind;
 (function (TokenKind) {
     // Literals
@@ -148,6 +149,10 @@ class Lexer {
         this.col = 1;
         this.tokens = [];
         this.tokenIndex = 0;
+        /** Comments captured during tokenisation, in source order. */
+        this.comments = [];
+        /** How many comments have been handed to the parser via takeCommentsBefore. */
+        this.commentCursor = 0;
         this.source = source;
         this.tokenize();
     }
@@ -165,8 +170,8 @@ class Lexer {
         }
         return ch;
     }
-    addToken(kind, value, line, col) {
-        this.tokens.push({ kind, value, line, col });
+    addToken(kind, value, line, col, pos) {
+        this.tokens.push({ kind, value, line, col, pos });
     }
     skipWhitespaceAndComments() {
         while (this.pos < this.source.length) {
@@ -175,28 +180,53 @@ class Lexer {
                 this.advance();
             }
             else if (ch === '/' && this.peek(1) === '/') {
-                // Line comment
-                while (this.pos < this.source.length && this.peek() !== '\n') {
-                    this.advance();
-                }
+                this.collectLineComment();
             }
             else if (ch === '/' && this.peek(1) === '*') {
-                // Block comment
-                this.advance();
-                this.advance();
-                while (this.pos < this.source.length) {
-                    if (this.peek() === '*' && this.peek(1) === '/') {
-                        this.advance();
-                        this.advance();
-                        break;
-                    }
-                    this.advance();
-                }
+                this.collectBlockComment();
             }
             else {
                 break;
             }
         }
+    }
+    collectLineComment() {
+        const startLine = this.line;
+        const startCol = this.col;
+        const startPos = this.pos;
+        // Consume the // and the rest of the line, but not the trailing \n.
+        while (this.pos < this.source.length && this.peek() !== '\n') {
+            this.advance();
+        }
+        this.recordComment(this.source.slice(startPos, this.pos), 'line', startLine, startCol, startPos);
+    }
+    collectBlockComment() {
+        const startLine = this.line;
+        const startCol = this.col;
+        const startPos = this.pos;
+        this.advance();
+        this.advance(); // consume /*
+        while (this.pos < this.source.length) {
+            if (this.peek() === '*' && this.peek(1) === '/') {
+                this.advance();
+                this.advance();
+                break;
+            }
+            this.advance();
+        }
+        this.recordComment(this.source.slice(startPos, this.pos), 'block', startLine, startCol, startPos);
+    }
+    recordComment(raw, kind, line, col, pos) {
+        const c = { raw, kind, line, col, pos, isMagic: false };
+        if (kind === 'line') {
+            const m = trivia_1.MAGIC_COMMENT_RE.exec(raw);
+            if (m) {
+                c.isMagic = true;
+                c.key = m[1];
+                c.value = m[2];
+            }
+        }
+        this.comments.push(c);
     }
     readString(quote) {
         let result = '';
@@ -249,6 +279,7 @@ class Lexer {
                 break;
             const startLine = this.line;
             const startCol = this.col;
+            const startPos = this.pos;
             const ch = this.peek();
             // Numbers
             if (ch >= '0' && ch <= '9' || (ch === '.' && this.peek(1) >= '0' && this.peek(1) <= '9')) {
@@ -278,20 +309,20 @@ class Lexer {
                 if (this.peek() === 'n') {
                     num += this.advance();
                 }
-                this.addToken(TokenKind.Number, num, startLine, startCol);
+                this.addToken(TokenKind.Number, num, startLine, startCol, startPos);
                 continue;
             }
             // Strings
             if (ch === '"' || ch === "'") {
                 this.advance(); // consume opening quote
                 const str = this.readString(ch);
-                this.addToken(TokenKind.String, str, startLine, startCol);
+                this.addToken(TokenKind.String, str, startLine, startCol, startPos);
                 continue;
             }
             // Template literals
             if (ch === '`') {
                 this.advance(); // consume backtick
-                this.tokenizeTemplate(startLine, startCol);
+                this.tokenizeTemplate(startLine, startCol, startPos);
                 continue;
             }
             // Identifiers and keywords
@@ -308,10 +339,10 @@ class Lexer {
                 }
                 const kw = KEYWORDS[ident];
                 if (kw !== undefined) {
-                    this.addToken(kw, ident, startLine, startCol);
+                    this.addToken(kw, ident, startLine, startCol, startPos);
                 }
                 else {
-                    this.addToken(TokenKind.Identifier, ident, startLine, startCol);
+                    this.addToken(TokenKind.Identifier, ident, startLine, startCol, startPos);
                 }
                 continue;
             }
@@ -319,65 +350,65 @@ class Lexer {
             this.advance(); // consume current char
             switch (ch) {
                 case '{':
-                    this.addToken(TokenKind.LBrace, ch, startLine, startCol);
+                    this.addToken(TokenKind.LBrace, ch, startLine, startCol, startPos);
                     break;
                 case '}':
-                    this.addToken(TokenKind.RBrace, ch, startLine, startCol);
+                    this.addToken(TokenKind.RBrace, ch, startLine, startCol, startPos);
                     break;
                 case '(':
-                    this.addToken(TokenKind.LParen, ch, startLine, startCol);
+                    this.addToken(TokenKind.LParen, ch, startLine, startCol, startPos);
                     break;
                 case ')':
-                    this.addToken(TokenKind.RParen, ch, startLine, startCol);
+                    this.addToken(TokenKind.RParen, ch, startLine, startCol, startPos);
                     break;
                 case '[':
-                    this.addToken(TokenKind.LBracket, ch, startLine, startCol);
+                    this.addToken(TokenKind.LBracket, ch, startLine, startCol, startPos);
                     break;
                 case ']':
-                    this.addToken(TokenKind.RBracket, ch, startLine, startCol);
+                    this.addToken(TokenKind.RBracket, ch, startLine, startCol, startPos);
                     break;
                 case ',':
-                    this.addToken(TokenKind.Comma, ch, startLine, startCol);
+                    this.addToken(TokenKind.Comma, ch, startLine, startCol, startPos);
                     break;
                 case ';':
-                    this.addToken(TokenKind.Semicolon, ch, startLine, startCol);
+                    this.addToken(TokenKind.Semicolon, ch, startLine, startCol, startPos);
                     break;
                 case ':':
-                    this.addToken(TokenKind.Colon, ch, startLine, startCol);
+                    this.addToken(TokenKind.Colon, ch, startLine, startCol, startPos);
                     break;
                 case '~':
-                    this.addToken(TokenKind.Tilde, ch, startLine, startCol);
+                    this.addToken(TokenKind.Tilde, ch, startLine, startCol, startPos);
                     break;
                 case '@':
-                    this.addToken(TokenKind.At, ch, startLine, startCol);
+                    this.addToken(TokenKind.At, ch, startLine, startCol, startPos);
                     break;
                 case '.':
                     if (this.peek() === '.' && this.peek(1) === '.') {
                         this.advance();
                         this.advance();
-                        this.addToken(TokenKind.DotDotDot, '...', startLine, startCol);
+                        this.addToken(TokenKind.DotDotDot, '...', startLine, startCol, startPos);
                     }
                     else {
-                        this.addToken(TokenKind.Dot, ch, startLine, startCol);
+                        this.addToken(TokenKind.Dot, ch, startLine, startCol, startPos);
                     }
                     break;
                 case '?':
                     if (this.peek() === '.') {
                         this.advance();
-                        this.addToken(TokenKind.QuestionDot, '?.', startLine, startCol);
+                        this.addToken(TokenKind.QuestionDot, '?.', startLine, startCol, startPos);
                     }
                     else if (this.peek() === '?') {
                         this.advance();
                         if (this.peek() === '=') {
                             this.advance();
-                            this.addToken(TokenKind.QuestionQuestionEq, '??=', startLine, startCol);
+                            this.addToken(TokenKind.QuestionQuestionEq, '??=', startLine, startCol, startPos);
                         }
                         else {
-                            this.addToken(TokenKind.QuestionQuestion, '??', startLine, startCol);
+                            this.addToken(TokenKind.QuestionQuestion, '??', startLine, startCol, startPos);
                         }
                     }
                     else {
-                        this.addToken(TokenKind.Question, ch, startLine, startCol);
+                        this.addToken(TokenKind.Question, ch, startLine, startCol, startPos);
                     }
                     break;
                 case '!':
@@ -385,14 +416,14 @@ class Lexer {
                         this.advance();
                         if (this.peek() === '=') {
                             this.advance();
-                            this.addToken(TokenKind.BangEqEq, '!==', startLine, startCol);
+                            this.addToken(TokenKind.BangEqEq, '!==', startLine, startCol, startPos);
                         }
                         else {
-                            this.addToken(TokenKind.BangEq, '!=', startLine, startCol);
+                            this.addToken(TokenKind.BangEq, '!=', startLine, startCol, startPos);
                         }
                     }
                     else {
-                        this.addToken(TokenKind.Bang, ch, startLine, startCol);
+                        this.addToken(TokenKind.Bang, ch, startLine, startCol, startPos);
                     }
                     break;
                 case '=':
@@ -400,43 +431,43 @@ class Lexer {
                         this.advance();
                         if (this.peek() === '=') {
                             this.advance();
-                            this.addToken(TokenKind.EqEqEq, '===', startLine, startCol);
+                            this.addToken(TokenKind.EqEqEq, '===', startLine, startCol, startPos);
                         }
                         else {
-                            this.addToken(TokenKind.EqEq, '==', startLine, startCol);
+                            this.addToken(TokenKind.EqEq, '==', startLine, startCol, startPos);
                         }
                     }
                     else if (this.peek() === '>') {
                         this.advance();
-                        this.addToken(TokenKind.Arrow, '=>', startLine, startCol);
+                        this.addToken(TokenKind.Arrow, '=>', startLine, startCol, startPos);
                     }
                     else {
-                        this.addToken(TokenKind.Eq, ch, startLine, startCol);
+                        this.addToken(TokenKind.Eq, ch, startLine, startCol, startPos);
                     }
                     break;
                 case '<':
                     if (this.peek() === '=') {
                         this.advance();
-                        this.addToken(TokenKind.LtEq, '<=', startLine, startCol);
+                        this.addToken(TokenKind.LtEq, '<=', startLine, startCol, startPos);
                     }
                     else if (this.peek() === '<') {
                         this.advance();
                         if (this.peek() === '=') {
                             this.advance();
-                            this.addToken(TokenKind.LtLtEq, '<<=', startLine, startCol);
+                            this.addToken(TokenKind.LtLtEq, '<<=', startLine, startCol, startPos);
                         }
                         else {
-                            this.addToken(TokenKind.LtLt, '<<', startLine, startCol);
+                            this.addToken(TokenKind.LtLt, '<<', startLine, startCol, startPos);
                         }
                     }
                     else {
-                        this.addToken(TokenKind.Lt, ch, startLine, startCol);
+                        this.addToken(TokenKind.Lt, ch, startLine, startCol, startPos);
                     }
                     break;
                 case '>':
                     if (this.peek() === '=') {
                         this.advance();
-                        this.addToken(TokenKind.GtEq, '>=', startLine, startCol);
+                        this.addToken(TokenKind.GtEq, '>=', startLine, startCol, startPos);
                     }
                     else if (this.peek() === '>') {
                         this.advance();
@@ -444,48 +475,48 @@ class Lexer {
                             this.advance();
                             if (this.peek() === '=') {
                                 this.advance();
-                                this.addToken(TokenKind.GtGtGtEq, '>>>=', startLine, startCol);
+                                this.addToken(TokenKind.GtGtGtEq, '>>>=', startLine, startCol, startPos);
                             }
                             else {
-                                this.addToken(TokenKind.GtGtGt, '>>>', startLine, startCol);
+                                this.addToken(TokenKind.GtGtGt, '>>>', startLine, startCol, startPos);
                             }
                         }
                         else if (this.peek() === '=') {
                             this.advance();
-                            this.addToken(TokenKind.GtGtEq, '>>=', startLine, startCol);
+                            this.addToken(TokenKind.GtGtEq, '>>=', startLine, startCol, startPos);
                         }
                         else {
-                            this.addToken(TokenKind.GtGt, '>>', startLine, startCol);
+                            this.addToken(TokenKind.GtGt, '>>', startLine, startCol, startPos);
                         }
                     }
                     else {
-                        this.addToken(TokenKind.Gt, ch, startLine, startCol);
+                        this.addToken(TokenKind.Gt, ch, startLine, startCol, startPos);
                     }
                     break;
                 case '+':
                     if (this.peek() === '+') {
                         this.advance();
-                        this.addToken(TokenKind.PlusPlus, '++', startLine, startCol);
+                        this.addToken(TokenKind.PlusPlus, '++', startLine, startCol, startPos);
                     }
                     else if (this.peek() === '=') {
                         this.advance();
-                        this.addToken(TokenKind.PlusEq, '+=', startLine, startCol);
+                        this.addToken(TokenKind.PlusEq, '+=', startLine, startCol, startPos);
                     }
                     else {
-                        this.addToken(TokenKind.Plus, ch, startLine, startCol);
+                        this.addToken(TokenKind.Plus, ch, startLine, startCol, startPos);
                     }
                     break;
                 case '-':
                     if (this.peek() === '-') {
                         this.advance();
-                        this.addToken(TokenKind.MinusMinus, '--', startLine, startCol);
+                        this.addToken(TokenKind.MinusMinus, '--', startLine, startCol, startPos);
                     }
                     else if (this.peek() === '=') {
                         this.advance();
-                        this.addToken(TokenKind.MinusEq, '-=', startLine, startCol);
+                        this.addToken(TokenKind.MinusEq, '-=', startLine, startCol, startPos);
                     }
                     else {
-                        this.addToken(TokenKind.Minus, ch, startLine, startCol);
+                        this.addToken(TokenKind.Minus, ch, startLine, startCol, startPos);
                     }
                     break;
                 case '*':
@@ -493,36 +524,36 @@ class Lexer {
                         this.advance();
                         if (this.peek() === '=') {
                             this.advance();
-                            this.addToken(TokenKind.StarStarEq, '**=', startLine, startCol);
+                            this.addToken(TokenKind.StarStarEq, '**=', startLine, startCol, startPos);
                         }
                         else {
-                            this.addToken(TokenKind.StarStar, '**', startLine, startCol);
+                            this.addToken(TokenKind.StarStar, '**', startLine, startCol, startPos);
                         }
                     }
                     else if (this.peek() === '=') {
                         this.advance();
-                        this.addToken(TokenKind.StarEq, '*=', startLine, startCol);
+                        this.addToken(TokenKind.StarEq, '*=', startLine, startCol, startPos);
                     }
                     else {
-                        this.addToken(TokenKind.Star, ch, startLine, startCol);
+                        this.addToken(TokenKind.Star, ch, startLine, startCol, startPos);
                     }
                     break;
                 case '/':
                     if (this.peek() === '=') {
                         this.advance();
-                        this.addToken(TokenKind.SlashEq, '/=', startLine, startCol);
+                        this.addToken(TokenKind.SlashEq, '/=', startLine, startCol, startPos);
                     }
                     else {
-                        this.addToken(TokenKind.Slash, ch, startLine, startCol);
+                        this.addToken(TokenKind.Slash, ch, startLine, startCol, startPos);
                     }
                     break;
                 case '%':
                     if (this.peek() === '=') {
                         this.advance();
-                        this.addToken(TokenKind.PercentEq, '%=', startLine, startCol);
+                        this.addToken(TokenKind.PercentEq, '%=', startLine, startCol, startPos);
                     }
                     else {
-                        this.addToken(TokenKind.Percent, ch, startLine, startCol);
+                        this.addToken(TokenKind.Percent, ch, startLine, startCol, startPos);
                     }
                     break;
                 case '&':
@@ -530,18 +561,18 @@ class Lexer {
                         this.advance();
                         if (this.peek() === '=') {
                             this.advance();
-                            this.addToken(TokenKind.AmpAmpEq, '&&=', startLine, startCol);
+                            this.addToken(TokenKind.AmpAmpEq, '&&=', startLine, startCol, startPos);
                         }
                         else {
-                            this.addToken(TokenKind.AmpAmp, '&&', startLine, startCol);
+                            this.addToken(TokenKind.AmpAmp, '&&', startLine, startCol, startPos);
                         }
                     }
                     else if (this.peek() === '=') {
                         this.advance();
-                        this.addToken(TokenKind.AmpEq, '&=', startLine, startCol);
+                        this.addToken(TokenKind.AmpEq, '&=', startLine, startCol, startPos);
                     }
                     else {
-                        this.addToken(TokenKind.Amp, ch, startLine, startCol);
+                        this.addToken(TokenKind.Amp, ch, startLine, startCol, startPos);
                     }
                     break;
                 case '|':
@@ -549,27 +580,27 @@ class Lexer {
                         this.advance();
                         if (this.peek() === '=') {
                             this.advance();
-                            this.addToken(TokenKind.PipePipeEq, '||=', startLine, startCol);
+                            this.addToken(TokenKind.PipePipeEq, '||=', startLine, startCol, startPos);
                         }
                         else {
-                            this.addToken(TokenKind.PipePipe, '||', startLine, startCol);
+                            this.addToken(TokenKind.PipePipe, '||', startLine, startCol, startPos);
                         }
                     }
                     else if (this.peek() === '=') {
                         this.advance();
-                        this.addToken(TokenKind.PipeEq, '|=', startLine, startCol);
+                        this.addToken(TokenKind.PipeEq, '|=', startLine, startCol, startPos);
                     }
                     else {
-                        this.addToken(TokenKind.Pipe, ch, startLine, startCol);
+                        this.addToken(TokenKind.Pipe, ch, startLine, startCol, startPos);
                     }
                     break;
                 case '^':
                     if (this.peek() === '=') {
                         this.advance();
-                        this.addToken(TokenKind.CaretEq, '^=', startLine, startCol);
+                        this.addToken(TokenKind.CaretEq, '^=', startLine, startCol, startPos);
                     }
                     else {
-                        this.addToken(TokenKind.Caret, ch, startLine, startCol);
+                        this.addToken(TokenKind.Caret, ch, startLine, startCol, startPos);
                     }
                     break;
                 default:
@@ -577,21 +608,21 @@ class Lexer {
                     break;
             }
         }
-        this.addToken(TokenKind.EOF, '', this.line, this.col);
+        this.addToken(TokenKind.EOF, '', this.line, this.col, this.pos);
     }
-    tokenizeTemplate(startLine, startCol, hasHead = false) {
+    tokenizeTemplate(startLine, startCol, startPos, hasHead = false) {
         let str = '';
         while (this.pos < this.source.length) {
             const ch = this.peek();
             if (ch === '`') {
                 this.advance();
-                this.addToken(hasHead ? TokenKind.TemplateTail : TokenKind.NoSubstTemplate, str, startLine, startCol);
+                this.addToken(hasHead ? TokenKind.TemplateTail : TokenKind.NoSubstTemplate, str, startLine, startCol, startPos);
                 return;
             }
             if (ch === '$' && this.peek(1) === '{') {
                 this.advance();
                 this.advance();
-                this.addToken(hasHead ? TokenKind.TemplateMiddle : TokenKind.TemplateHead, str, startLine, startCol);
+                this.addToken(hasHead ? TokenKind.TemplateMiddle : TokenKind.TemplateHead, str, startLine, startCol, startPos);
                 // Now tokenize the expression until matching }
                 let depth = 1;
                 while (this.pos < this.source.length && depth > 0) {
@@ -651,7 +682,7 @@ class Lexer {
             }
         }
         // Unterminated template
-        this.addToken(TokenKind.TemplateTail, str, startLine, startCol);
+        this.addToken(TokenKind.TemplateTail, str, startLine, startCol, startPos);
     }
     tokenizeSingle() {
         this.skipWhitespaceAndComments();
@@ -659,10 +690,11 @@ class Lexer {
             return;
         const startLine = this.line;
         const startCol = this.col;
+        const startPos = this.pos;
         const ch = this.peek();
         if (ch === '`') {
             this.advance();
-            this.tokenizeTemplate(startLine, startCol);
+            this.tokenizeTemplate(startLine, startCol, startPos);
             return;
         }
         if (ch === '}') {
@@ -695,13 +727,13 @@ class Lexer {
                 while (this.peek() >= '0' && this.peek() <= '9')
                     num += this.advance();
             }
-            this.addToken(TokenKind.Number, num, startLine, startCol);
+            this.addToken(TokenKind.Number, num, startLine, startCol, startPos);
             return;
         }
         if (ch === '"' || ch === "'") {
             this.advance();
             const str = this.readString(ch);
-            this.addToken(TokenKind.String, str, startLine, startCol);
+            this.addToken(TokenKind.String, str, startLine, startCol, startPos);
             return;
         }
         if (ch === '_' || ch === '$' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) {
@@ -717,10 +749,10 @@ class Lexer {
             }
             const kw = KEYWORDS[ident];
             if (kw !== undefined) {
-                this.addToken(kw, ident, startLine, startCol);
+                this.addToken(kw, ident, startLine, startCol, startPos);
             }
             else {
-                this.addToken(TokenKind.Identifier, ident, startLine, startCol);
+                this.addToken(TokenKind.Identifier, ident, startLine, startCol, startPos);
             }
             return;
         }
@@ -728,83 +760,83 @@ class Lexer {
         this.advance();
         switch (ch) {
             case '(':
-                this.addToken(TokenKind.LParen, ch, startLine, startCol);
+                this.addToken(TokenKind.LParen, ch, startLine, startCol, startPos);
                 break;
             case ')':
-                this.addToken(TokenKind.RParen, ch, startLine, startCol);
+                this.addToken(TokenKind.RParen, ch, startLine, startCol, startPos);
                 break;
             case '[':
-                this.addToken(TokenKind.LBracket, ch, startLine, startCol);
+                this.addToken(TokenKind.LBracket, ch, startLine, startCol, startPos);
                 break;
             case ']':
-                this.addToken(TokenKind.RBracket, ch, startLine, startCol);
+                this.addToken(TokenKind.RBracket, ch, startLine, startCol, startPos);
                 break;
             case '.':
-                this.addToken(TokenKind.Dot, ch, startLine, startCol);
+                this.addToken(TokenKind.Dot, ch, startLine, startCol, startPos);
                 break;
             case ',':
-                this.addToken(TokenKind.Comma, ch, startLine, startCol);
+                this.addToken(TokenKind.Comma, ch, startLine, startCol, startPos);
                 break;
             case ';':
-                this.addToken(TokenKind.Semicolon, ch, startLine, startCol);
+                this.addToken(TokenKind.Semicolon, ch, startLine, startCol, startPos);
                 break;
             case ':':
-                this.addToken(TokenKind.Colon, ch, startLine, startCol);
+                this.addToken(TokenKind.Colon, ch, startLine, startCol, startPos);
                 break;
             case '+':
-                this.addToken(TokenKind.Plus, ch, startLine, startCol);
+                this.addToken(TokenKind.Plus, ch, startLine, startCol, startPos);
                 break;
             case '-':
-                this.addToken(TokenKind.Minus, ch, startLine, startCol);
+                this.addToken(TokenKind.Minus, ch, startLine, startCol, startPos);
                 break;
             case '*':
-                this.addToken(TokenKind.Star, ch, startLine, startCol);
+                this.addToken(TokenKind.Star, ch, startLine, startCol, startPos);
                 break;
             case '/':
-                this.addToken(TokenKind.Slash, ch, startLine, startCol);
+                this.addToken(TokenKind.Slash, ch, startLine, startCol, startPos);
                 break;
             case '%':
-                this.addToken(TokenKind.Percent, ch, startLine, startCol);
+                this.addToken(TokenKind.Percent, ch, startLine, startCol, startPos);
                 break;
             case '!':
-                this.addToken(TokenKind.Bang, ch, startLine, startCol);
+                this.addToken(TokenKind.Bang, ch, startLine, startCol, startPos);
                 break;
             case '=':
-                this.addToken(TokenKind.Eq, ch, startLine, startCol);
+                this.addToken(TokenKind.Eq, ch, startLine, startCol, startPos);
                 break;
             case '<':
-                this.addToken(TokenKind.Lt, ch, startLine, startCol);
+                this.addToken(TokenKind.Lt, ch, startLine, startCol, startPos);
                 break;
             case '>':
-                this.addToken(TokenKind.Gt, ch, startLine, startCol);
+                this.addToken(TokenKind.Gt, ch, startLine, startCol, startPos);
                 break;
             case '&':
-                this.addToken(TokenKind.Amp, ch, startLine, startCol);
+                this.addToken(TokenKind.Amp, ch, startLine, startCol, startPos);
                 break;
             case '|':
-                this.addToken(TokenKind.Pipe, ch, startLine, startCol);
+                this.addToken(TokenKind.Pipe, ch, startLine, startCol, startPos);
                 break;
             case '^':
-                this.addToken(TokenKind.Caret, ch, startLine, startCol);
+                this.addToken(TokenKind.Caret, ch, startLine, startCol, startPos);
                 break;
             case '~':
-                this.addToken(TokenKind.Tilde, ch, startLine, startCol);
+                this.addToken(TokenKind.Tilde, ch, startLine, startCol, startPos);
                 break;
             case '?':
-                this.addToken(TokenKind.Question, ch, startLine, startCol);
+                this.addToken(TokenKind.Question, ch, startLine, startCol, startPos);
                 break;
             case '{':
-                this.addToken(TokenKind.LBrace, ch, startLine, startCol);
+                this.addToken(TokenKind.LBrace, ch, startLine, startCol, startPos);
                 break;
             default: break;
         }
     }
     // Public interface for the parser
     current() {
-        return this.tokens[this.tokenIndex] ?? { kind: TokenKind.EOF, value: '', line: 0, col: 0 };
+        return this.tokens[this.tokenIndex] ?? { kind: TokenKind.EOF, value: '', line: 0, col: 0, pos: 0 };
     }
     peek2(offset = 1) {
-        return this.tokens[this.tokenIndex + offset] ?? { kind: TokenKind.EOF, value: '', line: 0, col: 0 };
+        return this.tokens[this.tokenIndex + offset] ?? { kind: TokenKind.EOF, value: '', line: 0, col: 0, pos: 0 };
     }
     consume() {
         const tok = this.tokens[this.tokenIndex];
@@ -834,6 +866,31 @@ class Lexer {
     }
     getTokens() {
         return this.tokens;
+    }
+    // ─── Comment / trivia API for the parser ────────────────────────────────
+    /**
+     * Return all comments whose `pos` is strictly less than `beforePos`,
+     * advancing an internal cursor so subsequent calls only return comments
+     * recorded since the previous call. Used by the parser at
+     * statement/declaration attachment points to collect leading comments.
+     */
+    takeCommentsBefore(beforePos) {
+        const out = [];
+        while (this.commentCursor < this.comments.length
+            && this.comments[this.commentCursor].pos < beforePos) {
+            out.push(this.comments[this.commentCursor++]);
+        }
+        return out;
+    }
+    /** Drain any remaining unconsumed comments — for end-of-program trailing trivia. */
+    drainRemainingComments() {
+        const out = this.comments.slice(this.commentCursor);
+        this.commentCursor = this.comments.length;
+        return out;
+    }
+    /** All comments captured during tokenisation, in source order. Read-only. */
+    allComments() {
+        return this.comments;
     }
 }
 exports.Lexer = Lexer;

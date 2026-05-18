@@ -44,6 +44,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Library = void 0;
 exports.loadDefaultLibrary = loadDefaultLibrary;
+exports.defaultLibraryDir = defaultLibraryDir;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 class Library {
@@ -85,11 +86,23 @@ class Library {
     }
 }
 exports.Library = Library;
-/** Convenience: load the library from the default sibling location. */
+/** Convenience: load the library from the default sibling location.
+ *
+ * Resolution order:
+ *   1. `$FLOW_V2_LIBRARY` env var (used by tests + by callers that keep
+ *      the library in a shared cache outside the repo).
+ *   2. `../integrations/library/` relative to the package root (legacy).
+ */
 function loadDefaultLibrary() {
-    // ../integrations/library relative to the v1-to-v2 package root
+    return new Library(defaultLibraryDir());
+}
+/** The directory `loadDefaultLibrary` resolves to. Exposed so callers
+ * (e.g. `v2-to-v1.convertV2ToV1`) can use the same resolution rule for
+ * the libraryDir option without re-implementing it. */
+function defaultLibraryDir() {
+    if (process.env.FLOW_V2_LIBRARY)
+        return process.env.FLOW_V2_LIBRARY;
     const here = path.resolve(__dirname, '..', '..');
-    const libDir = path.join(here, 'integrations', 'library');
-    return new Library(libDir);
+    return path.join(here, 'integrations', 'library');
 }
 //# sourceMappingURL=library.js.map

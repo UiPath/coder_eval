@@ -129,11 +129,12 @@ export interface Metadata {
     description?: string;
 }
 /**
- * Supplementary definition file that captures everything in a .flow file
- * that FIL cannot represent. When paired with a FIL file, the two together
- * contain all the information needed to produce a complete, runnable .flow file.
+ * In-memory bundle of everything a v1 .flow file carries that FIL does not
+ * express directly: flow header, embedded type definitions, bindings, and
+ * per-node metadata. Built during conversion from a parsed FIL + library +
+ * bindings and consumed by `filToFlow` to reconstruct a complete .flow.
  */
-export interface FlowDefinitionFile {
+export interface FlowOverrides {
     flowId: string;
     flowName: string;
     flowVersion: string;
@@ -147,7 +148,7 @@ export interface FlowDefinitionFile {
 }
 /**
  * Per-node metadata that supplements what FIL can express.
- * Keyed by node ID in the FlowDefinitionFile.nodeOverrides map.
+ * Keyed by node ID in the FlowOverrides.nodeOverrides map.
  */
 export interface NodeOverride {
     /** The node type (e.g., "uipath.connector.uipath-salesforce-slack.send-message-to-user") */

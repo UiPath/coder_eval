@@ -8,9 +8,7 @@ export interface LoadedProject {
     flowVersion: string;
     /**
      * Derived from the FIL's top-level `flow`/`action`/`trigger` declarations.
-     * Kept under the `manifest` field for compatibility with the dispatcher
-     * and preflight resolver, which were written against the legacy
-     * `<Name>.manifest.flow` shape.
+     * Consumed by the dispatcher and preflight resolver.
      */
     manifest: FlowManifest;
     bindings?: BindingsFile;

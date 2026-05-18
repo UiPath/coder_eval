@@ -4,18 +4,11 @@
  * v2tov1 — reconstruct a v1 .flow from a v2 project.
  *
  * Usage:
- *   v2tov1 <input> [--fil <name.fil>] [--manifest <name.manifest.flow>]
- *                  [--bindings <bindings.json>] [--library <dir>]
- *                  [--out <out.flow>]
+ *   v2tov1 <input.fil> [--bindings <bindings.json>] [--library <dir>]
+ *                      [--out <out.flow>]
  *
- * <input> can be either:
- *   - a .fil file              → preferred; manifest is synthesized from the
- *                                FIL's `flow`/`action`/`trigger` declarations
- *   - a .manifest.flow file    → legacy; the manifest is read explicitly and
- *                                the .fil is looked up alongside it
- *
- * If both `--manifest` and a `.fil` are present, the manifest is preferred
- * (acts as an override during incremental migration).
+ * The manifest is always synthesized from the FIL's
+ * `flow`/`action`/`trigger` declarations.
  *
  * Output: writes <out.flow> AND bindings.json (verbatim copy of the input
  * bindings) to the output directory — together they form the v1 artifact set.
@@ -63,19 +56,13 @@ function fail(msg) {
     process.exit(1);
 }
 function parseArgs(argv) {
-    let inputPath;
     let filPath;
-    let manifestPath;
     let bindingsPath;
     let libraryDir;
     let outPath;
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
-        if (a === '--fil')
-            filPath = argv[++i];
-        else if (a === '--manifest')
-            manifestPath = argv[++i];
-        else if (a === '--bindings')
+        if (a === '--bindings')
             bindingsPath = argv[++i];
         else if (a === '--library')
             libraryDir = argv[++i];
@@ -83,55 +70,22 @@ function parseArgs(argv) {
             outPath = argv[++i];
         else if (a.startsWith('--'))
             fail(`unknown flag: ${a}`);
-        else if (!inputPath)
-            inputPath = a;
+        else if (!filPath)
+            filPath = a;
         else
             fail(`unexpected positional argument: ${a}`);
     }
-    if (!inputPath)
-        fail('missing input path (a .fil or .manifest.flow file)');
-    return { inputPath: inputPath, filPath, manifestPath, bindingsPath, libraryDir, outPath };
+    if (!filPath)
+        fail('missing input .fil file');
+    return { filPath: filPath, bindingsPath, libraryDir, outPath };
 }
 function main() {
     const args = parseArgs(process.argv.slice(2));
-    if (!fs.existsSync(args.inputPath))
-        fail(`input not found: ${args.inputPath}`);
-    // Classify the input. `.manifest.flow` → manifest-mode; `.fil` → FIL-mode.
-    // `.flow.json` is the legacy manifest extension (kept for back-compat).
-    const isManifest = args.inputPath.endsWith('.manifest.flow') ||
-        args.inputPath.endsWith('.flow.json');
-    const dir = path.dirname(args.inputPath);
-    let basename;
-    let filPath;
-    let manifestPath;
-    if (isManifest) {
-        basename = path
-            .basename(args.inputPath)
-            .replace(/\.manifest\.flow$/, '')
-            .replace(/\.flow\.json$/, '');
-        manifestPath = args.manifestPath ?? args.inputPath;
-        filPath = args.filPath ?? path.join(dir, `${basename}.fil`);
-    }
-    else {
-        basename = path
-            .basename(args.inputPath)
-            .replace(/\.fil$/, '');
-        filPath = args.filPath ?? args.inputPath;
-        manifestPath = args.manifestPath;
-        // If no --manifest, look for a sibling .manifest.flow as a fallback.
-        if (!manifestPath) {
-            const sibling = path.join(dir, `${basename}.manifest.flow`);
-            if (fs.existsSync(sibling))
-                manifestPath = sibling;
-        }
-    }
-    if (!fs.existsSync(filPath))
-        fail(`FIL source not found: ${filPath}`);
-    const filSource = fs.readFileSync(filPath, 'utf8');
-    let manifest = null;
-    if (manifestPath && fs.existsSync(manifestPath)) {
-        manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    }
+    if (!fs.existsSync(args.filPath))
+        fail(`input not found: ${args.filPath}`);
+    const dir = path.dirname(args.filPath);
+    const basename = path.basename(args.filPath).replace(/\.fil$/, '');
+    const filSource = fs.readFileSync(args.filPath, 'utf8');
     const bindingsPath = args.bindingsPath ?? path.join(dir, 'bindings.json');
     let bindings = { schemaVersion: '1', bindings: [] };
     if (fs.existsSync(bindingsPath)) {
@@ -143,7 +97,7 @@ function main() {
         convertOpts.library = new v1_to_v2_1.Library(args.libraryDir);
         convertOpts.libraryDir = args.libraryDir;
     }
-    const result = (0, index_1.convertV2ToV1)(filSource, manifest, bindings, convertOpts);
+    const result = (0, index_1.convertV2ToV1)(filSource, null, bindings, convertOpts);
     fs.writeFileSync(outPath, JSON.stringify(result.flow, null, 2) + '\n');
     // The v1 artifact set is <Name>.flow + bindings.json. Write bindings.json
     // alongside the output flow (verbatim copy of the input bindings).

@@ -1,6 +1,6 @@
 "use strict";
 /**
- * Build the in-memory Flow v2 manifest from a v1 .flow file's nodeOverrides
+ * Build the in-memory Flow v2 manifest from collected FlowOverrides
  * + the canonical connector library.
  *
  * The manifest is now an intermediate: it carries the varying parts of each
@@ -11,22 +11,22 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.buildManifest = buildManifest;
 const configuration_1 = require("./configuration");
-function buildManifest(defFlow, library, opts = {}) {
+function buildManifest(overrides, library, opts = {}) {
     const manifest = {
         schemaVersion: '1',
-        flowId: defFlow.flowId,
-        flowName: defFlow.flowName,
-        flowVersion: defFlow.flowVersion,
+        flowId: overrides.flowId,
+        flowName: overrides.flowName,
+        flowVersion: overrides.flowVersion,
         nodes: {},
     };
-    if (defFlow.solutionId)
-        manifest.solutionId = defFlow.solutionId;
-    if (defFlow.projectId)
-        manifest.projectId = defFlow.projectId;
-    if (defFlow.metadata?.description)
-        manifest.description = defFlow.metadata.description;
-    if (defFlow.variableOverrides)
-        manifest.variables = defFlow.variableOverrides;
+    if (overrides.solutionId)
+        manifest.solutionId = overrides.solutionId;
+    if (overrides.projectId)
+        manifest.projectId = overrides.projectId;
+    if (overrides.metadata?.description)
+        manifest.description = overrides.metadata.description;
+    if (overrides.variableOverrides)
+        manifest.variables = overrides.variableOverrides;
     const referenced = new Set();
     const unresolved = [];
     // Build a UUID → binding-id index from the v1 bindings[] so compressNode
@@ -37,7 +37,7 @@ function buildManifest(defFlow, library, opts = {}) {
     // v2-to-v1).
     const uuidToBindingId = new Map();
     const resourceBindingIdByKeyAndAttribute = new Map();
-    for (const raw of defFlow.bindings ?? []) {
+    for (const raw of overrides.bindings ?? []) {
         const b = raw;
         if (typeof b.id !== 'string')
             continue;
@@ -49,7 +49,7 @@ function buildManifest(defFlow, library, opts = {}) {
             resourceBindingIdByKeyAndAttribute.set(resourceBindingKey(b.resourceKey, b.propertyAttribute), b.id);
         }
     }
-    for (const [nodeId, override] of Object.entries(defFlow.nodeOverrides)) {
+    for (const [nodeId, override] of Object.entries(overrides.nodeOverrides)) {
         const node = compressNode(nodeId, override, library, referenced, unresolved, uuidToBindingId, resourceBindingIdByKeyAndAttribute, opts);
         if (node)
             manifest.nodes[nodeId] = node;
@@ -99,32 +99,33 @@ function compressNode(nodeId, override, library, referenced, unresolved, uuidToB
         node.label = override.display.label;
     if (override.inputs)
         node.rawInputs = override.inputs;
-    // For `core.logic.mock` nodes, promote the fixture out of rawInputs to a
-    // top-level `fixture` field. The v1 shape buries it under
-    // `rawInputs.fixture` (or .output / .value); the v2 shape lifts it so
-    // FIL authors can write `action … : mock { fixture: { … } };`.
-    if (type === 'core.logic.mock' && node.rawInputs) {
-        const r = node.rawInputs;
-        let extracted;
-        if ('fixture' in r) {
-            extracted = r.fixture;
-            delete r.fixture;
-        }
-        else if ('output' in r) {
-            extracted = r.output;
-            delete r.output;
-        }
-        else if ('value' in r) {
-            extracted = r.value;
-            delete r.value;
-        }
-        if (extracted !== undefined) {
-            node.fixture = extracted;
-            if (Object.keys(r).length === 0)
-                delete node.rawInputs;
-        }
+    if ((type === 'core.logic.mock' || type === 'uipath.human-in-the-loop') && node.rawInputs) {
+        promoteDryRunFixture(node);
     }
     return node;
+}
+function promoteDryRunFixture(node) {
+    const r = node.rawInputs;
+    if (!r)
+        return;
+    let extracted;
+    if ('fixture' in r) {
+        extracted = r.fixture;
+        delete r.fixture;
+    }
+    else if ('output' in r) {
+        extracted = r.output;
+        delete r.output;
+    }
+    else if ('value' in r) {
+        extracted = r.value;
+        delete r.value;
+    }
+    if (extracted !== undefined) {
+        node.fixture = extracted;
+        if (Object.keys(r).length === 0)
+            delete node.rawInputs;
+    }
 }
 function compressProcessResourceNode(node, override, nodeType, resourceBindingIdByKeyAndAttribute) {
     const spec = processResourceSpec(nodeType);

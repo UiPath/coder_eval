@@ -214,6 +214,9 @@ async function main() {
             case 'inline-agent':
                 detail = `inline-agent ${n.source}`;
                 break;
+            case 'hitl':
+                detail = `hitl ${n.taskType}`;
+                break;
         }
         process.stderr.write(`    - ${n.nodeId.padEnd(24)} ${detail}\n`);
     }

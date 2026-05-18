@@ -5,10 +5,8 @@
 // `uip is connections list`. The connector library must contain a matching
 // definition with a CRUD-shaped operation.
 //
-// Phase 4: flow-run no longer reads a `<Name>.manifest.flow` sidecar. The
-// equivalent manifest is derived from the FIL's `flow`/`action`/`trigger`
-// declarations and presented to the rest of the pipeline in the same shape
-// the dispatcher/preflight resolver already consume.
+// The in-memory manifest the dispatcher and preflight resolver consume is
+// derived from the FIL's `flow`/`action`/`trigger` declarations.
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     var desc = Object.getOwnPropertyDescriptor(m, k);
@@ -66,10 +64,10 @@ const RPA_WORKFLOW_NODE_PREFIX = 'uipath.core.rpa-workflow.';
 const RPA_WORKFLOW_SERVICE_TYPE = 'Orchestrator.StartJob';
 const INLINE_AGENT_NODE_TYPE = 'uipath.agent.autonomous';
 const INLINE_AGENT_SERVICE_TYPE = 'Orchestrator.StartInlineAgentJob';
+const HITL_NODE_TYPE = 'uipath.human-in-the-loop';
 // ─── Project discovery ───────────────────────────────────────────────────────
 function loadProject(projectDir, opts = {}) {
     const filPath = opts.filPath ?? autodiscoverFil(projectDir);
-    rejectLegacyManifestArtifacts(projectDir);
     const filSource = fs.readFileSync(filPath, 'utf8');
     const program = new parser_1.Parser(filSource).parse();
     const manifest = (0, fil_to_manifest_1.filProgramToManifest)(program);
@@ -107,22 +105,6 @@ function autodiscoverFil(dir) {
         throw new Error(`ambiguous .fil match in ${dir}: ${entries.join(', ')}. Pass --fil explicitly.`);
     }
     return path.join(dir, entries[0]);
-}
-/**
- * Phase 4: flow-run no longer reads any manifest sidecar. If the project
- * still has one, surface a clear migration message — the FIL itself should
- * now carry the per-node data via `action`/`trigger` declarations.
- */
-function rejectLegacyManifestArtifacts(dir) {
-    const all = fs.readdirSync(dir);
-    const legacy = all.filter(f => f.endsWith('.manifest.flow') || f.endsWith('.flow.json') || f.endsWith('.def.flow'));
-    if (legacy.length === 0)
-        return;
-    throw new Error(`found legacy manifest sidecar in ${dir}: ${legacy.join(', ')}. ` +
-        `flow-run no longer reads manifest files — the FIL's top-level ` +
-        `\`action\`/\`trigger\` declarations are now the source of truth. ` +
-        `Rebuild the project with v1tov2 (which omits the sidecar by default) ` +
-        `or delete the file once the FIL has the equivalent declarations.`);
 }
 // ─── Pre-flight validation ───────────────────────────────────────────────────
 function preflight(project, libraryDir, connections) {
@@ -220,6 +202,13 @@ function resolveAllNodes(project, libraryDir, bindingResolver, out, errors, warn
             const inlineAgentNode = resolveInlineAgentNode(nodeId, nodeType, node, errors);
             if (inlineAgentNode)
                 out.push(inlineAgentNode);
+            continue;
+        }
+        // ── HITL quickform nodes ──
+        if (nodeType === HITL_NODE_TYPE) {
+            const hitlNode = resolveHitlNode(nodeId, nodeType, node, errors);
+            if (hitlNode)
+                out.push(hitlNode);
             continue;
         }
         // ── Skip non-dispatchable types (control flow, triggers, end) ──
@@ -430,6 +419,28 @@ function resolveInlineAgentNode(nodeId, nodeType, node, errors) {
 }
 function inlineAgentInputs(node) {
     return node.rawInputs ?? node.inputs ?? {};
+}
+function resolveHitlNode(nodeId, nodeType, node, errors) {
+    const inputs = node.rawInputs ?? node.inputs ?? {};
+    if (inputs.type !== 'quick') {
+        errors.push(`node "${nodeId}" (${nodeType}): only HITL quickform inputs.type="quick" is supported in Flow v2 dry-run`);
+        return null;
+    }
+    const schema = inputs.schema;
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+        errors.push(`node "${nodeId}" (${nodeType}): missing rawInputs.schema for HITL quickform`);
+        return null;
+    }
+    return {
+        kind: 'hitl',
+        nodeId,
+        nodeType,
+        taskType: 'quick',
+        schema: schema,
+        recipient: inputs.recipient,
+        priority: typeof inputs.priority === 'string' ? inputs.priority : undefined,
+        fixture: pickMockFixture(node),
+    };
 }
 function requireInlineString(nodeId, nodeType, inputs, field, errors) {
     const value = inputs[field];

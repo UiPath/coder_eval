@@ -133,7 +133,7 @@ export interface DecisionRecord {
     step: number;
     nodeId: string;
     nodeType: string;
-    /** 'connector' | 'http' | 'mock' | 'script' | 'agent' | 'api-workflow' | 'rpa-workflow' | 'inline-agent' | 'timer' */
+    /** 'connector' | 'http' | 'mock' | 'script' | 'agent' | 'api-workflow' | 'rpa-workflow' | 'inline-agent' | 'hitl' | 'timer' */
     kind: string;
     connectorKey?: string;
     verb?: string;
@@ -261,7 +261,18 @@ export interface ResolvedInlineAgentNode {
     /** Configured dry-run fixture. Undefined -> return {}. */
     fixture?: unknown;
 }
-export type ResolvedNode = ResolvedConnectorNode | ResolvedHttpNode | ResolvedMockNode | ResolvedScriptNode | ResolvedAgentNode | ResolvedApiWorkflowNode | ResolvedRpaWorkflowNode | ResolvedInlineAgentNode;
+export interface ResolvedHitlNode {
+    kind: 'hitl';
+    nodeId: string;
+    nodeType: string;
+    taskType: 'quick';
+    schema: Record<string, unknown>;
+    recipient?: unknown;
+    priority?: string;
+    /** Configured dry-run fixture. Undefined -> return {}. */
+    fixture?: unknown;
+}
+export type ResolvedNode = ResolvedConnectorNode | ResolvedHttpNode | ResolvedMockNode | ResolvedScriptNode | ResolvedAgentNode | ResolvedApiWorkflowNode | ResolvedRpaWorkflowNode | ResolvedInlineAgentNode | ResolvedHitlNode;
 export interface PreflightReport {
     nodes: ResolvedNode[];
     warnings: string[];

@@ -4,6 +4,14 @@ export declare class Parser {
     private inAsync;
     constructor(source: string);
     parse(): AST.Program;
+    /**
+     * Drain comments preceding the next token from the lexer's trivia stream.
+     * Called by the attachment points (top-level dispatch, parseStatement) to
+     * collect comments that belong to the node about to be parsed. Returns
+     * `undefined` when there's nothing to attach so we don't add empty arrays
+     * to every AST node.
+     */
+    private takeLeadingComments;
     /** Consumes `flow <kebab-id> { … };`. The `flow` keyword has already been peeked. */
     private parseFlowDeclaration;
     /** Consumes `action <name>: <typeRef> { … }?;`. The `action` keyword has already been peeked. */
@@ -44,6 +52,7 @@ export declare class Parser {
     private parseType;
     private parseFunctionDeclaration;
     private parseStatement;
+    private parseStatementInner;
     private parseBlockStatement;
     private parseVariableDeclaration;
     private parseReturnStatement;

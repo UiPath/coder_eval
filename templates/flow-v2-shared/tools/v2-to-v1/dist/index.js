@@ -1,11 +1,12 @@
 "use strict";
 /**
- * Public API for converting a Flow v2 project (FIL + manifest + bindings)
- * back to a Flow v1 .flow file.
+ * Public API for converting a Flow v2 project (FIL + bindings) back to a
+ * Flow v1 .flow file.
  *
  * The hard part — turning sequential FIL `await` calls into a node graph
  * with edges, variables, and subflows — lives in `./fil-to-flow`. v2-to-v1
- * rehydrates a FlowDefinitionFile for it from the manifest + bindings.
+ * derives the in-memory manifest from the FIL's `flow`/`action`/`trigger`
+ * declarations, then hands the per-node overrides + bindings to filToFlow.
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -65,14 +66,12 @@ Object.defineProperty(exports, "applyFilInputExpressions", { enumerable: true, g
 var fil_to_manifest_2 = require("./fil-to-manifest");
 Object.defineProperty(exports, "filProgramToManifest", { enumerable: true, get: function () { return fil_to_manifest_2.filProgramToManifest; } });
 // ─── FIL → Flow graph reconstruction (re-exports for cs2fil) ─────────────────
-//
-// This was previously in `flow2fil`. v2-to-v1 now owns this layer.
 var fil_to_flow_2 = require("./fil-to-flow");
 Object.defineProperty(exports, "filToFlow", { enumerable: true, get: function () { return fil_to_flow_2.filToFlow; } });
 Object.defineProperty(exports, "filToFlowWithScope", { enumerable: true, get: function () { return fil_to_flow_2.filToFlowWithScope; } });
 function convertV2ToV1(filSource, manifest, bindings, opts = {}) {
     const library = opts.library ?? (0, v1_to_v2_1.loadDefaultLibrary)();
-    const libraryDir = opts.libraryDir ?? path.resolve(__dirname, '..', '..', 'integrations', 'library');
+    const libraryDir = opts.libraryDir ?? (0, v1_to_v2_1.defaultLibraryDir)();
     const cache = opts.fieldsCache === null
         ? undefined
         : (opts.fieldsCache ?? (0, v1_to_v2_1.loadDefaultFieldsCache)());
@@ -80,20 +79,19 @@ function convertV2ToV1(filSource, manifest, bindings, opts = {}) {
     const parser = new parser_1.Parser(filSource);
     const program = parser.parse();
     // 1b. If no manifest was supplied, synthesize one from the FIL's
-    //     top-level `flow`/`action`/`trigger` declarations. This is the
-    //     manifest-removal path — projects that have migrated drop the
-    //     `<Name>.manifest.flow` sidecar and let v2-to-v1 derive the
-    //     equivalent shape from the FIL itself.
+    //     top-level `flow`/`action`/`trigger` declarations. The declarations
+    //     are the source of truth for per-node metadata; in-memory manifest
+    //     objects are only used by callers that already have one resolved.
     if (!manifest) {
         const derived = (0, fil_to_manifest_1.filProgramToManifest)(program);
         if (!derived) {
-            throw new Error('convertV2ToV1: no manifest provided and the FIL has no `flow`/' +
-                '`action`/`trigger` declarations to derive one from. Either pass ' +
-                'a `<Name>.manifest.flow` or add the declarations to the FIL.');
+            throw new Error('convertV2ToV1: the FIL has no `flow`/`action`/`trigger` ' +
+                'declarations to derive a manifest from. Add the declarations to ' +
+                'the FIL.');
         }
         manifest = derived;
     }
-    // 2. Expand manifest entries → NodeOverrides for flow2fil. The manifest
+    // 2. Expand manifest entries → NodeOverrides for filToFlow. The manifest
     //    references bindings by symbolic ID; we need bindings.json so we can
     //    write the real UUIDs into v1's inputs.detail.connectionId.
     const expanded = (0, manifest_1.expandManifest)(manifest, { library, fieldsCache: cache, bindings });
@@ -102,7 +100,7 @@ function convertV2ToV1(filSource, manifest, bindings, opts = {}) {
     //    embeddedDefinitions, AND every core type bundled by this package.
     //    The bundled core defs cover trigger/end/decision/merge/script/etc. —
     //    types the converter auto-generates from FIL syntax. Without seeding
-    //    these into defFlow, filToFlow's patchEdgePorts can't repair edges
+    //    these into overrides, filToFlow's patchEdgePorts can't repair edges
     //    to those auto-generated nodes (the script node uses `success` not
     //    `output` as its source handle, etc.).
     const bundledCoreDefs = loadBundledCoreDefinitions();
@@ -117,8 +115,8 @@ function convertV2ToV1(filSource, manifest, bindings, opts = {}) {
     for (const k of Object.keys(allEmbedded))
         seedTypeRefs.add(k);
     const builtDefs = (0, definitions_1.buildDefinitions)(seedTypeRefs, { library, libraryDir }, allEmbedded);
-    // 4. Build a FlowDefinitionFile and hand to flow2fil.
-    const defFlow = {
+    // 4. Build a FlowOverrides bundle and hand to filToFlow.
+    const overrides = {
         flowId: manifest.flowId,
         flowName: manifest.flowName,
         flowVersion: manifest.flowVersion,
@@ -127,13 +125,13 @@ function convertV2ToV1(filSource, manifest, bindings, opts = {}) {
         bindings: bindings.bindings,
     };
     if (manifest.solutionId)
-        defFlow.solutionId = manifest.solutionId;
+        overrides.solutionId = manifest.solutionId;
     if (manifest.projectId)
-        defFlow.projectId = manifest.projectId;
+        overrides.projectId = manifest.projectId;
     if (manifest.variables)
-        defFlow.variableOverrides = manifest.variables;
+        overrides.variableOverrides = manifest.variables;
     // 5. Reconstruct nodes/edges/variables from FIL.
-    const flow = (0, fil_to_flow_1.filToFlow)(program, manifest.flowId, defFlow);
+    const flow = (0, fil_to_flow_1.filToFlow)(program, manifest.flowId, overrides);
     // 5b. filToFlow synthesizes additional nodes (decisions, merges, setvar
     //     scripts, end nodes, …) from FIL control flow. Their typeRefs aren't
     //     in `expanded.typeRefs` (which only covers manifest-declared nodes),

@@ -1,8 +1,7 @@
 "use strict";
 /**
- * Phase 3 of the manifest-removal work: bake `ManifestFile` per-node data
- * into the FIL's `action` and `trigger` declaration bodies, so the FIL is
- * self-contained and the `<Name>.manifest.flow` sidecar can be dropped.
+ * Bake `ManifestFile` per-node data into the FIL's `action` and `trigger`
+ * declaration bodies, so the emitted FIL is self-contained.
  *
  * Called from `convertV1ToV2` after `flowToFil` and `buildManifest` have run.
  * The flow-to-fil emitter already produced minimal action declarations (one

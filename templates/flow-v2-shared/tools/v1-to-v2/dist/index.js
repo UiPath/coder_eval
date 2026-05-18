@@ -10,7 +10,7 @@
  * bakes that per-node metadata into FIL action/trigger declarations.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.isControlFlowNode = exports.isTriggerNode = exports.NODE_TYPES = exports.buildSubflowGraph = exports.buildGraph = exports.FlowGraph = exports.INLINED_NODE_TYPES = exports.SCRIPT_FN_PREFIX = exports.flowToFilWithDef = exports.flowToFil = exports.emitType = exports.emitExpression = exports.emitProgram = exports.envelopeConfiguration = exports.flattenConfiguration = exports.ESSENTIAL_KEYS = exports.distillConfiguration = exports.TIER_A_DEFAULTS = exports.loadDefaultFieldsCache = exports.FileSystemFieldsCache = exports.loadDefaultLibrary = exports.Library = void 0;
+exports.isControlFlowNode = exports.isTriggerNode = exports.NODE_TYPES = exports.buildSubflowGraph = exports.buildGraph = exports.FlowGraph = exports.INLINED_NODE_TYPES = exports.SCRIPT_FN_PREFIX = exports.flowToFilWithOverrides = exports.flowToFil = exports.emitType = exports.emitExpression = exports.emitProgram = exports.envelopeConfiguration = exports.flattenConfiguration = exports.ESSENTIAL_KEYS = exports.distillConfiguration = exports.TIER_A_DEFAULTS = exports.loadDefaultFieldsCache = exports.FileSystemFieldsCache = exports.defaultLibraryDir = exports.loadDefaultLibrary = exports.Library = void 0;
 exports.convertV1ToV2 = convertV1ToV2;
 const flow_to_fil_1 = require("./flow-to-fil");
 const fil_emitter_1 = require("./fil-emitter");
@@ -22,6 +22,7 @@ const configuration_1 = require("./configuration");
 var library_2 = require("./library");
 Object.defineProperty(exports, "Library", { enumerable: true, get: function () { return library_2.Library; } });
 Object.defineProperty(exports, "loadDefaultLibrary", { enumerable: true, get: function () { return library_2.loadDefaultLibrary; } });
+Object.defineProperty(exports, "defaultLibraryDir", { enumerable: true, get: function () { return library_2.defaultLibraryDir; } });
 var configuration_2 = require("./configuration");
 Object.defineProperty(exports, "FileSystemFieldsCache", { enumerable: true, get: function () { return configuration_2.FileSystemFieldsCache; } });
 Object.defineProperty(exports, "loadDefaultFieldsCache", { enumerable: true, get: function () { return configuration_2.loadDefaultFieldsCache; } });
@@ -43,7 +44,7 @@ Object.defineProperty(exports, "emitType", { enumerable: true, get: function () 
 var flow_to_fil_2 = require("./flow-to-fil");
 // flow → FIL graph traversal
 Object.defineProperty(exports, "flowToFil", { enumerable: true, get: function () { return flow_to_fil_2.flowToFil; } });
-Object.defineProperty(exports, "flowToFilWithDef", { enumerable: true, get: function () { return flow_to_fil_2.flowToFilWithDef; } });
+Object.defineProperty(exports, "flowToFilWithOverrides", { enumerable: true, get: function () { return flow_to_fil_2.flowToFilWithOverrides; } });
 Object.defineProperty(exports, "SCRIPT_FN_PREFIX", { enumerable: true, get: function () { return flow_to_fil_2.SCRIPT_FN_PREFIX; } });
 Object.defineProperty(exports, "INLINED_NODE_TYPES", { enumerable: true, get: function () { return flow_to_fil_2.INLINED_NODE_TYPES; } });
 var flow_graph_1 = require("./flow-graph");
@@ -62,21 +63,19 @@ function convertV1ToV2(flow, opts = {}) {
         ? undefined
         : (opts.fieldsCache ?? (0, configuration_1.loadDefaultFieldsCache)());
     const source = opts.source ?? flow.id ?? flow.name ?? 'unknown';
-    const { program, defFlow } = (0, flow_to_fil_1.flowToFilWithDef)(flow);
+    const { program, overrides } = (0, flow_to_fil_1.flowToFilWithOverrides)(flow);
     // flow-to-fil only collects overrides for nodes it actually walks; in flows
     // with multi-branch fan-outs, some nodes get skipped. Backfill from
     // flow.nodes directly so the v2 manifest preserves every v1 node id.
     for (const n of flow.nodes ?? []) {
-        if (defFlow.nodeOverrides[n.id])
+        if (overrides.nodeOverrides[n.id])
             continue;
-        defFlow.nodeOverrides[n.id] = nodeToOverride(n);
+        overrides.nodeOverrides[n.id] = nodeToOverride(n);
     }
-    const { manifest, referencedEntries, unresolvedTypes } = (0, manifest_1.buildManifest)(defFlow, library, { fieldsCache: cache, source });
+    const { manifest, referencedEntries, unresolvedTypes } = (0, manifest_1.buildManifest)(overrides, library, { fieldsCache: cache, source });
     const bindings = (0, bindings_1.buildBindings)(flow.bindings ?? []);
-    // Phase 3: bake every manifest entry's per-instance data into the FIL's
-    // action / trigger declaration bodies. This makes the FIL self-contained
-    // so the manifest.flow sidecar can be dropped — `v2-to-v1` (Phase 2)
-    // already knows how to derive the equivalent manifest from FIL alone.
+    // Bake every manifest entry's per-instance data into the FIL's action /
+    // trigger declaration bodies, so the emitted FIL is self-contained.
     // `topLevelNodeIds` keeps subflow-internal trigger nodes from polluting
     // the main program's top-level `trigger` declarations.
     const topLevelNodeIds = new Set((flow.nodes ?? []).map((n) => n.id));

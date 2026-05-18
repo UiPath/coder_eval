@@ -13,15 +13,15 @@ import { Library } from './library';
 import { ManifestFile } from './manifest';
 import { BindingsFile } from './bindings';
 import { FieldsContainerCache } from './configuration';
-export { Library, LibraryEntry, loadDefaultLibrary } from './library';
+export { Library, LibraryEntry, loadDefaultLibrary, defaultLibraryDir } from './library';
 export { ManifestFile, ManifestNode } from './manifest';
 export { BindingsFile, BindingEntry } from './bindings';
 export { FieldsContainerCache, FileSystemFieldsCache, loadDefaultFieldsCache, TIER_A_DEFAULTS, distillConfiguration, } from './configuration';
 export { ESSENTIAL_KEYS, flattenConfiguration, envelopeConfiguration, } from './envelope';
 export { emitProgram, emitExpression, emitType, } from './fil-emitter';
-export { flowToFil, flowToFilWithDef, SCRIPT_FN_PREFIX, INLINED_NODE_TYPES, } from './flow-to-fil';
+export { flowToFil, flowToFilWithOverrides, SCRIPT_FN_PREFIX, INLINED_NODE_TYPES, } from './flow-to-fil';
 export { FlowGraph, buildGraph, buildSubflowGraph, OutEdge, InEdge, } from './flow-graph';
-export { FlowFile, FlowDefinitionFile, NodeInstance, NodeOverride, NodeDefinition, NodeDisplay, NodeUI, EdgeInstance, WorkflowVariables, GlobalVariable, NodeVariable, VariableUpdate, SubflowEntry, Metadata, NODE_TYPES, isTriggerNode, isControlFlowNode, } from './flow-types';
+export { FlowFile, FlowOverrides, NodeInstance, NodeOverride, NodeDefinition, NodeDisplay, NodeUI, EdgeInstance, WorkflowVariables, GlobalVariable, NodeVariable, VariableUpdate, SubflowEntry, Metadata, NODE_TYPES, isTriggerNode, isControlFlowNode, } from './flow-types';
 export interface ConvertResult {
     /** FIL TypeScript source code. */
     fil: string;

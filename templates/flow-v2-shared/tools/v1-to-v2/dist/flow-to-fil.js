@@ -12,7 +12,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SCRIPT_FN_PREFIX = exports.INLINED_NODE_TYPES = void 0;
 exports.flowToFil = flowToFil;
-exports.flowToFilWithDef = flowToFilWithDef;
+exports.flowToFilWithOverrides = flowToFilWithOverrides;
 exports.convertFlowExpression = convertFlowExpression;
 const flow_types_1 = require("./flow-types");
 const flow_graph_1 = require("./flow-graph");
@@ -41,14 +41,14 @@ function flowToFil(flow) {
     return converter.convert();
 }
 /**
- * Converts a FlowFile to FIL AST and also produces a .def.flow sidecar
- * that captures all metadata not representable in FIL.
+ * Converts a FlowFile to FIL AST and collects per-node FlowOverrides
+ * that capture metadata not representable in FIL.
  */
-function flowToFilWithDef(flow) {
+function flowToFilWithOverrides(flow) {
     const converter = new FlowToFilConverter(flow, true);
     const program = converter.convert();
-    const defFlow = converter.buildDefFlow();
-    return { program, defFlow };
+    const overrides = converter.buildOverrides();
+    return { program, overrides };
 }
 /** Parser for FIL TypeScript — used to embed script bodies as sync helpers. */
 const parser_1 = require("fil-compiler/dist/parser");
@@ -157,10 +157,10 @@ class FlowToFilConverter {
         };
     }
     /**
-     * Build the .def.flow sidecar from collected metadata.
+     * Build the FlowOverrides bundle from collected per-node metadata.
      * Must be called after convert().
      */
-    buildDefFlow() {
+    buildOverrides() {
         return {
             flowId: this.flow.id,
             flowName: this.flow.name,
@@ -175,7 +175,7 @@ class FlowToFilConverter {
         };
     }
     /**
-     * Record a node's metadata in nodeOverrides for the .def.flow sidecar.
+     * Record a node's metadata in the FlowOverrides bundle.
      * Inlined node types (mock/delay/script) deliberately skip collection so
      * the v2 manifest doesn't carry redundant entries for them — their
      * representation is the FIL itself.
@@ -246,7 +246,7 @@ class FlowToFilConverter {
         // Walk the graph
         const startNode = graph.getStartNode();
         if (startNode) {
-            // Collect trigger node metadata for .def.flow
+            // Collect trigger node metadata into FlowOverrides
             this.collectNodeOverride(startNode);
             // Start from the node after the trigger
             const firstNodeId = (0, flow_types_1.isTriggerNode)(startNode.type)
@@ -292,7 +292,7 @@ class FlowToFilConverter {
         const node = graph.getNode(nodeId);
         if (!node || stopAt.has(nodeId))
             return [];
-        // Collect node metadata for .def.flow sidecar
+        // Collect node metadata into FlowOverrides
         this.collectNodeOverride(node);
         const statements = [];
         switch (node.type) {
@@ -439,6 +439,30 @@ class FlowToFilConverter {
         if (!helper) {
             return this.convertActionNode(node, graph, variables, stopAt);
         }
+        // Try natural-form dissolution first: setvar-shaped script nodes get
+        // emitted as bare `x++` / `let y: T = expr;` statements instead of a
+        // `__script_<id>` helper function. Returns null when no pattern
+        // matches → fall through to the helper-function path.
+        const natural = tryEmitNaturalForm(node, helper, variables);
+        if (natural) {
+            const stmts = [...natural];
+            stmts.push(...this.continueAfter(node.id, graph, variables, stopAt));
+            return stmts;
+        }
+        // Attach magic comments above the helper for any node decoration that
+        // diverges from defaults. The function name already carries the v1
+        // node id, so `// script_id:` isn't emitted here — only `label` and
+        // `description` need a magic-comment landing pad (helper functions
+        // have no declaration body to host them as fields).
+        const synthesized = [];
+        if (node.display?.label && node.display.label !== node.id) {
+            synthesized.push(makeMagicComment('label', node.display.label));
+        }
+        if (node.display?.subLabel) {
+            synthesized.push(makeMagicComment('description', node.display.subLabel));
+        }
+        if (synthesized.length > 0)
+            helper.leadingComments = synthesized;
         // Stash the helper so emitter writes it alongside main(). It's a sync
         // function — `extractSubflowCall` (on the reverse path) keys off
         // `isAsync` to distinguish subflows from scripts.
@@ -653,7 +677,7 @@ class FlowToFilConverter {
         const inputs = node.inputs || {};
         // Connector nodes have inputs.detail with infrastructure metadata.
         // Extract only user-set field values for the FIL representation;
-        // the full inputs blob is preserved in the .def.flow sidecar.
+        // the full inputs blob is preserved in FlowOverrides.
         const detail = inputs.detail;
         if (detail && typeof detail === 'object' && detail.connector) {
             return this.buildConnectorInputExpr(detail);
@@ -1079,6 +1103,201 @@ function parseIso8601DurationMs(value) {
         Number(h || 0) * 3600000 +
         Number(mi || 0) * 60000 +
         Number(s || 0) * 1000);
+}
+/**
+ * Build a synthetic magic-comment AST node. Position fields are zeroed —
+ * the comment didn't come from any source position; it's emitted from
+ * collected v1 node metadata.
+ */
+function makeMagicComment(key, value) {
+    return {
+        raw: `// ${key}: ${value}`,
+        kind: 'line',
+        line: 0,
+        col: 0,
+        pos: 0,
+        isMagic: true,
+        key,
+        value,
+    };
+}
+/**
+ * Structural check for the partitioner's auto-generated id shape:
+ * `setvar_<lhs>_<digits>`. Done with plain string operations rather than a
+ * dynamic regex — `lhs` flows in from v1 node-variable ids and we don't
+ * want to interpolate it into a regex pattern.
+ */
+function isDefaultSetvarId(id, lhs) {
+    const prefix = `setvar_${lhs}_`;
+    if (!id.startsWith(prefix))
+        return false;
+    const suffix = id.slice(prefix.length);
+    if (suffix.length === 0)
+        return false;
+    for (let i = 0; i < suffix.length; i++) {
+        const c = suffix.charCodeAt(i);
+        if (c < 0x30 || c > 0x39)
+            return false; // not 0-9
+    }
+    return true;
+}
+/**
+ * Attach `// script_id:` / `// label:` / `// description:` magic comments to
+ * a statement when the v1 node's id/label/subLabel diverge from the defaults
+ * the v2→v1 partitioner would have generated. `defaultIdLhs` is the variable
+ * name the partitioner uses to build its auto-generated id pattern
+ * (`setvar_<lhs>_<digit>`).
+ */
+function attachNonDefaultScriptMeta(stmt, node, defaultIdLhs) {
+    const comments = stmt.leadingComments ? [...stmt.leadingComments] : [];
+    if (!isDefaultSetvarId(node.id, defaultIdLhs)) {
+        comments.push(makeMagicComment('script_id', node.id));
+    }
+    if (node.display?.label && node.display.label !== node.id) {
+        comments.push(makeMagicComment('label', node.display.label));
+    }
+    if (node.display?.subLabel) {
+        comments.push(makeMagicComment('description', node.display.subLabel));
+    }
+    if (comments.length > 0)
+        stmt.leadingComments = comments;
+}
+/**
+ * Try to emit a v1 `core.action.script` node as bare FIL statements
+ * (`x++`, `let y: T = expr`, …) instead of a `__script_<id>` helper
+ * function. Three recognised shapes:
+ *
+ *   1. Single mutation setvar: body `return <expr>;` + one variableUpdate
+ *      whose expression is `=js:result.response`. Emits `<lhs> = <expr>;`
+ *      with `x++` / `x--` sugar when `<expr>` is `(x + 1)` / `(x - 1)`.
+ *   2. Single const-init setvar: body `return <expr>;` + one nodeVar
+ *      binding to this node's output port. Emits typed
+ *      `let <lhs>: <type> = <expr>;` (the `let X: T` shape preserves the
+ *      flow-global convention on the v2→v1 round-trip).
+ *   3. Coalesced multi-init setvar: body is a chain of `const <name> = …;`
+ *      followed by `return { <name>, … };` + a variableUpdate per name
+ *      whose expression is `=js:result.response.<name>`. Each declaration
+ *      becomes its own `let <name>: <type> = <expr>;` statement; the head
+ *      carries any non-default id/label/description magic comments.
+ *
+ * Returns `null` when no pattern matches — the caller falls back to the
+ * existing `__script_<id>` helper-function emission path.
+ */
+function tryEmitNaturalForm(node, helper, variables) {
+    if (node.type !== 'core.action.script')
+        return null;
+    const bodyStmts = helper.body.body;
+    if (bodyStmts.length === 0)
+        return null;
+    const lastStmt = bodyStmts[bodyStmts.length - 1];
+    if (lastStmt.kind !== 'ReturnStatement' || !lastStmt.argument)
+        return null;
+    const updates = variables?.variableUpdates?.[node.id];
+    const nodeVar = variables?.nodes?.find((nv) => nv.binding?.nodeId === node.id);
+    // ── Pattern 3: coalesced multi-init ───────────────────────────────────
+    if (bodyStmts.length > 1) {
+        const decls = [];
+        for (let i = 0; i < bodyStmts.length - 1; i++) {
+            if (bodyStmts[i].kind !== 'VariableDeclaration')
+                return null;
+            decls.push(bodyStmts[i]);
+        }
+        if (lastStmt.argument.kind !== 'ObjectExpression')
+            return null;
+        const returnObj = lastStmt.argument;
+        const returnedNames = new Set();
+        for (const p of returnObj.properties) {
+            if (!p.shorthand)
+                return null;
+            returnedNames.add(p.key);
+        }
+        if (!updates || updates.length !== decls.length)
+            return null;
+        for (const u of updates) {
+            if (u.expression !== `=js:result.response.${u.variableId}`)
+                return null;
+        }
+        for (const d of decls) {
+            if (!returnedNames.has(d.name))
+                return null;
+        }
+        if (nodeVar)
+            return null;
+        const out = [];
+        for (const d of decls) {
+            const globalEntry = variables?.globals?.find((g) => g.id === d.name);
+            const typeAnn = globalEntry
+                ? flowTypeToFil(globalEntry.type)
+                : (d.typeAnnotation ?? 'json');
+            const newDecl = {
+                kind: 'VariableDeclaration',
+                declarationKind: 'let',
+                name: d.name,
+                typeAnnotation: typeAnn,
+                initializer: d.initializer,
+            };
+            // Preserve plain comments the parser attached to this decl (e.g.
+            // free-form developer commentary inside the coalesced body).
+            if (d.leadingComments && d.leadingComments.length > 0) {
+                newDecl.leadingComments = [...d.leadingComments];
+            }
+            out.push(newDecl);
+        }
+        attachNonDefaultScriptMeta(out[0], node, decls[0].name);
+        return out;
+    }
+    // bodyStmts.length === 1 — `return <expr>;`
+    const expr = lastStmt.argument;
+    // ── Pattern 1: single mutation setvar ─────────────────────────────────
+    if (updates && updates.length === 1 && updates[0].expression === '=js:result.response') {
+        if (nodeVar)
+            return null;
+        const lhs = updates[0].variableId;
+        let stmt;
+        if (expr.kind === 'BinaryExpression'
+            && (expr.operator === '+' || expr.operator === '-')
+            && expr.left.kind === 'Identifier' && expr.left.name === lhs
+            && expr.right.kind === 'Literal' && expr.right.value === 1) {
+            // `lhs + 1` / `lhs - 1` → `lhs++` / `lhs--`
+            stmt = {
+                kind: 'ExpressionStatement',
+                expression: {
+                    kind: 'UpdateExpression',
+                    operator: expr.operator === '+' ? '++' : '--',
+                    argument: { kind: 'Identifier', name: lhs },
+                    prefix: false,
+                },
+            };
+        }
+        else {
+            stmt = {
+                kind: 'ExpressionStatement',
+                expression: {
+                    kind: 'AssignmentExpression',
+                    operator: '=',
+                    left: { kind: 'Identifier', name: lhs },
+                    right: expr,
+                },
+            };
+        }
+        attachNonDefaultScriptMeta(stmt, node, lhs);
+        return [stmt];
+    }
+    // ── Pattern 2: single const-init setvar ───────────────────────────────
+    if ((!updates || updates.length === 0) && nodeVar) {
+        const lhs = nodeVar.id;
+        const typeAnn = flowTypeToFil(nodeVar.type);
+        const stmt = {
+            kind: 'VariableDeclaration',
+            declarationKind: 'let',
+            name: lhs,
+            typeAnnotation: typeAnn,
+            initializer: expr,
+        };
+        attachNonDefaultScriptMeta(stmt, node, lhs);
+        return [stmt];
+    }
+    return null;
 }
 /**
  * Parse a script body string as a sync FIL helper function. Returns the

@@ -9,8 +9,10 @@
 # tested via `dotnet run -- --test`, so this script does NOT execute the FIL.
 # It only produces the v1 artifacts:
 #
-#   1. cs2fil cs-to-fil → <project>/.cs2v1/<Name>.fil + .manifest.flow
-#      (FIL compile errors here abort the script).
+#   1. cs2fil cs-to-fil → <project>/.cs2v1/<Name>.fil
+#      (FIL compile errors here abort the script). The emitted FIL carries
+#      flow/action/trigger declarations so v2-to-v1 can derive the manifest
+#      directly from it.
 #   2. dotnet run -- --emit-bindings <project>/.cs2v1/bindings.json
 #      (resolves bindings via the C# project's own configuration builder —
 #      the canonical source of binding values, including user-secrets and
@@ -33,9 +35,10 @@ fi
 
 mkdir -p "$WORK_DIR"
 
-# Step 1: cs2fil → <Name>.fil + <Name>.manifest.flow (analyzers + FIL emit).
-# cs2fil also emits a stub bindings.json derived from the analyzed C#; we'll
-# overwrite that in step 2 with the project's resolved bindings.
+# Step 1: cs2fil → <Name>.fil (analyzers + FIL emit, including flow/action
+# /trigger declarations). cs2fil also emits a stub bindings.json derived
+# from the analyzed C#; we'll overwrite that in step 2 with the project's
+# resolved bindings.
 if [[ ! -d "$CSHARP_ROOT/cli/dist" ]]; then
     (cd "$CSHARP_ROOT/cli" && npm install >/dev/null 2>&1 && npm run build)
 fi
@@ -60,8 +63,7 @@ fi
 
 echo "==> Converting FIL → v1 .flow..."
 "$NODE_BIN" "$FLOW_V2/v2-to-v1/dist/cli.js" \
-    "$WORK_DIR/$NAME.manifest.flow" \
-    --fil "$WORK_DIR/$NAME.fil" \
+    "$WORK_DIR/$NAME.fil" \
     --bindings "$WORK_DIR/bindings.json" \
     --out "./$NAME.flow"
 

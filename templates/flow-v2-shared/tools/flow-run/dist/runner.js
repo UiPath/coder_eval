@@ -473,6 +473,9 @@ function logNodeStart(opts, step, nodeId, node) {
         case 'inline-agent':
             detail = `inline-agent ${node.source}`;
             break;
+        case 'hitl':
+            detail = `hitl ${node.taskType}`;
+            break;
     }
     log(opts, `[step ${step}] -> ${nodeId} (${detail})`);
 }

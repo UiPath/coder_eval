@@ -3,6 +3,16 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Parser = void 0;
 const lexer_1 = require("./lexer");
+function isWordKeywordToken(token) {
+    return token.kind === token.value
+        && /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(token.value);
+}
+function isBareIdentifierToken(token) {
+    return token.kind === lexer_1.TokenKind.Identifier || isWordKeywordToken(token);
+}
+function isTypeRefSegmentToken(token) {
+    return token.kind === lexer_1.TokenKind.Number || isBareIdentifierToken(token);
+}
 class Parser {
     constructor(source) {
         this.inAsync = false;
@@ -18,12 +28,17 @@ class Parser {
             // Skip semicolons at top level
             if (this.lexer.match(lexer_1.TokenKind.Semicolon))
                 continue;
+            // Grab any comments preceding this declaration so we can attach them
+            // to whichever node we're about to parse.
+            const leading = this.takeLeadingComments();
             const tok = this.lexer.current();
+            let parsed;
             if (tok.kind === lexer_1.TokenKind.Identifier && tok.value === 'flow') {
                 if (flow) {
                     throw new Error(`Duplicate \`flow\` declaration at line ${tok.line}:${tok.col}`);
                 }
                 flow = this.parseFlowDeclaration();
+                parsed = flow;
             }
             else if (tok.kind === lexer_1.TokenKind.Identifier && tok.value === 'action') {
                 const decl = this.parseActionDeclaration();
@@ -32,6 +47,7 @@ class Parser {
                 }
                 seenNodeNames.add(decl.name);
                 actions.push(decl);
+                parsed = decl;
             }
             else if (tok.kind === lexer_1.TokenKind.Identifier && tok.value === 'trigger') {
                 const decl = this.parseTriggerDeclaration();
@@ -40,10 +56,15 @@ class Parser {
                 }
                 seenNodeNames.add(decl.name);
                 triggers.push(decl);
+                parsed = decl;
             }
             else {
-                functions.push(this.parseFunctionDeclaration());
+                const fn = this.parseFunctionDeclaration();
+                functions.push(fn);
+                parsed = fn;
             }
+            if (leading)
+                parsed.leadingComments = leading;
         }
         if (!flow) {
             throw new Error('`flow <id> { name: "…", version: "…" };` declaration is required at the top of every FIL program');
@@ -57,6 +78,17 @@ class Parser {
             throw new Error('`flow` declaration is missing required field `version`');
         }
         return { kind: 'Program', flow, actions, triggers, functions };
+    }
+    /**
+     * Drain comments preceding the next token from the lexer's trivia stream.
+     * Called by the attachment points (top-level dispatch, parseStatement) to
+     * collect comments that belong to the node about to be parsed. Returns
+     * `undefined` when there's nothing to attach so we don't add empty arrays
+     * to every AST node.
+     */
+    takeLeadingComments() {
+        const cs = this.lexer.takeCommentsBefore(this.lexer.current().pos);
+        return cs.length > 0 ? cs : undefined;
     }
     // ─── Top-level declarations (flow / action / trigger) ─────────────────────
     /** Consumes `flow <kebab-id> { … };`. The `flow` keyword has already been peeked. */
@@ -101,7 +133,7 @@ class Parser {
      */
     consumeKebabIdentifier(role) {
         const first = this.lexer.current();
-        if (first.kind !== lexer_1.TokenKind.Identifier) {
+        if (!isBareIdentifierToken(first)) {
             throw new Error(`Expected ${role} identifier at line ${first.line}:${first.col}, got ${first.kind} "${first.value}"`);
         }
         let name = first.value;
@@ -109,7 +141,7 @@ class Parser {
         while (this.lexer.check(lexer_1.TokenKind.Minus)) {
             this.lexer.consume();
             const next = this.lexer.current();
-            if (next.kind !== lexer_1.TokenKind.Identifier && next.kind !== lexer_1.TokenKind.Number) {
+            if (!isTypeRefSegmentToken(next)) {
                 throw new Error(`Expected identifier or number after \`-\` in ${role} at line ${next.line}:${next.col}`);
             }
             name += '-' + next.value;
@@ -148,21 +180,21 @@ class Parser {
      * `@`, `{`, `;`, or any non-alphanumeric / non-dash token.
      */
     consumeTypeRefSegment(firstTok) {
-        if (firstTok.kind !== lexer_1.TokenKind.Identifier && firstTok.kind !== lexer_1.TokenKind.Number) {
+        if (!isTypeRefSegmentToken(firstTok)) {
             throw new Error(`Expected type segment at line ${firstTok.line}:${firstTok.col}, got ${firstTok.kind} "${firstTok.value}"`);
         }
         let seg = firstTok.value;
         this.lexer.consume();
         while (true) {
             const t = this.lexer.current();
-            if (t.kind === lexer_1.TokenKind.Identifier || t.kind === lexer_1.TokenKind.Number) {
+            if (isTypeRefSegmentToken(t)) {
                 seg += t.value;
                 this.lexer.consume();
             }
             else if (t.kind === lexer_1.TokenKind.Minus) {
                 this.lexer.consume();
                 const next = this.lexer.current();
-                if (next.kind === lexer_1.TokenKind.Identifier || next.kind === lexer_1.TokenKind.Number) {
+                if (isTypeRefSegmentToken(next)) {
                     seg += '-' + next.value;
                     this.lexer.consume();
                 }
@@ -270,6 +302,17 @@ class Parser {
     }
     // ─── Statements ───────────────────────────────────────────────────────────
     parseStatement() {
+        // Wrap the inner dispatch so every statement gets a chance to absorb
+        // preceding comments. Captured *before* the labeled-statement check
+        // inside parseStatementInner — so `// magic\nlabel: while (…)` attaches
+        // to the LabeledStatement, not to the inner WhileStatement.
+        const leading = this.takeLeadingComments();
+        const stmt = this.parseStatementInner();
+        if (leading)
+            stmt.leadingComments = leading;
+        return stmt;
+    }
+    parseStatementInner() {
         const tok = this.lexer.current();
         // Check for labeled statement
         if (tok.kind === lexer_1.TokenKind.Identifier && this.lexer.peek2().kind === lexer_1.TokenKind.Colon) {

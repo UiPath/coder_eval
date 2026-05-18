@@ -80,6 +80,101 @@
       "type": "bpmn:EndEvent"
     }
   },
+  "uipath.human-in-the-loop@1.0": {
+    "nodeType": "uipath.human-in-the-loop",
+    "version": "1.0",
+    "category": "human-task",
+    "tags": [
+      "human-task",
+      "hitl",
+      "human-in-the-loop",
+      "approval"
+    ],
+    "sortOrder": 0,
+    "display": {
+      "label": "Human Task - Quick Form / App",
+      "icon": "users",
+      "shape": "square"
+    },
+    "handleConfiguration": [
+      {
+        "position": "left",
+        "handles": [
+          {
+            "id": "input",
+            "type": "target",
+            "handleType": "input"
+          }
+        ],
+        "visible": true
+      },
+      {
+        "position": "right",
+        "handles": [
+          {
+            "id": "completed",
+            "type": "source",
+            "handleType": "output",
+            "showButton": true,
+            "constraints": {
+              "forbiddenTargetCategories": [
+                "trigger"
+              ]
+            }
+          }
+        ],
+        "visible": true
+      }
+    ],
+    "model": {
+      "type": "bpmn:UserTask",
+      "serviceType": "Actions.HITL"
+    },
+    "inputDefaults": {
+      "type": "quick",
+      "schema": {
+        "fields": [],
+        "outcomes": [
+          {
+            "id": "submit",
+            "name": "Submit",
+            "type": "string",
+            "isPrimary": true,
+            "action": "Continue"
+          }
+        ]
+      },
+      "recipient": {
+        "channels": [
+          "Email",
+          "ActionCenter"
+        ],
+        "connections": {},
+        "assignee": {
+          "type": "group"
+        }
+      }
+    },
+    "outputDefinition": {
+      "output": {
+        "type": "object",
+        "description": "Task result data",
+        "source": "=result",
+        "var": "output"
+      },
+      "status": {
+        "type": "string",
+        "description": "Task completion status",
+        "source": "=result.Action",
+        "var": "status"
+      }
+    },
+    "runtimeConstraints": {
+      "exclude": [
+        "api-function"
+      ]
+    }
+  },
   "core.action.transform@1.0.0": {
     "nodeType": "core.action.transform",
     "supportsErrorHandling": true,

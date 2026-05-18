@@ -21,6 +21,7 @@ exports.dispatchAgent = dispatchAgent;
 exports.dispatchApiWorkflow = dispatchApiWorkflow;
 exports.dispatchRpaWorkflow = dispatchRpaWorkflow;
 exports.dispatchInlineAgent = dispatchInlineAgent;
+exports.dispatchHitl = dispatchHitl;
 exports.dispatchScript = dispatchScript;
 const child_process_1 = require("child_process");
 class DispatchError extends Error {
@@ -43,6 +44,7 @@ async function dispatch(node, inputJson, opts) {
         case 'api-workflow': return dispatchApiWorkflow(node, inputJson, opts);
         case 'rpa-workflow': return dispatchRpaWorkflow(node, inputJson, opts);
         case 'inline-agent': return dispatchInlineAgent(node, inputJson, opts);
+        case 'hitl': return dispatchHitl(node, inputJson, opts);
     }
 }
 // ─── Connector dispatch (existing) ───────────────────────────────────────────
@@ -376,6 +378,16 @@ function dispatchInlineAgent(node, inputJson, opts) {
     }
     throw new DispatchError(`node "${node.nodeId}": live inline Agent dispatch is not supported by flow-run yet; ` +
         `use --dry-run or run through the Flow/Studio Web debug path for Orchestrator.StartInlineAgentJob.`, node.nodeId);
+}
+function dispatchHitl(node, inputJson, opts) {
+    if (opts.verbose || opts.dryRun) {
+        process.stderr.write(`[dispatch] hitl "${node.nodeId}" -> quickform\n`);
+    }
+    if (opts.dryRun) {
+        return { outputJson: renderFixture(node.fixture), raw: '<dry-run-hitl>' };
+    }
+    throw new DispatchError(`node "${node.nodeId}": live HITL dispatch is not supported by flow-run yet; ` +
+        `use --dry-run or run through the Flow/Studio Web debug path for Actions.HITL.`, node.nodeId);
 }
 function renderFixture(fixture) {
     if (fixture === undefined)

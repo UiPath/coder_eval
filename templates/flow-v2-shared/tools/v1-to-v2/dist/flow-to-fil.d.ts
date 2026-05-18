@@ -9,7 +9,7 @@
  * 5. Map variables to parameters/returns
  */
 import * as AST from 'fil-compiler/dist/ast';
-import { FlowFile, FlowDefinitionFile } from './flow-types';
+import { FlowFile, FlowOverrides } from './flow-types';
 /**
  * Node types that flow→FIL inlines into FIL constructs:
  *   - delay   → `await executeTimer(...)`
@@ -29,12 +29,12 @@ export declare const INLINED_NODE_TYPES: Set<string>;
 export declare const SCRIPT_FN_PREFIX = "__script_";
 export declare function flowToFil(flow: FlowFile): AST.Program;
 /**
- * Converts a FlowFile to FIL AST and also produces a .def.flow sidecar
- * that captures all metadata not representable in FIL.
+ * Converts a FlowFile to FIL AST and collects per-node FlowOverrides
+ * that capture metadata not representable in FIL.
  */
-export declare function flowToFilWithDef(flow: FlowFile): {
+export declare function flowToFilWithOverrides(flow: FlowFile): {
     program: AST.Program;
-    defFlow: FlowDefinitionFile;
+    overrides: FlowOverrides;
 };
 /**
  * Convert a Flow expression string to a FIL AST expression.
