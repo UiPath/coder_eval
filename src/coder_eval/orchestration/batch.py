@@ -92,6 +92,7 @@ async def run_batch(
                         rt,
                         preserve_sandbox=config.preserve_sandbox,
                         stream_callback=task_callback,
+                        verbose=config.verbose,
                     ).run()
                 else:
                     orchestrator = Orchestrator(

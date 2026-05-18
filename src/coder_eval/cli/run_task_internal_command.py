@@ -53,13 +53,20 @@ def run_task_internal_command(
         "--task-dir",
         help="Original task directory mount (used to resolve relative template paths).",
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Enable verbose (DEBUG level) logging",
+    ),
 ) -> None:
     """Run a single staged task inside the container."""
     # Use the same logging path as the host CLI so LOG_LEVEL from the
     # forwarded env is honoured. Without this, root stays at INFO and the
     # DEBUG-level task_log_handler attached by Orchestrator never sees the
     # agent's per-tool-call DEBUG records.
-    setup_logging(level=settings.log_level)
+    log_level = "DEBUG" if verbose else settings.log_level
+    setup_logging(level=log_level)
 
     # Start the host-heartbeat watchdog: if the host process dies
     # ungracefully (SIGKILL, Claude-Code Escape, crash) before it can

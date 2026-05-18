@@ -62,3 +62,6 @@ class BatchRunConfig(BaseModel):
         default=None,
         description="Override sandbox driver for all tasks.",
     )
+
+    # Logging
+    verbose: bool = Field(default=False, description="Enable verbose (DEBUG level) logging for Docker output")

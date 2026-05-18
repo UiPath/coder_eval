@@ -328,6 +328,7 @@ def run_command(
                 max_rows=sample,
                 repeats=repeats,
                 driver=driver,
+                verbose=verbose,
             )
         )
     except KeyboardInterrupt:
@@ -359,6 +360,7 @@ async def _run_all_tasks(
     max_rows: int | None = None,
     repeats: int | None = None,
     driver: str | None = None,
+    verbose: bool = False,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -419,6 +421,7 @@ async def _run_all_tasks(
         max_rows=max_rows,
         repeats=repeats,
         driver=driver,  # type: ignore[arg-type]  # narrowed at runtime by click.Choice
+        verbose=verbose,
     )
 
     # Always run through experiment layer (defaults to experiments/default.yaml)

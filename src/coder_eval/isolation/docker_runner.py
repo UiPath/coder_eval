@@ -275,10 +275,12 @@ class DockerRunner:
         rt: ResolvedTask,
         preserve_sandbox: bool = False,
         stream_callback: StreamCallback | None = None,
+        verbose: bool = False,
     ) -> None:
         self.rt = rt
         self.preserve_sandbox = preserve_sandbox
         self.stream_callback = stream_callback
+        self.verbose = verbose
 
     @property
     def _docker_config(self) -> DockerDriverConfig:
@@ -395,9 +397,10 @@ class DockerRunner:
                             safe_emit(self.stream_callback, event)
                             continue
                         # fall through to log preservation
+                    log_fn = logger.info if self.verbose else logger.debug
+                    log_fn("[docker:%s] %s", self.rt.task.task_id, line)
                     await asyncio.to_thread(log_fh.write, line + "\n")
                     await asyncio.to_thread(log_fh.flush)
-                    logger.debug("[docker:%s] %s", self.rt.task.task_id, line)
                 returncode = await proc.wait()
             finally:
                 heartbeat_task.cancel()
@@ -660,6 +663,8 @@ class DockerRunner:
         argv += [image]
         # Override the entrypoint's defaults so they point at the symmetric
         # host paths now bind-mounted into the container.
+        if self.verbose:
+            argv += ["-v"]
         argv += ["--output", str(output_dir)]
         if host_task_dir is not None:
             argv += ["--task-dir", str(host_task_dir)]
