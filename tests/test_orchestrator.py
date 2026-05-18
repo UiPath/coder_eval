@@ -507,6 +507,66 @@ def test_create_error_result(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_setup_preserve_sandbox_uses_ephemeral_runtime_dir(tmp_path, monkeypatch):
+    """Preserved runs should execute in a tempdir, then copy artifacts at cleanup."""
+    from datetime import datetime
+
+    from coder_eval import orchestrator as orchestrator_module
+    from coder_eval.models import AgentKind, ApiBackend, DirectRoute, EvaluationResult, SnapshotConfig, SnapshotMode
+    from coder_eval.sandbox import Sandbox
+
+    class DummyAgent:
+        async def start(
+            self,
+            working_directory: str,
+            *,
+            env_path_prepend: list[str] | None = None,
+            plugin_tools_dir: str | None = None,
+        ) -> None:
+            self.working_directory = working_directory
+
+        def get_sdk_options(self):
+            return {"env": {"PATH": os.environ.get("PATH", "")}}
+
+    async def create_dummy_agent(_self):
+        return DummyAgent()
+
+    task_file = Path("tasks/hello_date.yaml")
+    task, _ = load_task(task_file)
+    task.sandbox.python = None
+    task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.DISABLED)
+
+    run_dir = tmp_path / "test_run" / "hello_date"
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=True, variant_id="test-variant")
+    orchestrator.task_file = task_file
+    orchestrator.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        variant_id="test-variant",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+
+    monkeypatch.setattr(orchestrator_module.settings, "api_backend", ApiBackend.DIRECT)
+    monkeypatch.setattr(type(orchestrator_module.settings), "validate_api_keys", lambda _self, _agent_type: None)
+    monkeypatch.setattr(orchestrator_module, "resolve_route", lambda _settings: DirectRoute(judge_transport=None))
+    monkeypatch.setattr(Orchestrator, "_create_agent", create_dummy_agent)
+
+    await orchestrator._setup()
+
+    assert isinstance(orchestrator.sandbox, Sandbox)
+    assert orchestrator.sandbox.sandbox_dir is not None
+    assert not orchestrator.sandbox.is_persistent
+    sandbox_dir = orchestrator.sandbox.sandbox_dir.resolve()
+    assert run_dir.resolve() not in [sandbox_dir, *sandbox_dir.parents]
+
+    await orchestrator._cleanup()
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_cleanup_persistent_sandbox(tmp_path):
     """Test that _cleanup with preserve_sandbox=True and a persistent sandbox skips copy."""
     from datetime import datetime

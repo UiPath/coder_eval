@@ -668,6 +668,21 @@ def test_sandbox_default_setup_still_uses_tempdir():
         sandbox.cleanup()
 
 
+def test_sandbox_default_setup_handles_slashed_task_id():
+    """Dataset row task IDs ("parent/row") must not break tempdir creation."""
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="dataset-example/alpha")
+
+    try:
+        sandbox_dir = sandbox.setup()
+        assert sandbox_dir.exists()
+        # Slash must be flattened so mkdtemp does not look for a missing parent dir.
+        assert "/" not in sandbox_dir.name
+        assert "coder_eval_dataset-example_alpha_" in sandbox_dir.name
+    finally:
+        sandbox.cleanup()
+
+
 # ==================== Snapshot Tests ====================
 
 

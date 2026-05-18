@@ -119,8 +119,11 @@ class Sandbox:
             self.sandbox_dir = target_dir
             self._cleanup_on_exit = False
         else:
-            # Default: create a temporary directory
-            self.sandbox_dir = Path(tempfile.mkdtemp(prefix=f"coder_eval_{self.task_id}_"))
+            # Default: create a temporary directory. Dataset row tasks have IDs like
+            # "parent/row" -- flatten path separators so they don't become subdirectories
+            # under /tmp (mkdtemp does not auto-create parent dirs).
+            safe_task_id = self.task_id.replace("/", "_").replace("\\", "_")
+            self.sandbox_dir = Path(tempfile.mkdtemp(prefix=f"coder_eval_{safe_task_id}_"))
 
         try:
             # Setup template content (repo, directory, or inline files)

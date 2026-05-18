@@ -722,14 +722,11 @@ class Orchestrator:
         task_dir = self.task_file.parent.resolve() if self.task_file else None
         self.sandbox = Sandbox(self.task.sandbox, task_id=self.task.task_id, task_dir=task_dir)
 
-        # When preserving, work directly in the final artifacts directory (skip copy on cleanup)
-        persist_target: Path | None = None
-        if self.preserve_sandbox:
-            persist_target = self.run_dir / "artifacts" / self.task.task_id
-
+        # Preserve by copying after execution. Running directly under run_dir/artifacts
+        # lets parent-dir node_modules contaminate Node tool resolution on shared hosts.
         async def _setup_sandbox() -> Any:
             assert self.sandbox is not None
-            return await asyncio.to_thread(self.sandbox.setup, target_dir=persist_target)
+            return await asyncio.to_thread(self.sandbox.setup)
 
         sandbox_dir = await execute_with_retry(
             operation=_setup_sandbox,
