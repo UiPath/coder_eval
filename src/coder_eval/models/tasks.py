@@ -666,18 +666,28 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
     @field_validator("success_criteria", mode="before")
     @classmethod
     def check_removed_criteria_types(cls, v: Any) -> Any:
-        """Provide helpful errors for criterion types removed in the consolidation."""
+        """Normalize legacy criterion aliases and error on removed types."""
         removed: dict[str, str] = {
             "program_stdout_equals": "Use 'run_command' with 'expected_stdout' and 'stdout_match' instead.",
             "code_lints": "Use 'run_command' to run your linter directly instead.",
             "scored_command": "Use 'run_command' with 'score_from_stdout: true' instead.",
         }
         if isinstance(v, list):
+            normalized: list[Any] = []
             for item in v:
                 if isinstance(item, dict):
                     ctype = item.get("type")
                     if ctype in removed:
                         raise ValueError(f"Criterion type '{ctype}' has been removed. {removed[ctype]}")
+                    if ctype == "command_not_executed":
+                        item = {
+                            **item,
+                            "type": "command_executed",
+                            "min_count": 0,
+                            "max_count": 0,
+                        }
+                normalized.append(item)
+            return normalized
         return v
 
     @field_validator("success_criteria")

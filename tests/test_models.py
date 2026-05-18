@@ -48,6 +48,33 @@ def test_success_criterion_discriminated_union():
     assert criterion.type == "run_command"
 
 
+def test_command_not_executed_alias_normalizes_before_union_dispatch():
+    """Legacy negative command assertions normalize before union dispatch."""
+    from coder_eval.models import CommandExecutedCriterion
+
+    td = TaskDefinition(
+        task_id="legacy_command_not_executed",
+        description="d",
+        initial_prompt="p",
+        agent=None,
+        sandbox=SandboxConfig(driver="tempdir"),
+        success_criteria=[
+            {
+                "type": "command_not_executed",
+                "description": "Do not call the retired command",
+                "tool_name": "Bash",
+                "command_pattern": r"uip\s+codedagent\s+new\b",
+            },
+        ],
+    )
+
+    legacy = td.success_criteria[0]
+    assert isinstance(legacy, CommandExecutedCriterion)
+    assert legacy.type == "command_executed"
+    assert legacy.min_count == 0
+    assert legacy.max_count == 0
+
+
 class TestLLMJudgeCriterion:
     """Tests for the new llm_judge success criterion model."""
 
