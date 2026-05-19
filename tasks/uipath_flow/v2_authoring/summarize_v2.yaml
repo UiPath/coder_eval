@@ -1,0 +1,234 @@
+task_id: uipath-flow-v2-summarize
+description: >
+  Author a two-file Flow v2 FIL project that invokes the OOTB Summarize
+  pattern node over a trigger-bound file attachment handle, dry-runs with a
+  fixture, and converts cleanly to v1.
+tags: [flow-v2, fil, generate, summarize, deep-rag, document-processing, non-is-node]
+
+run_limits:
+  max_turns: 70
+  turn_timeout: 1200
+  task_timeout: 1800
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-v2"
+    - type: template_dir
+      path: "../../../templates/flow-v2-shared"
+      include_patterns:
+        - "tools/*/dist"
+        - "tools/*/dist/**"
+
+pre_run:
+  - command: "mkdir -p .flow-v2-library-json && printf '{\"version\":1,\"entries\":[]}\n' > .flow-v2-library-json/index.json && (cd tools && npm ci --omit=dev)"
+    timeout: 120
+
+initial_prompt: |
+  Author a UiPath Flow v2 project named **SummarizeContract** in the
+  current directory. Read `SKILL.md` first. Use the current two-file model:
+  `SummarizeContract.fil` plus `bindings.json`. Do NOT create a
+  `SummarizeContract.manifest.flow` sidecar.
+
+  ## Scenario
+
+  The flow takes one trigger-bound file attachment handle named
+  `documentFile`, invokes the OOTB Summarize pattern node over the whole
+  attachment through the Summarize action, and returns the synthesized summary
+  text plus citations as flow outputs.
+
+  ## Required FIL structure
+
+  `SummarizeContract.fil` must include:
+
+  - `flow summarize-contract { name: "Summarize Contract", version: "1.0.0" };`
+  - `trigger manualStart: start;`
+  - `action summarizeContract: uipath.pattern.deep-rag@1.0 { ... };`
+  - `async function main(documentFile: file): Promise<json> { ... }`
+
+  `documentFile: file` is an opaque Flow attachment handle used for v1
+  roundtrip. FIL/WASM code must not read, stream, or dereference it. The
+  Summarize action receives the attachment through the trigger-output
+  expression below.
+
+  The `summarizeContract` action body must include:
+
+  ```typescript
+  label: "Summarize Contract",
+  rawInputs: {
+    attachment: "=js:$vars.manualStart.output.documentFile",
+    prompt: "Write a 5-bullet executive summary covering scope, term, SLAs, penalties, and termination.",
+    returnCitations: true,
+  },
+  outputs: {
+    output: { type: "object", source: "=response", var: "output" },
+    error: { type: "object", source: "=Error", var: "error" },
+  },
+  fixture: {
+    id: "dry-run-summary",
+    content: {
+      Text: "Dry-run executive summary.",
+      Citations: [
+        { Ordinal: 1, PageNumber: 2, Source: "contract.pdf", Reference: "p.2" },
+      ],
+    },
+  },
+  ```
+
+  Important wire-shape requirements:
+
+  - The node type is `uipath.pattern.deep-rag@1.0`, not `1.0.0`.
+  - Do not add `binding`, `folderBinding`, `resource`, or `resourceBindings`.
+  - Do not create or copy an embedded definition blob.
+  - The attachment input must be the whole trigger output attachment handle:
+    `=js:$vars.manualStart.output.documentFile`.
+  - Do not pass `=js:$vars.documentFile`, a file id, URL, path, `.Id`, or
+    `.FullName`.
+  - Output fields are PascalCase: `content.Text`,
+    `content.Citations`, and citation fields `Ordinal`, `PageNumber`,
+    `Source`, `Reference`.
+
+  In `main()`, invoke Summarize by action identifier:
+
+  ```typescript
+  const raw: string = await executeNode(summarizeContract, "{}");
+  return ({
+    summary: JSON.parse(raw).content.Text,
+    citations: JSON.parse(raw).content.Citations,
+  });
+  ```
+
+  Do not call `executeNode("summarizeContract", ...)` by string literal.
+
+  ## Required bindings.json
+
+  `bindings.json` must be present and may use an empty bindings array:
+
+  ```json
+  {
+    "schemaVersion": "1",
+    "bindings": []
+  }
+  ```
+
+  ## Verifying your work
+
+  The sandbox has a local empty JSON library at `.flow-v2-library-json`
+  because this task uses only the OOTB Summarize node, not connector
+  definitions. Use that local library for `verify.sh` and `convert.sh`.
+  Do not run `setup-library.sh`.
+
+  ```bash
+  ./parse-fil.sh SummarizeContract.fil
+  FLOW_V2_LIBRARY_JSON="$PWD/.flow-v2-library-json" ./verify.sh
+  FLOW_V2_LIBRARY_JSON="$PWD/.flow-v2-library-json" ./convert.sh SummarizeContract
+  uip maestro flow validate SummarizeContract.flow
+  uip maestro flow format SummarizeContract.flow
+  ```
+
+  Do not run `./verify.sh --live`; live `ECS.DeepRag` dispatch is
+  intentionally unsupported in Flow v2 for this task.
+
+success_criteria:
+  - type: file_exists
+    description: "FIL source file exists"
+    path: "SummarizeContract.fil"
+    weight: 1.0
+
+  - type: file_exists
+    description: "Bindings exist"
+    path: "bindings.json"
+    weight: 1.0
+
+  - type: run_command
+    description: "No manifest sidecar was authored"
+    command: "test ! -e SummarizeContract.manifest.flow"
+    timeout: 5
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "FIL parses cleanly"
+    command: "./parse-fil.sh SummarizeContract.fil"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "flow-run dry-run passes with the Summarize fixture"
+    command: 'FLOW_V2_LIBRARY_JSON="$PWD/.flow-v2-library-json" ./verify.sh'
+    timeout: 90
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "v2 to v1 conversion succeeds"
+    command: 'FLOW_V2_LIBRARY_JSON="$PWD/.flow-v2-library-json" ./convert.sh SummarizeContract'
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_exists
+    description: "Converted v1 .flow exists"
+    path: "SummarizeContract.flow"
+    weight: 1.0
+
+  - type: run_command
+    description: "Converted .flow contains the required Summarize shape and validates"
+    command: "python3 $TASK_DIR/../shared/check_summarize_flow.py --fil SummarizeContract.fil --converted-flow SummarizeContract.flow"
+    timeout: 90
+    expected_exit_code: 0
+    weight: 5.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Converted .flow validates"
+    command: "uip maestro flow validate SummarizeContract.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "format succeeds"
+    command: "uip maestro flow format SummarizeContract.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: llm_judge
+    description: "Flow invokes Summarize over a trigger-bound file and returns summary/citations"
+    prompt: |
+      Did the agent author a two-file v2 Flow that:
+      (a) declares the exact Summarize action
+          `summarizeContract: uipath.pattern.deep-rag@1.0` in FIL;
+      (b) takes opaque trigger-bound `documentFile: file` metadata in `main`
+          without trying to read or dereference it in FIL;
+      (c) wires `rawInputs.attachment` to
+          `=js:$vars.manualStart.output.documentFile`;
+      (d) sets the required prompt and `returnCitations: true`;
+      (e) invokes `summarizeContract` by action identifier, not a string;
+      (f) returns PascalCase `content.Text` and `content.Citations`;
+      (g) converts to a valid v1 `.flow` with no manifest sidecar?
+
+      Score 1.0 if all seven pieces are present. Subtract 0.12 per missing
+      piece. If the solution uses connector or process-resource bindings for
+      Summarize, cap at 0.5. If a manifest sidecar is required, cap at 0.4.
+    files:
+      - "SummarizeContract.fil"
+      - "bindings.json"
+      - "SummarizeContract.flow"
+    weight: 3.0
+    pass_threshold: 0.7

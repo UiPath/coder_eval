@@ -1,0 +1,185 @@
+task_id: uipath-flow-summarize
+description: >
+  Author a Flow v1 (.flow JSON) project that invokes the OOTB Summarize
+  pattern node over a trigger-bound file attachment handle and validates with
+  the v1 schema. V1 counterpart to v2_authoring/summarize_v2.
+tags: [flow, flow-json, generate, summarize, deep-rag, document-processing, non-is-node]
+
+run_limits:
+  max_turns: 80
+  turn_timeout: 1800
+  task_timeout: 2400
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+initial_prompt: |
+  Before starting, load the `uipath-maestro-flow` skill and read its
+  SKILL.md. Author the flow as v1 JSON. Do NOT use Flow v2, FIL, or C#.
+  Do NOT ask for approval, confirmation, or feedback. Build the complete
+  flow end-to-end in a single pass.
+  Use the required node and definition shapes below as the source of truth;
+  do not spend time searching registries or example projects unless validation
+  fails.
+
+  Create a UiPath Flow project named **SummarizeContract**.
+
+  ## Scenario
+
+  The flow takes one trigger-bound file attachment handle named
+  `documentFile`, invokes the OOTB Summarize pattern node over the whole
+  attachment through the node input, and returns the synthesized summary text
+  plus citations as flow outputs.
+
+  ## Flow behavior
+
+  1. Start with a manual trigger whose node id is `manualStart`.
+  2. Declare a global input variable `documentFile` with:
+     - `direction: "in"`
+     - `type: "file"`
+     - `triggerNodeId: "manualStart"`
+  3. Run one Summarize node with id `summarizeContract` and label
+     `Summarize Contract`.
+  4. The Summarize node must use the whole trigger output attachment handle:
+     `=js:$vars.manualStart.output.documentFile`.
+  5. Use this exact prompt:
+     `Write a 5-bullet executive summary covering scope, term, SLAs, penalties, and termination.`
+  6. Set `returnCitations` to boolean `true`.
+  7. End the flow and map flow outputs:
+     - `summary` from `=js:$vars.summarizeContract.output.content.Text`
+     - `citations` from `=js:$vars.summarizeContract.output.content.Citations`
+
+  ## Files to write
+
+  Save the flow as:
+
+  - `SummarizeContract/project.uiproj`
+  - `SummarizeContract/flow_files/SummarizeContract.flow`
+
+  ## Required Summarize node shape
+
+  The Summarize node instance must have:
+
+  - `type: "uipath.pattern.deep-rag"`
+  - `typeVersion: "1.0"`
+  - `id: "summarizeContract"`
+  - no instance-level `model` block
+  - `inputs.attachment: "=js:$vars.manualStart.output.documentFile"`
+  - `inputs.prompt` set to the exact prompt above
+  - `inputs.returnCitations: true`
+  - `outputs.output.source: "=response"`
+  - `outputs.error.source: "=Error"`
+
+  Use this output block:
+
+  ```json
+  {
+    "output": {
+      "type": "object",
+      "source": "=response",
+      "var": "output"
+    },
+    "error": {
+      "type": "object",
+      "source": "=Error",
+      "var": "error"
+    }
+  }
+  ```
+
+  Do not pass a file id, URL, path, `.Id`, `.FullName`, or a bare
+  `=js:$vars.documentFile` variable. The attachment input must be the whole
+  trigger output attachment handle: `=js:$vars.manualStart.output.documentFile`.
+
+  ## Required definitions
+
+  Include a matching `definitions[]` entry for every node type used in the
+  flow, including this Summarize node, manual trigger, and end node. The
+  Summarize definition must include:
+
+  - `nodeType: "uipath.pattern.deep-rag"`
+  - `version: "1.0"`
+  - `category: "document-processing"`
+  - `display.label: "Summarize"`
+  - `display.icon: "sigma"`
+  - `model.type: "bpmn:ServiceTask"`
+  - `model.serviceType: "ECS.DeepRag"`
+  - `inputDefinition.properties.attachment`
+  - `inputDefinition.properties.prompt`
+  - `inputDefinition.properties.returnCitations`
+  - `inputDefaults.returnCitations: false`
+  - `outputDefinition.output.source: "=response"`
+  - PascalCase output schema fields:
+    `Text`, `Citations`, `Ordinal`, `PageNumber`, `Source`, `Reference`
+
+  ## Verifying your work
+
+  ```bash
+  $HOME/.bun/bin/uip maestro flow validate SummarizeContract/flow_files/SummarizeContract.flow
+  $HOME/.bun/bin/uip maestro flow format SummarizeContract/flow_files/SummarizeContract.flow
+  ```
+
+  Iterate until validation succeeds. Do not substitute a mock, connector,
+  Agent, or process-resource node for Summarize.
+
+success_criteria:
+  - type: file_exists
+    description: "project.uiproj exists"
+    path: "SummarizeContract/project.uiproj"
+    weight: 1.0
+
+  - type: file_exists
+    description: "Flow file exists"
+    path: "SummarizeContract/flow_files/SummarizeContract.flow"
+    weight: 1.0
+
+  - type: run_command
+    description: "Flow contains the required Summarize shape and validates"
+    command: "python3 $TASK_DIR/../shared/check_summarize_flow.py --v1-flow SummarizeContract/flow_files/SummarizeContract.flow"
+    timeout: 90
+    expected_exit_code: 0
+    weight: 5.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "v1 .flow validates"
+    command: "UIPATH_FLOW_CLI=${UIPATH_FLOW_CLI:-$HOME/.bun/bin/uip}; \"$UIPATH_FLOW_CLI\" maestro flow validate SummarizeContract/flow_files/SummarizeContract.flow"
+    timeout: 90
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "format succeeds"
+    command: "UIPATH_FLOW_CLI=${UIPATH_FLOW_CLI:-$HOME/.bun/bin/uip}; \"$UIPATH_FLOW_CLI\" maestro flow format SummarizeContract/flow_files/SummarizeContract.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: llm_judge
+    description: "Flow invokes Summarize over a trigger-bound file and returns summary/citations"
+    prompt: |
+      Did the agent author a v1 .flow JSON that:
+      (a) contains exactly one `uipath.pattern.deep-rag` node named
+          `summarizeContract` with `typeVersion: "1.0"`;
+      (b) wires `inputs.attachment` to
+          `=js:$vars.manualStart.output.documentFile`;
+      (c) declares `documentFile` as a trigger-bound file input variable;
+      (d) sets the required prompt and `returnCitations: true`;
+      (e) returns PascalCase `content.Text` and `content.Citations`;
+      (f) includes definitions needed for v1 validation?
+
+      Score 1.0 if all six pieces are present and structurally connected.
+      Subtract 0.16 per missing piece. If the Summarize node is replaced by a
+      mock, connector, Agent, or process-resource node, cap the score at 0.3.
+    files:
+      - "SummarizeContract/flow_files/SummarizeContract.flow"
+    weight: 3.0
+    pass_threshold: 0.7

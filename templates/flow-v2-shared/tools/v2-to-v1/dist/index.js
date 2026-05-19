@@ -197,6 +197,10 @@ function buildProcessResourceDefinitionsFromManifest(manifest) {
         }
         if (nodeType === 'uipath.agent.autonomous') {
             out[node.type] = buildInlineAgentDefinition(version, node);
+            continue;
+        }
+        if (nodeType === 'uipath.pattern.deep-rag') {
+            out[node.type] = buildSummarizeDefinition(version);
         }
     }
     return out;
@@ -545,6 +549,97 @@ function buildInlineAgentDefinition(version, node) {
                 { name: 'name', type: 'string', value: '' },
                 { name: 'entryPoint', type: 'string', value: '' },
             ],
+        },
+    };
+}
+function buildSummarizeDefinition(version) {
+    return {
+        nodeType: 'uipath.pattern.deep-rag',
+        version,
+        category: 'document-processing',
+        tags: ['synthesis', 'citation', 'reasoning'],
+        sortOrder: 1,
+        supportsErrorHandling: true,
+        display: {
+            label: 'Summarize',
+            icon: 'sigma',
+        },
+        handleConfiguration: [
+            {
+                position: 'left',
+                handles: [
+                    {
+                        id: 'input',
+                        type: 'target',
+                        handleType: 'input',
+                    },
+                ],
+            },
+            {
+                position: 'right',
+                handles: [
+                    {
+                        id: 'output',
+                        type: 'source',
+                        handleType: 'output',
+                    },
+                ],
+            },
+        ],
+        model: {
+            type: 'bpmn:ServiceTask',
+            serviceType: 'ECS.DeepRag',
+        },
+        inputDefinition: {
+            type: 'object',
+            properties: {
+                attachment: { type: 'string' },
+                prompt: { type: 'string' },
+                returnCitations: { type: 'boolean' },
+            },
+        },
+        inputDefaults: {
+            attachment: '',
+            prompt: '',
+            returnCitations: false,
+        },
+        outputDefinition: {
+            output: {
+                type: 'object',
+                source: '=response',
+                var: 'output',
+                schema: {
+                    $schema: 'http://json-schema.org/draft-07/schema#',
+                    type: 'object',
+                    properties: {
+                        id: { type: 'string' },
+                        content: {
+                            type: ['object', 'null'],
+                            properties: {
+                                Text: { type: 'string' },
+                                Citations: {
+                                    type: ['array', 'null'],
+                                    items: {
+                                        type: 'object',
+                                        properties: {
+                                            Ordinal: { type: 'integer' },
+                                            PageNumber: { type: 'integer' },
+                                            Source: { type: 'string' },
+                                            Reference: { type: 'string' },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            error: {
+                type: 'object',
+                description: 'Error information if the node fails',
+                source: '=Error',
+                var: 'error',
+            },
         },
     };
 }

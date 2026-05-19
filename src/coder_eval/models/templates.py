@@ -6,11 +6,13 @@ import os
 from abc import ABC
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class StarterFile(BaseModel):
     """A file to create in the sandbox before agent starts."""
+
+    model_config = ConfigDict(extra="forbid")
 
     path: str = Field(description="Relative path in sandbox (e.g., 'src/main.py')")
     content: str = Field(description="File content")
@@ -22,7 +24,7 @@ class BaseTemplateSource(BaseModel, ABC):
     Note: No type field here - each subclass defines its own Literal type.
     """
 
-    pass
+    model_config = ConfigDict(extra="forbid")
 
 
 class TemplateDirSource(BaseTemplateSource):
@@ -37,6 +39,15 @@ class TemplateDirSource(BaseTemplateSource):
             "Defaults to '.' (sandbox root). Must be a relative path that stays within the sandbox."
         ),
     )
+    include_patterns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Template-relative glob patterns to copy even when the path matches a default sandbox "
+            "ignore pattern. Author-controlled — re-including sensitive directories such as `.git` "
+            "or `.env` is possible, so review patterns when writing tasks. `*` does not stop at `/`, "
+            "see `_matches_template_include_pattern`."
+        ),
+    )
 
     @field_validator("mount_point")
     @classmethod
@@ -48,6 +59,19 @@ class TemplateDirSource(BaseTemplateSource):
         parts = v.replace("\\", "/").split("/")
         if any(p == ".." for p in parts):
             raise ValueError(f"mount_point must not contain '..' segments, got: {v!r}")
+        return v
+
+    @field_validator("include_patterns")
+    @classmethod
+    def _validate_include_patterns(cls, v: list[str]) -> list[str]:
+        for pattern in v:
+            if not pattern:
+                raise ValueError("include_patterns entries must not be empty")
+            if os.path.isabs(pattern) or pattern.startswith(("/", "\\")):
+                raise ValueError(f"include_patterns entries must be relative, got: {pattern!r}")
+            parts = pattern.replace("\\", "/").split("/")
+            if any(p == ".." for p in parts):
+                raise ValueError(f"include_patterns entries must not contain '..' segments, got: {pattern!r}")
         return v
 
 

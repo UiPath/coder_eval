@@ -1,4 +1,4 @@
-import { HistoryEvent, ResolvedAgentNode, ResolvedApiWorkflowNode, ResolvedConnectorNode, ResolvedHitlNode, ResolvedHttpNode, ResolvedInlineAgentNode, ResolvedMockNode, ResolvedNode, ResolvedRpaWorkflowNode, ResolvedScriptNode } from './types';
+import { HistoryEvent, ResolvedAgentNode, ResolvedApiWorkflowNode, ResolvedConnectorNode, ResolvedHitlNode, ResolvedHttpNode, ResolvedInlineAgentNode, ResolvedMockNode, ResolvedNode, ResolvedRpaWorkflowNode, ResolvedScriptNode, ResolvedSummarizeNode } from './types';
 export interface DispatchResult {
     outputJson: string;
     raw: string;
@@ -39,4 +39,5 @@ export declare function dispatchApiWorkflow(node: ResolvedApiWorkflowNode, input
 export declare function dispatchRpaWorkflow(node: ResolvedRpaWorkflowNode, inputJson: string, opts: DispatchOptions): DispatchResult;
 export declare function dispatchInlineAgent(node: ResolvedInlineAgentNode, inputJson: string, opts: DispatchOptions): DispatchResult;
 export declare function dispatchHitl(node: ResolvedHitlNode, inputJson: string, opts: DispatchOptions): DispatchResult;
+export declare function dispatchSummarize(node: ResolvedSummarizeNode, inputJson: string, opts: DispatchOptions): DispatchResult;
 export declare function dispatchScript(node: ResolvedScriptNode, inputJson: string, opts: DispatchOptions): DispatchResult;

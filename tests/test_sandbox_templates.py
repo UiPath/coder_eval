@@ -244,6 +244,99 @@ class TestTemplateIgnorePatterns:
         finally:
             sandbox.cleanup(preserve=False)
 
+    def test_template_include_patterns_restore_ignored_paths(self, tmp_path):
+        """Template sources can opt committed generated assets back into copying."""
+        template_dir = tmp_path / "template"
+        dist_dir = template_dir / "tools" / "fil" / "dist"
+        src_dir = template_dir / "tools" / "fil" / "src"
+        node_modules_dir = template_dir / "tools" / "node_modules" / "wabt"
+        dist_dir.mkdir(parents=True)
+        src_dir.mkdir(parents=True)
+        node_modules_dir.mkdir(parents=True)
+        (dist_dir / "index.js").write_text("console.log('built')")
+        (src_dir / "index.ts").write_text("export {}")
+        (node_modules_dir / "index.js").write_text("module.exports = {}")
+
+        config = SandboxConfig(
+            driver="tempdir",
+            python=None,
+            template_sources=[
+                TemplateDirSource(
+                    path=str(template_dir),
+                    include_patterns=["tools/*/dist", "tools/*/dist/**"],
+                ),
+            ],
+        )
+        sandbox = Sandbox(config, task_id="test-include-ignored")
+
+        try:
+            sandbox_path = sandbox.setup()
+
+            assert (sandbox_path / "tools" / "fil" / "dist" / "index.js").exists()
+            assert (sandbox_path / "tools" / "fil" / "src" / "index.ts").exists()
+            assert not (sandbox_path / "tools" / "node_modules").exists()
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_template_dir_survives_ignored_segment_in_ancestor(self, tmp_path):
+        """Ancestor dirs matching ignore tokens (e.g. ~/build/…) must not nuke templates."""
+        # Stage the template under a parent named like a default ignore pattern.
+        # If `_should_ignore_template_file` checked absolute path segments, this
+        # would silently drop every file in the template.
+        outer = tmp_path / "build"
+        template_dir = outer / "template"
+        (template_dir / "src").mkdir(parents=True)
+        (template_dir / "src" / "module.py").write_text("def foo(): pass")
+        (template_dir / "README.md").write_text("# Test")
+
+        config = SandboxConfig(
+            driver="tempdir",
+            python=None,
+            template_sources=[TemplateDirSource(path=str(template_dir))],
+        )
+        sandbox = Sandbox(config, task_id="test-ancestor-segment")
+
+        try:
+            sandbox_path = sandbox.setup()
+            assert (sandbox_path / "src" / "module.py").exists()
+            assert (sandbox_path / "README.md").exists()
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_template_include_patterns_strip_leading_dot_slash(self, tmp_path):
+        """`./tools/...` patterns are normalized to `tools/...` (removeprefix, not lstrip)."""
+        template_dir = tmp_path / "template"
+        dist_dir = template_dir / "tools" / "fil" / "dist"
+        dist_dir.mkdir(parents=True)
+        (dist_dir / "index.js").write_text("console.log('built')")
+
+        config = SandboxConfig(
+            driver="tempdir",
+            python=None,
+            template_sources=[
+                TemplateDirSource(
+                    path=str(template_dir),
+                    include_patterns=["./tools/*/dist", "./tools/*/dist/**"],
+                ),
+            ],
+        )
+        sandbox = Sandbox(config, task_id="test-include-leading-dot")
+
+        try:
+            sandbox_path = sandbox.setup()
+            assert (sandbox_path / "tools" / "fil" / "dist" / "index.js").exists()
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_template_include_patterns_reject_absolute_or_parent(self):
+        """Validator rejects absolute paths and `..` segments in include_patterns."""
+        with pytest.raises(ValueError, match="must be relative"):
+            TemplateDirSource(path="/tmp/x", include_patterns=["/etc/passwd"])
+        with pytest.raises(ValueError, match=r"must not contain '\.\.'"):
+            TemplateDirSource(path="/tmp/x", include_patterns=["../escape/**"])
+        with pytest.raises(ValueError, match="must not be empty"):
+            TemplateDirSource(path="/tmp/x", include_patterns=[""])
+
 
 class TestStarterFiles:
     """Tests for starter_files functionality."""

@@ -326,10 +326,6 @@ class TypeChecker {
         if (!this.functions.has('main')) {
             throw new Error('FIL program must define a main() function');
         }
-        const main = this.functions.get('main');
-        if (main.params.length > 0) {
-            throw new Error('main() must take no parameters');
-        }
         // Second pass: type check each function
         for (const fn of program.functions) {
             this.checkFunction(fn);

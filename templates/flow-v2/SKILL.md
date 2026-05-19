@@ -13,7 +13,7 @@ A v2 flow project is **two files**:
 | `<Name>.fil`     | FIL source — async TypeScript-subset describing the flow's logic, the flow identity, and the nodes (actions + triggers) it uses   |
 | `bindings.json`  | Connection IDs (folder, connector, agent process keys) referenced by the FIL action/trigger declarations                          |
 
-**Primary verifier:** `./verify.sh` parses the FIL, validates connector bindings against your tenant (via `uip is connections list`), validates process-resource bindings from `bindings.json`, validates inline Agent `rawInputs` shape, and executes supported node decisions. Connector calls go through `uip is resources execute`; Agent nodes are validated and dry-run only until live Agent dispatch is wired. It records every dispatch in `decisions.json` so you can see what was sent and what came back. Use it as the inner loop while authoring.
+**Primary verifier:** `./verify.sh` parses the FIL, validates connector bindings against your tenant (via `uip is connections list`), validates process-resource bindings from `bindings.json`, validates inline Agent and Summarize `rawInputs` shape, and executes supported node decisions. Connector calls go through `uip is resources execute`; Agent and Summarize nodes are validated and dry-run only until live product dispatch is wired. It records every dispatch in `decisions.json` so you can see what was sent and what came back. Use it as the inner loop while authoring.
 
 **Final compatibility check (deploy gate):** `./convert.sh <Name>` produces `<Name>.flow` (the v1 form), then `uip maestro flow validate <Name>.flow` cross-checks against the v1 schema. Run this before declaring the flow shippable, but don't depend on it for iteration — `./verify.sh`'s errors are far more actionable than `convert + validate`'s output.
 
@@ -38,7 +38,7 @@ A v2 flow project is **two files**:
 5. **Verify with `./verify.sh`** (the inner authoring loop):
    - `./verify.sh` — parses FIL, resolves bindings, lists what would be dispatched. No connector calls. Surfaces compile errors with file:line:col, missing/stub bindings, unknown node types.
    - Replace stub UUIDs with real connection IDs from `verify.sh`'s "candidates for X:" hints (or from `uip is connections list` directly).
-   - `./verify.sh --live` — runs supported live nodes for real. Each connector call goes through `uip is resources execute`; HTTP nodes via `fetch()`. Do not use `--live` for Agent-bearing flows yet; live Agent dispatch fails explicitly. After completion, read `.flow-run/decisions.json` to see exact inputs and outputs per node.
+   - `./verify.sh --live` — runs supported live nodes for real. Each connector call goes through `uip is resources execute`; HTTP nodes via `fetch()`. Do not use `--live` for Agent- or Summarize-bearing flows yet; those live dispatch paths fail explicitly. After completion, read `.flow-run/decisions.json` to see exact inputs and outputs per node.
    - Iterate. Compile errors → fix the FIL. Connector failures → adjust the `inputs` you pass via `executeNode(...)` or the action's `rawInputs` (the failure envelope is preserved in `decisions.json`).
 6. **Final compatibility check** (only when the flow is otherwise done):
    - `./convert.sh <Name>` → writes `<Name>.flow`.
@@ -119,7 +119,7 @@ The `{ … }` block on an `action` or `trigger` declaration accepts these fields
 | `configuration`        | Distilled `inputs.detail.configuration` payload for integration nodes (per-instance field values)                           |
 | `configurationExtras`  | Catch-all for fields that diverge from canonical-library defaults                                                          |
 | `outputs`              | Override the library's default output schema (the v1 node's output-port → flow-variable bindings — NOT the value the node returns at runtime) |
-| `fixture`              | Dry-run value returned by fixture-aware nodes such as `core.logic.mock`, published Agents, inline Agents, and HITL quickform. Any JSON shape is allowed. |
+| `fixture`              | Dry-run value returned by fixture-aware nodes such as `core.logic.mock`, published Agents, inline Agents, HITL quickform, and Summarize. Any JSON shape is allowed. |
 
 Fields are constant-folded — literals, nested objects/arrays, and untagged template literals survive into the runtime manifest. Identifiers or arithmetic in a body field are dropped (use the runtime path via `executeNode` arguments for computed values).
 
@@ -169,6 +169,71 @@ action reviewExpense: uipath.human-in-the-loop@1.0 {
 `./verify.sh` supports HITL quickform in dry-run only. Live Action Center
 dispatch must use the product debug/runtime path.
 
+## OOTB Non-IS actions: Summarize
+
+Summarize is an OOTB pattern node, not a connector. It does not use
+`binding`, `folderBinding`, `resource`, or `resourceBindings`. Use the exact
+wire type `uipath.pattern.deep-rag@1.0`; the canvas display name is
+`Summarize`, but the node type stays `deep-rag`.
+
+Summarize attachments must be Flow attachment handles wired from a
+trigger-bound `file` input variable. In FIL, `file` is opaque metadata for
+round-tripping to v1; the WASM runtime cannot open or stream it. Do not pass a
+file id, URL, path, `.Id`, `.FullName`, or a bare `=js:$vars.documentFile`
+variable.
+
+```typescript
+flow summarize-demo {
+  name: "Summarize Demo",
+  version: "1.0.0",
+};
+
+trigger manualStart: start;
+
+action summarizeContract: uipath.pattern.deep-rag@1.0 {
+  label: "Summarize Contract",
+  rawInputs: {
+    attachment: "=js:$vars.manualStart.output.documentFile",
+    prompt: "Write a 5-bullet executive summary covering scope, term, SLAs, penalties, and termination.",
+    returnCitations: true,
+  },
+  outputs: {
+    output: { type: "object", source: "=response", var: "output" },
+    error: { type: "object", source: "=Error", var: "error" },
+  },
+  fixture: {
+    id: "dry-run-summary",
+    content: {
+      Text: "Dry-run executive summary.",
+      Citations: [
+        { Ordinal: 1, PageNumber: 2, Source: "contract.pdf", Reference: "p.2" },
+      ],
+    },
+  },
+};
+
+async function main(documentFile: file): Promise<json> {
+  const raw: string = await executeNode(summarizeContract, "{}");
+  return ({
+    summary: JSON.parse(raw).content.Text,
+    citations: JSON.parse(raw).content.Citations,
+  });
+}
+```
+
+The `documentFile: file` parameter exists to synthesize a v1 trigger-bound
+`file` input. Do not read it in FIL code. Actions that need the attachment
+must use the trigger-output expression shown above.
+
+The converted v1 node must have `typeVersion: "1.0"`, no instance `model`
+block, `inputs.attachment` in the trigger-output shape shown above, and
+`outputs.output.source: "=response"`. Output fields are PascalCase:
+`content.Text`, `content.Citations`, and citation fields `Ordinal`,
+`PageNumber`, `Source`, `Reference`.
+
+`./verify.sh` supports Summarize in dry-run only and returns the configured
+`fixture`. Live `ECS.DeepRag` dispatch must use the Flow/Studio Web debug path.
+
 ### Types
 
 ```typescript
@@ -178,6 +243,7 @@ let pi: f64 = 3.14;       // 64-bit float
 let ok: bool = true;      // boolean
 let s: string = "hi";     // string
 let j: json = ({ a: 1 }); // JSON object/array — stored as a string internally
+let f: file;              // Opaque Flow attachment metadata, preserved in v1 as type "file"
 const t: DateTime = getDateTime();
 const dur: TimeSpan = TimeSpan.fromMinutes(5n);
 ```

@@ -1,6 +1,6 @@
 import { Comment } from './trivia';
 export { Comment } from './trivia';
-export type FILType = 'i32' | 'i64' | 'f64' | 'bool' | 'string' | 'json' | 'DateTime' | 'TimeSpan' | 'void' | {
+export type FILType = 'i32' | 'i64' | 'f64' | 'bool' | 'string' | 'json' | 'file' | 'DateTime' | 'TimeSpan' | 'void' | {
     kind: 'Promise';
     inner: FILType;
 } | {

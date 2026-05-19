@@ -13,7 +13,7 @@
  * 4. Auto-layout positions on a grid
  */
 import * as AST from 'fil-compiler/dist/ast';
-import { FlowFile, FlowOverrides } from 'v1-to-v2';
+import { FlowFile, FlowOverrides, NodeVariable } from 'v1-to-v2';
 /**
  * FIL name → v1 expression path. E.g. `userId → 'vars.userId'` for a flow
  * global, or `item → 'iterator.item'` for a for-of iterator. Phase A's
@@ -31,5 +31,10 @@ export declare function filToFlowWithScope(program: AST.Program, flowId?: string
     scope: Scope;
 };
 /** Convert a FIL AST expression to a Flow expression string. */
-export declare function convertFILExprToFlowExpr(expr: AST.Expression): string;
+interface FlowExprConvertOptions {
+    nodeVars?: NodeVariable[];
+    actionIds?: Map<string, string>;
+}
+export declare function convertFILExprToFlowExpr(expr: AST.Expression, opts?: FlowExprConvertOptions): string;
+export {};
 //# sourceMappingURL=fil-to-flow.d.ts.map

@@ -217,6 +217,9 @@ async function main() {
             case 'hitl':
                 detail = `hitl ${n.taskType}`;
                 break;
+            case 'summarize':
+                detail = 'summarize';
+                break;
         }
         process.stderr.write(`    - ${n.nodeId.padEnd(24)} ${detail}\n`);
     }

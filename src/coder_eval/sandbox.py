@@ -1,6 +1,7 @@
 """Sandbox manager for isolated execution environments."""
 
 import asyncio
+import fnmatch
 import json
 import logging
 import os
@@ -266,11 +267,17 @@ class Sandbox:
 
         # Copy contents with ignore patterns
         for item in template_path.rglob("*"):
-            if self._should_ignore_template_file(item):
-                continue
-
             # Calculate relative path
             rel_path = item.relative_to(template_path)
+            # Match ignore patterns against the template-relative path only —
+            # checking the absolute path would let an ancestor directory named
+            # `dist`, `build`, `env`, `venv`, or `node_modules` filter out the
+            # entire template (e.g. if the repo is cloned under ~/build/…).
+            if self._should_ignore_template_file(rel_path) and not self._matches_template_include_pattern(
+                rel_path, source.include_patterns
+            ):
+                continue
+
             dest_path = mount_root / rel_path
 
             if item.is_dir():
@@ -371,6 +378,25 @@ class Sandbox:
         """Check if template file/directory should be ignored."""
         patterns = get_ignore_patterns(self.config.ignore_patterns)
         return should_ignore_path(path, patterns)
+
+    def _matches_template_include_pattern(self, rel_path: Path, include_patterns: list[str]) -> bool:
+        """Return whether a template-relative path is explicitly re-included.
+
+        Patterns are matched with :func:`fnmatch.fnmatchcase` against the
+        forward-slash form of ``rel_path``. Note that ``*`` does NOT stop at
+        ``/`` (unlike gitignore), so ``tools/*/dist`` will also match
+        ``tools/a/b/dist``. This is permissive by design: include patterns can
+        only re-include paths the default ignore list rejected, so widening is
+        safer than narrowing. A leading ``./`` on the pattern is stripped.
+        """
+        if not include_patterns:
+            return False
+        normalized_path = rel_path.as_posix()
+        for pattern in include_patterns:
+            normalized_pattern = pattern.replace("\\", "/").removeprefix("./")
+            if fnmatch.fnmatchcase(normalized_path, normalized_pattern):
+                return True
+        return False
 
     def _setup_virtualenv(self) -> None:
         """Create a Python virtual environment in the sandbox."""

@@ -19,6 +19,7 @@
 #     plus candidate IDs for that connector key
 #   published Agent resource bindings with missing/wrong process metadata
 #   inline Agent rawInputs.source/prompt/model/variable placeholder issues
+#   Summarize rawInputs.attachment/prompt/returnCitations issues
 #   non-CRUD or unrecognized node types
 set -euo pipefail
 

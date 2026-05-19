@@ -269,6 +269,7 @@ class FilToFlowConverter {
                 id: param.name,
                 direction: 'in',
                 type: filTypeToFlow(param.type),
+                triggerNodeId: lastNodeId,
             });
             scope.set(param.name, `vars.${param.name}`);
         }
@@ -845,7 +846,7 @@ class FilToFlowConverter {
         if (stmt.argument.kind === 'ObjectExpression') {
             // Return { a: expr1, b: expr2 } → end node with multiple outputs
             for (const prop of stmt.argument.properties) {
-                outputs[prop.key] = { source: `=js:${convertFILExprToFlowExpr(prop.value)}` };
+                outputs[prop.key] = { source: `=js:${convertFILExprToFlowExpr(prop.value, { nodeVars, actionIds: this.actionIds })}` };
                 // Also register as output variable if not already present
                 if (!globals.find(g => g.id === prop.key && g.direction === 'out')) {
                     // Change existing inout to out, or add new out
@@ -861,7 +862,7 @@ class FilToFlowConverter {
         }
         else {
             // Single return value
-            const source = `=js:${convertFILExprToFlowExpr(stmt.argument)}`;
+            const source = `=js:${convertFILExprToFlowExpr(stmt.argument, { nodeVars, actionIds: this.actionIds })}`;
             // Find an existing out variable, or promote an inout, or create one
             let outVar = globals.find(g => g.direction === 'out');
             if (!outVar) {
@@ -1196,48 +1197,94 @@ function extractLiteralValue(expr) {
         return expr.value;
     return undefined;
 }
-/** Convert a FIL AST expression to a Flow expression string. */
-function convertFILExprToFlowExpr(expr) {
+function convertFILExprToFlowExpr(expr, opts = {}) {
+    const nodeOutput = tryConvertNodeOutputExpression(expr, opts.nodeVars, opts.actionIds);
+    if (nodeOutput)
+        return nodeOutput;
     switch (expr.kind) {
         case 'Identifier':
             return expr.name;
         case 'Literal':
             return expr.raw;
         case 'BinaryExpression':
-            return `${convertFILExprToFlowExpr(expr.left)} ${expr.operator} ${convertFILExprToFlowExpr(expr.right)}`;
+            return `${convertFILExprToFlowExpr(expr.left, opts)} ${expr.operator} ${convertFILExprToFlowExpr(expr.right, opts)}`;
         case 'LogicalExpression':
-            return `${convertFILExprToFlowExpr(expr.left)} ${expr.operator} ${convertFILExprToFlowExpr(expr.right)}`;
+            return `${convertFILExprToFlowExpr(expr.left, opts)} ${expr.operator} ${convertFILExprToFlowExpr(expr.right, opts)}`;
         case 'MemberExpression': {
-            const obj = convertFILExprToFlowExpr(expr.object);
+            const obj = convertFILExprToFlowExpr(expr.object, opts);
             if (expr.computed) {
-                return `${obj}[${convertFILExprToFlowExpr(expr.property)}]`;
+                return `${obj}[${convertFILExprToFlowExpr(expr.property, opts)}]`;
             }
-            return `${obj}.${convertFILExprToFlowExpr(expr.property)}`;
+            return `${obj}.${convertFILExprToFlowExpr(expr.property, opts)}`;
         }
         case 'CallExpression': {
-            const callee = convertFILExprToFlowExpr(expr.callee);
-            const args = expr.arguments.map(convertFILExprToFlowExpr).join(', ');
+            const callee = convertFILExprToFlowExpr(expr.callee, opts);
+            const args = expr.arguments.map((arg) => convertFILExprToFlowExpr(arg, opts)).join(', ');
             return `${callee}(${args})`;
         }
         case 'AwaitExpression':
-            return convertFILExprToFlowExpr(expr.argument);
+            return convertFILExprToFlowExpr(expr.argument, opts);
         case 'UnaryExpression':
             if (expr.prefix)
-                return `${expr.operator}${convertFILExprToFlowExpr(expr.argument)}`;
-            return `${convertFILExprToFlowExpr(expr.argument)}${expr.operator}`;
+                return `${expr.operator}${convertFILExprToFlowExpr(expr.argument, opts)}`;
+            return `${convertFILExprToFlowExpr(expr.argument, opts)}${expr.operator}`;
         case 'ConditionalExpression':
-            return `${convertFILExprToFlowExpr(expr.test)} ? ${convertFILExprToFlowExpr(expr.consequent)} : ${convertFILExprToFlowExpr(expr.alternate)}`;
+            return `${convertFILExprToFlowExpr(expr.test, opts)} ? ${convertFILExprToFlowExpr(expr.consequent, opts)} : ${convertFILExprToFlowExpr(expr.alternate, opts)}`;
         case 'TypeAssertion':
-            return convertFILExprToFlowExpr(expr.expression);
+            return convertFILExprToFlowExpr(expr.expression, opts);
         case 'ObjectExpression': {
-            const props = expr.properties.map(p => p.shorthand ? p.key : `${p.key}: ${convertFILExprToFlowExpr(p.value)}`).join(', ');
+            const props = expr.properties.map(p => p.shorthand ? p.key : `${p.key}: ${convertFILExprToFlowExpr(p.value, opts)}`).join(', ');
             return `{ ${props} }`;
         }
         case 'ArrayExpression':
-            return `[${expr.elements.map(convertFILExprToFlowExpr).join(', ')}]`;
+            return `[${expr.elements.map((element) => convertFILExprToFlowExpr(element, opts)).join(', ')}]`;
         default:
             return '/* unknown */';
     }
+}
+function tryConvertNodeOutputExpression(expr, nodeVars, actionIds) {
+    const path = [];
+    let current = expr;
+    while (current.kind === 'MemberExpression' && !current.computed) {
+        if (current.property.kind !== 'Identifier')
+            return null;
+        path.unshift(current.property.name);
+        current = current.object;
+    }
+    if (current.kind !== 'CallExpression')
+        return null;
+    const callee = current.callee;
+    if (callee.kind !== 'MemberExpression' ||
+        callee.computed ||
+        callee.object.kind !== 'Identifier' ||
+        callee.object.name !== 'JSON' ||
+        callee.property.kind !== 'Identifier' ||
+        callee.property.name !== 'parse') {
+        return null;
+    }
+    const arg = current.arguments[0];
+    if (!arg || arg.kind !== 'Identifier')
+        return null;
+    const nodeVar = nodeVars?.find((v) => v.id === arg.name);
+    if (nodeVar) {
+        const suffix = path.length > 0 ? `.${path.join('.')}` : '';
+        return `$vars.${nodeVar.binding.nodeId}.${nodeVar.binding.outputId}${suffix}`;
+    }
+    const inferred = inferNodeOutputBindingFromDataIdentifier(arg.name, actionIds);
+    if (!inferred)
+        return null;
+    const suffix = path.length > 0 ? `.${path.join('.')}` : '';
+    return `$vars.${inferred.nodeId}.${inferred.outputId}${suffix}`;
+}
+function inferNodeOutputBindingFromDataIdentifier(name, actionIds) {
+    if (!actionIds || !name.endsWith('Data'))
+        return null;
+    const candidate = name.slice(0, -'Data'.length);
+    for (const nodeId of actionIds.values()) {
+        if (nodeId === candidate)
+            return { nodeId, outputId: 'output' };
+    }
+    return null;
 }
 /**
  * For each edge whose `sourcePort` doesn't match any source handle on the
@@ -1708,6 +1755,7 @@ function filTypeToFlow(t) {
             case 'i64': return 'integer';
             case 'bool': return 'boolean';
             case 'json': return 'object';
+            case 'file': return 'file';
             case 'void': return 'object';
             default: return 'object';
         }

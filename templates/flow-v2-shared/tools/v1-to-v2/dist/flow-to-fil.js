@@ -1010,6 +1010,7 @@ function flowTypeToFil(flowType) {
         case 'integer': return 'i32';
         case 'boolean': return 'bool';
         case 'object': return 'json';
+        case 'file': return 'file';
         case 'array': return { kind: 'array', element: 'json' };
         default: return 'json';
     }

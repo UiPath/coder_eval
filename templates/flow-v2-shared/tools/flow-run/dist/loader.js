@@ -65,6 +65,7 @@ const RPA_WORKFLOW_SERVICE_TYPE = 'Orchestrator.StartJob';
 const INLINE_AGENT_NODE_TYPE = 'uipath.agent.autonomous';
 const INLINE_AGENT_SERVICE_TYPE = 'Orchestrator.StartInlineAgentJob';
 const HITL_NODE_TYPE = 'uipath.human-in-the-loop';
+const SUMMARIZE_NODE_TYPE = 'uipath.pattern.deep-rag';
 // ─── Project discovery ───────────────────────────────────────────────────────
 function loadProject(projectDir, opts = {}) {
     const filPath = opts.filPath ?? autodiscoverFil(projectDir);
@@ -209,6 +210,13 @@ function resolveAllNodes(project, libraryDir, bindingResolver, out, errors, warn
             const hitlNode = resolveHitlNode(nodeId, nodeType, node, errors);
             if (hitlNode)
                 out.push(hitlNode);
+            continue;
+        }
+        // ── Summarize pattern nodes ──
+        if (nodeType === SUMMARIZE_NODE_TYPE) {
+            const summarizeNode = resolveSummarizeNode(nodeId, nodeType, node, errors);
+            if (summarizeNode)
+                out.push(summarizeNode);
             continue;
         }
         // ── Skip non-dispatchable types (control flow, triggers, end) ──
@@ -439,6 +447,33 @@ function resolveHitlNode(nodeId, nodeType, node, errors) {
         schema: schema,
         recipient: inputs.recipient,
         priority: typeof inputs.priority === 'string' ? inputs.priority : undefined,
+        fixture: pickMockFixture(node),
+    };
+}
+function resolveSummarizeNode(nodeId, nodeType, node, errors) {
+    const errorStart = errors.length;
+    const inputs = node.rawInputs ?? node.inputs ?? {};
+    const attachment = requireInlineString(nodeId, nodeType, inputs, 'attachment', errors);
+    const prompt = requireInlineString(nodeId, nodeType, inputs, 'prompt', errors);
+    const rawReturnCitations = inputs.returnCitations;
+    let returnCitations = false;
+    if (rawReturnCitations !== undefined) {
+        if (typeof rawReturnCitations !== 'boolean') {
+            errors.push(`node "${nodeId}" (${nodeType}): rawInputs.returnCitations must be a boolean when provided`);
+        }
+        else {
+            returnCitations = rawReturnCitations;
+        }
+    }
+    if (errors.length > errorStart || !attachment || !prompt)
+        return null;
+    return {
+        kind: 'summarize',
+        nodeId,
+        nodeType,
+        attachment,
+        prompt,
+        returnCitations,
         fixture: pickMockFixture(node),
     };
 }

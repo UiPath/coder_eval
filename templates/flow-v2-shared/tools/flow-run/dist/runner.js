@@ -476,6 +476,9 @@ function logNodeStart(opts, step, nodeId, node) {
         case 'hitl':
             detail = `hitl ${node.taskType}`;
             break;
+        case 'summarize':
+            detail = 'summarize';
+            break;
     }
     log(opts, `[step ${step}] -> ${nodeId} (${detail})`);
 }
