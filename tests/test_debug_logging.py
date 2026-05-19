@@ -6,6 +6,7 @@ import pytest
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.models import AgentConfig, AgentKind
+from tests._path_helpers import tmp_subdir
 
 
 @pytest.fixture
@@ -138,7 +139,7 @@ def test_format_messages_block_based_mixed(agent):
     msg = _make_assistant_message(
         content=[
             _TextBlock("Let me read that file."),
-            _ToolUseBlock("Read", "tool_1", {"path": "/tmp/test.py"}),
+            _ToolUseBlock("Read", "tool_1", {"path": str(tmp_subdir("test.py"))}),
         ]
     )
 

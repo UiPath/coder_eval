@@ -1293,6 +1293,27 @@ def test_check_parent_node_modules_contamination_clean_tree(tmp_path):
     assert sandbox._check_parent_node_modules_contamination() == []
 
 
+@pytest.mark.skipif(os.name == "nt", reason="printf-binary stunt relies on a POSIX shell")
+def test_run_command_handles_non_utf8_output():
+    """run_command must not raise UnicodeDecodeError on non-UTF-8 stdout.
+
+    Agents can produce raw bytes (binary tool output, locale-encoded errors on
+    Windows). With ``errors="replace"`` the decode falls back to U+FFFD instead
+    of crashing the run mid-criterion.
+    """
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_non_utf8")
+    try:
+        sandbox.setup()
+        # printf interprets \x80 as a raw byte — invalid UTF-8 lead byte.
+        exit_code, stdout, _stderr = sandbox.run_command(r"printf '\x80\x81'")
+        assert exit_code == 0
+        # Got back a string (replacement char or any decoded form), not a crash.
+        assert isinstance(stdout, str)
+    finally:
+        sandbox.cleanup()
+
+
 def test_run_command_npm_prefix_visible_to_subprocess():
     """End-to-end: NPM_CONFIG_PREFIX shows up in the actual command env."""
     config = SandboxConfig(driver="tempdir", python=None)

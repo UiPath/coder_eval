@@ -15,6 +15,8 @@ def _git_short_sha(repo_path: Path) -> str:
             ["git", "rev-parse", "--short", "HEAD"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             cwd=repo_path,
         )
@@ -61,14 +63,18 @@ def get_version_info(sandbox_path: Path | None = None) -> dict[str, Any]:
 
     # Try to get Claude CLI version
     try:
-        result = subprocess.run(["claude", "-v"], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(
+            ["claude", "-v"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5
+        )
         version_info["claude_code_cli"] = result.stdout.strip()
     except (FileNotFoundError, subprocess.SubprocessError):
         version_info["claude_code_cli"] = "Not Found"
 
     # Try to get uv version
     try:
-        result = subprocess.run(["uv", "--version"], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(
+            ["uv", "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5
+        )
         version_info["uv"] = result.stdout.strip()
     except (FileNotFoundError, subprocess.SubprocessError):
         version_info["uv"] = "Not Found"

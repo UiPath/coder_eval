@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,6 +16,15 @@ from coder_eval.evaluation.sub_agent import (
 from coder_eval.models import AgentConfig, AgentKind, TurnRecord
 from coder_eval.models.routing import DirectRoute
 from coder_eval.sandbox import Sandbox
+
+
+# Symlink creation on Windows requires either admin privileges or Developer
+# Mode enabled; CI runners usually have neither. Mark the tests that rely on
+# os.symlink so they skip cleanly there.
+_SKIP_NO_SYMLINK = pytest.mark.skipif(
+    os.name == "nt",
+    reason="Symlink creation on Windows requires admin or Developer Mode; not asserted in CI.",
+)
 
 
 @pytest.fixture
@@ -334,6 +344,7 @@ def test_runner_asserts_setting_sources_empty(sandbox: Sandbox, bad_sources: lis
 # --- symlink + pattern filtering (unit + end-to-end) ---
 
 
+@_SKIP_NO_SYMLINK
 def test_ignore_callable_skips_symlinks(tmp_path: Path) -> None:
     (tmp_path / "regular.txt").write_text("ok")
     (tmp_path / "sub").mkdir()
@@ -362,6 +373,7 @@ def test_ignore_callable_still_honors_patterns(tmp_path: Path) -> None:
     assert "keep.py" not in skipped
 
 
+@_SKIP_NO_SYMLINK
 def test_runner_copytree_drops_top_level_symlinks(sandbox: Sandbox, tmp_path: Path) -> None:
     """End-to-end: a malicious symlink in the sandbox does not land in the judge workspace."""
     import os
@@ -389,6 +401,7 @@ def test_runner_copytree_drops_top_level_symlinks(sandbox: Sandbox, tmp_path: Pa
     assert "leak" not in captured["entries"]
 
 
+@_SKIP_NO_SYMLINK
 def test_runner_copytree_drops_nested_symlinks(sandbox: Sandbox, tmp_path: Path) -> None:
     """Nested symlinks are stripped too, not just top-level ones."""
     import os

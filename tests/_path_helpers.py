@@ -4,7 +4,24 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 from pathlib import Path
+
+
+def tmp_subdir(*parts: str) -> Path:
+    """Return a cross-platform temp-style ``Path`` for use in tests.
+
+    Use this when a test needs a ``Path`` value as an opaque carrier (e.g.
+    a ``BatchRunConfig(run_dir=...)`` exercising validator logic) but never
+    actually touches the filesystem at that path. ``Path("/tmp/x")`` parses
+    on Windows but obscures intent; ``tmp_subdir("x")`` produces
+    ``C:\\Users\\…\\AppData\\Local\\Temp\\x`` on Windows and ``/tmp/x`` on
+    POSIX while reading the same way at the call site.
+
+    For tests that DO create files on disk, use pytest's ``tmp_path``
+    fixture instead — it cleans up automatically per-test.
+    """
+    return Path(tempfile.gettempdir(), *parts)
 
 
 # ``label`` is interpolated raw into the shim body. Restricting to a short

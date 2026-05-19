@@ -114,6 +114,7 @@ def _preflight() -> None:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=5,
         )
     except FileNotFoundError as exc:
@@ -156,6 +157,7 @@ def _preflight_image_version(image: str) -> None:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=10,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
@@ -181,6 +183,12 @@ def _preflight_image_version(image: str) -> None:
 
 
 _CONTAINER_NAME_INVALID = re.compile(r"[^a-zA-Z0-9_.-]")
+
+# A leading Windows drive letter (``C:\foo`` / ``c:/foo``). Used so the colon
+# in ``C:\foo`` is not misread as the ``src:dst`` separator when a Windows
+# task author writes an extra_mounts entry. Bare ``C:`` (no path body) is
+# intentionally not matched — that is malformed and should fail downstream.
+_DRIVE_PREFIX = re.compile(r"^[A-Za-z]:[\\/]")
 
 
 def _sanitize_container_name_component(s: str) -> str:
@@ -221,10 +229,18 @@ def _validate_extra_mount(spec: str) -> str:
       - Destinations colliding with framework mounts (``/work``, ``/``,
         etc.) are rejected outright.
     """
-    parts = spec.split(":")
+    # Split off an optional leading Windows drive letter so the colon in
+    # ``C:\foo`` is not misread as the ``src:dst`` separator. The container
+    # side is always POSIX (Docker containers are Linux), so only the source
+    # side can carry a drive letter.
+    if _DRIVE_PREFIX.match(spec):
+        head, body = spec[:2], spec[2:]
+    else:
+        head, body = "", spec
+    parts = body.split(":")
     if len(parts) < 2 or len(parts) > 3:
         raise ValueError(f"Invalid extra_mounts entry {spec!r}: expected `src:dst[:ro|rw]`.")
-    src, dst = parts[0], parts[1]
+    src, dst = head + parts[0], parts[1]
     # Default to read-only when mode is omitted. Mounting host paths RW
     # by default is the wrong sandbox stance: the few RW use-cases are
     # better stated explicitly than implied by silence.

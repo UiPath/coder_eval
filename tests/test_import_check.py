@@ -1,11 +1,13 @@
 """Tests for the import_check criterion."""
 
 import json
+import shlex
 from unittest.mock import MagicMock
 
 import pytest
 
-from coder_eval.criteria.import_check import ImportCheckChecker, extract_imports
+from coder_eval.criteria import import_check as import_check_mod
+from coder_eval.criteria.import_check import ImportCheckChecker, _python_exe, extract_imports
 from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.models import ImportCheckCriterion, SandboxConfig
 from coder_eval.sandbox import Sandbox
@@ -66,6 +68,34 @@ class TestExtractImports:
     def test_duplicates_deduplicated(self):
         source = "import os\nimport os\nfrom os import path"
         assert extract_imports(source) == ["os"]
+
+
+# ---------------------------------------------------------------------------
+# _python_exe helper tests
+# ---------------------------------------------------------------------------
+
+
+class TestPythonExe:
+    """Verify the sandbox python invocation is portable + properly quoted."""
+
+    def test_posix_quoting_via_shlex(self, monkeypatch):
+        fake_path = "/usr/local/bin/python 3.13"
+        monkeypatch.setattr(import_check_mod.os, "name", "posix")
+        monkeypatch.setattr(import_check_mod.sys, "executable", fake_path)
+        result = _python_exe()
+        # Round-trip through shlex.split to prove the quoting survives.
+        assert shlex.split(result) == [fake_path]
+
+    def test_windows_quoting_wraps_in_double_quotes(self, monkeypatch):
+        fake_path = r"C:\Program Files\Python313\python.exe"
+        monkeypatch.setattr(import_check_mod.os, "name", "nt")
+        monkeypatch.setattr(import_check_mod.sys, "executable", fake_path)
+        result = _python_exe()
+        assert result == f'"{fake_path}"'
+
+    def test_fallback_when_sys_executable_empty(self, monkeypatch):
+        monkeypatch.setattr(import_check_mod.sys, "executable", "")
+        assert _python_exe() == "python"
 
 
 # ---------------------------------------------------------------------------

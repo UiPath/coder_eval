@@ -3,8 +3,30 @@
 import asyncio
 import contextlib
 import signal
+from collections.abc import Callable
 
 import typer
+
+
+def _install_proxy_signal_handlers(loop: asyncio.AbstractEventLoop, handler: Callable[[], None]) -> None:
+    """Wire SIGINT/SIGTERM to ``handler`` with a Windows fallback.
+
+    The asyncio Proactor event loop on Windows does not implement
+    ``loop.add_signal_handler``. We try the loop-based registration first
+    (the POSIX happy path) and fall back to the synchronous ``signal.signal``
+    API if NotImplementedError is raised — that path covers Windows, and is
+    safe here because the handler is trivial (sets an Event).
+
+    The fallback covers both signals after a single failure; if SIGINT
+    succeeds and SIGTERM later raises, re-registering SIGINT through
+    ``signal.signal`` is last-write-wins harmless.
+    """
+    try:
+        loop.add_signal_handler(signal.SIGINT, handler)
+        loop.add_signal_handler(signal.SIGTERM, handler)
+    except NotImplementedError:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(sig, lambda *_args: handler())
 
 
 def proxy_command(
@@ -125,14 +147,7 @@ async def _run_proxy(port: int, env_file: str, vendor: str, api_flavor: str, qui
     def _signal_handler() -> None:
         stop_event.set()
 
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _signal_handler)
-        except NotImplementedError:
-            # Windows ProactorEventLoop doesn't support add_signal_handler;
-            # fall back to the sync signal module (safe here since the handler is trivial)
-            signal.signal(sig, lambda *_args: _signal_handler())
+    _install_proxy_signal_handlers(asyncio.get_running_loop(), _signal_handler)
 
     try:
         await stop_event.wait()

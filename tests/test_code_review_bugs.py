@@ -6,6 +6,8 @@ and PASS after.
 
 from pathlib import Path
 
+from tests._path_helpers import tmp_subdir
+
 
 class TestProjectRootResolution:
     """Bug: _PROJECT_ROOT in run_helpers.py uses 3 parent levels instead of 4.
@@ -55,7 +57,7 @@ class TestPreserveSandboxDefault:
         """BatchRunConfig.preserve_sandbox default should match CLI --preserve default."""
         from coder_eval.orchestration.config import BatchRunConfig
 
-        config = BatchRunConfig(run_dir=Path("/tmp/test"))
+        config = BatchRunConfig(run_dir=tmp_subdir("test"))
         # CLI defaults to True (--preserve/--no-preserve with default True)
         # BatchRunConfig should match
         assert config.preserve_sandbox is True, (

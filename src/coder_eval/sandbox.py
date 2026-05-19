@@ -179,7 +179,7 @@ class Sandbox:
         cmd = ["git", "clone", source.url, str(repo_dir)]
 
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=60)
+            subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", timeout=60)
 
             # Checkout specific commit if specified
             if source.commit:
@@ -189,6 +189,7 @@ class Sandbox:
                     check=True,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
                     timeout=30,
                 )
         except subprocess.CalledProcessError as e:
@@ -384,7 +385,7 @@ class Sandbox:
             subprocess.run(["uv", "--version"], check=True, capture_output=True, timeout=5)
             # Use uv to create venv
             cmd = ["uv", "venv", str(self.venv_dir)]
-            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=60)
+            subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", timeout=60)
         except (subprocess.CalledProcessError, FileNotFoundError):
             # Fallback to standard venv if uv is not available
             import venv
@@ -415,7 +416,7 @@ class Sandbox:
             env = None
 
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300, env=env)
+            subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", timeout=300, env=env)
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to install packages: {e.stderr}") from e
 
@@ -434,7 +435,15 @@ class Sandbox:
             cmd = ["npm", "install", *packages]
 
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300, cwd=self.sandbox_dir)
+            subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=300,
+                cwd=self.sandbox_dir,
+            )
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to install node packages: {e.stderr}") from e
 
@@ -788,7 +797,11 @@ class Sandbox:
         env = self._build_run_command_env()
 
         try:
-            # Shell execution is intentional for sandbox - allows pipes, redirects, and complex commands
+            # Shell execution is intentional for sandbox - allows pipes, redirects, and complex commands.
+            # Decode stdout/stderr as UTF-8 with replacement on bad bytes so an agent that emits
+            # non-UTF-8 output (e.g. raw binary, locale-encoded compiler errors on Windows) does not
+            # kill the run with UnicodeDecodeError. Downstream callers (e.g. import_check) only need
+            # JSON-parseable strings; a replacement char is preferable to a crash.
             result = subprocess.run(
                 command,
                 shell=True,  # nosec B602 - Required for sandbox command execution
@@ -796,6 +809,8 @@ class Sandbox:
                 env=env,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
             )
 

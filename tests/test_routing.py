@@ -1,5 +1,8 @@
 """Tests for API routing: _build_sdk_env() and route dataclasses."""
 
+import os
+import tempfile
+
 from claude_agent_sdk import ClaudeAgentOptions
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _dump_sdk_options
@@ -14,7 +17,7 @@ class TestBuildSdkEnv:
 
     def test_direct_forwards_path_when_set(self, monkeypatch):
         """DirectRoute forwards PATH when set in parent environment."""
-        custom_path = "/custom/bin:/usr/bin"
+        custom_path = f"/custom/bin{os.pathsep}/usr/bin"
         monkeypatch.setenv("PATH", custom_path)
         env, model = ClaudeCodeAgent._build_sdk_env(DirectRoute())
         assert env["PATH"] == custom_path
@@ -29,7 +32,7 @@ class TestBuildSdkEnv:
 
     def test_proxy_returns_base_url_and_dummy_key(self, monkeypatch):
         """ProxyRoute produces ANTHROPIC_BASE_URL, dummy API key, and forwards PATH."""
-        custom_path = "/proxy/bin:/usr/bin"
+        custom_path = f"/proxy/bin{os.pathsep}/usr/bin"
         monkeypatch.setenv("PATH", custom_path)
         env, _ = ClaudeCodeAgent._build_sdk_env(ProxyRoute(port=8080))
         assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8080"
@@ -43,7 +46,7 @@ class TestBuildSdkEnv:
 
     def test_bedrock_basic_env(self, monkeypatch):
         """BedrockRoute produces CLAUDE_CODE_USE_BEDROCK, token, region, and forwards PATH."""
-        custom_path = "/bedrock/bin:/usr/bin"
+        custom_path = f"/bedrock/bin{os.pathsep}/usr/bin"
         monkeypatch.setenv("PATH", custom_path)
         route = BedrockRoute(bearer_token="tok-123", region="us-east-1")
         env, _ = ClaudeCodeAgent._build_sdk_env(route)
@@ -329,7 +332,7 @@ class TestSdkOptionsDumpRedaction:
         """AWS_BEARER_TOKEN_BEDROCK must not appear in plain text in sdk_options dump."""
         route = BedrockRoute(bearer_token="SECRET_TOKEN_123", region="us-east-1")
         env, _ = ClaudeCodeAgent._build_sdk_env(route)
-        opts = ClaudeAgentOptions(cwd="/tmp", env=env)
+        opts = ClaudeAgentOptions(cwd=tempfile.gettempdir(), env=env)
         dump = _dump_sdk_options(opts)
         env_dump = dump.get("env", {})
         assert env_dump.get("AWS_BEARER_TOKEN_BEDROCK") != "SECRET_TOKEN_123"
@@ -337,7 +340,7 @@ class TestSdkOptionsDumpRedaction:
     def test_proxy_dummy_key_redacted_in_dump(self):
         """ANTHROPIC_API_KEY (even dummy) is redacted in sdk_options dump."""
         env, _ = ClaudeCodeAgent._build_sdk_env(ProxyRoute(port=8080))
-        opts = ClaudeAgentOptions(cwd="/tmp", env=env)
+        opts = ClaudeAgentOptions(cwd=tempfile.gettempdir(), env=env)
         dump = _dump_sdk_options(opts)
         env_dump = dump.get("env", {})
         assert env_dump.get("ANTHROPIC_API_KEY") != "llmgw-proxy"

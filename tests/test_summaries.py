@@ -4,6 +4,7 @@ from datetime import datetime
 
 from coder_eval.evaluation.summaries import summarize_commands
 from coder_eval.models import CommandTelemetry
+from tests._path_helpers import tmp_subdir
 
 
 def _make_cmd(tool_name="Bash", params=None, status="success", seq=0, result_summary=None):
@@ -31,9 +32,10 @@ class TestSummarizeCommands:
         assert "[success]" in result
 
     def test_read_file_path_shown(self):
-        cmd = _make_cmd(tool_name="Read", params={"file_path": "/tmp/test.py"}, seq=0)
+        path_str = str(tmp_subdir("test.py"))
+        cmd = _make_cmd(tool_name="Read", params={"file_path": path_str}, seq=0)
         result = summarize_commands([cmd])
-        assert "/tmp/test.py" in result
+        assert path_str in result
 
     def test_grep_pattern_shown(self):
         cmd = _make_cmd(tool_name="Grep", params={"pattern": "def main"}, seq=0)

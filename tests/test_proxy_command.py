@@ -1,12 +1,13 @@
 """Unit tests for the standalone proxy CLI command."""
 
 import asyncio
+import signal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import typer
 
-from coder_eval.cli.proxy_command import _run_proxy
+from coder_eval.cli.proxy_command import _install_proxy_signal_handlers, _run_proxy
 
 
 @pytest.fixture
@@ -83,6 +84,36 @@ class TestProxyCommandValidation:
             with pytest.raises(typer.Exit) as exc_info:
                 await _run_proxy(port=0, env_file=".env", vendor="awsbedrock", api_flavor="invoke", quiet=False)
             assert exc_info.value.exit_code == 1
+
+
+class TestSignalHandlerInstallation:
+    """Verify _install_proxy_signal_handlers picks the right backend per platform."""
+
+    def test_posix_path_uses_loop_add_signal_handler(self):
+        loop = MagicMock(spec=asyncio.AbstractEventLoop)
+        handler = MagicMock()
+
+        _install_proxy_signal_handlers(loop, handler)
+
+        assert loop.add_signal_handler.call_count == 2
+        loop.add_signal_handler.assert_any_call(signal.SIGINT, handler)
+        loop.add_signal_handler.assert_any_call(signal.SIGTERM, handler)
+
+    def test_windows_path_falls_back_to_signal_signal(self):
+        loop = MagicMock(spec=asyncio.AbstractEventLoop)
+        loop.add_signal_handler.side_effect = NotImplementedError
+        handler = MagicMock()
+
+        with patch("coder_eval.cli.proxy_command.signal.signal") as mock_signal:
+            _install_proxy_signal_handlers(loop, handler)
+
+        signals_registered = {call.args[0] for call in mock_signal.call_args_list}
+        assert signals_registered == {signal.SIGINT, signal.SIGTERM}
+        # The lambda passed to signal.signal must invoke ``handler``; a regression
+        # where the lambda captured nothing would otherwise pass silently.
+        registered_lambda = mock_signal.call_args_list[0].args[1]
+        registered_lambda(signal.SIGINT, None)
+        handler.assert_called_once()
 
 
 class TestProxyCommandOutput:

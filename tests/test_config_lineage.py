@@ -19,6 +19,7 @@ from coder_eval.orchestration.experiment import (
     resolve_task_for_variant,
 )
 from coder_eval.orchestration.task_loader import load_task
+from tests._path_helpers import tmp_subdir
 
 
 def _write_task_yaml(path: Path, task_id: str, agent: dict | None = None, **extras) -> Path:
@@ -270,7 +271,7 @@ class TestApplyCliOverridesLineage:
             success_criteria=[{"type": "file_exists", "path": "t.py", "description": "x"}],
         )
         lineage: dict[str, ConfigLineageEntry] = {}
-        config = BatchRunConfig(run_dir=Path("/tmp/run"), max_parallel=1, agent_model="opus-override")
+        config = BatchRunConfig(run_dir=tmp_subdir("run"), max_parallel=1, agent_model="opus-override")
         with patch("coder_eval.config.settings") as mock_settings:
             mock_settings.default_agent_model = None
             mock_settings.default_permission_mode = None
@@ -293,7 +294,7 @@ class TestApplyCliOverridesLineage:
         )
         lineage: dict[str, ConfigLineageEntry] = {}
         config = BatchRunConfig(
-            run_dir=Path("/tmp/run"), max_parallel=1, snapshot_mode="hybrid", snapshot_checkpoint_freq=2
+            run_dir=tmp_subdir("run"), max_parallel=1, snapshot_mode="hybrid", snapshot_checkpoint_freq=2
         )
         with patch("coder_eval.config.settings") as mock_settings:
             mock_settings.default_agent_model = None
@@ -317,7 +318,7 @@ class TestApplyCliOverridesLineage:
             success_criteria=[{"type": "file_exists", "path": "t.py", "description": "x"}],
         )
         lineage: dict[str, ConfigLineageEntry] = {}
-        config = BatchRunConfig(run_dir=Path("/tmp/run"), max_parallel=1, disallowed_tools=["TodoWrite", "Agent"])
+        config = BatchRunConfig(run_dir=tmp_subdir("run"), max_parallel=1, disallowed_tools=["TodoWrite", "Agent"])
         with patch("coder_eval.config.settings") as mock_settings:
             mock_settings.default_agent_model = None
             mock_settings.default_permission_mode = None
@@ -370,7 +371,7 @@ class TestApplyCliOverridesLineage:
             success_criteria=[{"type": "file_exists", "path": "t.py", "description": "x"}],
         )
         lineage: dict[str, ConfigLineageEntry] = {}
-        config = BatchRunConfig(run_dir=Path("/tmp/run"), max_parallel=1)
+        config = BatchRunConfig(run_dir=tmp_subdir("run"), max_parallel=1)
         with patch("coder_eval.config.settings", real_settings):
             _apply_cli_overrides(task, config, lineage)
         assert task.agent.model == "claude-opus-4-7"
@@ -388,7 +389,7 @@ class TestApplyCliOverridesLineage:
             success_criteria=[{"type": "file_exists", "path": "t.py", "description": "x"}],
         )
         lineage: dict[str, ConfigLineageEntry] = {}
-        config = BatchRunConfig(run_dir=Path("/tmp/run"), max_parallel=1)
+        config = BatchRunConfig(run_dir=tmp_subdir("run"), max_parallel=1)
         with patch("coder_eval.config.settings") as mock_settings:
             mock_settings.default_agent_model = "env-model"
             mock_settings.default_permission_mode = None

@@ -117,7 +117,7 @@ def load_experiment(experiment_file: Path) -> ExperimentDefinition:
     if not experiment_file.exists():
         raise FileNotFoundError(f"Experiment file not found: {experiment_file}")
 
-    with open(experiment_file) as f:
+    with open(experiment_file, encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
     try:

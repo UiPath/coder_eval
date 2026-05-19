@@ -1,11 +1,18 @@
 """Tests for report generation module."""
 
+import os
 from datetime import datetime
 
 import pytest
 
 from coder_eval.models import RunSummary
 from coder_eval.reports import ReportGenerator
+
+
+_SKIP_NO_SYMLINK = pytest.mark.skipif(
+    os.name == "nt",
+    reason="Symlink creation on Windows requires admin or Developer Mode; not asserted in CI.",
+)
 
 
 def _make_task_result(
@@ -436,6 +443,7 @@ def test_load_from_run_dir_missing_files(tmp_path):
         ReportGenerator.load_from_run_dir(run_dir)
 
 
+@_SKIP_NO_SYMLINK
 def test_load_from_run_dir_resolves_symlink(tmp_path):
     """Test that symlinks are resolved when loading reports."""
     # Create actual run directory

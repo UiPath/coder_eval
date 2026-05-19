@@ -4,14 +4,13 @@ CLAUDE.md item 10: every new BatchRunConfig field must be exercised across
 all 5 merge layers. This file covers `BatchRunConfig.driver`.
 """
 
-from pathlib import Path
-
 import pytest
 from pydantic import ValidationError
 
 from coder_eval.models import AgentConfig, AgentKind, FileExistsCriterion, SandboxConfig, TaskDefinition
 from coder_eval.orchestration.config import BatchRunConfig
 from coder_eval.orchestration.experiment import _apply_cli_overrides
+from tests._path_helpers import tmp_subdir
 
 
 def _make_task(driver: str = "tempdir") -> TaskDefinition:
@@ -29,14 +28,14 @@ class TestDriverOverride:
     def test_cli_override_wins_over_task_yaml(self):
         """`--driver docker` flips a `driver: tempdir` task to docker."""
         task = _make_task(driver="tempdir")
-        config = BatchRunConfig(run_dir=Path("/tmp/x"), driver="docker")
+        config = BatchRunConfig(run_dir=tmp_subdir("x"), driver="docker")
         _apply_cli_overrides(task, config)
         assert task.sandbox is not None and task.sandbox.driver == "docker"
 
     def test_no_override_preserves_task_yaml(self):
         """Absent CLI flag → task YAML's driver is left alone."""
         task = _make_task(driver="docker")
-        config = BatchRunConfig(run_dir=Path("/tmp/x"))  # driver defaults to None
+        config = BatchRunConfig(run_dir=tmp_subdir("x"))  # driver defaults to None
         _apply_cli_overrides(task, config)
         assert task.sandbox is not None and task.sandbox.driver == "docker"
 
@@ -45,7 +44,7 @@ class TestDriverOverride:
         from coder_eval.models import ConfigLineageEntry
 
         task = _make_task(driver="tempdir")
-        config = BatchRunConfig(run_dir=Path("/tmp/x"), driver="docker")
+        config = BatchRunConfig(run_dir=tmp_subdir("x"), driver="docker")
         lineage: dict[str, ConfigLineageEntry] = {}
         _apply_cli_overrides(task, config, lineage=lineage)
         entry = lineage["sandbox.driver"]
@@ -57,14 +56,14 @@ class TestDriverOverride:
         """Override against a task without a `sandbox:` block must fail loud."""
         task = _make_task()
         task.sandbox = None  # type: ignore[assignment]
-        config = BatchRunConfig(run_dir=Path("/tmp/x"), driver="docker")
+        config = BatchRunConfig(run_dir=tmp_subdir("x"), driver="docker")
         with pytest.raises(ValueError, match="no sandbox config"):
             _apply_cli_overrides(task, config)
 
     def test_invalid_driver_value_rejected_at_config_layer(self):
         """`BatchRunConfig.driver` is Literal-typed; bogus values fail Pydantic validation."""
         with pytest.raises(ValidationError):
-            BatchRunConfig(run_dir=Path("/tmp/x"), driver="bogus")  # type: ignore[arg-type]
+            BatchRunConfig(run_dir=tmp_subdir("x"), driver="bogus")  # type: ignore[arg-type]
 
 
 class TestExperimentLayerDriver:

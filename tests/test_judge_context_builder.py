@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -17,6 +18,12 @@ from coder_eval.evaluation.judge_context import (
 )
 from coder_eval.models import CommandTelemetry, TurnRecord
 from coder_eval.sandbox import Sandbox
+
+
+_SKIP_NO_SYMLINK = pytest.mark.skipif(
+    os.name == "nt",
+    reason="Symlink creation on Windows requires admin or Developer Mode; not asserted in CI.",
+)
 
 
 @pytest.fixture
@@ -471,6 +478,7 @@ def test_collect_reference_secrets_collects_file_contents(tmp_path: Path) -> Non
     assert set(secrets) == {"contents of a", "contents of b"}
 
 
+@_SKIP_NO_SYMLINK
 def test_collect_reference_secrets_skips_symlinks(tmp_path: Path) -> None:
     """SECURITY: symlinks inside the reference dir must NOT be followed.
 

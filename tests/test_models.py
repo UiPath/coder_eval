@@ -416,21 +416,21 @@ class TestTemplateDirSourceMountPoint:
     """Tests for TemplateDirSource.mount_point validation."""
 
     def test_default_mount_point(self):
-        src = TemplateDirSource(path="/tmp/x")
+        src = TemplateDirSource(path=str(Path(tempfile.gettempdir(), "x")))
         assert src.mount_point == "."
 
     def test_relative_mount_point_accepted(self):
-        src = TemplateDirSource(path="/tmp/x", mount_point="a/b")
+        src = TemplateDirSource(path=str(Path(tempfile.gettempdir(), "x")), mount_point="a/b")
         assert src.mount_point == "a/b"
 
     def test_absolute_mount_point_rejected(self):
         with pytest.raises(ValueError, match="must be a relative path"):
-            TemplateDirSource(path="/tmp/x", mount_point="/abs/path")
+            TemplateDirSource(path=str(Path(tempfile.gettempdir(), "x")), mount_point="/abs/path")
 
     def test_dotdot_mount_point_rejected(self):
         with pytest.raises(ValueError, match=r"must not contain '\.\.'"):
-            TemplateDirSource(path="/tmp/x", mount_point="../escape")
+            TemplateDirSource(path=str(Path(tempfile.gettempdir(), "x")), mount_point="../escape")
 
     def test_empty_mount_point_rejected(self):
         with pytest.raises(ValueError, match="must not be empty"):
-            TemplateDirSource(path="/tmp/x", mount_point="")
+            TemplateDirSource(path=str(Path(tempfile.gettempdir(), "x")), mount_point="")

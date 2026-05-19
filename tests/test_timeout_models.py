@@ -90,18 +90,18 @@ class TestBatchRunConfigTimeouts:
 
     def test_defaults_are_none(self):
         """Both timeout overrides default to None."""
-        from pathlib import Path
+        from tests._path_helpers import tmp_subdir
 
-        config = BatchRunConfig(run_dir=Path("/tmp/test"))
+        config = BatchRunConfig(run_dir=tmp_subdir("test"))
         assert config.task_timeout is None
         assert config.turn_timeout is None
 
     def test_valid_values(self):
         """Accepts valid timeout overrides."""
-        from pathlib import Path
+        from tests._path_helpers import tmp_subdir
 
         config = BatchRunConfig(
-            run_dir=Path("/tmp/test"),
+            run_dir=tmp_subdir("test"),
             task_timeout=300,
             turn_timeout=60,
         )
@@ -110,14 +110,14 @@ class TestBatchRunConfigTimeouts:
 
     def test_task_timeout_below_minimum_rejected(self):
         """Rejects task_timeout < 30."""
-        from pathlib import Path
+        from tests._path_helpers import tmp_subdir
 
         with pytest.raises(ValidationError, match="greater than or equal to 30"):
-            BatchRunConfig(run_dir=Path("/tmp/test"), task_timeout=10)
+            BatchRunConfig(run_dir=tmp_subdir("test"), task_timeout=10)
 
     def test_turn_timeout_below_minimum_rejected(self):
         """Rejects turn_timeout < 10."""
-        from pathlib import Path
+        from tests._path_helpers import tmp_subdir
 
         with pytest.raises(ValidationError, match="greater than or equal to 10"):
-            BatchRunConfig(run_dir=Path("/tmp/test"), turn_timeout=3)
+            BatchRunConfig(run_dir=tmp_subdir("test"), turn_timeout=3)

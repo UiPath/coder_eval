@@ -312,6 +312,128 @@ def test_ce008_noqa_suppresses(write_py):
     assert violations == []
 
 
+# ---------- CE010 subprocess.run explicit encoding ----------
+
+
+def test_ce010_flags_subprocess_run_text_without_encoding(write_py):
+    from tests.lint.rules.subprocess_run_explicit_encoding import SubprocessRunExplicitEncoding
+
+    source = "import subprocess\n\ndef f():\n    subprocess.run(['ls'], text=True, capture_output=True)\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[SubprocessRunExplicitEncoding])
+    assert len(violations) == 1
+    assert violations[0].rule_id == "CE010"
+
+
+def test_ce010_allows_subprocess_run_text_with_encoding(write_py):
+    from tests.lint.rules.subprocess_run_explicit_encoding import SubprocessRunExplicitEncoding
+
+    source = "import subprocess\n\ndef f():\n    subprocess.run(['ls'], text=True, encoding='utf-8')\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[SubprocessRunExplicitEncoding])
+    assert violations == []
+
+
+def test_ce010_ignores_subprocess_run_byte_mode(write_py):
+    """Byte-mode subprocess.run (no text=True) doesn't need encoding."""
+    from tests.lint.rules.subprocess_run_explicit_encoding import SubprocessRunExplicitEncoding
+
+    source = "import subprocess\n\ndef f():\n    subprocess.run(['ls'], capture_output=True)\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[SubprocessRunExplicitEncoding])
+    assert violations == []
+
+
+def test_ce010_flags_universal_newlines_alias(write_py):
+    """The legacy ``universal_newlines=True`` alias must also be flagged."""
+    from tests.lint.rules.subprocess_run_explicit_encoding import SubprocessRunExplicitEncoding
+
+    source = "import subprocess\n\ndef f():\n    subprocess.run(['ls'], universal_newlines=True)\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[SubprocessRunExplicitEncoding])
+    assert len(violations) == 1
+
+
+def test_ce010_covers_check_output_and_friends(write_py):
+    """``check_output`` / ``call`` / ``check_call`` / ``Popen`` accept the same kwargs."""
+    from tests.lint.rules.subprocess_run_explicit_encoding import SubprocessRunExplicitEncoding
+
+    source = (
+        "import subprocess\n"
+        "\n"
+        "def f():\n"
+        "    subprocess.check_output(['ls'], text=True)\n"
+        "    subprocess.call(['ls'], text=True)\n"
+        "    subprocess.check_call(['ls'], text=True)\n"
+        "    subprocess.Popen(['ls'], text=True)\n"
+    )
+    path = write_py(source)
+    violations = check_file(path, rules=[SubprocessRunExplicitEncoding])
+    assert len(violations) == 4
+
+
+# ---------- CE011 open() explicit encoding ----------
+
+
+def test_ce011_flags_open_without_encoding(write_py):
+    from tests.lint.rules.open_explicit_encoding import OpenExplicitEncoding
+
+    source = "def f(p):\n    with open(p) as fh:\n        return fh.read()\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[OpenExplicitEncoding])
+    assert len(violations) == 1
+    assert violations[0].rule_id == "CE011"
+
+
+def test_ce011_allows_open_with_encoding(write_py):
+    from tests.lint.rules.open_explicit_encoding import OpenExplicitEncoding
+
+    source = "def f(p):\n    with open(p, encoding='utf-8') as fh:\n        return fh.read()\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[OpenExplicitEncoding])
+    assert violations == []
+
+
+def test_ce011_ignores_byte_mode(write_py):
+    """``open(p, 'rb')`` returns bytes — no encoding kwarg needed."""
+    from tests.lint.rules.open_explicit_encoding import OpenExplicitEncoding
+
+    source = "def f(p):\n    with open(p, 'rb') as fh:\n        return fh.read()\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[OpenExplicitEncoding])
+    assert violations == []
+
+
+def test_ce011_ignores_write_byte_mode(write_py):
+    """``open(p, 'wb')`` writes bytes — no encoding kwarg needed."""
+    from tests.lint.rules.open_explicit_encoding import OpenExplicitEncoding
+
+    source = "def f(p, data):\n    with open(p, 'wb') as fh:\n        fh.write(data)\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[OpenExplicitEncoding])
+    assert violations == []
+
+
+def test_ce011_flags_explicit_text_mode_without_encoding(write_py):
+    """``open(p, 'w')`` is text mode — must pass encoding."""
+    from tests.lint.rules.open_explicit_encoding import OpenExplicitEncoding
+
+    source = "def f(p, data):\n    with open(p, 'w') as fh:\n        fh.write(data)\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[OpenExplicitEncoding])
+    assert len(violations) == 1
+
+
+def test_ce011_ignores_path_open_method(write_py):
+    """``Path.open(...)`` is a method call, not the builtin — out of scope."""
+    from tests.lint.rules.open_explicit_encoding import OpenExplicitEncoding
+
+    source = "from pathlib import Path\n\ndef f(p: Path):\n    with p.open() as fh:\n        return fh.read()\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[OpenExplicitEncoding])
+    assert violations == []
+
+
 # ---------- CE009 yaml models forbid extras ----------
 
 

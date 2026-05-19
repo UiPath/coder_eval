@@ -6,10 +6,9 @@ shape (CLI flag surface) and patches into ``run_limits`` via field merge —
 the same wiring used in ``_apply_cli_overrides``.
 """
 
-from pathlib import Path
-
 from coder_eval.models import AgentConfig, FileExistsCriterion, RunLimits, SandboxConfig, TaskDefinition
 from coder_eval.orchestration.config import BatchRunConfig
+from tests._path_helpers import tmp_subdir
 
 
 def _make_task(*, turn_timeout: int | None = None, task_timeout: int | None = None) -> TaskDefinition:
@@ -49,7 +48,7 @@ class TestBatchTimeoutOverrides:
         assert task.run_limits is not None
         assert task.run_limits.task_timeout == 600
 
-        config = BatchRunConfig(run_dir=Path("/tmp/test"), task_timeout=300)
+        config = BatchRunConfig(run_dir=tmp_subdir("test"), task_timeout=300)
         _apply_timeouts(task, config)
 
         assert task.run_limits.task_timeout == 300
@@ -60,7 +59,7 @@ class TestBatchTimeoutOverrides:
         assert task.run_limits is not None
         assert task.run_limits.turn_timeout == 120
 
-        config = BatchRunConfig(run_dir=Path("/tmp/test"), turn_timeout=60)
+        config = BatchRunConfig(run_dir=tmp_subdir("test"), turn_timeout=60)
         _apply_timeouts(task, config)
 
         assert task.run_limits.turn_timeout == 60
@@ -69,7 +68,7 @@ class TestBatchTimeoutOverrides:
         """None overrides don't clobber task YAML values."""
         task = _make_task(task_timeout=600, turn_timeout=120)
 
-        config = BatchRunConfig(run_dir=Path("/tmp/test"))
+        config = BatchRunConfig(run_dir=tmp_subdir("test"))
         _apply_timeouts(task, config)
 
         assert task.run_limits is not None
@@ -81,7 +80,7 @@ class TestBatchTimeoutOverrides:
         task = _make_task()
         assert task.run_limits is None
 
-        config = BatchRunConfig(run_dir=Path("/tmp/test"))
+        config = BatchRunConfig(run_dir=tmp_subdir("test"))
         _apply_timeouts(task, config)
 
         assert task.run_limits is None
@@ -91,7 +90,7 @@ class TestBatchTimeoutOverrides:
         task = _make_task()
         assert task.run_limits is None
 
-        config = BatchRunConfig(run_dir=Path("/tmp/test"), task_timeout=300, turn_timeout=60)
+        config = BatchRunConfig(run_dir=tmp_subdir("test"), task_timeout=300, turn_timeout=60)
         _apply_timeouts(task, config)
 
         assert task.run_limits is not None

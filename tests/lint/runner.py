@@ -15,8 +15,10 @@ from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
 from tests.lint.rules.no_silent_except import NoSilentExcept
 from tests.lint.rules.no_submodule_model_imports import NoSubmoduleModelImports
 from tests.lint.rules.no_top_level_run_limits_access import NoTopLevelRunLimitsAccess
+from tests.lint.rules.open_explicit_encoding import OpenExplicitEncoding
 from tests.lint.rules.read_text_explicit_encoding import ReadTextExplicitEncoding
 from tests.lint.rules.register_criterion_required import RegisterCriterionRequired
+from tests.lint.rules.subprocess_run_explicit_encoding import SubprocessRunExplicitEncoding
 from tests.lint.rules.yaml_models_forbid_extras import YamlModelsForbidExtras
 from tests.lint.violation import Violation
 
@@ -32,6 +34,8 @@ ALL_RULES: list[RuleClass] = [
     NoAgentTimingAccess,
     NoTopLevelRunLimitsAccess,
     ReadTextExplicitEncoding,
+    SubprocessRunExplicitEncoding,
+    OpenExplicitEncoding,
     YamlModelsForbidExtras,
 ]
 

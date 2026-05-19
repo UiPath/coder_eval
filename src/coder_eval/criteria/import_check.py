@@ -17,6 +17,9 @@ Advantages over dynamic import:
 import ast
 import json
 import logging
+import os
+import shlex
+import sys
 from typing import TYPE_CHECKING
 
 from coder_eval.criteria.base import BaseCriterion, register_criterion
@@ -29,6 +32,24 @@ if TYPE_CHECKING:
     from coder_eval.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
+
+
+def _python_exe() -> str:
+    """Return a shell-quoted reference to the running Python interpreter.
+
+    Uses ``sys.executable`` so the sandbox runs the same interpreter as the
+    host. Windows ships only ``python.exe`` (no ``python3``), and Windows
+    install paths frequently contain spaces, so quoting is required.
+
+    Falls back to a bare ``python`` when ``sys.executable`` is empty (e.g.
+    embedded interpreters where the field is unset).
+    """
+    exe = sys.executable
+    if not exe:
+        return "python"
+    if os.name == "nt":
+        return f'"{exe}"'
+    return shlex.quote(exe)
 
 
 def extract_imports(source: str) -> list[str]:
@@ -120,7 +141,15 @@ class ImportCheckChecker(BaseCriterion[ImportCheckCriterion]):
             )
 
         # 4. Validate imports via sandbox Python using find_spec (no code execution).
-        #    Use python3 for portability (python may not exist on some systems).
+        #    Use sys.executable so the sandbox uses the same Python that's running
+        #    coder_eval — Windows ships only python.exe (no python3).
+        #    Safety: ``check_script`` embeds ``repr(unique_modules)`` inside the
+        #    outer double-quoted ``-c "..."`` argument. The module names come from
+        #    ``ast.Import``/``ast.ImportFrom`` node fields, which Python's grammar
+        #    restricts to identifier syntax (``[a-zA-Z0-9_.]`` plus PEP 3131
+        #    Unicode letters) — none of which include a quote character, so
+        #    ``repr`` always emits single-quoted string literals here and the
+        #    surrounding double quotes are not broken by the embedded list.
         check_script = (
             f"import importlib.util, json; "
             f"modules = {unique_modules!r}; "
@@ -134,7 +163,7 @@ class ImportCheckChecker(BaseCriterion[ImportCheckCriterion]):
         )
 
         exit_code, stdout, _stderr = sandbox.run_command(
-            f'python3 -c "{check_script}"',
+            f'{_python_exe()} -c "{check_script}"',
             timeout=criterion.timeout,
         )
 

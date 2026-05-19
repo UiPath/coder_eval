@@ -1,9 +1,8 @@
 """Tests for streaming callback integration in Orchestrator."""
 
-from pathlib import Path
-
 from coder_eval.models import AgentConfig, AgentKind, SandboxConfig, TaskDefinition
 from coder_eval.streaming.events import StreamEvent
+from tests._path_helpers import tmp_subdir
 
 
 class CollectingCallback:
@@ -36,7 +35,7 @@ def test_orchestrator_accepts_stream_callback():
 
     task = _make_minimal_task()
     cb = CollectingCallback()
-    orch = Orchestrator(task=task, run_dir=Path("/tmp/test-run"), stream_callback=cb, variant_id="test-variant")
+    orch = Orchestrator(task=task, run_dir=tmp_subdir("test-run"), stream_callback=cb, variant_id="test-variant")
     assert orch.stream_callback is cb
 
 
@@ -45,7 +44,7 @@ def test_orchestrator_defaults_stream_callback_to_none():
     from coder_eval.orchestrator import Orchestrator
 
     task = _make_minimal_task()
-    orch = Orchestrator(task=task, run_dir=Path("/tmp/test-run"), variant_id="test-variant")
+    orch = Orchestrator(task=task, run_dir=tmp_subdir("test-run"), variant_id="test-variant")
     assert orch.stream_callback is None
 
 
@@ -60,7 +59,7 @@ def test_orchestrator_stream_callback_uses_variant_prefixed_task_id():
 
     task = _make_minimal_task()
     cb = CollectingCallback()
-    orch = Orchestrator(task=task, run_dir=Path("/tmp/test-run"), stream_callback=cb, variant_id="fast-variant")
+    orch = Orchestrator(task=task, run_dir=tmp_subdir("test-run"), stream_callback=cb, variant_id="fast-variant")
 
     # The _log_task_id should include the variant prefix
     assert orch._log_task_id == "fast-variant/stream-test/00"

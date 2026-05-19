@@ -187,3 +187,48 @@ class TestDockerRunnerUserAndOutput:
                 # Should be the container-side path, not the host path
                 assert output_arg == str(CONTAINER_OUTPUT_DIR)
                 assert str(output_dir) not in output_arg
+
+
+class TestWindowsDriveLetterSource:
+    """Drive-letter sources like ``C:\\data:/mnt/data:ro`` must parse on a POSIX host
+    so a Windows-authored task at least survives spec validation. The
+    ``Path.exists()`` check is patched out because the test host is POSIX —
+    the parsing logic, not the existence check, is what we're covering.
+    """
+
+    @pytest.fixture
+    def _patch_exists(self, monkeypatch):
+        from coder_eval.isolation import docker_runner as dr
+
+        monkeypatch.setattr(dr.Path, "exists", lambda self: True)
+
+    @pytest.mark.parametrize(
+        ("spec", "expected_src", "expected_mode"),
+        [
+            (r"C:\data:/mnt/data:ro", r"C:\data", "ro"),
+            (r"C:\data:/mnt/data", r"C:\data", "ro"),
+            (r"C:/data:/mnt/data:rw", "C:/data", "rw"),
+            (r"c:\data:/mnt/data:rw", r"c:\data", "rw"),
+        ],
+    )
+    def test_drive_letter_specs_parse(self, _patch_exists, spec, expected_src, expected_mode):
+        result = _validate_extra_mount(spec)
+        assert result == f"{expected_src}:/mnt/data:{expected_mode}"
+
+    def test_posix_source_still_parses(self, real_dir):
+        """Regression guard: a POSIX source (no drive letter) is unaffected."""
+        result = _validate_extra_mount(f"{real_dir}:/mnt/data:ro")
+        assert result == f"{real_dir}:/mnt/data:ro"
+
+    def test_unc_path_source_parses(self, _patch_exists):
+        r"""UNC paths (``\\server\share``) contain no colon so legacy splitter handles them."""
+        result = _validate_extra_mount(r"\\server\share:/mnt/data:ro")
+        assert result == r"\\server\share:/mnt/data:ro"
+
+    def test_drive_letter_invalid_mode_rejected(self, _patch_exists):
+        with pytest.raises(ValueError, match="mode must be"):
+            _validate_extra_mount(r"C:\data:/mnt/data:bogus")
+
+    def test_drive_letter_missing_destination_rejected(self, _patch_exists):
+        with pytest.raises(ValueError, match="expected `src:dst"):
+            _validate_extra_mount(r"C:\data")

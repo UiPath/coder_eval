@@ -12,7 +12,15 @@ from coder_eval.orchestration.task_loader import load_task
 from coder_eval.orchestrator import Orchestrator, _format_routing
 from coder_eval.sandbox import Sandbox
 from coder_eval.utils import get_version_info
+from tests._path_helpers import tmp_subdir
 from tests.fixtures.mock_agent import MockAgent
+
+
+# Cross-platform stand-in for the literal _TEST_CWD cwd used by SDK-option
+# round-trip tests — the value only needs to be a stable opaque string that
+# survives serialisation; same value is used on both ends of every assertion.
+_TEST_CWD = str(tmp_subdir("test"))
+_SANDBOX_CWD = str(tmp_subdir("sandbox"))
 
 
 def test_format_routing_direct_includes_judge_transport_anthropic():
@@ -344,15 +352,15 @@ def test_batch_run_config_validation():
     from coder_eval.orchestration.config import BatchRunConfig
 
     # Valid config
-    config = BatchRunConfig(run_dir=Path("/tmp/run"), max_parallel=3)
+    config = BatchRunConfig(run_dir=tmp_subdir("run"), max_parallel=3)
     assert config.max_parallel == 3
 
     # Invalid: max_parallel < 1
     with pytest.raises(ValueError):
-        BatchRunConfig(run_dir=Path("/tmp/run"), max_parallel=0)
+        BatchRunConfig(run_dir=tmp_subdir("run"), max_parallel=0)
 
     with pytest.raises(ValueError):
-        BatchRunConfig(run_dir=Path("/tmp/run"), max_parallel=-1)
+        BatchRunConfig(run_dir=tmp_subdir("run"), max_parallel=-1)
 
 
 def test_generate_run_summary(tmp_path):
@@ -978,7 +986,7 @@ def test_batch_run_config_with_snapshot_overrides():
     from coder_eval.orchestration.config import BatchRunConfig
 
     config = BatchRunConfig(
-        run_dir=Path("/tmp/test_run"),
+        run_dir=tmp_subdir("test_run"),
         max_parallel=2,
         preserve_sandbox=True,
         snapshot_mode="hybrid",
@@ -994,7 +1002,7 @@ def test_batch_run_config_snapshot_defaults():
     from coder_eval.orchestration.config import BatchRunConfig
 
     config = BatchRunConfig(
-        run_dir=Path("/tmp/test_run"),
+        run_dir=tmp_subdir("test_run"),
     )
 
     assert config.snapshot_mode is None
@@ -1471,7 +1479,7 @@ def test_dump_sdk_options_basic():
     from coder_eval.agents.claude_code_agent import _dump_sdk_options
 
     options = ClaudeAgentOptions(
-        cwd="/tmp/test",
+        cwd=_TEST_CWD,
         permission_mode="bypassPermissions",
         allowed_tools=["Read", "Write"],
         model="claude-sonnet-4-5-20250514",
@@ -1480,7 +1488,7 @@ def test_dump_sdk_options_basic():
     dump = _dump_sdk_options(options)
 
     assert isinstance(dump, dict)
-    assert dump["cwd"] == "/tmp/test"
+    assert dump["cwd"] == _TEST_CWD
     assert dump["permission_mode"] == "bypassPermissions"
     assert dump["allowed_tools"] == ["Read", "Write"]
     assert dump["model"] == "claude-sonnet-4-5-20250514"
@@ -1496,7 +1504,7 @@ def test_dump_sdk_options_excludes_callables():
         pass
 
     options = ClaudeAgentOptions(
-        cwd="/tmp/test",
+        cwd=_TEST_CWD,
         stderr=my_stderr,
     )
 
@@ -1512,7 +1520,7 @@ def test_dump_sdk_options_includes_defaults():
 
     from coder_eval.agents.claude_code_agent import _dump_sdk_options
 
-    options = ClaudeAgentOptions(cwd="/tmp/test")
+    options = ClaudeAgentOptions(cwd=_TEST_CWD)
 
     dump = _dump_sdk_options(options)
 
@@ -1530,7 +1538,7 @@ def test_dump_sdk_options_converts_path():
 
     from coder_eval.agents.claude_code_agent import _dump_sdk_options
 
-    test_path = Path("/tmp/test")
+    test_path = Path(_TEST_CWD)  # round-tripped through SDK options dump
     options = ClaudeAgentOptions(cwd=test_path)
 
     dump = _dump_sdk_options(options)
@@ -1557,7 +1565,7 @@ def test_dump_sdk_options_handles_nested_dataclasses():
         return {"action": "allow"}
 
     options = ClaudeAgentOptions(
-        cwd="/tmp/test",
+        cwd=_TEST_CWD,
         hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[my_hook], timeout=30.0)]},
         agents={"helper": AgentDefinition(description="test agent", prompt="do stuff")},
     )
@@ -1627,7 +1635,7 @@ def test_evaluation_result_serialization_roundtrip_with_sdk_options():
         final_status="SUCCESS",
         iteration_count=1,
         sdk_options={
-            "cwd": "/tmp/test",
+            "cwd": _TEST_CWD,
             "permission_mode": "bypassPermissions",
             "allowed_tools": ["Read"],
             "model": "claude-sonnet-4-5-20250514",
@@ -1642,7 +1650,7 @@ def test_evaluation_result_serialization_roundtrip_with_sdk_options():
     restored = EvaluationResult.model_validate_json(json_str)
 
     assert restored.sdk_options is not None
-    assert restored.sdk_options["cwd"] == "/tmp/test"
+    assert restored.sdk_options["cwd"] == _TEST_CWD
     assert restored.sdk_options["permission_mode"] == "bypassPermissions"
     assert restored.sdk_options["allowed_tools"] == ["Read"]
     assert restored.sdk_options["model"] == "claude-sonnet-4-5-20250514"
@@ -1677,7 +1685,7 @@ def test_generate_run_summary_includes_sdk_options(tmp_path):
     from coder_eval.orchestration.batch import _generate_run_summary
 
     sdk_opts = {
-        "cwd": "/tmp/sandbox",
+        "cwd": _SANDBOX_CWD,
         "permission_mode": "bypassPermissions",
         "allowed_tools": [],
         "model": "claude-sonnet-4-5-20250514",
@@ -1730,7 +1738,7 @@ def test_batch_run_config_with_agent_overrides():
     from coder_eval.orchestration.config import BatchRunConfig
 
     config = BatchRunConfig(
-        run_dir=Path("/tmp/run"),
+        run_dir=tmp_subdir("run"),
         agent_model="claude-sonnet-4-20250514",
         permission_mode="bypassPermissions",
         max_turns=50,
@@ -1744,7 +1752,7 @@ def test_batch_run_config_agent_override_defaults():
     """Test BatchRunConfig agent override fields default to None."""
     from coder_eval.orchestration.config import BatchRunConfig
 
-    config = BatchRunConfig(run_dir=Path("/tmp/run"))
+    config = BatchRunConfig(run_dir=tmp_subdir("run"))
     assert config.agent_model is None
     assert config.permission_mode is None
     assert config.max_turns is None

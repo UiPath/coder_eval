@@ -17,6 +17,7 @@ from coder_eval.path_utils import (
     replicate_subdir_name,
     task_log_path,
 )
+from tests._path_helpers import tmp_subdir
 
 
 def test_generate_run_id():
@@ -33,19 +34,19 @@ def test_replicate_subdir_name_zero_pads():
 
 
 def test_build_task_run_dir_default_replicate():
-    run_dir = Path("/tmp/runs/2025-01-01_12-00-00")
+    run_dir = tmp_subdir("runs", "2025-01-01_12-00-00")
     result = build_task_run_dir(run_dir, "default", "hello_world")
     assert result == run_dir / "default" / "hello_world" / "00"
 
 
 def test_build_task_run_dir_dataset_row_task_id():
-    run_dir = Path("/tmp/runs/2025-01-01_12-00-00")
+    run_dir = tmp_subdir("runs", "2025-01-01_12-00-00")
     result = build_task_run_dir(run_dir, "sonnet", "classify/row-001")
     assert result == run_dir / "sonnet" / "classify" / "row-001" / "00"
 
 
 def test_build_task_run_dir_custom_replicate_index():
-    run_dir = Path("/tmp/runs/2025-01-01_12-00-00")
+    run_dir = tmp_subdir("runs", "2025-01-01_12-00-00")
     result = build_task_run_dir(run_dir, "v1", "task_a", replicate_index=3)
     assert result == run_dir / "v1" / "task_a" / "03"
 
@@ -71,7 +72,7 @@ def test_format_task_log_id_large_replicate_no_truncation():
 
 
 def test_format_task_log_id_matches_build_task_run_dir_relative_path():
-    run_dir = Path("/tmp/runs/X")
+    run_dir = tmp_subdir("runs", "X")
     task_dir = build_task_run_dir(run_dir, "v", "t", 3)
     assert format_task_log_id("v", "t", 3) == task_dir.relative_to(run_dir).as_posix()
 
