@@ -35,21 +35,24 @@ success_criteria:
 
   - type: "agent_judge"
     pass_threshold: 0.8
-    # Haiku is sufficient: the file is pre-attached via `files:` and tools are
-    # disabled, so the judge grades directly from the included content. With no
-    # tool-call phase to compete with the verdict turn, haiku's structured-
-    # output reliability is fine here. Default is opus which is wildly overkill.
-    model: "claude-haiku-4-5-20251001"
     # Generous headroom for the rare case where the judge needs extra turns to
     # settle on the strict JSON-only format. The file is already pre-attached
     # so most runs verdict on turn 1.
     max_turns: 8
-    # No tools: the file content is pre-attached, so the judge must grade from
-    # the included content rather than fishing with Read/Grep — eliminates the
-    # MAX_TURNS_EXHAUSTED flake where the judge burned turns on tool calls
-    # (incl. attempting Read on the wrong path) before the verdict turn.
-    # Also narrows the security surface (cf. AgentJudgeCriterion SECURITY note).
-    allowed_tools: []
+    agent:
+      # Haiku is sufficient: the file is pre-attached via `files:` and tools
+      # are disabled, so the judge grades directly from the included content.
+      # With no tool-call phase to compete with the verdict turn, haiku's
+      # structured-output reliability is fine here. Default is sonnet, which
+      # is wildly overkill.
+      model: "claude-haiku-4-5-20251001"
+      # No tools: the file content is pre-attached, so the judge must grade
+      # from the included content rather than fishing with Read/Grep —
+      # eliminates the MAX_TURNS_EXHAUSTED flake where the judge burned turns
+      # on tool calls (incl. attempting Read on the wrong path) before the
+      # verdict turn. Also narrows the security surface (cf.
+      # AgentJudgeCriterion SECURITY note).
+      allowed_tools: []
     files: ["greet.py"]
     prompt: |
       Grade greet.py structurally. The file content is included above. The agent

@@ -105,7 +105,19 @@ agent:
     - "Write"
     - "Bash"
   model: "claude-sonnet-4-20250514"   # Optional: specific model
+  sdk_options:                        # Optional: Claude Code SDK pass-through
+    effort: high                      # any non-framework-managed ClaudeAgentOptions field
 ```
+
+**`sdk_options`** is a typed pass-through dict for Claude Code SDK
+`ClaudeAgentOptions` fields that coder_eval doesn't own directly. Keys are
+validated against the SDK's dataclass at YAML load; framework-managed keys
+(`model`, `allowed_tools`, `permission_mode`, `hooks`, `mcp_servers`, …)
+are rejected. Deep-merged across the 5-layer config chain. Override via
+CLI with the repeatable `--sdk-option KEY=VALUE`. See the
+[SDK pass-through feature spec](features/2026-05-18-sdk-pass-through.md)
+for the full reference, including the valid keys list.
+
 
 **Permission Modes:**
 - `auto` — Agent decides when to ask for permission
@@ -596,11 +608,13 @@ Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LL
   include_agent_output: false
   include_tool_calls: false
   include_dialog: false              # Opt-in: include the full user<->agent conversation (recommended for simulation)
-  model: "claude-opus-4-6"
   max_turns: 5
   turn_timeout: 300
-  permission_mode: "bypassPermissions"
-  allowed_tools: ["Bash", "Read", "Grep", "Glob"]
+  agent:                              # Nested AgentConfig — same shape as task.agent
+    model: "claude-sonnet-4-6"
+    permission_mode: "bypassPermissions"
+    allowed_tools: ["Bash", "Read", "Grep", "Glob"]
+    sdk_options: {effort: low}        # Optional SDK pass-through (e.g. effort)
   weight: 5.0
   pass_threshold: 0.7
 ```
@@ -615,13 +629,9 @@ Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LL
 | `include_dialog` | `false` | Include the full user↔agent conversation across **all** turns. The rendered block is wrapped as `UNTRUSTED DATA` and warns the judge that simulator-generated user messages may invent premises (recommended whenever a task uses `simulation:`). |
 | `max_dialog_chars` | `80000` | Aggregate cap on dialog text (per-message cap is `max_file_chars`). Trailing turns are dropped past the cap. |
 | `max_file_chars` | `20000` | Per-file truncation for pre-attached files |
-| `model` | `claude-opus-4-6` | Claude Code SDK model ID (distinct ID space from `llm_judge.model`) |
-| `max_turns` | `10` | Judge's inner-loop turn limit |
+| `max_turns` | `50` | Judge's inner-loop turn limit |
 | `turn_timeout` | `300` | Wall-clock timeout (seconds) |
-| `permission_mode` | `bypassPermissions` | SDK permission mode — safe because the judge works on a throwaway copy |
-| `allowed_tools` | `[Bash, Read, Write, Glob, Grep, Edit]` | Tools available to the judge. Narrow this when Bash is not needed. |
-| `disallowed_tools` | `None` | Tools explicitly blocked |
-| `ignore_patterns` | `[.git, node_modules, __pycache__, .venv]` | Passed to `shutil.ignore_patterns` when copying the sandbox |
+| `agent` | hardened judge defaults | Nested `AgentConfig` — `model`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `ignore_patterns`, `sdk_options`. A partial block (e.g. only `model:`) still applies the judge security defaults for missing fields, and the security floor (`.claude` / `.mcp.json` / `_reference` ignore patterns, `setting_sources=[]`) is always enforced. |
 
 **Security**
 
@@ -634,7 +644,7 @@ The judge runs with the evaluator's API credentials and can execute arbitrary Ba
 
 **Reference handling**: The reference solution is shown to the judge verbatim (same as `llm_judge`) and is scrubbed from the persisted `CriterionResult.details` — a misbehaving judge that echoes the reference in its rationale won't leak it into run artifacts.
 
-**Backend support**: Works on `direct` and `bedrock` backends. The `proxy` backend fails fast with a clear error (needs threading the proxy port to the checker — tracked as a follow-up on issue #166).
+**Backend support**: Works on all three backends (`direct`, `bedrock`, `proxy`) — the checker forwards the orchestrator's `ApiRoute` to the judge sub-agent.
 
 **Operational notes**:
 
@@ -648,7 +658,6 @@ The judge runs with the evaluator's API credentials and can execute arbitrary Ba
 - `score` missing / non-numeric / non-finite
 - `TurnTimeoutError` (judge exceeded `turn_timeout`)
 - SDK subprocess failure (e.g. `claude` CLI missing)
-- `PROXY` backend (unsupported in MVP)
 
 ## Sandbox Snapshots
 

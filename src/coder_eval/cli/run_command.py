@@ -65,6 +65,44 @@ def _resolve_experiment_path(experiment: Path | None) -> Path | None:
     raise typer.BadParameter(f"Experiment not found: {experiment}.{hint}")
 
 
+# YAML 1.1 truthy aliases that PyYAML coerces to bool. We keep these as
+# strings so e.g. ``--sdk-option region=on`` doesn't become ``region=True``
+# — any string-valued SDK field that happens to collide with a YAML keyword
+# would otherwise silently miscoerce. Explicit ``true``/``false`` (YAML 1.2
+# canonical) still go through normally.
+_YAML_TRUTHY_ALIASES = frozenset({"y", "n", "yes", "no", "on", "off"})
+
+
+def _parse_sdk_options(pairs: list[str]) -> dict[str, Any]:
+    """Parse repeatable ``--sdk-option KEY=VALUE`` flags into a dict.
+
+    Values pass through ``yaml.safe_load`` so ints / floats / null / explicit
+    ``true``/``false`` coerce naturally. YAML 1.1 truthy aliases
+    (``on``/``off``/``yes``/``no``/``y``/``n``, case-insensitive) are kept as
+    strings to avoid the foot-gun where a string-valued SDK field colliding
+    with a YAML keyword is silently turned into a bool. Duplicate keys: last
+    specified wins. Key validation happens at AgentConfig construction.
+    """
+    import yaml
+
+    out: dict[str, Any] = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise typer.BadParameter(f"--sdk-option must be key=value, got: {pair!r}")
+        key, _, value = pair.partition("=")
+        key = key.strip()
+        if not key:
+            raise typer.BadParameter(f"--sdk-option key cannot be empty: {pair!r}")
+        try:
+            parsed = yaml.safe_load(value)
+        except yaml.YAMLError as e:
+            raise typer.BadParameter(f"--sdk-option value for {key!r} is not valid YAML: {e}") from e
+        if isinstance(parsed, bool) and value.strip().lower() in _YAML_TRUTHY_ALIASES:
+            parsed = value
+        out[key] = parsed
+    return out
+
+
 def run_command(
     task_files: list[Path] | None = typer.Argument(  # noqa: B008
         None,
@@ -189,6 +227,15 @@ def run_command(
         help=(
             "Override agent file-change detection ignore patterns (comma-separated, e.g., '*.log,__pycache__')."
             " Does not affect sandbox/snapshot ignore patterns."
+        ),
+    ),
+    sdk_option: list[str] = typer.Option(  # noqa: B008
+        [],
+        "--sdk-option",
+        help=(
+            "Pass-through Claude Code SDK option, e.g. --sdk-option effort=high. "
+            "Repeatable. Values are YAML-parsed (true/false/null/numbers coerced). "
+            "Keys must be ClaudeAgentOptions fields and must not be framework-managed."
         ),
     ),
     backend: str | None = typer.Option(
@@ -324,6 +371,7 @@ def run_command(
                 disallowed_tools_list,
                 plugins_list,
                 ignore_patterns_list,
+                _parse_sdk_options(sdk_option),
                 experiment_path=resolved_experiment,
                 max_rows=sample,
                 repeats=repeats,
@@ -356,6 +404,7 @@ async def _run_all_tasks(
     disallowed_tools: list[str] | None = None,
     plugins: list[SdkPluginConfig] | None = None,
     ignore_patterns: list[str] | None = None,
+    sdk_options: dict[str, Any] | None = None,
     experiment_path: Path | None = None,
     max_rows: int | None = None,
     repeats: int | None = None,
@@ -416,6 +465,7 @@ async def _run_all_tasks(
         disallowed_tools=disallowed_tools,
         plugins=plugins,
         ignore_patterns=ignore_patterns,
+        sdk_options=sdk_options or {},
         task_timeout=task_timeout,
         turn_timeout=turn_timeout,
         max_rows=max_rows,

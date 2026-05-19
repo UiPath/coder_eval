@@ -29,9 +29,15 @@ from coder_eval.evaluation.sub_agent import SubAgentRunner
 from coder_eval.models import (
     AgentConfig,
     AgentJudgeCriterion,
-    AgentKind,
     CriterionResult,
     JudgeCriterionResult,
+)
+
+# Private helper + shared security-floor constant — not part of the public
+# coder_eval.models surface, but the single source of truth for both files.
+from coder_eval.models.criteria import (  # noqa: CE001
+    JUDGE_SECURITY_IGNORE_FLOOR,
+    _default_judge_agent_config,
 )
 
 
@@ -148,7 +154,11 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
         runner = SubAgentRunner(
             sandbox=sandbox,
             agent_config=agent_config,
-            ignore_patterns=criterion.ignore_patterns,
+            # Use the floor-enforced patterns from the built config, not the
+            # user's raw ``criterion.agent.ignore_patterns`` — _build_agent_config
+            # injects the required security entries (.claude / .mcp.json /
+            # _reference) unconditionally.
+            ignore_patterns=agent_config.ignore_patterns,
             route=route,
             reference_dir=ref_dir_for_runner,
         )
@@ -198,23 +208,34 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
 
 
 def _build_agent_config(criterion: AgentJudgeCriterion, *, system_prompt: str) -> AgentConfig:
-    return AgentConfig(
-        type=AgentKind.CLAUDE_CODE,
-        model=criterion.model,
-        permission_mode=criterion.permission_mode,
-        allowed_tools=criterion.allowed_tools,
-        disallowed_tools=criterion.disallowed_tools,
-        system_prompt=system_prompt,
-        # SECURITY: force setting_sources=[] so the SDK does NOT load
-        # .claude/settings.json or .mcp.json from the judge's cwd. Those
-        # files can install pre-LLM lifecycle hooks (SessionStart/PreToolUse)
-        # or MCP subprocesses that run with the evaluator's credentials —
-        # BEFORE the allowed_tools gate kicks in. A compromised main agent
-        # dropping .claude/settings.json into the sandbox would otherwise
-        # exfiltrate creds regardless of how tight allowed_tools is.
-        # Defense-in-depth: criterion.ignore_patterns also excludes these paths.
-        setting_sources=[],
-    )
+    # When YAML supplies a partial `agent:` block (e.g. only ``model:``),
+    # Pydantic constructs a fresh AgentConfig from those keys and the judge
+    # defaults from _default_judge_agent_config never apply. Overlay the
+    # user-set fields on top of a fresh judge default so missing keys keep
+    # the hardened defaults (read-only toolkit, bypassPermissions, etc.).
+    #
+    # ``sdk_options`` gets a special deep-merge to match the experiment-layer
+    # behavior: if defaults ever supply pass-through keys, a partial user
+    # override should add to / override individual keys without wiping the
+    # rest. Today defaults['sdk_options'] is empty so this is a no-op, but
+    # the symmetry prevents a future-foot-gun when judge defaults grow.
+    defaults = _default_judge_agent_config()
+    user_overrides = criterion.agent.model_dump(exclude_unset=True)
+    if "sdk_options" in user_overrides:
+        user_overrides["sdk_options"] = {**defaults.sdk_options, **user_overrides["sdk_options"]}
+    config = defaults.model_copy(update=user_overrides, deep=True)
+    config.system_prompt = system_prompt
+    # SECURITY: force setting_sources=[] regardless of user YAML so the SDK
+    # does NOT load .claude/settings.json or .mcp.json from the judge's cwd.
+    # Those files can install pre-LLM lifecycle hooks (SessionStart /
+    # PreToolUse) or MCP subprocesses that run with the evaluator's
+    # credentials BEFORE the allowed_tools gate kicks in.
+    config.setting_sources = []
+    # SECURITY: ensure the ignore_patterns floor is present even if the
+    # user supplied their own list. Set-union guarantees idempotence and
+    # doesn't depend on order.
+    config.ignore_patterns = list({*config.ignore_patterns, *JUDGE_SECURITY_IGNORE_FLOOR})
+    return config
 
 
 def _build_result(

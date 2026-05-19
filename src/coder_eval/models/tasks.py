@@ -6,11 +6,10 @@ import re
 import warnings
 from typing import Any, Literal, Self
 
-from claude_agent_sdk import SdkPluginConfig, SettingSource
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from coder_eval.models.agent_config import AgentConfig
 from coder_eval.models.criteria import SuccessCriterion
-from coder_eval.models.enums import AgentKind
 from coder_eval.models.limits import RunLimits
 from coder_eval.models.sandbox import SandboxConfig
 
@@ -22,78 +21,6 @@ class UnknownTaskFieldWarning(DeprecationWarning):
     the message text — and so other ``DeprecationWarning``s emitted during load
     don't get conflated with stale-field signal.
     """
-
-
-class AgentConfig(BaseModel):
-    """Configuration for the coding agent."""
-
-    model_config = ConfigDict(validate_assignment=True, populate_by_name=True, extra="forbid")
-
-    type: AgentKind | None = Field(
-        default=None,
-        description=(
-            "The type of agent to use (claude-code, aider, etc.). "
-            "May be omitted on the task and supplied via experiment defaults or --type."
-        ),
-    )
-    permission_mode: Literal["default", "acceptEdits", "plan", "bypassPermissions"] = Field(
-        default="acceptEdits", description="Permission mode for agent actions"
-    )
-    allowed_tools: list[str] | None = Field(
-        default=None, description="List of allowed tools (e.g., ['Read', 'Write', 'Bash'])"
-    )
-    disallowed_tools: list[str] | None = Field(
-        default=None, description="List of disallowed tools (e.g., ['TodoWrite'])"
-    )
-    model: str | None = Field(default=None, description="Specific model to use (if applicable)")
-    plugins: list[SdkPluginConfig] | None = Field(default=None, description="List of Claude Code plugins")
-
-    # Customizable ignore patterns for file tracking
-    ignore_patterns: list[str] = Field(
-        default_factory=list,
-        description="Additional patterns to ignore during file change detection (beyond defaults)",
-        validation_alias=AliasChoices("ignore_patterns", "additional_ignore_patterns"),
-    )
-
-    system_prompt: str | None = Field(
-        default=None,
-        description=(
-            "Custom system prompt injected into the Claude Code agent. "
-            "Replaces the default system prompt. Supports inline text or multi-line YAML strings. "
-            "Mutually exclusive with system_prompt_file."
-        ),
-    )
-    system_prompt_file: str | None = Field(
-        default=None,
-        description=(
-            "Path to a file containing the system prompt (relative to task YAML). "
-            "The file contents are loaded at task resolution time and set as system_prompt. "
-            "Mutually exclusive with system_prompt."
-        ),
-    )
-    setting_sources: list[SettingSource] | None = Field(
-        default=None,
-        description=(
-            "Claude Code setting sources to load (e.g., ['project', 'user']). "
-            "Defaults to ['project'] so .mcp.json is discovered. Set to [] to disable all settings. "
-            "None means use the framework default (['project'])."
-        ),
-    )
-    claude_settings: str | dict[str, Any] | None = Field(
-        default=None,
-        description=(
-            "Claude Code settings passed via --settings. Accepts a JSON-serializable dict "
-            "(inlined) or a file path string. Use permissions.deny to block tool access to "
-            'specific paths: {"permissions": {"deny": ["Read(/some/path/**)"]}}.'
-        ),
-    )
-
-    @model_validator(mode="after")
-    def check_prompt_exclusivity(self) -> Self:
-        """Ensure system_prompt and system_prompt_file are mutually exclusive."""
-        if self.system_prompt is not None and self.system_prompt_file is not None:
-            raise ValueError("Only one of 'system_prompt' or 'system_prompt_file' can be provided, not both")
-        return self
 
 
 DEFAULT_SIMULATION_STOP_TOKEN = "<<<END>>>"

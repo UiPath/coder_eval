@@ -172,21 +172,39 @@ def _hoist_agent_timing_dict(
 def _merge_agent_dicts(*layers: dict[str, Any] | None) -> dict[str, Any]:
     """Merge multiple partial agent config dicts (left to right, later wins).
 
-    Shallow merge only — each layer's keys overwrite the previous entirely.
-    Lists and nested dicts are replaced, not recursively merged.
+    Shallow merge for every key except ``sdk_options``, which is deep-merged
+    so a higher-priority layer adding a single SDK key doesn't wipe keys set
+    by lower-priority layers. Lists and other nested dicts are still replaced.
     None layers are skipped.
+
+    ``sdk_options`` semantics are intentionally additive-only: explicit empty
+    dicts and missing dicts are both no-ops. There is no syntax for "clear all
+    inherited SDK options at this layer" — the merge composes individual keys.
+    To suppress a specific key, override it with a new value at a higher layer.
 
     Handles mutually exclusive prompt fields: when a layer sets system_prompt,
     the previously merged system_prompt_file is cleared, and vice versa.
     """
     merged: dict[str, Any] = {}
+    sdk_options_merged: dict[str, Any] = {}
     for layer in layers:
-        if layer is not None:
-            if layer.get("system_prompt") is not None:
-                merged.pop("system_prompt_file", None)
-            if layer.get("system_prompt_file") is not None:
-                merged.pop("system_prompt", None)
-            merged.update(layer)
+        if layer is None:
+            continue
+        if layer.get("system_prompt") is not None:
+            merged.pop("system_prompt_file", None)
+        if layer.get("system_prompt_file") is not None:
+            merged.pop("system_prompt", None)
+        # Presence-based check (not truthy): explicit `{}` and missing both
+        # cleanly no-op via dict.update({}). Avoids the silent-drop foot-gun
+        # where a layer's explicit `sdk_options: {}` looks meaningful but
+        # isn't distinguished from "layer didn't set this key".
+        layer_sdk_options = layer.get("sdk_options")
+        if isinstance(layer_sdk_options, dict):
+            sdk_options_merged.update(layer_sdk_options)
+        # everything else replaces (shallow):
+        merged.update({k: v for k, v in layer.items() if k != "sdk_options"})
+    if sdk_options_merged:
+        merged["sdk_options"] = sdk_options_merged
     return merged
 
 
@@ -279,7 +297,14 @@ def _build_agent_lineage(
         if layer is None:
             continue
         for key, value in layer.items():
-            lineage[f"agent.{key}"] = ConfigLineageEntry(value=value, source=source_name)
+            if key == "sdk_options" and isinstance(value, dict):
+                # sdk_options is deep-merged across layers; record per-key provenance
+                # so a higher layer contributing one SDK key doesn't shadow lineage
+                # for the others.
+                for sdk_key, sdk_value in value.items():
+                    lineage[f"agent.sdk_options.{sdk_key}"] = ConfigLineageEntry(value=sdk_value, source=source_name)
+            else:
+                lineage[f"agent.{key}"] = ConfigLineageEntry(value=value, source=source_name)
     return lineage
 
 
@@ -700,6 +725,10 @@ def _apply_cli_overrides(
     if config.ignore_patterns is not None:
         task.agent.ignore_patterns = config.ignore_patterns
         _record("agent.ignore_patterns", config.ignore_patterns, "--ignore-patterns")
+    if config.sdk_options:
+        task.agent.sdk_options = {**task.agent.sdk_options, **config.sdk_options}
+        for key, value in config.sdk_options.items():
+            _record(f"agent.sdk_options.{key}", value, f"--sdk-option {key}={value}")
 
     # Sandbox driver override (CLI > task YAML). Driver value is already
     # Literal-validated upstream via BatchRunConfig; nothing to re-check.

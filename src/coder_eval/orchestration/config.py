@@ -1,7 +1,7 @@
 """Configuration models for orchestration."""
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from claude_agent_sdk import SdkPluginConfig
 from pydantic import BaseModel, ConfigDict, Field
@@ -38,6 +38,10 @@ class BatchRunConfig(BaseModel):
         default=None, description="Override plugins (SdkPluginConfig objects) for all tasks"
     )
     ignore_patterns: list[str] | None = Field(default=None, description="Override ignore patterns for all tasks")
+    sdk_options: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Override SDK pass-through options for all tasks (key=value pairs from --sdk-option).",
+    )
 
     # Timeout overrides (CLI > task YAML)
     task_timeout: int | None = Field(default=None, ge=30, description="Override task timeout for all tasks")

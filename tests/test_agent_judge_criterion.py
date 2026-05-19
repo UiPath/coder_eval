@@ -152,15 +152,21 @@ def test_agent_judge_turn_timeout_maps_to_zero(sandbox: Sandbox, direct_route: D
 
 
 def test_agent_judge_config_propagates(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    from coder_eval.models import AgentConfig
+
     criterion = AgentJudgeCriterion(
         description="x",
         prompt="grade",
-        model="claude-sonnet-4-6",
         max_turns=3,
         turn_timeout=45,
-        permission_mode="plan",
-        allowed_tools=["Read", "Grep"],
-        disallowed_tools=["Bash"],
+        agent=AgentConfig(
+            type="claude-code",
+            model="claude-sonnet-4-6",
+            permission_mode="plan",
+            allowed_tools=["Read", "Grep"],
+            disallowed_tools=["Bash"],
+            sdk_options={"effort": "low"},
+        ),
     )
     mock_agent = _make_mock_agent('{"score": 1.0, "rationale": "ok"}')
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent) as mock_cls:
@@ -172,6 +178,7 @@ def test_agent_judge_config_propagates(sandbox: Sandbox, direct_route: DirectRou
     assert agent_config.allowed_tools == ["Read", "Grep"]
     assert agent_config.disallowed_tools == ["Bash"]
     assert agent_config.setting_sources == []
+    assert agent_config.sdk_options == {"effort": "low"}
     # max_turns and turn_timeout are passed as call-time args to communicate(),
     # not stored on AgentConfig.
     mock_agent.communicate.assert_awaited_once()
@@ -189,8 +196,147 @@ def test_agent_judge_rejects_turn_timeout_below_ten() -> None:
 
 def test_agent_judge_default_ignores_include_claude_and_mcp() -> None:
     c = AgentJudgeCriterion(description="x", prompt="grade")
-    assert ".claude" in c.ignore_patterns
-    assert ".mcp.json" in c.ignore_patterns
+    assert ".claude" in c.agent.ignore_patterns
+    assert ".mcp.json" in c.agent.ignore_patterns
+
+
+def test_agent_judge_old_shape_rejected() -> None:
+    """Old-shape YAML (criterion-level model / permission_mode / ...) raises ValidationError."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AgentJudgeCriterion(description="x", prompt="grade", permission_mode="plan")
+
+
+def test_agent_judge_default_agent_config_is_per_instance() -> None:
+    """Each AgentJudgeCriterion gets a fresh AgentConfig — no shared mutable refs."""
+    inst1 = AgentJudgeCriterion(description="x", prompt="grade")
+    inst2 = AgentJudgeCriterion(description="x", prompt="grade")
+    assert inst1.agent is not inst2.agent
+    assert inst1.agent.allowed_tools is not inst2.agent.allowed_tools
+
+    inst1.agent.allowed_tools.append("Write")
+    assert "Write" not in (inst2.agent.allowed_tools or [])
+
+
+def test_agent_judge_build_agent_config_does_not_mutate_criterion(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """Calling _build_agent_config (via SuccessChecker) leaves criterion.agent untouched.
+
+    Defensive: model_copy(deep=True) ensures system_prompt rebuild for each row
+    doesn't leak back into the YAML-loaded criterion across dataset fan-out.
+    """
+    criterion = AgentJudgeCriterion(description="x", prompt="grade")
+    original_setting_sources = criterion.agent.setting_sources
+    original_system_prompt = criterion.agent.system_prompt
+    mock_agent = _make_mock_agent('{"score": 1.0, "rationale": "ok"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+    assert criterion.agent.setting_sources == original_setting_sources
+    assert criterion.agent.system_prompt == original_system_prompt
+
+
+def test_agent_judge_setting_sources_forced_empty(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """_build_agent_config always sets setting_sources=[] regardless of YAML."""
+    from coder_eval.models import AgentConfig
+
+    criterion = AgentJudgeCriterion(
+        description="x",
+        prompt="grade",
+        agent=AgentConfig(type="claude-code", setting_sources=["project"]),
+    )
+    mock_agent = _make_mock_agent('{"score": 1.0, "rationale": "ok"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent) as mock_cls:
+        SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+    (agent_config,) = mock_cls.call_args.args
+    assert agent_config.setting_sources == []
+
+
+def test_agent_judge_partial_agent_block_preserves_judge_defaults(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """A partial agent: block must not clobber the judge's hardened defaults.
+
+    Before the merge fix in _build_agent_config, supplying only ``model:`` in
+    YAML caused Pydantic to construct a fresh AgentConfig with ``permission_mode``
+    falling back to acceptEdits, ``allowed_tools=None`` (==> all tools), and
+    ``ignore_patterns=[]`` — silently dropping the security floor.
+    """
+    from coder_eval.models import AgentConfig
+
+    criterion = AgentJudgeCriterion(
+        description="x",
+        prompt="grade",
+        agent=AgentConfig(type="claude-code", model="claude-haiku-4-5-20251001"),
+    )
+    mock_agent = _make_mock_agent('{"score": 1.0, "rationale": "ok"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent) as mock_cls:
+        SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+    (agent_config,) = mock_cls.call_args.args
+    assert agent_config.permission_mode == "bypassPermissions"
+    assert agent_config.allowed_tools == ["Bash", "Read", "Glob", "Grep"]
+    assert ".claude" in agent_config.ignore_patterns
+    assert ".mcp.json" in agent_config.ignore_patterns
+    assert "_reference" in agent_config.ignore_patterns
+
+
+def test_agent_judge_sdk_options_deep_merge_with_growing_defaults(
+    sandbox: Sandbox, direct_route: DirectRoute, monkeypatch
+) -> None:
+    """Future-proof: when judge defaults grow non-empty sdk_options and the user
+    supplies a partial sdk_options, the deep-merge in _build_agent_config must
+    preserve default keys not overridden by the user.
+
+    Today ``_default_judge_agent_config().sdk_options`` is empty, so the merge is
+    a no-op. This test simulates a future where defaults add e.g. ``effort:
+    medium``, and locks in that a user supplying ``{include_partial_messages:
+    True}`` does NOT wipe the default's ``effort`` key.
+    """
+    from coder_eval.models import AgentConfig
+    from coder_eval.models.criteria import _default_judge_agent_config
+
+    real_default = _default_judge_agent_config
+
+    def _default_with_sdk_options() -> AgentConfig:
+        cfg = real_default()
+        cfg.sdk_options = {"effort": "medium", "fallback_model": "claude-haiku-4-5-20251001"}
+        return cfg
+
+    # Patch both call sites (the model factory and the checker's import).
+    monkeypatch.setattr("coder_eval.models.criteria._default_judge_agent_config", _default_with_sdk_options)
+    monkeypatch.setattr("coder_eval.criteria.agent_judge._default_judge_agent_config", _default_with_sdk_options)
+
+    criterion = AgentJudgeCriterion(
+        description="x",
+        prompt="grade",
+        agent=AgentConfig(type="claude-code", sdk_options={"include_partial_messages": True, "effort": "high"}),
+    )
+    mock_agent = _make_mock_agent('{"score": 1.0, "rationale": "ok"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent) as mock_cls:
+        SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+    (agent_config,) = mock_cls.call_args.args
+    # User-set keys win; default keys not overridden survive.
+    assert agent_config.sdk_options == {
+        "include_partial_messages": True,
+        "effort": "high",
+        "fallback_model": "claude-haiku-4-5-20251001",
+    }
+
+
+def test_agent_judge_security_ignore_patterns_floor_enforced(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """User-supplied ignore_patterns are merged with the security floor, never replace it."""
+    from coder_eval.models import AgentConfig
+
+    criterion = AgentJudgeCriterion(
+        description="x",
+        prompt="grade",
+        agent=AgentConfig(type="claude-code", ignore_patterns=["custom_dir"]),
+    )
+    mock_agent = _make_mock_agent('{"score": 1.0, "rationale": "ok"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent) as mock_cls:
+        SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+    (agent_config,) = mock_cls.call_args.args
+    assert "custom_dir" in agent_config.ignore_patterns
+    assert ".claude" in agent_config.ignore_patterns
+    assert ".mcp.json" in agent_config.ignore_patterns
+    assert "_reference" in agent_config.ignore_patterns
 
 
 # --- PROXY routing ---
@@ -835,7 +981,7 @@ def test_agent_judge_integration_real_sdk(tmp_path: Path) -> None:
     if not api_key or api_key.startswith("sk-ant-test-"):
         pytest.skip("Needs a real ANTHROPIC_API_KEY to talk to the SDK")
 
-    from coder_eval.models import SandboxConfig
+    from coder_eval.models import AgentConfig, SandboxConfig
 
     (tmp_path / "hello.txt").write_text("Hello, world!\n")
     sb = Sandbox(SandboxConfig(driver="tempdir"), task_id="agent_judge_integration")
@@ -847,10 +993,13 @@ def test_agent_judge_integration_real_sdk(tmp_path: Path) -> None:
             "Check hello.txt in your working directory. If it contains exactly "
             "'Hello, world!' return score=1.0, otherwise 0.0. Reply with ONLY the JSON verdict."
         ),
-        model="claude-haiku-4-5-20251001",
         max_turns=6,
         turn_timeout=90,
-        allowed_tools=["Read"],
+        agent=AgentConfig(
+            type="claude-code",
+            model="claude-haiku-4-5-20251001",
+            allowed_tools=["Read"],
+        ),
     )
     result = SuccessChecker(sb, init_registry=False, route=DirectRoute()).check(criterion)
 

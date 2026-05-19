@@ -462,6 +462,7 @@ class ClaudeCodeAgent(Agent):
                 settings=json.dumps(self.config.claude_settings)
                 if isinstance(self.config.claude_settings, dict)
                 else self.config.claude_settings,
+                **self.config.sdk_options,
             )
 
             # Dump SDK options for later inspection (captures all 37+ fields including defaults)

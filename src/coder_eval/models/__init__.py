@@ -7,6 +7,9 @@ which submodule they're defined in.
 # SDK Types
 from claude_agent_sdk import SdkPluginConfig
 
+# Agent config
+from coder_eval.models.agent_config import AgentConfig
+
 # Enums
 # Criteria
 from coder_eval.models.criteria import (
@@ -129,7 +132,6 @@ from coder_eval.models.sandbox import (
 # Tasks
 from coder_eval.models.tasks import (
     DEFAULT_SIMULATION_STOP_TOKEN,
-    AgentConfig,
     CriteriaCheckTiming,
     Dataset,
     PostRunCommand,

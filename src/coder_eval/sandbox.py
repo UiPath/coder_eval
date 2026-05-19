@@ -494,6 +494,13 @@ class Sandbox:
         resolved ``uip`` binary depends on PATH, and the path-aligned criterion
         is the canonical lookup. Failures are swallowed — the env var simply
         stays unset and the CLI falls back to its walk-based discovery.
+
+        Passing ``None`` clears the agent-aligned PATH prefix and re-derives
+        ``PLUGIN_TOOLS_DIR`` from ``os.environ['PATH']`` alone. The new pin
+        may differ from the previous one if the parent PATH resolves ``uip``
+        to a different install — by design, since dropping the agent
+        alignment means the criterion subprocess should now match the parent
+        environment.
         """
         self._command_base_path = path or None
         self._refresh_plugin_tools_dir()
@@ -586,6 +593,14 @@ class Sandbox:
 
         Returns the deleted directory on success, ``None`` when no action
         was taken (flag off, dir absent, or under-test ``$HOME`` mismatch).
+
+        TOCTOU: there is a small window between ``Path.resolve(strict=True)``
+        and ``shutil.rmtree`` during which the target could be replaced.
+        Combined defenses: (a) the resolved-anchor check rejects HOME=/,
+        (b) ``resolved_home in resolved_target.parents`` confines deletion
+        under HOME, (c) the operator opt-in gates the entire path. Failures
+        in ``rmtree`` are silenced (``ignore_errors=True``) and surfaced via
+        a residual-presence warning rather than a raise.
         """
         flag = os.environ.get(self.REMEDIATE_HOME_PLUGINS_ENV, "").strip().lower()
         if flag not in {"1", "true", "yes"}:

@@ -7,7 +7,42 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from coder_eval.models.agent_config import AgentConfig
+from coder_eval.models.enums import AgentKind
 from coder_eval.models.gateway import DEFAULT_GATEWAY_MODEL
+
+
+# SECURITY: ignore_patterns floor. The judge's working directory is a copy of
+# the agent's sandbox; if the agent dropped these in, they'd otherwise be
+# copied across and either (a) cause the SDK to load hooks / MCP servers from
+# the main agent's settings (despite ``setting_sources=[]``, the agent ignore
+# patterns also gate what shutil.copytree pulls in) or (b) collide with the
+# reference mount point. The floor is enforced UNCONDITIONALLY in
+# ``criteria/agent_judge.py::_build_agent_config``, even when the user
+# supplied their own ``agent.ignore_patterns`` — author convenience does not
+# override the judge's safety floor. Single source of truth: importing this
+# constant from both call-sites keeps the model defaults and the checker
+# floor in sync.
+JUDGE_SECURITY_IGNORE_FLOOR: tuple[str, ...] = (".claude", ".mcp.json", "_reference")
+
+
+def _default_judge_agent_config() -> AgentConfig:
+    """Build the default judge AgentConfig.
+
+    The returned ``ignore_patterns`` extend ``JUDGE_SECURITY_IGNORE_FLOOR``
+    with developer-noise dirs (``.git``, ``node_modules``, ...). The security
+    trio is appended via the shared constant so it cannot drift from the
+    floor enforced in ``_build_agent_config``.
+    """
+    # Developer-noise dirs first, security floor (single source of truth) last.
+    developer_noise = [".git", "node_modules", "__pycache__", ".venv"]
+    return AgentConfig(
+        type=AgentKind.CLAUDE_CODE,
+        model="claude-sonnet-4-6",
+        permission_mode="bypassPermissions",
+        allowed_tools=["Bash", "Read", "Glob", "Grep"],
+        ignore_patterns=[*developer_noise, *JUDGE_SECURITY_IGNORE_FLOOR],
+    )
 
 
 class BaseSuccessCriterion(BaseModel, ABC):
@@ -878,15 +913,6 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
     )
 
     # Judge agent config
-    model: str = Field(
-        default="claude-sonnet-4-6",
-        description=(
-            "Claude Code SDK model ID (e.g. 'claude-sonnet-4-6'). Distinct from "
-            "LLMJudgeCriterion.model, which uses gateway model IDs. Sonnet is the default "
-            "because tool-using judges spend most of their tokens on tool I/O context — "
-            "Opus offers limited grading uplift for ~5x the cost. Override per task if needed."
-        ),
-    )
     max_turns: int = Field(
         default=50,
         gt=0,
@@ -902,45 +928,14 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
         ge=10,
         description="Wall-clock timeout for the judge turn (seconds). Minimum 10.",
     )
-    permission_mode: Literal["default", "acceptEdits", "plan", "bypassPermissions"] = Field(
-        default="bypassPermissions",
-        description="Judge works on a throwaway copy, so bypassing permission prompts is fine.",
-    )
-    allowed_tools: list[str] = Field(
-        default_factory=lambda: ["Bash", "Read", "Glob", "Grep"],
+    agent: AgentConfig = Field(
+        default_factory=_default_judge_agent_config,
         description=(
-            "Read-only investigation toolkit by default — judges should observe, not modify. "
-            "Bash is included for CLI validation (e.g. `uip rpa get-errors`, `xmllint`). "
-            "Add `Write` / `Edit` per task if the judge needs scratch files (rare); narrow to "
-            "['Read', 'Grep', 'Glob'] when Bash is not needed — see SECURITY note."
+            "Judge agent configuration. Defaults to a sonnet, bypass-permissions, read-only "
+            "toolkit suitable for investigation-style judging. Override fields per task as "
+            "needed. For security, the judge always runs with setting_sources=[] regardless "
+            "of what this field declares — see _build_agent_config."
         ),
-    )
-    disallowed_tools: list[str] | None = Field(
-        default=None,
-        description="Tools to block even if in allowed_tools.",
-    )
-    ignore_patterns: list[str] = Field(
-        default_factory=lambda: [
-            ".git",
-            "node_modules",
-            "__pycache__",
-            ".venv",
-            # SECURITY: exclude files that would make the judge CLI load hooks /
-            # MCP servers planted by the main agent. The checker also sets
-            # setting_sources=[] on the judge's AgentConfig as defense-in-depth.
-            ".claude",
-            ".mcp.json",
-            # SECURITY + collision: ``_reference`` is the mount point for the
-            # directory-form reference. Stripped from the SANDBOX side only so
-            # (a) the second copytree doesn't FileExistsError on a template-staged
-            # or agent-planted ``_reference/``, and (b) the judge sees grading
-            # material exclusively from task.reference. The reference-side
-            # copytree uses a SEPARATE ignore set (``reference_ignore_patterns``,
-            # default ``[]`` in SubAgentRunner) so a nested ``_reference/`` inside
-            # the user's reference dir is NOT silently dropped.
-            "_reference",
-        ],
-        description="Patterns passed to shutil.ignore_patterns when copying the sandbox.",
     )
     capture_transcript: bool = Field(
         default=True,

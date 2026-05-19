@@ -965,3 +965,170 @@ class TestSandboxFieldMerge:
         resolved_task, _, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0], config)
         # Task timeout wins over experiment default
         assert resolved_task.sandbox.limits.timeout == 200
+
+
+class TestSdkOptionsMerge:
+    """5-layer merge coverage for ``agent.sdk_options`` (default -> experiment-defaults -> task -> variant -> CLI).
+
+    Each layer can contribute or override individual SDK option keys; the merge
+    is deep on this key so a higher layer adding ``effort`` doesn't wipe an
+    ``include_partial_messages`` set by a lower layer.
+    """
+
+    @staticmethod
+    def _resolve(
+        *,
+        default_opts: dict | None = None,
+        exp_opts: dict | None = None,
+        task_opts: dict | None = None,
+        variant_opts: dict | None = None,
+        cli_opts: dict | None = None,
+    ):
+        from pathlib import Path
+
+        from coder_eval.orchestration.config import BatchRunConfig
+        from coder_eval.orchestration.experiment import _apply_cli_overrides
+
+        default_exp = ExperimentDefinition(
+            experiment_id="default",
+            defaults=ExperimentDefaults(
+                agent={
+                    "type": "claude-code",
+                    **({"sdk_options": default_opts} if default_opts is not None else {}),
+                },
+            ),
+            variants=[ExperimentVariant(variant_id="default")],
+        )
+        task_agent: dict = {"type": "claude-code"}
+        if task_opts is not None:
+            task_agent["sdk_options"] = task_opts
+        task = _make_task(agent=task_agent)
+        variant_agent: dict | None = None
+        if variant_opts is not None:
+            variant_agent = {"sdk_options": variant_opts}
+        experiment = ExperimentDefinition(
+            experiment_id="test",
+            defaults=ExperimentDefaults(
+                agent={"sdk_options": exp_opts} if exp_opts is not None else None,
+            ),
+            variants=[ExperimentVariant(variant_id="v1", agent=variant_agent)],
+        )
+
+        resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+
+        if cli_opts is not None:
+            cli_cfg = BatchRunConfig(run_dir=Path("/tmp/run"), sdk_options=cli_opts)
+            _apply_cli_overrides(resolved, cli_cfg, lineage)
+
+        return resolved, lineage
+
+    def test_only_default_contributes(self):
+        resolved, lineage = self._resolve(default_opts={"effort": "low"})
+        assert resolved.agent.sdk_options == {"effort": "low"}
+        assert lineage["agent.sdk_options.effort"].source == "default"
+
+    def test_experiment_defaults_override_default_and_add_keys(self):
+        resolved, lineage = self._resolve(
+            default_opts={"effort": "low"},
+            exp_opts={"effort": "medium", "include_partial_messages": True},
+        )
+        assert resolved.agent.sdk_options == {"effort": "medium", "include_partial_messages": True}
+        assert lineage["agent.sdk_options.effort"].source == "experiment-defaults"
+        assert lineage["agent.sdk_options.include_partial_messages"].source == "experiment-defaults"
+
+    def test_task_overrides_one_key_others_survive(self):
+        resolved, lineage = self._resolve(
+            default_opts={"effort": "low"},
+            exp_opts={"include_partial_messages": True},
+            task_opts={"effort": "high"},
+        )
+        assert resolved.agent.sdk_options == {"effort": "high", "include_partial_messages": True}
+        assert lineage["agent.sdk_options.effort"].source == "task"
+        assert lineage["agent.sdk_options.include_partial_messages"].source == "experiment-defaults"
+
+    def test_variant_overrides_task(self):
+        resolved, lineage = self._resolve(
+            default_opts={"effort": "low"},
+            task_opts={"effort": "high"},
+            variant_opts={"effort": "xhigh"},
+        )
+        assert resolved.agent.sdk_options == {"effort": "xhigh"}
+        assert lineage["agent.sdk_options.effort"].source == "variant"
+
+    def test_cli_overrides_all_lower_layers(self):
+        resolved, lineage = self._resolve(
+            default_opts={"effort": "low", "include_partial_messages": True},
+            cli_opts={"effort": "max"},
+        )
+        assert resolved.agent.sdk_options == {"effort": "max", "include_partial_messages": True}
+        assert lineage["agent.sdk_options.effort"].source == "cli"
+        assert lineage["agent.sdk_options.effort"].source_detail == "--sdk-option effort=max"
+        # The unaffected key stays at its original source.
+        assert lineage["agent.sdk_options.include_partial_messages"].source == "default"
+
+    def test_no_layer_sets_anything(self):
+        resolved, lineage = self._resolve()
+        assert isinstance(resolved.agent.sdk_options, dict)
+        assert resolved.agent.sdk_options == {}
+        sdk_keys = [k for k in lineage if k.startswith("agent.sdk_options.")]
+        assert sdk_keys == []
+
+    def test_explicit_empty_dict_is_noop_not_clear(self):
+        """Explicit ``sdk_options: {}`` at a higher layer is a no-op.
+
+        The merge contract is additive-only: there is no "clear all inherited
+        SDK options" syntax. An explicit ``{}`` MUST NOT silently wipe lower-
+        layer values, and it MUST NOT raise. This locks the documented
+        semantics in ``_merge_agent_dicts`` against accidental regression.
+        """
+        # variant supplies ``{}``; default supplies effort=low → default wins.
+        resolved, lineage = self._resolve(
+            default_opts={"effort": "low"},
+            variant_opts={},
+        )
+        assert resolved.agent.sdk_options == {"effort": "low"}
+        assert lineage["agent.sdk_options.effort"].source == "default"
+
+        # task supplies ``{}``; experiment-defaults supplies a key → exp-defaults wins.
+        resolved, lineage = self._resolve(
+            exp_opts={"include_partial_messages": True},
+            task_opts={},
+        )
+        assert resolved.agent.sdk_options == {"include_partial_messages": True}
+        assert lineage["agent.sdk_options.include_partial_messages"].source == "experiment-defaults"
+
+    def test_validator_rejects_unknown_sdk_key_at_load(self):
+        """An unknown SDK option in a task YAML fails Pydantic validation."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="not a ClaudeAgentOptions field"):
+            _make_task(agent={"type": "claude-code", "sdk_options": {"not_a_real_field": 1}})
+
+    def test_validator_rejects_security_critical_sdk_key_at_load(self):
+        """Security-critical SDK fields (hooks/mcp_servers/...) can't leak in via sdk_options."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="framework-managed"):
+            _make_task(agent={"type": "claude-code", "sdk_options": {"hooks": {}}})
+
+    def test_judge_nested_sdk_options_validator_runs(self):
+        """The same validator applies to AgentJudgeCriterion.agent.sdk_options."""
+        from pydantic import ValidationError
+
+        from coder_eval.models import AgentConfig, AgentJudgeCriterion
+
+        # happy path
+        c = AgentJudgeCriterion(
+            description="x",
+            prompt="grade",
+            agent=AgentConfig(type="claude-code", sdk_options={"effort": "low"}),
+        )
+        assert c.agent.sdk_options == {"effort": "low"}
+
+        # rejection path
+        with pytest.raises(ValidationError, match="framework-managed"):
+            AgentJudgeCriterion(
+                description="x",
+                prompt="grade",
+                agent=AgentConfig(type="claude-code", sdk_options={"hooks": {}}),
+            )

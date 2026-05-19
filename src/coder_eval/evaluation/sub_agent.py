@@ -136,7 +136,7 @@ class SubAgentRunner:
             # reference, dropping grading material the user explicitly chose to
             # include.
             #
-            # Defense-in-depth on the sandbox side: ``AgentJudgeCriterion.ignore_patterns``
+            # Defense-in-depth on the sandbox side: ``AgentJudgeCriterion.agent.ignore_patterns``
             # includes ``_reference`` so the first copytree above strips any
             # sandbox-side ``_reference/`` (agent-planted or template-staged). If a
             # caller overrides ignore_patterns and removes ``_reference``, the second

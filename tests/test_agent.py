@@ -349,6 +349,100 @@ async def test_claude_settings_none_default():
     assert captured_options[0].settings is None
 
 
+@pytest.mark.asyncio
+async def test_sdk_options_forwarded_to_sdk():
+    """An sdk_options key (e.g. effort) is splatted into ClaudeAgentOptions."""
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, sdk_options={"effort": "medium"})
+    agent = ClaudeCodeAgent(config)
+
+    captured_options = await _capture_sdk_options(agent)
+
+    assert captured_options[0].effort == "medium"
+
+
+@pytest.mark.asyncio
+async def test_sdk_options_empty_dict_default():
+    """When sdk_options is unset (default {}), the SDK gets no extra kwargs."""
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+    agent = ClaudeCodeAgent(config)
+    assert config.sdk_options == {}
+
+    captured_options = await _capture_sdk_options(agent)
+
+    # effort defaults on the SDK side when not passed.
+    assert captured_options[0].effort is None
+
+
+def test_sdk_options_unknown_key_rejected():
+    """A key not present on ClaudeAgentOptions is rejected at validation time."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="not a ClaudeAgentOptions field"):
+        AgentConfig(type=AgentKind.CLAUDE_CODE, sdk_options={"not_a_real_field": 1})
+
+
+def test_sdk_options_framework_managed_key_rejected():
+    """A framework-managed key (e.g. model) cannot be set via sdk_options."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="framework-managed"):
+        AgentConfig(type=AgentKind.CLAUDE_CODE, sdk_options={"model": "opus"})
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "hooks",
+        "mcp_servers",
+        "cli_path",
+        "extra_args",
+        "agents",
+        "can_use_tool",
+        "permission_prompt_tool_name",
+        "tools",
+        "sandbox",
+        "skills",
+        "add_dirs",
+    ],
+)
+def test_sdk_options_security_critical_key_rejected(key):
+    """Security-critical SDK fields are framework-managed.
+
+    Allowing these via sdk_options would re-open the security holes that
+    agent_judge specifically closes with setting_sources=[] — see
+    `criteria/agent_judge.py` SECURITY comment.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="framework-managed"):
+        AgentConfig(type=AgentKind.CLAUDE_CODE, sdk_options={key: "x"})
+
+
+def test_sdk_options_validates_on_assignment():
+    """validate_assignment re-runs the field validator on attribute writes."""
+    from pydantic import ValidationError
+
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+    with pytest.raises(ValidationError, match="not a ClaudeAgentOptions field"):
+        config.sdk_options = {"bogus": 1}
+
+
+def test_sdk_options_pydantic_round_trip():
+    """AgentConfig with sdk_options survives model_dump -> model_validate cleanly.
+
+    Locks in persistence integrity for EvaluationResult-style serialization
+    paths that depend on Pydantic round-trip identity.
+    """
+    original = AgentConfig(
+        type=AgentKind.CLAUDE_CODE,
+        sdk_options={"effort": "medium", "include_partial_messages": True},
+    )
+    dumped = original.model_dump()
+    restored = AgentConfig.model_validate(dumped)
+    assert restored.sdk_options == {"effort": "medium", "include_partial_messages": True}
+    assert restored == original
+
+
 def test_claude_agent_file_change_detection():
     """Test file change detection logic."""
     config = AgentConfig(

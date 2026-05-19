@@ -8,9 +8,9 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
 
+from coder_eval.models.agent_config import AgentConfig
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind, FinalStatus
-from coder_eval.models.tasks import AgentConfig
 from coder_eval.models.telemetry import CommandStatistics, CommandTelemetry, TokenUsage
 
 

@@ -327,6 +327,28 @@ class TestApplyCliOverridesLineage:
         assert lineage["agent.disallowed_tools"].source == "cli"
         assert lineage["agent.disallowed_tools"].source_detail == "--disallowed-tools"
 
+    def test_cli_sdk_option_override(self):
+        from coder_eval.models import TaskDefinition
+
+        task = TaskDefinition(
+            task_id="test",
+            description="test",
+            initial_prompt="do",
+            agent={"type": "claude-code", "sdk_options": {"effort": "low"}},
+            sandbox={"driver": "tempdir"},
+            success_criteria=[{"type": "file_exists", "path": "t.py", "description": "x"}],
+        )
+        lineage: dict[str, ConfigLineageEntry] = {}
+        config = BatchRunConfig(run_dir=Path("/tmp/run"), max_parallel=1, sdk_options={"effort": "high"})
+        with patch("coder_eval.config.settings") as mock_settings:
+            mock_settings.default_agent_model = None
+            mock_settings.default_permission_mode = None
+            mock_settings.default_max_turns = None
+            _apply_cli_overrides(task, config, lineage)
+        assert task.agent.sdk_options == {"effort": "high"}
+        assert lineage["agent.sdk_options.effort"].source == "cli"
+        assert lineage["agent.sdk_options.effort"].source_detail == "--sdk-option effort=high"
+
     def test_task_yaml_model_preserved_when_no_cli_or_env(self, monkeypatch):
         """Regression: task YAML's agent.model survives when no --model and no DEFAULT_AGENT_MODEL.
 

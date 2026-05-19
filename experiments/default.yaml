@@ -60,6 +60,15 @@ defaults:
     # Example: ["*.log", "__pycache__"]
     ignore_patterns: []
 
+    # Claude Code SDK pass-through options — anything coder_eval doesn't own
+    # directly (e.g. `effort`, `include_partial_messages`). Keys must be
+    # ClaudeAgentOptions fields and must not be framework-managed (model,
+    # allowed_tools, permission_mode, hooks, mcp_servers, ...). Deep-merged
+    # across experiment / task / variant / --sdk-option layers, so a higher
+    # layer adding one key doesn't wipe the rest.
+    # Example: sdk_options: {effort: high}
+    # sdk_options: {}
+
   # Sandbox-internal cleanup appended after each task's own post_run (MST-9674).
   # PR #250 sandbox-scopes Node/npm installs to <sandbox>/{node_modules,.npm-prefix};
   # removing them keeps preserved-sandbox artifacts small and is a no-op in normal
