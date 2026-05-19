@@ -12,6 +12,8 @@ description: Run a multi-model code review on uncommitted changes or a described
 
 Run a thorough code review using multiple AI models in parallel, then fix all high-confidence medium-severity and above findings.
 
+**Cost note**: This command runs `make verify` + a multi-model review (`gemini-3` + `codex` via MCP, plus an Opus sub-agent) + automatic fixes. Expensive in time and tokens. Use this for changes you're about to ship; for broad codebase audits use `/coder-eval-code-review-full`; for quick local checks, run targeted tools (`ruff`, `pyright`, `pytest`) directly.
+
 Input: $ARGUMENTS
 
 ## Determining Scope
@@ -21,6 +23,31 @@ Input: $ARGUMENTS
 **If no input was provided**: Review all locally modified files (unstaged + staged, not yet committed). Identify them from `git diff --name-only` and `git diff --name-only --cached`. If there are no uncommitted changes, review the files changed in the most recent commit (`git diff HEAD~1 --name-only`).
 
 Read all identified files in full before launching any review.
+
+## Severity Standard
+
+Tag every finding 🔴 Critical / 🟠 High / 🟡 Medium / 🔵 Low. Calibrate by
+**impact if shipped**, not by fix difficulty. When torn between two levels,
+pick the lower one. Use the anchors below to keep ratings reproducible across
+runs and across reviewers.
+
+| 🔴 Critical | 🟠 High | 🟡 Medium | 🔵 Low |
+|------------|--------|----------|-------|
+| Data loss; secrets/credentials leak; security hole reachable in production; crash on the golden path; silently-wrong `EvaluationResult` | Wrong behavior on a common path; race condition; resource leak (subprocess, tempdir, file handle); bare `except` swallowing a specific error class; logic fix landing without a regression test | Design issue (KISS/DRY/CLAUDE.md violation); Checklist hit outside a hot path; weak test that wouldn't catch the regression; missing `extra="forbid"` on a config model | Style or naming nit; missing internal docstring; redundant comment; example in `--help` is stale |
+
+**Security findings additional requirement**: any finding whose `Trigger` is
+security-class (Checklist items 5, 7, 14, anything about secrets/auth/subprocess
+injection, or a `bandit` / `pip-audit` hit) MUST include a CVSS v3.1 vector
+string (e.g. `CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H`). Map base score to
+severity: 9.0–10.0 → 🔴, 7.0–8.9 → 🟠, 4.0–6.9 → 🟡, 0.1–3.9 → 🔵.
+
+**Severity is NOT**:
+- a measure of fix difficulty — a one-line fix can still be 🔴.
+- a vote of confidence — use the `confirmed by N/3 reviewers` note instead.
+- inflated to make findings look important — when uncertain, go lower.
+
+**Fix threshold**: Step 4 fixes everything 🟡 and above. 🔵 is reported in the
+summary but not auto-fixed.
 
 ## Step 1: Automated Verification
 
@@ -38,7 +65,7 @@ If it fails, report what's failing and stop — code review on broken code is pr
 
 Launch two reviews **in parallel**:
 
-**Review A — Multi-model (Gemini + Codex)**: Use `mcp__multi__codereview` with `models: ["gemini-3", "codex"]`, `relevant_files`: absolute paths of all changed files, `content`: review request referencing the Review Criteria below, `step_number`: 1, `next_action`: "stop", `base_path`: project root. If `mcp__multi__codereview` is not available, launch two additional Opus sub-agents instead.
+**Review A — Multi-model (Gemini + Codex)**: Use `mcp__multi__codereview` with `models: ["gemini-3", "codex"]`, `relevant_files`: absolute paths of all changed files, `content`: review request referencing the Severity Standard, Review Principles, and Checklist below, `step_number`: 1, `next_action`: "stop", `base_path`: project root. If `mcp__multi__codereview` is not available, launch two additional Opus sub-agents instead.
 
 **Review B — Opus sub-agent**: Use the `Agent` tool with `model: "opus"`. Give it the list of changed files and the following specialized tasks to run in parallel internally:
 
@@ -47,15 +74,28 @@ Launch two reviews **in parallel**:
 - **Historical context**: Read git blame (`git log -p --follow`) for the changed files to identify bugs in light of past decisions.
 - **Review Criteria**: Evaluate against the full checklist below.
 
-Return structured findings: severity (critical/high/medium/low) + file:line + description + what specifically triggered the flag.
+**Required return shape** (each reviewer, no prose preamble or trailing summary):
+
+```
+- [severity: 🔴 Critical | 🟠 High | 🟡 Medium | 🔵 Low] One-line description
+  - File: `path:line`
+  - Trigger: which Principle / Checklist item / Severity anchor matched
+  - Recommendation: what to do (or `open question`)
+  - (Security findings only) CVSS vector: `CVSS:3.1/...`
+```
+
+Positives go in a separate list at the bottom of the response, not interleaved
+with findings. This shape lets Step 3 concatenate reviewer outputs with
+minimal reformatting.
 
 ## Step 3: Synthesize
 
 Combine surviving findings across all reviewers:
 
-- Deduplicate — consolidate overlapping findings into one entry
-- Note multi-reviewer agreement (higher confidence)
-- List positives alongside issues for a balanced view
+- Deduplicate — consolidate overlapping findings into one entry.
+- Note multi-reviewer agreement as `confirmed by N/3 reviewers` (genuine confirmation here: three reviewers independently looking at the same diff from the same lens).
+- On severity disagreement for the same finding, take the **highest** rating and note the disagreement.
+- List positives in a separate section below findings — never mixed in.
 
 ## Step 4: Fix Medium+ Issues
 
@@ -69,10 +109,18 @@ After all fixes, re-run `make verify`. Commit fixes if there are any (e.g., `fix
 
 ## Step 5: Summary
 
-Present a structured summary:
+Present a structured summary. The `Review Metadata` block makes runs comparable
+across sessions and provides forensic context if a fix later proves wrong:
 
 ```
 ## Code Review Complete
+
+### Review Metadata
+- Timestamp: <ISO timestamp from `date -u +%Y-%m-%dT%H:%M:%SZ`>
+- Git SHA: <`git rev-parse HEAD`>
+- Branch: <`git rev-parse --abbrev-ref HEAD`>
+- Scope: <uncommitted | described "<input>" | last commit>
+- Reviewers: <e.g. gemini-3, codex, opus-fallback-1, opus-fallback-2 — list actual reviewers used>
 
 ### Scope
 - Files reviewed: (list)
@@ -81,13 +129,13 @@ Present a structured summary:
 - make verify: passed / failed (details)
 
 ### Findings
-- Critical/High fixed: (count + brief descriptions)
-- Medium fixed: (count + brief descriptions)
-- Low/informational: (count, left as findings)
+- 🔴 Critical / 🟠 High fixed: (count + brief descriptions)
+- 🟡 Medium fixed: (count + brief descriptions)
+- 🔵 Low / informational: (count, left as findings)
 - Filtered as false positives: (count)
 
 ### Suggested Next Steps
-- (any low-severity findings worth revisiting)
+- (any 🔵 findings worth revisiting)
 - (patterns flagged as candidates for new lint rules)
 ```
 
@@ -124,7 +172,7 @@ Present a structured summary:
 7. **Resource cleanup**: No file handle, subprocess, or temp directory leaks — especially in error paths
 8. **Public API surface**: New exports from `coder_eval.models` are intentional; discriminated unions updated if needed
 9. **Regression lint**: For each correctness bug found, consider whether it is mechanically detectable (wrong import path, missing decorator, blocking call in async, silent exception). If so, flag it as a candidate for a new rule in `tests/lint/rules/`.
-10. **Layer-merge coverage**: New fields on `ResolvedTask` / `AgentConfig` / `BatchRunConfig` have explicit coverage in `test_experiment_resolver.py` exercising all 5 merge layers (default → exp defaults → task → variant → CLI), and a matching CLI override in `_apply_cli_overrides`. Fix-commit family includes `8ed1d6c`, `a5466b5`, `d2fa30d`, `56a5e38`, `2b2086b`.
+10. **Layer-merge coverage**: New fields on `ResolvedTask` / `AgentConfig` / `BatchRunConfig` have explicit coverage in `test_experiment_resolver.py` exercising all 5 merge layers (default → exp defaults → task → variant → CLI), and a matching CLI override in `_apply_cli_overrides`.
 11. **Pydantic round-trip integrity**: Changes to layered configs or polymorphic `CriterionResult` subclasses preserve `model_fields_set` and the discriminator across `model_dump(exclude_unset=True)` → `model_validate()`. Round-trip tests exist for new variants.
 12. **Discriminated unions**: New or modified Pydantic unions use `Annotated[..., Field(discriminator="type")]`. Bare `A | B | C` unions silently coerce to the first variant on a missing or typo'd `type`.
 13. **Cross-retry state hygiene**: After `AgentCrashError` / `TurnTimeoutError` / `is_error=True` SDK message, the agent resets `_session_id`, `pending_turn`, watchdog references, streaming-event `ContextVar`s, and iteration counters before the next attempt. Test covers a crashing turn followed by a successful turn in the same `Orchestrator` instance.
