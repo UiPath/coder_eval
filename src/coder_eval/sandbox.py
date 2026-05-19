@@ -899,33 +899,51 @@ class Sandbox:
     def preserve_to(self, artifact_dir: Path) -> Path:
         """Preserve sandbox contents to an artifact directory.
 
+        Uses ``shutil.move``: an atomic rename when source and destination
+        share a filesystem, copy+remove otherwise. Either way the source side
+        is gone the moment this method returns (no second-pass rmtree).
+
         Args:
-            artifact_dir: Directory to copy sandbox contents to
+            artifact_dir: Directory to move sandbox contents into.
 
         Returns:
-            Path to the preserved sandbox
+            Path to the preserved sandbox.
 
         Raises:
-            RuntimeError: If sandbox is not set up
+            RuntimeError: If sandbox is not set up.
         """
         if not self.sandbox_dir:
             raise RuntimeError("Sandbox not set up")
 
-        # Create artifact directory if it doesn't exist
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-
-        # Create unique directory for this sandbox
+        # task_id may contain "/" (dataset row tasks); ensure the parent exists.
         preserve_path = artifact_dir / self.task_id
+        preserve_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Guard against self-referential copy (sandbox already in target location)
+        # Guard against self-referential move (sandbox already at target).
         if self.sandbox_dir.resolve() == preserve_path.resolve():
             return preserve_path
 
         if preserve_path.exists():
             shutil.rmtree(preserve_path)
 
-        # Copy sandbox contents
-        shutil.copytree(self.sandbox_dir, preserve_path)
+        old_sandbox_dir = self.sandbox_dir
+        shutil.move(str(old_sandbox_dir), str(preserve_path))
+
+        # Sandbox now lives at the artifact path -- redirect pointers so that a
+        # subsequent cleanup() is a no-op. Venv absolute paths inside the venv
+        # are not rewritten (same behaviour as the prior copy-based code).
+        self.sandbox_dir = preserve_path
+        if self.venv_dir is not None:
+            try:
+                rel = self.venv_dir.relative_to(old_sandbox_dir)
+                self.venv_dir = preserve_path / rel
+            except ValueError:
+                # Defensive: venv_dir is currently always created under
+                # sandbox_dir (see _setup_virtualenv), so relative_to should
+                # always succeed. If a future code path places it elsewhere,
+                # leave the pointer untouched -- the move did not relocate it.
+                pass
+        self._cleanup_on_exit = False
         return preserve_path
 
     def cleanup(self, preserve: bool = False) -> None:

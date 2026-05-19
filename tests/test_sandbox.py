@@ -683,6 +683,52 @@ def test_sandbox_default_setup_handles_slashed_task_id():
         sandbox.cleanup()
 
 
+# ==================== preserve_to move semantics (MST-10032) ====================
+
+
+def test_preserve_to_moves_instead_of_copying(tmp_path):
+    """preserve_to() leaves no source dir behind (move, not copytree+rmtree)."""
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="move-task")
+
+    try:
+        original_dir = sandbox.setup()
+        (original_dir / "output.txt").write_text("agent output")
+
+        artifacts = tmp_path / "artifacts"
+        preserved = sandbox.preserve_to(artifacts)
+
+        # Original tempdir is gone the moment preserve_to returns -- no
+        # second-pass rmtree needed during cleanup().
+        assert not original_dir.exists()
+        assert preserved.exists()
+        assert (preserved / "output.txt").read_text() == "agent output"
+
+        # State has flipped to persistent so cleanup() is a no-op.
+        assert sandbox.sandbox_dir == preserved
+        assert sandbox.is_persistent
+        sandbox.cleanup()
+        assert preserved.exists()
+    finally:
+        # Sandbox is_persistent now; tmp_path autoremoves the rest.
+        pass
+
+
+def test_preserve_to_creates_parent_dirs_for_slashed_task_id(tmp_path):
+    """Dataset-row task IDs ("parent/row") need their parent created in artifacts."""
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="dataset/row-0")
+
+    try:
+        sandbox.setup()
+        artifacts = tmp_path / "artifacts"
+        preserved = sandbox.preserve_to(artifacts)
+        assert preserved == artifacts / "dataset" / "row-0"
+        assert preserved.exists()
+    finally:
+        sandbox.cleanup()
+
+
 # ==================== Snapshot Tests ====================
 
 
