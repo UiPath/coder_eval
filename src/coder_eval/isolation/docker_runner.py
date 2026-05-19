@@ -533,9 +533,14 @@ class DockerRunner:
             (host_claude_dir / "session-env").mkdir(parents=True, exist_ok=True)
 
     def _build_argv(self, input_dir: Path, output_dir: Path, *, container_name: str) -> list[str]:
+        import sys
+
         cfg = self._docker_config
         image = cfg.image or DEFAULT_IMAGE_TAG
         argv: list[str] = ["docker", "run", "--rm", "--name", container_name]
+
+        if sys.platform != "win32":
+            argv += ["--user", f"{os.getuid()}:{os.getgid()}"]
 
         if cfg.network == "none":
             argv += ["--network", "none"]
@@ -558,11 +563,10 @@ class DockerRunner:
                 argv += ["--env", env_var]
 
         argv += ["-v", f"{input_dir.resolve()}:{CONTAINER_INPUT_DIR}:ro"]
-        # Mount the host run_dir at the same path inside the container so
-        # the in-container Orchestrator writes task.json/task.log/etc.
-        # directly to the host filesystem (and absolute paths in logs
-        # match what a user sees on the host).
-        argv += ["-v", f"{output_dir}:{output_dir}"]
+        # Mount the host run_dir to the container's standard output location
+        # so the in-container Orchestrator writes task.json/task.log/etc.
+        # directly to the host filesystem via bind-mount.
+        argv += ["-v", f"{output_dir}:{CONTAINER_OUTPUT_DIR}"]
         # Mount the original task dir at the SAME host path so the
         # in-container Orchestrator can set TASK_DIR (used by run_command
         # criteria via `$TASK_DIR/foo.json`) to a path that resolves
@@ -661,11 +665,11 @@ class DockerRunner:
             argv += ["-v", normalized]
 
         argv += [image]
-        # Override the entrypoint's defaults so they point at the symmetric
-        # host paths now bind-mounted into the container.
+        # Pass the container-side output path (the input/output are bound at
+        # container-side defaults, so we just use those).
         if self.verbose:
             argv += ["-v"]
-        argv += ["--output", str(output_dir)]
+        argv += ["--output", str(CONTAINER_OUTPUT_DIR)]
         if host_task_dir is not None:
             argv += ["--task-dir", str(host_task_dir)]
         return argv

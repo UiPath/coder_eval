@@ -1,18 +1,25 @@
-"""Tests for DockerRunner mount-spec validation.
+"""Tests for DockerRunner mount-spec validation and container user/output setup.
 
 Covers the post-merge follow-up hardening: ``:ro`` default when mode is
 omitted, rejection of destinations that shadow framework-owned mounts
 (``/work``, ``/``), and ``~`` / ``$VAR`` expansion on the source side.
+
+Also covers user/output directory fixes: --user flag on POSIX, output
+directory mounted to /work/output, and --output argument using container path.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
-from coder_eval.isolation.docker_runner import _validate_extra_mount
+from coder_eval.isolation.docker_runner import CONTAINER_OUTPUT_DIR, DockerRunner, _validate_extra_mount
+from coder_eval.models import FileExistsCriterion, SandboxConfig, TaskDefinition
 
 
 # DockerRunner targets Linux containers from POSIX hosts. On Windows the test
@@ -92,3 +99,91 @@ class TestValidateExtraMount:
     def test_too_many_colons(self, real_dir):
         with pytest.raises(ValueError, match="expected `src:dst"):
             _validate_extra_mount(f"{real_dir}:/mnt/x:ro:extra")
+
+
+class TestDockerRunnerUserAndOutput:
+    """Tests for Docker runner user/output directory handling."""
+
+    def _make_runner(self, run_dir: Path | None = None) -> DockerRunner:
+        """Helper to create a DockerRunner instance for testing."""
+        if run_dir is None:
+            run_dir = Path(tempfile.gettempdir()) / "test_run"
+
+        task = TaskDefinition(
+            task_id="test",
+            description="test task",
+            initial_prompt="test",
+            sandbox=SandboxConfig(),
+            success_criteria=[FileExistsCriterion(description="test criterion", path="test.txt")],
+        )
+        rt = MagicMock()
+        rt.task = task
+        rt.run_dir = run_dir
+        rt.task_file = None
+
+        return DockerRunner(rt)
+
+    def test_user_flag_added_on_posix(self, monkeypatch):
+        """On POSIX systems, --user flag should be set to current UID:GID."""
+        monkeypatch.setattr("sys.platform", "linux")
+        runner = self._make_runner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = Path(tmpdir) / "input"
+            output_dir = Path(tmpdir) / "output"
+            input_dir.mkdir()
+            output_dir.mkdir()
+
+            argv = runner._build_argv(input_dir, output_dir, container_name="test-container")
+
+            # Check that --user flag is present
+            assert "--user" in argv
+            user_idx = argv.index("--user")
+            user_spec = argv[user_idx + 1]
+            assert ":" in user_spec
+            uid, gid = user_spec.split(":")
+            assert uid == str(os.getuid())
+            assert gid == str(os.getgid())
+
+    def test_output_mounted_to_container_output_dir(self):
+        """Output directory should be mounted to CONTAINER_OUTPUT_DIR (/work/output)."""
+        runner = self._make_runner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = Path(tmpdir) / "input"
+            output_dir = Path(tmpdir) / "output"
+            input_dir.mkdir()
+            output_dir.mkdir()
+
+            argv = runner._build_argv(input_dir, output_dir, container_name="test-container")
+
+            # Find the -v flag that mounts the output directory
+            volume_mounts = []
+            for i, arg in enumerate(argv):
+                if arg == "-v" and i + 1 < len(argv):
+                    volume_mounts.append(argv[i + 1])
+
+            # Check that output_dir is mounted to CONTAINER_OUTPUT_DIR
+            output_mount = f"{output_dir}:{CONTAINER_OUTPUT_DIR}"
+            assert output_mount in volume_mounts, f"Expected mount {output_mount} not found in {volume_mounts}"
+
+    def test_output_argument_uses_container_path(self):
+        """The --output argument should use the container-side path, not host path."""
+        runner = self._make_runner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = Path(tmpdir) / "input"
+            output_dir = Path(tmpdir) / "output"
+            input_dir.mkdir()
+            output_dir.mkdir()
+
+            argv = runner._build_argv(input_dir, output_dir, container_name="test-container")
+
+            # Find the --output argument
+            if "--output" in argv:
+                output_idx = argv.index("--output")
+                output_arg = argv[output_idx + 1]
+
+                # Should be the container-side path, not the host path
+                assert output_arg == str(CONTAINER_OUTPUT_DIR)
+                assert str(output_dir) not in output_arg
