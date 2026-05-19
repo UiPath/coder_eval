@@ -10,7 +10,6 @@ directory mounted to /work/output, and --output argument using container path.
 
 from __future__ import annotations
 
-import os
 import sys
 import tempfile
 from pathlib import Path
@@ -122,28 +121,6 @@ class TestDockerRunnerUserAndOutput:
         rt.task_file = None
 
         return DockerRunner(rt)
-
-    def test_user_flag_added_on_posix(self, monkeypatch):
-        """On POSIX systems, --user flag should be set to current UID:GID."""
-        monkeypatch.setattr("sys.platform", "linux")
-        runner = self._make_runner()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            input_dir = Path(tmpdir) / "input"
-            output_dir = Path(tmpdir) / "output"
-            input_dir.mkdir()
-            output_dir.mkdir()
-
-            argv = runner._build_argv(input_dir, output_dir, container_name="test-container")
-
-            # Check that --user flag is present
-            assert "--user" in argv
-            user_idx = argv.index("--user")
-            user_spec = argv[user_idx + 1]
-            assert ":" in user_spec
-            uid, gid = user_spec.split(":")
-            assert uid == str(os.getuid())
-            assert gid == str(os.getgid())
 
     def test_output_mounted_to_container_output_dir(self):
         """Output directory should be mounted to CONTAINER_OUTPUT_DIR (/work/output)."""

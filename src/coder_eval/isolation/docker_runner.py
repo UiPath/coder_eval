@@ -549,14 +549,9 @@ class DockerRunner:
             (host_claude_dir / "session-env").mkdir(parents=True, exist_ok=True)
 
     def _build_argv(self, input_dir: Path, output_dir: Path, *, container_name: str) -> list[str]:
-        import sys
-
         cfg = self._docker_config
         image = cfg.image or DEFAULT_IMAGE_TAG
         argv: list[str] = ["docker", "run", "--rm", "--name", container_name]
-
-        if sys.platform != "win32":
-            argv += ["--user", f"{os.getuid()}:{os.getgid()}"]
 
         if cfg.network == "none":
             argv += ["--network", "none"]
