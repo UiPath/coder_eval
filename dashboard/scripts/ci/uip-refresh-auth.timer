@@ -1,11 +1,11 @@
 [Unit]
-Description=Refresh uip access token every 50 minutes
+Description=Refresh uip access token every 50 minutes (ROPC, comfortably ahead of ~1h AT TTL)
 Documentation=https://github.com/UiPath/coder_eval/blob/main/dashboard/CI_DESIGN.md
 
 [Timer]
-OnActiveSec=50min
+OnBootSec=1min
 OnUnitActiveSec=50min
-Unit=uip-token-refresh.service
+Unit=uip-refresh-auth.service
 
 [Install]
 WantedBy=timers.target

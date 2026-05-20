@@ -75,7 +75,7 @@ uv run dashboard run --suite skills
 uv run dashboard run --model claude-sonnet-4-6
 
 # Skip slow steps during development
-uv run dashboard run --skip-build --skip-pull --skip-analysis
+uv run dashboard run --skip-pull --skip-analysis
 
 # Override tag filter (the `smoke` suite uses `smoke-pass` by default;
 # pass `--tags smoke-fail` to exercise the negative-path sentinel instead.)

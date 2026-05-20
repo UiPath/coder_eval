@@ -28,6 +28,17 @@ def _git_short_sha(repo_path: Path) -> str:
     return "unknown"
 
 
+def _uip_version() -> str:
+    """Return `uip --version` output, or 'unknown' if the CLI isn't installed."""
+    try:
+        result = subprocess.run(["uip", "--version"], capture_output=True, text=True, encoding="utf-8", timeout=5)
+        if result.returncode == 0:
+            return result.stdout.strip() or "unknown"
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return "unknown"
+    return "unknown"
+
+
 def get_version_info(sandbox_path: Path | None = None) -> dict[str, Any]:
     """Captures versions of key dependencies for reproducibility.
 
@@ -45,13 +56,16 @@ def get_version_info(sandbox_path: Path | None = None) -> dict[str, Any]:
     version_info["git_commit"] = _git_short_sha(project_root)
 
     # Sibling repos that contribute to the agent's runtime context.
-    # Path resolution: env var first (CODER_EVAL_{SKILLS,CLI}_DIR), then sibling-of-coder_eval default.
-    # The dashboard sets these env vars to its configured paths so custom layouts get the right SHA.
+    # Path resolution: env var first (CODER_EVAL_SKILLS_DIR), then sibling-of-coder_eval default.
+    # The dashboard sets this env var to its configured path so custom layouts get the right SHA.
     sibling_root = project_root.parent.parent
-    for name, env_var in (("skills", "CODER_EVAL_SKILLS_DIR"), ("cli", "CODER_EVAL_CLI_DIR")):
-        override = os.environ.get(env_var)
-        repo_path = Path(override) if override else sibling_root / name
-        version_info[f"{name}_git_commit"] = _git_short_sha(repo_path)
+    skills_override = os.environ.get("CODER_EVAL_SKILLS_DIR")
+    skills_path = Path(skills_override) if skills_override else sibling_root / "skills"
+    version_info["skills_git_commit"] = _git_short_sha(skills_path)
+
+    # uip CLI is installed via npm; capture `uip --version`. Read by
+    # dashboard/scripts/ci/slack_summary.py.
+    version_info["cli_version"] = _uip_version()
 
     # Get coder_eval version
     from importlib.metadata import PackageNotFoundError, version

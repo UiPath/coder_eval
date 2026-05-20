@@ -32,9 +32,6 @@ class Config(BaseSettings):
     # (active az login or Managed Identity).
     azure_storage_key: str = ""
 
-    # UiPath CLI repo path (sibling of coder_eval by default)
-    cli_dir: Path = CODER_EVAL_DIR.parent / "cli"
-
     # Skills repo path (sibling of coder_eval by default)
     skills_dir: Path = CODER_EVAL_DIR.parent / "skills"
 

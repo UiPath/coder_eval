@@ -113,8 +113,7 @@ def skill_breakdown(run: dict, min_tasks: int = 4) -> str:
 def configured_parallelism(run: dict) -> int | None:
     """Configured concurrency cap (BatchRunConfig.max_parallel) recorded in run.json.
 
-    Returns None for older runs that pre-date the field; the formatter omits the
-    parallelism line in that case.
+    Returns None when the field is absent; the formatter omits the parallelism line in that case.
     """
     val = run.get("max_parallel")
     if isinstance(val, int) and val > 0:
@@ -139,7 +138,7 @@ def build_metrics(cur: dict, suite: str, model: str, backend: str) -> str:
     env = cur.get("environment_info") or {}
     coder = (env.get("git_commit") or "?")[:7]
     skills_sha = (env.get("skills_git_commit") or "?")[:7]
-    cli = (env.get("cli_git_commit") or "?")[:7]
+    cli = env.get("cli_version") or "?"
 
     label = " / ".join(filter(None, [model, backend])) or "unknown config"
 
@@ -150,7 +149,7 @@ def build_metrics(cur: dict, suite: str, model: str, backend: str) -> str:
         f":white_check_mark: {n_pass}/{n_run} passed ({pct:.0f}%) · "
         f":x: {fail_total} failed ({n_fail} fail + {n_err} error){skipped_line}",
         f":moneybag: ${cost:.2f} · :stopwatch: {duration}{parallel_str}",
-        f":package: coder_eval @ {coder} · skills @ {skills_sha} · cli @ {cli}",
+        f":package: coder_eval @ {coder} · skills @ {skills_sha} · uip @ {cli}",
         f":bar_chart: {DASHBOARD_BASE}/{run_id}",
     ]
     skills_section = skill_breakdown(cur)

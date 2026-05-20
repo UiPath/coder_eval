@@ -29,6 +29,7 @@ env/
 
 # Environment variables
 .env
+.uipath-auth.env
 
 # IDE
 .vscode/

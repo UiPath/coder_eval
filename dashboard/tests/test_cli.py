@@ -103,7 +103,6 @@ def _setup_run_pipeline_mocks(mock_config_cls, tmp_path):
     """Configure shared mocks for `dashboard run` tests."""
     mock_cfg = MagicMock()
     mock_cfg.skills_dir = tmp_path / "skills"
-    mock_cfg.cli_dir = tmp_path / "cli"
     mock_cfg.uip_authority = ""
     mock_cfg.uip_client_id = ""
     mock_cfg.uip_client_secret = ""
@@ -136,7 +135,7 @@ def test_cli_run_calls_review(mock_config_cls, tmp_path):
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["run", "--skip-build", "--skip-pull", "--skip-login", "--suite", "smoke"],
+            ["run", "--skip-pull", "--skip-login", "--suite", "smoke"],
         )
 
     assert result.exit_code == 0, result.output
@@ -161,7 +160,6 @@ def test_cli_skip_review(mock_config_cls, tmp_path):
             cli,
             [
                 "run",
-                "--skip-build",
                 "--skip-pull",
                 "--skip-login",
                 "--skip-review",
@@ -191,7 +189,6 @@ def test_cli_warns_when_skip_analysis_without_skip_review(mock_config_cls, tmp_p
             cli,
             [
                 "run",
-                "--skip-build",
                 "--skip-pull",
                 "--skip-login",
                 "--skip-analysis",
@@ -219,7 +216,7 @@ def test_cli_review_failure_does_not_abort(mock_config_cls, tmp_path):
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["run", "--skip-build", "--skip-pull", "--skip-login", "--suite", "smoke"],
+            ["run", "--skip-pull", "--skip-login", "--suite", "smoke"],
         )
 
     assert result.exit_code == 0, result.output

@@ -17,14 +17,13 @@ Run the coder_eval dashboard pipeline: execute a test suite, upload results to A
 | `model=<model>` | `claude-sonnet-4-6` | Model to evaluate |
 | `tags=<tags>` | *(suite default)* | Tag filter for tasks |
 | `backend=<name>` | *(default)* | API backend: `direct`, `bedrock`, `proxy` |
-| `skip-build` | false | Skip UiPath CLI build step |
 | `skip-pull` | false | Skip git pull steps |
 | `skip-analysis` | false | Skip AI analysis generation |
 | `verbose` | false | Enable verbose logging |
 
 Examples:
 - `/run-dashboard suite=skills` — run skills suite with defaults
-- `/run-dashboard suite=smoke skip-build skip-pull` — quick smoke run
+- `/run-dashboard suite=smoke skip-pull` — quick smoke run
 - `/run-dashboard suite=flow model=claude-opus-4-6 backend=proxy` — flow suite with Opus via proxy
 - `/run-dashboard` — run all suites
 
@@ -43,7 +42,6 @@ Map arguments to flags:
 - `model=X` → `--model X`
 - `tags=X` → `--tags X`
 - `backend=X` → `--backend X`
-- `skip-build` → `--skip-build`
 - `skip-pull` → `--skip-pull`
 - `skip-analysis` → `--skip-analysis`
 - `verbose` → `--verbose`
@@ -64,7 +62,7 @@ Map arguments to flags:
     - `Suite:`, `Run started`, `Run completed:`
     - `PASS`, `FAIL`, `Task timed out`, `Sandbox preserved`
     - `Starting iteration`, `Criterion … score:`, `All success criteria`
-    - `UiPath CLI build succeeded`, `UiPath CLI login succeeded`
+    - `→ uip`, `UiPath CLI login succeeded`
     - `Blob upload complete`, `ADX ingest`, `tasks found`
     - `Traceback`, `ERROR`, `WARNING`
 

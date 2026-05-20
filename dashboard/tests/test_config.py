@@ -25,13 +25,6 @@ def test_config_loads_from_env(monkeypatch):
     assert cfg.azure_blob_container == "runs"  # default
 
 
-def test_config_cli_dir_default():
-    """cli_dir defaults to a sibling of the coder_eval repo."""
-    cfg_cli = Config.model_fields["cli_dir"].default
-    assert isinstance(cfg_cli, Path)
-    assert cfg_cli.name == "cli"
-
-
 def test_config_skills_dir_default():
     """skills_dir defaults to a sibling of the coder_eval repo."""
     cfg_skills = Config.model_fields["skills_dir"].default

@@ -84,7 +84,6 @@ def cli() -> None:
 @click.option("--model", default="claude-sonnet-4-6", help="Model to evaluate.")
 @click.option("--tags", default=None, help="Task tag filter (overrides suite defaults).")
 @click.option("--suite", default=None, help="Run only the named suite (e.g. 'skills', 'smoke', 'flow-init', 'flow').")
-@click.option("--skip-build", is_flag=True, help="Skip UiPath CLI build step.")
 @click.option("--skip-pull", is_flag=True, help="Skip git pull steps.")
 @click.option("--skip-analysis", is_flag=True, help="Skip AI analysis generation.")
 @click.option("--skip-review", is_flag=True, help="Skip post-run task review (review.json) generation.")
@@ -106,7 +105,6 @@ def run(
     model: str,
     tags: str | None,
     suite: str | None,
-    skip_build: bool,
     skip_pull: bool,
     skip_analysis: bool,
     skip_review: bool,
@@ -115,30 +113,24 @@ def run(
     backend: str | None,
     concurrency: int | None,
 ) -> None:
-    """Full pipeline: pull repos, build CLI, run tests, upload, ingest."""
+    """Full pipeline: pull repos, run tests, upload, ingest.
+
+    uip CLI is expected to already be on PATH (installed via npm by the caller).
+    """
     from .blob import upload_run
-    from .build import build_cli
     from .ingest import ingest_run
     from .run import pull_coder_eval, run_tests, uip_login
 
     cfg = Config()
     print(f"=== Run started at {datetime.now(UTC).isoformat()} ===")
 
-    # 1. Build UiPath CLI
-    if skip_build:
-        print("Skipping CLI build (--skip-build)")
-    elif build_cli(cfg.cli_dir):
-        print("CLI build succeeded")
-    else:
-        print("WARNING: CLI build failed, continuing with existing binary")
-
-    # 2. Pull coder_eval
+    # 1. Pull coder_eval
     if skip_pull:
         print("Skipping git pull (--skip-pull)")
     else:
         pull_coder_eval()
 
-    # 3. Determine which suites to run. Opt-in suites (default=False) are
+    # 2. Determine which suites to run. Opt-in suites (default=False) are
     # skipped on a bare `dashboard run` and only execute when named via --suite.
     all_suites = [
         _build_skills_suite(str(cfg.skills_dir)),
@@ -153,7 +145,7 @@ def run(
     else:
         suites_to_run = [s for s in all_suites if s.default]
 
-    # 3b. Validate UiPath credentials and tenant eagerly (fail-fast before any suite runs)
+    # 2b. Validate UiPath credentials and tenant eagerly (fail-fast before any suite runs)
     login_suites = [s for s in suites_to_run if s.uip_login]
     if login_suites and not skip_login:
         if not all([cfg.uip_authority, cfg.uip_client_id, cfg.uip_client_secret]):
@@ -166,7 +158,7 @@ def run(
             if not (s.uip_tenant or cfg.uip_tenant):
                 raise click.UsageError(f"Suite '{s.name}' requires uip login but no tenant is configured.")
 
-    # 4. Run each suite → login (if needed) → run → analyze → upload → ingest
+    # 3. Run each suite → login (if needed) → run → analyze → upload → ingest
     for s in suites_to_run:
         if s.uip_login and skip_login:
             print("Skipping UiPath CLI login (--skip-login); assuming already authenticated")
@@ -185,10 +177,9 @@ def run(
         print(f"\n--- Suite: {s.name} (tags={suite_tags}) ---")
 
         suite_concurrency = concurrency if concurrency is not None else s.concurrency
-        # Tell coder_eval where the sibling repos actually live so it captures their SHAs in env_info.
+        # Tell coder_eval where the skills repo lives so it captures its SHA in env_info.
         component_env = {
             "CODER_EVAL_SKILLS_DIR": str(cfg.skills_dir),
-            "CODER_EVAL_CLI_DIR": str(cfg.cli_dir),
         }
         suite_env = {**component_env, **(s.env or {})}
         latest_run = run_tests(

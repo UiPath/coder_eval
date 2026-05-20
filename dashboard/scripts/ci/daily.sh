@@ -7,8 +7,9 @@
 # in the process env regardless of caller (interactive shell, systemd timer,
 # manual smoke test). Required keys live in those two files:
 #   .env:           AWS_BEARER_TOKEN_BEDROCK, AWS_REGION, BEDROCK_MODEL,
-#                   LLMGW_*, GH_NPM_REGISTRY_TOKEN,
+#                   LLMGW_*,
 #                   UV_INDEX_UIPATH_PASSWORD (private uv index for uipath-llmgw-client),
+#                   GH_NPM_REGISTRY_TOKEN (PAT with read:packages — installs uip from GitHub Packages @alpha),
 #                   SLACK_WEBHOOK_URL (optional — empty = silent runs)
 #   dashboard/.env: ADX_*, AZURE_STORAGE_ACCOUNT, AZURE_BLOB_CONTAINER,
 #                   AZURE_STORAGE_KEY (when using --auth-mode key)
@@ -22,11 +23,12 @@ set -euo pipefail
 
 # Non-interactive shells (systemd, `ssh user@host '...'`) don't source ~/.bashrc,
 # so user-local tool dirs aren't on PATH by default. Prepend them explicitly.
-export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+# ~/.npm-global/bin is where `npm install -g` lands (npm prefix is user-writable
+# on this VM); ~/.local/bin holds uv etc.
+export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
 
 REPO=/home/azureuser/uipath/coder_eval
 SKILLS_REPO=/home/azureuser/uipath/skills
-CLI_REPO=/home/azureuser/uipath/cli
 LOG_DIR=/home/azureuser/runs-ci
 LOCK=/var/lock/uip-daily.lock
 MODEL="${MODEL:-claude-sonnet-4-6}"
@@ -36,8 +38,7 @@ BRANCH="${BRANCH:-main}"
 
 # Acquire the daily lock BEFORE pre-flight. Otherwise a second invocation's
 # pkill would SIGTERM the legitimate in-flight run's children before flock
-# detected the conflict. FD-based flock (held for the rest of the script)
-# replaces the previous inner-only `flock -n -E 75 "$LOCK" "${CMD[@]}"`.
+# detected the conflict. FD-based flock is held for the rest of the script.
 exec 9>>"$LOCK"
 flock -n 9 || exit 75
 
@@ -52,31 +53,11 @@ pkill -f '.venv/bin/dashboard'   2>/dev/null || true
 # Sweep sandbox tempdirs. With procs killed above, anything left is orphan.
 rm -rf /tmp/coder_eval_* 2>/dev/null || true
 
-# Best-effort scrub of a global @uipath/cli install. Per CI_DESIGN: npm-global
-# lands plugins under root-owned /usr/lib/node_modules/@uipath and the maestro
-# auto-install EACCES-es. Our PATH puts ~/.bun/bin first so the bun build
-# wins anyway, but we still try to clean up. Never fatal — warn and continue.
-if [ -d /usr/lib/node_modules/@uipath ] || npm ls -g --depth=0 2>/dev/null | grep -q '@uipath/cli'; then
-  echo "WARNING: global @uipath/cli install detected — attempting best-effort removal" >&2
-  npm uninstall -g @uipath/cli            2>/dev/null || true
-  sudo -n npm uninstall -g @uipath/cli    2>/dev/null || true
-  sudo -n rm -rf /usr/lib/node_modules/@uipath 2>/dev/null || true
-  if [ -d /usr/lib/node_modules/@uipath ] || npm ls -g --depth=0 2>/dev/null | grep -q '@uipath/cli'; then
-    echo "WARNING: global @uipath/cli still present — Run: sudo rm -rf /usr/lib/node_modules/@uipath. Continuing." >&2
-  fi
-fi
-
-# Wipe package caches + per-user globals so every run does a fresh resolve.
-# Adds ~30-90s to cold runs but kills the whole class of stale-pin / cache-
-# poisoning bugs (typescript@5.9.3 nested dirs in 2026-05 was the Node-side
-# version of this; without venv recreate below, we still had the Python-side
-# version uncovered). Bun-bin uip symlink dropped here, re-created by bun
-# link in the dev:cli:install step below.
+# Wipe caches so every run does a fresh resolve. Adds ~30s to cold runs but
+# eliminates stale-pin / cache-poisoning bugs (paired with the .venv recreate
+# below for the Python side).
 uv cache clean 2>/dev/null || true
-rm -rf "$HOME/.bun/install/cache"  2>/dev/null || true
-rm -rf "$HOME/.bun/install/global" 2>/dev/null || true
-rm -f  "$HOME/.bun/bin/uip"        2>/dev/null || true
-rm -rf "$HOME/.npm/_cacache"       2>/dev/null || true
+rm -rf "$HOME/.npm/_cacache" 2>/dev/null || true
 # ---- end pre-flight ----
 
 cd "$REPO"
@@ -95,33 +76,39 @@ for env_file in "$REPO/.env" "$REPO/dashboard/.env"; do
   fi
 done
 
-# Skills + CLI always track main — only coder_eval honors $BRANCH (for ad-hoc smoke tests).
+# Skills always tracks main — only coder_eval honors $BRANCH (for ad-hoc smoke tests).
 # Hard reset (not --ff-only pull) so any local cruft / untracked conflicts /
 # half-applied rebase from a prior session can't silently abort the wrapper.
 (cd "$SKILLS_REPO" && git fetch --quiet origin && git checkout --quiet main && git reset --hard --quiet origin/main)
 
-# CLI install: do a recursive node_modules clean before `bun install`.
-# `bun install --silent` is incremental and won't prune stale per-package
-# typescript copies left behind when upstream version pins shift; we got
-# bitten by this in 2026-05 when an upstream `ignoreDeprecations` bump
-# landed against stale nested typescript@5.9.3 dirs from an earlier
-# install. The clean adds ~30s but eliminates the whole class of bug.
-#
-# cli has also flipped between `dev:install-cli` and `dev:cli:install`
-# (governance rollout PR #1525 → revert #1883); tolerate either by trying both.
-(cd "$CLI_REPO" && git fetch --quiet origin && git checkout --quiet main && git reset --hard --quiet origin/main \
-                && find . -name node_modules -type d -prune -exec rm -rf {} + \
-                && bun install --silent \
-                && (bun run dev:install-cli || bun run dev:cli:install))
-
-# Sanity: warn if PATH lookup of `uip` doesn't land in ~/.bun/bin. We only
-# check the PATH-resolved location, not `readlink -f` — bun link symlinks
-# ~/.bun/bin/uip into the cli source tree (cli/packages/cli/dist/index.js),
-# so resolving the symlink chain is a false positive. Never fatal.
-UIP_PATH="$(command -v uip 2>/dev/null || true)"
-if [ -z "$UIP_PATH" ] || [ "$(dirname "$UIP_PATH")" != "$HOME/.bun/bin" ]; then
-  echo "WARNING: uip resolves unexpectedly: ${UIP_PATH:-<not found>}. Continuing." >&2
+# Install uip CLI from GitHub Packages @alpha — the cli's `ci.yml`
+# publishes `-alpha.<date>.<run>` prereleases under the `alpha` dist-tag on
+# every merge to `cli/main`, so this picks up the freshest CLI per run.
+# Public npmjs @latest only moves on GitHub Releases (~weeks behind main).
+# Mirrors skills/.github/workflows/smoke-skills.yml. The .npmrc lives in a
+# tempdir so the auth token never appears on argv and is wiped each run; the
+# tempdir also isolates the install from any future workspace-aware
+# package.json at the repo root.
+if [ -z "${GH_NPM_REGISTRY_TOKEN:-}" ]; then
+  echo "ERROR: GH_NPM_REGISTRY_TOKEN not set (needed to install @uipath/cli@alpha from GitHub Packages)" >&2
+  exit 1
 fi
+install_dir="$(mktemp -d)"
+cat > "$install_dir/.npmrc" <<EOF
+@uipath:registry=https://npm.pkg.github.com/
+//npm.pkg.github.com/:_authToken=${GH_NPM_REGISTRY_TOKEN}
+EOF
+(cd "$install_dir" && npm install -g @uipath/cli@alpha)
+rm -rf "$install_dir"
+
+# Hard-fail if uip didn't land on PATH — without it, downstream eval tasks
+# would silently produce garbage.
+UIP_PATH="$(command -v uip 2>/dev/null || true)"
+if [ -z "$UIP_PATH" ]; then
+  echo "ERROR: uip not on PATH after install" >&2
+  exit 1
+fi
+echo "→ uip $(uip --version 2>/dev/null || echo unknown) ($UIP_PATH)"
 
 # Recreate .venv from scratch. `uv pip install -e` is incremental and never
 # prunes packages dropped from pyproject.toml — wiping and rebuilding
@@ -144,8 +131,7 @@ else
 fi
 
 set +e
-# We already hold the daily lock from the top of the script (FD 9) — no
-# inner flock needed.
+# The FD 9 flock at script start serializes this block.
 "${CMD[@]}" > "$LOG" 2>&1
 RC=$?
 set -e
