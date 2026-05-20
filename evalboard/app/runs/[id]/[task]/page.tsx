@@ -4,7 +4,7 @@ import { readLogTail, readTaskDetail } from "@/lib/runs";
 import { readTaskReview } from "@/lib/reviews";
 import { fmtRunTime, humanizeTaskId } from "@/lib/format";
 import { StatusPill } from "@/lib/pills";
-import { ReviewChips } from "../review-chips";
+import { ChipButton } from "../chips";
 import {
     ArtifactsSection,
     CriteriaSection,
@@ -139,7 +139,17 @@ export default async function TaskPage({
                             {review.summary}
                         </p>
                         {review.tags.length > 0 && (
-                            <ReviewChips tags={review.tags} />
+                            <div className="flex flex-wrap gap-1 mt-0.5">
+                                {review.tags.map((t) => (
+                                    <ChipButton
+                                        key={t}
+                                        tag={t}
+                                        variant="review"
+                                        size="sm"
+                                        active={false}
+                                    />
+                                ))}
+                            </div>
                         )}
                     </div>
                 </section>

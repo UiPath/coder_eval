@@ -6,6 +6,21 @@ on:
     paths:
       - 'evalboard/**'
       - '.github/workflows/deploy-evalboard.yml'
+  merge_group:
+    # The `push` event on main is delivered unreliably for commits landing
+    # via merge queue — PR #269 (sha 87a7ad823) fired `merge_group` but
+    # never `push`, so this workflow never ran. Recent merges (1133fe828,
+    # 8704187f) did fire push, so it's intermittent rather than always
+    # broken. Triggering on both `merge_group` and `push` ensures we deploy
+    # in either case; the concurrency group below dedupes when both fire.
+    # Note: `merge_group` runs on the temporary `gh-readonly-queue/...`
+    # branch, but the queued code is functionally identical to what's
+    # about to land on main (merge_group success is the queue's final
+    # gate), so deploying from this context is safe.
+    branches: [main]
+    paths:
+      - 'evalboard/**'
+      - '.github/workflows/deploy-evalboard.yml'
   workflow_dispatch:
 
 # Only one deploy in flight at a time. Don't cancel in-progress runs — let them

@@ -31,15 +31,17 @@ const STYLES: Record<
 };
 
 function hrefForTag(
+    basePath: string,
     tag: string | null,
-    window: Window,
+    window: Window | null,
     q: string | null,
 ): string {
     const params = new URLSearchParams();
-    params.set("window", window);
+    if (window) params.set("window", window);
     if (tag) params.set("tag", tag);
     if (q) params.set("q", q);
-    return `/?${params.toString()}`;
+    const qs = params.toString();
+    return qs ? `${basePath}?${qs}` : basePath;
 }
 
 function TagChip({
@@ -47,6 +49,7 @@ function TagChip({
     count,
     variant,
     active,
+    basePath,
     window,
     q,
 }: {
@@ -54,13 +57,14 @@ function TagChip({
     count: number;
     variant: Variant;
     active: boolean;
-    window: Window;
+    basePath: string;
+    window: Window | null;
     q: string | null;
 }) {
     const s = STYLES[variant];
     return (
         <Link
-            href={hrefForTag(active ? null : tag, window, q)}
+            href={hrefForTag(basePath, active ? null : tag, window, q)}
             scroll={false}
             className={`inline-flex items-center gap-1 text-[11px] leading-none px-2 py-1 rounded border transition-colors ${active ? s.chipActive : s.chip}`}
         >
@@ -104,7 +108,8 @@ export function MergedTagRail({
     taskTags,
     reviewTags,
     activeTag,
-    window,
+    basePath = "/",
+    window = null,
     q = null,
     limit = 24,
 }: {
@@ -112,7 +117,11 @@ export function MergedTagRail({
     taskTags: TagCount[];
     reviewTags: TagCount[];
     activeTag: string | null;
-    window: Window;
+    // Path the chip links point at — "/" for the overview, "/trends" for the
+    // trends page. Query string is preserved.
+    basePath?: string;
+    // Null on pages that don't expose a window selector (e.g. /trends).
+    window?: Window | null;
     q?: string | null;
     limit?: number;
 }) {
@@ -134,6 +143,7 @@ export function MergedTagRail({
                     count={tc.count}
                     variant="indigo"
                     active={tc.tag === activeTag}
+                    basePath={basePath}
                     window={window}
                     q={q}
                 />
@@ -145,6 +155,7 @@ export function MergedTagRail({
                     count={tc.count}
                     variant="rose"
                     active={tc.tag === activeTag}
+                    basePath={basePath}
                     window={window}
                     q={q}
                 />
@@ -156,6 +167,7 @@ export function MergedTagRail({
                     count={tc.count}
                     variant="neutral"
                     active={tc.tag === activeTag}
+                    basePath={basePath}
                     window={window}
                     q={q}
                 />

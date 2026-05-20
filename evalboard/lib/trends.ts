@@ -1,0 +1,198 @@
+// Per-task trend aggregations over the most recent N runs. Reuses the
+// PerRun loader from overview.ts. Trends is fixed to a recency-based slice
+// rather than the date-window the front page uses — the small eval cadence
+// means "last 10 runs" is a more useful unit than "last 7 days".
+
+import { unstable_cache } from "next/cache";
+import { loadRecentRuns, type PerRun } from "./overview";
+import type { ComponentSha } from "./runs";
+
+export const TRENDS_RECENT_RUN_COUNT = 10;
+
+export interface TaskTrend {
+    taskId: string;
+    skill: string | null;
+    // Union of task-level tags observed across the runs in scope. Used by the
+    // trends page to filter the table by clicked tag rail chip.
+    tags: string[];
+    totalRuns: number;
+    successRuns: number;
+    passRate: number; // 0-1
+    avgDurationSeconds: number | null; // SUCCESS runs only
+    avgCostUsd: number | null; // SUCCESS runs only
+    avgActualCommands: number | null; // SUCCESS runs only
+    // Status sequence newest-first, one entry per run in scope.
+    recentStatuses: { runId: string; status: string | null }[];
+    // Failure-only review tags aggregated across the slice. Secondary signal —
+    // surfaces dominant failure mode without crowding out the primary metrics.
+    dominantFailureTags: { tag: string; count: number }[];
+}
+
+export interface TaskHistoryEntry {
+    runId: string;
+    status: string | null;
+    durationSeconds: number | null;
+    totalCostUsd: number | null;
+    weightedScore: number | null;
+    actualCommands: number | null;
+    componentShas: ComponentSha[];
+    failureTags: string[];
+}
+
+const DOMINANT_TAG_LIMIT = 4;
+
+function avg(nums: number[]): number | null {
+    if (nums.length === 0) return null;
+    return nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+
+function aggregate(perRun: PerRun[]): TaskTrend[] {
+    // Newest first so recentStatuses comes out chronological-descending.
+    const sorted = [...perRun].sort((a, b) => b.id.localeCompare(a.id));
+
+    type Bucket = {
+        skill: string | null;
+        tagSet: Set<string>;
+        statuses: { runId: string; status: string | null }[];
+        durations: number[]; // success only
+        costs: number[]; // success only
+        commands: number[]; // success only
+        successCount: number;
+        totalCount: number;
+        tagCounts: Map<string, number>;
+    };
+    const buckets = new Map<string, Bucket>();
+
+    for (const { id, overview, reviewTagsByTask } of sorted) {
+        if (!overview) continue;
+        for (const t of overview.tasks) {
+            let b = buckets.get(t.taskId);
+            if (!b) {
+                b = {
+                    skill: t.skill,
+                    tagSet: new Set(),
+                    statuses: [],
+                    durations: [],
+                    costs: [],
+                    commands: [],
+                    successCount: 0,
+                    totalCount: 0,
+                    tagCounts: new Map(),
+                };
+                buckets.set(t.taskId, b);
+            }
+            if (!b.skill && t.skill) b.skill = t.skill;
+            for (const tg of t.tags) b.tagSet.add(tg);
+            b.totalCount += 1;
+            b.statuses.push({ runId: id, status: t.status });
+            if (t.status === "SUCCESS") {
+                b.successCount += 1;
+                if (t.durationSeconds != null) b.durations.push(t.durationSeconds);
+                if (t.totalCostUsd != null) b.costs.push(t.totalCostUsd);
+                if (t.actualCommands != null) b.commands.push(t.actualCommands);
+            }
+            const failTags = reviewTagsByTask[t.taskId];
+            if (failTags) {
+                for (const tag of failTags) {
+                    b.tagCounts.set(tag, (b.tagCounts.get(tag) ?? 0) + 1);
+                }
+            }
+        }
+    }
+
+    const trends: TaskTrend[] = [];
+    for (const [taskId, b] of buckets) {
+        trends.push({
+            taskId,
+            skill: b.skill,
+            tags: [...b.tagSet],
+            totalRuns: b.totalCount,
+            successRuns: b.successCount,
+            passRate: b.totalCount > 0 ? b.successCount / b.totalCount : 0,
+            avgDurationSeconds: avg(b.durations),
+            avgCostUsd: avg(b.costs),
+            avgActualCommands: avg(b.commands),
+            recentStatuses: b.statuses,
+            dominantFailureTags: [...b.tagCounts.entries()]
+                .map(([tag, count]) => ({ tag, count }))
+                .sort(
+                    (a, b) =>
+                        b.count - a.count || a.tag.localeCompare(b.tag),
+                )
+                .slice(0, DOMINANT_TAG_LIMIT),
+        });
+    }
+
+    // Default sort: lowest pass rate first (worst offenders up top), then by
+    // total run count desc, then taskId for determinism.
+    trends.sort(
+        (a, b) =>
+            a.passRate - b.passRate ||
+            b.totalRuns - a.totalRuns ||
+            a.taskId.localeCompare(b.taskId),
+    );
+    return trends;
+}
+
+async function aggregateTaskTrendsInner(limit: number): Promise<TaskTrend[]> {
+    return aggregate(await loadRecentRuns(limit));
+}
+
+const cachedAggregate = unstable_cache(
+    aggregateTaskTrendsInner,
+    ["aggregate-task-trends"],
+    { revalidate: 300 },
+);
+
+export function aggregateTaskTrends(
+    limit: number = TRENDS_RECENT_RUN_COUNT,
+): Promise<TaskTrend[]> {
+    return cachedAggregate(limit);
+}
+
+// Predicate matching getOverview's tag scoping logic, but operating on the
+// aggregated TaskTrend (we don't keep per-run reviewTagsByTask around after
+// aggregation; dominantFailureTags is the equivalent task-level signal).
+export function trendMatchesTag(trend: TaskTrend, tag: string): boolean {
+    if (trend.skill === tag) return true;
+    if (trend.tags.includes(tag)) return true;
+    return trend.dominantFailureTags.some((t) => t.tag === tag);
+}
+
+async function historyForTaskInner(
+    taskId: string,
+    limit: number,
+): Promise<TaskHistoryEntry[]> {
+    const perRun = await loadRecentRuns(limit);
+    const out: TaskHistoryEntry[] = [];
+    for (const { id, overview, reviewTagsByTask } of perRun) {
+        if (!overview) continue;
+        const t = overview.tasks.find((x) => x.taskId === taskId);
+        if (!t) continue;
+        out.push({
+            runId: id,
+            status: t.status,
+            durationSeconds: t.durationSeconds,
+            totalCostUsd: t.totalCostUsd,
+            weightedScore: t.weightedScore,
+            actualCommands: t.actualCommands,
+            componentShas: overview.componentShas,
+            failureTags: reviewTagsByTask[taskId] ?? [],
+        });
+    }
+    out.sort((a, b) => b.runId.localeCompare(a.runId));
+    return out;
+}
+
+const cachedHistory = unstable_cache(
+    historyForTaskInner,
+    ["history-for-task"],
+    { revalidate: 300 },
+);
+
+export function historyForTask(
+    taskId: string,
+    limit: number = TRENDS_RECENT_RUN_COUNT,
+): Promise<TaskHistoryEntry[]> {
+    return cachedHistory(taskId, limit);
+}

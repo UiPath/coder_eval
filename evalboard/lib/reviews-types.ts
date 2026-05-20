@@ -24,22 +24,3 @@ export interface ReviewIndex {
 export type Window = "1d" | "7d" | "14d" | "30d";
 
 export const WINDOWS: Window[] = ["1d", "7d", "14d", "30d"];
-
-// Hotspots aggregate by task_id, not by tag. Open-vocabulary tags drift
-// across days, so cross-day tag aggregation is noisy; the task axis is
-// stable and the most actionable signal ("which tasks fail repeatedly").
-export interface TaskAggregate {
-    taskId: string;
-    occurrences: number; // total review entries (sums across replicates)
-    affectedRuns: number; // distinct run_ids in window
-    dominantTags: { tag: string; count: number }[]; // sorted desc
-    lastSeenRunId: string; // newest run_id where this task has a review
-}
-
-export interface TaskRunHit {
-    runId: string;
-    variantId: string;
-    replicate: string;
-    tags: string[];
-    summaryExcerpt: string;
-}

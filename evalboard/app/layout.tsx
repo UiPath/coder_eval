@@ -40,10 +40,10 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                     </div>
                     <div className="flex items-center gap-4 text-sm shrink-0">
                         <a
-                            href="/hotspots"
+                            href="/trends"
                             className="text-gray-700 hover:text-studio-blue"
                         >
-                            Hotspots
+                            Trends
                         </a>
                         <a
                             href={ADX_URL}

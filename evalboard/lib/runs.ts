@@ -25,8 +25,15 @@ export const RUNS_DIR = LOCAL_RUNS_DIR
 export interface ComponentSha {
     name: string; // "coder_eval" | "skills" | "cli"
     sha: string;
-    url: string | null; // null when SHA is "unknown"
+    // null when value isn't a real commit (e.g. "unknown", or a package tag
+    // like "alpha" since #276 switched to consuming GitHub Packages instead
+    // of building from source).
+    url: string | null;
 }
+
+// Git SHAs are hex, 7-40 chars. Non-matching strings are version labels
+// ("alpha", "stable", "v1.2.3") and shouldn't be linked to github.com/.../tree/<x>.
+const SHA_RE = /^[0-9a-f]{7,40}$/i;
 
 // A run is one `coder-eval run` invocation. It contains N task results.
 // Run-level summary stats. Fields aggregate across all tasks in the run.
@@ -134,27 +141,61 @@ interface RawRunJson {
     environment_info?: Record<string, string | number | null>;
 }
 
-// GitHub repos for the three components captured in env_info.
-// Keys match the `<name>_git_commit` fields written by coder_eval/utils.py.
-const COMPONENT_REPOS: Record<string, { display: string; repo: string }> = {
-    git_commit: { display: "coder_eval", repo: "UiPath/coder_eval" },
-    skills_git_commit: { display: "skills", repo: "UiPath/skills" },
-    cli_git_commit: { display: "cli", repo: "UiPath/cli" },
-};
+// Components captured in run env_info. Each entry may accept multiple keys —
+// the CLI shipped as `cli_git_commit` (when built from source) until
+// coder_eval #276 switched the runner to consume @uipath/cli@alpha from
+// GitHub Packages, after which it's `cli_version` (output of `uip --version`,
+// e.g. "0.1.21-alpha.234"). New keys come first so they win when both
+// happen to be present. `nonShaUrl` is the link target used when the env
+// value isn't a SHA (e.g. an npm package version) — null means no link.
+const COMPONENTS: {
+    display: string;
+    repo: string | null;
+    nonShaUrl: string | null;
+    keys: string[];
+}[] = [
+    {
+        display: "coder_eval",
+        repo: "UiPath/coder_eval",
+        nonShaUrl: null,
+        keys: ["git_commit"],
+    },
+    {
+        display: "skills",
+        repo: "UiPath/skills",
+        nonShaUrl: null,
+        keys: ["skills_git_commit"],
+    },
+    {
+        display: "cli",
+        repo: "UiPath/cli",
+        nonShaUrl: "https://github.com/UiPath/cli/pkgs/npm/cli/versions",
+        keys: ["cli_version", "cli_git_commit"],
+    },
+];
 
 function extractComponentShas(
     env: Record<string, string | number | null> | undefined,
 ): ComponentSha[] {
     if (!env) return [];
     const out: ComponentSha[] = [];
-    for (const [key, meta] of Object.entries(COMPONENT_REPOS)) {
-        const sha = env[key];
-        if (typeof sha !== "string" || !sha) continue;
-        const url =
-            sha === "unknown"
-                ? null
-                : `https://github.com/${meta.repo}/tree/${sha}`;
-        out.push({ name: meta.display, sha, url });
+    for (const comp of COMPONENTS) {
+        let value: string | null = null;
+        for (const k of comp.keys) {
+            const v = env[k];
+            if (typeof v === "string" && v) {
+                value = v;
+                break;
+            }
+        }
+        if (value == null) continue;
+        let url: string | null = null;
+        if (comp.repo && SHA_RE.test(value)) {
+            url = `https://github.com/${comp.repo}/tree/${value}`;
+        } else if (comp.nonShaUrl) {
+            url = comp.nonShaUrl;
+        }
+        out.push({ name: comp.display, sha: value, url });
     }
     return out;
 }
@@ -195,7 +236,7 @@ async function readRunJson(id: string): Promise<RawRunJson | null> {
 //      missing the convention.
 // Returns null when neither signal yields anything; the UI buckets these
 // under an "unknown" group.
-export function deriveSkill(
+function deriveSkill(
     taskPath: string | null | undefined,
     tags: string[] | null | undefined,
 ): string | null {
@@ -279,6 +320,8 @@ export interface RunOverviewTask {
     skill: string | null;
     totalCostUsd: number | null;
     durationSeconds: number | null;
+    weightedScore: number | null;
+    actualCommands: number | null;
 }
 
 export interface RunOverview {
@@ -288,6 +331,7 @@ export interface RunOverview {
     // front-page table and the chart can be built from a single read.
     totalCostUsd: number | null;
     taskDurationSeconds: number | null;
+    componentShas: ComponentSha[];
 }
 
 export async function readRunOverview(
@@ -307,6 +351,8 @@ export async function readRunOverview(
                 skill: deriveSkill(t.task_path, tags),
                 totalCostUsd: t.total_cost_usd ?? null,
                 durationSeconds: t.duration ?? null,
+                weightedScore: t.weighted_score ?? null,
+                actualCommands: t.actual_commands ?? null,
             };
         });
     const totalCost = taskResults.reduce(
@@ -327,13 +373,8 @@ export async function readRunOverview(
         taskDurationSeconds: allHaveDuration
             ? taskDurationSum
             : (data.total_duration_seconds ?? null),
+        componentShas: extractComponentShas(data.environment_info),
     };
-}
-
-export async function recentRunSummaries(limit = 20): Promise<RunSummary[]> {
-    const ids = (await listRunIds()).slice(0, limit);
-    const results = await Promise.all(ids.map((id) => readRunSummary(id)));
-    return results.filter((r): r is RunSummary => r !== null);
 }
 
 async function walkArtifacts(
@@ -410,7 +451,7 @@ function previewGlobal(val: unknown): string | null {
     }
 }
 
-export function parseFlowDebug(
+function parseFlowDebug(
     criteria: CriterionResult[],
 ): FlowDebugResult | null {
     const marker = '"Code": "FlowDebug"';
@@ -527,7 +568,7 @@ function summarizeCommand(cmd: CommandEntry): string {
     return s.length > 140 ? s.slice(0, 137) + "…" : s;
 }
 
-export function parseToolCalls(turns: TurnEntry[], max = 200): ToolCall[] {
+function parseToolCalls(turns: TurnEntry[], max = 200): ToolCall[] {
     const out: ToolCall[] = [];
     let i = 0;
     for (const turn of turns) {

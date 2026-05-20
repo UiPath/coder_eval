@@ -24,6 +24,8 @@ trends, heatmaps, and time-range filtering; evalboard owns the clickable
 path into a specific run's artifacts, criteria, and logs.
 
 - `/` — the 20 most recent runs, one row each, clickable.
+- `/trends` — per-task pass rate and avg duration/cost/turns across the
+  last 10 runs, with a tag filter and expandable per-task history.
 - `/runs/latest` — shortcut that redirects to the newest run id.
 - `/runs/<run-id>` — run summary (pass rate, cost, duration) + one row per
   task. Link this from the ADX dashboard's per-run cell.

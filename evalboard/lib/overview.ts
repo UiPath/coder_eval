@@ -3,7 +3,12 @@
 // the window are read once and projected into multiple shapes downstream.
 
 import { unstable_cache } from "next/cache";
-import { readRunOverview, type RunOverview, type RunOverviewTask } from "./runs";
+import {
+    listRunIds,
+    readRunOverview,
+    type RunOverview,
+    type RunOverviewTask,
+} from "./runs";
 import { listRunIdsInWindow, readRunReviewIndex, parseRunIdDate } from "./reviews";
 import { humanizeTaskId } from "./format";
 import { mapWithConcurrency } from "./concurrency";
@@ -59,7 +64,7 @@ const WINDOW_DAYS: Record<Window, number> = {
 // cached payload small (the raw ReviewIndex can be MBs for busy runs).
 // Shape is plain serializable JSON — unstable_cache stringifies its values,
 // so Map/Set won't round-trip.
-interface PerRun {
+export interface PerRun {
     id: string;
     overview: RunOverview | null;
     // tag -> count of review entries carrying it (for the rose rail).
@@ -68,50 +73,182 @@ interface PerRun {
     reviewTagsByTask: Record<string, string[]>;
 }
 
-async function loadWindowDataInner(window: Window): Promise<PerRun[]> {
-    const ids = await listRunIdsInWindow(window);
-    return mapWithConcurrency(ids, FETCH_CONCURRENCY, async (id) => {
-        const [overview, reviewIndex] = await Promise.all([
+async function loadPerRunForId(id: string): Promise<PerRun> {
+    // readRunOverview / readRunReviewIndex swallow 404s and JSON parse errors,
+    // but ensureRunSummary (called underneath) re-throws transient auth / IMDS /
+    // 5xx errors. A single bad run must not tank the whole page — downgrade to
+    // a null-overview PerRun so the aggregators (which already skip nulls) can
+    // proceed with the other runs.
+    let overview: RunOverview | null = null;
+    let reviewIndex: Awaited<ReturnType<typeof readRunReviewIndex>> = null;
+    try {
+        [overview, reviewIndex] = await Promise.all([
             readRunOverview(id),
             readRunReviewIndex(id),
         ]);
-        const reviewTagCounts: Record<string, number> = {};
-        const tagSetByTask = new Map<string, Set<string>>();
-        if (reviewIndex) {
-            for (const e of reviewIndex.reviews) {
-                let s = tagSetByTask.get(e.task_id);
-                if (!s) {
-                    s = new Set();
-                    tagSetByTask.set(e.task_id, s);
-                }
-                for (const tag of e.tags) {
-                    s.add(tag);
-                    reviewTagCounts[tag] = (reviewTagCounts[tag] ?? 0) + 1;
+    } catch (err) {
+        console.error(`[evalboard] loadPerRunForId(${id}) failed:`, err);
+        return { id, overview: null, reviewTagCounts: {}, reviewTagsByTask: {} };
+    }
+    const reviewTagCounts: Record<string, number> = {};
+    const tagSetByTask = new Map<string, Set<string>>();
+    if (reviewIndex) {
+        for (const e of reviewIndex.reviews) {
+            let s = tagSetByTask.get(e.task_id);
+            if (!s) {
+                s = new Set();
+                tagSetByTask.set(e.task_id, s);
+            }
+            for (const tag of e.tags) {
+                s.add(tag);
+                reviewTagCounts[tag] = (reviewTagCounts[tag] ?? 0) + 1;
+            }
+        }
+    }
+    const reviewTagsByTask: Record<string, string[]> = {};
+    for (const [taskId, tags] of tagSetByTask) {
+        reviewTagsByTask[taskId] = [...tags];
+    }
+    return { id, overview, reviewTagCounts, reviewTagsByTask };
+}
+
+async function loadWindowDataInner(window: Window): Promise<PerRun[]> {
+    const ids = await listRunIdsInWindow(window);
+    return mapWithConcurrency(ids, FETCH_CONCURRENCY, loadPerRunForId);
+}
+
+async function loadRecentRunsInner(limit: number): Promise<PerRun[]> {
+    const ids = (await listRunIds()).slice(0, limit);
+    return mapWithConcurrency(ids, FETCH_CONCURRENCY, loadPerRunForId);
+}
+
+const cachedLoadRecentRuns = unstable_cache(
+    loadRecentRunsInner,
+    ["evalboard-recent-runs"],
+    { revalidate: 300 },
+);
+
+// Fetch the N most recent runs in PerRun shape. Bypasses the
+// window-keyed cache used by getOverview because the trends page is
+// fixed-count, not date-bounded.
+export function loadRecentRuns(limit: number): Promise<PerRun[]> {
+    return cachedLoadRecentRuns(limit);
+}
+
+// Tag-count aggregation where each tag's count is the number of distinct
+// TASKS carrying it across the slice — mirrors the per-task counting used
+// by the run-detail page. Use this for views that aggregate across runs but
+// want to surface "how many tasks does this tag describe" rather than
+// "how many runs include any task with this tag".
+export function aggregateTaskTagCounts(perRun: PerRun[]): {
+    skills: TagCount[];
+    taskTags: TagCount[];
+    reviewTags: TagCount[];
+} {
+    const skillTaskIds = new Map<string, Set<string>>();
+    const taskTagTaskIds = new Map<string, Set<string>>();
+    const reviewTagTaskIds = new Map<string, Set<string>>();
+
+    function add(m: Map<string, Set<string>>, key: string, taskId: string) {
+        let s = m.get(key);
+        if (!s) {
+            s = new Set();
+            m.set(key, s);
+        }
+        s.add(taskId);
+    }
+
+    for (const { overview, reviewTagsByTask } of perRun) {
+        if (overview) {
+            for (const t of overview.tasks) {
+                if (t.skill) add(skillTaskIds, t.skill, t.taskId);
+                for (const tg of t.tags) {
+                    if (tg === t.skill) continue;
+                    add(taskTagTaskIds, tg, t.taskId);
                 }
             }
         }
-        const reviewTagsByTask: Record<string, string[]> = {};
-        for (const [taskId, tags] of tagSetByTask) {
-            reviewTagsByTask[taskId] = [...tags];
+        for (const [taskId, tags] of Object.entries(reviewTagsByTask)) {
+            for (const tag of tags) {
+                add(reviewTagTaskIds, tag, taskId);
+            }
         }
-        return { id, overview, reviewTagCounts, reviewTagsByTask };
-    });
+    }
+
+    function toCounts(m: Map<string, Set<string>>): TagCount[] {
+        return [...m.entries()]
+            .map(([tag, ids]) => ({ tag, count: ids.size }))
+            .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+    }
+
+    return {
+        skills: toCounts(skillTaskIds),
+        taskTags: toCounts(taskTagTaskIds),
+        reviewTags: toCounts(reviewTagTaskIds),
+    };
 }
+
+// Tag rail aggregation. Counts == "runs containing the tag", not total
+// occurrences — one increment per (tag, run) pair.
+function aggregateTagCounts(perRun: PerRun[]): {
+    skills: TagCount[];
+    taskTags: TagCount[];
+    reviewTags: TagCount[];
+} {
+    const skillRunIds = new Map<string, Set<string>>();
+    const taskTagRunIds = new Map<string, Set<string>>();
+    const reviewTagRunIds = new Map<string, Set<string>>();
+
+    function add(m: Map<string, Set<string>>, key: string, runId: string) {
+        let s = m.get(key);
+        if (!s) {
+            s = new Set();
+            m.set(key, s);
+        }
+        s.add(runId);
+    }
+
+    for (const { id, overview, reviewTagsByTask } of perRun) {
+        if (overview) {
+            for (const t of overview.tasks) {
+                if (t.skill) add(skillRunIds, t.skill, id);
+                for (const tg of t.tags) {
+                    if (tg === t.skill) continue;
+                    add(taskTagRunIds, tg, id);
+                }
+            }
+        }
+        for (const tags of Object.values(reviewTagsByTask)) {
+            for (const tag of tags) {
+                add(reviewTagRunIds, tag, id);
+            }
+        }
+    }
+
+    function toCounts(m: Map<string, Set<string>>): TagCount[] {
+        return [...m.entries()]
+            .map(([tag, ids]) => ({ tag, count: ids.size }))
+            .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+    }
+
+    return {
+        skills: toCounts(skillRunIds),
+        taskTags: toCounts(taskTagRunIds),
+        reviewTags: toCounts(reviewTagRunIds),
+    };
+}
+
 
 // Module-scope cache wrapper. Keying on the window arg means a single
 // request (Promise.all over getOverview+getRunListing) shares one fetch,
 // and cross-request results live for 5 minutes.
-const cachedLoadWindowData = unstable_cache(
+const loadWindowData = unstable_cache(
     loadWindowDataInner,
     ["evalboard-window-data"],
     { revalidate: 300 },
 );
 
-function loadWindowData(window: Window): Promise<PerRun[]> {
-    return cachedLoadWindowData(window);
-}
-
-function taskMatchesTag(
+export function taskMatchesTag(
     task: RunOverviewTask,
     reviewTagsByTask: Record<string, string[]>,
     tag: string,
@@ -189,54 +326,18 @@ export async function getOverview(
     const windowStart = nowMs - WINDOW_DAYS[window] * 86400_000;
     const windowEnd = nowMs;
 
-    // ---- Tag aggregation (over full window, regardless of filter) ----
-    // Counts are *runs containing the tag* — one increment per run regardless
-    // of how many tasks in that run carry it. So a tag that appears in every
-    // daily run for the window scores up to the run count. The task's own
-    // skill is filtered out of the secondary rail so it doesn't double-count.
-    const skillRunIds = new Map<string, Set<string>>();
-    const taskTagRunIds = new Map<string, Set<string>>();
-    const reviewTagRunIds = new Map<string, Set<string>>();
-
-    function add(m: Map<string, Set<string>>, key: string, runId: string) {
-        let s = m.get(key);
-        if (!s) {
-            s = new Set();
-            m.set(key, s);
-        }
-        s.add(runId);
-    }
-
-    for (const { id, overview, reviewTagsByTask } of perRun) {
-        if (overview) {
-            for (const t of overview.tasks) {
-                if (t.skill) add(skillRunIds, t.skill, id);
-                for (const tg of t.tags) {
-                    if (tg === t.skill) continue;
-                    add(taskTagRunIds, tg, id);
-                }
-            }
-        }
-        for (const tags of Object.values(reviewTagsByTask)) {
-            for (const tag of tags) {
-                add(reviewTagRunIds, tag, id);
-            }
-        }
-    }
-
-    function toCounts(m: Map<string, Set<string>>): TagCount[] {
-        return [...m.entries()]
-            .map(([tag, ids]) => ({ tag, count: ids.size }))
-            .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
-    }
+    // Tag rail counts are over the full window, ignoring the active filter —
+    // users need to see other tags they could switch to. Runs-based counting
+    // (one increment per (tag, run) pair) is the front-page convention.
+    const { skills, taskTags, reviewTags } = aggregateTagCounts(perRun);
 
     return {
         runs: runPoints,
         windowStart,
         windowEnd,
-        skills: toCounts(skillRunIds),
-        taskTags: toCounts(taskTagRunIds),
-        reviewTags: toCounts(reviewTagRunIds),
+        skills,
+        taskTags,
+        reviewTags,
         activeTag: tag,
     };
 }
