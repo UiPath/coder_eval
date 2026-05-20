@@ -15,6 +15,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
 
+# Workflow-default: zero permissions. Each job must opt in to what it needs.
+# The claude-review job below escalates as required.
+permissions: {}
+
 jobs:
   claude-review:
     name: Claude Code Review
@@ -36,7 +40,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0
 
@@ -44,7 +48,7 @@ jobs:
         # Pulls skills into ./skills so the reviewer can grep for downstream
         # usages of TaskDefinition / loader fields it sees changing in the
         # diff. UiPath/skills is public — no PAT needed.
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           repository: UiPath/skills
           ref: main
@@ -52,21 +56,25 @@ jobs:
           fetch-depth: 1
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.13"
 
-      - name: Install uv and project dependencies
+      - name: Install uv and project dependencies (hash-verified from uv.lock)
         run: |
           python -m pip install --upgrade pip
           pip install uv
-          uv venv .venv --clear
-          uv pip install --python .venv/bin/python -e ".[dev]"
+          uv sync --frozen --extra dev
         env:
+          # uv sync resolves named-index credentials from UV_INDEX_<NAME>_{USERNAME,PASSWORD}
+          # (the segment after UV_INDEX_ is the pyproject.toml index name uppercased).
+          # UV_EXTRA_INDEX_URL is kept in parallel for any uv pip-style invocations.
+          UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
+          UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
           UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
 
       - name: Claude Code Action
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@51ea8ea73a139f2a74ff649e3092c25a904aed7e  # v1.0.123
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}

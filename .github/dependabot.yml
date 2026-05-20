@@ -33,12 +33,10 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "monthly"  # Longest interval
-    open-pull-requests-limit: 1  # Only 1 PR at a time
+      interval: "monthly"
+    open-pull-requests-limit: 3  # Raised from 1: actions are SHA-pinned, so SHA bumps come as patch/minor PRs.
     labels:
       - "dependencies"
       - "github-actions"
-    # Only get major version updates
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+    # No ignore block — keep SHA pins current for patch and minor releases too,
+    # otherwise SHA pinning fossilizes the actions in place.

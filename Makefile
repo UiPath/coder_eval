@@ -4,8 +4,8 @@ help:  ## Show this help message
 	@echo "Available commands:"
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-install:  ## Install project with dev dependencies
-	uv pip install -e ".[dev]"
+install:  ## Install project with dev dependencies (hash-verified from uv.lock)
+	uv sync --frozen --extra dev
 	uv run pre-commit install
 
 format:  ## Auto-format code with ruff

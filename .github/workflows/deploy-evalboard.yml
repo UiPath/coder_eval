@@ -28,15 +28,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1  # v4.3.0
         with:
           version: 10.9.0
 
       - name: Set up Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: '22'
           cache: 'pnpm'
@@ -49,7 +49,7 @@ jobs:
         run: bash scripts/deploy.sh --build-only
 
       - name: Deploy to App Service
-        uses: azure/webapps-deploy@v3
+        uses: azure/webapps-deploy@02a81bead70021f5284939794bcec79c271ab383  # v3.0.8
         with:
           app-name: flow-evalboard
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}

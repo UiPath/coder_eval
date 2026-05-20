@@ -13,6 +13,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least-privilege default. No job in this workflow writes to the repo via
+# GITHUB_TOKEN — actions/upload-artifact and actions/cache use their own APIs.
+permissions:
+  contents: read
+
 jobs:
   quality-gate:
     name: Quality Gate (Format, Lint, Type, Test, Security)
@@ -21,20 +26,25 @@ jobs:
 
     # Set UiPath package index authentication for all steps
     env:
+      # uv sync resolves named-index credentials from UV_INDEX_<NAME>_{USERNAME,PASSWORD}
+      # (the segment after UV_INDEX_ is the pyproject.toml index name uppercased).
+      # UV_EXTRA_INDEX_URL is kept in parallel for any uv pip-style invocations.
+      UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
+      UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
       ANTHROPIC_API_KEY: "sk-ant-test-dummy-key-for-ci-tests-only"
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.13"
 
       - name: Cache dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: |
             ~/.cache/uv
@@ -42,7 +52,7 @@ jobs:
             .venv
             .pytest_cache
             .ruff_cache
-          key: ${{ runner.os }}-py3.13-${{ hashFiles('**/pyproject.toml') }}
+          key: ${{ runner.os }}-py3.13-${{ hashFiles('pyproject.toml', 'uv.lock') }}
           restore-keys: |
             ${{ runner.os }}-py3.13-
 
@@ -51,10 +61,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install uv
 
-      - name: Install project dependencies
-        run: |
-          uv venv .venv --clear
-          uv pip install --python .venv/bin/python -e ".[dev]"
+      - name: Install project dependencies (hash-verified from uv.lock)
+        run: uv sync --frozen --extra dev
 
       # PHASE 1: Fast checks (fail early)
       - name: Check code formatting (ruff format)
@@ -74,12 +82,43 @@ jobs:
       - name: Security - Dependency vulnerabilities (pip-audit)
         run: .venv/bin/pip-audit --desc --skip-editable --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219 # pygments 2.19.2 ReDoS + pip 26.0.1 tar/ZIP ambiguity; no fixes available on PyPI yet — revisit quarterly
 
+      - name: Security - OSV vulnerability scan (osv-scanner)
+        # Complements pip-audit: pip-audit queries the PyPI advisory DB;
+        # osv-scanner queries OSV.dev which aggregates GitHub Security
+        # Advisories and multiple ecosystems' DBs. Running both reduces the
+        # chance an advisory slips through.
+        #
+        # Scope: only coder_eval's own ``uv.lock`` — the same surface
+        # pip-audit covers. Sibling lockfiles in this monorepo
+        # (``dashboard/uv.lock``, ``evalboard/pnpm-lock.yaml``, template
+        # node_modules) are intentionally out of scope here; widen scope in
+        # a follow-up once those packages have a maintainer-owned bump
+        # cadence.
+        #
+        # Binary pinned by version + sha256 against the upstream release
+        # (https://github.com/google/osv-scanner/releases) so a registry
+        # compromise can't swap the binary under us.
+        env:
+          OSV_VERSION: "v2.3.8"
+          OSV_SHA256: "bc98e15319ed0d515e3f9235287ba53cdc5535d576d24fd573978ecfe9ab92dc"
+        run: |
+          set -euo pipefail
+          # RUNNER_TEMP is per-job-isolated on hosted runners and properly-configured
+          # self-hosted runners — avoids TOCTOU on shared /tmp between concurrent jobs.
+          OSV_BIN="${RUNNER_TEMP}/osv-scanner"
+          curl --fail --silent --show-error --location \
+            "https://github.com/google/osv-scanner/releases/download/${OSV_VERSION}/osv-scanner_linux_amd64" \
+            --output "${OSV_BIN}"
+          echo "${OSV_SHA256}  ${OSV_BIN}" | sha256sum -c -
+          chmod +x "${OSV_BIN}"
+          "${OSV_BIN}" --lockfile=uv.lock
+
       - name: Security - Code analysis (bandit)
         run: .venv/bin/bandit -r src/ -ll --format json -o bandit-report.json
 
       - name: Upload security reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: security-reports
           path: |
@@ -97,7 +136,7 @@ jobs:
             --cov-fail-under=80
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: coverage-report
           path: coverage.xml
@@ -113,7 +152,12 @@ jobs:
   windows-smoke:
     name: Windows Smoke Test
     runs-on: windows-latest
-    timeout-minutes: 10
+    # 15min headroom: the smoke task itself completes in ~7min, but the
+    # actions/cache post-step on Windows is slow when ``.venv`` is large.
+    # We also exclude ``.venv`` from the cached paths (uv re-creates it
+    # fast from the cached ``uv`` download dir), so 15min is comfortable
+    # with margin for transient network slowness on the dep install.
+    timeout-minutes: 15
     # Skip on fork PRs where secrets aren't available (matches e2e-smoke).
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     defaults:
@@ -121,6 +165,11 @@ jobs:
         shell: bash
 
     env:
+      # uv sync resolves named-index credentials from UV_INDEX_<NAME>_{USERNAME,PASSWORD}
+      # (the segment after UV_INDEX_ is the pyproject.toml index name uppercased).
+      # UV_EXTRA_INDEX_URL is kept in parallel for any uv pip-style invocations.
+      UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
+      UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
       # Job-level dummy key keeps the unit-test step deterministic and isolated
       # from real-API leakage. The e2e step below overrides at step scope only.
@@ -128,23 +177,28 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.13"
 
       - name: Cache dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
+          # ``.venv`` is deliberately excluded: tarring/untarring tens of
+          # thousands of small wheel files on Windows is what was tripping
+          # the 10-minute job timeout. Caching only the uv/pip download
+          # caches keeps ``uv sync --frozen`` fast (it hydrates ``.venv``
+          # from the wheel cache without re-downloading) at a fraction of
+          # the compress/decompress cost.
           path: |
             ~/AppData/Local/uv/cache
             ~/AppData/Local/pip/Cache
-            .venv
             .pytest_cache
             .ruff_cache
-          key: ${{ runner.os }}-py3.13-${{ hashFiles('**/pyproject.toml') }}
+          key: ${{ runner.os }}-py3.13-${{ hashFiles('pyproject.toml', 'uv.lock') }}
           restore-keys: |
             ${{ runner.os }}-py3.13-
 
@@ -153,10 +207,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install uv
 
-      - name: Install project dependencies
-        run: |
-          uv venv .venv --clear
-          uv pip install --python .venv/Scripts/python.exe -e ".[dev]"
+      - name: Install project dependencies (hash-verified from uv.lock)
+        run: uv sync --frozen --extra dev
 
       - name: Check code formatting (ruff format)
         run: .venv/Scripts/ruff format --check src/ tests/
@@ -171,7 +223,7 @@ jobs:
         run: .venv/Scripts/pytest tests/ -v -m "not live and not lint"
 
       - name: Set up Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: "20"
 
@@ -202,7 +254,7 @@ jobs:
 
       - name: Upload Windows smoke artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: windows-smoke-runs
           path: runs/win-smoke/
@@ -217,6 +269,11 @@ jobs:
 
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # uv sync resolves named-index credentials from UV_INDEX_<NAME>_{USERNAME,PASSWORD}
+      # (the segment after UV_INDEX_ is the pyproject.toml index name uppercased).
+      # UV_EXTRA_INDEX_URL is kept in parallel for any uv pip-style invocations.
+      UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
+      UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
       # tasks_run for --tags smoke-pass. 4 task files (hello_date, dataset_example,
       # smoke_llm_judge, smoke_agent_judge); dataset_example fans out to 2 inline
@@ -241,15 +298,15 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.13"
 
       - name: Set up Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: "20"
 
@@ -257,13 +314,13 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code
 
       - name: Cache dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: |
             ~/.cache/uv
             ~/.cache/pip
             .venv
-          key: ${{ runner.os }}-py3.13-e2e-${{ hashFiles('**/pyproject.toml') }}
+          key: ${{ runner.os }}-py3.13-e2e-${{ hashFiles('pyproject.toml', 'uv.lock') }}
           restore-keys: |
             ${{ runner.os }}-py3.13-e2e-
             ${{ runner.os }}-py3.13-
@@ -273,10 +330,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install uv
 
-      - name: Install project dependencies
-        run: |
-          uv venv .venv --clear
-          uv pip install --python .venv/bin/python -e ".[dev]"
+      - name: Install project dependencies (hash-verified from uv.lock)
+        run: uv sync --frozen --extra dev
 
       - name: Run smoke-pass bucket (expect all to succeed)
         run: |
@@ -358,7 +413,7 @@ jobs:
 
       - name: Upload run artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: e2e-smoke-runs
           path: |
@@ -377,25 +432,30 @@ jobs:
 
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # uv sync resolves named-index credentials from UV_INDEX_<NAME>_{USERNAME,PASSWORD}
+      # (the segment after UV_INDEX_ is the pyproject.toml index name uppercased).
+      # UV_EXTRA_INDEX_URL is kept in parallel for any uv pip-style invocations.
+      UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
+      UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.13"
 
       - name: Cache dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: |
             ~/.cache/uv
             ~/.cache/pip
             .venv
-          key: ${{ runner.os }}-py3.13-e2e-${{ hashFiles('**/pyproject.toml') }}
+          key: ${{ runner.os }}-py3.13-e2e-${{ hashFiles('pyproject.toml', 'uv.lock') }}
           restore-keys: |
             ${{ runner.os }}-py3.13-e2e-
             ${{ runner.os }}-py3.13-
@@ -405,10 +465,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install uv
 
-      - name: Install project dependencies
-        run: |
-          uv venv .venv --clear
-          uv pip install --python .venv/bin/python -e ".[dev]"
+      - name: Install project dependencies (hash-verified from uv.lock)
+        run: uv sync --frozen --extra dev
 
       - name: Run autogen on mock plugin
         run: .venv/bin/coder-eval tools autogen templates/plugins/mock-greeting-plugin tmp/autogen-out --coverage quick
@@ -423,7 +481,7 @@ jobs:
 
       - name: Upload autogen output on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: e2e-autogen-output
           path: tmp/autogen-out/
@@ -443,6 +501,11 @@ jobs:
       # would route the settings-enforcement test through a ProxyRoute and
       # fail without a running LLMGW proxy server (per the file's docstring).
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # uv sync resolves named-index credentials from UV_INDEX_<NAME>_{USERNAME,PASSWORD}
+      # (the segment after UV_INDEX_ is the pyproject.toml index name uppercased).
+      # UV_EXTRA_INDEX_URL is kept in parallel for any uv pip-style invocations.
+      UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
+      UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
       LLMGW_URL: ${{ secrets.LLMGW_URL }}
       LLMGW_CLIENT_ID: ${{ secrets.LLMGW_CLIENT_ID }}
@@ -469,15 +532,15 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.13"
 
       - name: Set up Node.js 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: "20"
 
@@ -488,13 +551,13 @@ jobs:
       # AgentConfig.isolation=true, so the SDK doesn't shell out to bwrap.
 
       - name: Cache dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: |
             ~/.cache/uv
             ~/.cache/pip
             .venv
-          key: ${{ runner.os }}-py3.13-live-${{ hashFiles('**/pyproject.toml') }}
+          key: ${{ runner.os }}-py3.13-live-${{ hashFiles('pyproject.toml', 'uv.lock') }}
           restore-keys: |
             ${{ runner.os }}-py3.13-live-
             ${{ runner.os }}-py3.13-
@@ -504,10 +567,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install uv
 
-      - name: Install project dependencies
-        run: |
-          uv venv .venv --clear
-          uv pip install --python .venv/bin/python -e ".[dev]"
+      - name: Install project dependencies (hash-verified from uv.lock)
+        run: uv sync --frozen --extra dev
 
       - name: Verify required secrets are present
         run: |
@@ -633,7 +694,7 @@ jobs:
 
       - name: Upload live-test artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: live-tests-output
           path: |
@@ -658,14 +719,19 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
 
     env:
+      # uv sync resolves named-index credentials from UV_INDEX_<NAME>_{USERNAME,PASSWORD}
+      # (the segment after UV_INDEX_ is the pyproject.toml index name uppercased).
+      # UV_EXTRA_INDEX_URL is kept in parallel for any uv pip-style invocations.
+      UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
+      UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
 
     steps:
       - name: Checkout coder_eval
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Checkout UiPath/skills @ main
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           repository: UiPath/skills
           ref: main
@@ -673,18 +739,18 @@ jobs:
           fetch-depth: 1
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.13"
 
       - name: Cache dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: |
             ~/.cache/uv
             ~/.cache/pip
             .venv
-          key: ${{ runner.os }}-py3.13-validate-skills-${{ hashFiles('**/pyproject.toml') }}
+          key: ${{ runner.os }}-py3.13-validate-skills-${{ hashFiles('pyproject.toml', 'uv.lock') }}
           restore-keys: |
             ${{ runner.os }}-py3.13-validate-skills-
             ${{ runner.os }}-py3.13-
@@ -694,10 +760,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install uv
 
-      - name: Install project dependencies
-        run: |
-          uv venv .venv --clear
-          uv pip install --python .venv/bin/python -e ".[dev]"
+      - name: Install project dependencies (hash-verified from uv.lock)
+        run: uv sync --frozen --extra dev
 
       - name: Validate every skills task YAML loads under current TaskDefinition schema
         # Hard gate. Catches the class of bug where a coder_eval PR renames or
