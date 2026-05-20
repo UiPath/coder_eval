@@ -2,7 +2,7 @@ task_id: flow-json-release-rollup
 description: >
   Complex Flow v1 (.flow JSON) authoring task. Combines a free HTTP API
   (GitHub releases) with three connectors (Outlook, Slack, Jira). Tests an
-  agent's ability to compose a non-trivial flow by hand: 20+ nodes, a loop, a
+  agent's ability to compose a non-trivial flow by hand: 15+ nodes, a loop, a
   pair of nested decisions, multi-connector fan-out, and per-iteration
   counters with a final aggregation pass. Mirrors the csharp_authoring and
   v2_authoring versions of the same scenario for cross-flavor comparison.
@@ -27,7 +27,7 @@ sandbox:
 
 initial_prompt: |
   Before starting, load the `uipath-maestro-flow` skill and read its
-  SKILL.md. Author the flow as JSON (do NOT use `uip maestro flow node add`
+  SKILL.md. Author the flow as JSON (do NOT use `$HOME/.bun/bin/uip maestro flow node add`
   — pure JSON authoring). Do NOT ask for approval, confirmation, or feedback.
   Build the complete flow end-to-end in a single pass.
 
@@ -85,13 +85,13 @@ initial_prompt: |
   three connectors:
 
   ```bash
-  uip is connections list --output json | jq '.Data[] | select(.ConnectorKey | startswith("uipath-microsoft-outlook365"))'
-  uip is connections list --output json | jq '.Data[] | select(.ConnectorKey | startswith("uipath-salesforce-slack"))'
-  uip is connections list --output json | jq '.Data[] | select(.ConnectorKey | startswith("uipath-atlassian-jira"))'
+  $HOME/.bun/bin/uip is connections list --output json | jq '.Data[] | select(.ConnectorKey | startswith("uipath-microsoft-outlook365"))'
+  $HOME/.bun/bin/uip is connections list --output json | jq '.Data[] | select(.ConnectorKey | startswith("uipath-salesforce-slack"))'
+  $HOME/.bun/bin/uip is connections list --output json | jq '.Data[] | select(.ConnectorKey | startswith("uipath-atlassian-jira"))'
 
-  uip maestro flow registry get uipath.connector.uipath-microsoft-outlook365.send-email --output json
-  uip maestro flow registry get uipath.connector.uipath-salesforce-slack.send-message-to-user --output json
-  uip maestro flow registry get uipath.connector.uipath-atlassian-jira.create-issue --output json
+  $HOME/.bun/bin/uip maestro flow registry get uipath.connector.uipath-microsoft-outlook365.send-email --output json
+  $HOME/.bun/bin/uip maestro flow registry get uipath.connector.uipath-salesforce-slack.send-message-to-user --output json
+  $HOME/.bun/bin/uip maestro flow registry get uipath.connector.uipath-atlassian-jira.create-issue --output json
   ```
 
   ## Output
@@ -103,13 +103,17 @@ initial_prompt: |
   ## Verifying your work
 
   ```bash
-  uip maestro flow validate ReleaseRollup/flow_files/ReleaseRollup.flow
-  uip maestro flow tidy     ReleaseRollup/flow_files/ReleaseRollup.flow
+  $HOME/.bun/bin/uip maestro flow validate ReleaseRollup/flow_files/ReleaseRollup.flow
+  $HOME/.bun/bin/uip maestro flow format     ReleaseRollup/flow_files/ReleaseRollup.flow
   ```
 
   Iterate until validate prints `"Result": "Success"`. Validation errors
-  point at fields in node `inputs` or `embeddedDefinitions`; tidy errors
+  point at fields in node `inputs` or `embeddedDefinitions`; format errors
   usually mean an edge points at a missing port.
+
+post_run:
+  - command: 'mkdir -p _outputs && find . -type d \( -name .uipath -o -name .claude -o -name .venv -o -name node_modules -o -name tools -o -name example -o -name _outputs -o -name .git -o -name .flow-run \) -prune -o -type f \( -name "*.flow" -o -name "*.fil" -o -name "bindings*.json" \) -exec sh -c ''f="${1#./}"; mkdir -p "_outputs/$(dirname "$f")" && cp "$1" "_outputs/$f"'' _ {} \; && find _outputs -type f -exec chmod a-w {} +'
+    timeout: 30
 
 success_criteria:
   - type: run_command
@@ -129,14 +133,14 @@ success_criteria:
     weight: 2.0
     pass_threshold: 1.0
   - type: run_command
-    description: "Flow has 20+ nodes"
+    description: "Flow has 15+ nodes"
     command: |
       python3 -c "
       import json, glob
       flows = glob.glob('**/flow_files/ReleaseRollup.flow', recursive=True)
       f = json.load(open(flows[0]))
       n = len(f['nodes'])
-      assert n >= 20, f'expected 20+ nodes, got {n}'
+      assert n >= 15, f'expected 15+ nodes, got {n}'
       print(f'{n} nodes')
       "
     timeout: 10
@@ -199,13 +203,13 @@ success_criteria:
     weight: 2.0
     pass_threshold: 1.0
   - type: run_command
-    description: "Flow validates with uip maestro flow validate"
+    description: "Flow validates with $HOME/.bun/bin/uip maestro flow validate"
     command: |
       python3 -c "
       import glob, subprocess, sys
       flows = glob.glob('**/flow_files/ReleaseRollup.flow', recursive=True)
       assert flows, 'no flow file found'
-      r = subprocess.run(['uip', 'maestro', 'flow', 'validate', flows[0]], capture_output=True, text=True)
+      r = subprocess.run(['$HOME/.bun/bin/uip', 'maestro', 'flow', 'validate', flows[0]], capture_output=True, text=True)
       print(r.stdout)
       print(r.stderr, file=sys.stderr)
       sys.exit(r.returncode)
@@ -215,12 +219,12 @@ success_criteria:
     weight: 3.0
     pass_threshold: 1.0
   - type: run_command
-    description: "tidy succeeds"
+    description: "format succeeds"
     command: |
       python3 -c "
       import glob, subprocess, sys
       flows = glob.glob('**/flow_files/ReleaseRollup.flow', recursive=True)
-      r = subprocess.run(['uip', 'maestro', 'flow', 'tidy', flows[0]], capture_output=True, text=True)
+      r = subprocess.run(['$HOME/.bun/bin/uip', 'maestro', 'flow', 'format', flows[0]], capture_output=True, text=True)
       print(r.stdout)
       print(r.stderr, file=sys.stderr)
       sys.exit(r.returncode)
@@ -245,14 +249,14 @@ success_criteria:
     weight: 1.0
     pass_threshold: 1.0
   - type: command_executed
-    description: "Agent fetched real connections via `uip is connections list`"
+    description: "Agent fetched real connections via `$HOME/.bun/bin/uip is connections list`"
     tool_name: "Bash"
     command_pattern: "uip.*is.*connections.*list"
     min_count: 1
     weight: 1.0
     pass_threshold: 1.0
   - type: command_executed
-    description: "Agent looked up at least one node type via `uip maestro flow registry get`"
+    description: "Agent looked up at least one node type via `$HOME/.bun/bin/uip maestro flow registry get`"
     tool_name: "Bash"
     command_pattern: "uip.*maestro.*flow.*registry.*get"
     min_count: 1

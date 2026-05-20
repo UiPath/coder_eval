@@ -7,7 +7,8 @@ description: >
 tags: [flow, flow-json, generate, mode-default, no-cli-expected]
 
 run_limits:
-  max_turns: 50
+  max_turns: 70
+  turn_timeout: 1200
 agent:
   type: claude-code
   permission_mode: acceptEdits
@@ -28,6 +29,10 @@ initial_prompt: |
   Do NOT run flow debug — just validate the flow.
   Do NOT ask for approval, confirmation, or feedback. Do NOT pause between planning and implementation. Build the complete flow end-to-end in a single pass.
   Before starting, load the uipath-maestro-flow skill. Read and follow its workflow steps exactly.
+
+post_run:
+  - command: 'mkdir -p _outputs && find . -type d \( -name .uipath -o -name .claude -o -name .venv -o -name node_modules -o -name tools -o -name example -o -name _outputs -o -name .git -o -name .flow-run \) -prune -o -type f \( -name "*.flow" -o -name "*.fil" -o -name "bindings*.json" \) -exec sh -c ''f="${1#./}"; mkdir -p "_outputs/$(dirname "$f")" && cp "$1" "_outputs/$f"'' _ {} \; && find _outputs -type f -exec chmod a-w {} +'
+    timeout: 30
 
 success_criteria:
   # --- Flow correctness ---

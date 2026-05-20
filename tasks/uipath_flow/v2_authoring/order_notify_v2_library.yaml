@@ -16,6 +16,9 @@ agent:
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
 
 sandbox:
+  ignore_patterns:
+    - "!dist"          # vendored flow-v2 JS toolchain (tools/*/dist/cli.js)
+    - "!node_modules"  # vendored wabt runtime dep (tools/node_modules/wabt)
   driver: tempdir
   python: {}
   template_sources:
@@ -54,7 +57,7 @@ initial_prompt: |
   ./verify.sh                                  # compile + binding check
   ./convert.sh OrderNotify                     # produces OrderNotify.flow
   uip maestro flow validate OrderNotify.flow   # must print "Result": "Success"
-  uip maestro flow tidy OrderNotify.flow       # designer-friendly layout
+  uip maestro flow format OrderNotify.flow       # designer-friendly layout
   ```
 
   Iterate until validate prints `"Result": "Success"`. Validation errors
@@ -66,6 +69,10 @@ initial_prompt: |
   `"$FLOW_V2_LIBRARY_MD/index.json"` and per-op `<key>/<op>@<ver>.json`):
   - `uipath.connector.uipath-microsoft-outlook365.get-email-list`
   - `uipath.connector.uipath-salesforce-slack.send-message-to-channel`
+
+post_run:
+  - command: 'mkdir -p _outputs && find . -type d \( -name .uipath -o -name .claude -o -name .venv -o -name node_modules -o -name tools -o -name example -o -name _outputs -o -name .git -o -name .flow-run \) -prune -o -type f \( -name "*.flow" -o -name "*.fil" -o -name "bindings*.json" \) -exec sh -c ''f="${1#./}"; mkdir -p "_outputs/$(dirname "$f")" && cp "$1" "_outputs/$f"'' _ {} \; && find _outputs -type f -exec chmod a-w {} +'
+    timeout: 30
 
 success_criteria:
   # ── 1. v2 source files exist ─────────────────────────────────────────────

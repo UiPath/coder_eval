@@ -195,24 +195,10 @@ class WatEmitter {
         }
         const entryLines = [];
         entryLines.push('  ;; Entry point');
+        const mainFn = program.functions.find(f => f.name === 'main');
         entryLines.push('  (func $fil_start (export "start")');
         entryLines.push('    (call $init_io)');
-        const mainFn = program.functions.find(f => f.name === 'main');
-        if (mainFn) {
-            // Flow-level main params model trigger inputs for conversion; flow-run
-            // does not inject an event payload yet, so local execution starts with
-            // zero/default placeholders.
-            for (const p of mainFn.params) {
-                const defaultValue = this.defaultValueForType(p.type);
-                if (defaultValue)
-                    entryLines.push(`    ${defaultValue}`);
-            }
-            entryLines.push('    (call $main)');
-            const mainRet = this.watType(mainFn.returnType);
-            if (mainRet !== 'void' && mainRet !== '') {
-                entryLines.push('    drop');
-            }
-        }
+        entryLines.push('    (call $main)');
         entryLines.push(`    (call $out_write_raw (i32.const ${WatEmitter.P_FLOW_DONE}) (i32.const ${WatEmitter.P_FLOW_LEN}))`);
         entryLines.push('    (call $out_flush)');
         entryLines.push('  )');
@@ -3672,19 +3658,6 @@ class WatEmitter {
         if (t.kind === 'array')
             return 'i32'; // pointer
         return 'i32';
-    }
-    defaultValueForType(t) {
-        const wat = this.watType(t);
-        switch (wat) {
-            case 'i64': return '(i64.const 0)';
-            case 'f64': return '(f64.const 0)';
-            case 'void': return '';
-            case '':
-                return '';
-            case 'i32':
-            default:
-                return '(i32.const 0)';
-        }
     }
     // ─── Collect local variables ──────────────────────────────────────────────
     collectLocals(block, ctx) {

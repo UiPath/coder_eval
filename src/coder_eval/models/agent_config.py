@@ -110,9 +110,20 @@ class AgentConfig(BaseModel):
     # Customizable ignore patterns for file tracking
     ignore_patterns: list[str] = Field(
         default_factory=list,
-        description="Additional patterns to ignore during file change detection (beyond defaults)",
+        description=(
+            "Pattern overrides applied during file change detection. "
+            "Plain entries add to the defaults; entries prefixed with '!' "
+            "remove a default (gitignore-style negation)."
+        ),
         validation_alias=AliasChoices("ignore_patterns", "additional_ignore_patterns"),
     )
+
+    @field_validator("ignore_patterns")
+    @classmethod
+    def _validate_ignore_patterns(cls, values: list[str]) -> list[str]:
+        from coder_eval.resources import normalize_ignore_pattern_entry
+
+        return [normalize_ignore_pattern_entry(v) for v in values]
 
     system_prompt: str | None = Field(
         default=None,

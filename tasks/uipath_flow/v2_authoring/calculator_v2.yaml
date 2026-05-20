@@ -16,6 +16,9 @@ agent:
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
 
 sandbox:
+  ignore_patterns:
+    - "!dist"          # vendored flow-v2 JS toolchain (tools/*/dist/cli.js)
+    - "!node_modules"  # vendored wabt runtime dep (tools/node_modules/wabt)
   driver: tempdir
   python: {}
   template_sources:
@@ -62,8 +65,12 @@ initial_prompt: |
   ./verify.sh                            # compile + binding check
   ./convert.sh Calculator                # writes Calculator.flow
   uip maestro flow validate Calculator.flow
-  uip maestro flow tidy Calculator.flow
+  uip maestro flow format Calculator.flow
   ```
+
+post_run:
+  - command: 'mkdir -p _outputs && find . -type d \( -name .uipath -o -name .claude -o -name .venv -o -name node_modules -o -name tools -o -name example -o -name _outputs -o -name .git -o -name .flow-run \) -prune -o -type f \( -name "*.flow" -o -name "*.fil" -o -name "bindings*.json" \) -exec sh -c ''f="${1#./}"; mkdir -p "_outputs/$(dirname "$f")" && cp "$1" "_outputs/$f"'' _ {} \; && find _outputs -type f -exec chmod a-w {} +'
+    timeout: 30
 
 success_criteria:
   - type: file_exists
@@ -103,8 +110,8 @@ success_criteria:
     weight: 3.0
     pass_threshold: 1.0
   - type: run_command
-    description: "tidy succeeds"
-    command: "uip maestro flow tidy Calculator.flow"
+    description: "format succeeds"
+    command: "uip maestro flow format Calculator.flow"
     timeout: 30
     expected_exit_code: 0
     weight: 1.0

@@ -132,7 +132,6 @@ export declare class WatEmitter {
     private getLocalRef;
     private getLocalSet;
     private watType;
-    private defaultValueForType;
     private collectLocals;
     private preScanStrings;
 }

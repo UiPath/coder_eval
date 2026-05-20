@@ -162,12 +162,16 @@ initial_prompt: |
   ## Verifying your work
 
   ```bash
-  uip maestro flow validate ApiAgeLookup/flow_files/ApiAgeLookup.flow
-  uip maestro flow format ApiAgeLookup/flow_files/ApiAgeLookup.flow
+  $HOME/.bun/bin/uip maestro flow validate ApiAgeLookup/flow_files/ApiAgeLookup.flow
+  $HOME/.bun/bin/uip maestro flow format ApiAgeLookup/flow_files/ApiAgeLookup.flow
   ```
 
   Iterate until validation succeeds. Do not substitute a mock node for the
   API Workflow resource node.
+
+post_run:
+  - command: 'mkdir -p _outputs && find . -type d \( -name .uipath -o -name .claude -o -name .venv -o -name node_modules -o -name tools -o -name example -o -name _outputs -o -name .git -o -name .flow-run \) -prune -o -type f \( -name "*.flow" -o -name "*.fil" -o -name "bindings*.json" \) -exec sh -c ''f="${1#./}"; mkdir -p "_outputs/$(dirname "$f")" && cp "$1" "_outputs/$f"'' _ {} \; && find _outputs -type f -exec chmod a-w {} +'
+    timeout: 30
 
 success_criteria:
   - type: file_exists
@@ -190,7 +194,7 @@ success_criteria:
 
   - type: run_command
     description: "v1 .flow validates"
-    command: "uip maestro flow validate ApiAgeLookup/flow_files/ApiAgeLookup.flow"
+    command: "$HOME/.bun/bin/uip maestro flow validate ApiAgeLookup/flow_files/ApiAgeLookup.flow"
     timeout: 30
     expected_exit_code: 0
     weight: 3.0
@@ -198,7 +202,7 @@ success_criteria:
 
   - type: run_command
     description: "format succeeds"
-    command: "uip maestro flow format ApiAgeLookup/flow_files/ApiAgeLookup.flow"
+    command: "$HOME/.bun/bin/uip maestro flow format ApiAgeLookup/flow_files/ApiAgeLookup.flow"
     timeout: 30
     expected_exit_code: 0
     weight: 1.0

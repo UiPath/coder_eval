@@ -1011,7 +1011,6 @@ function flowTypeToFil(flowType) {
         case 'boolean': return 'bool';
         case 'object': return 'json'; // legacy; v2-to-v1 now emits `any` for json
         case 'any': return 'json';
-        case 'file': return 'file';
         case 'array': return { kind: 'array', element: 'json' };
         default: return 'json';
     }

@@ -280,7 +280,44 @@ class Sandbox:
 
             dest_path = mount_root / rel_path
 
-            if item.is_dir():
+            # is_symlink() must come first — is_dir() / is_file() follow
+            # symlinks, so a `tools/node_modules/fil-compiler -> ../fil`
+            # link would look like a directory and we'd create an empty
+            # dir at the destination, breaking npm workspace resolution.
+            if item.is_symlink():
+                # `is_symlink()` before `exists()` because `exists()` follows
+                # the link; a *broken* symlink at dest is still an overwrite
+                # we need to clear.
+                if dest_path.is_symlink() or dest_path.exists():
+                    # Only a real directory needs rmtree; symlinks-to-dir,
+                    # symlinks-to-file, and regular files all clear with
+                    # unlink() (which removes the link, not its target).
+                    if dest_path.is_dir() and not dest_path.is_symlink():
+                        shutil.rmtree(dest_path)
+                    else:
+                        dest_path.unlink()
+                    overwrites.add(str(rel_path))
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                # `item.is_dir()` follows the symlink, so it tells us
+                # whether the target is a directory. On Windows
+                # `os.symlink` needs `target_is_directory=True` for
+                # directory targets — without it Windows creates a
+                # file-symlink that can't be traversed. POSIX ignores
+                # the flag.
+                #
+                # We preserve `os.readlink(item)` verbatim — both
+                # relative (npm workspaces, e.g. `node_modules/foo
+                # -> ../foo`) and absolute targets. Absolute targets
+                # remain live links into the host filesystem inside
+                # the sandbox; template authors are trusted infra
+                # (see `templates/` in this repo), so this is the
+                # intended behavior, not a defense boundary.
+                os.symlink(
+                    os.readlink(item),
+                    dest_path,
+                    target_is_directory=item.is_dir(),
+                )
+            elif item.is_dir():
                 dest_path.mkdir(parents=True, exist_ok=True)
             elif item.is_file():
                 # Track overwrites

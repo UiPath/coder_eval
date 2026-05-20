@@ -40,8 +40,8 @@ action robotEscalated: mock {
 };
 
 async function main(): Promise<void> {
-  const raw: string = await executeNode(runRobot, JSON.stringify({ newArgument: "" }));
-  const result: json = JSON.parse(raw);
+  const runRobotData: string = await executeNode(runRobot, JSON.stringify({ newArgument: "" }));
+  const result: json = JSON.parse(runRobotData);
   const output: json = result.output;
   const jobId: string = output.jobId;
   if (jobId !== "") {

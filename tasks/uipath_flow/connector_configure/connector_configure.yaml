@@ -6,6 +6,7 @@ tags: [flow, connector, configure, tier-4, integration]
 
 run_limits:
   max_turns: 50
+  turn_timeout: 1500
 agent:
   type: claude-code
   permission_mode: acceptEdits
@@ -22,12 +23,23 @@ initial_prompt: |
   Do NOT ask for approval, confirmation, or feedback. Do NOT pause between planning and implementation. Build the complete flow end-to-end in a single pass.
 
   Create a flow named "SlackNotifier" that sends a Slack message.
+
+  **Important — uip resolution:** the locally-installed
+  `@uipath/cli@0.1.21` (in `./node_modules/.bin/uip`) predates the
+  `maestro flow` namespace and will return "unknown command 'flow'".
+  Always invoke the host-installed bun CLI explicitly:
+
+      $HOME/.bun/bin/uip <subcommand> ...
+
+  Bash aliases will NOT survive across separate Bash tool calls, so
+  type the full `$HOME/.bun/bin/uip` path each time.
+
   Follow the connector guide's 6-step configuration workflow:
 
-  1. Fetch available Slack connections (uip is connections list)
-  2. Get enriched registry definition (uip maestro flow registry get with --connection-id)
-  3. Describe the resource (uip is resources describe)
-  4. Resolve any reference fields (uip is resources execute list)
+  1. Fetch available Slack connections ($HOME/.bun/bin/uip is connections list)
+  2. Get enriched registry definition ($HOME/.bun/bin/uip maestro flow registry get with --connection-id)
+  3. Describe the resource ($HOME/.bun/bin/uip is resources describe)
+  4. Resolve any reference fields ($HOME/.bun/bin/uip is resources execute list)
   5. Validate required fields
   6. Configure the connector node in the flow
 
@@ -35,6 +47,10 @@ initial_prompt: |
 
   Save the flow as SlackNotifier/flow_files/SlackNotifier.flow with
   SlackNotifier/project.uiproj. Also create bindings_v2.json if needed.
+
+post_run:
+  - command: 'mkdir -p _outputs && find . -type d \( -name .uipath -o -name .claude -o -name .venv -o -name node_modules -o -name tools -o -name example -o -name _outputs -o -name .git -o -name .flow-run \) -prune -o -type f \( -name "*.flow" -o -name "*.fil" -o -name "bindings*.json" \) -exec sh -c ''f="${1#./}"; mkdir -p "_outputs/$(dirname "$f")" && cp "$1" "_outputs/$f"'' _ {} \; && find _outputs -type f -exec chmod a-w {} +'
+    timeout: 30
 
 success_criteria:
   - type: command_executed

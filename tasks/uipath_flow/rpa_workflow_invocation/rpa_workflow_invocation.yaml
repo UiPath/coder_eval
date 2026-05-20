@@ -6,7 +6,7 @@ description: >
 tags: [flow, flow-json, generate, rpa-workflow, decision, mock, non-is-node]
 
 run_limits:
-  max_turns: 80
+  max_turns: 120
   turn_timeout: 1200
   task_timeout: 1800
 
@@ -161,13 +161,21 @@ initial_prompt: |
 
   ## Verifying your work
 
+  The locally-installed `@uipath/cli@0.1.21` (in `node_modules/.bin`)
+  predates the `maestro flow` namespace, so use the host-installed
+  bun CLI explicitly:
+
   ```bash
-  uip maestro flow validate RpaWorkflowGate/flow_files/RpaWorkflowGate.flow
-  uip maestro flow format RpaWorkflowGate/flow_files/RpaWorkflowGate.flow
+  $HOME/.bun/bin/uip maestro flow validate RpaWorkflowGate/flow_files/RpaWorkflowGate.flow
+  $HOME/.bun/bin/uip maestro flow format RpaWorkflowGate/flow_files/RpaWorkflowGate.flow
   ```
 
   Iterate until validation succeeds. Do not substitute a mock node for the
   RPA Workflow resource node.
+
+post_run:
+  - command: 'mkdir -p _outputs && find . -type d \( -name .uipath -o -name .claude -o -name .venv -o -name node_modules -o -name tools -o -name example -o -name _outputs -o -name .git -o -name .flow-run \) -prune -o -type f \( -name "*.flow" -o -name "*.fil" -o -name "bindings*.json" \) -exec sh -c ''f="${1#./}"; mkdir -p "_outputs/$(dirname "$f")" && cp "$1" "_outputs/$f"'' _ {} \; && find _outputs -type f -exec chmod a-w {} +'
+    timeout: 30
 
 success_criteria:
   - type: file_exists
@@ -188,9 +196,14 @@ success_criteria:
     weight: 5.0
     pass_threshold: 1.0
 
+  # Use the host-installed uip (bun) explicitly. The env_packages pin
+  # `@uipath/cli@0.1.21` installs a CLI without the `maestro flow`
+  # namespace into node_modules/.bin, which the sandbox prepends to
+  # PATH — so a bare `uip maestro flow validate` resolves to the wrong
+  # binary. Same override pattern as hitl_quickform.
   - type: run_command
     description: "v1 .flow validates"
-    command: "uip maestro flow validate RpaWorkflowGate/flow_files/RpaWorkflowGate.flow"
+    command: 'UIPATH_FLOW_CLI=${UIPATH_FLOW_CLI:-$HOME/.bun/bin/uip}; "$UIPATH_FLOW_CLI" maestro flow validate RpaWorkflowGate/flow_files/RpaWorkflowGate.flow'
     timeout: 30
     expected_exit_code: 0
     weight: 3.0
@@ -198,7 +211,7 @@ success_criteria:
 
   - type: run_command
     description: "format succeeds"
-    command: "uip maestro flow format RpaWorkflowGate/flow_files/RpaWorkflowGate.flow"
+    command: 'UIPATH_FLOW_CLI=${UIPATH_FLOW_CLI:-$HOME/.bun/bin/uip}; "$UIPATH_FLOW_CLI" maestro flow format RpaWorkflowGate/flow_files/RpaWorkflowGate.flow'
     timeout: 30
     expected_exit_code: 0
     weight: 1.0

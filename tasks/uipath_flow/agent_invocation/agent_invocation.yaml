@@ -114,11 +114,15 @@ initial_prompt: |
   ## Verifying your work
 
   ```bash
-  uip maestro flow validate AgentClassifier/flow_files/AgentClassifier.flow
-  uip maestro flow format AgentClassifier/flow_files/AgentClassifier.flow
+  $HOME/.bun/bin/uip maestro flow validate AgentClassifier/flow_files/AgentClassifier.flow
+  $HOME/.bun/bin/uip maestro flow format AgentClassifier/flow_files/AgentClassifier.flow
   ```
 
   Iterate until validation succeeds.
+
+post_run:
+  - command: 'mkdir -p _outputs && find . -type d \( -name .uipath -o -name .claude -o -name .venv -o -name node_modules -o -name tools -o -name example -o -name _outputs -o -name .git -o -name .flow-run \) -prune -o -type f \( -name "*.flow" -o -name "*.fil" -o -name "bindings*.json" \) -exec sh -c ''f="${1#./}"; mkdir -p "_outputs/$(dirname "$f")" && cp "$1" "_outputs/$f"'' _ {} \; && find _outputs -type f -exec chmod a-w {} +'
+    timeout: 30
 
 success_criteria:
   - type: file_exists
@@ -243,8 +247,8 @@ success_criteria:
     pass_threshold: 1.0
 
   - type: run_command
-    description: "Flow validates with uip maestro flow validate"
-    command: "uip maestro flow validate AgentClassifier/flow_files/AgentClassifier.flow"
+    description: "Flow validates with $HOME/.bun/bin/uip maestro flow validate"
+    command: "$HOME/.bun/bin/uip maestro flow validate AgentClassifier/flow_files/AgentClassifier.flow"
     timeout: 60
     expected_exit_code: 0
     weight: 3.0
@@ -252,7 +256,7 @@ success_criteria:
 
   - type: run_command
     description: "format succeeds"
-    command: "uip maestro flow format AgentClassifier/flow_files/AgentClassifier.flow"
+    command: "$HOME/.bun/bin/uip maestro flow format AgentClassifier/flow_files/AgentClassifier.flow"
     timeout: 60
     expected_exit_code: 0
     weight: 1.0

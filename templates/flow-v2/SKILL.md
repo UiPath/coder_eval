@@ -43,7 +43,7 @@ A v2 flow project is **two files**:
 6. **Final compatibility check** (only when the flow is otherwise done):
    - `./convert.sh <Name>` → writes `<Name>.flow`.
    - `uip maestro flow validate <Name>.flow`.
-   - `uip maestro flow tidy <Name>.flow` → auto-layout so the v1 file is openable in the designer.
+   - `uip maestro flow format <Name>.flow` → auto-layout so the v1 file is openable in the designer.
 
 ## FIL — the language
 
@@ -421,16 +421,72 @@ action getEmails: uipath.connector.uipath-microsoft-outlook365.get-email-list@1.
 };
 
 async function main(): Promise<void> {
-  const raw: string = await executeNode(getEmails, JSON.stringify({
+  const getEmailsData: string = await executeNode(getEmails, JSON.stringify({
     parentFolderId: "inbox",
     unReadOnly: true,
   }));
-  const emails: json = JSON.parse(raw);
+  const emails: json = JSON.parse(getEmailsData);
   // …
 }
 ```
 
 The compiler verifies the identifier resolves to a declared action. String-literal node names are rejected — typos turn into compile errors instead of silent runtime failures.
+
+#### Naming await results
+
+The `const` that captures `await executeNode(<X>, …)`'s return value lowers to the v1 path `$vars.<X>.output` — every later reference is rewritten to that path, and there is no v1 variable bound to your local's name. The original FIL identifier is lost on a v1 → v2 round-trip.
+
+To make round-trips deterministic, **name the await-result local `<nodeId>Data`** (the convention v1-to-v2 uses when reconstructing FIL from v1 expressions):
+
+```typescript
+// ✅ Round-trip-stable.
+const fetchBatchData: string = await executeNode(fetchBatch, "{}");
+const classifyIntentData: string = await executeNode(classifyIntent, "{}");
+
+// ❌ Works but lossy — round-trip mints `fetchBatchData`, not `rawBatch`.
+const rawBatch: string = await executeNode(fetchBatch, "{}");
+```
+
+The name only matters for round-trip stability; the v2 → v1 conversion produces the same `.flow` either way.
+
+#### One action per call site (1-to-1 rule)
+
+**Each `action` declaration must be invoked by exactly one `executeNode` call.** Actions don't behave like functions; each one lowers to a single node in the v1 Flow graph, and Flow nodes can't be reused across distinct call sites (every site holds its own inputs and graph position).
+
+- ✅ One call site, even inside a `for`/`while` loop or in one branch of an `if/else`.
+- ❌ Two `executeNode(sendEmail, …)` calls — even if only one fires at runtime due to branching. Declare separate actions instead, named after what they do at that site:
+
+```typescript
+// ❌ Don't do this — single action shared across three call sites.
+action sendEmail: uipath.connector.uipath-microsoft-outlook365.send-email@1.0.0 { … };
+
+async function main(): Promise<void> {
+  if (isSecurity) {
+    await executeNode(sendEmail, securityInputs);
+  } else {
+    await executeNode(sendEmail, normalInputs);
+  }
+  await executeNode(sendEmail, digestInputs);   // compile error: 3 call sites
+}
+
+// ✅ Do this — one declaration per call site, named for what it does.
+action sendSecurityEmail: uipath.connector.uipath-microsoft-outlook365.send-email@1.0.0 { … };
+action sendNormalEmail:   uipath.connector.uipath-microsoft-outlook365.send-email@1.0.0 { … };
+action sendDigestEmail:   uipath.connector.uipath-microsoft-outlook365.send-email@1.0.0 { … };
+
+async function main(): Promise<void> {
+  if (isSecurity) {
+    await executeNode(sendSecurityEmail, securityInputs);
+  } else {
+    await executeNode(sendNormalEmail, normalInputs);
+  }
+  await executeNode(sendDigestEmail, digestInputs);
+}
+```
+
+Naming hint: prefer operation-shape names that describe what the node does at that site (`incrementSkipped`, `buildJiraSummary`, `sendDigestEmail`) over variable-shape names that describe what the action *is* (`sendEmail`, `counter`, `summary`). The operation-shape name forces you to think about the call site, which is what the v1 graph cares about.
+
+The compiler also rejects actions that are declared but never invoked — they would synthesize an orphan node in the v1 form. Either remove the declaration or wire it into the flow.
 
 ### Control flow
 
@@ -509,7 +565,35 @@ Naming guidance — pick a name that describes the **operation**, not the variab
 | `buildDigestBody`       | `digestBody`                |
 | `extractSecurityFlags`  | `isSecurity`                |
 
-Magic comments on a `const X: T = expr;` declaration also **force materialization** — without them the converter often inlines such declarations as v1 `=js:` aliases (no node emitted). So adding `// description:` to a chain of typed `const` decls guarantees they each become a real, individually-named script node in v1.
+**Use magic comments sparingly — prefer fewer v1 script nodes.** A magic comment on a `const X: T = expr;` declaration **opts that statement out of two converter optimizations**:
+
+1. **Inline as a v1 `=js:` alias** — a simple `const x: T = expr;` whose value is used once or twice is inlined at the use sites (zero v1 nodes).
+2. **Coalesce into one setvar** — contiguous typed `const` declarations are bundled into a **single** v1 script node that returns `{ x, y, z }` — one v1 node instead of N.
+
+Each v1 script node runs in its own sandboxed job at runtime. Sandbox startup is non-trivial, so **fewer scripts = faster, cheaper executions.** Reserve magic comments for operations a human would actually look for in the canvas (a mutation step, a significant compute). For field extractions, JSON parsing, and other intermediate plumbing, **leave the magic comments off** and let the converter do its job.
+
+```typescript
+// ❌ Five separate v1 script nodes — five sandbox starts per loop iteration.
+// script_id: extractTagName
+const tagName: string = release.tag_name;
+// script_id: extractReleaseName
+const releaseName: string = release.name;
+// script_id: extractPublishedAt
+const publishedAt: string = release.published_at;
+// script_id: extractReleaseBody
+const releaseBody: string = release.body;
+// script_id: extractHtmlUrl
+const htmlUrl: string = release.html_url;
+
+// ✅ Coalesces into ONE v1 setvar that returns { tagName, releaseName, … }.
+// Plain comments survive into the combined script body as documentation.
+// Extract release fields.
+const tagName: string = release.tag_name;
+const releaseName: string = release.name;
+const publishedAt: string = release.published_at;
+const releaseBody: string = release.body;
+const htmlUrl: string = release.html_url;
+```
 
 ## Process-resource actions: published and inline Agents
 
@@ -674,12 +758,12 @@ Not yet supported: the 21 connector activities whose `operation.name` is `Downlo
 
 ## Final compatibility check (deploy gate)
 
-After verify.sh is happy, run the v1 converter + validator + tidy to confirm the flow round-trips into the v1 schema cleanly and is openable in the designer:
+After verify.sh is happy, run the v1 converter + validator + format to confirm the flow round-trips into the v1 schema cleanly and is openable in the designer:
 
 ```bash
 ./convert.sh OrderNotify                       # writes OrderNotify.flow
 uip maestro flow validate OrderNotify.flow     # final compatibility check
-uip maestro flow tidy OrderNotify.flow         # auto-layout for the designer view
+uip maestro flow format OrderNotify.flow         # auto-layout for the designer view
 ```
 
 Conversion produces stdout like:

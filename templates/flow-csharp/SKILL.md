@@ -18,7 +18,7 @@ converter.
 1. Scaffold        dotnet new csflow --name <Name>
 2. Author + test   edit Workflow.cs (analyzers gate); dotnet build; dotnet run -- --test
 3. Convert to v1   ./convert-to-v1.sh <Name>     → <Name>.flow + bindings.json
-4. Validate        uip maestro flow validate <Name>.flow && uip maestro flow tidy <Name>.flow
+4. Validate        uip maestro flow validate <Name>.flow && uip maestro flow format <Name>.flow
 ```
 
 The `csflow` template is pre-installed in this environment — go straight to
@@ -152,7 +152,7 @@ debugging conversion errors but not part of the deployable artifact set.
 
 ```bash
 uip maestro flow validate <Name>.flow
-uip maestro flow tidy <Name>.flow
+uip maestro flow format <Name>.flow
 ```
 
 `validate` cross-checks against the v1 schema. `tidy` auto-lays out the nodes

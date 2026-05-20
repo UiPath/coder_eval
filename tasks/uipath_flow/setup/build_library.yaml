@@ -16,9 +16,9 @@ description: >
 tags: [flow-v2, setup, infrastructure]
 
 run_limits:
-  max_turns: 2
-  turn_timeout: 60
-  task_timeout: 1800     # JSON-library build can take 10+ minutes on a cold cache
+  max_turns: 4
+  turn_timeout: 1800     # JSON-library build can take 10+ minutes on a cold cache
+  task_timeout: 1800
 
 agent:
   type: claude-code
@@ -31,20 +31,19 @@ sandbox:
     - type: template_dir
       path: "../../../templates/flow-v2-shared"
 
-pre_run:
-  - command: "bash setup-library.sh"
-    timeout: 1800
-    fail_on_error: true
-
 initial_prompt: |
-  The flow-v2 library cache has already been built by the pre_run step
-  (`setup-library.sh`). Your only job is to confirm the cache exists by
+  Build the shared flow-v2 connector library cache. Run exactly:
+
+      bash setup-library.sh
+
+  The script is idempotent — it is a fast no-op when the cache is
+  already populated, and it can take 10+ minutes to populate from a
+  cold cache. After it returns, confirm the cache is in place by
   running:
 
       bash check-library.sh --both
 
-  Then stop. Do not edit any files. Do not invoke the build script
-  again — it is idempotent but slow.
+  Then stop. Do not edit any files.
 
 success_criteria:
   - type: run_command

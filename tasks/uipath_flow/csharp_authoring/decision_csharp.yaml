@@ -94,7 +94,7 @@ success_criteria:
     pass_threshold: 1.0
   - type: run_command
     description: "tidy succeeds"
-    command: "uip maestro flow tidy EmailClassifier.flow"
+    command: "uip maestro flow format EmailClassifier.flow"
     timeout: 30
     expected_exit_code: 0
     weight: 1.0

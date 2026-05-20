@@ -5,7 +5,8 @@ description: >
 tags: [flow, flow-json, generate, no-cli]
 
 run_limits:
-  max_turns: 30
+  max_turns: 50
+  turn_timeout: 900
 agent:
   type: claude-code
   permission_mode: acceptEdits
@@ -32,6 +33,10 @@ initial_prompt: |
   4. Write a script that multiplies them: $vars.start.output.a * $vars.start.output.b
   5. Save as Calculator/flow_files/Calculator.flow
   6. Run the validation checklist
+
+post_run:
+  - command: 'mkdir -p _outputs && find . -type d \( -name .uipath -o -name .claude -o -name .venv -o -name node_modules -o -name tools -o -name example -o -name _outputs -o -name .git -o -name .flow-run \) -prune -o -type f \( -name "*.flow" -o -name "*.fil" -o -name "bindings*.json" \) -exec sh -c ''f="${1#./}"; mkdir -p "_outputs/$(dirname "$f")" && cp "$1" "_outputs/$f"'' _ {} \; && find _outputs -type f -exec chmod a-w {} +'
+    timeout: 30
 
 success_criteria:
   - type: file_exists

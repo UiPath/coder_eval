@@ -36,6 +36,10 @@ initial_prompt: |
   note what each mock replaces).
   Save as EmailClassifier/flow_files/EmailClassifier.flow with project.uiproj.
 
+post_run:
+  - command: 'mkdir -p _outputs && find . -type d \( -name .uipath -o -name .claude -o -name .venv -o -name node_modules -o -name tools -o -name example -o -name _outputs -o -name .git -o -name .flow-run \) -prune -o -type f \( -name "*.flow" -o -name "*.fil" -o -name "bindings*.json" \) -exec sh -c ''f="${1#./}"; mkdir -p "_outputs/$(dirname "$f")" && cp "$1" "_outputs/$f"'' _ {} \; && find _outputs -type f -exec chmod a-w {} +'
+    timeout: 30
+
 success_criteria:
   - type: json_check
     description: "Flow file is valid JSON with required fields"

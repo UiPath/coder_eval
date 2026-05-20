@@ -149,6 +149,10 @@ sandbox:
       - pylint>=3.0
   template_sources: [ ... ]           # Optional: preset files (see below)
   snapshots: { ... }                  # Optional: snapshot config (see below)
+  ignore_patterns:                    # Optional: overrides for template-copy filtering
+    - "!dist"                         #   `!`-prefix un-ignores a default pattern
+    - "!node_modules"
+    - "*.bak"                         #   bare entry adds an extra pattern
   limits:                             # Optional: resource limits
     timeout: 300                       # Enforced via subprocess timeout
     max_memory_mb: 512                 # NOT enforced (reserved for future use)
@@ -181,7 +185,12 @@ template_sources:
     mount_point: "."                      # Optional: subdir inside sandbox to copy into (default ".")
 ```
 
-The framework automatically ignores `.venv`, `.git`, `__pycache__`, and `node_modules`.
+The framework automatically ignores `.venv`, `.git`, `__pycache__`, `node_modules`, `dist`, `build`, and other common build/cache artifacts (full list: `coder_eval/resources/default_ignore_patterns.yaml`).
+
+Override the defaults via `sandbox.ignore_patterns` (or `agent.ignore_patterns` for judge-style sub-agents). Each entry is either:
+
+- A bare pattern (e.g. `*.bak`) — added on top of the defaults.
+- A `!`-prefixed pattern (gitignore-style negation, e.g. `!dist`) — removes that pattern from the defaults so the directory survives the template copy. Useful for tasks that ship a vendored toolchain under `dist/` or `node_modules/`. Surrounding whitespace is stripped; bare `!` and empty entries raise `ValueError` at YAML load.
 
 `mount_point` controls where inside the sandbox the template contents land. With `mount_point: "."` (default) files are copied to the sandbox root. With `mount_point: "c"` everything from the source directory ends up under `<sandbox>/c/`. The mount point must be a relative path that stays within the sandbox.
 

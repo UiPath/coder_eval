@@ -50,6 +50,10 @@ async function main(): Promise<void> {
 
 `executeNode(<actionRef>, inputJson)` takes an action identifier, not a string. Use `await executeNode(nameToAge, JSON.stringify({ name: "tomasz" }))`, not `executeNode("nameToAge", ...)`.
 
+**Name await-result locals `<nodeId>Data`.** The `const` that captures an await lowers to `$vars.<nodeId>.output` in the v1 form; your local's name is otherwise lost on round-trip. Using `nameToAgeData` (matching v1-to-v2's reconstruction convention) keeps v1 ↔ v2 round-trips deterministic. Example: `const nameToAgeData: string = await executeNode(nameToAge, …);`.
+
+**One action per call site.** Each `action` declaration must be invoked by exactly one `executeNode` call — actions aren't functions, they lower to single v1 nodes that can't be reused across distinct call sites. One call site inside a loop or one branch of an `if/else` is fine; the same identifier appearing at two lexical positions is a compile error. If you need to invoke a published process from two places (e.g., a retry path), declare a second action (e.g., `nameToAgeRetry`) with its own `resourceBindings`. Likewise, declaring an action you never invoke is a compile error — remove it or wire it in. Prefer operation-shape names (`fetchAdult`, `routeToAdult`) over variable-shape names (`process`, `result`) since each name describes one call site.
+
 Parse node outputs as JSON, then coerce fields into concrete types when needed:
 
 ```typescript

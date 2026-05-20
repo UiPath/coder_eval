@@ -40,8 +40,8 @@ action minorRoute: mock {
 };
 
 async function main(): Promise<void> {
-  const raw: string = await executeNode(nameToAge, JSON.stringify({ name: "tomasz" }));
-  const result: json = JSON.parse(raw);
+  const nameToAgeData: string = await executeNode(nameToAge, JSON.stringify({ name: "tomasz" }));
+  const result: json = JSON.parse(nameToAgeData);
   const response: json = result.response;
   const age: i32 = response.age;
   if (age >= 18) {

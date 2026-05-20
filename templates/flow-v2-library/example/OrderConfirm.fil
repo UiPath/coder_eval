@@ -21,11 +21,11 @@ action sendSlackMessage: uipath.connector.uipath-salesforce-slack.send-message-t
 };
 
 async function main(): Promise<void> {
-  const emailsRaw: string = await executeNode(
+  const getEmailsData: string = await executeNode(
     getEmails,
     JSON.stringify({ parentFolderId: "inbox", unReadOnly: true })
   );
-  const emails: json = JSON.parse(emailsRaw);
+  const emails: json = JSON.parse(getEmailsData);
   if (emails.length > 0) {
     const subject: string = (emails[0].subject ?? "(no subject)");
     await executeNode(

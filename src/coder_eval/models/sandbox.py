@@ -6,10 +6,11 @@ import warnings
 from datetime import datetime
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from coder_eval.models.enums import SnapshotMode
 from coder_eval.models.templates import TemplateSource
+from coder_eval.resources import normalize_ignore_pattern_entry
 
 
 class ResourceLimits(BaseModel):
@@ -275,9 +276,20 @@ class SandboxConfig(BaseModel):
     # Customizable ignore patterns
     ignore_patterns: list[str] = Field(
         default_factory=list,
-        description="Additional patterns to ignore during template setup and snapshots (beyond defaults)",
+        description=(
+            "Pattern overrides applied during template setup and snapshots. "
+            "Plain entries add to the defaults; entries prefixed with '!' "
+            "remove a default (gitignore-style negation). Use e.g. ['!dist', "
+            "'!node_modules'] to let vendored JS build outputs survive the "
+            "template copy."
+        ),
         validation_alias=AliasChoices("ignore_patterns", "additional_ignore_patterns"),
     )
+
+    @field_validator("ignore_patterns")
+    @classmethod
+    def _validate_ignore_patterns(cls, values: list[str]) -> list[str]:
+        return [normalize_ignore_pattern_entry(v) for v in values]
 
     @model_validator(mode="after")
     def validate_template_sources(self) -> SandboxConfig:

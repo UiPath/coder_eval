@@ -18,6 +18,9 @@ agent:
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
 
 sandbox:
+  ignore_patterns:
+    - "!dist"          # vendored flow-v2 JS toolchain (tools/*/dist/cli.js)
+    - "!node_modules"  # vendored wabt runtime dep (tools/node_modules/wabt)
   driver: tempdir
   python: {}
   template_sources:
@@ -53,6 +56,10 @@ initial_prompt: |
   - A short snippet showing what the FIL `action` declaration would look
     like with `binding` and `folderBinding` filled in (referencing
     bindings.json entries by symbolic id).
+
+post_run:
+  - command: 'mkdir -p _outputs && find . -type d \( -name .uipath -o -name .claude -o -name .venv -o -name node_modules -o -name tools -o -name example -o -name _outputs -o -name .git -o -name .flow-run \) -prune -o -type f \( -name "*.flow" -o -name "*.fil" -o -name "bindings*.json" \) -exec sh -c ''f="${1#./}"; mkdir -p "_outputs/$(dirname "$f")" && cp "$1" "_outputs/$f"'' _ {} \; && find _outputs -type f -exec chmod a-w {} +'
+    timeout: 30
 
 success_criteria:
   - type: file_exists

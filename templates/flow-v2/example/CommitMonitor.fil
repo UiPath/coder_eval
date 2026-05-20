@@ -4,7 +4,7 @@
 // Patterns demonstrated:
 //   - Action declarations with rawInputs, binding, folderBinding, label
 //   - HTTP node with dynamic URL built via string concat
-//   - JSON.parse(rawResponse) → JSON.parse(response.body) double-parse
+//   - JSON.parse(fetchCommitsData) → JSON.parse(response.body) double-parse
 //   - json field → string via a typed initializer (`const s: string = json.field`)
 //   - String `.toLowerCase()` + `.includes()` for case-insensitive substring
 //   - Decision in an iteration body, with counter increment
@@ -57,8 +57,8 @@ async function main(): Promise<void> {
     const repoStr: string = repo;
     const url: string = ("https://api.github.com/repos/" + repoStr + "/commits?per_page=1");
     const fetchInputs: json = ({ url: url });
-    const rawResponse: string = await executeNode(fetchCommits, JSON.stringify(fetchInputs));
-    const response: json = JSON.parse(rawResponse);
+    const fetchCommitsData: string = await executeNode(fetchCommits, JSON.stringify(fetchInputs));
+    const response: json = JSON.parse(fetchCommitsData);
     // HTTP response shape: { body, headers, statusCode }. body is itself JSON.
     // `response.body` is `json`, so hoist into a typed local before parsing.
     const responseBody: string = response.body;

@@ -467,14 +467,14 @@
                   {
                     "name": "output",
                     "type": "jsonSchema",
-                    "source": "=vars.response",
+                    "source": "=$vars.response",
                     "var": "{nodeId}.output",
                     "custom": true
                   },
                   {
                     "name": "error",
                     "type": "jsonSchema",
-                    "source": "=vars.error",
+                    "source": "=$vars.error",
                     "var": "{nodeId}.error",
                     "custom": true
                   }
@@ -756,7 +756,7 @@
             "source": "_Implicit_PostSubprocessGateway_{nodeId}",
             "type": "bpmn:SequenceFlow",
             "data": {
-              "conditionExpression": "=js:vars.{nodeId}.error || vars.{nodeId}.output?.statusCode >= 400",
+              "conditionExpression": "=js:$vars.{nodeId}.error || $vars.{nodeId}.output?.statusCode >= 400",
               "label": "Error"
             }
           },
