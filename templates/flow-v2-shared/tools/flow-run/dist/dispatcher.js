@@ -12,6 +12,7 @@
 //   rpa-workflow → dry-run fixture only; live RPA Workflow dispatch is not wired yet
 //   summarize → dry-run fixture only; live ECS.DeepRag dispatch is not wired yet
 //   batch-transform → dry-run fixture only; live ECS.BatchTransform dispatch is not wired yet
+//   queue    → dry-run fixture only; live Orchestrator Queue dispatch is not wired yet
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DispatchError = void 0;
 exports.dispatch = dispatch;
@@ -26,6 +27,7 @@ exports.dispatchInlineAgent = dispatchInlineAgent;
 exports.dispatchHitl = dispatchHitl;
 exports.dispatchSummarize = dispatchSummarize;
 exports.dispatchBatchTransform = dispatchBatchTransform;
+exports.dispatchQueue = dispatchQueue;
 exports.dispatchScript = dispatchScript;
 const child_process_1 = require("child_process");
 class DispatchError extends Error {
@@ -51,6 +53,7 @@ async function dispatch(node, inputJson, opts) {
         case 'hitl': return dispatchHitl(node, inputJson, opts);
         case 'summarize': return dispatchSummarize(node, inputJson, opts);
         case 'batch-transform': return dispatchBatchTransform(node, inputJson, opts);
+        case 'queue': return dispatchQueue(node, inputJson, opts);
     }
 }
 // ─── Connector dispatch (existing) ───────────────────────────────────────────
@@ -414,6 +417,17 @@ function dispatchBatchTransform(node, inputJson, opts) {
     }
     throw new DispatchError(`node "${node.nodeId}": live Batch Transform dispatch is not supported by flow-run yet; ` +
         `use --dry-run or run through the Flow/Studio Web debug path for ECS.BatchTransform.`, node.nodeId);
+}
+function dispatchQueue(node, inputJson, opts) {
+    if (opts.verbose || opts.dryRun) {
+        const name = node.queueName || node.resourceKey || node.nodeId;
+        process.stderr.write(`[dispatch] queue "${node.nodeId}" -> ${name}\n`);
+    }
+    if (opts.dryRun) {
+        return { outputJson: renderFixture(node.fixture), raw: '<dry-run-queue>' };
+    }
+    throw new DispatchError(`node "${node.nodeId}": live Queue dispatch is not supported by flow-run yet; ` +
+        `use --dry-run or run through the Flow/Studio Web debug path for ${node.serviceType}.`, node.nodeId);
 }
 function renderFixture(fixture) {
     if (fixture === undefined)

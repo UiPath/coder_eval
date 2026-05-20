@@ -133,7 +133,7 @@ export interface DecisionRecord {
     step: number;
     nodeId: string;
     nodeType: string;
-    /** 'connector' | 'http' | 'mock' | 'script' | 'agent' | 'api-workflow' | 'rpa-workflow' | 'inline-agent' | 'hitl' | 'summarize' | 'batch-transform' | 'timer' */
+    /** 'connector' | 'http' | 'mock' | 'script' | 'agent' | 'api-workflow' | 'rpa-workflow' | 'inline-agent' | 'hitl' | 'summarize' | 'batch-transform' | 'queue' | 'timer' */
     kind: string;
     connectorKey?: string;
     verb?: string;
@@ -296,7 +296,27 @@ export interface ResolvedBatchTransformNode {
     /** Configured dry-run fixture. Undefined -> return {}. */
     fixture?: unknown;
 }
-export type ResolvedNode = ResolvedConnectorNode | ResolvedHttpNode | ResolvedMockNode | ResolvedScriptNode | ResolvedAgentNode | ResolvedApiWorkflowNode | ResolvedRpaWorkflowNode | ResolvedInlineAgentNode | ResolvedHitlNode | ResolvedSummarizeNode | ResolvedBatchTransformNode;
+export interface ResolvedQueueNode {
+    kind: 'queue';
+    nodeId: string;
+    nodeType: string;
+    resource: string;
+    resourceKey?: string;
+    serviceType: string;
+    queueNameBinding: string;
+    folderPathBinding: string;
+    queueName: string;
+    folderPath: string;
+    queue?: unknown;
+    itemData?: unknown;
+    priority?: string;
+    reference?: string;
+    deferDate?: string;
+    dueDate?: string;
+    /** Configured dry-run fixture. Undefined -> return {}. */
+    fixture?: unknown;
+}
+export type ResolvedNode = ResolvedConnectorNode | ResolvedHttpNode | ResolvedMockNode | ResolvedScriptNode | ResolvedAgentNode | ResolvedApiWorkflowNode | ResolvedRpaWorkflowNode | ResolvedInlineAgentNode | ResolvedHitlNode | ResolvedSummarizeNode | ResolvedBatchTransformNode | ResolvedQueueNode;
 export interface PreflightReport {
     nodes: ResolvedNode[];
     warnings: string[];

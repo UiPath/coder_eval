@@ -11,9 +11,9 @@ A v2 flow project is **two files**:
 | File             | Role                                                                                                                              |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `<Name>.fil`     | FIL source — async TypeScript-subset describing the flow's logic, the flow identity, and the nodes (actions + triggers) it uses   |
-| `bindings.json`  | Connection IDs (folder, connector, agent process keys) referenced by the FIL action/trigger declarations                          |
+| `bindings.json`  | Connection IDs plus process/queue resource bindings referenced by the FIL action/trigger declarations                              |
 
-**Primary verifier:** `./verify.sh` parses the FIL, validates every connector binding against your tenant (via `uip is connections list`), validates OOTB non-connector node shape such as Batch Transform, and (in `--live` mode) executes each supported pending node decision. Connector calls go through `uip is resources execute`; Batch Transform is dry-run only until live product dispatch is wired. It records every dispatch in `decisions.json` so you can see what was sent to each node and what came back. Use it as the inner loop while authoring.
+**Primary verifier:** `./verify.sh` parses the FIL, validates every connector binding against your tenant (via `uip is connections list`), validates process/queue resource bindings from `bindings.json`, validates OOTB non-connector node shape such as Queue and Batch Transform, and (in `--live` mode) executes each supported pending node decision. Connector calls go through `uip is resources execute`; Queue and Batch Transform are dry-run only until live product dispatch is wired. It records every dispatch in `decisions.json` so you can see what was sent to each node and what came back. Use it as the inner loop while authoring.
 
 **Final compatibility check (deploy gate):** `./convert.sh <Name>` produces `<Name>.flow` (the v1 form), then `uip maestro flow validate <Name>.flow` cross-checks against the v1 schema. Run this before declaring the flow shippable, but don't depend on it for iteration — `./verify.sh`'s errors are far more actionable than `convert + validate`'s output.
 
@@ -38,7 +38,7 @@ A v2 flow project is **two files**:
 5. **Verify with `./verify.sh`** (the inner authoring loop):
    - `./verify.sh` — parses FIL, resolves bindings, lists what would be dispatched. No connector calls. Surfaces compile errors with file:line:col, missing/stub bindings, unknown node types.
    - Replace stub UUIDs with real connection IDs from `verify.sh`'s "candidates for X:" hints (or from `uip is connections list` directly).
-   - `./verify.sh --live` — runs for real. Each connector call goes through `uip is resources execute`; HTTP nodes via `fetch()`. Do not use `--live` for Batch Transform-bearing flows yet; that live dispatch path fails explicitly. After completion, read `.flow-run/decisions.json` to see exact inputs and outputs per node.
+   - `./verify.sh --live` — runs for real. Each connector call goes through `uip is resources execute`; HTTP nodes via `fetch()`. Do not use `--live` for Queue- or Batch Transform-bearing flows yet; those live dispatch paths fail explicitly. After completion, read `.flow-run/decisions.json` to see exact inputs and outputs per node.
    - Iterate. Compile errors → fix the FIL. Connector failures → adjust the `inputs` you pass via `executeNode(...)` or the action's `rawInputs` (the failure envelope is preserved in `decisions.json`).
 6. **Final compatibility check** (only when the flow is otherwise done):
    - `./convert.sh <Name>` → writes `<Name>.flow`.
@@ -112,12 +112,14 @@ The `{ … }` block on an `action` or `trigger` declaration accepts these fields
 | `label`                | Display name; defaults to the canonical-library label for integration nodes                                                |
 | `binding`              | Symbolic id of a `bindings.json` entry whose `propertyAttribute` is `ConnectionId`. Required for connector nodes.          |
 | `folderBinding`        | Symbolic id of a `bindings.json` entry whose `propertyAttribute` is `FolderKey`. Required for connector nodes.             |
+| `resource`             | Resource metadata for published Agent/API/RPA-style process nodes and Queue nodes                                           |
+| `resourceBindings`     | Maps resource properties such as `name` and `folderPath` to `bindings.json` ids                                             |
 | `rawInputs`            | Static defaults baked into the v1 node's `inputs`. Merged with the `executeNode` call's input at runtime; call wins on key collisions. |
 | `inputs`               | Top-level inputs that aren't in `rawInputs` (rare; mostly for legacy round-trips)                                          |
 | `configuration`        | Distilled `inputs.detail.configuration` payload for integration nodes (per-instance field values)                           |
 | `configurationExtras`  | Catch-all for fields that diverge from canonical-library defaults                                                          |
 | `outputs`              | Override the library's default output schema (the v1 node's output-port → flow-variable bindings — NOT the value the node returns at runtime) |
-| `fixture`              | Dry-run value returned by fixture-aware nodes such as `core.logic.mock` and Batch Transform. Any JSON shape is allowed. |
+| `fixture`              | Dry-run value returned by fixture-aware nodes such as `core.logic.mock`, Queue, and Batch Transform. Any JSON shape is allowed. |
 
 Fields are constant-folded — literals, nested objects/arrays, and untagged template literals survive into the runtime manifest. Identifiers or arithmetic in a body field are dropped (use the runtime path via `executeNode` arguments for computed values).
 
@@ -160,6 +162,72 @@ output is a file handle at `$vars.categorizeRows.output`, not transformed row
 JSON. `./verify.sh` supports Batch Transform in dry-run only and returns the
 configured `fixture`; live `ECS.BatchTransform` dispatch must use the
 Flow/Studio Web debug path.
+
+## OOTB Non-Connector Actions: Queue
+
+Queue create/create-and-wait use `core.action.queue.create@1.0` and
+`core.action.queue.create-and-wait@1.0`. They are OOTB Orchestrator actions,
+not connectors: do not add connector `binding`/`folderBinding`, `ConnectionId`,
+`FolderKey`, or process `resourceSubType` metadata. Use `resource` plus
+`resourceBindings` with `resource: "queue"`.
+
+```typescript
+action enqueueInvoice: core.action.queue.create@1.0 {
+  label: "Enqueue Invoice",
+  resource: {
+    resource: "queue",
+    resourceKey: "queue-key-001",
+    serviceType: "Orchestrator.CreateQueueItem",
+  },
+  resourceBindings: { name: "bQueueName", folderPath: "bQueueFolder" },
+  rawInputs: {
+    queue: { name: "InvoiceProcessingQueue", folderPath: "Shared", key: "queue-key-001" },
+    itemData: { invoiceId: "INV-1001", amount: 123.45, source: "flow-v2-eval" },
+    priority: "High",
+    reference: "INV-1001",
+    deferDate: "",
+    dueDate: "2026-06-01T17:00:00Z",
+  },
+  outputs: {
+    output: { type: "object", source: "=response", var: "output" },
+    error: { type: "object", source: "=Error", var: "error" },
+  },
+  fixture: { Id: "dry-run-queue-item", Status: "New", Reference: "INV-1001" },
+};
+```
+
+`itemData` may be authored as an object in FIL. The converter serializes it to
+the v1 `inputs.itemData` JSON string expected by the Queue node. `bindings.json`
+must include matching queue resource bindings:
+
+```json
+{
+  "schemaVersion": "1",
+  "bindings": [
+    {
+      "id": "bQueueName",
+      "name": "name",
+      "type": "string",
+      "resource": "queue",
+      "resourceKey": "queue-key-001",
+      "default": "InvoiceProcessingQueue",
+      "propertyAttribute": "name"
+    },
+    {
+      "id": "bQueueFolder",
+      "name": "folderPath",
+      "type": "string",
+      "resource": "queue",
+      "resourceKey": "queue-key-001",
+      "default": "Shared",
+      "propertyAttribute": "folderPath"
+    }
+  ]
+}
+```
+
+`./verify.sh` supports Queue nodes in dry-run only and returns the configured
+`fixture`; live Queue dispatch must use the Flow/Studio Web debug path.
 
 ### Types
 
@@ -379,11 +447,12 @@ verify.sh dispatches:
 - **Connector nodes** (CRUD: `Retrieve`/`Create`/`Update`/`Delete`/`Replace`/`List`) via `uip is resources execute`.
 - **HTTP nodes** (`core.action.http`, `core.action.http.v2`) via Node `fetch()`. Output: `{ body, headers, statusCode }`.
 - **Mock nodes** (`core.logic.mock`) — return the action's `fixture` body field, or `{}` if unconfigured. Example: `action fetchUser: mock { fixture: { id: 1, name: "Alice" } };`
+- **Queue nodes** (`core.action.queue.create@1.0`, `core.action.queue.create-and-wait@1.0`) — validate `queue` resource bindings (`name`, `folderPath`) and return the action's `fixture` in dry-run. Live Queue dispatch is intentionally unsupported for now.
 - **Timer decisions** (`executeTimer`) — record the deadline immediately. Pass `--real-time` to actually sleep.
 - **Promise.all** — every entry dispatched concurrently, all must complete; results recorded in entry order.
 - **Promise.any** (race) — entries dispatched concurrently, first to resolve wins.
 
-Not yet supported: the 21 connector activities whose `operation.name` is `Download` or `Upload`. verify.sh aborts on these with a specific message and points you at `convert.sh + uip maestro flow validate` until support lands.
+Not yet supported: the 21 connector activities whose `operation.name` is `Download` or `Upload`, and live Queue dispatch. verify.sh aborts on these with a specific message and points you at `convert.sh + uip maestro flow validate` or the Flow/Studio Web debug path until support lands.
 
 ## Final compatibility check (deploy gate)
 

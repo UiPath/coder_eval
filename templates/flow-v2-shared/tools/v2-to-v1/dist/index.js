@@ -211,9 +211,155 @@ function buildProcessResourceDefinitionsFromManifest(manifest) {
         }
         if (nodeType === 'uipath.pattern.batch-transform') {
             out[node.type] = buildBatchTransformDefinition(version);
+            continue;
+        }
+        const queueSpec = queueDefinitionSpec(nodeType);
+        if (queueSpec) {
+            out[node.type] = buildQueueDefinition(version, queueSpec);
         }
     }
     return out;
+}
+const QUEUE_DEFINITION_SPECS = [
+    {
+        nodeType: 'core.action.queue.create',
+        modelType: 'bpmn:SendTask',
+        serviceType: 'Orchestrator.CreateQueueItem',
+        label: 'Create queue item',
+        outputDescription: 'The created queue item response',
+    },
+    {
+        nodeType: 'core.action.queue.create-and-wait',
+        modelType: 'bpmn:ServiceTask',
+        serviceType: 'Orchestrator.CreateAndWaitForQueueItem',
+        label: 'Create and wait for queue item',
+        outputDescription: 'The processed queue item result',
+    },
+];
+function queueDefinitionSpec(nodeType) {
+    return QUEUE_DEFINITION_SPECS.find((spec) => spec.nodeType === nodeType);
+}
+function buildQueueDefinition(version, spec) {
+    return {
+        nodeType: spec.nodeType,
+        version,
+        category: 'data-operations',
+        tags: ['queue', 'orchestrator', 'create', 'item'],
+        sortOrder: 35,
+        supportsErrorHandling: true,
+        display: {
+            label: spec.label,
+            icon: 'list-plus',
+        },
+        handleConfiguration: [
+            {
+                position: 'left',
+                handles: [
+                    {
+                        id: 'input',
+                        type: 'target',
+                        handleType: 'input',
+                    },
+                ],
+            },
+            {
+                position: 'right',
+                handles: [
+                    {
+                        id: 'success',
+                        type: 'source',
+                        handleType: 'output',
+                    },
+                ],
+            },
+        ],
+        model: {
+            type: spec.modelType,
+            serviceType: spec.serviceType,
+            version: 'v2',
+            bindings: {
+                resource: 'queue',
+                resourceKey: '',
+                values: [
+                    {
+                        name: 'name',
+                        propertyAttribute: 'name',
+                    },
+                    {
+                        name: 'folderPath',
+                        propertyAttribute: 'folderPath',
+                    },
+                ],
+            },
+            context: [
+                {
+                    name: 'name',
+                    type: 'string',
+                    value: '<bindings.name>',
+                },
+                {
+                    name: 'folderPath',
+                    type: 'string',
+                    value: '<bindings.folderPath>',
+                },
+                {
+                    name: '_label',
+                    type: 'string',
+                    value: '',
+                },
+            ],
+        },
+        inputDefinition: {
+            type: 'object',
+            properties: {
+                queue: { type: 'object' },
+                itemData: { type: 'string' },
+                priority: { type: 'string' },
+                reference: { type: 'string' },
+                deferDate: { type: 'string' },
+                dueDate: { type: 'string' },
+            },
+            required: ['queue'],
+        },
+        inputDefaults: {
+            queue: null,
+            itemData: '',
+            priority: 'Normal',
+            reference: '',
+            deferDate: '',
+            dueDate: '',
+        },
+        outputDefinition: {
+            output: {
+                type: 'object',
+                description: spec.outputDescription,
+                source: '=response',
+                var: 'output',
+            },
+            error: {
+                type: 'object',
+                description: 'Error information if the node fails',
+                source: '=Error',
+                var: 'error',
+                schema: defaultErrorSchema(),
+            },
+        },
+    };
+}
+function defaultErrorSchema() {
+    return {
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        required: ['code', 'message', 'detail', 'category', 'status'],
+        properties: {
+            code: { type: 'string', description: 'Error code as a string' },
+            message: { type: 'string', description: 'High-level error message' },
+            detail: { type: 'string', description: 'Detailed error description' },
+            category: { type: 'string', description: 'Error category' },
+            status: { type: 'integer', description: 'HTTP status code' },
+        },
+        additionalProperties: false,
+    };
 }
 const PROCESS_RESOURCE_DEFINITION_SPECS = [
     {

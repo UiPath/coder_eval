@@ -27,6 +27,24 @@
       "resourceKey": "<slack-connection-id from `uip is connections list --output json`>",
       "default": "<slack-connection-id from `uip is connections list --output json`>",
       "propertyAttribute": "ConnectionId"
+    },
+    {
+      "id": "bQueueName",
+      "name": "name",
+      "type": "string",
+      "resource": "queue",
+      "resourceKey": "queue-key-001",
+      "default": "InvoiceProcessingQueue",
+      "propertyAttribute": "name"
+    },
+    {
+      "id": "bQueueFolder",
+      "name": "folderPath",
+      "type": "string",
+      "resource": "queue",
+      "resourceKey": "queue-key-001",
+      "default": "Shared",
+      "propertyAttribute": "folderPath"
     }
   ]
 }

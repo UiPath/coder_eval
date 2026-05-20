@@ -46,7 +46,8 @@ function buildManifest(overrides, library, opts = {}) {
         if (typeof b.resourceKey === 'string')
             uuidToBindingId.set(b.resourceKey.toLowerCase(), b.id);
         if (typeof b.resourceKey === 'string' && typeof b.propertyAttribute === 'string') {
-            resourceBindingIdByKeyAndAttribute.set(resourceBindingKey(b.resourceKey, b.propertyAttribute), b.id);
+            const resource = typeof b.resource === 'string' ? b.resource : '';
+            resourceBindingIdByKeyAndAttribute.set(resourceBindingKey(resource, b.resourceKey, b.propertyAttribute), b.id);
         }
     }
     for (const [nodeId, override] of Object.entries(overrides.nodeOverrides)) {
@@ -91,6 +92,9 @@ function compressNode(nodeId, override, library, referenced, unresolved, uuidToB
     }
     if (isProcessResourceNodeType(type)) {
         compressProcessResourceNode(node, override, type, resourceBindingIdByKeyAndAttribute);
+    }
+    if (isQueueNodeType(type)) {
+        compressQueueNode(node, override, type, resourceBindingIdByKeyAndAttribute);
     }
     // Non-integration nodes (control flow, custom actions, agents, etc.) have
     // no canonical library entry. Preserve their raw inputs blob verbatim and
@@ -150,8 +154,56 @@ function compressProcessResourceNode(node, override, nodeType, resourceBindingId
         node.resource.section = model.section;
     }
     const resourceBindings = {};
-    const nameBinding = findResourceBindingId(resourceKey, 'name', model, resourceBindingIdByKeyAndAttribute);
-    const folderBinding = findResourceBindingId(resourceKey, 'folderPath', model, resourceBindingIdByKeyAndAttribute);
+    const nameBinding = findResourceBindingId('process', resourceKey, 'name', model, resourceBindingIdByKeyAndAttribute);
+    const folderBinding = findResourceBindingId('process', resourceKey, 'folderPath', model, resourceBindingIdByKeyAndAttribute);
+    if (nameBinding)
+        resourceBindings.name = nameBinding;
+    if (folderBinding)
+        resourceBindings.folderPath = folderBinding;
+    if (Object.keys(resourceBindings).length > 0) {
+        node.resourceBindings = resourceBindings;
+    }
+}
+const QUEUE_NODE_SPECS = [
+    {
+        nodeType: 'core.action.queue.create',
+        serviceType: 'Orchestrator.CreateQueueItem',
+    },
+    {
+        nodeType: 'core.action.queue.create-and-wait',
+        serviceType: 'Orchestrator.CreateAndWaitForQueueItem',
+    },
+];
+function queueNodeSpec(nodeType) {
+    return QUEUE_NODE_SPECS.find((spec) => spec.nodeType === nodeType);
+}
+function isQueueNodeType(nodeType) {
+    return queueNodeSpec(nodeType) !== undefined;
+}
+function compressQueueNode(node, override, nodeType, resourceBindingIdByKeyAndAttribute) {
+    const spec = queueNodeSpec(nodeType);
+    if (!spec)
+        return;
+    const model = override.model;
+    const rawInputs = override.inputs;
+    const queueInput = rawInputs?.queue;
+    const queueRecord = queueInput && typeof queueInput === 'object' && !Array.isArray(queueInput)
+        ? queueInput
+        : undefined;
+    const bindingModel = model?.bindings;
+    const resourceKey = typeof bindingModel?.resourceKey === 'string' && bindingModel.resourceKey !== ''
+        ? bindingModel.resourceKey
+        : typeof queueRecord?.key === 'string'
+            ? queueRecord.key
+            : undefined;
+    node.resource = {
+        resource: typeof bindingModel?.resource === 'string' ? bindingModel.resource : 'queue',
+        ...(resourceKey ? { resourceKey } : {}),
+        serviceType: typeof model?.serviceType === 'string' ? model.serviceType : spec.serviceType,
+    };
+    const resourceBindings = {};
+    const nameBinding = findResourceBindingId('queue', resourceKey, 'name', model, resourceBindingIdByKeyAndAttribute);
+    const folderBinding = findResourceBindingId('queue', resourceKey, 'folderPath', model, resourceBindingIdByKeyAndAttribute);
     if (nameBinding)
         resourceBindings.name = nameBinding;
     if (folderBinding)
@@ -190,9 +242,9 @@ function parseProcessResourceKey(nodeType) {
     const spec = processResourceSpec(nodeType);
     return spec ? nodeType.slice(spec.prefix.length) : undefined;
 }
-function findResourceBindingId(resourceKey, propertyAttribute, model, resourceBindingIdByKeyAndAttribute) {
+function findResourceBindingId(resource, resourceKey, propertyAttribute, model, resourceBindingIdByKeyAndAttribute) {
     if (resourceKey) {
-        const fromBinding = resourceBindingIdByKeyAndAttribute.get(resourceBindingKey(resourceKey, propertyAttribute));
+        const fromBinding = resourceBindingIdByKeyAndAttribute.get(resourceBindingKey(resource, resourceKey, propertyAttribute));
         if (fromBinding)
             return fromBinding;
     }
@@ -202,8 +254,8 @@ function findResourceBindingId(resourceKey, propertyAttribute, model, resourceBi
     const match = fromContext?.match(/^=bindings\.(.+)$/);
     return match?.[1];
 }
-function resourceBindingKey(resourceKey, propertyAttribute) {
-    return `${resourceKey}\0${propertyAttribute.toLowerCase()}`;
+function resourceBindingKey(resource, resourceKey, propertyAttribute) {
+    return `${resource.toLowerCase()}\0${resourceKey}\0${propertyAttribute.toLowerCase()}`;
 }
 /**
  * Compress a v1 integration node by stripping fields that are deterministic

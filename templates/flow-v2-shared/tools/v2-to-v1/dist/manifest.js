@@ -69,9 +69,15 @@ function expandNode(nodeId, node, opts, bindingLookup, missing) {
         if (isProcessResourceNodeType(type) && node.resource) {
             override.model = buildProcessResourceModel(type, node, bindingLookup);
         }
+        if (isQueueNodeType(type)) {
+            override.model = buildQueueModel(type, node, bindingLookup);
+        }
         // Non-integration: rawInputs is the v1 inputs blob, captured verbatim.
-        if (node.rawInputs)
-            override.inputs = node.rawInputs;
+        if (node.rawInputs) {
+            override.inputs = isQueueNodeType(type)
+                ? normalizeQueueInputs(node.rawInputs)
+                : node.rawInputs;
+        }
         // `core.logic.mock` nodes carry their fixture under the top-level
         // `fixture` field in v2. v1's shape buries it inside the node's
         // `inputs` (as `inputs.fixture`); restore that shape on the way out.
@@ -247,5 +253,97 @@ function bindingDefault(binding) {
     if (typeof binding.resourceKey === 'string')
         return binding.resourceKey;
     return undefined;
+}
+const QUEUE_NODE_SPECS = [
+    {
+        nodeType: 'core.action.queue.create',
+        modelType: 'bpmn:SendTask',
+        serviceType: 'Orchestrator.CreateQueueItem',
+        label: 'Create queue item',
+    },
+    {
+        nodeType: 'core.action.queue.create-and-wait',
+        modelType: 'bpmn:ServiceTask',
+        serviceType: 'Orchestrator.CreateAndWaitForQueueItem',
+        label: 'Create and wait for queue item',
+    },
+];
+function queueNodeSpec(nodeType) {
+    return QUEUE_NODE_SPECS.find((spec) => spec.nodeType === nodeType);
+}
+function isQueueNodeType(nodeType) {
+    return queueNodeSpec(nodeType) !== undefined;
+}
+function buildQueueModel(nodeType, node, bindingLookup) {
+    const spec = queueNodeSpec(nodeType);
+    const resource = node.resource ?? { resource: 'queue' };
+    const resourceBindings = node.resourceBindings ?? {};
+    const rawInputs = node.rawInputs ?? {};
+    const queueInput = rawInputs.queue && typeof rawInputs.queue === 'object' && !Array.isArray(rawInputs.queue)
+        ? rawInputs.queue
+        : undefined;
+    const resourceKey = typeof resource.resourceKey === 'string'
+        ? resource.resourceKey
+        : typeof queueInput?.key === 'string'
+            ? queueInput.key
+            : undefined;
+    const nameBinding = resourceBindings.name ? bindingLookup.get(resourceBindings.name) : undefined;
+    const folderBinding = resourceBindings.folderPath ? bindingLookup.get(resourceBindings.folderPath) : undefined;
+    const nameDefault = bindingDefault(nameBinding)
+        ?? (typeof queueInput?.name === 'string' ? queueInput.name : undefined)
+        ?? '';
+    const folderPathDefault = bindingDefault(folderBinding)
+        ?? (typeof queueInput?.folderPath === 'string' ? queueInput.folderPath : undefined)
+        ?? '';
+    const label = node.label ?? spec?.label ?? 'Queue';
+    return {
+        type: spec?.modelType ?? 'bpmn:ServiceTask',
+        serviceType: resource.serviceType ?? spec?.serviceType,
+        version: 'v2',
+        debug: { runtime: 'bpmnEngine' },
+        bindings: {
+            resource: resource.resource ?? 'queue',
+            ...(resourceKey ? { resourceKey } : {}),
+            values: [
+                {
+                    name: 'name',
+                    propertyAttribute: 'name',
+                    default: nameDefault,
+                },
+                {
+                    name: 'folderPath',
+                    propertyAttribute: 'folderPath',
+                    default: folderPathDefault,
+                },
+            ],
+        },
+        context: [
+            {
+                name: 'name',
+                type: 'string',
+                value: resourceBindings.name ? `=bindings.${resourceBindings.name}` : '<bindings.name>',
+                default: nameDefault,
+            },
+            {
+                name: 'folderPath',
+                type: 'string',
+                value: resourceBindings.folderPath ? `=bindings.${resourceBindings.folderPath}` : '<bindings.folderPath>',
+                default: folderPathDefault,
+            },
+            {
+                name: '_label',
+                type: 'string',
+                value: label,
+            },
+        ],
+    };
+}
+function normalizeQueueInputs(rawInputs) {
+    const out = { ...rawInputs };
+    const itemData = out.itemData;
+    if (itemData !== undefined && itemData !== null && typeof itemData === 'object') {
+        out.itemData = JSON.stringify(itemData);
+    }
+    return out;
 }
 //# sourceMappingURL=manifest.js.map

@@ -223,6 +223,9 @@ async function main() {
             case 'batch-transform':
                 detail = 'batch-transform';
                 break;
+            case 'queue':
+                detail = `queue ${n.queueName || n.resourceKey || ''}`.trim();
+                break;
         }
         process.stderr.write(`    - ${n.nodeId.padEnd(24)} ${detail}\n`);
     }

@@ -442,6 +442,15 @@ function buildDecisionRecord(step, nodeId, node, inputJson, output, dispatchedAt
             serviceType: node.serviceType,
         };
     }
+    if (node.kind === 'queue') {
+        return {
+            ...base,
+            resourceKey: node.resourceKey,
+            serviceType: node.serviceType,
+            name: node.queueName,
+            folderPath: node.folderPath,
+        };
+    }
     return base;
 }
 function logNodeStart(opts, step, nodeId, node) {
@@ -481,6 +490,9 @@ function logNodeStart(opts, step, nodeId, node) {
             break;
         case 'batch-transform':
             detail = 'batch-transform';
+            break;
+        case 'queue':
+            detail = `queue ${node.queueName || node.resourceKey || ''}`.trim();
             break;
     }
     log(opts, `[step ${step}] -> ${nodeId} (${detail})`);

@@ -67,6 +67,10 @@ const INLINE_AGENT_SERVICE_TYPE = 'Orchestrator.StartInlineAgentJob';
 const HITL_NODE_TYPE = 'uipath.human-in-the-loop';
 const SUMMARIZE_NODE_TYPE = 'uipath.pattern.deep-rag';
 const BATCH_TRANSFORM_NODE_TYPE = 'uipath.pattern.batch-transform';
+const QUEUE_CREATE_NODE_TYPE = 'core.action.queue.create';
+const QUEUE_CREATE_AND_WAIT_NODE_TYPE = 'core.action.queue.create-and-wait';
+const QUEUE_CREATE_SERVICE_TYPE = 'Orchestrator.CreateQueueItem';
+const QUEUE_CREATE_AND_WAIT_SERVICE_TYPE = 'Orchestrator.CreateAndWaitForQueueItem';
 // ─── Project discovery ───────────────────────────────────────────────────────
 function loadProject(projectDir, opts = {}) {
     const filPath = opts.filPath ?? autodiscoverFil(projectDir);
@@ -225,6 +229,13 @@ function resolveAllNodes(project, libraryDir, bindingResolver, out, errors, warn
             const batchTransformNode = resolveBatchTransformNode(nodeId, nodeType, node, errors);
             if (batchTransformNode)
                 out.push(batchTransformNode);
+            continue;
+        }
+        // ── Queue operation nodes ──
+        if (isQueueNodeType(nodeType)) {
+            const queueNode = resolveQueueNode(nodeId, nodeType, node, bindingResolver, errors);
+            if (queueNode)
+                out.push(queueNode);
             continue;
         }
         // ── Skip non-dispatchable types (control flow, triggers, end) ──
@@ -514,6 +525,63 @@ function resolveBatchTransformNode(nodeId, nodeType, node, errors) {
         fixture: pickMockFixture(node),
     };
 }
+function resolveQueueNode(nodeId, nodeType, node, bindingResolver, errors) {
+    const errorStart = errors.length;
+    const inputs = node.rawInputs ?? node.inputs ?? {};
+    const queueInput = inputs.queue && typeof inputs.queue === 'object' && !Array.isArray(inputs.queue)
+        ? inputs.queue
+        : undefined;
+    const resourceKey = node.resource?.resourceKey
+        ?? (typeof queueInput?.key === 'string' ? queueInput.key : undefined);
+    if (!node.resource || node.resource.resource !== 'queue') {
+        errors.push(`node "${nodeId}" (${nodeType}): missing resource.resource="queue"`);
+    }
+    const resourceBindings = node.resourceBindings;
+    if (!resourceBindings) {
+        errors.push(`node "${nodeId}" (${nodeType}): missing "resourceBindings" for Queue node`);
+    }
+    const queueNameBindingId = resourceBindings?.name;
+    const folderPathBindingId = resourceBindings?.folderPath;
+    if (!queueNameBindingId) {
+        errors.push(`node "${nodeId}" (${nodeType}): missing resourceBindings.name`);
+    }
+    if (!folderPathBindingId) {
+        errors.push(`node "${nodeId}" (${nodeType}): missing resourceBindings.folderPath`);
+    }
+    const queueNameBinding = queueNameBindingId
+        ? resolveQueueBinding(nodeId, nodeType, 'name', queueNameBindingId, resourceKey, bindingResolver, errors)
+        : null;
+    const folderPathBinding = folderPathBindingId
+        ? resolveQueueBinding(nodeId, nodeType, 'folderPath', folderPathBindingId, resourceKey, bindingResolver, errors)
+        : null;
+    if (errors.length > errorStart ||
+        !node.resource ||
+        !queueNameBinding ||
+        !folderPathBinding ||
+        !queueNameBindingId ||
+        !folderPathBindingId) {
+        return null;
+    }
+    return {
+        kind: 'queue',
+        nodeId,
+        nodeType,
+        resource: 'queue',
+        resourceKey,
+        serviceType: node.resource.serviceType ?? queueServiceType(nodeType),
+        queueNameBinding: queueNameBindingId,
+        folderPathBinding: folderPathBindingId,
+        queueName: queueNameBinding.value,
+        folderPath: folderPathBinding.value,
+        queue: inputs.queue,
+        itemData: inputs.itemData,
+        priority: optionalString(inputs.priority),
+        reference: optionalString(inputs.reference),
+        deferDate: optionalString(inputs.deferDate),
+        dueDate: optionalString(inputs.dueDate),
+        fixture: pickMockFixture(node),
+    };
+}
 function requireInlineString(nodeId, nodeType, inputs, field, errors) {
     const value = inputs[field];
     if (typeof value !== 'string' || value.trim() === '') {
@@ -551,6 +619,33 @@ function requireOutputColumns(nodeId, nodeType, inputs, errors) {
         }
     }
     return columns.length === value.length ? columns : null;
+}
+function resolveQueueBinding(nodeId, nodeType, propertyAttribute, bindingId, resourceKey, bindingResolver, errors) {
+    const entry = bindingResolver.get(bindingId);
+    if (!entry) {
+        const known = bindingResolver.knownIds();
+        const suggest = known.length > 0 ? ` Known IDs: ${known.map(k => `"${k}"`).join(', ')}.` : '';
+        errors.push(`node "${nodeId}" (${nodeType}): resourceBinding "${bindingId}" is not declared in bindings.json.${suggest}`);
+        return null;
+    }
+    if (entry.resource !== 'queue') {
+        errors.push(`node "${nodeId}" (${nodeType}): binding "${bindingId}" must use resource "queue", got "${entry.resource ?? '<missing>'}"`);
+    }
+    if (entry.propertyAttribute !== propertyAttribute) {
+        errors.push(`node "${nodeId}" (${nodeType}): binding "${bindingId}" expected propertyAttribute "${propertyAttribute}", got "${entry.propertyAttribute ?? '<missing>'}"`);
+    }
+    if (resourceKey && typeof entry.resourceKey === 'string' && entry.resourceKey && entry.resourceKey !== resourceKey) {
+        errors.push(`node "${nodeId}" (${nodeType}): binding "${bindingId}" resourceKey "${entry.resourceKey}" does not match Queue resourceKey "${resourceKey}"`);
+    }
+    const value = bindingDefault(entry);
+    if (isPlaceholderValue(value)) {
+        errors.push(`node "${nodeId}" (${nodeType}): binding "${bindingId}" in bindings.json still has a placeholder value (${value}). ` +
+            `Replace it with the Queue ${propertyAttribute}.`);
+    }
+    if (propertyAttribute === 'name' && value.trim() === '') {
+        errors.push(`node "${nodeId}" (${nodeType}): binding "${bindingId}" must provide a Queue name in default`);
+    }
+    return { entry, value };
 }
 function requireInlineArray(nodeId, nodeType, inputs, field, errors) {
     const value = inputs[field];
@@ -680,6 +775,17 @@ function isApiWorkflowNodeType(nodeType) {
 }
 function isRpaWorkflowNodeType(nodeType) {
     return nodeType.startsWith(RPA_WORKFLOW_NODE_PREFIX);
+}
+function isQueueNodeType(nodeType) {
+    return nodeType === QUEUE_CREATE_NODE_TYPE || nodeType === QUEUE_CREATE_AND_WAIT_NODE_TYPE;
+}
+function queueServiceType(nodeType) {
+    return nodeType === QUEUE_CREATE_NODE_TYPE
+        ? QUEUE_CREATE_SERVICE_TYPE
+        : QUEUE_CREATE_AND_WAIT_SERVICE_TYPE;
+}
+function optionalString(value) {
+    return typeof value === 'string' ? value : undefined;
 }
 function parseProcessResourceKey(nodeType, prefix) {
     if (!nodeType.startsWith(prefix))

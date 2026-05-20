@@ -18,6 +18,7 @@
 #   bindings that don't match a real connection in `uip is connections list`,
 #     plus candidate IDs for that connector key
 #   published Agent resource bindings with missing/wrong process metadata
+#   Queue resource bindings with missing/wrong queue metadata
 #   inline Agent rawInputs.source/prompt/model/variable placeholder issues
 #   Summarize rawInputs.attachment/prompt/returnCitations issues
 #   non-CRUD or unrecognized node types
