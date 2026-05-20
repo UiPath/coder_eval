@@ -192,7 +192,7 @@ def _has_llmgw_credentials(settings: Settings) -> bool:
 def proxy_config_from_settings(settings: Settings, *, task_id: str) -> ProxyConfig:
     """Build a ProxyConfig from Settings fields.
 
-    Centralizes the Settings → ProxyConfig mapping used by both the orchestrator and autogen CLI.
+    Centralizes the Settings → ProxyConfig mapping used by the orchestrator and live proxy tests.
     """
     from coder_eval.proxy.config import ProxyConfig
 

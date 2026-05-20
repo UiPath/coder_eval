@@ -30,7 +30,14 @@ success_criteria:
 
   - type: "llm_judge"
     files: ["poem.txt"]
-    model: "anthropic.claude-haiku-4-5"
+    # No model: override — falls back to DEFAULT_GATEWAY_MODEL (sonnet-4-6).
+    # llm_judge dispatches through the UiPath LLM Gateway (evaluation/llmgw.py),
+    # not BedrockRoute, so the value here is a Gateway model id — NOT a Bedrock
+    # inference-profile id. Do not "fix" by Bedrock-qualifying it (e.g.
+    # eu.anthropic.claude-sonnet-4-6) — that would break the judge.
+    # Tried `anthropic.claude-haiku-4-5` for cost, but the Gateway routing the
+    # judge uses doesn't have a haiku 4.5 entry, so sonnet-4-6 is the working
+    # default.
     max_tokens: 200
     pass_threshold: 0.8
     prompt: |

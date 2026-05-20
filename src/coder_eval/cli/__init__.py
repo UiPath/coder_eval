@@ -2,8 +2,6 @@
 
 import typer
 
-from coder_eval.tools.autogen.cli import autogen_command
-
 from .console import console
 from .evaluate_command import evaluate_command
 from .plan_command import plan_command
@@ -20,14 +18,6 @@ app = typer.Typer(
     add_completion=False,
 )
 
-# Tools sub-app (optional authoring utilities, not part of the core eval loop)
-tools_app = typer.Typer(
-    name="tools",
-    help="Optional authoring and utility tools (task generation, etc.)",
-    add_completion=False,
-)
-app.add_typer(tools_app, name="tools")
-
 
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context) -> None:
@@ -41,7 +31,6 @@ def main(ctx: typer.Context) -> None:
     - evaluate: Run criteria against a directory without an agent
     - report: Display or export evaluation reports
     - proxy: Start a local LLM Gateway proxy for Claude Code CLI
-    - tools: Optional authoring utilities (e.g. tools autogen)
     """
     # If no subcommand was invoked, show help and exit
     if ctx.invoked_subcommand is None:
@@ -57,9 +46,6 @@ app.command(name="report")(report_command)
 app.command(name="proxy")(proxy_command)
 # Hidden internal command invoked inside the Docker container only.
 app.command(name="_run-task-internal", hidden=True)(run_task_internal_command)
-
-# Register tools subcommands
-tools_app.command(name="autogen")(autogen_command)
 
 
 __all__ = ["app"]

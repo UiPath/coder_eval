@@ -88,7 +88,7 @@ coder_eval/
 │   └── task_loader.py             # YAML task loading
 │
 ├── cli/                           # CLI commands (Typer + Rich)
-│   ├── __init__.py                # Typer app setup (core + tools sub-app)
+│   ├── __init__.py                # Typer app setup (core commands)
 │   ├── run_command.py             # `coder-eval run`
 │   ├── plan_command.py            # `coder-eval plan`
 │   ├── report_command.py          # `coder-eval report`
@@ -102,13 +102,6 @@ coder_eval/
 │   ├── config.py                  # ProxyConfig, DEFAULT_MODEL_MAP
 │   ├── pricing.py                 # Token cost calculation
 │   └── server.py                  # aiohttp proxy server (LLMGatewayProxy)
-│
-├── tools/                         # Optional authoring utilities (not part of eval loop)
-│   └── autogen/                   # Task generation from Claude Code plugin skill definitions
-│       ├── config.py              # AutogenConfig (Pydantic model)
-│       ├── generator.py           # LLM-based task + experiment generation
-│       ├── validator.py           # Pydantic validation gate for generated tasks
-│       └── cli.py                 # `coder-eval tools autogen` command
 │
 ├── scoring/                       # Code similarity scoring
 │   ├── ast_similarity.py          # AST-based comparison
@@ -146,7 +139,7 @@ templates/                         # Sandbox template directories
 - **Separation of Concerns**: Data models (`models/`) are pure Pydantic; logic lives in `criteria/`, `evaluation/`, etc.
 - **Callback Streaming**: `StreamCallback` protocol with `TaskScopedCallback` wrapper for real-time LLM event output
 - **Experiment Layer**: Pre-processing config resolver (`ExperimentRunner`) that resolves task × variant combinations via 5-layer merge (default → experiment defaults → task → variant → CLI) before passing to `run_batch`
-- **All core models importable from `coder_eval.models`** regardless of submodule (`AutogenConfig` lives in `coder_eval.tools.autogen.config` — it's not a core model)
+- **All core models importable from `coder_eval.models`** regardless of submodule
 - **Dataset fan-out**: `TaskDefinition.dataset` (inline rows or JSONL path) expands a single task into N row-tasks with `${row.<field>}` substitution in `initial_prompt` and `success_criteria` string fields. Expansion runs in `task_loader.expand_dataset` **before** variant resolution, so variants cannot override the dataset. Row cap: CLI `--sample N` > task-level `dataset.sample`.
 - **Per-criterion aggregation**: Each `BaseCriterion` subclass exposes `aggregate(criterion, per_row_results) -> CriterionAggregate | None`. Default emits `count / mean / median / std / min / max` so every criterion is suite-thresholdable for free. Classification-style criteria return `ClassificationCriterionResult` (subclass of `CriterionResult`) and layer accuracy / P/R/F1 / confusion via the shared `overlay_classification_metrics` utility. `BaseSuccessCriterion.suite_thresholds` gates the suite on those metrics; CLI exits non-zero on any gate failure.
 - **Run-time caps (non-criterion enforcement)**: `TaskDefinition.run_limits` (`RunLimits` model) is the single namespace for all run-time caps — `max_turns` / `task_timeout` / `turn_timeout` (structural) and `max_input_tokens` / `max_output_tokens` / `max_total_tokens` / `max_usd` (cumulative budget). Token/USD breaches abort with `FinalStatus.TOKEN_BUDGET_EXCEEDED` or `COST_BUDGET_EXCEEDED` (both `category == "failed"`). Structural caps accept `--max-turns` / `--task-timeout` / `--turn-timeout` (field-merged into `run_limits`); budget caps are YAML-only. Layered config uses field-merge — a variant block overrides individual keys without replacing the task's block. See `docs/features/2026-05-11-run-limits.md`.

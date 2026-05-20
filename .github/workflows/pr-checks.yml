@@ -172,8 +172,13 @@ jobs:
       UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
       # Job-level dummy key keeps the unit-test step deterministic and isolated
-      # from real-API leakage. The e2e step below overrides at step scope only.
+      # from real-API leakage. The e2e step below overrides to Bedrock at step scope.
       ANTHROPIC_API_KEY: "sk-ant-test-dummy-key-for-ci-tests-only"
+      # Bedrock secrets at job scope so the e2e step can engage BedrockRoute.
+      # See e2e-smoke for rationale on routing smoke through Bedrock.
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
 
     steps:
       - name: Checkout code
@@ -238,8 +243,15 @@ jobs:
 
       - name: Run hello_date smoke task
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}  # step-level override; job-level dummy stays for unit tests
-        run: .venv/Scripts/coder-eval run tasks/hello_date.yaml --model claude-haiku-4-5-20251001 --run-dir runs/win-smoke
+          # Step-level override engages BedrockRoute; job-level dummy
+          # ANTHROPIC_API_KEY stays in scope for the unit-test step above.
+          API_BACKEND: "bedrock"
+        # No --model: under API_BACKEND=bedrock the agent layer would prepend
+        # eu.anthropic./us.anthropic. to a bare alias like
+        # claude-haiku-4-5-20251001 and produce an inference-profile id Bedrock
+        # rejects with 400. Falling back to BEDROCK_MODEL (which is already a
+        # valid Bedrock profile id) is the same pattern live-tests uses.
+        run: .venv/Scripts/coder-eval run tasks/hello_date.yaml --run-dir runs/win-smoke
 
       - name: Verify hello_date result
         shell: bash
@@ -268,7 +280,15 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
 
     env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # Route smoke runs through Bedrock to keep Anthropic-credit spend off the
+      # critical path. ClaudeCodeAgent's BedrockRoute is exercised end-to-end
+      # by the live-tests BedrockRoute step, so the same path is used here.
+      # The DirectRoute path is still tested every PR by live-tests' DirectRoute
+      # step, so smoke coverage of the direct-API code path is not lost.
+      API_BACKEND: "bedrock"
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
       # uv sync resolves named-index credentials from UV_INDEX_<NAME>_{USERNAME,PASSWORD}
       # (the segment after UV_INDEX_ is the pyproject.toml index name uppercased).
       # UV_EXTRA_INDEX_URL is kept in parallel for any uv pip-style invocations.
@@ -333,11 +353,16 @@ jobs:
       - name: Install project dependencies (hash-verified from uv.lock)
         run: uv sync --frozen --extra dev
 
+      # All three smoke steps below omit --model. Under API_BACKEND=bedrock,
+      # the agent layer prepends eu.anthropic./us.anthropic. to a bare alias
+      # like claude-haiku-4-5-20251001 and produces an inference-profile id
+      # that Bedrock rejects with 400 (no such cross-region profile). Falling
+      # back to BEDROCK_MODEL — a valid pre-formatted Bedrock profile id — is
+      # the same pattern live-tests uses (see test_claude_settings_enforcement_live._model_for_env).
       - name: Run smoke-pass bucket (expect all to succeed)
         run: |
           .venv/bin/coder-eval run tasks/*.yaml \
             --tags smoke-pass \
-            --model claude-haiku-4-5-20251001 \
             --run-dir runs/ci-smoke-pass
 
       - name: Run smoke-fail bucket (expect failure detection)
@@ -345,7 +370,6 @@ jobs:
           # Inverted exit semantics: coder-eval exits 1 when a task fails. We *want* that.
           if .venv/bin/coder-eval run tasks/*.yaml \
               --tags smoke-fail \
-              --model claude-haiku-4-5-20251001 \
               --run-dir runs/ci-smoke-fail; then
             echo "FATAL: smoke-fail task succeeded — failure detection appears broken."
             exit 1
@@ -356,7 +380,6 @@ jobs:
           .venv/bin/coder-eval run tasks/*.yaml \
             --tags smoke-variants \
             --experiment experiments/smoke_variants.yaml \
-            --model claude-haiku-4-5-20251001 \
             --run-dir runs/ci-smoke-variants
 
       - name: Verify smoke-pass bucket
@@ -403,7 +426,7 @@ jobs:
         # PR #220 fixed a regression in evaluate-only mode (reference loading).
         # This step re-runs hello_date.yaml's criteria against the artifacts
         # the smoke-pass run already produced — no new agent invocation, so
-        # zero extra Anthropic calls. A regression in the evaluate code path
+        # zero extra LLM calls. A regression in the evaluate code path
         # surfaces as a non-zero exit code from `coder-eval evaluate`.
         run: |
           WORK="runs/ci-smoke-pass/default/hello_date_smoke_test/00/artifacts/hello_date_smoke_test"
@@ -421,70 +444,6 @@ jobs:
             runs/ci-smoke-fail/
             runs/ci-smoke-variants/
             runs/ci-smoke-eval-only/
-          retention-days: 7
-
-  e2e-autogen-smoke:
-    name: E2E Autogen Smoke Tests (Real API)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    # Skip on fork PRs where secrets aren't available
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      # uv sync resolves named-index credentials from UV_INDEX_<NAME>_{USERNAME,PASSWORD}
-      # (the segment after UV_INDEX_ is the pyproject.toml index name uppercased).
-      # UV_EXTRA_INDEX_URL is kept in parallel for any uv pip-style invocations.
-      UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
-      UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
-      UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-
-      - name: Set up Python 3.13
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
-        with:
-          python-version: "3.13"
-
-      - name: Cache dependencies
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
-        with:
-          path: |
-            ~/.cache/uv
-            ~/.cache/pip
-            .venv
-          key: ${{ runner.os }}-py3.13-e2e-${{ hashFiles('pyproject.toml', 'uv.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-py3.13-e2e-
-            ${{ runner.os }}-py3.13-
-
-      - name: Install uv
-        run: |
-          python -m pip install --upgrade pip
-          pip install uv
-
-      - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev
-
-      - name: Run autogen on mock plugin
-        run: .venv/bin/coder-eval tools autogen templates/plugins/mock-greeting-plugin tmp/autogen-out --coverage quick
-
-      - name: Verify output
-        run: |
-          TASKS=$(ls tmp/autogen-out/tasks/*.yaml 2>/dev/null | wc -l)
-          EXPERIMENTS=$(ls tmp/autogen-out/experiments/*.yaml 2>/dev/null | wc -l)
-          echo "Generated: $TASKS task(s), $EXPERIMENTS experiment(s)"
-          test "$TASKS" -gt 0 || { echo "No task YAML files generated"; exit 1; }
-          test "$EXPERIMENTS" -gt 0 || { echo "No experiment YAML files generated"; exit 1; }
-
-      - name: Upload autogen output on failure
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: e2e-autogen-output
-          path: tmp/autogen-out/
           retention-days: 7
 
   live-tests:

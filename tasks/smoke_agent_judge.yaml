@@ -40,12 +40,14 @@ success_criteria:
     # so most runs verdict on turn 1.
     max_turns: 8
     agent:
-      # Haiku is sufficient: the file is pre-attached via `files:` and tools
-      # are disabled, so the judge grades directly from the included content.
-      # With no tool-call phase to compete with the verdict turn, haiku's
-      # structured-output reliability is fine here. Default is sonnet, which
-      # is wildly overkill.
-      model: "claude-haiku-4-5-20251001"
+      # No model: override — falls back to _default_judge_agent_config's
+      # sonnet-4-6, which is the id the main agent already uses successfully
+      # via BEDROCK_MODEL. Previously pinned to haiku-4-5-20251001 for cost,
+      # but Bedrock EU has no cross-region inference profile for haiku 4.5
+      # under the id our qualifier produces (eu.anthropic.claude-haiku-4-5-20251001
+      # returns 400). Sonnet is overkill for this structural-only verdict but
+      # is the cheapest known-good option here.
+      #
       # No tools: the file content is pre-attached, so the judge must grade
       # from the included content rather than fishing with Read/Grep —
       # eliminates the MAX_TURNS_EXHAUSTED flake where the judge burned turns

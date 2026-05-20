@@ -74,12 +74,34 @@ jobs:
           UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
 
       - name: Claude Code Action
+        # Route through AWS Bedrock via the env-var path the Claude CLI honors
+        # (CLAUDE_CODE_USE_BEDROCK + AWS_BEARER_TOKEN_BEDROCK + AWS_REGION).
+        # The action's documented Bedrock path requires GitHub OIDC trust to an
+        # IAM role; this bearer-token route is undocumented for the action but
+        # is the same one the Claude CLI uses directly and is exercised end-to-end
+        # by the live-tests BedrockRoute step. A dummy anthropic_api_key is
+        # passed to `with:` only to satisfy the action's pre-flight validator
+        # (see comment on the key itself).
         uses: anthropics/claude-code-action@1dc994ee7a008f0ecc866d9ac23ef036b7229f84  # v1.0.127
+        env:
+          CLAUDE_CODE_USE_BEDROCK: "1"
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          # FIXME(SDK#24168): Claude Code SDK injects x-anthropic-billing-header
+          # which Bedrock rejects as a reserved keyword (HTTP 400). Drop once SDK fixes this.
+          CLAUDE_CODE_ATTRIBUTION_HEADER: "0"
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Dummy value to satisfy the action's pre-flight validator, which
+          # requires anthropic_api_key OR claude_code_oauth_token even when
+          # CLAUDE_CODE_USE_BEDROCK=1 is set in env. The Claude CLI underneath
+          # checks CLAUDE_CODE_USE_BEDROCK first and routes to Bedrock,
+          # ignoring this key. If the validator ever starts probing the key
+          # rather than just checking presence, this will need to flip to the
+          # OAuth-token rotation pattern used by UiPath/cli.
+          anthropic_api_key: "sk-ant-bedrock-routed-dummy"
           track_progress: true
-          claude_args: "--model claude-opus-4-6"
+          claude_args: "--model us.anthropic.claude-opus-4-6"
           prompt: |
             Review this PR following the guidelines in .github/code_review.md.
 
@@ -90,6 +112,6 @@ jobs:
             5. For each changed file, read the FULL file (not just the diff hunk) so you see surrounding context.
             6. Follow the cross-file consistency checks, "what's missing" analysis, and design-level scrutiny sections from code_review.md. Do not skip these.
 
-            Cross-repo check: the UiPath/skills repo is checked out at ./skills/ and is a primary downstream consumer (226 task YAMLs under skills/tests/tasks/). Decide whether the diff has plausible cross-repo blast radius based on what it changes, not which files it touches — pydantic schema or field changes, validator logic, loader/orchestration code, experiment defaults, success-criterion shapes, agent-config surface, or dependency bumps that affect YAML parsing all qualify regardless of file path. If yes, grep ./skills/tests/tasks/ for usages of the changed surface and flag any skills task YAML that would break. When you need ground truth on a specific suspicious YAML, run `.venv/bin/coder-eval plan ./skills/tests/tasks/<file>` — the same deterministic validator the validate-skills-yamls CI job uses. The validate-skills-yamls CI job catches schema-load failures, but it won't catch semantic drift (e.g. a field renamed AND added back as an alias) — that's your job. If the diff has no plausible consumer impact (docs, dashboard, evalboard, tests for unrelated subsystems, autogen tooling), skip this check.
+            Cross-repo check: the UiPath/skills repo is checked out at ./skills/ and is a primary downstream consumer (226 task YAMLs under skills/tests/tasks/). Decide whether the diff has plausible cross-repo blast radius based on what it changes, not which files it touches — pydantic schema or field changes, validator logic, loader/orchestration code, experiment defaults, success-criterion shapes, agent-config surface, or dependency bumps that affect YAML parsing all qualify regardless of file path. If yes, grep ./skills/tests/tasks/ for usages of the changed surface and flag any skills task YAML that would break. When you need ground truth on a specific suspicious YAML, run `.venv/bin/coder-eval plan ./skills/tests/tasks/<file>` — the same deterministic validator the validate-skills-yamls CI job uses. The validate-skills-yamls CI job catches schema-load failures, but it won't catch semantic drift (e.g. a field renamed AND added back as an alias) — that's your job. If the diff has no plausible consumer impact (docs, dashboard, evalboard, tests for unrelated subsystems), skip this check.
 
             Follow the output format specified in code_review.md. Include the "What's Missing" section even if empty.

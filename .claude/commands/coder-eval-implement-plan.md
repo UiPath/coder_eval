@@ -62,7 +62,7 @@ When implementing, keep these coder_eval conventions in mind:
 - **Criteria**: New criteria use `@register_criterion` decorator in `criteria/` and must be added to the `SuccessCriterion` discriminated union in `models/criteria.py`
 - **Agents**: New agents implement the `Agent` ABC (start, communicate, stop, get_state) and register in `AgentKind` enum + `Orchestrator._create_agent()`
 - **Config merge**: Changes to defaults must consider the 5-layer merge order (default.yaml -> experiment defaults -> task YAML -> variant -> CLI flags)
-- **Ripple effects**: When adding/removing/renaming a model field, config key, or CLI flag, trace every reference — task YAMLs in `tasks/`, experiment YAMLs in `experiments/`, slash command templates in `.claude/commands/`, docs, and autogen templates
+- **Ripple effects**: When adding/removing/renaming a model field, config key, or CLI flag, trace every reference — task YAMLs in `tasks/`, experiment YAMLs in `experiments/`, slash command templates in `.claude/commands/`, and docs
 
 ## Phase Execution Loop
 
@@ -227,7 +227,7 @@ Both the per-phase Opus review (Step 4) and the Full Code Review use these same 
 
 1. **Correctness**: Does the implementation match the plan's intent? Are all edge cases handled?
 2. **Type safety**: Proper annotations, no `Any` escape hatches, Pydantic fields have correct types/defaults/descriptions
-3. **Ripple completeness**: All references updated when a model field/config key/CLI flag is added/removed/renamed (task YAMLs, experiment YAMLs, `.claude/commands/`, docs, autogen templates, `experiments/default.yaml`, `models/__init__.py`)
+3. **Ripple completeness**: All references updated when a model field/config key/CLI flag is added/removed/renamed (task YAMLs, experiment YAMLs, `.claude/commands/`, docs, `experiments/default.yaml`, `models/__init__.py`)
 4. **Test quality**: No hardcoded magic values from config; at least one test for the exact edge case; sandbox cleanup via `try/finally` or fixtures; coverage of happy path, invalid input, error paths, boundary conditions
 5. **Shell safety**: Commands built via f-string use `shlex.quote()` or argument lists
 6. **Allowlist over denylist**: Status classification uses explicit allowlists, not denylists

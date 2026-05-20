@@ -19,7 +19,6 @@ A robust, extensible framework for evaluating AI coding agents with comprehensiv
 - **Parallel Execution** — Run multiple evaluations concurrently with configurable parallelism
 - **Real-Time Streaming** — `--stream` flag for live LLM event output (tool calls, results, text) with full/minimal verbosity modes
 - **Rich CLI** — User-friendly command-line interface with validation, execution, and reporting
-- **Task Autogen** (`coder-eval tools autogen`) — Generate task YAML files from Claude Code plugin skill definitions using an LLM
 - **Standalone Proxy** (`coder-eval proxy`) — Run the LLM Gateway proxy standalone to use `claude` CLI without an Anthropic API key
 
 ## Quick Start
@@ -187,38 +186,6 @@ coder-eval report runs/latest
 # Export to file
 coder-eval report runs/latest -o summary.md
 ```
-
-### `coder-eval tools autogen` — Generate Tasks from Plugin Skills
-
-Generates task YAML files from Claude Code plugin skill definitions. One focused LLM call is made per skill; results are written to `OUTPUT/tasks/` and a with-plugin vs without-plugin experiment is written to `OUTPUT/experiments/`.
-
-```bash
-# Generate tasks for all skills in a plugin (golden coverage: 2-3 tasks/skill)
-coder-eval tools autogen ./my-plugin ./tasks/generated
-
-# Quick coverage (1 task/skill — faster)
-coder-eval tools autogen ./my-plugin ./tasks/generated --coverage quick
-
-# Comprehensive coverage (3-5 tasks/skill)
-coder-eval tools autogen ./my-plugin ./tasks/generated --coverage comprehensive
-
-# Use a different generator model
-coder-eval tools autogen ./my-plugin ./tasks/generated --model claude-opus-4-6
-
-# Overwrite existing task files
-coder-eval tools autogen ./my-plugin ./tasks/generated --overwrite
-```
-
-**Options:**
-
-| Flag             | Description                                                                   |
-| ---------------- | ----------------------------------------------------------------------------- |
-| `--coverage, -c` | `quick` (1/skill), `golden` (2-3/skill, default), `comprehensive` (3-5/skill) |
-| `--model, -m`    | Anthropic model for generation (default: `claude-sonnet-4-6`)                 |
-| `--tags`         | Extra comma-separated tags added to every generated task                      |
-| `--overwrite`    | Overwrite existing task files in the output directory                         |
-
-> **Note:** `coder-eval tools autogen` is an optional authoring utility — it generates _inputs_ to the framework but is not part of the core evaluation loop. It requires `ANTHROPIC_API_KEY` to be set.
 
 ### `coder-eval proxy` — Standalone LLM Gateway Proxy
 
@@ -441,13 +408,11 @@ coder_eval/
 ├── evaluation/      # SuccessChecker + llm_judge / agent_judge runners
 ├── errors/          # Error categorization + retry logic
 ├── orchestration/   # Batch execution + experiment resolution + task loading
-├── cli/             # Typer CLI commands (run, plan, evaluate, report, proxy, tools)
+├── cli/             # Typer CLI commands (run, plan, evaluate, report, proxy)
 ├── scoring/         # Code similarity scorers (AST, token, complexity)
 ├── streaming/       # Real-time event streaming (callbacks, renderers)
 ├── agents/          # Agent implementations (Claude Code)
 ├── proxy/           # LLM Gateway proxy (local Anthropic API → LLMGW)
-├── tools/           # Optional authoring utilities (not part of eval loop)
-│   └── autogen/     #   Task generation from Claude Code plugin skill definitions
 ├── agent.py         # Agent ABC
 ├── sandbox.py       # Sandbox manager
 ├── orchestrator.py  # Main evaluation loop
@@ -572,7 +537,6 @@ See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.
 - [ ] Support for more agents (Aider, Cursor, etc.)
 - [ ] Web UI for results visualization
 - [x] Comparative analysis reports (experiment layer with multi-variant comparison)
-- [x] Task autogen from Claude Code plugin skill definitions (`coder-eval tools autogen`)
 
 ## License
 

@@ -113,6 +113,12 @@ class Settings(BaseSettings):
             missing.append("AWS_BEARER_TOKEN_BEDROCK")
         if not self.aws_region:
             missing.append("AWS_REGION")
+        # BEDROCK_MODEL is the route-level model source. Without it, an
+        # invocation that doesn't override via --model / DEFAULT_AGENT_MODEL /
+        # task.agent.model would send model=None to the SDK and Bedrock would
+        # return an opaque 400. Fail fast at startup with a clear error.
+        if not self.bedrock_model:
+            missing.append("BEDROCK_MODEL")
         if missing:
             raise ValueError(
                 f"Bedrock routing is enabled but missing required settings: {', '.join(missing)}."

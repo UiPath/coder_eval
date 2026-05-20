@@ -216,6 +216,7 @@ def test_config_bedrock_missing_token():
         api_backend=ApiBackend.BEDROCK,
         aws_bearer_token_bedrock=None,
         aws_region="us-east-1",
+        bedrock_model="claude-sonnet-4-6",
     )
 
     with pytest.raises(ValueError, match="AWS_BEARER_TOKEN_BEDROCK"):
@@ -231,9 +232,27 @@ def test_config_bedrock_missing_region():
         api_backend=ApiBackend.BEDROCK,
         aws_bearer_token_bedrock="tok-123",
         aws_region=None,
+        bedrock_model="claude-sonnet-4-6",
     )
 
     with pytest.raises(ValueError, match="AWS_REGION"):
+        settings.validate_api_keys("claude-code")
+
+
+def test_config_bedrock_missing_model():
+    """Bedrock backend + missing model raises ValueError so we fail fast at
+    startup instead of an opaque Bedrock 400 on first invocation."""
+    from coder_eval.config import Settings
+    from coder_eval.models.enums import ApiBackend
+
+    settings = Settings(
+        api_backend=ApiBackend.BEDROCK,
+        aws_bearer_token_bedrock="tok-123",
+        aws_region="us-east-1",
+        bedrock_model=None,
+    )
+
+    with pytest.raises(ValueError, match="BEDROCK_MODEL"):
         settings.validate_api_keys("claude-code")
 
 
@@ -246,6 +265,7 @@ def test_config_bedrock_valid():
         api_backend=ApiBackend.BEDROCK,
         aws_bearer_token_bedrock="tok-123",
         aws_region="us-east-1",
+        bedrock_model="claude-sonnet-4-6",
     )
 
     # Should NOT raise

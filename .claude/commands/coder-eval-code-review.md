@@ -165,7 +165,7 @@ across sessions and provides forensic context if a fix later proves wrong:
 
 1. **Correctness**: Are all edge cases handled? Does logic match intent?
 2. **Type safety**: Proper annotations, no `Any` escape hatches, Pydantic fields have correct types/defaults/descriptions
-3. **Ripple completeness**: All references updated when a model field/config key/CLI flag is added/removed/renamed (task YAMLs, experiment YAMLs, `.claude/commands/`, docs, autogen templates, `experiments/default.yaml`, `models/__init__.py`)
+3. **Ripple completeness**: All references updated when a model field/config key/CLI flag is added/removed/renamed (task YAMLs, experiment YAMLs, `.claude/commands/`, docs, `experiments/default.yaml`, `models/__init__.py`)
 4. **Test quality**: No hardcoded magic values from config; at least one test for the exact edge case; sandbox cleanup via `try/finally` or fixtures; coverage of happy path, invalid input, error paths, boundary conditions
 5. **Shell safety**: Commands built via f-string use `shlex.quote()` or argument lists
 6. **Allowlist over denylist**: Status classification uses explicit allowlists, not denylists
