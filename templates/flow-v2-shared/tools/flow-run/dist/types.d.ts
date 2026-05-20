@@ -133,7 +133,7 @@ export interface DecisionRecord {
     step: number;
     nodeId: string;
     nodeType: string;
-    /** 'connector' | 'http' | 'mock' | 'script' | 'agent' | 'api-workflow' | 'rpa-workflow' | 'inline-agent' | 'hitl' | 'summarize' | 'timer' */
+    /** 'connector' | 'http' | 'mock' | 'script' | 'agent' | 'api-workflow' | 'rpa-workflow' | 'inline-agent' | 'hitl' | 'summarize' | 'batch-transform' | 'timer' */
     kind: string;
     connectorKey?: string;
     verb?: string;
@@ -282,7 +282,21 @@ export interface ResolvedSummarizeNode {
     /** Configured dry-run fixture. Undefined -> return {}. */
     fixture?: unknown;
 }
-export type ResolvedNode = ResolvedConnectorNode | ResolvedHttpNode | ResolvedMockNode | ResolvedScriptNode | ResolvedAgentNode | ResolvedApiWorkflowNode | ResolvedRpaWorkflowNode | ResolvedInlineAgentNode | ResolvedHitlNode | ResolvedSummarizeNode;
+export interface ResolvedBatchTransformNode {
+    kind: 'batch-transform';
+    nodeId: string;
+    nodeType: string;
+    attachment: string;
+    prompt: string;
+    enableWebSearchGrounding: boolean;
+    outputColumns: Array<{
+        name: string;
+        description: string;
+    }>;
+    /** Configured dry-run fixture. Undefined -> return {}. */
+    fixture?: unknown;
+}
+export type ResolvedNode = ResolvedConnectorNode | ResolvedHttpNode | ResolvedMockNode | ResolvedScriptNode | ResolvedAgentNode | ResolvedApiWorkflowNode | ResolvedRpaWorkflowNode | ResolvedInlineAgentNode | ResolvedHitlNode | ResolvedSummarizeNode | ResolvedBatchTransformNode;
 export interface PreflightReport {
     nodes: ResolvedNode[];
     warnings: string[];

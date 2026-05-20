@@ -1,0 +1,253 @@
+task_id: uipath-flow-v2-batch-transform
+description: >
+  Author a two-file Flow v2 FIL project that invokes the OOTB Batch Transform
+  pattern node over a trigger-bound CSV file attachment handle, dry-runs with
+  a file-handle fixture, and converts cleanly to v1.
+tags: [flow-v2, fil, generate, batch-transform, csv, data-operations, non-is-node]
+
+run_limits:
+  max_turns: 70
+  turn_timeout: 1200
+  task_timeout: 1800
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-v2"
+    - type: template_dir
+      path: "../../../templates/flow-v2-shared"
+      include_patterns:
+        - "tools/*/dist"
+        - "tools/*/dist/**"
+
+pre_run:
+  - command: "mkdir -p .flow-v2-library-json && printf '{\"version\":1,\"entries\":[]}\n' > .flow-v2-library-json/index.json && (cd tools && npm ci --omit=dev)"
+    timeout: 120
+
+initial_prompt: |
+  Author a UiPath Flow v2 project named **BatchTransformDemo** in the
+  current directory. Read `SKILL.md` first. Use the current two-file model:
+  `BatchTransformDemo.fil` plus `bindings.json`. Do NOT create a
+  `BatchTransformDemo.manifest.flow` sidecar.
+
+  Task-specific override: Batch Transform is an OOTB pattern action that is
+  intentionally not available from the local Flow node registry in this
+  sandbox yet. Do NOT run `uip tools update`, `uip maestro flow registry
+  pull`, or registry `get/search` commands to discover it. Use the FIL action
+  shape below and the local Flow v2 verifier/converter.
+
+  ## Scenario
+
+  The flow takes one trigger-bound CSV file attachment handle named `csvFile`,
+  invokes the OOTB Batch Transform pattern node over the whole attachment, and
+  returns the transformed CSV file handle as a flow output named `result`.
+
+  ## Required FIL structure
+
+  `BatchTransformDemo.fil` must include:
+
+  - `flow batch-transform-demo { name: "Batch Transform Demo", version: "1.0.0" };`
+  - `trigger manualStart: start;`
+  - `action categorizeRows: uipath.pattern.batch-transform@1.0 { ... };`
+  - `async function main(csvFile: file): Promise<json> { ... }`
+
+  `csvFile: file` is an opaque Flow attachment handle used for v1 roundtrip.
+  FIL/WASM code must not read, stream, dereference, or open it. The Batch
+  Transform action receives the attachment through the trigger-output
+  expression below.
+
+  The `categorizeRows` action body must include:
+
+  ```typescript
+  label: "Categorize Rows",
+  rawInputs: {
+    attachment: "=js:$vars.manualStart.output.csvFile",
+    prompt: "Classify each invoice by category and write a one-line summary.",
+    enableWebSearchGrounding: false,
+    outputColumns: [
+      { name: "Category", description: "One of: Utility, Software, Travel, Other" },
+      { name: "Summary", description: "Plain-English one-line summary of the invoice" },
+    ],
+  },
+  outputs: {
+    output: { type: "file", source: "=response", var: "output" },
+    error: { type: "object", source: "=Error", var: "error" },
+  },
+  fixture: {
+    FullName: "categorized.csv",
+    Id: "dry-run-batch-transform-output",
+    MimeType: "text/csv",
+    Metadata: {},
+  },
+  ```
+
+  Important wire-shape requirements:
+
+  - The node type is `uipath.pattern.batch-transform@1.0`, not `1.0.0`.
+  - Do not add `binding`, `folderBinding`, `resource`, or `resourceBindings`.
+  - Do not create or copy an embedded definition blob.
+  - The attachment input must be the whole trigger output attachment handle:
+    `=js:$vars.manualStart.output.csvFile`.
+  - Do not pass `=js:$vars.csvFile`, a file id, URL, path, `.Id`, or
+    `.FullName`.
+  - `outputColumns` must be the exact array of `{ name, description }`
+    objects above. Do not use a map or string array.
+  - The result is a file handle at `$vars.categorizeRows.output`, not
+    transformed row JSON.
+
+  In `main()`, invoke Batch Transform by action identifier:
+
+  ```typescript
+  const raw: string = await executeNode(categorizeRows, "{}");
+  return ({
+    result: JSON.parse(raw),
+  });
+  ```
+
+  Do not call `executeNode("categorizeRows", ...)` by string literal.
+
+  ## Required bindings.json
+
+  `bindings.json` must be present and may use an empty bindings array:
+
+  ```json
+  {
+    "schemaVersion": "1",
+    "bindings": []
+  }
+  ```
+
+  ## Verifying your work
+
+  The sandbox has a local empty JSON library at `.flow-v2-library-json`
+  because this task uses only the OOTB Batch Transform node, not connector
+  definitions. Use that local library for `verify.sh` and `convert.sh`.
+  Do not run `setup-library.sh`.
+
+  ```bash
+  ./parse-fil.sh BatchTransformDemo.fil
+  FLOW_V2_LIBRARY_JSON="$PWD/.flow-v2-library-json" ./verify.sh
+  FLOW_V2_LIBRARY_JSON="$PWD/.flow-v2-library-json" ./convert.sh BatchTransformDemo
+  uip maestro flow validate BatchTransformDemo.flow
+  uip maestro flow format BatchTransformDemo.flow
+  ```
+
+  Do not run `./verify.sh --live`; live `ECS.BatchTransform` dispatch is
+  intentionally unsupported in Flow v2 for this task.
+
+success_criteria:
+  - type: file_exists
+    description: "FIL source file exists"
+    path: "BatchTransformDemo.fil"
+    weight: 1.0
+
+  - type: file_exists
+    description: "Bindings exist"
+    path: "bindings.json"
+    weight: 1.0
+
+  - type: run_command
+    description: "No manifest sidecar was authored"
+    command: "test ! -e BatchTransformDemo.manifest.flow"
+    timeout: 5
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "FIL parses cleanly"
+    command: "./parse-fil.sh BatchTransformDemo.fil"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "flow-run dry-run passes with the Batch Transform fixture"
+    command: 'FLOW_V2_LIBRARY_JSON="$PWD/.flow-v2-library-json" ./verify.sh'
+    timeout: 90
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "v2 to v1 conversion succeeds"
+    command: 'FLOW_V2_LIBRARY_JSON="$PWD/.flow-v2-library-json" ./convert.sh BatchTransformDemo'
+    timeout: 30
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: file_exists
+    description: "Converted v1 .flow exists"
+    path: "BatchTransformDemo.flow"
+    weight: 1.0
+
+  - type: run_command
+    description: "Converted .flow contains the required Batch Transform shape and validates"
+    command: "python3 $TASK_DIR/../shared/check_batch_transform_flow.py --fil BatchTransformDemo.fil --converted-flow BatchTransformDemo.flow"
+    timeout: 90
+    expected_exit_code: 0
+    weight: 5.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Converted .flow validates"
+    command: "uip maestro flow validate BatchTransformDemo.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "format succeeds"
+    command: "uip maestro flow format BatchTransformDemo.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: llm_judge
+    description: "Flow invokes Batch Transform over a trigger-bound CSV file and returns the result file"
+    prompt: |
+      Did the agent author a two-file v2 Flow that:
+      (a) declares the exact Batch Transform action
+          `categorizeRows: uipath.pattern.batch-transform@1.0` in FIL;
+      (b) takes opaque trigger-bound `csvFile: file` metadata in `main`
+          without trying to read or dereference it in FIL;
+      (c) wires `rawInputs.attachment` to
+          `=js:$vars.manualStart.output.csvFile`;
+      (d) sets the required prompt, `enableWebSearchGrounding: false`, and
+          the exact two `outputColumns` entries;
+      (e) invokes `categorizeRows` by action identifier, not a string;
+      (f) returns the Batch Transform file handle as `result`;
+      (g) converts to a valid v1 `.flow` with no `BatchTransformDemo.manifest.flow`
+          sidecar?
+
+      Important grading notes:
+      - `bindings.json` is the required second file in the Flow v2 two-file
+        model. Do not treat `bindings.json` as a manifest sidecar.
+      - The required `executeNode(categorizeRows, "{}")` call executes the
+        Batch Transform action. Do not treat this as reading, streaming, or
+        dereferencing `csvFile`.
+      - `return ({ result: JSON.parse(raw) })` is the expected way for this
+        task to return the Batch Transform file-handle payload produced by the
+        action fixture/converter.
+
+      Score 1.0 if all seven pieces are present. Subtract 0.12 per missing
+      piece. If the solution uses connector or process-resource bindings for
+      Batch Transform, cap at 0.5. If a manifest sidecar is required, cap at
+      0.4.
+    files:
+      - "BatchTransformDemo.fil"
+      - "bindings.json"
+      - "BatchTransformDemo.flow"
+    weight: 3.0
+    pass_threshold: 0.7

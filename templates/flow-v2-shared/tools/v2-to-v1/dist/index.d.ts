@@ -17,7 +17,7 @@ export { buildDefinitions } from './definitions';
 export { tryEmitV1Expression, Scope as ExpressionScope, EmitOptions as ExpressionEmitOptions, EmitResult as ExpressionEmitResult, } from './expression';
 export { applyFilInputExpressions, ApplyResult as ApplyInputExpressionsResult, } from './apply-input-expressions';
 export { filProgramToManifest } from './fil-to-manifest';
-export { filToFlow, filToFlowWithScope, Scope } from './fil-to-flow';
+export { filToFlow, filToFlowWithScope, Scope, normalizeTypeVersions } from './fil-to-flow';
 export interface ConvertOptions {
     /** Override the canonical library (default: ../integrations/library). */
     library?: Library;

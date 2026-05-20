@@ -30,11 +30,39 @@ export declare function filToFlowWithScope(program: AST.Program, flowId?: string
     flow: FlowFile;
     scope: Scope;
 };
-/** Convert a FIL AST expression to a Flow expression string. */
 interface FlowExprConvertOptions {
+    scope?: Scope;
     nodeVars?: NodeVariable[];
     actionIds?: Map<string, string>;
 }
-export declare function convertFILExprToFlowExpr(expr: AST.Expression, opts?: FlowExprConvertOptions): string;
+/**
+ * Convert a FIL AST expression into a v1 flow expression string (the
+ * subset of JS the v1 Jint evaluator accepts for non-script value
+ * fields: decision conditions, loop collections, end-node output
+ * sources, etc.).
+ *
+ * If `scope` is provided, identifiers are looked up against it and
+ * resolved to the v1 path (`$vars.X`, `$vars.<loopId>.currentItem`,
+ * inline-alias expressions, etc.). Without a scope, bare identifiers
+ * pass through verbatim — the legacy behavior, used only by call
+ * sites that already pre-substitute via the script-body-emitter.
+ */
+export declare function convertFILExprToFlowExpr(expr: AST.Expression, options?: Scope | FlowExprConvertOptions): string;
+/**
+ * Strip the patch component from every `typeVersion` / definition `version`
+ * string. The v2-to-v1 emitter hardcodes `1.0.0` at every node-mint site,
+ * but the Studio Web Flow editor (VS Code extension) flags `1.0.0` and
+ * expects `1.0` instead. Until the version-pinning story is sorted out
+ * upstream, this post-pass normalizes everything we emit to `MAJOR.MINOR`.
+ *
+ * Only touches `typeVersion` on node instances and `version` on
+ * definitions — leaves the flow-level `version` (the user-facing flow
+ * version string) and any other `version` field untouched.
+ *
+ * Called both at the end of `filToFlow` (for direct callers like tests
+ * and cs2fil) and at the end of `convertV2ToV1` after definitions are
+ * rebuilt from the canonical library.
+ */
+export declare function normalizeTypeVersions(flow: FlowFile): void;
 export {};
 //# sourceMappingURL=fil-to-flow.d.ts.map

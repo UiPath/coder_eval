@@ -1,0 +1,201 @@
+task_id: uipath-flow-batch-transform
+description: >
+  Author a Flow v1 (.flow JSON) project that invokes the OOTB Batch Transform
+  pattern node over a trigger-bound CSV file attachment handle and validates
+  with the v1 schema. V1 counterpart to v2_authoring/batch_transform_v2.
+tags: [flow, flow-json, generate, batch-transform, csv, data-operations, non-is-node]
+
+run_limits:
+  max_turns: 80
+  turn_timeout: 1800
+  task_timeout: 2400
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+initial_prompt: |
+  Before starting, load the `uipath-maestro-flow` skill and read its
+  SKILL.md. Author the flow as v1 JSON. Do NOT use Flow v2, FIL, or C#.
+  Do NOT ask for approval, confirmation, or feedback. Build the complete
+  flow end-to-end in a single pass.
+
+  Task-specific override: Batch Transform is intentionally not available from
+  the local Flow node registry in this sandbox yet. Do NOT run `uip tools
+  update`, `uip maestro flow registry pull`, or registry `get/search` commands
+  to discover it. Use the required node shape and definition below as the
+  source of truth, then validate and format the authored `.flow`.
+
+  Create a UiPath Flow project named **BatchTransformDemo**.
+
+  ## Scenario
+
+  The flow takes one trigger-bound CSV file attachment handle named `csvFile`,
+  invokes the OOTB Batch Transform pattern node over the whole attachment, and
+  returns the transformed CSV file handle as a flow output named `result`.
+
+  ## Flow behavior
+
+  1. Start with a manual trigger whose node id is `manualStart`.
+  2. Declare a global input variable `csvFile` with:
+     - `direction: "in"`
+     - `type: "file"`
+     - `triggerNodeId: "manualStart"`
+  3. Run one Batch Transform node with id `categorizeRows` and label
+     `Categorize Rows`.
+  4. The Batch Transform node must use the whole trigger output attachment
+     handle: `=js:$vars.manualStart.output.csvFile`.
+  5. Use this exact prompt:
+     `Classify each invoice by category and write a one-line summary.`
+  6. Set `enableWebSearchGrounding` to boolean `false`.
+  7. Set `outputColumns` exactly to:
+
+     ```json
+     [
+       { "name": "Category", "description": "One of: Utility, Software, Travel, Other" },
+       { "name": "Summary", "description": "Plain-English one-line summary of the invoice" }
+     ]
+     ```
+
+  8. End the flow and map flow output `result` from
+     `=js:$vars.categorizeRows.output`.
+
+  ## Files to write
+
+  Save the flow as:
+
+  - `BatchTransformDemo/project.uiproj`
+  - `BatchTransformDemo/flow_files/BatchTransformDemo.flow`
+
+  ## Required Batch Transform node shape
+
+  The Batch Transform node instance must have:
+
+  - `type: "uipath.pattern.batch-transform"`
+  - `typeVersion: "1.0"`
+  - `id: "categorizeRows"`
+  - no instance-level `model` block
+  - `inputs.attachment: "=js:$vars.manualStart.output.csvFile"`
+  - `inputs.prompt` set to the exact prompt above
+  - `inputs.enableWebSearchGrounding: false`
+  - `inputs.outputColumns` as the exact array-of-objects above
+  - `outputs.output.type: "file"`
+  - `outputs.output.source: "=response"`
+  - `outputs.error.source: "=Error"`
+
+  Use this output block:
+
+  ```json
+  {
+    "output": {
+      "type": "file",
+      "source": "=response",
+      "var": "output"
+    },
+    "error": {
+      "type": "object",
+      "description": "Error information if the node fails",
+      "source": "=Error",
+      "var": "error"
+    }
+  }
+  ```
+
+  Do not pass a file id, URL, path, `.Id`, `.FullName`, or a bare
+  `=js:$vars.csvFile` variable. The attachment input must be the whole trigger
+  output attachment handle: `=js:$vars.manualStart.output.csvFile`.
+
+  ## Required definitions
+
+  Include a matching `definitions[]` entry for every node type used in the
+  flow, including this Batch Transform node, manual trigger, and end node. The
+  Batch Transform definition must include:
+
+  - `nodeType: "uipath.pattern.batch-transform"`
+  - `version: "1.0"`
+  - `category: "data-operations"`
+  - `display.label: "Batch Transform"`
+  - `display.icon: "grid-2x2-plus"`
+  - `model.type: "bpmn:ServiceTask"`
+  - `model.serviceType: "ECS.BatchTransform"`
+  - `inputDefinition.properties.attachment`
+  - `inputDefinition.properties.prompt`
+  - `inputDefinition.properties.enableWebSearchGrounding`
+  - `inputDefinition.properties.outputColumns`
+  - `inputDefaults.enableWebSearchGrounding: false`
+  - `outputDefinition.output.type: "file"`
+  - `outputDefinition.output.source: "=response"`
+
+  ## Verifying your work
+
+  ```bash
+  $HOME/.bun/bin/uip maestro flow validate BatchTransformDemo/flow_files/BatchTransformDemo.flow
+  $HOME/.bun/bin/uip maestro flow format BatchTransformDemo/flow_files/BatchTransformDemo.flow
+  ```
+
+  Iterate until validation succeeds. Do not substitute a mock, connector,
+  Agent, or process-resource node for Batch Transform.
+
+success_criteria:
+  - type: file_exists
+    description: "project.uiproj exists"
+    path: "BatchTransformDemo/project.uiproj"
+    weight: 1.0
+
+  - type: file_exists
+    description: "Flow file exists"
+    path: "BatchTransformDemo/flow_files/BatchTransformDemo.flow"
+    weight: 1.0
+
+  - type: run_command
+    description: "Flow contains the required Batch Transform shape and validates"
+    command: "python3 $TASK_DIR/../shared/check_batch_transform_flow.py --v1-flow BatchTransformDemo/flow_files/BatchTransformDemo.flow"
+    timeout: 90
+    expected_exit_code: 0
+    weight: 5.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "v1 .flow validates"
+    command: "UIPATH_FLOW_CLI=${UIPATH_FLOW_CLI:-$HOME/.bun/bin/uip}; \"$UIPATH_FLOW_CLI\" maestro flow validate BatchTransformDemo/flow_files/BatchTransformDemo.flow"
+    timeout: 90
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "format succeeds"
+    command: "UIPATH_FLOW_CLI=${UIPATH_FLOW_CLI:-$HOME/.bun/bin/uip}; \"$UIPATH_FLOW_CLI\" maestro flow format BatchTransformDemo/flow_files/BatchTransformDemo.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: llm_judge
+    description: "Flow invokes Batch Transform over a trigger-bound CSV file and returns the result file"
+    prompt: |
+      Did the agent author a v1 .flow JSON that:
+      (a) contains exactly one `uipath.pattern.batch-transform` node named
+          `categorizeRows` with `typeVersion: "1.0"`;
+      (b) wires `inputs.attachment` to
+          `=js:$vars.manualStart.output.csvFile`;
+      (c) declares `csvFile` as a trigger-bound file input variable;
+      (d) sets the required prompt, `enableWebSearchGrounding: false`, and
+          the exact two `outputColumns` entries;
+      (e) declares the Batch Transform output as a `file` from `=response`;
+      (f) maps End output `result` to `=js:$vars.categorizeRows.output`;
+      (g) includes definitions needed for v1 validation?
+
+      Score 1.0 if all seven pieces are present and structurally connected.
+      Subtract 0.14 per missing piece. If the Batch Transform node is replaced
+      by a mock, connector, Agent, or process-resource node, cap the score at
+      0.3.
+    files:
+      - "BatchTransformDemo/flow_files/BatchTransformDemo.flow"
+    weight: 3.0
+    pass_threshold: 0.7

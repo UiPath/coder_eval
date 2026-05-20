@@ -11,6 +11,7 @@
 //   api-workflow → dry-run fixture only; live API Workflow dispatch is not wired yet
 //   rpa-workflow → dry-run fixture only; live RPA Workflow dispatch is not wired yet
 //   summarize → dry-run fixture only; live ECS.DeepRag dispatch is not wired yet
+//   batch-transform → dry-run fixture only; live ECS.BatchTransform dispatch is not wired yet
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DispatchError = void 0;
 exports.dispatch = dispatch;
@@ -24,6 +25,7 @@ exports.dispatchRpaWorkflow = dispatchRpaWorkflow;
 exports.dispatchInlineAgent = dispatchInlineAgent;
 exports.dispatchHitl = dispatchHitl;
 exports.dispatchSummarize = dispatchSummarize;
+exports.dispatchBatchTransform = dispatchBatchTransform;
 exports.dispatchScript = dispatchScript;
 const child_process_1 = require("child_process");
 class DispatchError extends Error {
@@ -48,6 +50,7 @@ async function dispatch(node, inputJson, opts) {
         case 'inline-agent': return dispatchInlineAgent(node, inputJson, opts);
         case 'hitl': return dispatchHitl(node, inputJson, opts);
         case 'summarize': return dispatchSummarize(node, inputJson, opts);
+        case 'batch-transform': return dispatchBatchTransform(node, inputJson, opts);
     }
 }
 // ─── Connector dispatch (existing) ───────────────────────────────────────────
@@ -401,6 +404,16 @@ function dispatchSummarize(node, inputJson, opts) {
     }
     throw new DispatchError(`node "${node.nodeId}": live Summarize dispatch is not supported by flow-run yet; ` +
         `use --dry-run or run through the Flow/Studio Web debug path for ECS.DeepRag.`, node.nodeId);
+}
+function dispatchBatchTransform(node, inputJson, opts) {
+    if (opts.verbose || opts.dryRun) {
+        process.stderr.write(`[dispatch] batch-transform "${node.nodeId}"\n`);
+    }
+    if (opts.dryRun) {
+        return { outputJson: renderFixture(node.fixture), raw: '<dry-run-batch-transform>' };
+    }
+    throw new DispatchError(`node "${node.nodeId}": live Batch Transform dispatch is not supported by flow-run yet; ` +
+        `use --dry-run or run through the Flow/Studio Web debug path for ECS.BatchTransform.`, node.nodeId);
 }
 function renderFixture(fixture) {
     if (fixture === undefined)

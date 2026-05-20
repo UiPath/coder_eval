@@ -13,7 +13,7 @@ A v2 flow project is **two files**:
 | `<Name>.fil`     | FIL source — async TypeScript-subset describing the flow's logic, the flow identity, and the nodes (actions + triggers) it uses   |
 | `bindings.json`  | Connection IDs (folder, connector, agent process keys) referenced by the FIL action/trigger declarations                          |
 
-**Primary verifier:** `./verify.sh` parses the FIL, validates connector bindings against your tenant (via `uip is connections list`), validates process-resource bindings from `bindings.json`, validates inline Agent and Summarize `rawInputs` shape, and executes supported node decisions. Connector calls go through `uip is resources execute`; Agent and Summarize nodes are validated and dry-run only until live product dispatch is wired. It records every dispatch in `decisions.json` so you can see what was sent and what came back. Use it as the inner loop while authoring.
+**Primary verifier:** `./verify.sh` parses the FIL, validates connector bindings against your tenant (via `uip is connections list`), validates process-resource bindings from `bindings.json`, validates inline Agent, Summarize, and Batch Transform `rawInputs` shape, and executes supported node decisions. Connector calls go through `uip is resources execute`; Agent, Summarize, and Batch Transform nodes are validated and dry-run only until live product dispatch is wired. It records every dispatch in `decisions.json` so you can see what was sent and what came back. Use it as the inner loop while authoring.
 
 **Final compatibility check (deploy gate):** `./convert.sh <Name>` produces `<Name>.flow` (the v1 form), then `uip maestro flow validate <Name>.flow` cross-checks against the v1 schema. Run this before declaring the flow shippable, but don't depend on it for iteration — `./verify.sh`'s errors are far more actionable than `convert + validate`'s output.
 
@@ -38,7 +38,7 @@ A v2 flow project is **two files**:
 5. **Verify with `./verify.sh`** (the inner authoring loop):
    - `./verify.sh` — parses FIL, resolves bindings, lists what would be dispatched. No connector calls. Surfaces compile errors with file:line:col, missing/stub bindings, unknown node types.
    - Replace stub UUIDs with real connection IDs from `verify.sh`'s "candidates for X:" hints (or from `uip is connections list` directly).
-   - `./verify.sh --live` — runs supported live nodes for real. Each connector call goes through `uip is resources execute`; HTTP nodes via `fetch()`. Do not use `--live` for Agent- or Summarize-bearing flows yet; those live dispatch paths fail explicitly. After completion, read `.flow-run/decisions.json` to see exact inputs and outputs per node.
+   - `./verify.sh --live` — runs supported live nodes for real. Each connector call goes through `uip is resources execute`; HTTP nodes via `fetch()`. Do not use `--live` for Agent-, Summarize-, or Batch Transform-bearing flows yet; those live dispatch paths fail explicitly. After completion, read `.flow-run/decisions.json` to see exact inputs and outputs per node.
    - Iterate. Compile errors → fix the FIL. Connector failures → adjust the `inputs` you pass via `executeNode(...)` or the action's `rawInputs` (the failure envelope is preserved in `decisions.json`).
 6. **Final compatibility check** (only when the flow is otherwise done):
    - `./convert.sh <Name>` → writes `<Name>.flow`.
@@ -119,7 +119,7 @@ The `{ … }` block on an `action` or `trigger` declaration accepts these fields
 | `configuration`        | Distilled `inputs.detail.configuration` payload for integration nodes (per-instance field values)                           |
 | `configurationExtras`  | Catch-all for fields that diverge from canonical-library defaults                                                          |
 | `outputs`              | Override the library's default output schema (the v1 node's output-port → flow-variable bindings — NOT the value the node returns at runtime) |
-| `fixture`              | Dry-run value returned by fixture-aware nodes such as `core.logic.mock`, published Agents, inline Agents, HITL quickform, and Summarize. Any JSON shape is allowed. |
+| `fixture`              | Dry-run value returned by fixture-aware nodes such as `core.logic.mock`, published Agents, inline Agents, HITL quickform, Summarize, and Batch Transform. Any JSON shape is allowed. |
 
 Fields are constant-folded — literals, nested objects/arrays, and untagged template literals survive into the runtime manifest. Identifiers or arithmetic in a body field are dropped (use the runtime path via `executeNode` arguments for computed values).
 
@@ -233,6 +233,69 @@ block, `inputs.attachment` in the trigger-output shape shown above, and
 
 `./verify.sh` supports Summarize in dry-run only and returns the configured
 `fixture`. Live `ECS.DeepRag` dispatch must use the Flow/Studio Web debug path.
+
+## OOTB Non-IS actions: Batch Transform
+
+Batch Transform is an OOTB pattern node, not a connector. It does not use
+`binding`, `folderBinding`, `resource`, or `resourceBindings`. Use the exact
+wire type `uipath.pattern.batch-transform@1.0`; the canvas display name is
+`Batch Transform`.
+
+Batch Transform attachments must be Flow attachment handles wired from a
+trigger-bound `file` input variable. In FIL, `file` is opaque metadata for
+round-tripping to v1; the WASM runtime cannot open or stream it. Do not pass a
+file id, URL, path, `.Id`, `.FullName`, or a bare `=js:$vars.csvFile`
+variable.
+
+```typescript
+flow batch-transform-demo {
+  name: "Batch Transform Demo",
+  version: "1.0.0",
+};
+
+trigger manualStart: start;
+
+action categorizeRows: uipath.pattern.batch-transform@1.0 {
+  label: "Categorize Rows",
+  rawInputs: {
+    attachment: "=js:$vars.manualStart.output.csvFile",
+    prompt: "Classify each invoice by category and write a one-line summary.",
+    enableWebSearchGrounding: false,
+    outputColumns: [
+      { name: "Category", description: "One of: Utility, Software, Travel, Other" },
+      { name: "Summary", description: "Plain-English one-line summary of the invoice" },
+    ],
+  },
+  outputs: {
+    output: { type: "file", source: "=response", var: "output" },
+    error: { type: "object", source: "=Error", var: "error" },
+  },
+  fixture: {
+    FullName: "categorized.csv",
+    Id: "dry-run-batch-transform-output",
+    MimeType: "text/csv",
+    Metadata: {},
+  },
+};
+
+async function main(csvFile: file): Promise<json> {
+  const raw: string = await executeNode(categorizeRows, "{}");
+  return ({
+    result: JSON.parse(raw),
+  });
+}
+```
+
+`outputColumns` must be an array of `{ name, description }` objects, not a map
+or string array. The converted v1 node must have `typeVersion: "1.0"`, no
+instance `model` block, `inputs.attachment` in the trigger-output shape shown
+above, `outputs.output.type: "file"`, and `outputs.output.source: "=response"`.
+The result is a file handle at `$vars.categorizeRows.output`,
+not transformed row JSON.
+
+`./verify.sh` supports Batch Transform in dry-run only and returns the
+configured `fixture`. Live `ECS.BatchTransform` dispatch must use the
+Flow/Studio Web debug path.
 
 ### Types
 

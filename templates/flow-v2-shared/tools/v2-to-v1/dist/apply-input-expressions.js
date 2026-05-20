@@ -75,7 +75,7 @@ function applyFilInputExpressions(flow, program) {
 function seedFromParams(fn) {
     const scope = new Map();
     for (const p of fn.params)
-        scope.set(p.name, `vars.${p.name}`);
+        scope.set(p.name, `$vars.${p.name}`);
     return scope;
 }
 function walkBody(stmts, scope, nodeById, actionIds, result) {
@@ -87,7 +87,7 @@ function walkStmt(stmt, scope, nodeById, actionIds, result) {
         case 'VariableDeclaration': {
             // Every declared local resolves to vars.<name> in v1 (filToFlow
             // makes it a flow global — see Phase B/D).
-            scope.set(stmt.name, `vars.${stmt.name}`);
+            scope.set(stmt.name, `$vars.${stmt.name}`);
             if (stmt.initializer) {
                 tryApplyToCall(stmt.initializer, scope, nodeById, actionIds, result);
             }
@@ -125,7 +125,7 @@ function walkStmt(stmt, scope, nodeById, actionIds, result) {
         case 'ForStatement': {
             const inner = new Map(scope);
             if (stmt.init && stmt.init.kind === 'VariableDeclaration') {
-                inner.set(stmt.init.name, `vars.${stmt.init.name}`);
+                inner.set(stmt.init.name, `$vars.${stmt.init.name}`);
             }
             const body = stmt.body.kind === 'BlockStatement'
                 ? stmt.body.body
@@ -154,7 +154,7 @@ function walkStmt(stmt, scope, nodeById, actionIds, result) {
             if (stmt.handler) {
                 const inner = new Map(scope);
                 if (stmt.handler.param) {
-                    inner.set(stmt.handler.param, `vars.${stmt.handler.param}`);
+                    inner.set(stmt.handler.param, `$vars.${stmt.handler.param}`);
                 }
                 walkBody(stmt.handler.body.body, inner, nodeById, actionIds, result);
             }

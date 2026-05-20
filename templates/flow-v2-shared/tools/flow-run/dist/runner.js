@@ -479,6 +479,9 @@ function logNodeStart(opts, step, nodeId, node) {
         case 'summarize':
             detail = 'summarize';
             break;
+        case 'batch-transform':
+            detail = 'batch-transform';
+            break;
     }
     log(opts, `[step ${step}] -> ${nodeId} (${detail})`);
 }

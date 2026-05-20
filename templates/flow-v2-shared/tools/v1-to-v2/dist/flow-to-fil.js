@@ -1007,9 +1007,10 @@ function flowTypeToFil(flowType) {
     switch (flowType) {
         case 'string': return 'string';
         case 'number': return 'f64';
-        case 'integer': return 'i32';
+        case 'integer': return 'i32'; // legacy; v2-to-v1 now emits `number` for all FIL numeric types
         case 'boolean': return 'bool';
-        case 'object': return 'json';
+        case 'object': return 'json'; // legacy; v2-to-v1 now emits `any` for json
+        case 'any': return 'json';
         case 'file': return 'file';
         case 'array': return { kind: 'array', element: 'json' };
         default: return 'json';
@@ -1214,8 +1215,12 @@ function tryEmitNaturalForm(node, helper, variables) {
         }
         if (!updates || updates.length !== decls.length)
             return null;
+        // Accept either the legacy `=js:result.response.<varName>` form
+        // (each update keyed by its variableId) or the new
+        // `=$vars.<nodeId>.output.<varName>` form v2-to-v1 now emits.
         for (const u of updates) {
-            if (u.expression !== `=js:result.response.${u.variableId}`)
+            if (u.expression !== `=js:result.response.${u.variableId}`
+                && !isVarsOutputRef(u.expression, node.id, u.variableId))
                 return null;
         }
         for (const d of decls) {
@@ -1250,14 +1255,22 @@ function tryEmitNaturalForm(node, helper, variables) {
     // bodyStmts.length === 1 — `return <expr>;`
     const expr = lastStmt.argument;
     // ── Pattern 1: single mutation setvar ─────────────────────────────────
-    if (updates && updates.length === 1 && updates[0].expression === '=js:result.response') {
+    // Accept either the legacy `=js:result.response` shape or any of the
+    // newer `=js:[Wrapper(]$vars.<scriptId>.output[)]` shapes. Both bind
+    // the global to the script's just-returned value. For single-mutation
+    // setvars the v2-to-v1 emission has no per-key suffix (the script
+    // returns one value, not a `{ k: v }` object), so pass `null` as the
+    // output key.
+    if (updates && updates.length === 1 &&
+        (updates[0].expression === '=js:result.response'
+            || isVarsOutputRef(updates[0].expression, node.id, null))) {
         if (nodeVar)
             return null;
         const lhs = updates[0].variableId;
         let stmt;
         if (expr.kind === 'BinaryExpression'
             && (expr.operator === '+' || expr.operator === '-')
-            && expr.left.kind === 'Identifier' && expr.left.name === lhs
+            && isLhsRef(expr.left, lhs)
             && expr.right.kind === 'Literal' && expr.right.value === 1) {
             // `lhs + 1` / `lhs - 1` → `lhs++` / `lhs--`
             stmt = {
@@ -1285,20 +1298,99 @@ function tryEmitNaturalForm(node, helper, variables) {
         return [stmt];
     }
     // ── Pattern 2: single const-init setvar ───────────────────────────────
-    if ((!updates || updates.length === 0) && nodeVar) {
-        const lhs = nodeVar.id;
-        const typeAnn = flowTypeToFil(nodeVar.type);
+    // Two legal shapes:
+    //   (a) Legacy: 0 updates + nodeVar binding {scriptId.output → globalName}
+    //   (b) Canonical (current v2-to-v1 emission): 1 update binding the
+    //       global to `=js:$vars.<scriptId>.output[ wrapped in Number/etc.]`
+    //       + matching global entry, no nodeVar with this name.
+    const pattern2 = (() => {
+        if ((!updates || updates.length === 0) && nodeVar) {
+            return { lhs: nodeVar.id, type: nodeVar.type };
+        }
+        if (updates && updates.length === 1 && !nodeVar) {
+            const u = updates[0];
+            if (!isVarsOutputRef(u.expression, node.id, null))
+                return null;
+            const g = variables?.globals?.find((g) => g.id === u.variableId);
+            if (!g)
+                return null;
+            return { lhs: u.variableId, type: g.type };
+        }
+        return null;
+    })();
+    if (pattern2) {
+        const typeAnn = flowTypeToFil(pattern2.type);
         const stmt = {
             kind: 'VariableDeclaration',
             declarationKind: 'let',
-            name: lhs,
+            name: pattern2.lhs,
             typeAnnotation: typeAnn,
             initializer: expr,
         };
-        attachNonDefaultScriptMeta(stmt, node, lhs);
+        attachNonDefaultScriptMeta(stmt, node, pattern2.lhs);
         return [stmt];
     }
     return null;
+}
+/**
+ * Strip the `$vars.` prefix from single-segment flow-global references in
+ * a v1 script body before we parse it as FIL. v2-to-v1 emits `$vars.X` for
+ * every flow-global reference so the v1 runtime can resolve them; in FIL
+ * those same references must be bare identifiers (`X`).
+ *
+ * The negative lookahead `(?!\s*\.)` skips multi-segment references like
+ * `$vars.<nodeId>.output` — those are node-output reads that need a
+ * different rewrite (handled, if at all, downstream).
+ */
+function preprocessScriptBody(body) {
+    return body.replace(/\$vars\.([A-Za-z_$][A-Za-z0-9_$]*)(?!\s*\.)/g, '$1');
+}
+/**
+ * True when `varExpr` is a v2-to-v1-emitted reference to the script
+ * node's own output. v2-to-v1 has emitted several shapes over time;
+ * the recognizer accepts any of:
+ *
+ *   - `=$vars.<nodeId>.output.<varName>` (interim; no longer emitted)
+ *   - `=js:$vars.<nodeId>.output` (single-mutation, no key)
+ *   - `=js:$vars.<nodeId>.output.<varName>` (coalesced multi-init)
+ *   - `=js:Number($vars.<nodeId>.output[.<varName>])` (with type coercion)
+ *   - `=js:String($vars.<nodeId>.output[.<varName>])`
+ *   - `=js:Boolean($vars.<nodeId>.output[.<varName>])`
+ *
+ * `outputKey` is `null` for single-mutation updates (the script returns
+ * one value) and the per-key name for coalesced multi-init updates.
+ */
+function isVarsOutputRef(varExpr, nodeId, outputKey) {
+    // Legacy interim shape (kept for back-compat with already-emitted .flow files).
+    if (outputKey !== null && varExpr === `=$vars.${nodeId}.output.${outputKey}`)
+        return true;
+    const suffix = outputKey === null ? '' : `.${outputKey}`;
+    const path = `\\$vars\\.${escapeRegex(nodeId)}\\.output${escapeRegex(suffix)}`;
+    const wrapper = `(?:Number|String|Boolean)`;
+    // Either bare `=js:$vars.X.output[.k]` or wrapped `=js:Wrapper($vars…)`.
+    const pattern = new RegExp(`^=js:(?:${wrapper}\\()?${path}\\)?$`);
+    return pattern.test(varExpr);
+}
+function escapeRegex(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+/**
+ * True when `expr` references the flow variable `lhs` — either as a bare
+ * Identifier or as a single-segment `$vars.<lhs>` MemberExpression. The
+ * latter handles cases where preprocessScriptBody didn't run (defensive
+ * fallback only — preprocessing strips $vars from script bodies up front).
+ */
+function isLhsRef(expr, lhs) {
+    if (expr.kind === 'Identifier' && expr.name === lhs)
+        return true;
+    if (expr.kind === 'MemberExpression'
+        && !expr.computed
+        && expr.object.kind === 'Identifier'
+        && expr.object.name === '$vars'
+        && expr.property.kind === 'Identifier'
+        && expr.property.name === lhs)
+        return true;
+    return false;
 }
 /**
  * Parse a script body string as a sync FIL helper function. Returns the
@@ -1306,7 +1398,8 @@ function tryEmitNaturalForm(node, helper, variables) {
  * caller falls back to executeNode emission then.
  */
 function parseScriptHelper(name, body) {
-    const safeBody = body.trim() ? body : 'return null;';
+    const stripped = preprocessScriptBody(body);
+    const safeBody = stripped.trim() ? stripped : 'return null;';
     // Prepend a stub `flow` declaration — the FIL parser requires one at the
     // top of every program, even when we're only interested in extracting one
     // sync helper function out of the result.

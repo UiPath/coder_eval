@@ -50,9 +50,12 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.filToFlow = filToFlow;
 exports.filToFlowWithScope = filToFlowWithScope;
 exports.convertFILExprToFlowExpr = convertFILExprToFlowExpr;
+exports.normalizeTypeVersions = normalizeTypeVersions;
 const AST = __importStar(require("fil-compiler/dist/ast"));
 const v1_to_v2_1 = require("v1-to-v2");
+const script_body_emitter_1 = require("./script-body-emitter");
 const expression_1 = require("./expression");
+const datetime_translator_1 = require("./datetime-translator");
 const KNOWN_SCRIPT_KEYS = new Set(['script_id', 'description', 'label']);
 /**
  * Extract magic-comment metadata from a statement's leadingComments. Returns
@@ -242,6 +245,7 @@ class FilToFlowConverter {
         if (flow.definitions && flow.definitions.length > 0) {
             patchEdgePorts(flow);
         }
+        normalizeTypeVersions(flow);
         return flow;
     }
     convertFunctionToSubflow(fn) {
@@ -271,13 +275,43 @@ class FilToFlowConverter {
                 type: filTypeToFlow(param.type),
                 triggerNodeId: lastNodeId,
             });
-            scope.set(param.name, `vars.${param.name}`);
+            scope.set(param.name, `$vars.${param.name}`);
         }
         // Walk statements
         const walkResult = this.walkStatements(fn.body.body, ctx, lastNodeId, globals, nodeVars, variableUpdates, scope);
         // Capture main's scope for callers that want to use it (Phase A wire-up).
         if (fn.name === 'main') {
             this.mainScope = scope;
+        }
+        // Main's body falling off the end without an explicit `return;` still
+        // needs a terminal v1 `core.control.end` node — the v1 graph isn't
+        // valid otherwise. walkReturnStatement already mints one for an
+        // explicit return; mirror that here for fall-through.
+        //
+        // Skip when:
+        //   - the last node *is* itself an END/TERMINATE, or
+        //   - the last node already has outgoing edges (the body's already
+        //     wired downstream — e.g. walkIfStatement returns the decision
+        //     id when both arms `return;`, so the decision already points
+        //     at the two per-arm end nodes).
+        if (fn.name === 'main') {
+            const lastNode = ctx.nodes.find(n => n.id === walkResult);
+            const lastType = lastNode?.type;
+            const alreadyTerminates = lastType === v1_to_v2_1.NODE_TYPES.END || lastType === v1_to_v2_1.NODE_TYPES.TERMINATE;
+            const hasOutgoingEdges = ctx.edges.some(e => e.sourceNodeId === walkResult);
+            if (lastNode && !alreadyTerminates && !hasOutgoingEdges) {
+                const endId = ctx.generateId('end');
+                const endNode = {
+                    id: endId,
+                    type: v1_to_v2_1.NODE_TYPES.END,
+                    typeVersion: '1.0.0',
+                    ui: { position: { x: ctx.nextX(), y: ctx.currentY() } },
+                    display: { label: 'End', icon: 'circle-check', shape: 'circle' },
+                };
+                this.applyNodeOverride(endNode);
+                ctx.addNode(endNode);
+                ctx.addEdge(walkResult, 'output', endId, 'input');
+            }
         }
         // Check for return type → output variable
         const retType = AST.isPromiseType(fn.returnType)
@@ -288,7 +322,7 @@ class FilToFlowConverter {
         }
         // Collapse contiguous runs of `setvar_X` const-init script nodes into a
         // single script that returns an object, with one variableUpdate per var.
-        coalesceConstScriptChains(ctx, nodeVars, variableUpdates);
+        coalesceConstScriptChains(ctx, nodeVars, variableUpdates, globals);
         const vars = {};
         if (globals.length > 0)
             vars.globals = globals;
@@ -318,7 +352,7 @@ class FilToFlowConverter {
             case 'IfStatement':
                 return this.walkIfStatement(stmt, ctx, prevNodeId, globals, nodeVars, variableUpdates, scope);
             case 'ReturnStatement':
-                return this.walkReturnStatement(stmt, ctx, prevNodeId, globals, nodeVars);
+                return this.walkReturnStatement(stmt, ctx, prevNodeId, globals, nodeVars, scope);
             case 'ForOfStatement':
                 return this.walkForOfStatement(stmt, ctx, prevNodeId, globals, nodeVars, variableUpdates, scope);
             case 'BlockStatement':
@@ -498,29 +532,29 @@ class FilToFlowConverter {
         // Make sure the mutated name resolves in scope. Mutations don't change
         // the v1 path — `vars.<name>` either way.
         if (!scope.has(varName))
-            scope.set(varName, `vars.${varName}`);
+            scope.set(varName, `$vars.${varName}`);
         // Emit the script node. If the source statement carries a magic
         // `// script_id: <name>` comment, honor it; otherwise auto-generate.
         const meta = readScriptMeta(sourceStmt);
         const scriptNodeId = meta?.scriptId
             ? ctx.claimId(meta.scriptId)
             : ctx.generateId(`setvar_${varName}_`);
-        const body = `return ${(0, v1_to_v2_1.emitExpression)(rhs)};`;
+        const body = `return ${(0, script_body_emitter_1.emitScriptBodyExpression)(rhs, scope)};`;
         const node = makeScriptNode(scriptNodeId, body, ctx.nextX(), ctx.currentY());
         applyScriptMeta(node, meta);
         this.applyNodeOverride(node);
         ctx.addNode(node);
         ctx.stmtForNode.set(scriptNodeId, sourceStmt);
         ctx.addEdge(prevNodeId, 'output', scriptNodeId, 'input');
-        // After the script runs, copy its result.response back into the named
-        // variable. The expression is `=js:result.response` — evaluated in the
-        // node-completion context, where `result` is the just-completed script's
-        // output envelope and `result.response` is its return value.
+        // After the script runs, copy its output back into the named variable.
+        // Canonical form: `=js:$vars.<scriptId>.output` (with optional type
+        // coercion when the global is a primitive).
         if (!variableUpdates[scriptNodeId])
             variableUpdates[scriptNodeId] = [];
+        const globalType = globals.find((g) => g.id === varName)?.type;
         variableUpdates[scriptNodeId].push({
             variableId: varName,
-            expression: '=js:result.response',
+            expression: buildVariableUpdateExpr(scriptNodeId, null, globalType),
         });
         return scriptNodeId;
     }
@@ -544,7 +578,7 @@ class FilToFlowConverter {
                     defaultValue: stmt.initializer ? extractLiteralValue(stmt.initializer) : undefined,
                 });
             }
-            scope.set(stmt.name, `vars.${stmt.name}`);
+            scope.set(stmt.name, `$vars.${stmt.name}`);
         }
         if (!stmt.initializer)
             return prevNodeId;
@@ -562,7 +596,7 @@ class FilToFlowConverter {
                     defaultValue: extractLiteralValue(stmt.initializer),
                 });
             }
-            scope.set(stmt.name, `vars.${stmt.name}`);
+            scope.set(stmt.name, `$vars.${stmt.name}`);
             return prevNodeId;
         }
         // Check for: const xData = await executeNode("x", ...);
@@ -574,15 +608,18 @@ class FilToFlowConverter {
             ctx.addNode(node);
             ctx.addEdge(prevNodeId, 'output', nodeName, 'input');
             // Bind the FIL local name (e.g. `userData`) to the node's output
-            // port. This way `vars.userData` resolves to the action's result in
-            // any later expression. Without this, an expression referencing
-            // `userData` would have no v1 binding.
+            // port. v1 exposes every action's output as `$vars.<nodeId>.output`,
+            // so we point the scope directly at that path — *not* at a
+            // `$vars.<localName>` alias, which the v1 evaluator wouldn't
+            // hydrate (no node assigns to that variable). The nodeVar entry
+            // is still registered with the local name so v1-to-v2 can recover
+            // the original identifier on round-trip.
             nodeVars.push({
                 id: stmt.name,
                 type: stmt.typeAnnotation ? filTypeToFlow(stmt.typeAnnotation) : 'object',
                 binding: { nodeId: nodeName, outputId: 'output' },
             });
-            scope.set(stmt.name, `vars.${stmt.name}`);
+            scope.set(stmt.name, `$vars.${nodeName}.output`);
             return nodeName;
         }
         // Check for: const results = await Promise.all([...]) / Promise.any([...])
@@ -598,7 +635,7 @@ class FilToFlowConverter {
                 type: stmt.typeAnnotation ? filTypeToFlow(stmt.typeAnnotation) : 'object',
                 binding: { nodeId: mergeId, outputId: 'output' },
             });
-            scope.set(stmt.name, `vars.${stmt.name}`);
+            scope.set(stmt.name, `$vars.${stmt.name}`);
             return mergeId;
         }
         // const fooData = __script_foo();
@@ -616,7 +653,7 @@ class FilToFlowConverter {
                 type: stmt.typeAnnotation ? filTypeToFlow(stmt.typeAnnotation) : 'object',
                 binding: { nodeId, outputId: 'output' },
             });
-            scope.set(stmt.name, `vars.${stmt.name}`);
+            scope.set(stmt.name, `$vars.${stmt.name}`);
             return nodeId;
         }
         // const fired = await executeTimer(TimeSpan.fromMillis(900000n));
@@ -635,7 +672,7 @@ class FilToFlowConverter {
                 type: stmt.typeAnnotation ? filTypeToFlow(stmt.typeAnnotation) : 'object',
                 binding: { nodeId, outputId: 'output' },
             });
-            scope.set(stmt.name, `vars.${stmt.name}`);
+            scope.set(stmt.name, `$vars.${stmt.name}`);
             return nodeId;
         }
         // Check for subflow call
@@ -651,7 +688,7 @@ class FilToFlowConverter {
                 type: stmt.typeAnnotation ? filTypeToFlow(stmt.typeAnnotation) : 'object',
                 binding: { nodeId: fnName, outputId: 'output' },
             });
-            scope.set(stmt.name, `vars.${stmt.name}`);
+            scope.set(stmt.name, `$vars.${stmt.name}`);
             return fnName;
         }
         // Phase B: `const/let <name> = <expr>` where <expr> is a non-trivial
@@ -704,7 +741,7 @@ class FilToFlowConverter {
             const scriptNodeId = meta?.scriptId
                 ? ctx.claimId(meta.scriptId)
                 : ctx.generateId(`setvar_${stmt.name}_`);
-            const body = `return ${(0, v1_to_v2_1.emitExpression)(stmt.initializer)};`;
+            const body = `return ${(0, script_body_emitter_1.emitScriptBodyExpression)(stmt.initializer, scope)};`;
             const node = makeScriptNode(scriptNodeId, body, ctx.nextX(), ctx.currentY());
             applyScriptMeta(node, meta);
             this.applyNodeOverride(node);
@@ -714,28 +751,37 @@ class FilToFlowConverter {
             // Register the variable: use the explicit type annotation if present,
             // otherwise leave as 'object' (the framework infers from the script
             // output at runtime).
+            const globalType = stmt.typeAnnotation ? filTypeToFlow(stmt.typeAnnotation) : 'object';
             if (!globals.find(g => g.id === stmt.name)) {
                 globals.push({
                     id: stmt.name,
                     direction: 'inout',
-                    type: stmt.typeAnnotation ? filTypeToFlow(stmt.typeAnnotation) : 'object',
+                    type: globalType,
                 });
             }
-            // The variable receives its value from the script's output port.
-            nodeVars.push({
-                id: stmt.name,
-                type: stmt.typeAnnotation ? filTypeToFlow(stmt.typeAnnotation) : 'object',
-                binding: { nodeId: scriptNodeId, outputId: 'output' },
+            // Bind the global to the script's output via a variableUpdate (the
+            // canonical maestro-flow shape; a same-named nodeVar binding would
+            // collide with the global and confuse Studio Web). The expression
+            // uses `=js:$vars.<scriptId>.output` with type coercion when the
+            // global is a primitive.
+            if (!variableUpdates[scriptNodeId])
+                variableUpdates[scriptNodeId] = [];
+            variableUpdates[scriptNodeId].push({
+                variableId: stmt.name,
+                expression: buildVariableUpdateExpr(scriptNodeId, null, globalType),
             });
-            scope.set(stmt.name, `vars.${stmt.name}`);
+            scope.set(stmt.name, `$vars.${stmt.name}`);
             return scriptNodeId;
         }
         return prevNodeId;
     }
     walkIfStatement(stmt, ctx, prevNodeId, globals, nodeVars, variableUpdates, scope) {
-        // Create decision node
+        // Create decision node. Decision/switch conditions are auto-evaluated
+        // as JS by the v1 runtime — they don't take an `=js:` prefix — but
+        // bare global references still need their `$vars.X` path so the
+        // evaluator can resolve them.
         const decisionId = ctx.generateId('decision');
-        const expression = convertFILExprToFlowExpr(stmt.test);
+        const expression = convertFILExprToFlowExpr(stmt.test, scope);
         const decisionNode = {
             id: decisionId,
             type: v1_to_v2_1.NODE_TYPES.DECISION,
@@ -825,7 +871,7 @@ class FilToFlowConverter {
         }
         return mergeId;
     }
-    walkReturnStatement(stmt, ctx, prevNodeId, globals, nodeVars) {
+    walkReturnStatement(stmt, ctx, prevNodeId, globals, nodeVars, scope) {
         if (!stmt.argument) {
             const endId = ctx.generateId('end');
             const endNode = {
@@ -844,9 +890,18 @@ class FilToFlowConverter {
         const endId = ctx.generateId('end');
         const outputs = {};
         if (stmt.argument.kind === 'ObjectExpression') {
-            // Return { a: expr1, b: expr2 } → end node with multiple outputs
+            // Return { a: expr1, b: expr2 } → end node with multiple outputs.
+            // End-node `source` is a value field — needs the `=js:` prefix when
+            // it references `$vars`. Resolving via scope ensures bare globals
+            // get rewritten to their v1 paths before we wrap.
             for (const prop of stmt.argument.properties) {
-                outputs[prop.key] = { source: `=js:${convertFILExprToFlowExpr(prop.value, { nodeVars, actionIds: this.actionIds })}` };
+                outputs[prop.key] = {
+                    source: `=js:${convertFILExprToFlowExpr(prop.value, {
+                        scope,
+                        nodeVars,
+                        actionIds: this.actionIds,
+                    })}`,
+                };
                 // Also register as output variable if not already present
                 if (!globals.find(g => g.id === prop.key && g.direction === 'out')) {
                     // Change existing inout to out, or add new out
@@ -862,7 +917,11 @@ class FilToFlowConverter {
         }
         else {
             // Single return value
-            const source = `=js:${convertFILExprToFlowExpr(stmt.argument, { nodeVars, actionIds: this.actionIds })}`;
+            const source = `=js:${convertFILExprToFlowExpr(stmt.argument, {
+                scope,
+                nodeVars,
+                actionIds: this.actionIds,
+            })}`;
             // Find an existing out variable, or promote an inout, or create one
             let outVar = globals.find(g => g.direction === 'out');
             if (!outVar) {
@@ -905,9 +964,17 @@ class FilToFlowConverter {
         return endId;
     }
     walkForOfStatement(stmt, ctx, prevNodeId, globals, nodeVars, variableUpdates, scope) {
-        // Create the loop node and wire entry.
-        const loopId = ctx.generateId('loop');
-        const collection = convertFILExprToFlowExpr(stmt.iterable);
+        // Honor `// script_id: <id>` on the for-of so the v1 loop has a
+        // stable id that round-trips. Without this, `loop1`/`loop2`/… get
+        // re-minted on every conversion and the v1 graph drifts.
+        const meta = readScriptMeta(stmt);
+        const loopId = meta?.scriptId
+            ? ctx.claimId(meta.scriptId)
+            : ctx.generateId('loop');
+        // `inputs.collection` is a value field — needs the `=js:` prefix when
+        // it references `$vars` (per maestro-flow skill rule #12). Resolve via
+        // scope first so bare globals/loop iterators become their `$vars` paths.
+        const collection = `=js:${convertFILExprToFlowExpr(stmt.iterable, scope)}`;
         const loopNode = {
             id: loopId,
             type: v1_to_v2_1.NODE_TYPES.LOOP,
@@ -920,10 +987,12 @@ class FilToFlowConverter {
         ctx.addNode(loopNode);
         ctx.addEdge(prevNodeId, 'output', loopId, 'input');
         // Walk the body INLINE — body nodes live in the same flow as the rest.
-        // The body inherits the outer scope and adds the iterator variable as
-        // `iterator.<name>` (the v1 namespace for for-of items). The first body
-        // statement adds an edge `loopId.output → firstBody.input` (loop's
-        // body-entry port); the body terminus is wired back as
+        // The body inherits the outer scope and binds the iterator variable to
+        // the v1 loop node's `currentItem` output, since that's the path v1
+        // evaluators actually resolve. (An older convention bound the iterator
+        // to `iterator.<name>`, but the v1 evaluator has no such namespace.)
+        // The first body statement adds an edge `loopId.output → firstBody.input`
+        // (loop's body-entry port); the body terminus is wired back as
         // `terminus.output → loopId.loopBack` (patchEdgePorts fixes the source
         // port if the terminus's node type doesn't accept `output`).
         const bodyStatements = stmt.body.kind === 'BlockStatement'
@@ -932,9 +1001,30 @@ class FilToFlowConverter {
         if (bodyStatements.length === 0)
             return loopId;
         const bodyScope = new Map(scope);
-        bodyScope.set(stmt.item, `iterator.${stmt.item}`);
+        bodyScope.set(stmt.item, `$vars.${loopId}.currentItem`);
+        // Snapshot node-list length so we can identify which nodes the body
+        // walk adds — every one of them needs `parentId: <loopId>` so the v1
+        // runtime knows it's part of the loop (per skill rule: missing
+        // `parentId` causes variableUpdates to not fire per-iteration and
+        // `$vars.<loopId>.currentItem` to be inaccessible).
+        const nodesBefore = ctx.nodes.length;
         const edgesBefore = ctx.edges.length;
         const bodyTerminus = this.walkStatements(bodyStatements, ctx, loopId, globals, nodeVars, variableUpdates, bodyScope);
+        for (let i = nodesBefore; i < ctx.nodes.length; i++) {
+            const n = ctx.nodes[i];
+            // Skip nodes that already carry a parentId (i.e., live inside a
+            // nested loop body whose walk already set theirs).
+            if (n.parentId === undefined)
+                n.parentId = loopId;
+        }
+        // Register the loop's iteration outputs as nodeVars so script bodies
+        // and other expressions can resolve `$vars.<loopId>.currentItem` /
+        // `.currentIndex` / `.output`. Without these entries the v1 evaluator
+        // reports them as undefined.
+        nodeVars.push({ id: `${loopId}.currentItem`, type: 'any',
+            binding: { nodeId: loopId, outputId: 'currentItem' } }, { id: `${loopId}.currentIndex`, type: 'number',
+            binding: { nodeId: loopId, outputId: 'currentIndex' } }, { id: `${loopId}.output`, type: 'array',
+            binding: { nodeId: loopId, outputId: 'output' } });
         // Find the body-entry node (target of the first new edge from loopId).
         const bodyEntryEdge = ctx.edges.slice(edgesBefore).find(e => e.sourceNodeId === loopId && e.sourcePort === 'output');
         if (bodyEntryEdge) {
@@ -1197,13 +1287,40 @@ function extractLiteralValue(expr) {
         return expr.value;
     return undefined;
 }
-function convertFILExprToFlowExpr(expr, opts = {}) {
+function normalizeFlowExprConvertOptions(input) {
+    if (!input)
+        return {};
+    if (input instanceof Map)
+        return { scope: input };
+    return input;
+}
+/**
+ * Convert a FIL AST expression into a v1 flow expression string (the
+ * subset of JS the v1 Jint evaluator accepts for non-script value
+ * fields: decision conditions, loop collections, end-node output
+ * sources, etc.).
+ *
+ * If `scope` is provided, identifiers are looked up against it and
+ * resolved to the v1 path (`$vars.X`, `$vars.<loopId>.currentItem`,
+ * inline-alias expressions, etc.). Without a scope, bare identifiers
+ * pass through verbatim — the legacy behavior, used only by call
+ * sites that already pre-substitute via the script-body-emitter.
+ */
+function convertFILExprToFlowExpr(expr, options) {
+    const opts = normalizeFlowExprConvertOptions(options);
     const nodeOutput = tryConvertNodeOutputExpression(expr, opts.nodeVars, opts.actionIds);
     if (nodeOutput)
         return nodeOutput;
+    const { scope } = opts;
     switch (expr.kind) {
-        case 'Identifier':
+        case 'Identifier': {
+            if (scope) {
+                const resolved = scope.get(expr.name);
+                if (resolved !== undefined)
+                    return resolved;
+            }
             return expr.name;
+        }
         case 'Literal':
             return expr.raw;
         case 'BinaryExpression':
@@ -1215,9 +1332,17 @@ function convertFILExprToFlowExpr(expr, opts = {}) {
             if (expr.computed) {
                 return `${obj}[${convertFILExprToFlowExpr(expr.property, opts)}]`;
             }
-            return `${obj}.${convertFILExprToFlowExpr(expr.property, opts)}`;
+            // Static property names pass through verbatim — they're keys, not
+            // scope-resolvable identifiers (`obj.field`, not `obj.<resolved>`).
+            const propName = expr.property.kind === 'Identifier' ? expr.property.name : convertFILExprToFlowExpr(expr.property, opts);
+            return `${obj}.${propName}`;
         }
         case 'CallExpression': {
+            // FIL DateTime/TimeSpan calls have no v1 equivalent — translate
+            // to JS Date arithmetic. See datetime-translator.ts.
+            const dt = (0, datetime_translator_1.tryTranslateDateTimeCall)(expr, (e) => convertFILExprToFlowExpr(e, opts));
+            if (dt !== null)
+                return dt;
             const callee = convertFILExprToFlowExpr(expr.callee, opts);
             const args = expr.arguments.map((arg) => convertFILExprToFlowExpr(arg, opts)).join(', ');
             return `${callee}(${args})`;
@@ -1233,7 +1358,20 @@ function convertFILExprToFlowExpr(expr, opts = {}) {
         case 'TypeAssertion':
             return convertFILExprToFlowExpr(expr.expression, opts);
         case 'ObjectExpression': {
-            const props = expr.properties.map(p => p.shorthand ? p.key : `${p.key}: ${convertFILExprToFlowExpr(p.value, opts)}`).join(', ');
+            const props = expr.properties.map(p => {
+                if (p.shorthand) {
+                    // `{ foo }` → `{ foo: <resolved> }` when scope has a path for
+                    // foo. Otherwise leave shorthand.
+                    if (scope) {
+                        const resolved = scope.get(p.key);
+                        if (resolved !== undefined && resolved !== p.key) {
+                            return `${p.key}: ${resolved}`;
+                        }
+                    }
+                    return p.key;
+                }
+                return `${p.key}: ${convertFILExprToFlowExpr(p.value, opts)}`;
+            }).join(', ');
             return `{ ${props} }`;
         }
         case 'ArrayExpression':
@@ -1587,7 +1725,7 @@ function applyScriptMeta(node, meta) {
  * survive. Downstream consumers continue to read `vars.X` via the new flow
  * global written by the per-var `variableUpdate`.
  */
-function coalesceConstScriptChains(ctx, nodeVars, variableUpdates) {
+function coalesceConstScriptChains(ctx, nodeVars, variableUpdates, globals) {
     const nodeById = new Map();
     for (const node of ctx.nodes)
         nodeById.set(node.id, node);
@@ -1601,7 +1739,18 @@ function coalesceConstScriptChains(ctx, nodeVars, variableUpdates) {
             inEdges.set(edge.targetNodeId, []);
         inEdges.get(edge.targetNodeId).push(edge);
     }
-    /** Returns `{ var, expr }` if `nodeId` is a combinable const-init script. */
+    /**
+     * Returns `{ var, expr }` if `nodeId` is a combinable const-init script.
+     *
+     * A const-init setvar is identified by:
+     *   - The source FIL statement being a `VariableDeclaration` (the
+     *     mutation path emits an `ExpressionStatement` instead).
+     *   - Exactly one variableUpdate binding a single global to the
+     *     canonical `=js:$vars.<scriptId>.output` form (so we know the
+     *     post-coalesce sub-key extraction will work).
+     *   - No magic-comment opt-out (a named script_id/label/description
+     *     means "treat this node as a singleton").
+     */
     const inspect = (nodeId) => {
         const node = nodeById.get(nodeId);
         if (!node)
@@ -1610,15 +1759,16 @@ function coalesceConstScriptChains(ctx, nodeVars, variableUpdates) {
             return null;
         if (!node.id.startsWith('setvar_'))
             return null;
-        if (variableUpdates[node.id]?.length)
+        const sourceStmt = ctx.stmtForNode.get(node.id);
+        if (!sourceStmt || sourceStmt.kind !== 'VariableDeclaration')
             return null;
-        const nv = nodeVars.find((n) => n.binding?.nodeId === node.id);
-        if (!nv)
+        const ups = variableUpdates[node.id];
+        if (!ups || ups.length !== 1)
             return null;
         // Magic-comment opt-out: a `// script_id: …` / `// description: …` /
         // `// label: …` on the source statement means "treat this node as a
         // singleton" — don't absorb it into a coalesced multi-assignment block.
-        if (hasAnyMagic(ctx.stmtForNode.get(node.id)))
+        if (hasAnyMagic(sourceStmt))
             return null;
         const body = node.inputs?.script;
         if (typeof body !== 'string')
@@ -1626,7 +1776,7 @@ function coalesceConstScriptChains(ctx, nodeVars, variableUpdates) {
         const m = /^return ([\s\S]+);$/.exec(body.trim());
         if (!m)
             return null;
-        return { varName: nv.id, expr: m[1] };
+        return { varName: ups[0].variableId, expr: m[1] };
     };
     const processed = new Set();
     const nodesToRemove = new Set();
@@ -1681,23 +1831,39 @@ function coalesceConstScriptChains(ctx, nodeVars, variableUpdates) {
             lines.push(`const ${c.varName} = ${c.expr};`);
         }
         lines.push(`return { ${chain.map((c) => c.varName).join(', ')} };`);
-        headNode.inputs.script = lines.join('\n');
-        // Drop per-var nodeVars bindings; the combined script's `output` port now
-        // holds the whole object. Replace with variableUpdates that pick out each
-        // sub-key.
+        let body = lines.join('\n');
+        // Each individual setvar's expression was emitted scope-aware, so
+        // references to chain-internal vars (e.g. `batch` in `batch.items`)
+        // arrived as `$vars.batch`. That's wrong inside the bundled script
+        // — `batch` is a JS local declared on a previous line. Rewrite
+        // `$vars.<local>` back to bare `<local>` for every chain var.
+        for (const c of chain) {
+            const pattern = new RegExp(`\\$vars\\.${escapeRegex(c.varName)}\\b`, 'g');
+            body = body.replace(pattern, c.varName);
+        }
+        headNode.inputs.script = body;
+        // Drop per-var nodeVars bindings; the combined script's `output` port
+        // now holds the whole object. Drop the per-chain-item variableUpdates
+        // too — each chain item had a `{ var: =js:$vars.<itemId>.output }`
+        // update bound to a node that's about to disappear. Replace with one
+        // combined updates list on the head, keyed off the combined output's
+        // sub-keys, with type coercion per global.
         for (const c of chain) {
             const idx = nodeVars.findIndex((n) => n.binding?.nodeId === c.id);
             if (idx >= 0)
                 nodeVars.splice(idx, 1);
+            delete variableUpdates[c.id];
         }
-        const updates = variableUpdates[chain[0].id] ?? [];
+        const headNodeId = chain[0].id;
+        const updates = [];
         for (const c of chain) {
+            const globalType = globals.find((g) => g.id === c.varName)?.type;
             updates.push({
                 variableId: c.varName,
-                expression: `=js:result.response.${c.varName}`,
+                expression: buildVariableUpdateExpr(headNodeId, c.varName, globalType),
             });
         }
-        variableUpdates[chain[0].id] = updates;
+        variableUpdates[headNodeId] = updates;
         // Remove internal chain edges (head→chain[1], chain[1]→chain[2], …) and
         // redirect the tail's outgoing edges (if any) to come from the head.
         for (let i = 0; i < chain.length - 1; i++) {
@@ -1719,6 +1885,43 @@ function coalesceConstScriptChains(ctx, nodeVars, variableUpdates) {
     }
     if (edgesToRemove.size > 0) {
         ctx.edges = ctx.edges.filter((e) => !edgesToRemove.has(e.id));
+    }
+}
+function escapeRegex(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+/**
+ * Strip the patch component from every `typeVersion` / definition `version`
+ * string. The v2-to-v1 emitter hardcodes `1.0.0` at every node-mint site,
+ * but the Studio Web Flow editor (VS Code extension) flags `1.0.0` and
+ * expects `1.0` instead. Until the version-pinning story is sorted out
+ * upstream, this post-pass normalizes everything we emit to `MAJOR.MINOR`.
+ *
+ * Only touches `typeVersion` on node instances and `version` on
+ * definitions — leaves the flow-level `version` (the user-facing flow
+ * version string) and any other `version` field untouched.
+ *
+ * Called both at the end of `filToFlow` (for direct callers like tests
+ * and cs2fil) and at the end of `convertV2ToV1` after definitions are
+ * rebuilt from the canonical library.
+ */
+function normalizeTypeVersions(flow) {
+    const stripPatch = (v) => {
+        if (typeof v !== 'string')
+            return v;
+        const m = v.match(/^(\d+\.\d+)\.\d+$/);
+        return m ? m[1] : v;
+    };
+    for (const n of flow.nodes ?? []) {
+        n.typeVersion = stripPatch(n.typeVersion);
+    }
+    for (const d of flow.definitions ?? []) {
+        d.version = stripPatch(d.version);
+    }
+    for (const sub of Object.values(flow.subflows ?? {})) {
+        for (const n of sub.nodes ?? []) {
+            n.typeVersion = stripPatch(n.typeVersion);
+        }
     }
 }
 /** Inverse of parseIso8601DurationMs in flow-to-fil. Emits PT<seconds>S. */
@@ -1746,25 +1949,73 @@ function msToIso8601Duration(ms) {
         out += `${Number.isInteger(seconds) ? seconds : seconds}S`;
     return out;
 }
+/**
+ * Build a v1 `variableUpdate.expression` for a script's output.
+ *
+ * Canonical form per the maestro-flow skill: `=js:$vars.<scriptId>.output`
+ * (with optional `.<key>` for multi-init coalesced scripts). The `=js:`
+ * prefix is required on every `$vars` reference in a value field.
+ *
+ * If the target global has a primitive type, wrap the `$vars…` path in
+ * the matching JS coercion (`Number`/`String`/`Boolean`) so the v1 type
+ * checker is satisfied — Studio Web reports the raw `$vars.X.output.k`
+ * shape as `unknown` and rejects assignments to typed globals.
+ */
+function buildVariableUpdateExpr(scriptNodeId, outputKey, globalType) {
+    const path = outputKey
+        ? `$vars.${scriptNodeId}.output.${outputKey}`
+        : `$vars.${scriptNodeId}.output`;
+    const wrapped = wrapWithTypeCoercion(path, globalType);
+    return `=js:${wrapped}`;
+}
+/** JS coercion to satisfy v1's static type checker for primitive globals. */
+function wrapWithTypeCoercion(jsExpr, globalType) {
+    switch (globalType) {
+        case 'number':
+            return `Number(${jsExpr})`;
+        case 'string':
+            return `String(${jsExpr})`;
+        case 'boolean':
+            return `Boolean(${jsExpr})`;
+        default:
+            // any, array, object, undeclared — leave raw. `any` already
+            // accepts the unknown-typed expression; for the others, no
+            // safe pure-JS cast exists that preserves identity.
+            return jsExpr;
+    }
+}
 function filTypeToFlow(t) {
     if (typeof t === 'string') {
         switch (t) {
             case 'string': return 'string';
+            // v1 has one numeric type — `number`. (FIL's `i32`/`i64`/`f64`
+            // distinction is for WASM lowering; the v1 evaluator is JS and
+            // doesn't carry an `integer` type.)
             case 'f64': return 'number';
-            case 'i32': return 'integer';
-            case 'i64': return 'integer';
+            case 'i32': return 'number';
+            case 'i64': return 'number';
             case 'bool': return 'boolean';
-            case 'json': return 'object';
             case 'file': return 'file';
-            case 'void': return 'object';
-            default: return 'object';
+            // FIL `json` and `void` map to `any` so the v1 type checker
+            // accepts assignments from `unknown`-typed expressions
+            // (e.g. `$vars.<scriptId>.output.<key>`). Using `object`
+            // produced "Type 'unknown' is not assignable to type 'object'"
+            // errors in the canvas.
+            case 'json': return 'any';
+            case 'void': return 'any';
+            // DateTime/TimeSpan: v1 has no first-class equivalent — both are
+            // lowered to JS `number` (ms timestamp / ms duration). See the
+            // DateTime translator in script-body-emitter.
+            case 'DateTime': return 'number';
+            case 'TimeSpan': return 'number';
+            default: return 'any';
         }
     }
     if (t.kind === 'Promise')
         return filTypeToFlow(t.inner);
     if (t.kind === 'array')
         return 'array';
-    return 'object';
+    return 'any';
 }
 /**
  * Heuristic mapping from a literal initializer to a v1 variable type.

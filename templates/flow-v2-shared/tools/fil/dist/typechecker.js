@@ -306,6 +306,19 @@ class TypeChecker {
         this.actionNames = new Set();
         /** Names of top-level `trigger` declarations. Triggers cannot be invoked via executeNode. */
         this.triggerNames = new Set();
+        /**
+         * Count of `executeNode(<action>, …)` call sites per declared action.
+         *
+         * Each `action` declaration lowers to exactly one v1 Flow node, and Flow
+         * nodes cannot be reused across distinct call sites — every call site is
+         * a separate position in the v1 graph with its own inputs. We therefore
+         * require each action to be invoked **exactly once** lexically. Calls
+         * inside a loop body or a single branch are fine; what's rejected is
+         * the same identifier appearing at two different positions in the
+         * source (e.g. one `executeNode(sendEmail, …)` inside the loop and a
+         * second one after it).
+         */
+        this.actionInvocationCounts = new Map();
     }
     check(program) {
         // Register top-level node declarations first.
@@ -329,6 +342,27 @@ class TypeChecker {
         // Second pass: type check each function
         for (const fn of program.functions) {
             this.checkFunction(fn);
+        }
+        // Third pass: validate that every declared action is invoked exactly
+        // once via executeNode. Actions lower to v1 Flow nodes 1:1, so a name
+        // used at two call sites would collapse to a single shared node — but
+        // Flow nodes can't be shared across call sites (each holds its own
+        // inputs and graph position). Likewise an action with zero call sites
+        // is dead code that would still synthesize a stub node in the v1
+        // output.
+        for (const action of program.actions) {
+            const count = this.actionInvocationCounts.get(action.name) ?? 0;
+            if (count === 0) {
+                throw new Error(`action "${action.name}" is declared but never invoked via executeNode. ` +
+                    `Either remove the declaration or add an \`await executeNode(${action.name}, …)\` call.`);
+            }
+            if (count > 1) {
+                throw new Error(`action "${action.name}" is invoked ${count} times via executeNode, but each ` +
+                    `action lowers to exactly one v1 Flow node — nodes can't be reused across ` +
+                    `distinct call sites. Declare a separate action per call site (e.g., ` +
+                    `"${action.name}1", "${action.name}2", …) with its own inputs/bindings, ` +
+                    `or refactor so the action is only called from one position.`);
+            }
         }
     }
     checkFunction(fn) {
@@ -735,6 +769,7 @@ class TypeChecker {
                     throw new Error(`executeNode: "${first.name}" is not a declared action. ` +
                         `Add an \`action ${first.name}: <type> { … };\` declaration at the top level.`);
                 }
+                this.actionInvocationCounts.set(first.name, (this.actionInvocationCounts.get(first.name) ?? 0) + 1);
                 // Type-check remaining args normally.
                 for (let i = 1; i < expr.arguments.length; i++)
                     this.inferExpr(expr.arguments[i]);

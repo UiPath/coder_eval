@@ -42,7 +42,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.filToFlowWithScope = exports.filToFlow = exports.filProgramToManifest = exports.applyFilInputExpressions = exports.tryEmitV1Expression = exports.buildDefinitions = exports.expandManifest = exports.rehydrateConfiguration = void 0;
+exports.normalizeTypeVersions = exports.filToFlowWithScope = exports.filToFlow = exports.filProgramToManifest = exports.applyFilInputExpressions = exports.tryEmitV1Expression = exports.buildDefinitions = exports.expandManifest = exports.rehydrateConfiguration = void 0;
 exports.convertV2ToV1 = convertV2ToV1;
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
@@ -69,6 +69,7 @@ Object.defineProperty(exports, "filProgramToManifest", { enumerable: true, get: 
 var fil_to_flow_2 = require("./fil-to-flow");
 Object.defineProperty(exports, "filToFlow", { enumerable: true, get: function () { return fil_to_flow_2.filToFlow; } });
 Object.defineProperty(exports, "filToFlowWithScope", { enumerable: true, get: function () { return fil_to_flow_2.filToFlowWithScope; } });
+Object.defineProperty(exports, "normalizeTypeVersions", { enumerable: true, get: function () { return fil_to_flow_2.normalizeTypeVersions; } });
 function convertV2ToV1(filSource, manifest, bindings, opts = {}) {
     const library = opts.library ?? (0, v1_to_v2_1.loadDefaultLibrary)();
     const libraryDir = opts.libraryDir ?? (0, v1_to_v2_1.defaultLibraryDir)();
@@ -148,6 +149,11 @@ function convertV2ToV1(filSource, manifest, bindings, opts = {}) {
     //    `inputs.detail.configuration`. FIL is the source of truth for
     //    per-instance field values when the agent authors flows directly.
     const inputExpressions = (0, apply_input_expressions_1.applyFilInputExpressions)(flow, program);
+    // 7. Re-run the typeVersion normalization (filToFlow ran it already, but
+    //    step 5b rebuilt `flow.definitions` from the canonical library, and
+    //    those library-derived definitions still carry `version: "1.0.0"`).
+    //    Studio Web's Flow editor flags `1.0.0` and wants `1.0`.
+    (0, fil_to_flow_1.normalizeTypeVersions)(flow);
     return {
         flow,
         missingLibraryEntries: expanded.missingLibraryEntries,
@@ -201,6 +207,10 @@ function buildProcessResourceDefinitionsFromManifest(manifest) {
         }
         if (nodeType === 'uipath.pattern.deep-rag') {
             out[node.type] = buildSummarizeDefinition(version);
+            continue;
+        }
+        if (nodeType === 'uipath.pattern.batch-transform') {
+            out[node.type] = buildBatchTransformDefinition(version);
         }
     }
     return out;
@@ -643,6 +653,92 @@ function buildSummarizeDefinition(version) {
         },
     };
 }
+function buildBatchTransformDefinition(version) {
+    return {
+        nodeType: 'uipath.pattern.batch-transform',
+        version,
+        category: 'data-operations',
+        tags: ['batch', 'transform', 'csv'],
+        sortOrder: 35,
+        supportsErrorHandling: true,
+        display: {
+            label: 'Batch Transform',
+            icon: 'grid-2x2-plus',
+        },
+        handleConfiguration: [
+            {
+                position: 'left',
+                handles: [
+                    {
+                        id: 'input',
+                        type: 'target',
+                        handleType: 'input',
+                    },
+                ],
+            },
+            {
+                position: 'right',
+                handles: [
+                    {
+                        id: 'output',
+                        type: 'source',
+                        handleType: 'output',
+                    },
+                ],
+            },
+        ],
+        model: {
+            type: 'bpmn:ServiceTask',
+            serviceType: 'ECS.BatchTransform',
+        },
+        inputDefinition: {
+            type: 'object',
+            properties: {
+                attachment: { type: 'string' },
+                prompt: { type: 'string' },
+                enableWebSearchGrounding: { type: 'boolean' },
+                outputColumns: { type: 'array' },
+            },
+        },
+        inputDefaults: {
+            attachment: '',
+            prompt: '',
+            enableWebSearchGrounding: false,
+            outputColumns: [
+                {
+                    name: 'OutputColumn1',
+                    description: 'Describe what this new column should contain',
+                },
+            ],
+        },
+        outputDefinition: {
+            output: {
+                type: 'file',
+                source: '=response',
+                var: 'output',
+            },
+            error: {
+                type: 'object',
+                description: 'Error information if the node fails',
+                source: '=Error',
+                var: 'error',
+                schema: {
+                    $schema: 'http://json-schema.org/draft-07/schema#',
+                    type: 'object',
+                    required: ['code', 'message', 'detail', 'category', 'status'],
+                    properties: {
+                        code: { type: 'string', description: 'Error code as a string' },
+                        message: { type: 'string', description: 'High-level error message' },
+                        detail: { type: 'string', description: 'Detailed error description' },
+                        category: { type: 'string', description: 'Error category' },
+                        status: { type: 'integer', description: 'HTTP status code' },
+                    },
+                    additionalProperties: false,
+                },
+            },
+        },
+    };
+}
 /**
  * Walk the flow's nodes (and subflow nodes) collecting every `<type>@<version>`
  * referenced. Used to ensure `definitions[]` covers every node the converter
@@ -650,7 +746,17 @@ function buildSummarizeDefinition(version) {
  */
 function collectAllTypeRefs(flow) {
     const out = new Set();
-    const add = (type, version) => out.add(`${type}@${version ?? '1.0.0'}`);
+    const add = (type, version) => {
+        let v = version ?? '1.0.0';
+        // `normalizeTypeVersions` has already stripped node typeVersions to
+        // MAJOR.MINOR (Studio Web extension preference). Definition lookup
+        // (bundled core-definitions, canonical library v1def files) still
+        // keys on the MAJOR.MINOR.PATCH form, so expand `1.0` → `1.0.0`
+        // before adding to the typeref set.
+        if (/^\d+\.\d+$/.test(v))
+            v = `${v}.0`;
+        out.add(`${type}@${v}`);
+    };
     for (const n of flow.nodes)
         add(n.type, n.typeVersion);
     for (const sf of Object.values(flow.subflows ?? {})) {

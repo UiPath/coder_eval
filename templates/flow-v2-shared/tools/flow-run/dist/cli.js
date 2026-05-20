@@ -220,6 +220,9 @@ async function main() {
             case 'summarize':
                 detail = 'summarize';
                 break;
+            case 'batch-transform':
+                detail = 'batch-transform';
+                break;
         }
         process.stderr.write(`    - ${n.nodeId.padEnd(24)} ${detail}\n`);
     }

@@ -29,6 +29,7 @@ export interface NodeInstance {
     }>;
     model?: Record<string, unknown>;
     uipath?: Record<string, unknown>;
+    parentId?: string;
 }
 export interface NodeUI {
     position: {

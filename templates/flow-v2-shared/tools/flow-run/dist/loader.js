@@ -66,6 +66,7 @@ const INLINE_AGENT_NODE_TYPE = 'uipath.agent.autonomous';
 const INLINE_AGENT_SERVICE_TYPE = 'Orchestrator.StartInlineAgentJob';
 const HITL_NODE_TYPE = 'uipath.human-in-the-loop';
 const SUMMARIZE_NODE_TYPE = 'uipath.pattern.deep-rag';
+const BATCH_TRANSFORM_NODE_TYPE = 'uipath.pattern.batch-transform';
 // ─── Project discovery ───────────────────────────────────────────────────────
 function loadProject(projectDir, opts = {}) {
     const filPath = opts.filPath ?? autodiscoverFil(projectDir);
@@ -217,6 +218,13 @@ function resolveAllNodes(project, libraryDir, bindingResolver, out, errors, warn
             const summarizeNode = resolveSummarizeNode(nodeId, nodeType, node, errors);
             if (summarizeNode)
                 out.push(summarizeNode);
+            continue;
+        }
+        // ── Batch Transform pattern nodes ──
+        if (nodeType === BATCH_TRANSFORM_NODE_TYPE) {
+            const batchTransformNode = resolveBatchTransformNode(nodeId, nodeType, node, errors);
+            if (batchTransformNode)
+                out.push(batchTransformNode);
             continue;
         }
         // ── Skip non-dispatchable types (control flow, triggers, end) ──
@@ -477,6 +485,35 @@ function resolveSummarizeNode(nodeId, nodeType, node, errors) {
         fixture: pickMockFixture(node),
     };
 }
+function resolveBatchTransformNode(nodeId, nodeType, node, errors) {
+    const errorStart = errors.length;
+    const inputs = node.rawInputs ?? node.inputs ?? {};
+    const attachment = requireInlineString(nodeId, nodeType, inputs, 'attachment', errors);
+    const prompt = requireInlineString(nodeId, nodeType, inputs, 'prompt', errors);
+    const outputColumns = requireOutputColumns(nodeId, nodeType, inputs, errors);
+    const rawEnableWebSearchGrounding = inputs.enableWebSearchGrounding;
+    let enableWebSearchGrounding = false;
+    if (rawEnableWebSearchGrounding !== undefined) {
+        if (typeof rawEnableWebSearchGrounding !== 'boolean') {
+            errors.push(`node "${nodeId}" (${nodeType}): rawInputs.enableWebSearchGrounding must be a boolean when provided`);
+        }
+        else {
+            enableWebSearchGrounding = rawEnableWebSearchGrounding;
+        }
+    }
+    if (errors.length > errorStart || !attachment || !prompt || !outputColumns)
+        return null;
+    return {
+        kind: 'batch-transform',
+        nodeId,
+        nodeType,
+        attachment,
+        prompt,
+        enableWebSearchGrounding,
+        outputColumns,
+        fixture: pickMockFixture(node),
+    };
+}
 function requireInlineString(nodeId, nodeType, inputs, field, errors) {
     const value = inputs[field];
     if (typeof value !== 'string' || value.trim() === '') {
@@ -484,6 +521,36 @@ function requireInlineString(nodeId, nodeType, inputs, field, errors) {
         return null;
     }
     return value;
+}
+function requireOutputColumns(nodeId, nodeType, inputs, errors) {
+    const value = inputs.outputColumns;
+    if (!Array.isArray(value) || value.length === 0) {
+        errors.push(`node "${nodeId}" (${nodeType}): missing rawInputs.outputColumns`);
+        return null;
+    }
+    const columns = [];
+    for (let i = 0; i < value.length; i++) {
+        const entry = value[i];
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            errors.push(`node "${nodeId}" (${nodeType}): rawInputs.outputColumns[${i}] must be an object`);
+            continue;
+        }
+        const record = entry;
+        if (typeof record.name !== 'string' || record.name.trim() === '') {
+            errors.push(`node "${nodeId}" (${nodeType}): rawInputs.outputColumns[${i}].name must be a non-empty string`);
+        }
+        if (typeof record.description !== 'string' || record.description.trim() === '') {
+            errors.push(`node "${nodeId}" (${nodeType}): rawInputs.outputColumns[${i}].description must be a non-empty string`);
+        }
+        if (typeof record.name === 'string' && record.name.trim() !== '' &&
+            typeof record.description === 'string' && record.description.trim() !== '') {
+            columns.push({
+                name: record.name,
+                description: record.description,
+            });
+        }
+    }
+    return columns.length === value.length ? columns : null;
 }
 function requireInlineArray(nodeId, nodeType, inputs, field, errors) {
     const value = inputs[field];

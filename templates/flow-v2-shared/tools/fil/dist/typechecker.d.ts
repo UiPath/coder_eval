@@ -17,6 +17,19 @@ export declare class TypeChecker {
     private actionNames;
     /** Names of top-level `trigger` declarations. Triggers cannot be invoked via executeNode. */
     private triggerNames;
+    /**
+     * Count of `executeNode(<action>, …)` call sites per declared action.
+     *
+     * Each `action` declaration lowers to exactly one v1 Flow node, and Flow
+     * nodes cannot be reused across distinct call sites — every call site is
+     * a separate position in the v1 graph with its own inputs. We therefore
+     * require each action to be invoked **exactly once** lexically. Calls
+     * inside a loop body or a single branch are fine; what's rejected is
+     * the same identifier appearing at two different positions in the
+     * source (e.g. one `executeNode(sendEmail, …)` inside the loop and a
+     * second one after it).
+     */
+    private actionInvocationCounts;
     check(program: AST.Program): void;
     private checkFunction;
     private pushScope;
