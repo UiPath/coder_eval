@@ -1,0 +1,11 @@
+# osv-scanner suppressions for advisories without an available fix.
+#
+# Mirrors the inline --ignore-vuln list passed to pip-audit in
+# .github/workflows/pr-checks.yml so both scanners stay in sync. pip-audit
+# accepts ignores as CLI flags; osv-scanner only reads them from this TOML.
+# When an advisory is fixed upstream, drop the entry here AND remove the
+# matching pip-audit flag in the same PR.
+
+[[IgnoredVulns]]
+id = "PYSEC-2025-183"
+reason = "pyjwt 2.12.1 weak-encryption — disputed by supplier (key length is application-chosen). No fix available on PyPI; revisit quarterly."
