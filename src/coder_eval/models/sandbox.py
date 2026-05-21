@@ -11,6 +11,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from coder_eval.models.enums import SnapshotMode
 from coder_eval.models.templates import TemplateSource
 from coder_eval.resources import normalize_ignore_pattern_entry
+from coder_eval.utils import get_default_docker_image_tag
 
 
 class ResourceLimits(BaseModel):
@@ -155,9 +156,12 @@ class DockerDriverConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    image: str | None = Field(
-        default=None,
-        description="Container image. Defaults to coder-eval-agent:<pkg-version> (built via `make docker-image`).",
+    image: str = Field(
+        default_factory=get_default_docker_image_tag,
+        description=(
+            "Container image (default: coder-eval-agent:<pkg-version>). Override to use a custom image "
+            "(e.g., for BYOD: Bring Your Own Docker)."
+        ),
     )
     network: Literal["bridge", "none"] = Field(
         default="bridge",

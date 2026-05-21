@@ -9,7 +9,7 @@ aggregation pipeline.
 Aggregation (P/R/F1, suite thresholds, reports) always stays on the host.
 """
 
-from .docker_runner import DEFAULT_IMAGE_TAG, DockerRunner, default_image_tag
+from .docker_runner import DockerRunner
 
 
-__all__ = ["DEFAULT_IMAGE_TAG", "DockerRunner", "default_image_tag"]
+__all__ = ["DockerRunner"]

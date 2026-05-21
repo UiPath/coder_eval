@@ -1,9 +1,28 @@
 """Utility functions for version tracking and reproducibility."""
 
+import logging
 import os
 import subprocess
 from pathlib import Path
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
+
+
+def get_default_docker_image_tag() -> str:
+    """Return the default coder-eval-agent image tag for this package version.
+
+    Returns 'coder-eval-agent:<version>' if installed, or 'coder-eval-agent:latest'
+    if running from source without -e installation.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return f"coder-eval-agent:{version('coder-eval')}"
+    except PackageNotFoundError:
+        logger.debug("coder-eval package not installed; defaulting image tag to :latest")
+        return "coder-eval-agent:latest"
 
 
 def _git_short_sha(repo_path: Path) -> str:

@@ -352,12 +352,12 @@ jobs:
       UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
       UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
-      # tasks_run for --tags smoke-pass. 4 task files (hello_date, dataset_example,
-      # smoke_llm_judge, smoke_agent_judge); dataset_example fans out to 2 inline
-      # rows, so 5 sub-tasks. If you add/remove a smoke-pass task or change the
-      # dataset row count, bump these.
-      EXPECTED_SMOKE_PASS_RUN: "5"
-      EXPECTED_SMOKE_PASS_SUCCEEDED: "5"
+      # tasks_run for --tags smoke-pass. 5 task files (hello_date, dataset_example,
+      # smoke_llm_judge, smoke_agent_judge, byod_smoke_test); dataset_example fans out
+      # to 2 inline rows, so 6 sub-tasks. If you add/remove a smoke-pass task or change
+      # the dataset row count, bump these.
+      EXPECTED_SMOKE_PASS_RUN: "6"
+      EXPECTED_SMOKE_PASS_SUCCEEDED: "6"
       # smoke-fail bucket: three tasks expected to fail.
       #   1. smoke_negative_path: file_contains criterion is unsatisfiable
       #      (sentinel-string regression detection for success-checker).
@@ -409,6 +409,12 @@ jobs:
 
       - name: Install project dependencies (hash-verified from uv.lock)
         run: uv sync --frozen --extra dev --extra uipath
+
+      - name: Build coder-eval-agent base Docker image
+        run: make docker-image
+
+      - name: Build BYOD template Docker image
+        run: docker build -t byod-custom-image:0.1.0 templates/byod_smoke_test/
 
       # All three smoke steps below omit --model. Under API_BACKEND=bedrock,
       # the agent layer prepends eu.anthropic./us.anthropic. to a bare alias

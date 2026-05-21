@@ -43,21 +43,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def default_image_tag() -> str:
-    """Return the default ``coder-eval-agent`` image tag for this package version."""
-    from importlib.metadata import PackageNotFoundError, version
-
-    try:
-        return f"coder-eval-agent:{version('coder-eval')}"
-    except PackageNotFoundError:
-        # Package not installed in current env (e.g. running from source without -e .).
-        # Fall back to :latest so a manually-tagged image still resolves.
-        logger.debug("coder-eval package not installed; defaulting image tag to :latest")
-        return "coder-eval-agent:latest"
-
-
-DEFAULT_IMAGE_TAG = default_image_tag()
-
 # Container-side paths. Kept in lockstep with docker/entrypoint.sh.
 CONTAINER_WORK_DIR = "/work"
 CONTAINER_INPUT_DIR = "/work/input"
@@ -314,7 +299,7 @@ class DockerRunner:
         dispatcher converts that to an ERROR-status EvaluationResult.
         """
         _preflight()
-        image = self._docker_config.image or DEFAULT_IMAGE_TAG
+        image = self._docker_config.image
         await asyncio.to_thread(_preflight_image_version, image)
         await asyncio.to_thread(self.rt.run_dir.mkdir, parents=True, exist_ok=True)
 
@@ -547,7 +532,7 @@ class DockerRunner:
 
     def _build_argv(self, input_dir: Path, output_dir: Path, *, container_name: str) -> list[str]:
         cfg = self._docker_config
-        image = cfg.image or DEFAULT_IMAGE_TAG
+        image = cfg.image
         argv: list[str] = ["docker", "run", "--rm", "--name", container_name]
 
         if cfg.network == "none":
