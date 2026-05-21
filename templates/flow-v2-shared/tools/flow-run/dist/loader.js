@@ -62,6 +62,8 @@ const API_WORKFLOW_NODE_PREFIX = 'uipath.core.api-workflow.';
 const API_WORKFLOW_SERVICE_TYPE = 'Orchestrator.ExecuteApiWorkflowAsync';
 const RPA_WORKFLOW_NODE_PREFIX = 'uipath.core.rpa-workflow.';
 const RPA_WORKFLOW_SERVICE_TYPE = 'Orchestrator.StartJob';
+const AGENTIC_PROCESS_NODE_PREFIX = 'uipath.core.agentic-process.';
+const AGENTIC_PROCESS_SERVICE_TYPE = 'Orchestrator.StartAgenticProcessAsync';
 const INLINE_AGENT_NODE_TYPE = 'uipath.agent.autonomous';
 const INLINE_AGENT_SERVICE_TYPE = 'Orchestrator.StartInlineAgentJob';
 const HITL_NODE_TYPE = 'uipath.human-in-the-loop';
@@ -201,6 +203,13 @@ function resolveAllNodes(project, libraryDir, bindingResolver, out, errors, warn
             const rpaWorkflowNode = resolveRpaWorkflowNode(nodeId, nodeType, node, bindingResolver, errors);
             if (rpaWorkflowNode)
                 out.push(rpaWorkflowNode);
+            continue;
+        }
+        // ── Agentic Process resource nodes ──
+        if (isAgenticProcessNodeType(nodeType)) {
+            const agenticProcessNode = resolveAgenticProcessNode(nodeId, nodeType, node, bindingResolver, errors);
+            if (agenticProcessNode)
+                out.push(agenticProcessNode);
             continue;
         }
         // ── Inline low-code Agent nodes ──
@@ -348,6 +357,16 @@ function resolveRpaWorkflowNode(nodeId, nodeType, node, bindingResolver, errors)
         articleLabel: 'an RPA Workflow',
     });
     return base ? { kind: 'rpa-workflow', ...base } : null;
+}
+function resolveAgenticProcessNode(nodeId, nodeType, node, bindingResolver, errors) {
+    const base = resolveProcessResourceNode(nodeId, nodeType, node, bindingResolver, errors, {
+        prefix: AGENTIC_PROCESS_NODE_PREFIX,
+        resourceSubType: 'ProcessOrchestration',
+        serviceType: AGENTIC_PROCESS_SERVICE_TYPE,
+        label: 'Agentic Process',
+        articleLabel: 'an Agentic Process',
+    });
+    return base ? { kind: 'agentic-process', ...base } : null;
 }
 function resolveProcessResourceNode(nodeId, nodeType, node, bindingResolver, errors, spec) {
     const errorStart = errors.length;
@@ -775,6 +794,9 @@ function isApiWorkflowNodeType(nodeType) {
 }
 function isRpaWorkflowNodeType(nodeType) {
     return nodeType.startsWith(RPA_WORKFLOW_NODE_PREFIX);
+}
+function isAgenticProcessNodeType(nodeType) {
+    return nodeType.startsWith(AGENTIC_PROCESS_NODE_PREFIX);
 }
 function isQueueNodeType(nodeType) {
     return nodeType === QUEUE_CREATE_NODE_TYPE || nodeType === QUEUE_CREATE_AND_WAIT_NODE_TYPE;

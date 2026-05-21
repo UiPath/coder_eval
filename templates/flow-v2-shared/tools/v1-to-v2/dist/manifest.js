@@ -143,12 +143,15 @@ function compressProcessResourceNode(node, override, nodeType, resourceBindingId
     const resourceSubType = typeof bindingModel?.resourceSubType === 'string'
         ? bindingModel.resourceSubType
         : spec.resourceSubType;
+    const orchestratorType = typeof bindingModel?.orchestratorType === 'string'
+        ? bindingModel.orchestratorType
+        : spec.orchestratorType;
     node.resource = {
         resource: typeof bindingModel?.resource === 'string' ? bindingModel.resource : 'process',
         resourceSubType,
         resourceKey,
-        orchestratorType: typeof bindingModel?.orchestratorType === 'string' ? bindingModel.orchestratorType : spec.orchestratorType,
         serviceType: typeof model?.serviceType === 'string' ? model.serviceType : spec.serviceType,
+        ...(orchestratorType ? { orchestratorType } : {}),
     };
     if (typeof model?.section === 'string') {
         node.resource.section = model.section;
@@ -230,6 +233,11 @@ const PROCESS_RESOURCE_SPECS = [
         resourceSubType: 'Process',
         orchestratorType: 'process',
         serviceType: 'Orchestrator.StartJob',
+    },
+    {
+        prefix: 'uipath.core.agentic-process.',
+        resourceSubType: 'ProcessOrchestration',
+        serviceType: 'Orchestrator.StartAgenticProcessAsync',
     },
 ];
 function processResourceSpec(nodeType) {

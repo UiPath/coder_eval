@@ -10,6 +10,7 @@
 //   agent     → dry-run fixture only; live Agent dispatch is not wired yet
 //   api-workflow → dry-run fixture only; live API Workflow dispatch is not wired yet
 //   rpa-workflow → dry-run fixture only; live RPA Workflow dispatch is not wired yet
+//   agentic-process → dry-run fixture only; live Agentic Process dispatch is not wired yet
 //   summarize → dry-run fixture only; live ECS.DeepRag dispatch is not wired yet
 //   batch-transform → dry-run fixture only; live ECS.BatchTransform dispatch is not wired yet
 //   queue    → dry-run fixture only; live Orchestrator Queue dispatch is not wired yet
@@ -23,6 +24,7 @@ exports.dispatchMock = dispatchMock;
 exports.dispatchAgent = dispatchAgent;
 exports.dispatchApiWorkflow = dispatchApiWorkflow;
 exports.dispatchRpaWorkflow = dispatchRpaWorkflow;
+exports.dispatchAgenticProcess = dispatchAgenticProcess;
 exports.dispatchInlineAgent = dispatchInlineAgent;
 exports.dispatchHitl = dispatchHitl;
 exports.dispatchSummarize = dispatchSummarize;
@@ -49,6 +51,7 @@ async function dispatch(node, inputJson, opts) {
         case 'agent': return dispatchAgent(node, inputJson, opts);
         case 'api-workflow': return dispatchApiWorkflow(node, inputJson, opts);
         case 'rpa-workflow': return dispatchRpaWorkflow(node, inputJson, opts);
+        case 'agentic-process': return dispatchAgenticProcess(node, inputJson, opts);
         case 'inline-agent': return dispatchInlineAgent(node, inputJson, opts);
         case 'hitl': return dispatchHitl(node, inputJson, opts);
         case 'summarize': return dispatchSummarize(node, inputJson, opts);
@@ -377,6 +380,17 @@ function dispatchRpaWorkflow(node, inputJson, opts) {
     }
     throw new DispatchError(`node "${node.nodeId}": live RPA Workflow dispatch is not supported by flow-run yet; ` +
         `use --dry-run or run through the Flow/Studio Web debug path for Orchestrator.StartJob.`, node.nodeId);
+}
+function dispatchAgenticProcess(node, inputJson, opts) {
+    if (opts.verbose || opts.dryRun) {
+        const name = node.name || node.resourceKey || node.nodeId;
+        process.stderr.write(`[dispatch] agentic-process "${node.nodeId}" → ${name}\n`);
+    }
+    if (opts.dryRun) {
+        return { outputJson: renderFixture(node.fixture), raw: '<dry-run-agentic-process>' };
+    }
+    throw new DispatchError(`node "${node.nodeId}": live Agentic Process dispatch is not supported by flow-run yet; ` +
+        `use --dry-run or run through the Flow/Studio Web debug path for ${node.serviceType}.`, node.nodeId);
 }
 function dispatchInlineAgent(node, inputJson, opts) {
     if (opts.verbose || opts.dryRun) {

@@ -425,7 +425,7 @@ function buildDecisionRecord(step, nodeId, node, inputJson, output, dispatchedAt
     if (node.kind === 'connector') {
         return { ...base, connectorKey: node.connectorKey, verb: node.verb, objectName: node.objectName };
     }
-    if (node.kind === 'agent' || node.kind === 'api-workflow' || node.kind === 'rpa-workflow') {
+    if (node.kind === 'agent' || node.kind === 'api-workflow' || node.kind === 'rpa-workflow' || node.kind === 'agentic-process') {
         return {
             ...base,
             resourceKey: node.resourceKey,
@@ -478,6 +478,9 @@ function logNodeStart(opts, step, nodeId, node) {
             break;
         case 'rpa-workflow':
             detail = `rpa-workflow ${node.name || node.resourceKey || ''}`.trim();
+            break;
+        case 'agentic-process':
+            detail = `agentic-process ${node.name || node.resourceKey || ''}`.trim();
             break;
         case 'inline-agent':
             detail = `inline-agent ${node.source}`;

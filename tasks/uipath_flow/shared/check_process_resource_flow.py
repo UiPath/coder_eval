@@ -44,6 +44,25 @@ CONFIGS: dict[str, dict[str, Any]] = {
         "fixture_terms": ["fixture", "output", "jobId", "dry-run-job"],
         "routing_terms": ["jobId", "robotStarted", "robotEscalated"],
     },
+    "agentic-process": {
+        "node_id": "runOrchestration",
+        "node_type": "uipath.core.agentic-process.5f9ad95a-b862-46c7-98c3-a9be2e5b922f",
+        "label": "Run Customer Intake",
+        "resource_key": "Shared.Customer Intake Orchestration",
+        "resource_subtype": "ProcessOrchestration",
+        "service_type": "Orchestrator.StartAgenticProcessAsync",
+        "model_type": "bpmn:CallActivity",
+        "name_binding": "bAgenticProcessName",
+        "folder_binding": "bAgenticProcessFolder",
+        "name_default": "Customer Intake Orchestration",
+        "folder_default": "Shared",
+        "input_key": "customerName",
+        "input_value": "Ada Lovelace",
+        "output_source": "=result.response",
+        "error_source": "=result.Error",
+        "fixture_terms": ["fixture", "response", "status", "accepted", "priority", "high"],
+        "routing_terms": ["status", "acceptedRoute", "reviewRoute"],
+    },
 }
 
 
@@ -105,6 +124,7 @@ def check_v1_flow(path: Path, cfg: dict[str, Any]) -> None:
     require(inputs.get(cfg["input_key"]) == cfg["input_value"], f"wrong process node inputs: {inputs}")
 
     model = node.get("model") or {}
+    require(model.get("type") == cfg.get("model_type", "bpmn:ServiceTask"), f"wrong model.type: {model}")
     require(model.get("serviceType") == cfg["service_type"], f"wrong serviceType: {model}")
     require(model.get("section") == "Published", f"wrong section: {model}")
     model_bindings = model.get("bindings") or {}
@@ -117,10 +137,11 @@ def check_v1_flow(path: Path, cfg: dict[str, Any]) -> None:
         model_bindings.get("resourceKey") == cfg["resource_key"],
         f"wrong model.bindings.resourceKey: {model_bindings}",
     )
-    require(
-        model_bindings.get("orchestratorType") == cfg["orchestrator_type"],
-        f"wrong model.bindings.orchestratorType: {model_bindings}",
-    )
+    if cfg.get("orchestrator_type") is not None:
+        require(
+            model_bindings.get("orchestratorType") == cfg["orchestrator_type"],
+            f"wrong model.bindings.orchestratorType: {model_bindings}",
+        )
     values = model_bindings.get("values") or {}
     require(values.get("name") == cfg["name_default"], f"wrong model binding name value: {values}")
     require(values.get("folderPath") == cfg["folder_default"], f"wrong model binding folderPath value: {values}")
@@ -137,8 +158,14 @@ def check_v1_flow(path: Path, cfg: dict[str, Any]) -> None:
         )
 
     outputs = node.get("outputs") or {}
+    if cfg.get("output_source") is not None:
+        output = outputs.get("output") or {}
+        require(output.get("source") == cfg["output_source"], f"wrong output source: {outputs}")
     error_output = outputs.get("error") or {}
-    require(error_output.get("source") in {"=Error", "=result.Error"}, f"missing standard error output: {outputs}")
+    if cfg.get("error_source") is not None:
+        require(error_output.get("source") == cfg["error_source"], f"wrong error source: {outputs}")
+    else:
+        require(error_output.get("source") in {"=Error", "=result.Error"}, f"missing standard error output: {outputs}")
 
     check_bindings(bindings, cfg)
 
@@ -151,6 +178,10 @@ def check_v1_flow(path: Path, cfg: dict[str, Any]) -> None:
     require(
         resource_defs[0].get("model", {}).get("serviceType") == cfg["service_type"],
         f"resource definition has wrong serviceType: {resource_defs[0]}",
+    )
+    require(
+        resource_defs[0].get("model", {}).get("type") == cfg.get("model_type", "bpmn:ServiceTask"),
+        f"resource definition has wrong model.type: {resource_defs[0]}",
     )
 
     node_types = [node.get("type") for node in nodes]
@@ -190,13 +221,18 @@ def check_v2_project(fil_path: Path, bindings_path: Path, cfg: dict[str, Any]) -
         cfg["label"],
         cfg["resource_key"],
         f'resourceSubType: "{cfg["resource_subtype"]}"',
-        f'orchestratorType: "{cfg["orchestrator_type"]}"',
         f'serviceType: "{cfg["service_type"]}"',
         cfg["name_binding"],
         cfg["folder_binding"],
         cfg["input_key"],
         cfg["input_value"],
     ]
+    if cfg.get("orchestrator_type") is not None:
+        required_terms.append(f'orchestratorType: "{cfg["orchestrator_type"]}"')
+    if cfg.get("output_source") is not None:
+        required_terms.append(f'source: "{cfg["output_source"]}"')
+    if cfg.get("error_source") is not None:
+        required_terms.append(f'source: "{cfg["error_source"]}"')
     for term in required_terms + cfg["fixture_terms"] + cfg["routing_terms"]:
         require(term in source, f"required FIL term {term!r} not found")
 

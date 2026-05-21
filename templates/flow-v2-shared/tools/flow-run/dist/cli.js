@@ -211,6 +211,9 @@ async function main() {
             case 'rpa-workflow':
                 detail = `rpa-workflow ${n.name || n.resourceKey || ''}`.trim();
                 break;
+            case 'agentic-process':
+                detail = `agentic-process ${n.name || n.resourceKey || ''}`.trim();
+                break;
             case 'inline-agent':
                 detail = `inline-agent ${n.source}`;
                 break;

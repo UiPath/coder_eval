@@ -1,6 +1,6 @@
 ---
 name: uipath-flow-v2-process-resources
-description: "UiPath Flow v2 process-resource authoring — FIL plus bindings.json for published API Workflow and RPA Workflow nodes. Verify with flow-run dry-run; live process dispatch is intentionally blocked until the CLI/API path is confirmed."
+description: "UiPath Flow v2 process-resource authoring — FIL plus bindings.json for published API Workflow, RPA Workflow, and Agentic Process nodes. Verify with flow-run dry-run; live process dispatch is intentionally blocked until the CLI/API path is confirmed."
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
 
@@ -24,7 +24,7 @@ Do not create a `.manifest.flow` file for these tasks. The action declarations i
 5. Run `./convert.sh <Name>`.
 6. Run `uip maestro flow validate <Name>.flow` and `uip maestro flow format <Name>.flow`.
 
-Do not run `./verify.sh --live` for API Workflow or RPA Workflow nodes. Live dispatch is blocked until the direct Orchestrator CLI/API path is confirmed.
+Do not run `./verify.sh --live` for API Workflow, RPA Workflow, or Agentic Process nodes. Live dispatch is blocked until the direct Orchestrator CLI/API path is confirmed.
 
 ## FIL Basics
 
@@ -129,6 +129,43 @@ action runRobot: uipath.core.rpa-workflow.7648307a-b180-467c-81f3-06f49a87313b@1
 };
 ```
 
+## Agentic Process Action
+
+Published Agentic Process nodes use `uipath.core.agentic-process.<key>@1.0.0` and process resource bindings with `resourceSubType: "ProcessOrchestration"`. The current Flow Workbench shape uses `Orchestrator.StartAgenticProcessAsync`; some registry docs may show `Orchestrator.StartAgenticProcess`, so preserve the explicit `serviceType` from the task or source flow.
+
+```typescript
+action runOrchestration: uipath.core.agentic-process.5f9ad95a-b862-46c7-98c3-a9be2e5b922f@1.0.0 {
+  label: "Run Customer Intake",
+  rawInputs: { customerName: "Ada Lovelace" },
+  resource: {
+    resource: "process",
+    resourceSubType: "ProcessOrchestration",
+    resourceKey: "Shared.Customer Intake Orchestration",
+    serviceType: "Orchestrator.StartAgenticProcessAsync",
+    section: "Published",
+  },
+  resourceBindings: {
+    name: "bAgenticProcessName",
+    folderPath: "bAgenticProcessFolder",
+  },
+  outputs: {
+    output: {
+      type: "object",
+      description: "The return value of the agentic process",
+      source: "=result.response",
+      var: "output",
+    },
+    error: {
+      type: "object",
+      description: "Error information if the agentic process fails",
+      source: "=result.Error",
+      var: "error",
+    },
+  },
+  fixture: { response: { status: "accepted", priority: "high" } },
+};
+```
+
 ## Bindings
 
 Process resource bindings use `resource: "process"` and one entry for each resource property.
@@ -163,8 +200,10 @@ Process resource bindings use `resource: "process"` and one entry for each resou
 
 For RPA Workflow, use `bRpaName` / `bRpaFolder`, `resourceSubType: "Process"`, and the `Shared/sol_with_all_projects.RPA Workflow12Feb` resource key.
 
+For Agentic Process, use `bAgenticProcessName` / `bAgenticProcessFolder`, `resourceSubType: "ProcessOrchestration"`, and the `Shared.Customer Intake Orchestration` resource key.
+
 ## What Verification Means
 
-`./verify.sh` runs `flow-run --dry-run`. It validates the FIL, process-resource action declarations, and `bindings.json`. API Workflow and RPA Workflow nodes return their `fixture` values in dry-run. Live dispatch fails intentionally with an explicit unsupported-dispatch error.
+`./verify.sh` runs `flow-run --dry-run`. It validates the FIL, process-resource action declarations, and `bindings.json`. API Workflow, RPA Workflow, and Agentic Process nodes return their `fixture` values in dry-run. Live dispatch fails intentionally with an explicit unsupported-dispatch error.
 
 `./convert.sh <Name>` calls the v2-to-v1 converter with `<Name>.fil` and writes `<Name>.flow`. The converted v1 flow should validate and format with the UiPath CLI.

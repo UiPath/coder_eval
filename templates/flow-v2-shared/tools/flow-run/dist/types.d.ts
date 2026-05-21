@@ -133,7 +133,7 @@ export interface DecisionRecord {
     step: number;
     nodeId: string;
     nodeType: string;
-    /** 'connector' | 'http' | 'mock' | 'script' | 'agent' | 'api-workflow' | 'rpa-workflow' | 'inline-agent' | 'hitl' | 'summarize' | 'batch-transform' | 'queue' | 'timer' */
+    /** 'connector' | 'http' | 'mock' | 'script' | 'agent' | 'api-workflow' | 'rpa-workflow' | 'agentic-process' | 'inline-agent' | 'hitl' | 'summarize' | 'batch-transform' | 'queue' | 'timer' */
     kind: string;
     connectorKey?: string;
     verb?: string;
@@ -247,6 +247,23 @@ export interface ResolvedRpaWorkflowNode {
     /** Configured dry-run fixture. Undefined -> return {}. */
     fixture?: unknown;
 }
+export interface ResolvedAgenticProcessNode {
+    kind: 'agentic-process';
+    nodeId: string;
+    nodeType: string;
+    resource: string;
+    resourceSubType: string;
+    resourceKey?: string;
+    orchestratorType?: string;
+    serviceType: string;
+    section?: string;
+    nameBinding: string;
+    folderPathBinding: string;
+    name: string;
+    folderPath: string;
+    /** Configured dry-run fixture. Undefined -> return {}. */
+    fixture?: unknown;
+}
 export interface ResolvedInlineAgentNode {
     kind: 'inline-agent';
     nodeId: string;
@@ -316,7 +333,7 @@ export interface ResolvedQueueNode {
     /** Configured dry-run fixture. Undefined -> return {}. */
     fixture?: unknown;
 }
-export type ResolvedNode = ResolvedConnectorNode | ResolvedHttpNode | ResolvedMockNode | ResolvedScriptNode | ResolvedAgentNode | ResolvedApiWorkflowNode | ResolvedRpaWorkflowNode | ResolvedInlineAgentNode | ResolvedHitlNode | ResolvedSummarizeNode | ResolvedBatchTransformNode | ResolvedQueueNode;
+export type ResolvedNode = ResolvedConnectorNode | ResolvedHttpNode | ResolvedMockNode | ResolvedScriptNode | ResolvedAgentNode | ResolvedApiWorkflowNode | ResolvedRpaWorkflowNode | ResolvedAgenticProcessNode | ResolvedInlineAgentNode | ResolvedHitlNode | ResolvedSummarizeNode | ResolvedBatchTransformNode | ResolvedQueueNode;
 export interface PreflightReport {
     nodes: ResolvedNode[];
     warnings: string[];

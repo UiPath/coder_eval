@@ -395,6 +395,17 @@ const PROCESS_RESOURCE_DEFINITION_SPECS = [
         supportsErrorHandling: true,
         inputDefaultsFromRawInputs: true,
     },
+    {
+        prefix: 'uipath.core.agentic-process.',
+        category: 'agentic-process',
+        icon: 'agentic-process',
+        sortOrder: 520,
+        resourceSubType: 'ProcessOrchestration',
+        serviceType: 'Orchestrator.StartAgenticProcessAsync',
+        defaultLabel: 'Agentic Process',
+        supportsErrorHandling: true,
+        modelType: 'bpmn:CallActivity',
+    },
 ];
 function processResourceDefinitionSpec(nodeType) {
     return PROCESS_RESOURCE_DEFINITION_SPECS.find((spec) => nodeType.startsWith(spec.prefix));
@@ -402,6 +413,7 @@ function processResourceDefinitionSpec(nodeType) {
 function buildProcessResourceDefinition(nodeType, version, node, spec) {
     const label = node.label ?? spec.defaultLabel;
     const resource = node.resource ?? { resource: 'process', resourceSubType: spec.resourceSubType };
+    const orchestratorType = resource.orchestratorType ?? spec.orchestratorType;
     return {
         nodeType,
         version,
@@ -448,7 +460,7 @@ function buildProcessResourceDefinition(nodeType, version, node, spec) {
             },
         ],
         model: {
-            type: 'bpmn:ServiceTask',
+            type: spec.modelType ?? 'bpmn:ServiceTask',
             serviceType: resource.serviceType ?? spec.serviceType,
             version: 'v2',
             ...(resource.section ? { section: resource.section } : {}),
@@ -459,7 +471,7 @@ function buildProcessResourceDefinition(nodeType, version, node, spec) {
                 resource: resource.resource ?? 'process',
                 resourceSubType: resource.resourceSubType ?? spec.resourceSubType,
                 ...(resource.resourceKey ? { resourceKey: resource.resourceKey } : {}),
-                orchestratorType: resource.orchestratorType ?? spec.orchestratorType,
+                ...(orchestratorType ? { orchestratorType } : {}),
                 values: {
                     name: label,
                     folderPath: '',
@@ -517,8 +529,8 @@ function jsonSchemaType(value) {
                 : 'string';
 }
 function defaultProcessResourceOutputDefinition(spec) {
-    return spec.resourceSubType === 'Agent'
-        ? {
+    if (spec.resourceSubType === 'Agent') {
+        return {
             output: {
                 type: 'object',
                 description: 'The return value of the agent',
@@ -531,15 +543,32 @@ function defaultProcessResourceOutputDefinition(spec) {
                 source: '=result.Error',
                 var: 'error',
             },
-        }
-        : {
+        };
+    }
+    if (spec.resourceSubType === 'ProcessOrchestration') {
+        return {
+            output: {
+                type: 'object',
+                description: 'The return value of the agentic process',
+                source: '=result.response',
+                var: 'output',
+            },
             error: {
                 type: 'object',
-                description: 'Error information if the node fails',
-                source: '=Error',
+                description: 'Error information if the agentic process fails',
+                source: '=result.Error',
                 var: 'error',
             },
         };
+    }
+    return {
+        error: {
+            type: 'object',
+            description: 'Error information if the node fails',
+            source: '=Error',
+            var: 'error',
+        },
+    };
 }
 function buildInlineAgentDefinition(version, node) {
     const rawInputs = node.rawInputs ?? {};

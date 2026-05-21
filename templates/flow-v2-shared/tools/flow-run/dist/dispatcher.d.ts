@@ -1,4 +1,4 @@
-import { HistoryEvent, ResolvedAgentNode, ResolvedApiWorkflowNode, ResolvedBatchTransformNode, ResolvedConnectorNode, ResolvedHitlNode, ResolvedHttpNode, ResolvedInlineAgentNode, ResolvedMockNode, ResolvedNode, ResolvedQueueNode, ResolvedRpaWorkflowNode, ResolvedScriptNode, ResolvedSummarizeNode } from './types';
+import { HistoryEvent, ResolvedAgenticProcessNode, ResolvedAgentNode, ResolvedApiWorkflowNode, ResolvedBatchTransformNode, ResolvedConnectorNode, ResolvedHitlNode, ResolvedHttpNode, ResolvedInlineAgentNode, ResolvedMockNode, ResolvedNode, ResolvedQueueNode, ResolvedRpaWorkflowNode, ResolvedScriptNode, ResolvedSummarizeNode } from './types';
 export interface DispatchResult {
     outputJson: string;
     raw: string;
@@ -37,6 +37,7 @@ export declare function dispatchMock(node: ResolvedMockNode, inputJson: string, 
 export declare function dispatchAgent(node: ResolvedAgentNode, inputJson: string, opts: DispatchOptions): DispatchResult;
 export declare function dispatchApiWorkflow(node: ResolvedApiWorkflowNode, inputJson: string, opts: DispatchOptions): DispatchResult;
 export declare function dispatchRpaWorkflow(node: ResolvedRpaWorkflowNode, inputJson: string, opts: DispatchOptions): DispatchResult;
+export declare function dispatchAgenticProcess(node: ResolvedAgenticProcessNode, inputJson: string, opts: DispatchOptions): DispatchResult;
 export declare function dispatchInlineAgent(node: ResolvedInlineAgentNode, inputJson: string, opts: DispatchOptions): DispatchResult;
 export declare function dispatchHitl(node: ResolvedHitlNode, inputJson: string, opts: DispatchOptions): DispatchResult;
 export declare function dispatchSummarize(node: ResolvedSummarizeNode, inputJson: string, opts: DispatchOptions): DispatchResult;

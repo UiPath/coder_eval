@@ -185,6 +185,13 @@ const PROCESS_RESOURCE_SPECS = [
         serviceType: 'Orchestrator.StartJob',
         label: 'RPA Workflow',
     },
+    {
+        prefix: 'uipath.core.agentic-process.',
+        resourceSubType: 'ProcessOrchestration',
+        serviceType: 'Orchestrator.StartAgenticProcessAsync',
+        label: 'Agentic Process',
+        modelType: 'bpmn:CallActivity',
+    },
 ];
 function processResourceSpec(nodeType) {
     return PROCESS_RESOURCE_SPECS.find((spec) => nodeType.startsWith(spec.prefix));
@@ -208,8 +215,9 @@ function buildProcessResourceModel(nodeType, node, bindingLookup) {
     const nameDefault = bindingDefault(nameBinding);
     const folderPathDefault = bindingDefault(folderBinding);
     const label = node.label ?? nameDefault ?? spec?.label ?? 'Resource';
+    const orchestratorType = resource.orchestratorType ?? spec?.orchestratorType;
     return {
-        type: 'bpmn:ServiceTask',
+        type: spec?.modelType ?? 'bpmn:ServiceTask',
         serviceType: resource.serviceType ?? spec?.serviceType,
         version: 'v2',
         ...(resource.section ? { section: resource.section } : {}),
@@ -218,7 +226,7 @@ function buildProcessResourceModel(nodeType, node, bindingLookup) {
             resource: resource.resource ?? 'process',
             resourceSubType: resource.resourceSubType ?? spec?.resourceSubType,
             ...(resourceKey ? { resourceKey } : {}),
-            orchestratorType: resource.orchestratorType ?? spec?.orchestratorType,
+            ...(orchestratorType ? { orchestratorType } : {}),
             values: {
                 name: nameDefault ?? '',
                 folderPath: folderPathDefault ?? '',
