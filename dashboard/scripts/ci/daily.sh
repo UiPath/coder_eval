@@ -8,11 +8,21 @@
 # manual smoke test). Required keys live in those two files:
 #   .env:           AWS_BEARER_TOKEN_BEDROCK, AWS_REGION, BEDROCK_MODEL,
 #                   LLMGW_*,
-#                   UV_INDEX_UIPATH_PASSWORD (private uv index for uipath-llmgw-client),
+#                   UV_INDEX_UIPATH_PASSWORD (private uv index PAT for
+#                     uipath-llmgw-client; also passed as the password build
+#                     secret to `make docker-image` — username is optional,
+#                     Azure Artifacts accepts the PAT alone),
 #                   GH_NPM_REGISTRY_TOKEN (PAT with read:packages — installs uip from GitHub Packages @alpha),
-#                   SLACK_WEBHOOK_URL (optional — empty = silent runs)
+#                   SLACK_WEBHOOK_URL (optional — empty disables ping;
+#                     when set, slack_summary.py auto-suppresses on
+#                     wrapper failure or low task count to avoid spamming
+#                     the channel with broken/test-run results)
 #   dashboard/.env: ADX_*, AZURE_STORAGE_ACCOUNT, AZURE_BLOB_CONTAINER,
 #                   AZURE_STORAGE_KEY (when using --auth-mode key)
+#
+# Host prerequisites: a working Docker daemon. Skills tasks since
+# skills#856 (2026-05-20) run inside the coder-eval-agent container,
+# built fresh from $REPO/docker/Dockerfile on every run.
 #
 # Optional overrides (env, mostly for ad-hoc smoke tests):
 #   TASK_PATTERN  glob/path of a single task yaml. When set, runs
@@ -31,10 +41,12 @@ REPO=/home/azureuser/uipath/coder_eval
 SKILLS_REPO=/home/azureuser/uipath/skills
 LOG_DIR=/home/azureuser/runs-ci
 LOCK=/var/lock/uip-daily.lock
-MODEL="${MODEL:-claude-sonnet-4-6}"
 BACKEND="${BACKEND:-bedrock}"
 SUITE="${SUITE:-skills}"
 BRANCH="${BRANCH:-main}"
+# MODEL is resolved AFTER sourcing .env so it can fall back to $BEDROCK_MODEL
+# (the full Bedrock id, e.g. eu.anthropic.claude-sonnet-4-6) — the host
+# CLI's short aliases don't resolve inside the coder-eval-agent container.
 
 # Acquire the daily lock BEFORE pre-flight. Otherwise a second invocation's
 # pkill would SIGTERM the legitimate in-flight run's children before flock
@@ -45,13 +57,33 @@ flock -n 9 || exit 75
 # ---- pre-flight cleanup (aggressive — every run starts as fresh as possible) ----
 # Kill stray uip/eval processes from a prior crashed run (OOM, 4h SIGTERM,
 # manual ctrl-c). Safe under the lock above — no live daily.sh to disturb.
-pkill -f 'uip flow debug'        2>/dev/null || true
-pkill -f 'uv run coder-eval'     2>/dev/null || true
-pkill -f '.venv/bin/coder-eval'  2>/dev/null || true
-pkill -f '.venv/bin/dashboard'   2>/dev/null || true
+pkill -f 'uip flow debug'                       2>/dev/null || true
+pkill -f 'uv run coder-eval'                    2>/dev/null || true
+pkill -f '.venv/bin/coder-eval'                 2>/dev/null || true
+pkill -f '.venv/bin/dashboard'                  2>/dev/null || true
+# claude_agent_sdk spawns a bundled `claude` binary as a subprocess of the
+# orchestrator. When the orchestrator dies (pkill above, OOM, ctrl-c), this
+# binary gets reparented to init and survives — observed running 23 min
+# post-kill, still hitting Bedrock. Match the full path to avoid catching
+# unrelated `claude` binaries on PATH.
+pkill -f 'claude_agent_sdk/_bundled/claude'     2>/dev/null || true
 
 # Sweep sandbox tempdirs. With procs killed above, anything left is orphan.
 rm -rf /tmp/coder_eval_* 2>/dev/null || true
+
+# Fail fast if the docker daemon isn't reachable — skills tasks run inside
+# coder-eval-agent containers, so a broken daemon would surface as opaque
+# per-task errors mid-suite.
+if ! docker info >/dev/null 2>&1; then
+  echo "ERROR: docker daemon unreachable (skills tasks require docker since skills#856)" >&2
+  exit 1
+fi
+
+# Reap orphan coder-eval-agent containers from a prior crashed run. The
+# daily.sh `pkill` above kills the dashboard process; child containers
+# launched via `docker run` survive their parent and need explicit cleanup.
+docker ps -aq --filter "ancestor=coder-eval-agent" 2>/dev/null \
+  | xargs -r docker rm -f >/dev/null 2>&1 || true
 
 # Wipe caches so every run does a fresh resolve. Adds ~30s to cold runs but
 # eliminates stale-pin / cache-poisoning bugs (paired with the .venv recreate
@@ -75,6 +107,14 @@ for env_file in "$REPO/.env" "$REPO/dashboard/.env"; do
     set +a
   fi
 done
+
+# Resolve MODEL after sourcing .env so the default falls back to $BEDROCK_MODEL
+# (full Bedrock id). Caller-set MODEL still wins.
+MODEL="${MODEL:-${BEDROCK_MODEL:-}}"
+if [ -z "$MODEL" ]; then
+  echo "ERROR: MODEL not set and BEDROCK_MODEL missing from .env" >&2
+  exit 1
+fi
 
 # Skills always tracks main — only coder_eval honors $BRANCH (for ad-hoc smoke tests).
 # Hard reset (not --ff-only pull) so any local cruft / untracked conflicts /
@@ -118,6 +158,22 @@ uv venv --python 3.13
 uv pip install --python .venv/bin/python -e ".[dev]" --quiet
 uv pip install --python .venv/bin/python -e "./dashboard" --quiet
 
+# Build the coder-eval-agent image. Mirrors skills/.github/workflows/smoke-skills.yml.
+# UV_INDEX_UIPATH_PASSWORD is the only one we hard-require: the Azure Artifacts
+# feed accepts the PAT as the password with an empty username, and the
+# Dockerfile reads both `--secret`s via `cat ... || true` (see docker/Dockerfile).
+if [ -z "${UV_INDEX_UIPATH_PASSWORD:-}" ]; then
+  echo "ERROR: UV_INDEX_UIPATH_PASSWORD not set (needed for docker image build)" >&2
+  exit 1
+fi
+make docker-image
+
+# The skills `default.yaml` experiment mounts `~/.uipath:/.uipath:rw` so
+# the in-container uip CLI reuses the host's cached creds. ROPC login
+# (see PR #276) already creates this dir on first `uip login`, but make
+# it idempotent so a freshly imaged VM doesn't bind-mount a missing path.
+mkdir -p "$HOME/.uipath"
+
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/$(date -u +%Y%m%dT%H%M%SZ).log"
 
@@ -136,6 +192,9 @@ set +e
 RC=$?
 set -e
 
+# Slack ping. Suppression policy (RC != 0, partial runs, low task count)
+# lives inside slack_summary.py — daily.sh just sends whatever payload it
+# produces. Empty stdout = silent run.
 if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
   PAYLOAD=$(CODER_EVAL_REPO="$REPO" .venv/bin/python \
     dashboard/scripts/ci/slack_summary.py \

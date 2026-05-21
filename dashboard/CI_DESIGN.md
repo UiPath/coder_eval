@@ -2,17 +2,17 @@
 
 How the nightly skills-suite eval is wired up: what runs, where it runs, how it authenticates, and the architectural choices behind it.
 
-_Last verified: 2026-05-18_ · _Owner: bai.li@uipath.com_
+_Last verified: 2026-05-20_ · _Owner: bai.li@uipath.com_
 
 ## Overview
 
-Every weeknight at 04:00 UTC (21:00 PT prev day / 07:00 Romania) a `systemd --user` timer on a long-lived Azure VM kicks off `daily.sh`. The slot is chosen to finish ~06:00 UTC — fresh before Romania's 9 AM standup, after Bellevue's workday. The wrapper pulls `main` for `coder_eval` and `skills`, installs `@uipath/cli@alpha` from GitHub Packages (each merge to `cli/main` publishes a fresh `-alpha.<date>.<run>` prerelease under that dist-tag, so the eval tracks CLI HEAD — matching what skills smoke does in `skills/.github/workflows/smoke-skills.yml`), syncs Python deps, runs the `skills` suite at 20x parallel via `dashboard run`, uploads the run directory to Azure Blob, ingests it into ADX, and posts a mechanical metrics summary to Slack. Auth to UiPath is via ROPC (`grant_type=password`) against a **dedicated bot user** (`coder-eval-bot@uipath-qa.com`) — a 50-min systemd timer mints a fresh access token from the bot's credentials stored in `.uipath-auth.env`. Auth to Azure Blob and ADX is via `bai.li@uipath.com`'s `az login` plus RBAC roles. A 4-hour systemd timeout and a `flock` on `/var/lock/uip-daily.lock` prevent runaway / overlapping runs.
+Every weeknight at 04:00 UTC (21:00 PT prev day / 07:00 Romania) a `systemd --user` timer on a long-lived Azure VM kicks off `daily.sh`. The slot is chosen to finish ~06:00 UTC — fresh before Romania's 9 AM standup, after Bellevue's workday. The wrapper pulls `main` for `coder_eval` and `skills`, installs `@uipath/cli@alpha` from GitHub Packages (each merge to `cli/main` publishes a fresh `-alpha.<date>.<run>` prerelease under that dist-tag, so the eval tracks CLI HEAD — matching what skills smoke does in `skills/.github/workflows/smoke-skills.yml`), syncs Python deps, builds the `coder-eval-agent` docker image (skills#856 onwards, smoke-tagged tasks run inside containers), runs the `skills` suite in parallel via `dashboard run`, uploads the run directory to Azure Blob, ingests it into ADX, and (on credible full-suite runs only) posts a mechanical metrics summary to Slack. Auth to UiPath is via ROPC (`grant_type=password`) against a **dedicated bot user** (`coder-eval-bot@uipath-qa.com`) — a 50-min systemd timer mints a fresh access token from the bot's credentials stored in `.uipath-auth.env`. Auth to Azure Blob and ADX is via `bai.li@uipath.com`'s `az login` plus RBAC roles. A 4-hour systemd timeout and a `flock` on `/var/lock/uip-daily.lock` prevent runaway / overlapping runs.
 
 ## Where things live
 
 | | |
 |---|---|
-| VM | `coder-eval-runner` · 20.51.110.31 (static) · `Standard_D4s_v3` · Ubuntu 24.04 · westus2 · RG `rg-coder-eval-tests` |
+| VM | `coder-eval-runner` · 20.51.110.31 (static) · `Standard_D8s_v3` (8 vCPU, 32 GB) · Ubuntu 24.04 · westus2 · RG `rg-coder-eval-tests` |
 | Repos on VM | `~/uipath/{coder_eval,skills}` — both on `main`. `uip` CLI lives in `~/.npm-global/bin/`, refreshed via `npm install -g @uipath/cli@alpha` from GitHub Packages each run. |
 | Wrapper logs | `~/runs-ci/<UTC-timestamp>.log` |
 | Run directory | `~/uipath/coder_eval/runs/<run-id>/` (latest symlinked at `runs/latest`) |
@@ -34,19 +34,21 @@ The systemd timer fires the `coder-eval-daily.service` oneshot, which `ExecStart
 2. **Source `.env` files** — `~/uipath/coder_eval/.env` (bedrock keys, LLMGW, UV index password, `GH_NPM_REGISTRY_TOKEN`, optional Slack webhook) and `~/uipath/coder_eval/dashboard/.env` (ADX, Azure storage, optional storage key fallback). Done after the pull so newly-added keys upstream get picked up.
 3. **Install `uip` CLI** — `npm install -g @uipath/cli@alpha` from GitHub Packages (`@uipath:registry=https://npm.pkg.github.com/`), run from a tempdir whose `.npmrc` carries the auth token. Matches the smoke workflow. `cli/main` publishes `-alpha.<date>.<run>` prereleases under the `alpha` dist-tag on every merge, so each nightly run picks up the freshest CLI; public npmjs `@latest` only moves on GitHub Releases (weeks behind main). Token comes from `GH_NPM_REGISTRY_TOKEN` in `.env` — a GitHub PAT with `read:packages` scope.
 4. **Sync Python deps** — `uv pip install -e ".[dev]"` and `-e "./dashboard"` against the in-tree `.venv`.
-5. **`dashboard run --suite skills`** under `flock -n -E 75`. Skills suite is 153 tasks × `claude-sonnet-4-6` × bedrock backend × `concurrency=20`. Tasks run in sandboxed tempdirs, each calling the bot-authenticated `uip` CLI for flow validation/debug.
-6. **Blob upload + ADX ingest** — both wrapped in try/except inside `cli.py`. A failure prints a traceback and continues, so the Slack post still fires with metrics from `runs/latest/run.json`.
-7. **Slack post** — `slack_summary.py` reads `runs/latest/run.json` and emits a JSON payload with pass/fail counts, total cost, wall duration, configured parallelism, repo SHAs, and the dashboard URL. `daily.sh` curl-POSTs to `$SLACK_WEBHOOK_URL` (no-ops if empty).
+5. **Docker preflight + image build** — fail fast if the daemon is unreachable; reap orphan `coder-eval-agent` containers and orphan `claude_agent_sdk/_bundled/claude` processes from prior crashed runs; then `make docker-image` (mirrors `smoke-skills.yml`). Required since skills#856 flipped the smoke-tagged tasks to `driver: docker`. Build needs only `UV_INDEX_UIPATH_PASSWORD` — Azure Artifacts accepts the PAT alone.
+6. **`dashboard run --suite skills`** under `flock -n -E 75`. Skills suite is every `.yaml` under `tests/tasks/**`. The `driver: docker` tasks (smoke-tagged since skills#856) run inside `coder-eval-agent` containers; the rest run in host tempdirs. Model `claude-sonnet-4-6`, resolved at runtime to `$BEDROCK_MODEL` (the full Bedrock id — the host CLI's short aliases don't resolve inside the container); backend `bedrock`; parallelism from `BatchRunConfig.max_parallel`. Task order is shuffled per run to surface cross-task resource pollution.
+7. **Blob upload + ADX ingest** — both wrapped in try/except inside `cli.py`. A failure prints a traceback and continues; metrics still land in `runs/latest/run.json` for the Slack step.
+8. **Slack post (conditional)** — `slack_summary.py` reads `runs/latest/run.json` and either emits a JSON payload (pass/fail counts, total cost, wall duration, configured parallelism, repo SHAs, dashboard URL) or prints empty stdout to suppress the ping. Suppression gates: `rc != 0` (any wrapper failure, including `flock` skip), missing `run.json` (e.g. `TASK_PATTERN` smoke mode), or `tasks_run < MIN_TASKS_FOR_PING` (the constant in `slack_summary.py` — guards against test runs and broken discovery). The webhook reaches a large channel, so the policy is biased toward silent-on-doubt. `daily.sh` curl-POSTs only when stdout is non-empty (still a full no-op if `SLACK_WEBHOOK_URL` itself is empty).
 
-Total wall time: ~1–2 hours at 20x parallel. Peak memory: ~8 GB out of 16 GB (D4s_v3 has comfortable headroom).
+Wall time and peak memory scale with task count and `max_parallel`; the VM has comfortable headroom under the current configuration.
 
 ## VM setup
 
 | | |
 |---|---|
-| SKU | `Standard_D4s_v3` (4 vCPU, 16 GB RAM, ~$140/mo PAYG). 16 GB is the floor for `concurrency=20` — smaller SKUs OOM. |
+| SKU | `Standard_D8s_v3` (8 vCPU, 32 GB RAM). Sized for `BatchRunConfig.max_parallel=20` with the docker-driver tasks each holding a full container's worth of RAM. |
 | OS | Ubuntu 24.04 LTS — matches dev laptops; `uip` CLI Just Works. |
-| Disk | 64 GB Premium SSD (repos + uv caches + sandbox dirs trend ~8–10 GB after a few weeks). |
+| Docker | Required since skills#856. Daemon must be reachable to the `azureuser` (member of the `docker` group). Image rebuilt fresh every run by `daily.sh`. |
+| Disk | 64 GB Premium SSD (repos + uv caches + sandbox dirs trend up over time; periodic cleanup recommended). |
 | NSG | SSH (22) restricted to the office egress IP; no inbound 80/443. |
 | Identity | System-assigned Managed Identity provisioned (currently unused by code; available if we migrate off user-scoped auth). |
 | Linger | `loginctl enable-linger azureuser` so `systemd --user` services run without an SSH session. |
@@ -140,14 +142,24 @@ Slack post is a **Workflow Builder webhook** (not the classic Incoming Webhooks 
 `daily.sh` shells out to `slack_summary.py` after `dashboard run` exits. The Python script reads `runs/latest/run.json` and emits a JSON payload like:
 
 ```
-:chart_with_upwards_trend: skills suite — 2026-04-29_04-09-34 (claude-sonnet-4-6 / bedrock)
-:white_check_mark: 103/153 passed (67%) · :x: 50 failed (34 fail + 16 error)
-:moneybag: $113.55 · :stopwatch: 1h 46m · 10x parallel
-:package: coder_eval @ aba0525 · skills @ 0126731 · uip @ 1.0.4
-:bar_chart: https://coder-evalboard.uipath-dev.com/runs/2026-04-29_04-09-34
+:chart_with_upwards_trend: skills suite — <run-id> (claude-sonnet-4-6 / bedrock)
+:white_check_mark: <pass>/<run> passed (<pct>%) · :x: <fail> failed (<f> fail + <e> error)
+:moneybag: $<cost> · :stopwatch: <wall> · <N>x parallel
+:package: coder_eval @ <sha> · skills @ <sha> · uip @ <ver>
+:bar_chart: https://coder-evalboard.uipath-dev.com/runs/<run-id>
 ```
 
-Pure mechanical metrics — no LLM analysis, no comparison to previous runs. The parallelism field is the configured concurrency cap from `RunSummary.max_parallel` (the suite's `BatchRunConfig.max_parallel`); the line is omitted when the field is absent from `run.json`. On hard failure (no `run.json`) or `flock` skip (exit 75), the payload degrades to a one-liner status.
+Pure mechanical metrics — no LLM analysis, no comparison to previous runs. The parallelism line is the configured cap from `RunSummary.max_parallel`; the line is omitted when the field is absent.
+
+**Suppression policy** (also in nightly step 8 above): the script prints empty stdout — which `daily.sh` treats as a no-op — when any of these gates trip:
+
+| Gate | Why suppress |
+|---|---|
+| `rc != 0` | Wrapper failure of any kind (lock conflict, crash, partial run). Metrics would be misleading; investigate the wrapper log instead. |
+| `runs/latest/run.json` missing | E.g. `TASK_PATTERN` single-task smoke that bypasses the dashboard wrapper. Nothing meaningful to summarize. |
+| `tasks_run < MIN_TASKS_FOR_PING` | The constant in `slack_summary.py`. Guards against broken task discovery and ad-hoc test runs. |
+
+The webhook reaches a large audience, so the policy is biased toward silent-on-doubt. Surfacing failures is the wrapper log's job, not Slack's.
 
 ### Webhook setup (~5 min, one-time)
 
@@ -163,12 +175,15 @@ The webhook URL is auth-equivalent — anyone with it can post to the channel. T
 
 ## Failure modes + graceful degradation
 
-- **flock contention** (`/var/lock/uip-daily.lock` held by another `uip` invocation) → `daily.sh` exits 75; Slack posts `:warning: skipped (lock held)`.
-- **Blob upload failure** (`az` not installed, RBAC revoked, key wrong) → traceback printed; run continues; ADX ingest still attempts; Slack posts metrics; dashboard URL will 404 because nothing was uploaded.
-- **ADX ingest failure** (Kusto cluster unreachable, AzureCliCredential expired) → traceback printed; run continues; Slack posts metrics; row missing from ADX (backfill via `dashboard ingest <run_dir>`).
-- **No `run.json`** (the eval itself crashed before completion) → Slack posts `:x: run failed before producing run.json (exit N)` with the wrapper log path.
-- **Systemd `TimeoutStartSec=4h` exceeded** → systemd SIGTERMs the wrapper. Slack post may not fire.
-- **VM down** → no Slack post at all (no heartbeat configured today).
+Slack is intentionally silent on failure (see the suppression policy in the Slack section). Investigate via the wrapper log + `journalctl`, not the channel.
+
+- **Docker daemon unreachable** → `daily.sh` preflight fails the run before the dashboard wrapper starts. Wrapper log carries the error.
+- **flock contention** (`/var/lock/uip-daily.lock` held by another `uip` invocation) → `daily.sh` exits 75. Slack suppressed (rc != 0).
+- **Blob upload failure** (`az` not installed, RBAC revoked, key wrong) → traceback printed; run continues; ADX ingest still attempts; Slack posts metrics if `rc == 0` and `tasks_run` is above the floor; dashboard URL will 404 because nothing was uploaded.
+- **ADX ingest failure** (Kusto cluster unreachable, AzureCliCredential expired) → traceback printed; run continues; Slack posts metrics on the same conditions; row missing from ADX (backfill via `dashboard ingest <run_dir>`).
+- **No `run.json`** (the eval itself crashed before completion) → Slack suppressed. `~/runs-ci/<latest>.log` carries the wrapper-level error.
+- **Systemd `TimeoutStartSec=4h` exceeded** → systemd SIGTERMs the wrapper. Slack suppressed (rc != 0).
+- **VM down** → no run, no Slack post (no heartbeat configured today).
 
 ## Operate
 
@@ -236,7 +251,8 @@ Single-task smoke mode: set `TASK_PATTERN=path/to/task.yaml` to skip the dashboa
 | Symptom | Where to look |
 |---|---|
 | No Slack post | `journalctl --user -u coder-eval-daily.service -n 200` |
-| Slack says "skipped (lock held)" | Find the other `uip` invocation: `ps -ef \| grep -E 'uip\|flock'` |
-| Slack says "exited N — metrics from latest run.json" | `~/runs-ci/<latest>.log` for the wrapper-level error; `runs/latest/<task>/00/task.log` for per-task |
+| Slack quiet but run expected | Expected behavior when the run failed, was a `TASK_PATTERN` smoke, or had `tasks_run < MIN_TASKS_FOR_PING`. Check `journalctl --user -u coder-eval-daily.service` and the wrapper log to confirm. |
+| Lock conflict suspected | Find the other `uip` invocation: `ps -ef \| grep -E 'uip\|flock'` |
+| Wrapper exited non-zero but tasks did run | `~/runs-ci/<latest>.log` for the wrapper-level error; `runs/latest/<task>/00/task.log` for per-task |
 | Dashboard URL 404s | Blob upload failed; re-run `dashboard upload runs/<run_id>` after fixing auth |
 | Run not in ADX | Ingest failed; re-run `dashboard ingest runs/<run_id>` after fixing auth |

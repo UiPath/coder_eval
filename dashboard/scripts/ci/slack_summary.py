@@ -6,8 +6,11 @@ Reads ``runs/latest/run.json`` to compute mechanical metrics: pass / fail
 SHAs. No LLM — pure data-from-disk.
 
 Prints a JSON object {"text": "..."} on stdout, ready to feed into the
-Slack Workflow Builder webhook. On missing run.json the message degrades
-gracefully to a one-liner so daily.sh can still notify on hard failures.
+Slack Workflow Builder webhook. Suppresses output (empty stdout) when the
+run shouldn't ping the channel — wrapper failure, missing run.json, or
+fewer than ``MIN_TASKS_FOR_PING`` tasks recorded (likely a test run /
+broken task discovery). The webhook goes to a 300-person channel, so the
+bias is heavily toward "stay silent unless we're confident".
 """
 
 from __future__ import annotations
@@ -22,6 +25,11 @@ from pathlib import Path
 REPO = Path(os.environ.get("CODER_EVAL_REPO", "/home/azureuser/uipath/coder_eval"))
 RUNS = REPO / "runs"
 DASHBOARD_BASE = "https://coder-evalboard.uipath-dev.com/runs"
+
+# Minimum tasks_run before we'll post to the channel. Production suite is ~300;
+# anything significantly lower likely means broken task discovery, a partial
+# run, or an ad-hoc smoke test — none of which the channel needs to see.
+MIN_TASKS_FOR_PING = 100
 
 
 def fmt_duration(seconds: float) -> str:
@@ -167,26 +175,29 @@ def main() -> int:
     p.add_argument("--backend", default=os.environ.get("BACKEND", ""))
     args = p.parse_args()
 
+    # Suppression policy — print nothing (daily.sh skips the curl on empty stdout)
+    # when the run shouldn't ping a 300-person channel. Gate on whether the task
+    # phase produced usable run.json data, NOT on the wrapper's exit code: once
+    # tasks have run and run.json is written, post-analysis flakes (review
+    # timeout, upload glitch) should not silence the channel — they happen after
+    # the task data is durable on disk. RC != 0 from a pre-task-phase failure
+    # (lock conflict, dep install failure, missing creds) leaves no run.json, so
+    # the load_run check below still catches those.
     latest_dir = RUNS / "latest"
     if latest_dir.is_symlink() or latest_dir.exists():
         latest_dir = latest_dir.resolve()
     cur = load_run(latest_dir) if latest_dir.exists() else None
 
-    if args.rc == 75:
-        text = f":warning: skipped (lock held — concurrent uip on the box) · suite={args.suite}"
-    elif args.rc != 0 and not cur:
-        text = f":x: run failed before producing run.json (exit {args.rc}) · suite={args.suite} · log: {args.log}"
-    elif cur:
-        text = build_metrics(cur, args.suite, args.model, args.backend)
-        if args.rc != 0:
-            text = (
-                f":warning: dashboard exited {args.rc} (some tasks may have failed) — "
-                f"metrics from latest run.json:\n" + text
-            )
-    else:
-        text = f":question: unknown state (exit {args.rc}, no run.json) · log: {args.log}"
+    if not cur:
+        # No run.json (e.g., TASK_PATTERN single-task smoke that bypasses the
+        # dashboard wrapper, or a pre-task wrapper crash). Nothing to summarize.
+        return 0
 
-    print(json.dumps({"text": text}))
+    if (cur.get("tasks_run") or 0) < MIN_TASKS_FOR_PING:
+        # Likely a test run or broken task discovery — don't spam the channel.
+        return 0
+
+    print(json.dumps({"text": build_metrics(cur, args.suite, args.model, args.backend)}))
     return 0
 
 

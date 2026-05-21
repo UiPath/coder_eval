@@ -1,5 +1,6 @@
 """Helper functions for the run command."""
 
+import random
 from pathlib import Path
 
 import typer
@@ -37,11 +38,12 @@ def discover_default_tasks() -> list[Path]:
         )
         raise typer.Exit(1)
 
-    task_files = sorted(DEFAULT_TASKS_DIR.rglob("*.yaml"))
+    task_files = list(DEFAULT_TASKS_DIR.rglob("*.yaml"))
     if not task_files:
         console.print(f"[red]No .yaml files found in {DEFAULT_TASKS_DIR}[/red]")
         raise typer.Exit(1)
 
+    random.shuffle(task_files)
     console.print(f"[dim]Discovered {len(task_files)} task(s) from {DEFAULT_TASKS_DIR}[/dim]")
     return task_files
 
@@ -91,6 +93,7 @@ def expand_task_files(task_files: list[Path]) -> list[Path]:
         console.print("[red]No task files found![/red]")
         raise typer.Exit(1)
 
+    random.shuffle(all_task_files)
     return all_task_files
 
 
