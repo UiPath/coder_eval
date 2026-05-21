@@ -733,8 +733,6 @@ def _apply_cli_overrides(
     # Sandbox driver override (CLI > task YAML). Driver value is already
     # Literal-validated upstream via BatchRunConfig; nothing to re-check.
     if config.driver is not None:
-        if task.sandbox is None:
-            raise ValueError(f"Task '{task.task_id}' has no sandbox config; cannot apply --driver override.")
         task.sandbox.driver = config.driver
         _record("sandbox.driver", config.driver, "--driver")
 

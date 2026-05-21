@@ -42,7 +42,7 @@ initial_prompt: "Instructions..."     # Prompt sent to the agent (required)
 tags: [smoke, golden, pure-python]    # Optional tags for filtering (kebab-case)
 
 agent: { ... }                        # Agent configuration (optional, resolved from experiment)
-sandbox: { ... }                      # Sandbox configuration (required)
+sandbox: { ... }                      # Sandbox configuration (optional, defaults to tempdir)
 success_criteria: [ ... ]             # List of criteria (required, at least 1)
 
 reference: { ... }                    # Optional reference solution
@@ -140,9 +140,11 @@ for the full reference.
 
 ## Sandbox Configuration
 
+The `sandbox` block is optional. When omitted, it defaults to `driver: "tempdir"` with standard Python environment.
+
 ```yaml
 sandbox:
-  driver: "tempdir"                   # Sandbox type ("tempdir" or "docker")
+  driver: "tempdir"                   # Sandbox type ("tempdir" or "docker"); default: "tempdir"
   python:                              # Python env config (null to skip venv)
     env_packages:                      # Packages to install in sandbox venv
       - pytest

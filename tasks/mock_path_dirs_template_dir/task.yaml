@@ -11,8 +11,6 @@ agent:
   allowed_tools: ["Bash", "Write"]
 
 sandbox:
-  driver: "tempdir"
-  python: null  # No venv needed; the agent just shells out to the mock binaries.
   template_sources:
     - type: "template_dir"
       path: "./mock-cli-bins"

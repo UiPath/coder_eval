@@ -15,8 +15,6 @@ agent:
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
 
 sandbox:
-  driver: "tempdir"
-  python: {}
   template_sources:
     - type: "template_dir"
       path: ../templates/wrong-import-path-agent

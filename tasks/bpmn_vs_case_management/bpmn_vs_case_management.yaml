@@ -10,8 +10,6 @@ agent:
   allowed_tools: ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
 
 sandbox:
-  driver: "tempdir"
-  python: null
   template_sources:
     - type: template_dir
       path: "template"

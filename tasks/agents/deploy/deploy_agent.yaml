@@ -18,8 +18,6 @@ agent:
       path: ../skills
 
 sandbox:
-  driver: "tempdir"
-  python: {}
   template_sources:
     - type: "template_dir"
       path: templates/word-count-agent

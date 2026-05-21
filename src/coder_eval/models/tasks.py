@@ -322,7 +322,10 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
     agent: AgentConfig | None = Field(
         default=None, description="Agent configuration (resolved from experiment if omitted)"
     )
-    sandbox: SandboxConfig = Field(description="Sandbox configuration")
+    sandbox: SandboxConfig = Field(
+        default_factory=SandboxConfig,
+        description="Sandbox configuration (defaults to tempdir if omitted)",
+    )
     success_criteria: list[SuccessCriterion] = Field(description="List of criteria that must all pass for task success")
     run_limits: RunLimits | None = Field(
         default=None,

@@ -30,7 +30,7 @@ from coder_eval.isolation.docker_runner import (
     HEARTBEAT_STALE_SECONDS,
 )
 from coder_eval.logging_config import setup_logging
-from coder_eval.models import ConfigLineageEntry, SandboxConfig
+from coder_eval.models import ConfigLineageEntry
 from coder_eval.orchestration.task_loader import load_task
 
 
@@ -147,9 +147,8 @@ def run_task_internal_command(
     # Force driver back to tempdir for the actual in-container run.
     # We're already inside the container; another nested docker would be
     # both wrong and impossible (no docker CLI in image).
-    sandbox = task.sandbox or SandboxConfig()
-    if sandbox.driver == "docker":
-        task = task.model_copy(update={"sandbox": sandbox.model_copy(update={"driver": "tempdir"})})
+    if task.sandbox.driver == "docker":
+        task = task.model_copy(update={"sandbox": task.sandbox.model_copy(update={"driver": "tempdir"})})
 
     output_dir.mkdir(parents=True, exist_ok=True)
 

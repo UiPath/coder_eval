@@ -30,7 +30,6 @@ from coder_eval.models import (
     EvaluationResult,
     FinalStatus,
     ResourceLimits,
-    SandboxConfig,
 )
 from coder_eval.streaming.callbacks import safe_emit
 from coder_eval.streaming.wire import deserialize_event, has_prefix
@@ -300,13 +299,11 @@ class DockerRunner:
 
     @property
     def _docker_config(self) -> DockerDriverConfig:
-        sandbox = self.rt.task.sandbox or SandboxConfig()
-        return sandbox.docker
+        return self.rt.task.sandbox.docker
 
     @property
     def _limits(self) -> ResourceLimits:
-        sandbox = self.rt.task.sandbox or SandboxConfig()
-        return sandbox.limits
+        return self.rt.task.sandbox.limits
 
     async def run(self) -> EvaluationResult:
         """Run the task in a container and return the parsed EvaluationResult.

@@ -8,10 +8,6 @@ agent:
   permission_mode: "acceptEdits"  # Safer default
   allowed_tools: ["Read", "Write", "Bash"]
 
-sandbox:
-  driver: "tempdir"
-  python: {}
-
 success_criteria:
   - type: "file_exists"
     path: "app.py"

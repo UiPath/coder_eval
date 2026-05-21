@@ -4,16 +4,13 @@ tags: [example, basic]
 
 run_limits:
   max_turns: 3
+
 agent:
   type: "claude-code"
   permission_mode: acceptEdits
   allowed_tools: ["Bash"]
 
 sandbox:
-  driver: "tempdir"
-  python: {}
-
-  # Snapshot configuration
   snapshots:
     mode: "hybrid"  # Options: disabled, full, incremental, hybrid
     checkpoint_frequency: 2  # Full snapshot every 2 iterations (hybrid mode only)

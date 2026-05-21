@@ -8,8 +8,6 @@ agent:
   allowed_tools: ["Bash", "Write"]
 
 sandbox:
-  driver: "tempdir"
-  python: null  # No venv needed; we only invoke the mock binary.
   mock_path_dirs:
     - "mocks"
   template_sources:

@@ -52,13 +52,15 @@ class TestDriverOverride:
         assert entry.source == "cli"
         assert entry.source_detail == "--driver"
 
-    def test_missing_sandbox_raises_clear_error(self):
-        """Override against a task without a `sandbox:` block must fail loud."""
+    def test_sandbox_always_present(self):
+        """Sandbox is always present (uses default_factory), so it can always be overridden."""
         task = _make_task()
-        task.sandbox = None  # type: ignore[assignment]
+        # Even a minimal task without explicit sandbox has it set by default_factory
+        assert task.sandbox is not None
         config = BatchRunConfig(run_dir=tmp_subdir("x"), driver="docker")
-        with pytest.raises(ValueError, match="no sandbox config"):
-            _apply_cli_overrides(task, config)
+        # Override should succeed since sandbox is always present
+        _apply_cli_overrides(task, config)
+        assert task.sandbox.driver == "docker"
 
     def test_invalid_driver_value_rejected_at_config_layer(self):
         """`BatchRunConfig.driver` is Literal-typed; bogus values fail Pydantic validation."""

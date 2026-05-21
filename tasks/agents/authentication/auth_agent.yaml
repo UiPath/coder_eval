@@ -17,10 +17,6 @@ agent:
     - type: "local"
       path: ../skills
 
-sandbox:
-  driver: "tempdir"
-  python: {}
-
 success_criteria:
   - type: "command_executed"
     tool_name: "Bash"

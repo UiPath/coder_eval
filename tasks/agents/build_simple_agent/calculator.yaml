@@ -15,10 +15,6 @@ agent:
     - type: "local"
       path: ../skills
 
-sandbox:
-  driver: "tempdir"
-  python: {}
-
 success_criteria:
   - type: "file_check"
     path: "main.py"

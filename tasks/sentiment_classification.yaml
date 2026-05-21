@@ -7,11 +7,6 @@ agent:
   permission_mode: "acceptEdits"
   allowed_tools: ["Write"]
 
-sandbox:
-  driver: "tempdir"
-  python: null
-
-
 # Row 3 is intentionally mislabeled (text is clearly positive but expected=negative).
 # A correct model produces: accuracy 2/3, recall(positive)=1/2, recall(negative)=1/1,
 # precision(positive)=1/1, precision(negative)=1/2, f1(positive)=f1(negative)=2/3.

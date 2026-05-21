@@ -25,10 +25,6 @@ agent:
   permission_mode: "acceptEdits"
   allowed_tools: ["Bash"]
 
-sandbox:
-  driver: "tempdir"
-  python: {}
-
 success_criteria:
   # If the orchestrator's task_timeout watchdog fires, this criterion never
   # runs (sandbox never reaches the check phase). The bucket-level assertion

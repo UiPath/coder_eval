@@ -29,10 +29,6 @@ agent:
   permission_mode: "acceptEdits"
   allowed_tools: ["Bash"]
 
-sandbox:
-  driver: "tempdir"
-  python: {}
-
 success_criteria:
   # The single turn runs, criteria check returns FAIL, then the budget gate
   # short-circuits the run to COST_BUDGET_EXCEEDED (a "failed"-category status).

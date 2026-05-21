@@ -18,10 +18,6 @@ agent:
   permission_mode: "acceptEdits"
   allowed_tools: ["Write"]
 
-sandbox:
-  driver: "tempdir"
-  python: {}
-
 success_criteria:
   - type: "file_exists"
     path: "out.txt"
