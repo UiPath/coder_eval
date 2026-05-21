@@ -2,12 +2,23 @@
 
 import json
 import logging
+import re
 import shlex
 import uuid
 from typing import TYPE_CHECKING, Any
 
 from coder_eval.criteria.base import BaseCriterion, register_criterion
 from coder_eval.models import CriterionResult, UiPathEvalCriterion
+
+
+# Detector for "the `uipath` CLI is not available in the sandbox". Sandboxes run
+# on Linux (/bin/sh — dash on Ubuntu), so exit code 127 + "command not found" is
+# the only shell signal we need to recognize. The regex also matches the python
+# ModuleNotFoundError format for tasks that run `python -m uipath`.
+_UIPATH_MISSING_PATTERN = re.compile(
+    r"\buipath\b.*command not found|no module named ['\"]?uipath['\"]?(?:\s|$)",
+    re.IGNORECASE,
+)
 
 
 if TYPE_CHECKING:
@@ -62,11 +73,26 @@ class UiPathEvalChecker(BaseCriterion[UiPathEvalCriterion]):
         exit_code, _, stderr = sandbox.run_command(cmd)
 
         if exit_code != 0:
+            stderr_text = stderr or ""
+            # Exit code 127 is the POSIX "command not found" signal; the regex
+            # also catches `ModuleNotFoundError` for tasks that invoke
+            # `python -m uipath` instead of the CLI.
+            cli_missing = exit_code == 127 or bool(_UIPATH_MISSING_PATTERN.search(stderr_text))
+            hint = ""
+            if cli_missing:
+                # The host's `[uipath]` extra installs `uipath` into the host
+                # venv; the sandbox runs in its own `uv` environment and must
+                # resolve `uipath` from the task's own deps.
+                hint = (
+                    " — the sandbox could not resolve the `uipath` CLI. "
+                    "Ensure the task's Python deps include `uipath` (the in-sandbox "
+                    "dependency is separate from the host's `coder-eval[uipath]` extra)."
+                )
             return CriterionResult(
                 criterion_type=criterion.type,
                 description=criterion.description,
                 score=0.0,
-                details=f"Command failed with exit code {exit_code}: {stderr}",
+                details=f"Command failed with exit code {exit_code}: {stderr}{hint}",
             )
 
         # Parse the output JSON file

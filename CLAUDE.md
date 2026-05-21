@@ -243,7 +243,9 @@ Tasks are YAML files. See [docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_G
 
 ## Dependencies
 
-**Runtime**: pydantic, pydantic-settings, pyyaml, typer, rich, python-dotenv, anthropic, claude-agent-sdk, anyio, uipath, uipath-llmgw-client, pylint, radon
+**Runtime (always)**: pydantic, pydantic-settings, pyyaml, typer, rich, python-dotenv, anthropic, claude-agent-sdk, anyio, pylint, radon, tqdm, aiohttp, jmespath, jsonschema
+
+**Runtime (optional, `[uipath]` extra)**: uipath, uipath-llmgw-client — required only for the LLMGW judge transport, the `rephrase` prompt mutation, and (in-host) the `uipath` SDK. Base installs without this extra still run end-to-end; LLMGW-dependent paths fail at dispatch with a clear `pip install 'coder-eval[uipath]'` hint. See `docs/features/2026-05-19-optional-uipath-packages.md`.
 
 **Dev**: pytest, pytest-asyncio, pytest-mock, pytest-cov, ruff, pyright, pip-audit, bandit, pre-commit, mcp
 

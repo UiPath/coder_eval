@@ -24,7 +24,7 @@ def test_helper_raises_when_package_missing(monkeypatch):
     with pytest.raises(RuntimeError) as exc_info:
         llmgw.get_llmgw_chat_model(model="anthropic.foo", temperature=0.0, max_tokens=100)
 
-    assert "pip install uipath-llmgw-client" in str(exc_info.value)
+    assert "coder-eval[uipath]" in str(exc_info.value)
 
 
 def test_helper_passes_args_through(monkeypatch):

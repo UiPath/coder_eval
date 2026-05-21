@@ -388,8 +388,6 @@ dependencies = [
     { name = "rich" },
     { name = "tqdm" },
     { name = "typer" },
-    { name = "uipath" },
-    { name = "uipath-llmgw-client" },
 ]
 
 [package.optional-dependencies]
@@ -405,6 +403,10 @@ dev = [
     { name = "pytest-mock" },
     { name = "pytest-xdist", extra = ["psutil"] },
     { name = "ruff" },
+]
+uipath = [
+    { name = "uipath" },
+    { name = "uipath-llmgw-client" },
 ]
 
 [package.metadata]
@@ -435,10 +437,10 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.7" },
     { name = "tqdm", specifier = ">=4.67.3" },
     { name = "typer", specifier = ">=0.24.1" },
-    { name = "uipath", specifier = ">=2.10.31" },
-    { name = "uipath-llmgw-client", specifier = ">=1.0.0", index = "https://uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/" },
+    { name = "uipath", marker = "extra == 'uipath'", specifier = ">=2.10.31" },
+    { name = "uipath-llmgw-client", marker = "extra == 'uipath'", specifier = ">=1.0.0", index = "https://uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "uipath"]
 
 [[package]]
 name = "colorama"

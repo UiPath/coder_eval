@@ -26,7 +26,9 @@ def create_rephrase_fn() -> RephraseFn:
         Callable that takes (current_prompt, PromptRephrase) and returns rephrased text.
 
     Raises:
-        RuntimeError: If uipath_llmgw_client is not installed.
+        RuntimeError: If ``uipath_llmgw_client`` is not installed. The
+            wrapped error message points at the optional ``[uipath]``
+            extra (``pip install 'coder-eval[uipath]'``).
     """
     cache: dict[tuple[str, float, int], Any] = {}
 

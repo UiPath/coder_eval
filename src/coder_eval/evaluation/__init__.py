@@ -7,6 +7,6 @@ This package contains:
 
 NO re-exports - use explicit imports:
     from coder_eval.evaluation.checker import SuccessChecker
-    from coder_eval.evaluation.llmgw import get_llmgw_chat_model
+    from coder_eval.evaluation.llmgw import get_llmgw_chat_model, is_llmgw_client_installed
     from coder_eval.evaluation.summaries import summarize_commands
 """

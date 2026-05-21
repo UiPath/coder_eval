@@ -14,8 +14,6 @@ dependencies = [
     "anthropic>=0.86.0",
     "claude-agent-sdk>=0.2.82",
     "anyio>=4.13.0",
-    "uipath>=2.10.31",
-    "uipath-llmgw-client>=1.0.0",
     "pylint>=4.0.5",
     "radon>=6.0.1",
     "tqdm>=4.67.3",
@@ -37,6 +35,17 @@ dev = [
     "pip-audit>=2.10.0",
     "bandit[toml]>=1.9.4",
     "pre-commit>=4.5.1",
+]
+# Optional extra that enables UiPath-specific features:
+#   - llm_judge via the LLMGW chat-model transport (uipath-llmgw-client)
+#   - prompt `rephrase` mutation (uipath-llmgw-client)
+#   - the `uipath` Python SDK on the host (handy for local sandbox parity with
+#     tasks that invoke `uv run uipath eval ...`)
+# Without this extra, the framework still installs and runs; UiPath-dependent
+# code paths fail at dispatch with a clear hint pointing back here.
+uipath = [
+    "uipath>=2.10.31",
+    "uipath-llmgw-client>=1.0.0",
 ]
 
 [project.scripts]

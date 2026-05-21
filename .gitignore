@@ -23,6 +23,7 @@ var/
 
 # Virtual environments
 .venv
+.venv-noextra
 venv/
 ENV/
 env/

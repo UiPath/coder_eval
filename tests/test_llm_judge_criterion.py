@@ -618,6 +618,8 @@ def test_judge_direct_route_with_no_transport_fails_with_clear_error(sandbox: Sa
     assert result.error is not None
     assert "ANTHROPIC_API_KEY" in result.error
     assert "LLMGW" in result.error
+    # The error should point users at the optional [uipath] extra.
+    assert "coder-eval[uipath]" in result.error
     assert result.findings == []
     assert result.transcript is None
     assert m_llmgw.call_count == 0

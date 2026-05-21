@@ -514,6 +514,8 @@ Checks whether the agent executed specific tools/commands during evaluation. Ins
 
 Evaluates a UiPath agent against a named evaluation set. **Fractional scoring:** metrics passed / total metrics.
 
+> The `uipath` CLI must be available **inside the sandbox** (typically declared in the task's own Python deps). This is independent of the host's optional `coder-eval[uipath]` extra — see the install matrix in [README.md](../README.md#installation).
+
 ```yaml
 - type: "uipath_eval"
   agent_name: "my-agent"
@@ -533,6 +535,8 @@ Evaluates a UiPath agent against a named evaluation set. **Fractional scoring:**
 ### `llm_judge`
 
 Have an LLM grade the task against a rubric written in the task YAML. **Continuous scoring** from a JSON verdict `{"score": 0.0-1.0, "rationale": "..."}`; parse failure, non-numeric score, or LLM error all produce `score=0.0` with an `error` populated.
+
+> Routing the judge through the **LLM Gateway** transport (when `ANTHROPIC_API_KEY` is absent and `LLMGW_*` creds are set) requires the optional `coder-eval[uipath]` extra. With the extra missing, the run still starts and `llm_judge` reports a clear `error` pointing at `pip install 'coder-eval[uipath]'`. Anthropic-SDK and Bedrock transports do **not** need the extra.
 
 ```yaml
 - type: "llm_judge"

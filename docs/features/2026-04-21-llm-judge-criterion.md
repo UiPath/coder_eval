@@ -62,7 +62,7 @@ Every failure maps to `score=0.0` with `error` populated (no exceptions escape):
 - Non-JSON response from the model → parse failure
 - `score` key missing from the JSON verdict
 - `score` is not coercible to a float
-- Missing `uipath_llmgw_client` package → `RuntimeError` from `get_llmgw_chat_model`, routed through `@handle_criterion_errors`
+- Missing `uipath_llmgw_client` package → `RuntimeError` from `get_llmgw_chat_model` with a `pip install 'coder-eval[uipath]'` hint, routed through `@handle_criterion_errors`. The package now ships via the optional [`[uipath]`](./2026-05-19-optional-uipath-packages.md) extra, so a base install no longer pulls it in.
 - LLM Gateway unavailable / network error → same path as above
 
 Out-of-range scores (`score: 1.7`, `score: -0.3`) are silently **clamped**, not errored — the judge is allowed to over-/under-shoot as long as the value is numeric.

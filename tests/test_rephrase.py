@@ -1,4 +1,9 @@
-"""Tests for orchestration/rephrase.py — LLM Gateway rephrase callback."""
+"""Tests for orchestration/rephrase.py — LLM Gateway rephrase callback.
+
+The tests patch the ``get_llmgw_chat_model`` wrapper (not the underlying
+``uipath_llmgw_client`` module) so they run without the optional ``[uipath]``
+extra installed.
+"""
 
 from unittest.mock import MagicMock, patch
 
@@ -7,17 +12,20 @@ import pytest
 from coder_eval.models import PromptRephrase
 
 
+_PATCH_TARGET = "coder_eval.orchestration.rephrase.get_llmgw_chat_model"
+
+
 class TestCreateRephraseFn:
     """Tests for create_rephrase_fn() factory and the returned callback."""
 
-    @patch("uipath_llmgw_client.get_langchain_chat_model")
+    @patch(_PATCH_TARGET)
     def test_returns_callable(self, mock_get_model):
         from coder_eval.orchestration.rephrase import create_rephrase_fn
 
         fn = create_rephrase_fn()
         assert callable(fn)
 
-    @patch("uipath_llmgw_client.get_langchain_chat_model")
+    @patch(_PATCH_TARGET)
     def test_rephrase_calls_llm_and_returns_content(self, mock_get_model):
         from coder_eval.orchestration.rephrase import create_rephrase_fn
 
@@ -39,7 +47,7 @@ class TestCreateRephraseFn:
         assert "Make it concise" in call_args[1]["content"]
         assert "original prompt" in call_args[1]["content"]
 
-    @patch("uipath_llmgw_client.get_langchain_chat_model")
+    @patch(_PATCH_TARGET)
     def test_llm_client_cached_by_config(self, mock_get_model):
         from coder_eval.orchestration.rephrase import create_rephrase_fn
 
@@ -53,10 +61,10 @@ class TestCreateRephraseFn:
         fn("prompt1", mutation)
         fn("prompt2", mutation)
 
-        # Same config → get_langchain_chat_model called only once
+        # Same config → wrapper called only once
         assert mock_get_model.call_count == 1
 
-    @patch("uipath_llmgw_client.get_langchain_chat_model")
+    @patch(_PATCH_TARGET)
     def test_different_configs_create_separate_clients(self, mock_get_model):
         from coder_eval.orchestration.rephrase import create_rephrase_fn
 
@@ -71,7 +79,7 @@ class TestCreateRephraseFn:
         # Different models → two separate clients
         assert mock_get_model.call_count == 2
 
-    @patch("uipath_llmgw_client.get_langchain_chat_model")
+    @patch(_PATCH_TARGET)
     def test_llm_invoke_error_wrapped_with_context(self, mock_get_model):
         from coder_eval.orchestration.rephrase import create_rephrase_fn
 
@@ -85,7 +93,7 @@ class TestCreateRephraseFn:
         with pytest.raises(RuntimeError, match=r"Prompt rephrase failed.*test-model.*gateway timeout"):
             fn("prompt", mutation)
 
-    @patch("uipath_llmgw_client.get_langchain_chat_model")
+    @patch(_PATCH_TARGET)
     def test_non_string_content_converted(self, mock_get_model):
         from coder_eval.orchestration.rephrase import create_rephrase_fn
 

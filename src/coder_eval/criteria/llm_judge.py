@@ -109,20 +109,25 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
                     max_tokens=criterion.max_tokens,
                 )
             case DirectRoute(judge_transport=None):
-                # Neither ANTHROPIC_API_KEY nor LLMGW creds were configured at startup.
-                # Return a properly-typed JudgeCriterionResult so renderers / aggregators
-                # that switch on ``isinstance(cr, JudgeCriterionResult)`` see the uniform
-                # shape — mirrors the TurnTimeoutError arm in agent_judge.py.
-                logger.error("llm_judge unreachable: no ANTHROPIC_API_KEY and no LLMGW_* credentials configured")
+                # No usable transport was resolved at startup: either no creds
+                # were configured, or LLMGW creds are set but the optional
+                # ``[uipath]`` extra (uipath_llmgw_client) is not installed.
+                # Return a properly-typed JudgeCriterionResult so renderers /
+                # aggregators that switch on ``isinstance(cr, JudgeCriterionResult)``
+                # see the uniform shape — mirrors the TurnTimeoutError arm in
+                # agent_judge.py.
+                logger.error("llm_judge unreachable: no ANTHROPIC_API_KEY and no usable LLMGW transport")
                 return JudgeCriterionResult(
                     criterion_type=criterion.type,
                     description=criterion.description,
                     score=0.0,
                     details="(judge transport unconfigured)",
                     error=(
-                        "llm_judge requires ANTHROPIC_API_KEY or the LLMGW_* credential set; "
-                        "neither is configured. Set one in your environment, or remove/"
-                        "disable the llm_judge criterion."
+                        "llm_judge requires one of:\n"
+                        "  - ANTHROPIC_API_KEY in the environment, or\n"
+                        "  - the LLMGW_* credential set AND the `coder-eval[uipath]` extra "
+                        "installed (pip install 'coder-eval[uipath]').\n"
+                        "Set one of the above, or remove/disable the llm_judge criterion."
                     ),
                 )
             case DirectRoute() | ProxyRoute():

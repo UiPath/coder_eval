@@ -167,6 +167,85 @@ class TestUiPathEvalCriterion:
         assert result.score == 0.0
         assert "Command failed with exit code 1" in result.details
 
+    def test_command_failure_uipath_cli_missing_appends_hint(self):
+        """When stderr signals a missing in-sandbox `uipath` CLI, details append the hint."""
+        sandbox = MockSandbox()
+        sandbox.set_command_result(127, "", "/bin/sh: uipath: command not found")
+
+        criterion = UiPathEvalCriterion(
+            description="Verify UiPath eval metrics",
+            agent_name="any",
+            eval_set="test_eval",
+            thresholds={"success_rate": 0.90},
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion)
+
+        assert result.score == 0.0
+        assert "could not resolve the `uipath` CLI" in result.details
+        # The hint mentions the in-sandbox source of truth, not the host extra.
+        assert "in-sandbox dependency" in result.details
+
+    def test_command_failure_module_not_found_appends_hint(self):
+        """A 'No module named uipath' error also triggers the hint."""
+        sandbox = MockSandbox()
+        sandbox.set_command_result(1, "", "Traceback: ModuleNotFoundError: No module named 'uipath'")
+
+        criterion = UiPathEvalCriterion(
+            description="Verify UiPath eval metrics",
+            agent_name="any",
+            eval_set="test_eval",
+            thresholds={"success_rate": 0.90},
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion)
+
+        assert result.score == 0.0
+        assert "could not resolve the `uipath` CLI" in result.details
+
+    def test_command_failure_exit_code_127_appends_hint_even_with_empty_stderr(self):
+        """Exit code 127 alone is enough — some shells produce empty stderr on command-not-found."""
+        sandbox = MockSandbox()
+        sandbox.set_command_result(127, "", "")
+
+        criterion = UiPathEvalCriterion(
+            description="Verify UiPath eval metrics",
+            agent_name="any",
+            eval_set="test_eval",
+            thresholds={"success_rate": 0.90},
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion)
+
+        assert result.score == 0.0
+        assert "could not resolve the `uipath` CLI" in result.details
+
+    def test_command_failure_unrelated_stderr_does_not_append_hint(self):
+        """Arbitrary stderr (no CLI-missing signature, non-trigger exit code) must NOT get the hint.
+
+        Regression guard for the prior substring-only heuristic, which would have
+        matched if a task's stderr happened to contain the trigger phrases for
+        unrelated reasons.
+        """
+        sandbox = MockSandbox()
+        sandbox.set_command_result(1, "", "TypeError: cannot compare 'int' and 'str'")
+
+        criterion = UiPathEvalCriterion(
+            description="Verify UiPath eval metrics",
+            agent_name="any",
+            eval_set="test_eval",
+            thresholds={"success_rate": 0.90},
+        )
+
+        checker = SuccessChecker(sandbox)
+        result = checker.check(criterion)
+
+        assert result.score == 0.0
+        assert "could not resolve the `uipath` CLI" not in result.details
+
     def test_invalid_json_output(self):
         """Test when output.json contains invalid JSON."""
         sandbox = MockSandbox()

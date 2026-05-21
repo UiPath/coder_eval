@@ -62,7 +62,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev
+        run: uv sync --frozen --extra dev --extra uipath
 
       # PHASE 1: Fast checks (fail early)
       - name: Check code formatting (ruff format)
@@ -149,6 +149,63 @@ jobs:
           echo "✅ Quality gate complete!"
           echo "📊 All checks passed: formatting, linting, types, security, tests"
 
+  no-uipath-extra:
+    # Proves that `pip install coder-eval` (without the optional `[uipath]`
+    # extra) yields a working framework: imports succeed, the criterion
+    # registry validates, and the LLMGW-specific code paths fail with a
+    # clear hint instead of an import error. UV_EXTRA_INDEX_URL is
+    # deliberately NOT set, so the private UiPath index is unreachable
+    # and `uipath` / `uipath-llmgw-client` cannot be installed.
+    name: No-Extra Install (uipath optional)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+
+      - name: Install project without [uipath] extra
+        run: |
+          uv venv .venv --clear
+          # Only the `dev` extra is requested — `[uipath]` is deliberately omitted.
+          # Without UV_EXTRA_INDEX_URL, the UiPath private index is unreachable,
+          # so this also verifies the install needs no private-feed access.
+          uv pip install --python .venv/bin/python -e ".[dev]"
+
+      - name: Verify uipath packages are NOT installed
+        run: |
+          set -e
+          ! .venv/bin/python -c "import uipath_llmgw_client" 2>/dev/null
+          ! .venv/bin/python -c "import uipath" 2>/dev/null
+          echo "✓ uipath / uipath_llmgw_client absent as expected"
+
+      - name: Verify framework imports succeed without the extra
+        run: |
+          .venv/bin/python -c "
+          import coder_eval
+          import coder_eval.models
+          import coder_eval.evaluation.llmgw as llmgw
+          import coder_eval.orchestration.rephrase
+          from coder_eval.criteria import init_criteria, CriterionRegistry
+          assert llmgw.is_llmgw_client_installed() is False
+          init_criteria(validate=True)
+          assert 'llm_judge' in CriterionRegistry.list_types()
+          assert 'uipath_eval' in CriterionRegistry.list_types()
+          print('✓ framework imports + criterion registry OK')
+          "
+
+      - name: Run optional-dependency test suite
+        run: .venv/bin/pytest tests/test_optional_dependencies.py tests/test_llm_gateway_helper.py tests/test_rephrase.py -v --no-header
+
   windows-smoke:
     name: Windows Smoke Test
     runs-on: windows-latest
@@ -213,7 +270,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev
+        run: uv sync --frozen --extra dev --extra uipath
 
       - name: Check code formatting (ruff format)
         run: .venv/Scripts/ruff format --check src/ tests/
@@ -351,7 +408,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev
+        run: uv sync --frozen --extra dev --extra uipath
 
       # All three smoke steps below omit --model. Under API_BACKEND=bedrock,
       # the agent layer prepends eu.anthropic./us.anthropic. to a bare alias
@@ -527,7 +584,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev
+        run: uv sync --frozen --extra dev --extra uipath
 
       - name: Verify required secrets are present
         run: |
@@ -720,7 +777,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev
+        run: uv sync --frozen --extra dev --extra uipath
 
       - name: Validate every skills task YAML loads under current TaskDefinition schema
         # Hard gate. Catches the class of bug where a coder_eval PR renames or

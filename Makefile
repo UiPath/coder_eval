@@ -1,11 +1,15 @@
-.PHONY: help install format check typecheck test test-live test-smoke verify clean run lint docker-image
+.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra clean run lint docker-image
 
 help:  ## Show this help message
 	@echo "Available commands:"
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-install:  ## Install project with dev dependencies (hash-verified from uv.lock)
-	uv sync --frozen --extra dev
+install:  ## Install project with dev + uipath dependencies (hash-verified from uv.lock)
+	# Includes the optional [uipath] extra so the dev install has parity with CI
+	# (LLMGW judge transport, rephrase mutation, in-host uipath SDK). Requires
+	# UV_INDEX_UIPATH_USERNAME / UV_INDEX_UIPATH_PASSWORD for the private feed —
+	# see the install matrix in README.md if you want to skip the extra.
+	uv sync --frozen --extra dev --extra uipath
 	uv run pre-commit install
 
 format:  ## Auto-format code with ruff
@@ -39,6 +43,21 @@ verify:  ## Run all verification steps (CI equivalent)
 	# uv run pip-audit --desc --skip-editable
 	# uv run bandit -r src/ -ll --format json -o bandit-report.json
 	uv run pytest tests/ -n auto -m "not live and not lint" --cov=coder_eval --cov-report=term-missing --cov-report=xml --cov-fail-under=80
+
+verify-noextra:  ## Verify the framework works without the optional [uipath] extra
+	# Build a throwaway venv that has ONLY the [dev] extra (no [uipath]); confirms
+	# `pip install coder-eval` (without the extra) is functional. Mirrors the
+	# `no-uipath-extra` CI job. Run as: `make verify-noextra` after `make install`.
+	rm -rf .venv-noextra
+	python3.13 -m venv .venv-noextra
+	.venv-noextra/bin/pip install --upgrade pip uv >/dev/null
+	.venv-noextra/bin/uv pip install --python .venv-noextra/bin/python -e ".[dev]"
+	@echo "--- verifying uipath / uipath_llmgw_client are NOT installed ---"
+	! .venv-noextra/bin/python -c "import uipath_llmgw_client" 2>/dev/null
+	! .venv-noextra/bin/python -c "import uipath" 2>/dev/null
+	@echo "--- running optional-dependency tests ---"
+	.venv-noextra/bin/pytest tests/test_optional_dependencies.py tests/test_llm_gateway_helper.py tests/test_rephrase.py -v --no-header
+	rm -rf .venv-noextra
 
 clean:  ## Clean build artifacts and cache
 	rm -rf build/ dist/ *.egg-info .pytest_cache .ruff_cache .coverage coverage.xml htmlcov/ bandit-report.json coverage.xml

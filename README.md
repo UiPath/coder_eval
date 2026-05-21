@@ -34,7 +34,7 @@ A robust, extensible framework for evaluating AI coding agents with comprehensiv
   ```bash
   brew install uv  # macOS, or: pip install uv
   ```
-- **UiPath package index credentials** — `UV_INDEX_UIPATH_USERNAME` / `UV_INDEX_UIPATH_PASSWORD` must be set and exported (required for LLMGW package). See [Agents Gym installation guide](https://github.com/UiPath/agents_gym?tab=readme-ov-file#installation) for setup instructions.
+- **UiPath package index credentials** *(optional)* — only needed if you want the `[uipath]` extra (LLMGW judge transport, `rephrase` prompt mutation, in-host `uipath` SDK). Set `UV_INDEX_UIPATH_USERNAME` / `UV_INDEX_UIPATH_PASSWORD` and export them. See the [Agents Gym installation guide](https://github.com/UiPath/agents_gym?tab=readme-ov-file#installation) for setup. Without these, install the framework without `[uipath]`; LLMGW-specific features will fail at dispatch with a clear hint.
 
 ### Installation
 
@@ -50,9 +50,24 @@ source .venv/bin/activate
 # Install with dev dependencies (recommended)
 make install
 
-# Or manually
-uv pip install -e ".[dev]"
+# Or manually — pick the surface that matches your environment:
+uv pip install -e ".[dev]"              # core + dev tools (no UiPath features)
+uv pip install -e ".[dev,uipath]"       # + LLMGW judge transport, rephrase, uipath SDK
 ```
+
+#### Which features need the `[uipath]` extra?
+
+| Feature                                                              | Needs `[uipath]`? |
+| -------------------------------------------------------------------- | ----------------- |
+| Agent loop, sandbox, all non-LLM criteria                            | no                |
+| `llm_judge` via Anthropic SDK (`ANTHROPIC_API_KEY`)                  | no                |
+| `llm_judge` via AWS Bedrock                                          | no                |
+| `llm_judge` via LLM Gateway transport (`judge_transport="llmgw"`)    | **yes**           |
+| LLM Gateway proxy backend (`api_backend=proxy`)                      | no (uses HTTP)    |
+| Prompt `rephrase` mutation                                           | **yes**           |
+| `uipath_eval` criterion (in-sandbox `uipath` CLI)                    | sandbox-side only |
+
+If you skip `[uipath]`, runs that don't touch LLMGW work unchanged. Runs that do touch it fail at dispatch with a `RuntimeError` pointing back to `pip install 'coder-eval[uipath]'`.
 
 ### Configuration
 

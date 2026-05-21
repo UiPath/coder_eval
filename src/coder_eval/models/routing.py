@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -11,6 +12,8 @@ from coder_eval.models.enums import ApiBackend
 if TYPE_CHECKING:
     from coder_eval.config import Settings
     from coder_eval.proxy.config import ProxyConfig
+
+logger = logging.getLogger(__name__)
 
 
 # Resolved-at-startup transport for the `llm_judge` criterion under DirectRoute.
@@ -22,6 +25,13 @@ JudgeTransport = Literal["anthropic", "llmgw"]
 
 # Bedrock cross-region inference profile prefixes.
 _BEDROCK_KNOWN_PREFIXES: tuple[str, ...] = ("eu.", "us.", "apac.", "global.")
+
+
+# One-shot guard for the "LLMGW creds set but package missing" warning.
+# ``resolve_route`` is called once per task in the orchestrator, so without
+# this guard a batch run would emit the same warning N times. Process-lifetime
+# state is fine here — the install state can't change mid-process.
+_llmgw_missing_warning_emitted = False
 
 
 def to_bedrock_inference_profile(model: str | None, region: str | None) -> str | None:
@@ -159,18 +169,37 @@ def resolve_route(settings: Settings) -> ApiRoute:
 
 
 def _resolve_direct_judge_transport(settings: Settings) -> JudgeTransport | None:
-    """Pick the judge transport for ``DirectRoute`` based on which creds are configured.
+    """Pick the judge transport for ``DirectRoute`` based on what's available.
 
-    Precedence: ``ANTHROPIC_API_KEY`` first, then the LLMGW credential set as a
-    fallback. Returns ``None`` if neither is configured — the run still starts,
-    but any enabled ``llm_judge`` criterion will fail at dispatch with a clear
-    error. The choice is made once at startup so it is deterministic across
-    criteria, audit-loggable, and recordable in ``environment_info``.
+    Precedence: ``ANTHROPIC_API_KEY`` first; then the LLMGW credential set
+    **and** the optional ``[uipath]`` extra (so ``uipath_llmgw_client`` is
+    importable). Returns ``None`` if neither path is usable — the run still
+    starts, but any enabled ``llm_judge`` criterion will fail at dispatch
+    with a clear error pointing at the install hint. The choice is made
+    once at startup so it is deterministic across criteria, audit-loggable,
+    and recordable in ``environment_info``.
     """
+    # Local import keeps this leaf model module free of evaluation deps.
+    from coder_eval.evaluation.llmgw import is_llmgw_client_installed
+
     if settings.anthropic_api_key:
         return "anthropic"
-    if _has_llmgw_credentials(settings):
+    has_creds = _has_llmgw_credentials(settings)
+    if has_creds and is_llmgw_client_installed():
         return "llmgw"
+    if has_creds:
+        # Operator-visible signal: full LLMGW credentials are configured but the
+        # optional package is missing, so the judge transport is being demoted
+        # to None. Logged once per process — batch runs call resolve_route per
+        # task, and repeating the same warning N times just floods the log.
+        global _llmgw_missing_warning_emitted
+        if not _llmgw_missing_warning_emitted:
+            logger.warning(
+                "LLM Gateway credentials are configured, but `uipath_llmgw_client` is not "
+                "installed — llm_judge will fail at dispatch. Install with: "
+                "pip install 'coder-eval[uipath]' (or `uv sync --extra uipath`)."
+            )
+            _llmgw_missing_warning_emitted = True
     return None
 
 
