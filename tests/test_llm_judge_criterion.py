@@ -21,11 +21,45 @@ from coder_eval.sandbox import Sandbox
 
 
 def _make_mock_llm(content: str) -> MagicMock:
-    """Return a MagicMock whose .invoke() returns an object with a .content string."""
+    """Return a MagicMock whose ``.invoke()`` returns an object that looks like both
+    legacy text-channel output (``.content``) and the typed tool-channel
+    output (``.tool_calls``).
+
+    Legacy tests pass JSON-formatted strings; this helper parses them
+    into a synthetic ``submit_verdict`` tool call so the criterion's
+    typed-channel extraction sees the same verdict the legacy parser
+    would have. Non-JSON content surfaces as zero tool calls — equivalent
+    to "judge did not call submit_verdict".
+    """
+    import json as _json
+
+    from pydantic import ValidationError
+
+    from coder_eval.models import JudgeVerdict
+
     response = MagicMock()
     response.content = content
+    response.tool_calls = []
+    try:
+        data = _json.loads(content)
+        # Validate-then-roundtrip via JudgeVerdict so out-of-range scores clamp the
+        # same way they would in production (the model would emit the post-clamp
+        # value too, since the tool's ``input_schema`` is the same).
+        verdict = JudgeVerdict.model_validate(data)
+        response.tool_calls = [{"name": "submit_verdict", "args": verdict.model_dump()}]
+    except (_json.JSONDecodeError, TypeError):
+        # Intentional: simulates the model returning prose the parser can't
+        # decode — the judge sees no tool_calls and must surface that itself.
+        pass
+    except ValidationError:
+        # Surface the validation error so legacy tests that pin
+        # ``"score field is not a number"`` / ``"score field missing"`` / etc.
+        # see the same vocabulary they did under the old parser.
+        response.tool_calls = [{"name": "submit_verdict", "args": data}]
+
     llm = MagicMock()
     llm.invoke.return_value = response
+    llm.bind_tools.return_value = llm  # bind_tools(...).invoke(...) routes through the same path
     return llm
 
 
@@ -103,14 +137,14 @@ def test_judge_score_clamped_low(sandbox: Sandbox) -> None:
     assert result.score == 0.0
 
 
-def test_judge_parse_failure(sandbox: Sandbox) -> None:
+def test_judge_no_tool_call_maps_to_score_zero(sandbox: Sandbox) -> None:
+    """When the model emits text instead of a submit_verdict tool call, score=0 with diagnostic."""
     criterion = LLMJudgeCriterion(description="x", prompt="grade")
     mock_llm = _make_mock_llm("not json at all")
     with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
         result = SuccessChecker(sandbox, init_registry=False).check(criterion)
     assert result.score == 0.0
-    assert result.error is not None
-    assert "Failed to parse" in result.error
+    assert result.error == "Judge did not call submit_verdict"
 
 
 def test_judge_non_numeric_score(sandbox: Sandbox) -> None:
@@ -174,6 +208,7 @@ def test_judge_missing_file_marker(sandbox: Sandbox, tmp_path: Path) -> None:
 def test_judge_llm_exception_maps_to_score_zero(sandbox: Sandbox) -> None:
     criterion = LLMJudgeCriterion(description="x", prompt="grade")
     mock_llm = MagicMock()
+    mock_llm.bind_tools.return_value = mock_llm  # tool-channel path goes through bind_tools()
     mock_llm.invoke.side_effect = RuntimeError("gateway down")
     with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
         result = SuccessChecker(sandbox, init_registry=False).check(criterion)
@@ -477,15 +512,19 @@ def test_judge_no_route_falls_back_to_llmgw(sandbox: Sandbox) -> None:
     assert m_anthropic.call_count == 0
 
 
+def _tool_use_block(score: float, rationale: str = "ok") -> dict:
+    return {
+        "content": [{"type": "tool_use", "name": "submit_verdict", "input": {"score": score, "rationale": rationale}}]
+    }
+
+
 def test_judge_bedrock_route_uses_bedrock_invoker(sandbox: Sandbox) -> None:
     from coder_eval.models.routing import BedrockRoute
 
     route = BedrockRoute(bearer_token="t", region="eu-north-1")
     criterion = LLMJudgeCriterion(description="x", prompt="grade")
     with (
-        patch(
-            "coder_eval.criteria.llm_judge.invoke_bedrock_judge", return_value='{"score":0.7,"rationale":"ok"}'
-        ) as m_bedrock,
+        patch("coder_eval.criteria.llm_judge.invoke_bedrock_judge", return_value=_tool_use_block(0.7)) as m_bedrock,
         patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge") as m_anthropic,
         patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model") as m_llmgw,
     ):
@@ -497,6 +536,7 @@ def test_judge_bedrock_route_uses_bedrock_invoker(sandbox: Sandbox) -> None:
     assert kwargs["model"] == criterion.model
     assert kwargs["temperature"] == criterion.temperature
     assert kwargs["max_tokens"] == criterion.max_tokens
+    assert kwargs["tool_spec"]["name"] == "submit_verdict"
     assert m_anthropic.call_count == 0
     assert m_llmgw.call_count == 0
 
@@ -507,9 +547,7 @@ def test_judge_direct_route_uses_anthropic_invoker(sandbox: Sandbox) -> None:
     route = DirectRoute()
     criterion = LLMJudgeCriterion(description="x", prompt="grade")
     with (
-        patch(
-            "coder_eval.criteria.llm_judge.invoke_anthropic_judge", return_value='{"score":0.5,"rationale":"ok"}'
-        ) as m_anthropic,
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", return_value=_tool_use_block(0.5)) as m_anthropic,
         patch("coder_eval.criteria.llm_judge.invoke_bedrock_judge") as m_bedrock,
         patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model") as m_llmgw,
     ):
@@ -527,9 +565,7 @@ def test_judge_proxy_route_uses_anthropic_invoker(sandbox: Sandbox) -> None:
     route = ProxyRoute(port=12345)
     criterion = LLMJudgeCriterion(description="x", prompt="grade")
     with (
-        patch(
-            "coder_eval.criteria.llm_judge.invoke_anthropic_judge", return_value='{"score":0.4,"rationale":"ok"}'
-        ) as m_anthropic,
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", return_value=_tool_use_block(0.4)) as m_anthropic,
         patch("coder_eval.criteria.llm_judge.invoke_bedrock_judge") as m_bedrock,
         patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model") as m_llmgw,
     ):
@@ -670,8 +706,8 @@ def test_judge_bedrock_route_threads_model_unchanged(sandbox: Sandbox) -> None:
 def test_judge_empty_rationale_returns_judge_result_with_error(sandbox: Sandbox) -> None:
     """A model that emits whitespace-only rationale → JudgeCriterionResult(error=...).
 
-    Locks in the ValidationError → parse_judge_verdict → JudgeCriterionResult(score=0.0)
-    chain — the pre-fix code would silently emit ``rationale: `` (blank) in details.
+    Locks in the ValidationError → JudgeCriterionResult(score=0.0) chain —
+    the pre-fix code would silently emit ``rationale: `` (blank) in details.
     """
     from coder_eval.models import JudgeCriterionResult
 
@@ -721,16 +757,18 @@ def test_judge_prompt_requires_findings(sandbox: Sandbox) -> None:
 
 
 def test_judge_transcript_captures_raw_verdict_by_default(sandbox: Sandbox) -> None:
+    """Tool-channel transcript stores the JSON-dumped verdict (no internal spaces) as raw_verdict."""
     criterion = LLMJudgeCriterion(description="x", prompt="grade")
-    raw = '{"score": 0.5, "rationale": "ok", "findings": ["a"]}'
-    mock_llm = _make_mock_llm(raw)
+    mock_llm = _make_mock_llm('{"score": 0.5, "rationale": "ok", "findings": ["a"]}')
     with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
         result = SuccessChecker(sandbox, init_registry=False).check(criterion)
 
     transcript = getattr(result, "transcript", None)
     assert transcript is not None
-    assert transcript.raw_verdict == raw
-    assert transcript.tool_calls == []  # llm_judge has no tool calls
+    assert '"score":0.5' in transcript.raw_verdict
+    assert '"rationale":"ok"' in transcript.raw_verdict
+    assert '"findings":["a"]' in transcript.raw_verdict
+    assert transcript.tool_calls == []  # llm_judge transcript carries no sub-agent tool calls
 
 
 def test_judge_capture_transcript_false_drops_transcript(sandbox: Sandbox) -> None:
@@ -787,8 +825,8 @@ def test_judge_legacy_two_field_verdict_still_parses(sandbox: Sandbox) -> None:
     assert getattr(result, "findings", []) == []
 
 
-def test_judge_parse_failure_still_carries_transcript(sandbox: Sandbox) -> None:
-    """Even on parse failure we want the raw response captured for audit."""
+def test_judge_no_tool_call_still_carries_transcript(sandbox: Sandbox) -> None:
+    """Even when the model emits no submit_verdict call, the transcript records the diagnostic."""
     criterion = LLMJudgeCriterion(description="x", prompt="grade")
     mock_llm = _make_mock_llm("totally not json")
     with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
@@ -797,7 +835,7 @@ def test_judge_parse_failure_still_carries_transcript(sandbox: Sandbox) -> None:
     assert result.score == 0.0
     transcript = getattr(result, "transcript", None)
     assert transcript is not None
-    assert "totally not json" in transcript.raw_verdict
+    assert "Judge did not call submit_verdict" in transcript.raw_verdict
 
 
 # --- enabled flag (master skip) ---
@@ -874,3 +912,136 @@ def test_judge_agent_output_empty_does_not_emit_block(sandbox: Sandbox) -> None:
     details = result.details or ""
     assert "notes:" in details
     assert "latest agent output is empty" in details
+
+
+# --- submit_verdict tool channel ---
+
+
+class _StubLLMWithToolCall:
+    """Mimics a LangChain chat model: ``.bind_tools(...)`` returns self, ``.invoke()`` returns AIMessage."""
+
+    def __init__(self, tool_calls: list[dict[str, Any]]) -> None:
+        self._tool_calls = tool_calls
+        self._bound = False
+
+    def bind_tools(self, tools: list, tool_choice: str | None = None) -> _StubLLMWithToolCall:
+        self._bound = True
+        return self
+
+    def invoke(self, messages: list) -> MagicMock:
+        response = MagicMock()
+        response.tool_calls = self._tool_calls
+        return response
+
+
+def test_llm_judge_tool_channel_happy_path(sandbox: Sandbox) -> None:
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    stub = _StubLLMWithToolCall(
+        [{"name": "submit_verdict", "args": {"score": 0.6, "rationale": "ok", "findings": ["a"]}}]
+    )
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=stub):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+    assert result.score == 0.6
+    assert result.error is None
+    assert stub._bound, "bind_tools was not called"
+
+
+def test_llm_judge_tool_channel_did_not_call(sandbox: Sandbox) -> None:
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    stub = _StubLLMWithToolCall([])  # model returned text only, no tool call
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=stub):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+    assert result.score == 0.0
+    assert result.error == "Judge did not call submit_verdict"
+
+
+def test_llm_judge_tool_channel_invalid_args(sandbox: Sandbox) -> None:
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    stub = _StubLLMWithToolCall([{"name": "submit_verdict", "args": {"score": "not numeric"}}])
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=stub):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+    assert result.score == 0.0
+    assert result.error is not None
+    assert "score field is not a number" in result.error
+
+
+def test_llm_judge_tool_channel_last_call_wins(sandbox: Sandbox) -> None:
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    stub = _StubLLMWithToolCall(
+        [
+            {"name": "submit_verdict", "args": {"score": 0.2, "rationale": "first"}},
+            {"name": "submit_verdict", "args": {"score": 0.9, "rationale": "second"}},
+        ]
+    )
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=stub):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+    assert result.score == 0.9
+
+
+def test_llm_judge_tool_channel_transcript_carries_structured_verdict(sandbox: Sandbox) -> None:
+    """Tool channel transcript stores the JSON-dumped verdict, not the agent's raw text."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    stub = _StubLLMWithToolCall(
+        [{"name": "submit_verdict", "args": {"score": 0.42, "rationale": "headline", "findings": ["f1"]}}]
+    )
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=stub):
+        result = SuccessChecker(sandbox, init_registry=False).check(criterion)
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    assert '"score":0.42' in transcript.raw_verdict
+
+
+def test_llm_judge_transport_unconfigured(sandbox: Sandbox) -> None:
+    from coder_eval.models.routing import DirectRoute
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute(judge_transport=None)).check(criterion)
+    assert result.score == 0.0
+    assert "transport unconfigured" in (result.details or "")
+
+
+def test_llm_judge_tool_channel_bedrock(sandbox: Sandbox) -> None:
+    """Bedrock route uses the Anthropic-native tool format and feeds the dict extractor."""
+    from coder_eval.models.routing import BedrockRoute
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    bedrock_response = {
+        "content": [
+            {"type": "tool_use", "name": "submit_verdict", "input": {"score": 0.81, "rationale": "ok"}},
+        ]
+    }
+    with patch("coder_eval.criteria.llm_judge.invoke_bedrock_judge", return_value=bedrock_response) as mock_invoke:
+        result = SuccessChecker(
+            sandbox, init_registry=False, route=BedrockRoute(bearer_token="t", region="us-east-1")
+        ).check(criterion)
+    assert result.score == 0.81
+    # Confirm we passed the Anthropic-native tool spec.
+    kwargs = mock_invoke.call_args.kwargs
+    assert kwargs["tool_spec"]["name"] == "submit_verdict"
+    assert "input_schema" in kwargs["tool_spec"]
+
+
+def test_llm_judge_tool_channel_anthropic_direct(sandbox: Sandbox) -> None:
+    """DirectRoute (anthropic transport) uses invoke_anthropic_judge returning a dict."""
+    from coder_eval.models.routing import DirectRoute
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    anthropic_dict = {
+        "content": [
+            {"type": "tool_use", "name": "submit_verdict", "input": {"score": 0.33, "rationale": "ok"}},
+        ]
+    }
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", return_value=anthropic_dict) as mock_invoke:
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute(judge_transport="anthropic")).check(
+            criterion
+        )
+    assert result.score == 0.33
+    assert mock_invoke.call_args.kwargs["tool_spec"]["name"] == "submit_verdict"
+
+
+def test_llm_judge_rejects_legacy_verdict_channel_field() -> None:
+    """YAML still carrying ``verdict_channel`` raises a migration-friendly error."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="verdict_channel field was removed"):
+        LLMJudgeCriterion.model_validate({"description": "x", "prompt": "grade", "verdict_channel": "text"})

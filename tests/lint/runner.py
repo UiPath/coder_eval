@@ -15,6 +15,8 @@ from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
 from tests.lint.rules.no_silent_except import NoSilentExcept
 from tests.lint.rules.no_submodule_model_imports import NoSubmoduleModelImports
 from tests.lint.rules.no_top_level_run_limits_access import NoTopLevelRunLimitsAccess
+from tests.lint.rules.no_transcript_regex_in_eval import NoTranscriptRegexInEval
+from tests.lint.rules.no_type_name_string_dispatch import NoTypeNameStringDispatch
 from tests.lint.rules.open_explicit_encoding import OpenExplicitEncoding
 from tests.lint.rules.read_text_explicit_encoding import ReadTextExplicitEncoding
 from tests.lint.rules.register_criterion_required import RegisterCriterionRequired
@@ -37,6 +39,8 @@ ALL_RULES: list[RuleClass] = [
     SubprocessRunExplicitEncoding,
     OpenExplicitEncoding,
     YamlModelsForbidExtras,
+    NoTypeNameStringDispatch,
+    NoTranscriptRegexInEval,
 ]
 
 _NOQA_ALL = re.compile(r"#\s*noqa\s*$")

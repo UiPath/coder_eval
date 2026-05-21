@@ -9,12 +9,17 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class JudgeVerdict(BaseModel):
-    """Typed contract for a judge's JSON verdict.
+    """Typed contract for a judge's verdict.
+
+    Used both as the tool-input schema for the ``submit_verdict`` call (across
+    SDK MCP, LangChain ``.bind_tools()``, and Anthropic-native ``tools``) and
+    as the validation target for the three extractors in
+    ``coder_eval.evaluation.verdict_tool``.
 
     Score is clamped to [0.0, 1.0] by a validator (not a Field constraint) so
-    out-of-range values from the model become 0.0/1.0 rather than parse errors —
-    matching the legacy ``extract_score`` clamp. Non-finite values (NaN, +/-Infinity)
-    are rejected explicitly because ``max(0.0, min(1.0, nan))`` silently yields 1.0.
+    out-of-range values from the model become 0.0/1.0 rather than tool-input
+    validation errors. Non-finite values (NaN, +/-Infinity) are rejected
+    explicitly because ``max(0.0, min(1.0, nan))`` silently yields 1.0.
     Booleans are rejected because Python treats them as ints.
 
     ``findings`` carries the audit trail — the system prompt always asks
@@ -66,11 +71,12 @@ class JudgeVerdict(BaseModel):
         # makes that contract explicit.
         collapsed = " ".join(v.split())
         if not collapsed:
-            # Whitespace-only / empty input surfaces as a parse error so the judge
-            # result records the error string instead of silently emitting a blank
-            # ``rationale: `` line in ``format_details``. ``parse_judge_verdict``
-            # catches the ValidationError and the checker returns a
-            # ``JudgeCriterionResult(score=0.0, error=...)`` — uniform shape.
+            # Whitespace-only / empty input surfaces as a validation error so the
+            # judge result records the error string instead of silently emitting
+            # a blank ``rationale: `` line in ``format_details``. The
+            # ``extract_verdict_from_*`` extractors translate the
+            # ``ValidationError`` into a JudgeCriterionResult(score=0.0, error=...)
+            # — uniform shape across all three backends.
             raise ValueError("rationale is empty after whitespace collapse")
         return collapsed
 

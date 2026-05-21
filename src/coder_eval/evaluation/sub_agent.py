@@ -13,9 +13,10 @@ import logging
 import shutil
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
+from coder_eval.evaluation.verdict_tool import VerdictCapture
 from coder_eval.models import AgentConfig
 
 
@@ -73,6 +74,8 @@ class SubAgentRunner:
         route: ApiRoute,
         reference_dir: Path | None = None,
         reference_ignore_patterns: list[str] | None = None,
+        extra_mcp_servers: dict[str, Any] | None = None,
+        capture: VerdictCapture | None = None,
     ) -> None:
         # SECURITY: setting_sources=[] is enforced by the caller — it's the caller's
         # responsibility to build the AgentConfig correctly because the field is part of
@@ -102,6 +105,14 @@ class SubAgentRunner:
         # subdir of the same name. Symlinks are stripped unconditionally by
         # ``_ignore_patterns_and_symlinks([])``.
         self._reference_ignore_patterns = reference_ignore_patterns or []
+        # Runtime-only in-process MCP server injection (e.g. the judge
+        # submit_verdict tool). NOT routed through ``sdk_options`` —
+        # ``mcp_servers`` is in ``_FRAMEWORK_OWNED_SDK_FIELDS``.
+        self._extra_mcp_servers = extra_mcp_servers or {}
+        # Public attribute so the criterion can read it after ``run()`` returns.
+        # When the caller passes ``capture=None`` the runner doesn't expose one,
+        # matching the opt-in-per-construction contract for the verdict channel.
+        self.capture = capture
 
     def run(self, user_msg: str, *, max_turns: int | None, turn_timeout: float) -> TurnRecord:
         """Copy sandbox → start agent → communicate → stop. Kill on any exception.
@@ -160,7 +171,11 @@ class SubAgentRunner:
                     ignore=_ignore_patterns_and_symlinks(self._reference_ignore_patterns),
                 )
 
-            agent = ClaudeCodeAgent(self._agent_config, route=self._route)
+            agent = ClaudeCodeAgent(
+                self._agent_config,
+                route=self._route,
+                extra_mcp_servers=self._extra_mcp_servers,
+            )
             logger.info(
                 "sub_agent: starting (model=%s, max_turns=%s, allowed_tools=%s)",
                 self._agent_config.model,

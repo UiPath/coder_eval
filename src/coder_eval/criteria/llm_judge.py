@@ -16,14 +16,21 @@ from coder_eval.evaluation.judge_context import (
     format_details,
     scrub_reference,
 )
-from coder_eval.evaluation.judge_verdict import parse_judge_verdict
 from coder_eval.evaluation.llmgw import get_llmgw_chat_model
+from coder_eval.evaluation.verdict_tool import (
+    SUBMIT_VERDICT_ANTHROPIC_TOOL,
+    SUBMIT_VERDICT_LC_TOOL,
+    SUBMIT_VERDICT_TOOL_NAME,
+    extract_verdict_from_anthropic_response,
+    extract_verdict_from_langchain_message,
+)
 from coder_eval.models import (
     BedrockRoute,
     CriterionResult,
     DirectRoute,
     JudgeCriterionResult,
     JudgeTranscript,
+    JudgeVerdict,
     LLMJudgeCriterion,
     ProxyRoute,
 )
@@ -38,12 +45,12 @@ logger = logging.getLogger(__name__)
 
 
 _SYSTEM_PROMPT = (
-    "You are a strict code reviewer. Follow the grading prompt and return ONLY a JSON object "
-    "with keys: 'score' (float 0..1), 'rationale' (1-2 sentence headline), and 'findings' "
-    "(a list of short bullet strings — each one a concrete observation tied to a file path, "
-    "line, or behavior, with a brief correctness annotation like '— correct' or "
-    "'— minor deviation'). Be specific in 'findings' so a reviewer can audit your verdict; "
-    "keep 'rationale' short."
+    "You are a strict code reviewer. Follow the grading prompt and call the ``submit_verdict`` "
+    "tool exactly once with: ``score`` (float 0..1), ``rationale`` (1-2 sentence headline), and "
+    "``findings`` (list of short bullet strings — each a concrete observation tied to a file "
+    "path, line, or behavior, with a brief correctness annotation like '— correct' or "
+    "'— minor deviation'). Be specific in ``findings`` so a reviewer can audit your verdict; "
+    "keep ``rationale`` short. Do NOT emit JSON in text — use the tool."
 )
 
 
@@ -83,93 +90,49 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
             max_file_chars=criterion.max_file_chars,
         ).build(sandbox, reference_code, turn_records)
 
-        system_msg = _SYSTEM_PROMPT
         user_msg = _render_user_message(criterion.prompt, context)
 
-        match route:
-            case BedrockRoute():
-                content = invoke_bedrock_judge(
-                    route=route,
-                    model=criterion.model,
-                    system=system_msg,
-                    user=user_msg,
-                    temperature=criterion.temperature,
-                    max_tokens=criterion.max_tokens,
-                )
-            case DirectRoute(judge_transport="llmgw"):
-                # Direct backend with no ANTHROPIC_API_KEY but LLMGW creds present.
-                # The agent uses its own auth (OAuth token / cached login); only the
-                # judge falls back here. Resolved once in ``resolve_route`` so the
-                # choice is deterministic and surfaced in environment_info.
-                content = _invoke_llmgw_judge(
-                    model=criterion.model,
-                    system=system_msg,
-                    user=user_msg,
-                    temperature=criterion.temperature,
-                    max_tokens=criterion.max_tokens,
-                )
-            case DirectRoute(judge_transport=None):
-                # No usable transport was resolved at startup: either no creds
-                # were configured, or LLMGW creds are set but the optional
-                # ``[uipath]`` extra (uipath_llmgw_client) is not installed.
-                # Return a properly-typed JudgeCriterionResult so renderers /
-                # aggregators that switch on ``isinstance(cr, JudgeCriterionResult)``
-                # see the uniform shape — mirrors the TurnTimeoutError arm in
-                # agent_judge.py.
-                logger.error("llm_judge unreachable: no ANTHROPIC_API_KEY and no usable LLMGW transport")
-                return JudgeCriterionResult(
-                    criterion_type=criterion.type,
-                    description=criterion.description,
-                    score=0.0,
-                    details="(judge transport unconfigured)",
-                    error=(
-                        "llm_judge requires one of:\n"
-                        "  - ANTHROPIC_API_KEY in the environment, or\n"
-                        "  - the LLMGW_* credential set AND the `coder-eval[uipath]` extra "
-                        "installed (pip install 'coder-eval[uipath]').\n"
-                        "Set one of the above, or remove/disable the llm_judge criterion."
-                    ),
-                )
-            case DirectRoute() | ProxyRoute():
-                content = invoke_anthropic_judge(
-                    route=route,
-                    model=criterion.model,
-                    system=system_msg,
-                    user=user_msg,
-                    temperature=criterion.temperature,
-                    max_tokens=criterion.max_tokens,
-                )
-            case _:
-                # route is None or a future ApiRoute variant — keep LLMGW as the safe default.
-                content = _invoke_llmgw_judge(
-                    model=criterion.model,
-                    system=system_msg,
-                    user=user_msg,
-                    temperature=criterion.temperature,
-                    max_tokens=criterion.max_tokens,
-                )
+        # Transport-unconfigured arm needs to short-circuit BEFORE backend dispatch.
+        if isinstance(route, DirectRoute) and route.judge_transport is None:
+            logger.error("llm_judge unreachable: no ANTHROPIC_API_KEY and no usable LLMGW transport")
+            return JudgeCriterionResult(
+                criterion_type=criterion.type,
+                description=criterion.description,
+                score=0.0,
+                details="(judge transport unconfigured)",
+                error=(
+                    "llm_judge requires one of:\n"
+                    "  - ANTHROPIC_API_KEY in the environment, or\n"
+                    "  - the LLMGW_* credential set AND the `coder-eval[uipath]` extra "
+                    "installed (pip install 'coder-eval[uipath]').\n"
+                    "Set one of the above, or remove/disable the llm_judge criterion."
+                ),
+            )
+
+        scrub_key = reference_code if criterion.include_reference else None
+        verdict, parse_error, raw_verdict_text = _invoke_tool_channel(
+            criterion=criterion,
+            route=route,
+            system_msg=_SYSTEM_PROMPT,
+            user_msg=user_msg,
+        )
 
         # Sanitize any raw model text we persist to CriterionResult.details. A misbehaving
         # model could echo the reference back in an unparseable response, so we scrub it.
-        scrub_key = reference_code if criterion.include_reference else None
-        scrubbed = scrub_reference(content, scrub_key)
+        scrubbed = scrub_reference(raw_verdict_text, scrub_key)
 
         def _maybe_transcript() -> JudgeTranscript | None:
             if not criterion.capture_transcript:
                 return None
             return build_judge_transcript(
-                raw_verdict=content,
+                raw_verdict=raw_verdict_text,
                 max_chars=criterion.max_transcript_chars,
-                judge_system_prompt=system_msg,
+                judge_system_prompt=_SYSTEM_PROMPT,
                 judge_prompt=user_msg,
                 scrub_key=scrub_key,
             )
 
-        verdict, parse_error = parse_judge_verdict(content)
         if parse_error is not None:
-            # Scrub the error too: parse errors can echo the raw score value
-            # (e.g. "score field is not a number: '<reference code>'") when a
-            # misbehaving model stuffs the reference into the score field.
             return JudgeCriterionResult(
                 criterion_type=criterion.type,
                 description=criterion.description,
@@ -187,28 +150,81 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
             score=verdict.score,
             details=scrub_reference(details, scrub_key),
             findings=[scrub_reference(f, scrub_key) for f in verdict.findings],
-            transcript=_maybe_transcript(),  # type: ignore[arg-type]
+            transcript=_maybe_transcript(),
         )
 
 
-def _invoke_llmgw_judge(*, model: str, system: str, user: str, temperature: float, max_tokens: int) -> str:
-    """Single-completion call through the LangChain LLM Gateway chat model.
+def _invoke_tool_channel(
+    *,
+    criterion: LLMJudgeCriterion,
+    route: ApiRoute | None,
+    system_msg: str,
+    user_msg: str,
+) -> tuple[JudgeVerdict | None, str | None, str]:
+    """Dispatch the tool-channel invocation by route.
 
-    Shared by the ``DirectRoute(judge_transport="llmgw")`` arm and the generic
-    no-route fallback so both paths use the same client construction.
+    Returns ``(verdict, parse_error, raw_verdict_text)``. ``raw_verdict_text`` is
+    the JSON-dumped verdict for the transcript when present, or a fallback
+    marker when the model failed to call the tool — preserves the
+    "judge transcript carries the structured payload" invariant.
     """
-    llm = get_llmgw_chat_model(model=model, temperature=temperature, max_tokens=max_tokens)
-    response = llm.invoke(
-        [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
-    )
-    return response.content if isinstance(response.content, str) else str(response.content)
+    match route:
+        case BedrockRoute():
+            response = invoke_bedrock_judge(
+                route=route,
+                model=criterion.model,
+                system=system_msg,
+                user=user_msg,
+                temperature=criterion.temperature,
+                max_tokens=criterion.max_tokens,
+                tool_spec=SUBMIT_VERDICT_ANTHROPIC_TOOL,
+            )
+            verdict, err = extract_verdict_from_anthropic_response(response)
+        case DirectRoute(judge_transport="llmgw"):
+            llm = get_llmgw_chat_model(
+                model=criterion.model,
+                temperature=criterion.temperature,
+                max_tokens=criterion.max_tokens,
+            ).bind_tools([SUBMIT_VERDICT_LC_TOOL], tool_choice=SUBMIT_VERDICT_TOOL_NAME)
+            response = llm.invoke(
+                [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ]
+            )
+            verdict, err = extract_verdict_from_langchain_message(response)
+        case DirectRoute() | ProxyRoute():
+            anthropic_response = invoke_anthropic_judge(
+                route=route,
+                model=criterion.model,
+                system=system_msg,
+                user=user_msg,
+                temperature=criterion.temperature,
+                max_tokens=criterion.max_tokens,
+                tool_spec=SUBMIT_VERDICT_ANTHROPIC_TOOL,
+            )
+            verdict, err = extract_verdict_from_anthropic_response(anthropic_response)
+        case _:
+            llm = get_llmgw_chat_model(
+                model=criterion.model,
+                temperature=criterion.temperature,
+                max_tokens=criterion.max_tokens,
+            ).bind_tools([SUBMIT_VERDICT_LC_TOOL], tool_choice=SUBMIT_VERDICT_TOOL_NAME)
+            response = llm.invoke(
+                [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ]
+            )
+            verdict, err = extract_verdict_from_langchain_message(response)
+
+    if verdict is not None:
+        return verdict, None, verdict.model_dump_json()
+    return None, err, f"(no verdict — {err})"
 
 
 def _render_user_message(prompt: str, context: JudgeContext) -> str:
-    """Render the user-facing prompt envelope for the text-only LLM judge."""
+    """Render the user-facing prompt envelope for the LLM judge."""
     reference_block = ""
     if context.reference is not None:
         reference_block = f"REFERENCE SOLUTION (for your review only):\n```\n{context.reference}\n```\n\n"
@@ -229,9 +245,9 @@ def _render_user_message(prompt: str, context: JudgeContext) -> str:
     dialog_block = _render_dialog_block(context.dialog)
 
     closing = (
-        "Respond with ONLY JSON. Required keys: "
-        '{"score": <float 0..1>, "rationale": "<1-2 sentences>", '
-        '"findings": ["<short observation 1 — correct/deviation/issue>", ...]}'
+        "Call the submit_verdict tool exactly once with "
+        '"score" (float 0..1), "rationale" (1-2 sentences), and '
+        '"findings" (list of short observations).'
     )
 
     return (

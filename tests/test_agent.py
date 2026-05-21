@@ -481,7 +481,16 @@ def test_claude_agent_file_change_detection():
 
 
 def test_claude_agent_message_formatting():
-    """Test message formatting logic with SDK message objects."""
+    """Test message formatting logic with real SDK message objects.
+
+    Uses the actual claude-agent-sdk classes (not local mock classes with
+    the same name) — the formatter now identifies messages via
+    ``isinstance``, so mock classes that don't inherit from the SDK types
+    would fall through to the unknown-type branch.
+    """
+    from claude_agent_sdk import AssistantMessage, ResultMessage
+    from claude_agent_sdk.types import TextBlock
+
     config = AgentConfig(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
@@ -489,27 +498,40 @@ def test_claude_agent_message_formatting():
 
     agent = ClaudeCodeAgent(config)
 
-    # Test AssistantMessage (mock object with correct class name)
-    class AssistantMessage:
-        def __init__(self, content):
-            self.content = content
-
-    messages = [AssistantMessage("Hello, world!")]
+    # AssistantMessage with a single TextBlock — the canonical SDK shape.
+    messages = [AssistantMessage(content=[TextBlock(text="Hello, world!")], model="claude")]
     formatted = agent._format_messages(messages)
     assert "[ASSISTANT] Hello, world!" in formatted
 
-    # Test ResultMessage (mock object with correct class name — SDK uses "result" attribute)
-    class ResultMessage:
-        def __init__(self, result, is_error=False):
-            self.result = result
-            self.is_error = is_error
-
-    messages = [ResultMessage("File written successfully", is_error=False)]
+    # ResultMessage success.
+    messages = [
+        ResultMessage(
+            subtype="success",
+            duration_ms=0,
+            duration_api_ms=0,
+            is_error=False,
+            num_turns=1,
+            session_id="s",
+            total_cost_usd=0.0,
+            result="File written successfully",
+        )
+    ]
     formatted = agent._format_messages(messages)
     assert "[RESULT - SUCCESS] File written successfully" in formatted
 
-    # Test error result
-    messages = [ResultMessage("File not found", is_error=True)]
+    # ResultMessage error.
+    messages = [
+        ResultMessage(
+            subtype="error",
+            duration_ms=0,
+            duration_api_ms=0,
+            is_error=True,
+            num_turns=1,
+            session_id="s",
+            total_cost_usd=0.0,
+            result="File not found",
+        )
+    ]
     formatted = agent._format_messages(messages)
     assert "[RESULT - ERROR] File not found" in formatted
 
@@ -558,107 +580,231 @@ async def test_claude_agent_lifecycle():
 
 
 def test_claude_agent_message_formatting_edge_cases():
-    """Test message formatting with various SDK message types and edge cases."""
+    """Test message formatting with various SDK message types and edge cases.
+
+    Uses real SDK classes throughout — the formatter now identifies messages
+    via ``isinstance``, so SDK types and their subclasses (e.g.
+    ``TaskStartedMessage`` extends ``SystemMessage``) are handled correctly
+    without relying on string-name equality.
+    """
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ResultMessage,
+        SystemMessage,
+        UserMessage,
+    )
+    from claude_agent_sdk.types import TextBlock
+
     config = AgentConfig(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
     )
     agent = ClaudeCodeAgent(config)
 
+    def _make_assistant(text: str) -> AssistantMessage:
+        return AssistantMessage(content=[TextBlock(text=text)], model="claude")
+
+    def _make_result(text: str, *, is_error: bool = False) -> ResultMessage:
+        return ResultMessage(
+            subtype="error" if is_error else "success",
+            duration_ms=0,
+            duration_api_ms=0,
+            is_error=is_error,
+            num_turns=1,
+            session_id="s",
+            total_cost_usd=0.0,
+            result=text,
+        )
+
     # Test 1: Empty messages list
-    formatted = agent._format_messages([])
+    assert agent._format_messages([]) == "[No output]"
+
+    # Test 2: SystemMessage (filtered out)
+    formatted = agent._format_messages([SystemMessage(subtype="init", data={})])
     assert formatted == "[No output]"
 
-    # Test 2: SystemMessage (should be filtered out)
-    class SystemMessage:
-        pass
-
-    formatted = agent._format_messages([SystemMessage()])
+    # Test 3: UserMessage (filtered out)
+    formatted = agent._format_messages([UserMessage(content="test")])
     assert formatted == "[No output]"
 
-    # Test 3: UserMessage (should be filtered out)
-    class UserMessage:
-        def __init__(self, content):
-            self.content = content
+    # Test 4: tool_use stream event — duck-typed; the SDK doesn't export a
+    # public StreamEvent class, so the formatter matches on attribute shape.
+    class _ToolUseEvent:
+        type = "tool_use"
+        name = "Read"
 
-    formatted = agent._format_messages([UserMessage("test")])
-    assert formatted == "[No output]"
-
-    # Test 4: StreamEvent with tool_use
-    class StreamEvent:
-        def __init__(self, event_type, name=None):
-            self.type = event_type
-            self.name = name
-
-    formatted = agent._format_messages([StreamEvent("tool_use", "Read")])
+    formatted = agent._format_messages([_ToolUseEvent()])
     assert "[TOOL USE] Read" in formatted
 
-    # Test 5: StreamEvent without tool_use (should be filtered)
-    formatted = agent._format_messages([StreamEvent("thinking")])
-    assert formatted == "[No output]"
+    # Test 5: Non-tool_use event of the same shape — falls through to the
+    # unknown-tag branch (was previously filtered; now we surface "an
+    # unknown message type appeared" via its class name).
+    class _ThinkingEvent:
+        type = "thinking"
 
-    # Test 6: Unknown message type
+    formatted = agent._format_messages([_ThinkingEvent()])
+    assert formatted == "[_ThinkingEvent]"
+
+    # Test 6: Unknown message type — only the type-name tag is emitted.
+    # The body (``str(msg)``) is intentionally NOT included; see the long
+    # docstring on ``_format_messages`` and
+    # ``test_format_messages_unknown_type_does_not_leak_unbalanced_braces``
+    # for the rationale.
     class CustomMessage:
         def __str__(self):
             return "custom content here"
 
     formatted = agent._format_messages([CustomMessage()])
     assert "[CustomMessage]" in formatted
-    assert "custom content" in formatted
+    # Body must NOT leak — protects downstream JSON parsers from
+    # truncated ``__repr__`` output with unmatched braces.
+    assert "custom content" not in formatted
 
     # Test 7: Message without expected attributes (defensive getattr)
     class BareMessage:
         pass
 
-    # Should not raise exception - uses defensive getattr
     formatted = agent._format_messages([BareMessage()])
     assert "[BareMessage]" in formatted
 
     # Test 8: Multiple message types in sequence
-    class AssistantMessage:
-        def __init__(self, content):
-            self.content = content
-
-    class ResultMessage:
-        def __init__(self, result, is_error=False):
-            self.result = result
-            self.is_error = is_error
-
     messages = [
-        SystemMessage(),  # Filtered
-        UserMessage("user input"),  # Filtered
-        AssistantMessage("Hello from assistant"),
-        ResultMessage("Operation successful", is_error=False),
-        StreamEvent("tool_use", "Bash"),
-        StreamEvent("thinking"),  # Filtered
+        SystemMessage(subtype="init", data={}),  # Filtered
+        UserMessage(content="user input"),  # Filtered
+        _make_assistant("Hello from assistant"),
+        _make_result("Operation successful", is_error=False),
+        _ToolUseEvent(),
+        _ThinkingEvent(),  # Now surfaced as ``[_ThinkingEvent]``
     ]
     formatted = agent._format_messages(messages)
 
     assert "[ASSISTANT] Hello from assistant" in formatted
     assert "[RESULT - SUCCESS] Operation successful" in formatted
-    assert "[TOOL USE] Bash" in formatted
+    assert "[TOOL USE] Read" in formatted
     assert "SystemMessage" not in formatted
     assert "user input" not in formatted
-    assert "thinking" not in formatted
 
     # Test 9: ResultMessage with error
-    formatted = agent._format_messages([ResultMessage("File not found", is_error=True)])
+    formatted = agent._format_messages([_make_result("File not found", is_error=True)])
     assert "[RESULT - ERROR] File not found" in formatted
 
     # Test 10: AssistantMessage with empty content
-    formatted = agent._format_messages([AssistantMessage("")])
-    # Empty content should be skipped
+    formatted = agent._format_messages([AssistantMessage(content=[], model="claude")])
     assert formatted == "[No output]"
 
     # Test 11: Multiple AssistantMessages
-    messages = [
-        AssistantMessage("First response"),
-        AssistantMessage("Second response"),
-    ]
+    messages = [_make_assistant("First response"), _make_assistant("Second response")]
     formatted = agent._format_messages(messages)
     assert "[ASSISTANT] First response" in formatted
     assert "[ASSISTANT] Second response" in formatted
     assert formatted.count("[ASSISTANT]") == 2
+
+
+def test_format_messages_system_message_subclasses_are_filtered():
+    """Regression: SystemMessage SUBCLASSES (TaskStartedMessage, etc.) must
+    be filtered out the same way SystemMessage itself is.
+
+    claude-agent-sdk 0.1.x added ``TaskStartedMessage``,
+    ``TaskNotificationMessage``, and ``TaskProgressMessage`` for sub-agent
+    lifecycle reporting. Each is declared as a subclass of
+    ``SystemMessage`` with an explicit drop-in contract:
+
+        "Subclass of SystemMessage: existing ``isinstance(msg,
+        SystemMessage)`` and ``case SystemMessage()`` checks continue to
+        match."
+
+    An earlier version of ``_format_messages`` compared the exact
+    ``type(msg).__name__`` string against ``"SystemMessage"``, which
+    defeated the SDK's drop-in design — the subclasses fell through to
+    an "unknown message type" branch that ran ``str(msg)[:100]`` and
+    emitted a truncated Python-repr containing nested ``data={...}``
+    dict literals. Even though the typed verdict tool channel has
+    since obviated the brace-walking verdict parser that originally
+    motivated this fix, the underlying ``isinstance``-vs-name-equality
+    contract is still worth pinning.
+
+    This test exercises the real SDK ``TaskStartedMessage`` instance
+    (not a name-collision mock) and asserts:
+
+      1. The lifecycle message is silently filtered (not emitted as a
+         tag, exactly as ``SystemMessage`` itself would be).
+      2. A verdict-shaped JSON literal in a sibling ``AssistantMessage``
+         survives intact in the formatter output.
+    """
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ResultMessage,
+        SystemMessage,
+        TaskNotificationMessage,
+        TaskStartedMessage,
+    )
+    from claude_agent_sdk.types import TextBlock
+
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    # Sanity-check: the SDK classes still extend SystemMessage as the
+    # docstring promises. If this regresses upstream, our isinstance
+    # filter would silently revert to the buggy unknown-type path.
+    assert issubclass(TaskStartedMessage, SystemMessage)
+    assert issubclass(TaskNotificationMessage, SystemMessage)
+
+    verdict_json = '{"score": 1.0, "rationale": "all good"}'
+
+    messages = [
+        TaskStartedMessage(
+            subtype="task_started",
+            data={
+                "type": "system",
+                "subtype": "task_started",
+                "task_id": "abc-def-long-id",
+                "message": "starting sub-task",
+            },
+            task_id="abc-def-long-id",
+            description="starting sub-task",
+            uuid="u",
+            session_id="s",
+            tool_use_id=None,
+            task_type="general",
+        ),
+        TaskNotificationMessage(
+            subtype="task_notification",
+            data={"type": "system", "subtype": "task_notification"},
+            task_id="abc-def-long-id",
+            status="completed",
+            output_file=None,
+            summary=None,
+            uuid="u",
+            session_id="s",
+            tool_use_id=None,
+            usage=None,
+        ),
+        AssistantMessage(content=[TextBlock(text=verdict_json)], model="claude"),
+        ResultMessage(
+            subtype="success",
+            duration_ms=0,
+            duration_api_ms=0,
+            is_error=False,
+            num_turns=1,
+            session_id="s",
+            total_cost_usd=0.0,
+            result=verdict_json,
+        ),
+    ]
+    formatted = agent._format_messages(messages)
+
+    # SystemMessage subclasses are silently filtered (no tag emitted).
+    assert "TaskStartedMessage" not in formatted
+    assert "TaskNotificationMessage" not in formatted
+
+    # The verdict JSON survives, brace counts are balanced.
+    assert formatted.count("{") == formatted.count("}")
+
+    # Formatter contract: verdict JSON survives intact in the textual transcript
+    # used for log auditing. The judge no longer parses this output — it's
+    # purely a human-readable artifact now — but a regression that drops or
+    # truncates the verdict text would still mask debugging signal.
+    assert verdict_json in formatted
 
 
 @pytest.mark.asyncio

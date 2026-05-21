@@ -497,3 +497,178 @@ def test_ce008_skips_files_outside_scope(tmp_path: Path) -> None:
     )
     violations = check_file(path, rules=[YamlModelsForbidExtras])
     assert violations == []
+
+
+# ---------- CE012 no type-name string dispatch ----------
+
+
+def test_ce012_flags_eq_against_string_literal(write_py):
+    """``type(x).__name__ == "Foo"`` is subclass-blind — flag it."""
+    from tests.lint.rules.no_type_name_string_dispatch import NoTypeNameStringDispatch
+
+    source = 'def f(msg):\n    if type(msg).__name__ == "SystemMessage":\n        return None\n'
+    path = write_py(source)
+    violations = check_file(path, rules=[NoTypeNameStringDispatch])
+    assert len(violations) == 1
+    assert violations[0].rule_id == "CE012"
+
+
+def test_ce012_flags_ne_against_string_literal(write_py):
+    from tests.lint.rules.no_type_name_string_dispatch import NoTypeNameStringDispatch
+
+    source = 'def f(msg):\n    return type(msg).__name__ != "AssistantMessage"\n'
+    path = write_py(source)
+    violations = check_file(path, rules=[NoTypeNameStringDispatch])
+    assert len(violations) == 1
+
+
+def test_ce012_flags_reversed_comparison(write_py):
+    """The literal-first form ``"Foo" == type(x).__name__`` is also flagged."""
+    from tests.lint.rules.no_type_name_string_dispatch import NoTypeNameStringDispatch
+
+    source = 'def f(msg):\n    return "ResultMessage" == type(msg).__name__\n'
+    path = write_py(source)
+    violations = check_file(path, rules=[NoTypeNameStringDispatch])
+    assert len(violations) == 1
+
+
+def test_ce012_flags_in_tuple_of_string_literals(write_py):
+    """Membership against a tuple of name literals is the same anti-pattern."""
+    from tests.lint.rules.no_type_name_string_dispatch import NoTypeNameStringDispatch
+
+    source = 'def f(msg):\n    return type(msg).__name__ in ("SystemMessage", "UserMessage")\n'
+    path = write_py(source)
+    violations = check_file(path, rules=[NoTypeNameStringDispatch])
+    assert len(violations) == 1
+
+
+def test_ce012_allows_isinstance(write_py):
+    """``isinstance`` is the recommended form — must not be flagged."""
+    from tests.lint.rules.no_type_name_string_dispatch import NoTypeNameStringDispatch
+
+    source = "def f(msg):\n    return isinstance(msg, SystemMessage)\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[NoTypeNameStringDispatch])
+    assert violations == []
+
+
+def test_ce012_allows_type_name_in_format_string(write_py):
+    """``f'got {type(x).__name__}'`` is a diagnostic, not a dispatch — must not flag."""
+    from tests.lint.rules.no_type_name_string_dispatch import NoTypeNameStringDispatch
+
+    source = 'def f(msg):\n    return f"got {type(msg).__name__}"\n'
+    path = write_py(source)
+    violations = check_file(path, rules=[NoTypeNameStringDispatch])
+    assert violations == []
+
+
+def test_ce012_allows_type_name_compared_to_variable(write_py):
+    """Comparing against a variable (not a string literal) is data-driven — allow it."""
+    from tests.lint.rules.no_type_name_string_dispatch import NoTypeNameStringDispatch
+
+    source = "def f(msg, expected):\n    return type(msg).__name__ == expected\n"
+    path = write_py(source)
+    violations = check_file(path, rules=[NoTypeNameStringDispatch])
+    assert violations == []
+
+
+def test_ce012_noqa_suppresses(write_py):
+    from tests.lint.rules.no_type_name_string_dispatch import NoTypeNameStringDispatch
+
+    source = 'def f(msg):\n    return type(msg).__name__ == "SystemMessage"  # noqa: CE012 -- intentional\n'
+    path = write_py(source)
+    violations = check_file(path, rules=[NoTypeNameStringDispatch])
+    assert violations == []
+
+
+# --- CE013 ---
+
+
+@pytest.fixture
+def write_eval_py(tmp_path: Path):
+    """Write a .py file under a simulated ``src/coder_eval/evaluation/`` path
+    so CE013's scope check (``"/coder_eval/evaluation/" in filepath``) fires."""
+
+    def _write(source: str, name: str = "sample.py") -> Path:
+        target_dir = tmp_path / "src" / "coder_eval" / "evaluation"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        path = target_dir / name
+        path.write_text(source, encoding="utf-8")
+        return path
+
+    return _write
+
+
+@pytest.fixture
+def write_criteria_py(tmp_path: Path):
+    def _write(source: str, name: str = "sample.py") -> Path:
+        target_dir = tmp_path / "src" / "coder_eval" / "criteria"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        path = target_dir / name
+        path.write_text(source, encoding="utf-8")
+        return path
+
+    return _write
+
+
+def test_ce013_flags_re_compile_with_tag_pattern_in_evaluation(write_eval_py):
+    from tests.lint.rules.no_transcript_regex_in_eval import NoTranscriptRegexInEval
+
+    source = 'import re\n_RE = re.compile(r"(?:^|\\n)\\[RESULT - [A-Z_]+\\] ")\n'
+    path = write_eval_py(source)
+    violations = check_file(path, rules=[NoTranscriptRegexInEval])
+    assert len(violations) == 1
+    assert violations[0].rule_id == "CE013"
+
+
+def test_ce013_flags_re_search_with_json_shape_in_criteria(write_criteria_py):
+    from tests.lint.rules.no_transcript_regex_in_eval import NoTranscriptRegexInEval
+
+    # The string literal passed to re.search must contain the verbatim sequence ``"score"``
+    # so the rule's marker check fires. Use a Python triple-quoted source so the inner
+    # quotes survive into the literal at the AST level.
+    source = "import re\ndef f(s):\n    return re.search('\"score\":', s)\n"
+    path = write_criteria_py(source)
+    violations = check_file(path, rules=[NoTranscriptRegexInEval])
+    assert len(violations) == 1
+
+
+def test_ce013_allows_re_in_other_packages(write_py):
+    """``re.compile`` in a non-evaluation/criteria module is fine (e.g. orchestrator)."""
+    from tests.lint.rules.no_transcript_regex_in_eval import NoTranscriptRegexInEval
+
+    source = 'import re\n_RE = re.compile(r"(?:^|\\n)\\[ASSISTANT\\] ")\n'
+    path = write_py(source)
+    violations = check_file(path, rules=[NoTranscriptRegexInEval])
+    assert violations == []
+
+
+def test_ce013_allows_noqa_suppression(write_eval_py):
+    from tests.lint.rules.no_transcript_regex_in_eval import NoTranscriptRegexInEval
+
+    source = 'import re\n_RE = re.compile(r"\\[RESULT - X\\] ")  # noqa: CE013 -- legacy\n'
+    path = write_eval_py(source)
+    violations = check_file(path, rules=[NoTranscriptRegexInEval])
+    assert violations == []
+
+
+def test_ce013_does_not_flag_user_regex_compile_in_file_matches_regex(write_criteria_py):
+    """A user-supplied non-transcript pattern (no ``[ASSISTANT]`` / ``[RESULT`` / score literal)
+    must not trip the rule. ``criteria/file_matches_regex.py`` compiles arbitrary user patterns."""
+    from tests.lint.rules.no_transcript_regex_in_eval import NoTranscriptRegexInEval
+
+    source = "import re\ndef f(p):\n    return re.compile(p)\n"  # user-supplied pattern, no literal
+    path = write_criteria_py(source)
+    violations = check_file(path, rules=[NoTranscriptRegexInEval])
+    assert violations == []
+
+
+def test_ce013_would_have_caught_parse_judge_verdict_regex(write_eval_py):
+    """Regression test: pin the historical defect class so a future change can't silently
+    weaken the rule. The exact line from the legacy parser must trigger CE013."""
+    from tests.lint.rules.no_transcript_regex_in_eval import NoTranscriptRegexInEval
+
+    source = 'import re\n_RESULT_TAG_RE = re.compile(r"(?:^|\\n)\\[RESULT - [A-Z_]+\\] ")\n'
+    path = write_eval_py(source)
+    violations = check_file(path, rules=[NoTranscriptRegexInEval])
+    assert len(violations) == 1, "rule must catch the historical [RESULT - …] pattern"

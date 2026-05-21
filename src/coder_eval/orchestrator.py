@@ -111,9 +111,12 @@ async def _pump_stream(
             log_fn("[%s] %s", label, line)
 
 
-# Exact set of tags emitted by ClaudeCodeAgent._format_messages. Unknown
-# bracketed words (e.g. "[NOTE]", "[TODO]", pylint error codes, markdown-style
-# footnotes) are intentionally NOT matched — they must pass through as content.
+# Structural tags emitted by ClaudeCodeAgent._format_messages. Other
+# bracketed words (markdown footnotes, pylint codes, unknown SDK message types
+# like [TaskStartedMessage]) are intentionally NOT matched — they pass through
+# as content. Source of truth for the tag vocabulary is
+# ``ClaudeCodeAgent._format_messages``; this regex is telemetry-only (utterance
+# extraction for the per-task log), not a correctness-critical parser.
 _UTTERANCE_TAG_RE = re.compile(r"^\[(ASSISTANT|RESULT - SUCCESS|RESULT - ERROR|TOOL USE)\](?: (.*))?$")
 
 

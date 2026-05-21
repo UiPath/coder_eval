@@ -103,6 +103,10 @@ external = [
     "CE007",
     "CE008",
     "CE009",
+    "CE010",
+    "CE011",
+    "CE012",
+    "CE013",
 ]  # custom architectural lint rules (tests/lint/)
 
 [tool.ruff.lint.per-file-ignores]

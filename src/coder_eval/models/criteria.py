@@ -26,6 +26,22 @@ from coder_eval.models.gateway import DEFAULT_GATEWAY_MODEL
 JUDGE_SECURITY_IGNORE_FLOOR: tuple[str, ...] = (".claude", ".mcp.json", "_reference")
 
 
+def _reject_removed_verdict_channel(data: Any) -> Any:
+    """Raise with a migration message when YAML still carries the removed ``verdict_channel`` key.
+
+    Shared between ``LLMJudgeCriterion`` and ``AgentJudgeCriterion`` so the error
+    string stays in lockstep. Runs in ``mode="before"`` so the migration message
+    wins over the generic ``extra="forbid"`` "Extra inputs are not permitted"
+    error.
+    """
+    if isinstance(data, dict) and "verdict_channel" in data:
+        raise ValueError(
+            "verdict_channel field was removed on 2026-05-21; the submit_verdict "
+            "tool channel is the only path. Delete this field from your task YAML."
+        )
+    return data
+
+
 def _default_judge_agent_config() -> AgentConfig:
     """Build the default judge AgentConfig.
 
@@ -661,11 +677,14 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
     """Have an LLM grade the task's final state against an author-supplied prompt.
 
     The judge can be given any combination of: sandbox files, the agent's last-turn
-    output, a tool-call summary, and the reference solution. It returns a JSON verdict
-    {"score": <float 0..1>, "rationale": "<1-2 sentences>"}; the float is the score.
+    output, a tool-call summary, and the reference solution. It reports its verdict
+    by emitting a single ``submit_verdict`` tool call with ``score`` (float),
+    ``rationale`` (string), and ``findings`` (list of strings). Tool-call shape is
+    forced via ``tool_choice`` on every backend; the model never returns prose.
 
-    Continuous scoring. LLM error or JSON parse failure -> 0.0 with error.
-    Score is clamped to [0.0, 1.0]. Non-numeric score -> 0.0 with error.
+    Continuous scoring. LLM error or a "did not call submit_verdict" diagnostic
+    -> 0.0 with error. Score is clamped to [0.0, 1.0] by the ``JudgeVerdict``
+    validator. Non-numeric / non-finite score -> 0.0 with error.
     """
 
     # Strict YAML-key validation: catch typos at load time rather than silently
@@ -795,13 +814,22 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
         ),
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_verdict_channel(cls, data: Any) -> Any:
+        return _reject_removed_verdict_channel(data)
+
 
 class AgentJudgeCriterion(BaseSuccessCriterion):
     """Spawn a Claude Code SDK agent as the judge.
 
     The judge runs in an isolated copy of the sandbox with tool access (Bash, Read,
-    Glob, Grep by default) and returns a JSON verdict
-    ``{"score": <float 0..1>, "rationale": "<1-2 sentences>", ...}``.
+    Glob, Grep by default) and reports its verdict by calling the in-process
+    ``submit_verdict`` MCP tool (``mcp__coder_eval_judge__submit_verdict``,
+    force-added to ``allowed_tools``) exactly once with ``score`` / ``rationale``
+    / ``findings``. The SDK has no ``tool_choice`` equivalent so the channel
+    relies on system-prompt discipline; a judge that never calls the tool
+    scores 0.0 with a "did not call submit_verdict" diagnostic.
 
     File access: the judge has live access to the sandbox copy as its working
     directory and can load files via its tools (``Read``, ``Glob``). The optional
@@ -823,7 +851,8 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
     Use ``llm_judge`` for scenarios with adversarial generation. Narrow
     ``allowed_tools`` per task when Bash is not needed.
 
-    Continuous scoring. Parse/score errors -> 0.0. Score clamped to [0.0, 1.0].
+    Continuous scoring. Verdict-validation errors or a "did not call" diagnostic
+    -> 0.0. Score clamped to [0.0, 1.0] by the ``JudgeVerdict`` validator.
     """
 
     # Strict YAML-key validation: catch typos at load time rather than silently
@@ -957,6 +986,11 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
             "Truncation marks the transcript as ``truncated=True``."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_verdict_channel(cls, data: Any) -> Any:
+        return _reject_removed_verdict_channel(data)
 
 
 # Discriminated union of all success criteria

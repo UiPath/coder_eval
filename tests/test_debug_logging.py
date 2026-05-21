@@ -3,6 +3,8 @@
 import logging
 
 import pytest
+from claude_agent_sdk import AssistantMessage
+from claude_agent_sdk.types import TextBlock, ToolUseBlock
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.models import AgentConfig, AgentKind
@@ -96,36 +98,20 @@ def test_log_debug_result_cost_present(agent, caplog):
 
 
 # --- Issue #4: _format_messages renders block-based AssistantMessage as raw list ---
-
-
-class _TextBlock:
-    def __init__(self, text):
-        self.text = text
-        self.type = "text"
-
-
-class _ToolUseBlock:
-    def __init__(self, name, tool_id, tool_input):
-        self.name = name
-        self.id = tool_id
-        self.input = tool_input
-        self.type = "tool_use"
+#
+# Uses real claude_agent_sdk classes — _format_messages dispatches via
+# ``isinstance`` against the SDK's AssistantMessage, so locally-defined mock
+# classes with the same name would fall through to the unknown-type branch.
 
 
 def _make_assistant_message(content, model="test-model"):
-    """Create a mock AssistantMessage with the correct class name for dispatch."""
-
-    class AssistantMessage:
-        def __init__(self, content, model):
-            self.content = content
-            self.model = model
-
-    return AssistantMessage(content, model)
+    """Build a real SDK AssistantMessage for isinstance-based dispatch."""
+    return AssistantMessage(content=content, model=model)
 
 
 def test_format_messages_block_based_assistant(agent):
     """AssistantMessage with block-based content (list of TextBlocks) should extract text properly."""
-    msg = _make_assistant_message(content=[_TextBlock("Hello from Claude")])
+    msg = _make_assistant_message(content=[TextBlock(text="Hello from Claude")])
 
     formatted = agent._format_messages([msg])
 
@@ -138,8 +124,8 @@ def test_format_messages_block_based_mixed(agent):
     """AssistantMessage with mixed blocks should extract text and show tool uses."""
     msg = _make_assistant_message(
         content=[
-            _TextBlock("Let me read that file."),
-            _ToolUseBlock("Read", "tool_1", {"path": str(tmp_subdir("test.py"))}),
+            TextBlock(text="Let me read that file."),
+            ToolUseBlock(id="tool_1", name="Read", input={"path": str(tmp_subdir("test.py"))}),
         ]
     )
 

@@ -12,7 +12,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, Message, ProcessError, query
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    Message,
+    ProcessError,
+    ResultMessage,
+    SystemMessage,
+    UserMessage,
+    query,
+)
 
 # Private SDK import — the public `query()` API doesn't expose the subprocess
 # handle, but we need it to SIGKILL on timeout (the SDK's anyio task groups
@@ -183,6 +193,7 @@ class ClaudeCodeAgent(Agent):
         route: ApiRoute | None = None,
         *,
         instance_name: str = "coder",
+        extra_mcp_servers: dict[str, Any] | None = None,
     ):
         """Initialize the Claude Code agent.
 
@@ -194,9 +205,16 @@ class ClaudeCodeAgent(Agent):
                 ``"simulator"`` for the tools-disabled user-simulator agent).
                 Lets you tell them apart in ``task.log`` when both run in
                 the same process.
+            extra_mcp_servers: Runtime-only in-process MCP servers (e.g. the
+                judge ``submit_verdict`` tool) merged into ``ClaudeAgentOptions.mcp_servers``.
+                NOT sourced from YAML — ``mcp_servers`` is in
+                ``_FRAMEWORK_OWNED_SDK_FIELDS`` and explicitly denied via
+                ``sdk_options`` for security. The judge criterion is the only
+                caller today.
         """
         self.config = config
         self.route = route or DirectRoute()
+        self._extra_mcp_servers = extra_mcp_servers or {}
         self.client: ClaudeSDKClient | None = None
         self.working_directory: Path | None = None
         self._state = AgentState.WORKING
@@ -210,6 +228,10 @@ class ClaudeCodeAgent(Agent):
         self._env_path_prepend: list[str] = []
         self._plugin_tools_dir: str | None = None
         self._log = _PrefixedAdapter(logger, {"prefix": instance_name})
+        # Deduplicate "unhandled SDK message type" warnings per agent
+        # instance — _format_messages runs many times per task and these
+        # types are stable for the lifetime of a session.
+        self._warned_unknown_types: set[str] = set()
         self.pending_turn: TurnRecord | None = None
 
     async def start(
@@ -462,6 +484,7 @@ class ClaudeCodeAgent(Agent):
                 settings=json.dumps(self.config.claude_settings)
                 if isinstance(self.config.claude_settings, dict)
                 else self.config.claude_settings,
+                mcp_servers=self._extra_mcp_servers,
                 **self.config.sdk_options,
             )
 
@@ -1327,30 +1350,20 @@ class ClaudeCodeAgent(Agent):
         return changes
 
     def _format_messages(self, messages: list[Message]) -> str:
-        """Format agent messages into a readable string.
-
-        Args:
-            messages: List of messages from the agent (SDK message objects)
-
-        Returns:
-            Formatted string representation
-        """
+        # isinstance, not type-name equality: SystemMessage subclasses must hit
+        # the SystemMessage arm per their drop-in contract. Unknown types emit
+        # the bare tag only — including a truncated ``__repr__`` can leak
+        # unmatched braces into the transcript persisted to ``task.json``.
         formatted_parts = []
 
         for msg in messages:
-            # Handle SDK message objects (they have a type attribute, not a dict)
-            msg_type_name = type(msg).__name__
-
-            if msg_type_name == "SystemMessage":
-                # System messages (less interesting for output)
+            if isinstance(msg, SystemMessage):
                 continue
 
-            elif msg_type_name == "UserMessage":
-                # User messages (we already know what we sent)
+            if isinstance(msg, UserMessage):
                 continue
 
-            elif msg_type_name == "AssistantMessage":
-                # Assistant text responses — content may be a string or list of blocks
+            if isinstance(msg, AssistantMessage):
                 content = getattr(msg, "content", "")
                 if isinstance(content, list):
                     for block in content:
@@ -1359,25 +1372,31 @@ class ClaudeCodeAgent(Agent):
                             formatted_parts.append(f"[ASSISTANT] {text}")
                 elif content:
                     formatted_parts.append(f"[ASSISTANT] {content}")
+                continue
 
-            elif msg_type_name == "ResultMessage":
-                # SDK ResultMessage uses "result" (not "content") for the final text
+            if isinstance(msg, ResultMessage):
                 result_text = getattr(msg, "result", "") or ""
                 is_error = getattr(msg, "is_error", False)
                 status = "ERROR" if is_error else "SUCCESS"
                 formatted_parts.append(f"[RESULT - {status}] {result_text}")
+                continue
 
-            elif msg_type_name == "StreamEvent":
-                # Stream events (tool use, thinking, etc.)
-                event_type = getattr(msg, "type", "unknown")
-                if event_type == "tool_use":
-                    tool_name = getattr(msg, "name", "unknown")
-                    formatted_parts.append(f"[TOOL USE] {tool_name}")
-                # Skip other stream events like thinking
+            # StreamEvent isn't exported by the SDK — duck-type on ``type``.
+            event_type = getattr(msg, "type", None)
+            if event_type == "tool_use":
+                tool_name = getattr(msg, "name", "unknown")
+                formatted_parts.append(f"[TOOL USE] {tool_name}")
+                continue
 
-            else:
-                # Unknown message type - include for debugging
-                formatted_parts.append(f"[{msg_type_name}] {str(msg)[:100]}")
+            type_name = type(msg).__name__
+            if type_name not in self._warned_unknown_types:
+                self._warned_unknown_types.add(type_name)
+                self._log.warning(
+                    "Unhandled SDK message type %s in _format_messages — "
+                    "extend the isinstance chain when the SDK adds new types.",
+                    type_name,
+                )
+            formatted_parts.append(f"[{type_name}]")
 
         return "\n".join(formatted_parts) if formatted_parts else "[No output]"
 
@@ -1387,17 +1406,10 @@ class ClaudeCodeAgent(Agent):
         Args:
             messages: List of messages from the agent (SDK objects)
         """
-        # Check for error indicators
+        # Check for explicit error messages (use getattr for safe access).
+        # ResultMessage.is_error is intentionally NOT a state-change trigger —
+        # the agent may recover from a tool error on a later turn.
         for msg in messages:
-            msg_type_name = type(msg).__name__
-
-            if msg_type_name == "ResultMessage":
-                is_error = getattr(msg, "is_error", False)
-                if is_error:
-                    # Don't change state on tool errors - agent might recover
-                    pass
-
-            # Check for explicit error messages (use getattr for safe access)
             if getattr(msg, "error", None):
                 self._state = AgentState.ERROR
                 return

@@ -1,22 +1,32 @@
 """Checker-level integration tests for agent_judge.
 
-Parser-detail coverage lives in test_judge_verdict.py.
 Sandbox-copy + subprocess-lifecycle coverage lives in test_sub_agent_runner.py.
+Verdict-tool extractor unit tests live in test_verdict_tool.py.
 This file covers the orchestration glue: prompt assembly, result mapping,
 backend routing, and config propagation.
+
+Test pattern: tests mock ``ClaudeCodeAgent`` via ``_AGENT_PATCH_PATH`` and
+pass a JSON ``agent_output`` for legacy convenience; an autouse fixture
+wraps ``SubAgentRunner.run`` so that JSON-shaped agent output is parsed
+into the runner's ``VerdictCapture``, simulating what the real
+``submit_verdict`` tool call would do.
 """
 
 from __future__ import annotations
 
+import json as _json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from coder_eval.criteria import init_criteria
 from coder_eval.evaluation.checker import SuccessChecker
+from coder_eval.evaluation.sub_agent import SubAgentRunner
 from coder_eval.models import (
     AgentJudgeCriterion,
+    JudgeVerdict,
     TurnRecord,
 )
 from coder_eval.models.routing import DirectRoute, ProxyRoute
@@ -43,6 +53,44 @@ def _make_mock_agent(agent_output: str) -> MagicMock:
     agent.stop = AsyncMock(return_value=None)
     agent.kill = AsyncMock(return_value=None)
     return agent
+
+
+# Original ``SubAgentRunner.run`` — wrapped below so JSON-shaped agent_output
+# in tests populates the runner's ``VerdictCapture`` exactly as the real
+# ``submit_verdict`` tool call would.
+_orig_run = SubAgentRunner.run
+
+
+def _run_with_capture_simulation(self, user_msg, *, max_turns, turn_timeout):
+    turn = _orig_run(self, user_msg, max_turns=max_turns, turn_timeout=turn_timeout)
+    if self.capture is not None and self.capture.verdict is None and self.capture.error is None:
+        try:
+            data = _json.loads(turn.agent_output)
+        except (ValueError, TypeError):
+            return turn
+        try:
+            self.capture.verdict = JudgeVerdict.model_validate(data)
+        except ValidationError as e:
+            # Surface the same legacy-vocabulary diagnostic ``submit_verdict``'s
+            # ``@tool`` handler would have written. Bypasses a circular test-only
+            # import by re-deriving the first error message inline.
+            from coder_eval.evaluation.verdict_tool import _format_validation_error
+
+            self.capture.error = _format_validation_error(e)
+    return turn
+
+
+@pytest.fixture(autouse=True)
+def _simulate_capture_population(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bridge legacy test mocks (JSON in ``turn.agent_output``) to the typed verdict channel.
+
+    Real production runs populate ``capture`` via the ``submit_verdict`` SDK tool
+    handler; tests stub the agent so the tool never fires. This fixture parses
+    the agent's output as JSON and populates the runner's capture so the
+    criterion sees the verdict via the standard ``extract_verdict_from_capture``
+    path.
+    """
+    monkeypatch.setattr(SubAgentRunner, "run", _run_with_capture_simulation)
 
 
 @pytest.fixture
@@ -117,15 +165,14 @@ def test_agent_judge_missing_score_key(sandbox: Sandbox, direct_route: DirectRou
     assert "missing" in result.error
 
 
-def test_agent_judge_parse_failure_prefixes_untrusted(sandbox: Sandbox, direct_route: DirectRoute) -> None:
-    """Non-JSON judge output surfaces with an UNTRUSTED_JUDGE_OUTPUT: prefix in details."""
+def test_agent_judge_no_verdict_surfaces_untrusted_output(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """A judge that finishes without calling submit_verdict surfaces with UNTRUSTED_JUDGE_OUTPUT in details."""
     criterion = AgentJudgeCriterion(description="x", prompt="grade")
     mock_agent = _make_mock_agent("I ran xmllint and everything looks great")
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
         result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
     assert result.score == 0.0
-    assert result.error is not None
-    assert "Failed to parse" in result.error
+    assert result.error == "Judge did not call submit_verdict"
     assert (result.details or "").startswith("UNTRUSTED_JUDGE_OUTPUT:")
 
 
@@ -175,7 +222,7 @@ def test_agent_judge_config_propagates(sandbox: Sandbox, direct_route: DirectRou
     (agent_config,) = mock_cls.call_args.args
     assert agent_config.model == "claude-sonnet-4-6"
     assert agent_config.permission_mode == "plan"
-    assert agent_config.allowed_tools == ["Read", "Grep"]
+    assert set(agent_config.allowed_tools or []) == {"Read", "Grep", "mcp__coder_eval_judge__submit_verdict"}
     assert agent_config.disallowed_tools == ["Bash"]
     assert agent_config.setting_sources == []
     assert agent_config.sdk_options == {"effort": "low"}
@@ -271,7 +318,13 @@ def test_agent_judge_partial_agent_block_preserves_judge_defaults(sandbox: Sandb
         SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
     (agent_config,) = mock_cls.call_args.args
     assert agent_config.permission_mode == "bypassPermissions"
-    assert agent_config.allowed_tools == ["Bash", "Read", "Glob", "Grep"]
+    assert set(agent_config.allowed_tools or []) == {
+        "Bash",
+        "Read",
+        "Glob",
+        "Grep",
+        "mcp__coder_eval_judge__submit_verdict",
+    }
     assert ".claude" in agent_config.ignore_patterns
     assert ".mcp.json" in agent_config.ignore_patterns
     assert "_reference" in agent_config.ignore_patterns
@@ -1005,3 +1058,165 @@ def test_agent_judge_integration_real_sdk(tmp_path: Path) -> None:
 
     assert result.error is None, f"integration judge failed: {result.error}\n{result.details}"
     assert result.score >= 0.7
+
+
+# --- verdict_channel="tool" path ---
+
+
+def _patch_runner_with_capture(verdict_payload: dict | None, agent_output: str = "Verdict submitted."):
+    """Return a patch context manager that swaps ``SubAgentRunner.run`` for a stub
+    that populates the runner's ``capture`` and returns a synthetic turn.
+
+    When ``verdict_payload`` is None the capture stays empty (simulates the judge
+    failing to call submit_verdict).
+    """
+    from coder_eval.evaluation.sub_agent import SubAgentRunner
+    from coder_eval.models import JudgeVerdict
+
+    def _stub_run(self, user_msg, *, max_turns, turn_timeout):
+        if verdict_payload is not None:
+            self.capture.verdict = JudgeVerdict.model_validate(verdict_payload)
+            self.capture.error = None
+            self.capture.called_count += 1
+        return _make_turn(agent_output)
+
+    return patch.object(SubAgentRunner, "run", _stub_run)
+
+
+def test_agent_judge_tool_channel_happy_path(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    criterion = AgentJudgeCriterion(description="x", prompt="grade")
+    payload = {"score": 0.75, "rationale": "ok", "findings": ["a", "b"]}
+    with _patch_runner_with_capture(payload):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+    assert result.score == 0.75
+    assert result.error is None
+    assert getattr(result, "findings", []) == ["a", "b"]
+
+
+def test_agent_judge_tool_channel_did_not_call(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    criterion = AgentJudgeCriterion(description="x", prompt="grade")
+    with _patch_runner_with_capture(None):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+    assert result.score == 0.0
+    assert result.error == "Judge did not call submit_verdict"
+
+
+def test_agent_judge_tool_channel_overwrites_on_retry(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """LAST-call discipline at the criterion layer — the final verdict wins."""
+    criterion = AgentJudgeCriterion(description="x", prompt="grade")
+
+    def _stub_run(self, user_msg, *, max_turns, turn_timeout):
+        # Simulate two calls — final one wins.
+        self.capture.verdict = JudgeVerdict(score=0.2, rationale="first")
+        self.capture.called_count += 1
+        self.capture.verdict = JudgeVerdict(score=0.9, rationale="second")
+        self.capture.called_count += 1
+        return _make_turn("Verdict submitted.")
+
+    with patch.object(SubAgentRunner, "run", _stub_run):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+    assert result.score == 0.9
+    assert "second" in (result.details or "")
+
+
+def test_agent_judge_tool_channel_added_to_allowed_tools() -> None:
+    """The submit_verdict MCP tool is force-added to allowed_tools — security-floor contract."""
+    from coder_eval.criteria.agent_judge import _build_agent_config
+
+    criterion = AgentJudgeCriterion(description="x", prompt="grade")
+    config = _build_agent_config(criterion, system_prompt="sys")
+    assert "mcp__coder_eval_judge__submit_verdict" in (config.allowed_tools or [])
+
+
+def test_agent_judge_tool_channel_transcript_carries_structured_verdict(
+    sandbox: Sandbox, direct_route: DirectRoute
+) -> None:
+    """Tool channel: raw_verdict in the transcript is the JSON-dumped JudgeVerdict, not agent text."""
+    criterion = AgentJudgeCriterion(description="x", prompt="grade")
+    payload = {"score": 0.42, "rationale": "headline", "findings": ["evidence"]}
+    with _patch_runner_with_capture(payload, agent_output="Verdict submitted, stopping."):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    assert '"score":0.42' in transcript.raw_verdict
+    assert '"rationale":"headline"' in transcript.raw_verdict
+    assert "Verdict submitted" not in transcript.raw_verdict
+
+
+def test_agent_judge_tool_channel_transcript_falls_back_to_agent_output_when_no_verdict(
+    sandbox: Sandbox, direct_route: DirectRoute
+) -> None:
+    """When the judge never calls submit_verdict, raw_verdict falls back to the agent's last words."""
+    criterion = AgentJudgeCriterion(description="x", prompt="grade")
+    with _patch_runner_with_capture(None, agent_output="I considered grading but did not."):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    assert transcript.raw_verdict == "I considered grading but did not."
+
+
+def test_agent_judge_timeout_returns_judge_criterion_result(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """A turn timeout produces a properly-typed ``JudgeCriterionResult`` with score=0."""
+    from coder_eval.errors.timeout import TurnTimeoutError
+
+    criterion = AgentJudgeCriterion(description="x", prompt="grade", turn_timeout=10)
+
+    def _raise(self, user_msg, *, max_turns, turn_timeout):
+        raise TurnTimeoutError(10.0, task_id="t", iteration=1)
+
+    with patch.object(SubAgentRunner, "run", _raise):
+        result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
+    assert result.score == 0.0
+    assert "TurnTimeoutError" in (result.error or "")
+
+
+def test_agent_judge_rejects_legacy_verdict_channel_field() -> None:
+    """YAML still carrying ``verdict_channel`` raises a migration-friendly error."""
+    with pytest.raises(ValidationError, match="verdict_channel field was removed"):
+        AgentJudgeCriterion.model_validate({"description": "x", "prompt": "grade", "verdict_channel": "text"})
+
+
+# --- ClaudeCodeAgent + SubAgentRunner forwarding ---
+
+
+def test_sub_agent_runner_forwards_extra_mcp_servers(tmp_path: Path) -> None:
+    """SubAgentRunner stores extra_mcp_servers and forwards them to ClaudeCodeAgent without
+    mutating sdk_options (mcp_servers is in _FRAMEWORK_OWNED_SDK_FIELDS)."""
+    from coder_eval.evaluation.sub_agent import SubAgentRunner
+    from coder_eval.evaluation.verdict_tool import VerdictCapture, build_submit_verdict_mcp_server
+    from coder_eval.models import AgentConfig, SandboxConfig
+
+    sb = Sandbox(SandboxConfig(driver="tempdir"), task_id="x")
+    sb.sandbox_dir = tmp_path
+    capture = VerdictCapture()
+    server_name, server = build_submit_verdict_mcp_server(capture)
+    cfg = AgentConfig(
+        type="claude-code",
+        model="claude-haiku-4-5",
+        permission_mode="bypassPermissions",
+        setting_sources=[],
+        allowed_tools=["Read"],
+    )
+    runner = SubAgentRunner(
+        sandbox=sb,
+        agent_config=cfg,
+        ignore_patterns=[],
+        route=DirectRoute(),
+        extra_mcp_servers={server_name: server},
+        capture=capture,
+    )
+    assert runner.capture is capture
+    # sdk_options must NOT carry mcp_servers
+    assert "mcp_servers" not in cfg.sdk_options
+
+
+def test_claude_code_agent_accepts_extra_mcp_servers() -> None:
+    """ClaudeCodeAgent stores extra_mcp_servers; merging into ClaudeAgentOptions is tested live."""
+    from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
+    from coder_eval.models import AgentConfig
+
+    cfg = AgentConfig(type="claude-code", model="m", setting_sources=[])
+    agent = ClaudeCodeAgent(cfg, extra_mcp_servers={"a": {"type": "sdk", "name": "a", "instance": object()}})
+    assert agent._extra_mcp_servers == {
+        "a": {"type": "sdk", "name": "a", "instance": agent._extra_mcp_servers["a"]["instance"]}
+    }
