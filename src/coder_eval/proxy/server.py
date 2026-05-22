@@ -50,25 +50,6 @@ _ALLOWED_BODY_FIELDS = {
 }
 
 
-def _strip_cache_control(payload: dict[str, Any]) -> None:
-    """Remove cache_control from system, messages, and tools blocks (unsupported by Bedrock)."""
-    system = payload.get("system")
-    if isinstance(system, list):
-        for block in system:
-            if isinstance(block, dict):
-                block.pop("cache_control", None)
-    for msg in payload.get("messages", []):
-        if isinstance(msg, dict):
-            content = msg.get("content")
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict):
-                        block.pop("cache_control", None)
-    for tool in payload.get("tools", []):
-        if isinstance(tool, dict):
-            tool.pop("cache_control", None)
-
-
 @dataclass
 class ProxyUsage:
     """Accumulated token usage tracked by the proxy."""
@@ -388,8 +369,6 @@ class LLMGatewayProxy:
 
             # Bedrock requires this specific anthropic_version
             payload["anthropic_version"] = "bedrock-2023-05-31"
-            # Bedrock doesn't support cache_control in system/messages blocks
-            _strip_cache_control(payload)
 
         body = json.dumps(payload).encode()
 

@@ -92,7 +92,7 @@ Optional:
 5. For each request:
    - Maps model names (e.g., `claude-sonnet-4-6` → `anthropic.claude-sonnet-4-6`)
    - Acquires/refreshes OAuth2 bearer token via S2S flow
-   - Strips Bedrock-incompatible fields (`cache_control`, non-allowlisted body fields)
+   - Strips non-allowlisted body fields (e.g. `model`, `stream`) for Bedrock
    - Forwards to the LLM Gateway passthrough endpoint
    - Streams the response back transparently
 6. On shutdown (Ctrl+C), prints usage summary (requests, tokens, cost)
@@ -103,7 +103,7 @@ When `--vendor=awsbedrock` (default), the proxy:
 
 - Strips body fields not in the Bedrock allowlist (e.g., `stream`)
 - Sets `anthropic_version` to `bedrock-2023-05-31`
-- Removes `cache_control` from `system`, `messages`, and `tools` blocks (Bedrock doesn't support prompt caching annotations)
+- Forwards `cache_control` blocks (`system`, `messages`, `tools`) intact — Bedrock supports Anthropic prompt caching with the same syntax as the direct API
 
 ## Relationship to `--proxy` Flag
 
@@ -121,7 +121,7 @@ Both use the same underlying `LLMGatewayProxy` class — no code duplication.
 ### Files Changed
 
 - **`cli/proxy_command.py`** (new) — CLI command: env loading, validation, proxy lifecycle, signal handling, Rich output
-- **`proxy/server.py`** (modified) — Added `_strip_cache_control()` for Bedrock compatibility
+- **`proxy/server.py`** (modified) — Vendor-gated body-field allowlist + Bedrock `anthropic_version` injection
 - **`cli/__init__.py`** (modified) — Registered the `proxy` command
 
 ### Design Decisions

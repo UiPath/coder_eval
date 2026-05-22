@@ -6,6 +6,7 @@ pricing calculation, token manager, and proxy lifecycle.
 
 import base64
 import json
+from urllib.parse import urlparse
 
 import httpx
 import pytest
@@ -21,7 +22,6 @@ from coder_eval.proxy.server import (
     _RETRY_CFG,
     LLMGatewayProxy,
     ProxyUsage,
-    _strip_cache_control,
 )
 
 
@@ -949,71 +949,113 @@ class TestRateLimitRetry:
 
 
 # ---------------------------------------------------------------------------
-# _strip_cache_control
+# cache_control forwarding
 # ---------------------------------------------------------------------------
 
 
-class TestStripCacheControl:
-    """Tests for _strip_cache_control Bedrock compatibility helper."""
+class TestCacheControlForwarding:
+    """Verify cache_control blocks survive the proxy and reach the gateway.
 
-    def test_strips_from_system_blocks(self):
-        payload: dict = {
-            "system": [
-                {"type": "text", "text": "You are helpful", "cache_control": {"type": "ephemeral"}},
-                {"type": "text", "text": "Be concise"},
-            ],
-            "messages": [],
-        }
-        _strip_cache_control(payload)
-        assert "cache_control" not in payload["system"][0]
-        assert payload["system"][0]["text"] == "You are helpful"
+    AWS Bedrock and Vertex AI both support Anthropic prompt caching with the
+    same ``cache_control: {type: "ephemeral"}`` syntax used by the direct API,
+    so the proxy must forward those blocks intact rather than stripping them.
+    """
 
-    def test_strips_from_message_content_blocks(self):
-        payload: dict = {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Hello", "cache_control": {"type": "ephemeral"}},
-                    ],
-                }
-            ],
-        }
-        _strip_cache_control(payload)
-        assert "cache_control" not in payload["messages"][0]["content"][0]
+    async def _capture_forwarded_body(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        request_json: dict,
+        vendor: str = "awsbedrock",
+    ) -> dict:
+        """Spin up the proxy, send ``request_json``, return the body the proxy forwarded upstream."""
+        captured: dict = {}
+        _real_post = httpx.AsyncClient.post
 
-    def test_strips_from_tools(self):
-        """Tools can have cache_control for prompt caching — Bedrock doesn't support it."""
-        payload: dict = {
-            "messages": [],
-            "tools": [
-                {
-                    "name": "get_weather",
-                    "description": "Get weather",
-                    "input_schema": {"type": "object"},
-                    "cache_control": {"type": "ephemeral"},
-                },
-                {"name": "get_time", "description": "Get time", "input_schema": {"type": "object"}},
-            ],
-        }
-        _strip_cache_control(payload)
-        assert "cache_control" not in payload["tools"][0]
-        assert payload["tools"][0]["name"] == "get_weather"
-        assert payload["tools"][1]["name"] == "get_time"
+        async def mock_post(client_self, url, **kwargs):
+            if urlparse(str(url)).hostname == "gateway.example.com":
+                captured["body"] = json.loads(kwargs["content"])
+                return httpx.Response(200, json=_OK_RESPONSE_JSON)
+            return await _real_post(client_self, url, **kwargs)
 
-    def test_handles_string_system(self):
-        """system can be a plain string — should not crash."""
-        payload: dict = {"system": "You are helpful", "messages": []}
-        _strip_cache_control(payload)
-        assert payload["system"] == "You are helpful"
+        monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
 
-    def test_handles_string_message_content(self):
-        """message content can be a plain string — should not crash."""
-        payload: dict = {"messages": [{"role": "user", "content": "Hello"}]}
-        _strip_cache_control(payload)
-        assert payload["messages"][0]["content"] == "Hello"
+        proxy = _make_proxy(vendor=vendor)
+        proxy._token_manager._token = "test-token"
+        port = await proxy.start()
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(f"http://127.0.0.1:{port}/v1/messages", json=request_json)
+            assert resp.status_code == 200, resp.text
+        finally:
+            await proxy.stop()
+        return captured["body"]
 
-    def test_handles_empty_payload(self):
-        payload: dict = {}
-        _strip_cache_control(payload)
-        assert payload == {}
+    @pytest.mark.parametrize("vendor", ["awsbedrock", "anthropic"])
+    async def test_cache_control_preserved_in_system(self, monkeypatch, vendor):
+        body = await self._capture_forwarded_body(
+            monkeypatch,
+            {
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 10,
+                "system": [
+                    {"type": "text", "text": "You are helpful", "cache_control": {"type": "ephemeral"}},
+                    {"type": "text", "text": "Be concise"},
+                ],
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            vendor=vendor,
+        )
+        assert body["system"][0].get("cache_control") == {"type": "ephemeral"}
+        assert "cache_control" not in body["system"][1]
+
+    async def test_cache_control_preserved_in_message_content(self, monkeypatch):
+        body = await self._capture_forwarded_body(
+            monkeypatch,
+            {
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 10,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "long prefix", "cache_control": {"type": "ephemeral"}},
+                            {"type": "text", "text": "trailing question"},
+                        ],
+                    }
+                ],
+            },
+        )
+        content = body["messages"][0]["content"]
+        assert content[0].get("cache_control") == {"type": "ephemeral"}
+        assert "cache_control" not in content[1]
+
+    async def test_cache_control_preserved_in_tools(self, monkeypatch):
+        body = await self._capture_forwarded_body(
+            monkeypatch,
+            {
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 10,
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [
+                    {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "input_schema": {"type": "object"},
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                ],
+            },
+        )
+        assert body["tools"][0].get("cache_control") == {"type": "ephemeral"}
+
+    async def test_anthropic_version_still_injected(self, monkeypatch):
+        """The Bedrock version stamp must still be injected even without stripping."""
+        body = await self._capture_forwarded_body(
+            monkeypatch,
+            {
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 10,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert body["anthropic_version"] == "bedrock-2023-05-31"
