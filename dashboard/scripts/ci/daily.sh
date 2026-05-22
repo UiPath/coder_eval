@@ -29,6 +29,9 @@
 #                 `coder-eval run <pattern>` directly and skips the
 #                 dashboard wrapper (no upload/ingest, no analysis).
 #   SUITE / MODEL / BACKEND   override the daily defaults.
+#   BRANCH         coder_eval branch (default: main).
+#   SKILLS_BRANCH  skills branch (default: main). Set both when
+#                  dry-running a coder_eval + skills PR pair before merge.
 set -euo pipefail
 
 # Non-interactive shells (systemd, `ssh user@host '...'`) don't source ~/.bashrc,
@@ -44,6 +47,7 @@ LOCK=/var/lock/uip-daily.lock
 BACKEND="${BACKEND:-bedrock}"
 SUITE="${SUITE:-skills}"
 BRANCH="${BRANCH:-main}"
+SKILLS_BRANCH="${SKILLS_BRANCH:-main}"
 # MODEL is resolved AFTER sourcing .env so it can fall back to $BEDROCK_MODEL
 # (the full Bedrock id, e.g. eu.anthropic.claude-sonnet-4-6) — the host
 # CLI's short aliases don't resolve inside the coder-eval-agent container.
@@ -116,10 +120,10 @@ if [ -z "$MODEL" ]; then
   exit 1
 fi
 
-# Skills always tracks main — only coder_eval honors $BRANCH (for ad-hoc smoke tests).
-# Hard reset (not --ff-only pull) so any local cruft / untracked conflicts /
-# half-applied rebase from a prior session can't silently abort the wrapper.
-(cd "$SKILLS_REPO" && git fetch --quiet origin && git checkout --quiet main && git reset --hard --quiet origin/main)
+# Skills tracks $SKILLS_BRANCH (default main). Hard reset (not --ff-only pull)
+# so any local cruft / untracked conflicts / half-applied rebase from a prior
+# session can't silently abort the wrapper.
+(cd "$SKILLS_REPO" && git fetch --quiet origin && git checkout --quiet "$SKILLS_BRANCH" && git reset --hard --quiet "origin/$SKILLS_BRANCH")
 
 # Install uip CLI from GitHub Packages @alpha — the cli's `ci.yml`
 # publishes `-alpha.<date>.<run>` prereleases under the `alpha` dist-tag on
@@ -168,7 +172,19 @@ if [ -z "${UV_INDEX_UIPATH_PASSWORD:-}" ]; then
 fi
 make docker-image
 
-# The skills `default.yaml` experiment mounts `~/.uipath:/.uipath:rw` so
+# Build the skills extension image (skills PR #918). The skills `nightly.yaml`
+# and `smoke.yaml` experiments reference `image: skills-image:latest` to get a
+# container with `@uipath/cli` and `@uipath/admin-tool` (plus any other
+# skill-specific tooling) pre-installed on top of coder-eval-agent. Without
+# this build, those experiments fail at container start with "image not found".
+docker build \
+  --build-arg CODER_EVAL_IMAGE=coder-eval-agent:latest \
+  --build-arg NPM_AUTH_TOKEN="$GH_NPM_REGISTRY_TOKEN" \
+  -t skills-image:latest \
+  -f "$SKILLS_REPO/tests/docker/Dockerfile" \
+  "$SKILLS_REPO"
+
+# The skills `nightly.yaml` experiment mounts `~/.uipath:/.uipath:rw` so
 # the in-container uip CLI reuses the host's cached creds. ROPC login
 # (see PR #276) already creates this dir on first `uip login`, but make
 # it idempotent so a freshly imaged VM doesn't bind-mount a missing path.

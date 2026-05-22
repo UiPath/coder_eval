@@ -1,7 +1,31 @@
 """Upload run results to Azure Blob Storage."""
 
-import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+# Patterns applied to the blob name (relative to the run dir).
+# Files matching any pattern are skipped — they're reconstructible
+# build artifacts that bloat upload time without adding evalboard value.
+_EXCLUDE_PATTERNS = [
+    "*/.venv/*",
+    "*/__pycache__/*",
+    "*.pyc",
+    "*/bin/*",
+    "*/obj/*",
+    "*.dll",
+    "*.nupkg",
+    "*.pdb",
+    "*/node_modules/*",
+    "*/.npm-prefix/*",
+]
+
+_MAX_WORKERS = 32
+
+
+def _excluded(blob_name: str) -> bool:
+    from fnmatch import fnmatch
+
+    return any(fnmatch(blob_name, pat) for pat in _EXCLUDE_PATTERNS)
 
 
 def upload_run(
@@ -11,23 +35,40 @@ def upload_run(
     container: str,
     account_key: str = "",
 ) -> None:
-    cmd = [
-        "az",
-        "storage",
-        "blob",
-        "upload-batch",
-        "--source",
-        str(run_path),
-        "--destination",
-        container,
-        "--destination-path",
-        run_id,
-        "--account-name",
-        storage_account,
-        "--overwrite",
-    ]
+    from azure.storage.blob import BlobServiceClient
+
+    url = f"https://{storage_account}.blob.core.windows.net"
     if account_key:
-        cmd.extend(["--auth-mode", "key", "--account-key", account_key])
+        client = BlobServiceClient(url, credential=account_key)
     else:
-        cmd.extend(["--auth-mode", "login"])
-    subprocess.run(cmd, check=True)
+        from azure.identity import DefaultAzureCredential
+
+        client = BlobServiceClient(url, credential=DefaultAzureCredential())
+
+    container_client = client.get_container_client(container)
+
+    files = [f for f in run_path.rglob("*") if f.is_file()]
+
+    def _upload(f: Path) -> bool:
+        rel = f.relative_to(run_path).as_posix()
+        if _excluded(rel):
+            return False
+        blob_name = f"{run_id}/{rel}"
+        with f.open("rb") as data:
+            container_client.upload_blob(blob_name, data, overwrite=True)
+        return True
+
+    uploaded = skipped = errors = 0
+    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
+        futures = {executor.submit(_upload, f): f for f in files}
+        for future in as_completed(futures):
+            try:
+                if future.result():
+                    uploaded += 1
+                else:
+                    skipped += 1
+            except Exception as exc:
+                errors += 1
+                print(f"  WARNING: upload failed for {futures[future]}: {exc}")
+
+    print(f"Uploaded {uploaded} blobs ({skipped} skipped, {errors} errors)")

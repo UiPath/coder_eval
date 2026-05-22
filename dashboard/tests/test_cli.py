@@ -36,25 +36,24 @@ def test_ingest_command(mock_get_client, mock_config_cls, tmp_path):
 
 
 @patch("dashboard.cli.Config")
-@patch("dashboard.blob.subprocess.run")
-def test_upload_command(mock_subprocess, mock_config_cls, tmp_path):
-    """Test that `dashboard upload` calls az storage blob upload-batch."""
+@patch("dashboard.blob.upload_run")
+def test_upload_command(mock_upload_run, mock_config_cls, tmp_path):
+    """Test that `dashboard upload` calls upload_run with the right args."""
     run_dir = tmp_path / "test-run"
     run_dir.mkdir()
 
     mock_cfg = MagicMock()
     mock_cfg.azure_storage_account = "teststorage"
     mock_cfg.azure_blob_container = "runs"
+    mock_cfg.azure_storage_key = ""
     mock_config_cls.return_value = mock_cfg
 
     runner = CliRunner()
     result = runner.invoke(cli, ["upload", str(run_dir)])
     assert result.exit_code == 0, result.output
     assert "Uploaded" in result.output
-    mock_subprocess.assert_called_once()
-    call_args = mock_subprocess.call_args[0][0]
-    assert "az" in call_args
-    assert "--account-name" in call_args
+    mock_upload_run.assert_called_once()
+    assert "teststorage" in str(mock_upload_run.call_args)
 
 
 @patch("dashboard.cli.Config")
@@ -232,7 +231,7 @@ def test_build_skills_suite():
     assert suite.task_patterns == ["/path/to/skills/tests/tasks/**/*.yaml"]
     # Activation/ is carved out structurally; it's owned by the activation suite.
     assert suite.exclude_patterns == ["/path/to/skills/tests/tasks/activation/**/*.yaml"]
-    assert suite.experiment == "/path/to/skills/tests/experiments/e2e.yaml"
+    assert suite.experiment == "/path/to/skills/tests/experiments/nightly.yaml"
     assert suite.uip_login is True
     assert suite.default is True
     assert suite.env == {"SKILLS_REPO_PATH": "/path/to/skills"}
