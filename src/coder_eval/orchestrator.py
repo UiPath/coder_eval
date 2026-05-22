@@ -1293,7 +1293,7 @@ class Orchestrator:
                 )
                 self.result.turns.append(turn_record)
                 self._sync_sandbox_command_path_with_agent()
-                dialog_pairs.append((current_prompt, turn_record.agent_output or ""))
+                dialog_pairs.append((current_prompt, _extract_utterance(turn_record.agent_output or "")))
                 agent_meta_parts = []
                 if turn_record.duration_seconds is not None:
                     agent_meta_parts.append(f"{turn_record.duration_seconds:.1f}s")
