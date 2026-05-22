@@ -191,6 +191,7 @@ class DockerDriverConfig(BaseModel):
             "UIPATH_ORGANIZATION_ID",
             "AWS_BEARER_TOKEN_BEDROCK",
             "AWS_REGION",
+            "BEDROCK_MODEL",
             # Claude Code SDK Bedrock toggle + optional model override; required
             # alongside AWS_BEARER_TOKEN_BEDROCK to route the in-container SDK
             # through Bedrock instead of falling back to ~/.claude OAuth.

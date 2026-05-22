@@ -459,7 +459,7 @@ class TestReportTokenUsageSection:
                     "weighted_score": 1.0,
                     "duration": 30.0,
                     "iteration_count": 1,
-                    "turns": [],
+                    "iterations": [],
                     "reference_similarity": None,
                     "input_tokens": 7000,
                     "output_tokens": 3000,

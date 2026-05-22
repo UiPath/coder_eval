@@ -1983,7 +1983,7 @@ async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
 
     Locks the orchestrator wiring between `execute_with_retry` and the
     `_preserve_partial_on_failure` callback: the partial record reaches
-    `result.turns` before the successful retry's record, and both share the
+    `result.iterations` before the successful retry's record, and both share the
     same iteration number (per the agent-side rollback contract).
     """
     from datetime import datetime
@@ -2094,9 +2094,9 @@ async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
     assert success is True
     # communicate called twice: once crashing, once clean.
     assert mock_agent.communicate.call_count == 2
-    # Both records reach result.turns: partial first (via callback), then successful (via main flow).
-    assert len(orchestrator.result.turns) == 2
-    preserved, clean = orchestrator.result.turns
+    # Both records reach result.iterations: partial first (via callback), then successful (via main flow).
+    assert len(orchestrator.result.iterations) == 2
+    preserved, clean = orchestrator.result.iterations
     assert preserved.crashed is True
     assert preserved.commands[0].tool_name == "Skill"
     assert clean.crashed is False
@@ -2204,7 +2204,9 @@ async def test_evaluation_loop_stamps_timeout_reason_on_partial(tmp_path):
 
     # The preserved partial carries the normalised timeout reason. The
     # render layer uses this to label the inter-attempt transition.
-    assert any(t.crashed and t.crash_reason == "Agent turn timed out after 600s" for t in orchestrator.result.turns)
+    assert any(
+        t.crashed and t.crash_reason == "Agent turn timed out after 600s" for t in orchestrator.result.iterations
+    )
 
 
 def test_aggregate_token_usage_includes_crashed_partials(tmp_path):
@@ -2265,7 +2267,7 @@ def test_aggregate_token_usage_includes_crashed_partials(tmp_path):
     )
     # Edge case: ResultMessage arrived just before the crash, so the partial
     # carries token_usage. The retry then makes a separate billed call.
-    orchestrator.result.turns = [
+    orchestrator.result.iterations = [
         TurnRecord(
             iteration=1,
             user_input="p",

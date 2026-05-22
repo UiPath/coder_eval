@@ -52,6 +52,7 @@ from .models import (
     TaskDefinition,
     TaskResult,
     TurnRecord,
+    UserMessage,
     proxy_config_from_settings,
     resolve_route,
 )
@@ -495,12 +496,12 @@ class Orchestrator:
         self.result.calculate_weighted_score(self.task.success_criteria)
 
         # Command statistics
-        if self.result.turns:
-            self.result.command_stats = calculate_command_statistics(self.result.turns)
+        if self.result.iterations:
+            self.result.command_stats = calculate_command_statistics(self.result.iterations)
 
         # Resolve model_used (last turn with model wins, then agent config)
-        if self.result.turns:
-            for turn in reversed(self.result.turns):
+        if self.result.iterations:
+            for turn in reversed(self.result.iterations):
                 if turn.model_used:
                     self.result.model_used = turn.model_used
                     break
@@ -514,15 +515,15 @@ class Orchestrator:
         # Lets users audit whether a configured max_usd budget was actually enforceable.
         if self.task.run_limits is not None and self.task.run_limits.max_usd is not None:
             any_cost_reported = any(
-                t.token_usage is not None and t.token_usage.total_cost_usd is not None for t in self.result.turns
+                t.token_usage is not None and t.token_usage.total_cost_usd is not None for t in self.result.iterations
             )
             self.result.environment_info["cost_data_available"] = any_cost_reported
 
-        if self.result.turns:
-            self.result.total_assistant_turns = sum(t.assistant_turn_count for t in self.result.turns)
+        if self.result.iterations:
+            self.result.total_assistant_turns = sum(t.assistant_turn_count for t in self.result.iterations)
 
         # command_stats counts crashed partials too — they're real executed work.
-        if self.result.turns and self.result.command_stats:
+        if self.result.iterations and self.result.command_stats:
             actual_cmds = self.result.command_stats.total_commands
             self.result.actual_commands = actual_cmds
             if self.task.expected_commands is not None:
@@ -592,7 +593,7 @@ class Orchestrator:
     def _check_run_limits(self, *, iteration: int) -> None:
         """Raise BudgetExceededError if any RunLimits budget is exceeded.
 
-        Called after each completed turn. Aggregates across self.result.turns.
+        Called after each completed turn. Aggregates across self.result.iterations.
         No-op when self.task.run_limits is None.
         """
         assert self.result is not None
@@ -600,7 +601,7 @@ class Orchestrator:
         if limits is None:
             return
 
-        usages = [t.token_usage for t in self.result.turns if t.token_usage is not None]
+        usages = [t.token_usage for t in self.result.iterations if t.token_usage is not None]
         if not usages:
             return
 
@@ -661,8 +662,8 @@ class Orchestrator:
         from .models.telemetry import TokenUsage
 
         # Include crashed=True partials: each API call is billed independently.
-        if self.result.turns:
-            usages = [t.token_usage for t in self.result.turns if t.token_usage is not None]
+        if self.result.iterations:
+            usages = [t.token_usage for t in self.result.iterations if t.token_usage is not None]
             if usages:
                 costs = [u.total_cost_usd for u in usages if u.total_cost_usd is not None]
                 self.result.total_token_usage = TokenUsage(
@@ -911,7 +912,7 @@ class Orchestrator:
 
         Shared by the criteria-feedback and simulation loops. Crashed partials
         from ``AgentCrashError`` / ``TurnTimeoutError`` are appended to
-        ``self.result.turns`` via the ``on_attempt_error`` hook (terminal
+        ``self.result.iterations`` via the ``on_attempt_error`` hook (terminal
         failures included) so observational criteria still see them. Each
         attempt gets a fresh ``turn_timeout``; ``TurnTimeoutError`` is
         ``AGENT_TIMEOUT`` (``max_retries=0``) so it still terminates after
@@ -933,10 +934,10 @@ class Orchestrator:
             agent_callback = TaskScopedCallback(self.stream_callback, self._log_task_id)
 
         def _drain_pending_turn(*, attempt: int) -> None:
-            """Read agent.pending_turn and, if set, append it to result.turns."""
+            """Read agent.pending_turn and, if set, append it to result.iterations."""
             partial = agent.pending_turn
             if partial is not None:
-                result.turns.append(partial)
+                result.iterations.append(partial)
                 logger.debug(
                     "[%s] Drained partial turn record (attempt %d, iteration %d): %d commands",
                     self.task.task_id,
@@ -1045,7 +1046,7 @@ class Orchestrator:
                 self.task.success_criteria,
                 reference_code=reference_code,
                 reference_dir=reference_dir,
-                turn_records=self.result.turns,
+                turn_records=self.result.iterations,
             )
             self.result.success_criteria_results = criteria_results
             all_passed = all(
@@ -1091,7 +1092,7 @@ class Orchestrator:
             iteration=iteration,
             operation_label="Agent communication",
         )
-        self.result.turns.append(turn_record)
+        self.result.iterations.append(turn_record)
         self._sync_sandbox_command_path_with_agent()
 
         safe_emit(
@@ -1129,7 +1130,7 @@ class Orchestrator:
             self.task.success_criteria,
             reference_code=reference_code,
             reference_dir=reference_dir,
-            turn_records=self.result.turns,
+            turn_records=self.result.iterations,
         )
         self.result.success_criteria_results = criteria_results
 
@@ -1215,10 +1216,20 @@ class Orchestrator:
         all_passed = False
         turns_completed = 0
 
+        # UserMessage captured for the upcoming agent call; prepended to the
+        # next turn_record.messages. None outside simulation paths.
+        pending_user_turn: UserMessage | None = None
+        sim_model_id = getattr(sim_config, "model", None)
+        # Track whether we entered the agent-call loop — used by the finally
+        # block to decide whether to persist an orphaned pending_user_turn.
+        agent_turn_attempted = False
+
         try:
             # Pure-simulation mode: no pinned opener — ask the simulator to
             # generate turn 1 from empty history before the agent sees anything.
             if initial_prompt is None:
+                user_started_wall = datetime.now()
+                user_started_mono = time.monotonic()
                 try:
                     opener = await simulator.next_user_message([])
                 except Exception:
@@ -1234,10 +1245,23 @@ class Orchestrator:
                         total_turns=0,
                     )
                     return False
+                user_completed_wall = datetime.now()
+                user_duration_ms = (time.monotonic() - user_started_mono) * 1000
                 simulator_input_tokens += opener.input_tokens or 0
                 simulator_output_tokens += opener.output_tokens or 0
                 total_tokens_used += (opener.input_tokens or 0) + (opener.output_tokens or 0)
                 current_prompt = opener.text
+                pending_user_turn = UserMessage(
+                    text=opener.text,
+                    raw_text=opener.raw_text,
+                    stop_requested=opener.stop_requested,
+                    started_at=user_started_wall,
+                    completed_at=user_completed_wall,
+                    generation_duration_ms=user_duration_ms,
+                    input_tokens=opener.input_tokens or 0,
+                    output_tokens=opener.output_tokens or 0,
+                    model=sim_model_id,
+                )
                 self._log_conversation("USER", 1, current_prompt, metadata="simulator-generated opener")
 
                 # Opener carrying the stop token means the simulator judged the
@@ -1259,6 +1283,7 @@ class Orchestrator:
                     return False
             else:
                 current_prompt = initial_prompt
+                pending_user_turn = UserMessage(text=initial_prompt)
                 self._log_conversation("USER", 1, current_prompt, metadata="pinned initial_prompt")
             # Parallel history of clean (user, agent) pairs for the simulator.
             # This intentionally excludes the working-directory prefix that gets
@@ -1286,12 +1311,16 @@ class Orchestrator:
                     ),
                 )
 
+                agent_turn_attempted = True
                 turn_record = await self._communicate_with_retry(
                     prompt=prompt_with_cwd,
                     iteration=turns_completed,
                     operation_label=f"Agent communication (sim turn {turns_completed})",
                 )
-                self.result.turns.append(turn_record)
+                if pending_user_turn is not None:
+                    turn_record.messages.insert(0, pending_user_turn)
+                    pending_user_turn = None
+                self.result.iterations.append(turn_record)
                 self._sync_sandbox_command_path_with_agent()
                 dialog_pairs.append((current_prompt, _extract_utterance(turn_record.agent_output or "")))
                 agent_meta_parts = []
@@ -1349,7 +1378,7 @@ class Orchestrator:
                         self.task.success_criteria,
                         reference_code=reference_code,
                         reference_dir=reference_dir,
-                        turn_records=self.result.turns,
+                        turn_records=self.result.iterations,
                     )
                     self.result.success_criteria_results = criteria_results
                     self.result.calculate_weighted_score(self.task.success_criteria)
@@ -1377,7 +1406,7 @@ class Orchestrator:
                             self.task.success_criteria,
                             reference_code=reference_code,
                             reference_dir=reference_dir,
-                            turn_records=self.result.turns,
+                            turn_records=self.result.iterations,
                         )
                         self.result.success_criteria_results = criteria_results
                         self.result.calculate_weighted_score(self.task.success_criteria)
@@ -1403,6 +1432,8 @@ class Orchestrator:
                     )
                     break
 
+                user_started_wall = datetime.now()
+                user_started_mono = time.monotonic()
                 try:
                     sim_result = await simulator.next_user_message(dialog_pairs)
                 except Exception:
@@ -1410,10 +1441,24 @@ class Orchestrator:
                     logger.exception("User simulator failed — ending dialog")
                     stop_reason = DialogStopReason.ERROR
                     break
+                user_completed_wall = datetime.now()
+                user_duration_ms = (time.monotonic() - user_started_mono) * 1000
 
                 simulator_input_tokens += sim_result.input_tokens or 0
                 simulator_output_tokens += sim_result.output_tokens or 0
                 total_tokens_used += (sim_result.input_tokens or 0) + (sim_result.output_tokens or 0)
+
+                pending_user_turn = UserMessage(
+                    text=sim_result.text,
+                    raw_text=sim_result.raw_text,
+                    stop_requested=sim_result.stop_requested,
+                    started_at=user_started_wall,
+                    completed_at=user_completed_wall,
+                    generation_duration_ms=user_duration_ms,
+                    input_tokens=sim_result.input_tokens or 0,
+                    output_tokens=sim_result.output_tokens or 0,
+                    model=sim_model_id,
+                )
 
                 if sim_result.stop_requested:
                     self._log_conversation(
@@ -1444,7 +1489,7 @@ class Orchestrator:
                     self.task.success_criteria,
                     reference_code=reference_code,
                     reference_dir=reference_dir,
-                    turn_records=self.result.turns,
+                    turn_records=self.result.iterations,
                 )
                 self.result.success_criteria_results = criteria_results
                 self.result.calculate_weighted_score(self.task.success_criteria)
@@ -1472,6 +1517,18 @@ class Orchestrator:
             )
             return all_passed
         finally:
+            # If an agent turn was attempted but crashed before attaching pending_user_turn to a turn_record,
+            # append it as a standalone entry so its telemetry is not lost. (If the simulator's opener
+            # had stop_requested, we never entered the agent loop, so don't record it.)
+            if agent_turn_attempted and pending_user_turn is not None and self.result is not None:
+                standalone_turn = TurnRecord(
+                    iteration=turns_completed,
+                    user_input=pending_user_turn.text or "",
+                    agent_output="",
+                    messages=[pending_user_turn],
+                )
+                self.result.iterations.append(standalone_turn)
+
             # When the dialog bails out via exception (TurnTimeoutError,
             # TaskTimeoutError, etc.) before reaching the explicit telemetry
             # write above, the happy-path write never happens — record partial

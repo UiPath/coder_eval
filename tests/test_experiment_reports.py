@@ -794,7 +794,7 @@ class TestComprehensiveVariantReport:
             success_criteria_results=[
                 CriterionResult(criterion_type="file_exists", description="check", score=1.0),
             ],
-            turns=[
+            iterations=[
                 TurnRecord(iteration=1, user_input="do it", agent_output="done", duration_seconds=30.0),
                 TurnRecord(iteration=2, user_input="fix it", agent_output="fixed", duration_seconds=30.0),
             ],

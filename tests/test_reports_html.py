@@ -60,7 +60,7 @@ def _make_command(
 def _make_result(
     *,
     final_status: FinalStatus = FinalStatus.SUCCESS,
-    turns: list[TurnRecord] | None = None,
+    iterations: list[TurnRecord] | None = None,
     criteria: list[CriterionResult] | None = None,
     error_message: str | None = None,
 ) -> EvaluationResult:
@@ -77,7 +77,7 @@ def _make_result(
         weighted_score=0.9 if final_status == FinalStatus.SUCCESS else 0.2,
         iteration_count=1,
         success_criteria_results=criteria or [],
-        turns=turns or [],
+        iterations=iterations or [],
         error_message=error_message,
     )
 
@@ -196,7 +196,7 @@ def test_task_html_minimal_success():
                 error=None,
             )
         ],
-        turns=[
+        iterations=[
             TurnRecord(
                 iteration=1,
                 user_input="Create Main.cs",
@@ -327,7 +327,7 @@ def test_task_html_truncates_long_parameters():
     """Long tool parameters should be truncated, not embedded verbatim."""
     huge = "X" * 2000
     result = _make_result(
-        turns=[
+        iterations=[
             TurnRecord(
                 iteration=1,
                 user_input="do it",
@@ -996,7 +996,7 @@ def test_iteration_group_rendering(scenario, turns, expectations):
     """Single-attempt iterations keep the plain heading; multi-attempt iterations
     render a coloured banner (recovered vs terminal) wrapping per-attempt cards."""
     final_status = FinalStatus.ERROR if scenario == "terminal" else FinalStatus.SUCCESS
-    result = _make_result(final_status=final_status, turns=turns)
+    result = _make_result(final_status=final_status, iterations=turns)
     html = HTMLReportGenerator.generate_task_html(result)
     for s in expectations["present"]:
         assert s in html, f"[{scenario}] expected {s!r} in html"
@@ -1011,7 +1011,7 @@ def test_attempt_transition_marker_and_trace_count():
     heading counts iterations (and adds attempts when partials are present)."""
     # Recovered with a stamped reason: marker carries the reason and "resuming".
     res_reason = _make_result(
-        turns=[
+        iterations=[
             TurnRecord(
                 iteration=1,
                 user_input="p",
@@ -1030,7 +1030,7 @@ def test_attempt_transition_marker_and_trace_count():
 
     # Backward-compat fallback: partial without crash_reason → "Agent crashed".
     res_fallback = _make_result(
-        turns=[
+        iterations=[
             TurnRecord(iteration=1, user_input="p", agent_output="<partial>", crashed=True),
             TurnRecord(iteration=1, user_input="p", agent_output="ok"),
         ],
@@ -1043,7 +1043,7 @@ def test_attempt_transition_marker_and_trace_count():
     # gets no trailing marker (and exactly one "resuming" appears overall).
     res_terminal = _make_result(
         final_status=FinalStatus.ERROR,
-        turns=[
+        iterations=[
             TurnRecord(iteration=1, user_input="p", agent_output="<partial>", crashed=True, crash_reason="boom 1"),
             TurnRecord(iteration=1, user_input="p", agent_output="<partial>", crashed=True, crash_reason="boom 2"),
         ],
@@ -1055,7 +1055,7 @@ def test_attempt_transition_marker_and_trace_count():
 
     # Clean run: trace count uses iterations only (no "attempts" segment).
     res_clean = _make_result(
-        turns=[
+        iterations=[
             TurnRecord(iteration=1, user_input="p", agent_output="ok"),
             TurnRecord(iteration=2, user_input="p", agent_output="ok"),
         ],
@@ -1069,7 +1069,7 @@ def test_generation_metrics_breaks_down_crashed_partials():
     """The "Crashed Partials" stat must split the count into recovered vs terminal
     so a reader can tell at a glance whether the agent recovered or aborted."""
     result = _make_result(
-        turns=[
+        iterations=[
             # Iteration 1: 1 crash + recovery.
             TurnRecord(iteration=1, user_input="p", agent_output="<partial>", crashed=True),
             TurnRecord(iteration=1, user_input="p", agent_output="ok"),

@@ -867,7 +867,7 @@ def _render_generation_metrics(result: EvaluationResult) -> str:
     """Render Generation Metrics — latency, turns."""
     from .reports import count_partials_by_outcome, group_consecutive_by_iteration
 
-    turns = result.turns or []
+    turns = result.iterations or []
     num_turns = len(turns)
     asst_turns = result.total_assistant_turns or 0
     avg_turn = (sum(t.duration_seconds for t in turns) / num_turns) if num_turns else 0.0
@@ -1089,7 +1089,7 @@ def _variant_rich_sections(variant_id: str, result: ExperimentResult | None, run
     sections.append(_render_variant_token_usage(eval_results))
 
     # Command Telemetry — aggregate turns across all variant tasks
-    all_turns = [t for r in eval_results for t in r.turns]
+    all_turns = [t for r in eval_results for t in r.iterations]
     if all_turns:
         stats = calculate_command_statistics(all_turns)
         if stats.total_commands > 0:
@@ -1115,9 +1115,9 @@ def _render_variant_generation_metrics(eval_results: list[EvaluationResult]) -> 
         return ""
     total_tasks = len(eval_results)
     total_duration = sum(r.duration_seconds for r in eval_results)
-    total_turns = sum(len(r.turns) for r in eval_results)
+    total_turns = sum(len(r.iterations) for r in eval_results)
     total_asst = sum(r.total_assistant_turns or 0 for r in eval_results)
-    per_turn_latencies = [t.duration_seconds for r in eval_results for t in r.turns]
+    per_turn_latencies = [t.duration_seconds for r in eval_results for t in r.iterations]
     avg_turn = (sum(per_turn_latencies) / len(per_turn_latencies)) if per_turn_latencies else 0.0
     total_latency_fmt = _esc(_format_duration(total_duration))
     avg_turn_fmt = _esc(_format_duration(avg_turn))
@@ -1414,15 +1414,15 @@ class HTMLReportGenerator:
         ``error_details["stack_trace"]`` so archived runs predating the tail
         capture still surface diagnostics.
         """
-        groups = _group_turns_by_iteration(result.turns or [])
+        groups = _group_turns_by_iteration(result.iterations or [])
         turns_html = "".join(_render_iteration_group(it, group) for it, group in groups)
         if not turns_html:
             no_turn_msg = "No turn data (agent communication failed before producing any turns)."
             turns_html = f'<div class="card"><p class="muted">{no_turn_msg}</p></div>'
 
         n_iterations = len(groups)
-        n_attempts = len(result.turns or [])
-        has_partials = any(t.crashed for t in (result.turns or []))
+        n_attempts = len(result.iterations or [])
+        has_partials = any(t.crashed for t in (result.iterations or []))
         iter_label = f"{n_iterations} iteration" + ("s" if n_iterations != 1 else "")
         if has_partials:
             attempts_label = f", {n_attempts} attempt" + ("s" if n_attempts != 1 else "")

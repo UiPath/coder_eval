@@ -143,10 +143,13 @@ from coder_eval.models.tasks import (
 
 # Telemetry
 from coder_eval.models.telemetry import (
+    AssistantMessage,
     CommandStatistics,
     CommandTelemetry,
+    ContentBlock,
     SlowestCommandInfo,
     TokenUsage,
+    UserMessage,
 )
 
 # Templates
@@ -218,10 +221,13 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "ResourceLimits",
     "validate_template_sources_list",
     # Telemetry
+    "AssistantMessage",
     "CommandTelemetry",
     "CommandStatistics",
+    "ContentBlock",
     "SlowestCommandInfo",
     "TokenUsage",
+    "UserMessage",
     # Results
     "ClassificationCriterionResult",
     "ClassLabelStats",

@@ -239,8 +239,8 @@ async def test_simulation_generates_opener_when_initial_prompt_absent(tmp_path, 
     assert "Begin the conversation" in stub.calls[0]
     assert stub.calls[1] == "I've successfully completed all required file operations based on the task criteria."
     # The agent's first user_input should be the simulator-generated opener.
-    assert result.turns[0].user_input is not None
-    assert "I want to build a little thing." in result.turns[0].user_input
+    assert result.iterations[0].user_input is not None
+    assert "I want to build a little thing." in result.iterations[0].user_input
     # Token accounting aggregates both simulator calls.
     assert sim.simulator_input_tokens == 10  # 5 + 5
     assert sim.simulator_output_tokens == 14  # 7 + 7
@@ -276,7 +276,7 @@ async def test_simulation_opener_with_stop_token_short_circuits(tmp_path, monkey
     assert result.simulation.stop_reason == "stop_token"
     # Agent never ran — the simulator already signalled done in the opener.
     assert result.simulation.total_turns == 0
-    assert len(result.turns) == 0
+    assert len(result.iterations) == 0
 
 
 @pytest.mark.asyncio

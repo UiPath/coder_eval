@@ -41,6 +41,7 @@ def _make_text_block(text: str = "I'll help"):
     del block.name
     del block.id
     del block.input
+    del block.thinking
     return block
 
 

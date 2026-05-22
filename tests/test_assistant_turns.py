@@ -85,21 +85,21 @@ class TestEvaluationResultTotalAssistantTurns:
             started_at=datetime.now(),
             final_status="SUCCESS",
             iteration_count=3,
-            turns=[
+            iterations=[
                 TurnRecord(iteration=1, user_input="a", agent_output="b", assistant_turn_count=3),
                 TurnRecord(iteration=2, user_input="c", agent_output="d", assistant_turn_count=5),
                 TurnRecord(iteration=3, user_input="e", agent_output="f", assistant_turn_count=2),
             ],
         )
         # Simulate what orchestrator does
-        result.total_assistant_turns = sum(t.assistant_turn_count for t in result.turns)
+        result.total_assistant_turns = sum(t.assistant_turn_count for t in result.iterations)
         assert result.total_assistant_turns == 10
 
     def test_no_turns_stays_none(self):
         """When there are no turns, total_assistant_turns should remain None.
 
         This tests the guard that the orchestrator has:
-            if self.result.turns:
+            if self.result.iterations:
                 self.result.total_assistant_turns = sum(...)
         """
         result = EvaluationResult(
@@ -110,11 +110,11 @@ class TestEvaluationResultTotalAssistantTurns:
             started_at=datetime.now(),
             final_status="ERROR",
             iteration_count=0,
-            turns=[],
+            iterations=[],
         )
         # Simulate orchestrator guard
-        if result.turns:
-            result.total_assistant_turns = sum(t.assistant_turn_count for t in result.turns)
+        if result.iterations:
+            result.total_assistant_turns = sum(t.assistant_turn_count for t in result.iterations)
 
         assert result.total_assistant_turns is None
 
@@ -147,7 +147,7 @@ class TestEvaluationResultTotalAssistantTurns:
 # --- Report-level tests ---
 
 
-def _make_task_result(task_id, turns=None, **kwargs):
+def _make_task_result(task_id, iterations=None, **kwargs):
     """Helper to create a task result dict."""
     return {
         "task_id": task_id,
@@ -155,7 +155,7 @@ def _make_task_result(task_id, turns=None, **kwargs):
         "weighted_score": kwargs.get("weighted_score", 1.0),
         "duration": kwargs.get("duration", 60.0),
         "iteration_count": kwargs.get("iteration_count", 1),
-        "turns": turns or [],
+        "iterations": iterations or [],
     }
 
 
@@ -167,7 +167,7 @@ class TestReportAssistantTurns:
         task_results = [
             _make_task_result(
                 "task1",
-                turns=[{"iteration": 1, "duration_seconds": 30.0, "assistant_turn_count": 5}],
+                iterations=[{"iteration": 1, "duration_seconds": 30.0, "assistant_turn_count": 5}],
             ),
         ]
         lines = ReportGenerator._generate_generation_metrics_section(task_results)
@@ -179,7 +179,7 @@ class TestReportAssistantTurns:
         task_results = [
             _make_task_result(
                 "task1",
-                turns=[
+                iterations=[
                     {"iteration": 1, "duration_seconds": 20.0, "assistant_turn_count": 3},
                     {"iteration": 2, "duration_seconds": 25.0, "assistant_turn_count": 5},
                 ],
@@ -198,7 +198,7 @@ class TestReportAssistantTurns:
         task_results = [
             _make_task_result(
                 "task1",
-                turns=[{"iteration": 1, "duration_seconds": 30.0}],
+                iterations=[{"iteration": 1, "duration_seconds": 30.0}],
             ),
         ]
         lines = ReportGenerator._generate_generation_metrics_section(task_results)
@@ -220,7 +220,7 @@ class TestReportAssistantTurns:
             task_results=[
                 _make_task_result(
                     "task1",
-                    turns=[
+                    iterations=[
                         {"iteration": 1, "duration_seconds": 30.0, "assistant_turn_count": 4},
                         {"iteration": 2, "duration_seconds": 30.0, "assistant_turn_count": 6},
                     ],
@@ -247,7 +247,7 @@ class TestReportAssistantTurns:
             task_results=[
                 _make_task_result(
                     "task1",
-                    turns=[{"iteration": 1, "duration_seconds": 30.0}],
+                    iterations=[{"iteration": 1, "duration_seconds": 30.0}],
                     iteration_count=1,
                 ),
             ],
@@ -273,7 +273,7 @@ class TestRunSummaryAssistantTurnCount:
             started_at=datetime.now(),
             final_status="SUCCESS",
             iteration_count=2,
-            turns=[
+            iterations=[
                 TurnRecord(iteration=1, user_input="a", agent_output="b", assistant_turn_count=3),
                 TurnRecord(iteration=2, user_input="c", agent_output="d", assistant_turn_count=7),
             ],
@@ -289,7 +289,7 @@ class TestRunSummaryAssistantTurnCount:
         )
 
         # Verify turns in summary contain assistant_turn_count
-        task_turns = summary.task_results[0]["turns"]
+        task_turns = summary.task_results[0]["iterations"]
         assert task_turns[0]["assistant_turn_count"] == 3
         assert task_turns[1]["assistant_turn_count"] == 7
 
@@ -306,7 +306,7 @@ class TestRunSummaryAssistantTurnCount:
             started_at=datetime.now(),
             final_status="SUCCESS",
             iteration_count=1,
-            turns=[
+            iterations=[
                 TurnRecord(iteration=1, user_input="a", agent_output="b", assistant_turn_count=5),
             ],
         )

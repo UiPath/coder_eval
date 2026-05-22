@@ -149,7 +149,7 @@ def _count_crashed_partials(task_results: list[dict[str, Any]]) -> tuple[int, in
 
     total = recovered = terminal = 0
     for task in task_results:
-        turns = task.get("turns") or []
+        turns = task.get("iterations") or []
         groups = group_consecutive_by_iteration(turns, _iteration_of)
         t_count, r_count, term_count = count_partials_by_outcome(groups, lambda t: bool(t.get("crashed")))
         total += t_count
@@ -241,7 +241,7 @@ class ReportGenerator:
         for task in task_results:
             task_id = task["task_id"]
             total_latency = f"{task['duration']:.1f}s"
-            turns = task.get("turns", [])
+            turns = task.get("iterations", [])
             num_turns = len(turns)
 
             asst_turns = sum(t.get("assistant_turn_count", 0) for t in turns)
@@ -319,7 +319,7 @@ class ReportGenerator:
             lines.append(f"- **Avg Generation Latency**: {sum(durations) / len(durations):.1f}s")
 
         total_asst_turns = sum(
-            sum(t.get("assistant_turn_count", 0) for t in task.get("turns", [])) for task in summary.task_results
+            sum(t.get("assistant_turn_count", 0) for t in task.get("iterations", [])) for task in summary.task_results
         )
         if total_asst_turns > 0:
             lines.append(f"- **Total Assistant Turns**: {total_asst_turns}")
@@ -385,7 +385,7 @@ class ReportGenerator:
             lines.append(row)
 
         # Generation Metrics section
-        if any(t.get("turns") for t in summary.task_results):
+        if any(t.get("iterations") for t in summary.task_results):
             lines.extend(["", ""])
             lines.extend(ReportGenerator._generate_generation_metrics_section(summary.task_results))
 
@@ -539,7 +539,7 @@ class ReportGenerator:
                 continue
             try:
                 result = EvaluationResult.model_validate_json(report_path.read_text(encoding="utf-8"))
-                all_turns.extend(result.turns)
+                all_turns.extend(result.iterations)
             except Exception:
                 logger.warning("Failed to load report %s for command statistics", report_path, exc_info=True)
 

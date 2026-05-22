@@ -8,7 +8,7 @@ import os
 import re
 import time
 from contextlib import suppress
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +45,7 @@ from coder_eval.models import (
     ApiRoute,
     BedrockRoute,
     CommandTelemetry,
+    ContentBlock,
     DirectRoute,
     FileChange,
     FileChanges,
@@ -54,6 +55,12 @@ from coder_eval.models import (
     TokenUsage,
     TurnRecord,
     to_bedrock_inference_profile,
+)
+from coder_eval.models import (
+    AssistantMessage as AssistantMessageTelemetry,
+)
+from coder_eval.models import (
+    UserMessage as UserMessageTelemetry,
 )
 from coder_eval.resources import get_ignore_patterns, should_ignore_path
 from coder_eval.streaming.callbacks import StreamCallback, safe_emit
@@ -85,6 +92,16 @@ def _is_assistant_message(message: Any) -> bool:
 def _is_tool_use_block(block: Any) -> bool:
     """Check if block is a ToolUseBlock using duck typing."""
     return hasattr(block, "name") and hasattr(block, "id") and hasattr(block, "input")
+
+
+def _is_thinking_block(block: Any) -> bool:
+    """Check if block is a ThinkingBlock (extended-thinking reasoning)."""
+    return hasattr(block, "thinking") and not hasattr(block, "text")
+
+
+def _is_text_block(block: Any) -> bool:
+    """Check if block is a TextBlock (visible narration)."""
+    return hasattr(block, "text") and not hasattr(block, "thinking")
 
 
 def _is_user_message(message: Any) -> bool:
@@ -219,6 +236,11 @@ class ClaudeCodeAgent(Agent):
         self.working_directory: Path | None = None
         self._state = AgentState.WORKING
         self._iteration = 0
+        # Set True right after _iteration is incremented at the start of communicate();
+        # consumed (and cleared) by discard_pending_turn() to roll back the counter exactly
+        # once per failed turn, even when _set_pending swallows a partial-build exception
+        # and leaves pending_turn as None.
+        self._iteration_was_incremented = False
         self._sdk_options_dump: dict[str, Any] | None = None
         self._session_id: str | None = None
         # Transport reference held only while a communicate() call is in flight,
@@ -390,6 +412,7 @@ class ClaudeCodeAgent(Agent):
         # Bump after _capture_file_tree so an OSError leaves the counter unchanged.
         files_before = self._capture_file_tree()
         self._iteration += 1
+        self._iteration_was_incremented = True
 
         # Collect all messages from the turn
         messages = []
@@ -400,6 +423,16 @@ class ClaudeCodeAgent(Agent):
         pending_commands: dict[str, dict[str, Any]] = {}  # tool_id -> {telemetry, command_start_time}
         processed_results: set[str] = set()  # Track duplicate ResultMessages
         sequence_number = 0
+
+        # Per-message telemetry (SDK messages). The list index is the
+        # assistant_turn_index attached to commands emitted in that turn.
+        sdk_messages: list[UserMessageTelemetry | AssistantMessageTelemetry] = []
+        last_assistant_message_index: int | None = None  # Track last AssistantMessage to populate with final tokens
+        # The SDK does not surface a "message started" event, so we approximate
+        # generation_duration_ms as wall-clock between SDK events: previous tool
+        # result (or turn start) to AssistantMessage arrival.
+        last_event_monotonic: float = turn_start_time
+        last_event_wall: datetime = datetime.now()
 
         # SDK ResultMessage token usage (captured from final message)
         sdk_result_usage: dict[str, Any] | None = None
@@ -436,6 +469,7 @@ class ClaudeCodeAgent(Agent):
                     messages=messages,
                     pending_commands=pending_commands,
                     assistant_turn_count=assistant_turn_count,
+                    messages_list=sdk_messages,
                     sdk_result_usage=sdk_result_usage,
                     sdk_result_cost=sdk_result_cost,
                     sdk_model_used=sdk_model_used,
@@ -546,23 +580,37 @@ class ClaudeCodeAgent(Agent):
 
                     # Two-phase command telemetry capture using type guards
 
-                    # PHASE 1: Capture ToolUseBlock and create pending command
+                    # PHASE 1: Capture ToolUseBlock + build AssistantTurn record.
                     if _is_assistant_message(message):
+                        message_arrival_monotonic = time.monotonic()
+                        message_arrival_wall = datetime.now()
+                        generation_started_wall = last_event_wall
+                        generation_duration_ms = (message_arrival_monotonic - last_event_monotonic) * 1000
+
+                        current_turn_index = len(sdk_messages)
                         assistant_turn_count += 1
                         model_attr = getattr(message, "model", None)
                         if isinstance(model_attr, str):
                             sdk_model_used = model_attr
+
                         content = getattr(message, "content", None)
-                        # Content can be a list of blocks (text, tool_use, etc.)
+                        turn_content_blocks: list[ContentBlock] = []
+                        turn_tool_use_ids: list[str] = []
+
+                        # Content can be a list of blocks (text, thinking, tool_use, etc.)
                         if content and isinstance(content, list):
                             for block in content:
+                                block_seq = len(turn_content_blocks)
+
                                 if _is_tool_use_block(block):
                                     command_start_time = time.monotonic()  # Precise command start time
 
                                     telemetry = CommandTelemetry(
                                         tool_name=block.name,
                                         tool_id=block.id,
-                                        timestamp=datetime.now(),
+                                        timestamp=message_arrival_wall,
+                                        generation_completed_at=message_arrival_wall,
+                                        assistant_turn_index=current_turn_index,
                                         parameters=block.input
                                         if isinstance(block.input, dict)
                                         else {"raw": block.input},
@@ -578,6 +626,15 @@ class ClaudeCodeAgent(Agent):
                                     }
                                     sequence_number += 1
 
+                                    turn_content_blocks.append(
+                                        ContentBlock(
+                                            block_type="tool_use",
+                                            sequence=block_seq,
+                                            tool_use_id=block.id,
+                                        )
+                                    )
+                                    turn_tool_use_ids.append(block.id)
+
                                     safe_emit(
                                         stream_callback,
                                         ToolCallEvent(
@@ -590,14 +647,66 @@ class ClaudeCodeAgent(Agent):
                                             sequence_number=sequence_number - 1,
                                         ),
                                     )
-                                elif hasattr(block, "text"):
+                                elif _is_thinking_block(block):
+                                    thinking_text = getattr(block, "thinking", None)
+                                    turn_content_blocks.append(
+                                        ContentBlock(
+                                            block_type="thinking",
+                                            sequence=block_seq,
+                                            thinking=str(thinking_text) if thinking_text else None,
+                                            signature=getattr(block, "signature", None),
+                                        )
+                                    )
+                                elif _is_text_block(block):
+                                    text_value = str(block.text)
+                                    turn_content_blocks.append(
+                                        ContentBlock(
+                                            block_type="text",
+                                            sequence=block_seq,
+                                            text=text_value,
+                                        )
+                                    )
                                     safe_emit(
                                         stream_callback,
                                         TextChunkEvent(
                                             task_id=self.config.type.value,
-                                            text=str(block.text),
+                                            text=text_value,
                                         ),
                                     )
+
+                        # Note: SDK intermediate AssistantMessages may have partial/cumulative token
+                        # usage during streaming. We'll populate the final AssistantMessage with the
+                        # accurate cumulative tokens from ResultMessage.
+                        # Intermediate AssistantMessages left at 0 (not reliable per-message counts).
+
+                        sdk_messages.append(
+                            AssistantMessageTelemetry(
+                                started_at=generation_started_wall,
+                                completed_at=message_arrival_wall,
+                                generation_duration_ms=max(0.0, generation_duration_ms),
+                                content_blocks=turn_content_blocks,
+                                tool_use_ids=turn_tool_use_ids,
+                                # Tokens populated from ResultMessage on the last AssistantMessage.
+                                input_tokens=0,
+                                output_tokens=0,
+                                cache_creation_tokens=0,
+                                cache_read_tokens=0,
+                                reasoning_tokens=0,
+                                stop_reason=(
+                                    getattr(message, "stop_reason", None)
+                                    if isinstance(getattr(message, "stop_reason", None), str)
+                                    else None
+                                ),
+                                model=sdk_model_used,
+                            )
+                        )
+                        # Track last AssistantMessage to populate with final tokens from ResultMessage
+                        last_assistant_message_index = len(sdk_messages) - 1
+
+                        # Mark this point as the latest event for the next
+                        # generation_duration_ms calculation.
+                        last_event_monotonic = message_arrival_monotonic
+                        last_event_wall = message_arrival_wall
 
                     # Capture SDK ResultMessage with token usage (check BEFORE tool results
                     # to avoid misclassification if SDK message also has tool_use_id/is_error)
@@ -621,10 +730,31 @@ class ClaudeCodeAgent(Agent):
                                 self._log.debug("session_id changed: %s -> %s", self._session_id, new_session_id)
                             self._session_id = new_session_id
 
+                        # Populate the last AssistantMessage with accurate cumulative tokens
+                        # from the final ResultMessage.
+                        if last_assistant_message_index is not None and sdk_result_usage:
+                            last_msg = sdk_messages[last_assistant_message_index]
+                            if isinstance(last_msg, AssistantMessageTelemetry):
+                                last_msg.input_tokens = int(sdk_result_usage.get("input_tokens", 0) or 0)
+                                last_msg.output_tokens = int(sdk_result_usage.get("output_tokens", 0) or 0)
+                                last_msg.cache_creation_tokens = int(
+                                    sdk_result_usage.get("cache_creation_input_tokens", 0) or 0
+                                )
+                                last_msg.cache_read_tokens = int(
+                                    sdk_result_usage.get("cache_read_input_tokens", 0) or 0
+                                )
+                                last_msg.reasoning_tokens = int(sdk_result_usage.get("reasoning_tokens", 0) or 0)
+
                     # PHASE 2: Process tool results from UserMessage content blocks.
                     # The SDK delivers tool results as UserMessage objects containing
                     # ToolResultBlock in their content list (not as standalone messages).
                     elif _is_user_message(message):
+                        # A user/tool-result message is what Claude reads
+                        # next; the LLM's generation clock for the *next*
+                        # assistant turn starts here.
+                        last_event_monotonic = time.monotonic()
+                        last_event_wall = datetime.now()
+
                         content = getattr(message, "content", None)
                         if content and isinstance(content, list):
                             for block in content:
@@ -742,6 +872,10 @@ class ClaudeCodeAgent(Agent):
 
         duration = time.monotonic() - turn_start_time
 
+        # Clear the rollback flag — this turn completed successfully and the iteration
+        # increment stands. (Discard is no-op on a successful turn anyway, but stay tidy.)
+        self._iteration_was_incremented = False
+
         return TurnRecord(
             iteration=self._iteration,
             user_input=user_input,
@@ -753,6 +887,7 @@ class ClaudeCodeAgent(Agent):
             token_usage=token_usage,
             model_used=sdk_model_used,
             assistant_turn_count=assistant_turn_count,
+            messages=sdk_messages,
             max_turns_exhausted=max_turns_exhausted,
             result_summary=sdk_result_summary,
         )
@@ -786,12 +921,19 @@ class ClaudeCodeAgent(Agent):
     async def discard_pending_turn(self) -> None:
         """Clear pending_turn and roll back the iteration counter.
 
-        Idempotent: a second call when the slot is already None is a no-op.
-        Call only after a failed ``communicate()``; never after a success.
+        Decrement fires when either signal says a turn was attempted:
+          - _iteration_was_incremented: set by communicate() right after the
+            counter bump. Survives _set_pending swallowing a partial-build
+            exception (pending_turn=None) — pending_turn alone is not a
+            reliable signal.
+          - pending_turn is not None: preserves backward compatibility for
+            callers that set pending_turn directly (tests).
+        Idempotent: after the first call, both signals are cleared.
         """
-        rollback = self.pending_turn is not None
+        should_rollback = self._iteration_was_incremented or self.pending_turn is not None
         self.pending_turn = None
-        if rollback and self._iteration > 0:
+        self._iteration_was_incremented = False
+        if should_rollback and self._iteration > 0:
             self._iteration -= 1
 
     @staticmethod
@@ -844,6 +986,7 @@ class ClaudeCodeAgent(Agent):
         messages: list[Message],
         pending_commands: dict[str, dict[str, Any]],
         assistant_turn_count: int,
+        messages_list: list[UserMessageTelemetry | AssistantMessageTelemetry],
         sdk_result_usage: dict[str, Any] | None,
         sdk_result_cost: float | None,
         sdk_model_used: str | None,
@@ -893,6 +1036,7 @@ class ClaudeCodeAgent(Agent):
             token_usage=token_usage,
             model_used=sdk_model_used,
             assistant_turn_count=assistant_turn_count,
+            messages=messages_list,
             max_turns_exhausted=False,
             result_summary=sdk_result_summary,
             crashed=True,
@@ -1145,6 +1289,15 @@ class ClaudeCodeAgent(Agent):
             cmd.duration_ms = duration_ms
             cmd.result_summary = content_str[:200] if content_str else None
             cmd.result_data = ClaudeCodeAgent._try_parse_json_value(content)
+
+            # Wall-clock execution bounds. `execution_completed_at` is now;
+            # `execution_started_at` is reconstructed by subtracting the
+            # measured monotonic duration. This avoids storing a separate
+            # wall-clock start (we don't have one without restructuring
+            # pending_commands further) while still giving consumers two
+            # explicit timestamps with the right delta.
+            cmd.execution_completed_at = datetime.now()
+            cmd.execution_started_at = cmd.execution_completed_at - timedelta(milliseconds=duration_ms)
 
             if is_error:
                 cmd.error_message = content_str

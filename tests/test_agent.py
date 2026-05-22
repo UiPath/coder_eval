@@ -80,6 +80,33 @@ async def test_discard_pending_turn_idempotent():
 
 
 @pytest.mark.asyncio
+async def test_discard_pending_turn_rolls_back_when_partial_build_failed():
+    """If _set_pending swallowed an exception and left pending_turn=None, discard
+    must still roll back the iteration counter.
+
+    Regression: previously the rollback gated on (pending_turn is not None), so
+    a swallowed partial-build exception caused _iteration to drift permanently
+    higher on every double-failure.
+    """
+    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+
+    # Simulate communicate() incrementing the counter and then crashing before
+    # _set_pending could finish (partial-build exception swallowed → pending_turn None).
+    agent._iteration = 5
+    agent._iteration_was_incremented = True
+    agent.pending_turn = None
+
+    await agent.discard_pending_turn()
+    assert agent._iteration == 4, "rollback must fire even when pending_turn is None"
+    assert agent._iteration_was_incremented is False
+
+    # Second call is idempotent — neither signal fires.
+    await agent.discard_pending_turn()
+    assert agent._iteration == 4
+
+
+@pytest.mark.asyncio
 async def test_stop_clears_pending_turn():
     """stop() clears pending_turn so stale partials don't leak between runs."""
     import tempfile

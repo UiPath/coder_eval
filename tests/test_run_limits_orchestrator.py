@@ -97,7 +97,7 @@ class TestCheckRunLimitsUnit:
 
     def test_noop_when_no_limits(self, tmp_path):
         orch = _make_orchestrator(_make_task(), tmp_path)
-        orch.result.turns.append(_make_turn(input_tokens=100))
+        orch.result.iterations.append(_make_turn(input_tokens=100))
         # Should not raise.
         orch._check_run_limits(iteration=1)
 
@@ -108,7 +108,7 @@ class TestCheckRunLimitsUnit:
 
     def test_input_token_trip(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_input_tokens=1000)), tmp_path)
-        orch.result.turns.append(_make_turn(input_tokens=2000))
+        orch.result.iterations.append(_make_turn(input_tokens=2000))
         with pytest.raises(BudgetExceededError) as exc:
             orch._check_run_limits(iteration=1)
         assert exc.value.budget_name == "input_tokens"
@@ -117,21 +117,21 @@ class TestCheckRunLimitsUnit:
 
     def test_output_token_trip(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_output_tokens=1000)), tmp_path)
-        orch.result.turns.append(_make_turn(output_tokens=2000))
+        orch.result.iterations.append(_make_turn(output_tokens=2000))
         with pytest.raises(BudgetExceededError) as exc:
             orch._check_run_limits(iteration=1)
         assert exc.value.budget_name == "output_tokens"
 
     def test_total_token_trip(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_total_tokens=2500)), tmp_path)
-        orch.result.turns.append(_make_turn(input_tokens=1500, output_tokens=1500))
+        orch.result.iterations.append(_make_turn(input_tokens=1500, output_tokens=1500))
         with pytest.raises(BudgetExceededError) as exc:
             orch._check_run_limits(iteration=1)
         assert exc.value.budget_name == "total_tokens"
 
     def test_cost_trip(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_usd=0.10)), tmp_path)
-        orch.result.turns.append(_make_turn(input_tokens=10, total_cost_usd=0.20))
+        orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=0.20))
         with pytest.raises(BudgetExceededError) as exc:
             orch._check_run_limits(iteration=1)
         assert exc.value.budget_name == "usd"
@@ -140,14 +140,14 @@ class TestCheckRunLimitsUnit:
     def test_cost_skipped_when_no_cost_reported(self, tmp_path, caplog):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_usd=0.10)), tmp_path)
         # turn has token_usage but no total_cost_usd
-        orch.result.turns.append(_make_turn(input_tokens=10, total_cost_usd=None))
+        orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=None))
         with caplog.at_level(logging.WARNING, logger="coder_eval.orchestrator"):
             orch._check_run_limits(iteration=1)
         assert any("max_usd budget configured but no turn reported cost" in m for m in caplog.messages)
 
     def test_cost_warning_only_once(self, tmp_path, caplog):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_usd=0.10)), tmp_path)
-        orch.result.turns.append(_make_turn(input_tokens=10, total_cost_usd=None))
+        orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=None))
         with caplog.at_level(logging.WARNING, logger="coder_eval.orchestrator"):
             orch._check_run_limits(iteration=1)
             orch._check_run_limits(iteration=2)
@@ -156,7 +156,7 @@ class TestCheckRunLimitsUnit:
 
     def test_count_cached_input_false_default(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_input_tokens=1000)), tmp_path)
-        orch.result.turns.append(_make_turn(input_tokens=500, cache_read_input_tokens=600))
+        orch.result.iterations.append(_make_turn(input_tokens=500, cache_read_input_tokens=600))
         # 500 < 1000 — cache reads don't count by default.
         orch._check_run_limits(iteration=1)
 
@@ -164,15 +164,15 @@ class TestCheckRunLimitsUnit:
         orch = _make_orchestrator(
             _make_task(run_limits=RunLimits(max_input_tokens=1000, count_cached_input=True)), tmp_path
         )
-        orch.result.turns.append(_make_turn(input_tokens=500, cache_read_input_tokens=600))
+        orch.result.iterations.append(_make_turn(input_tokens=500, cache_read_input_tokens=600))
         with pytest.raises(BudgetExceededError) as exc:
             orch._check_run_limits(iteration=1)
         assert exc.value.actual == 1100
 
     def test_cumulative_across_turns(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_input_tokens=1000)), tmp_path)
-        orch.result.turns.append(_make_turn(iteration=1, input_tokens=600))
-        orch.result.turns.append(_make_turn(iteration=2, input_tokens=500))
+        orch.result.iterations.append(_make_turn(iteration=1, input_tokens=600))
+        orch.result.iterations.append(_make_turn(iteration=2, input_tokens=500))
         with pytest.raises(BudgetExceededError):
             orch._check_run_limits(iteration=2)
 
@@ -294,25 +294,25 @@ class TestCostDataAvailableFlag:
 
     def test_flag_true_when_costs_reported(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_usd=0.5)), tmp_path)
-        orch.result.turns.append(_make_turn(input_tokens=10, total_cost_usd=0.001))
+        orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=0.001))
         self._invoke_finalize(orch)
         assert orch.result.environment_info["cost_data_available"] is True
 
     def test_flag_false_when_no_cost_reported(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_usd=0.5)), tmp_path)
-        orch.result.turns.append(_make_turn(input_tokens=10, total_cost_usd=None))
+        orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=None))
         self._invoke_finalize(orch)
         assert orch.result.environment_info["cost_data_available"] is False
 
     def test_flag_absent_when_no_max_usd_budget(self, tmp_path):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_total_tokens=1000)), tmp_path)
-        orch.result.turns.append(_make_turn(input_tokens=10, total_cost_usd=0.001))
+        orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=0.001))
         self._invoke_finalize(orch)
         assert "cost_data_available" not in orch.result.environment_info
 
     def test_flag_absent_when_no_run_limits(self, tmp_path):
         orch = _make_orchestrator(_make_task(), tmp_path)
-        orch.result.turns.append(_make_turn(input_tokens=10, total_cost_usd=0.001))
+        orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=0.001))
         self._invoke_finalize(orch)
         assert "cost_data_available" not in orch.result.environment_info
 

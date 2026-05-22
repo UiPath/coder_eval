@@ -343,9 +343,9 @@ async def test_turn_timeout_is_per_attempt_not_cycle(tmp_path):
     assert success is True
     assert timeouts_seen == [1.0, 1.0], "every attempt must receive turn_timeout fresh"
     # Result.turns: partial (from on_attempt_error) + success (from main flow).
-    assert len(orchestrator.result.turns) == 2
-    assert orchestrator.result.turns[0].crashed is True
-    assert orchestrator.result.turns[1].crashed is False
+    assert len(orchestrator.result.iterations) == 2
+    assert orchestrator.result.iterations[0].crashed is True
+    assert orchestrator.result.iterations[1].crashed is False
 
 
 @pytest.mark.asyncio

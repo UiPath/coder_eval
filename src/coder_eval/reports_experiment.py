@@ -72,7 +72,7 @@ def eval_result_to_task_dict(
         "iteration_count": result.iteration_count,
         "tags": tags if tags is not None else [],
         "task_path": task_path,
-        "turns": [
+        "iterations": [
             {
                 "iteration": t.iteration,
                 "duration_seconds": t.duration_seconds,
@@ -81,7 +81,7 @@ def eval_result_to_task_dict(
                 "crashed": t.crashed,
                 "crash_reason": t.crash_reason,
             }
-            for t in result.turns
+            for t in result.iterations
         ],
         "model_used": result.model_used,
         "reference_similarity": ref_similarity,
@@ -533,7 +533,7 @@ class ExperimentReportGenerator:
                 task_dicts = [eval_result_to_task_dict(er) for er in eval_results]
 
                 # Generation Metrics
-                if any(d.get("turns") for d in task_dicts):
+                if any(d.get("iterations") for d in task_dicts):
                     lines.extend(["", ""])
                     lines.extend(ReportGenerator._generate_generation_metrics_section(task_dicts))
 

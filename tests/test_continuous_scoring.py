@@ -36,7 +36,7 @@ def create_test_evaluation_result(**kwargs):
         "started_at": datetime.now(),
         "final_status": "SUCCESS",
         "iteration_count": 1,
-        "turns": [],
+        "iterations": [],
         "success_criteria_results": [],
     }
     defaults.update(kwargs)

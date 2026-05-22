@@ -6,12 +6,18 @@ import logging
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
 
 from coder_eval.models.agent_config import AgentConfig
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind, FinalStatus
-from coder_eval.models.telemetry import CommandStatistics, CommandTelemetry, TokenUsage
+from coder_eval.models.telemetry import (
+    AssistantMessage,
+    CommandStatistics,
+    CommandTelemetry,
+    TokenUsage,
+    UserMessage,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -287,7 +293,7 @@ class TurnRecord(BaseModel):
         description=(
             "Orchestrator iteration number. Multiple records may share this value when "
             "crashed=True partials precede a retry; use the list index in "
-            "EvaluationResult.turns as the canonical unique key."
+            "EvaluationResult.iterations as the canonical unique key."
         )
     )
     user_input: str = Field(description="Input prompt to the agent")
@@ -310,7 +316,16 @@ class TurnRecord(BaseModel):
     )
     assistant_turn_count: int = Field(
         default=0,
-        description="Number of AssistantMessage objects received from the SDK in this turn",
+        description="Number of AssistantMessage objects received from the SDK in this turn.",
+    )
+    messages: list[Annotated[UserMessage | AssistantMessage, Discriminator("role")]] = Field(
+        default_factory=list,
+        description=(
+            "Per-message telemetry in emission order, mirroring the LLM API messages array. "
+            "Includes UserMessage entries (simulator text or tool results) and AssistantMessage entries "
+            "(agent thinking/tool_use/text blocks). Preserves the full conversation trajectory for "
+            "replay and analysis. May be empty for agents/modes that don't surface message detail."
+        ),
     )
     max_turns_exhausted: bool = Field(
         default=False,
@@ -378,7 +393,7 @@ class EvaluationResult(BaseModel):
     variant_id: str = Field(default="default", description="ID of the experiment variant")
     agent_type: AgentKind = Field(description="Type of agent used")
     model_used: str | None = Field(
-        default=None, description="Model identifier used for the evaluation (resolved from turns or agent config)"
+        default=None, description="Model identifier used for the evaluation (resolved from iterations or agent config)"
     )
 
     # Execution metadata
@@ -408,7 +423,11 @@ class EvaluationResult(BaseModel):
     )
 
     # Detailed transcript
-    turns: list[TurnRecord] = Field(default_factory=list, description="Complete transcript of agent interactions")
+    iterations: list[TurnRecord] = Field(
+        default_factory=list,
+        description="Complete transcript of agent interactions across all iterations (task attempts)",
+        validation_alias=AliasChoices("iterations", "turns"),
+    )
 
     # Error information
     error_message: str | None = Field(default=None, description="Error message if evaluation failed")

@@ -35,7 +35,7 @@ def _make_task_result(
         "weighted_score": weighted_score,
         "duration": duration,
         "iteration_count": iteration_count,
-        "turns": turns or [],
+        "iterations": turns or [],
         "reference_similarity": reference_similarity,
         "model_used": model_used,
         "agent_config": agent_config,
@@ -939,7 +939,7 @@ def test_aggregate_command_statistics_nested_layout(tmp_path):
         "final_status": "SUCCESS",
         "iteration_count": 1,
         "environment_info": {},
-        "turns": [
+        "iterations": [
             {
                 "iteration": 1,
                 "user_input": "test prompt",

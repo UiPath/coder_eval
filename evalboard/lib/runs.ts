@@ -631,7 +631,7 @@ export async function readTaskDetail(
             details?: string;
             error?: string | null;
         }>;
-        turns?: TurnEntry[];
+        iterations?: TurnEntry[];
     }>(path.join(contentDir, "task.json"));
 
     const criteria: CriterionResult[] = (
@@ -657,7 +657,7 @@ export async function readTaskDetail(
     const artifacts = await walkArtifacts(artifactRoot, artifactPrefix);
 
     const flowDebug = parseFlowDebug(criteria);
-    const toolCalls = parseToolCalls(task?.turns ?? []);
+    const toolCalls = parseToolCalls(task?.iterations ?? []);
 
     const taskDescription =
         task?.task_config?.resolved?.initial_prompt ??
