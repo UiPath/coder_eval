@@ -35,7 +35,7 @@ permissions:
 jobs:
   deploy:
     name: Build + deploy to Azure App Service
-    runs-on: ubuntu-latest
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 20
     defaults:
       run:

@@ -22,7 +22,7 @@ permissions: {}
 jobs:
   claude-review:
     name: Claude Code Review
-    runs-on: ubuntu-latest
+    runs-on: uipath-ubuntu-latest
     timeout-minutes: 15
 
     # Only run on non-fork PRs (secrets required), or on @claude mentions
