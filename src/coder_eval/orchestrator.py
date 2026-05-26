@@ -300,6 +300,10 @@ class Orchestrator:
         # exactly once per task even if _check_run_limits fires every turn.
         self._cost_budget_skipped_logged: bool = False
 
+        # One-shot flag: emit the expected_turns rollup warning exactly once per
+        # task run even though _check_expected_turns is called after every turn.
+        self._expected_turns_warning_emitted: bool = False
+
         # Canonical id shared with run_dir layout, tqdm label, and streaming events.
         self._log_task_id = format_task_log_id(variant_id, task.task_id, replicate_index)
 
@@ -655,6 +659,37 @@ class Orchestrator:
                     task_id=self.task.task_id,
                     iteration=iteration,
                 )
+
+    def _check_expected_turns(self, *, iteration: int) -> None:
+        """Emit a one-shot warning if visible turns exceed expected_turns.
+
+        Soft sibling of ``_check_run_limits.max_turns``: never aborts the run.
+        ``max_turns`` remains the hard cap (enforced inside the SDK). A
+        "turn" here is one timeline entry: each tool call plus the final
+        reply when present — the same metric evalboard renders. Cumulative
+        across iterations so simulation/dialog tasks compare against the
+        budget the user set.
+        """
+        if self.result is None:
+            return
+        limits = self.task.run_limits
+        if limits is None or limits.expected_turns is None:
+            return
+        if self._expected_turns_warning_emitted:
+            return
+        from .reports_stats import visible_turn_count
+
+        total = visible_turn_count(self.result)
+        if total > limits.expected_turns:
+            logger.warning(
+                "Visible turns (%d) exceeded expected_turns (%d) at iteration %d "
+                "for task %s. Run continues — max_turns remains the hard cap.",
+                total,
+                limits.expected_turns,
+                iteration,
+                self.task.task_id,
+            )
+            self._expected_turns_warning_emitted = True
 
     def _aggregate_token_usage(self) -> None:
         """Aggregate token usage from turns and proxy, storing on self.result."""
@@ -1155,6 +1190,9 @@ class Orchestrator:
                 self.task.run_limits.max_turns if self.task.run_limits else None,
             )
 
+        # Soft cumulative-turn check (logs once; never aborts).
+        self._check_expected_turns(iteration=iteration)
+
         # Budget gate runs AFTER criteria so partial-credit visibility is preserved.
         self._check_run_limits(iteration=iteration)
 
@@ -1422,6 +1460,12 @@ class Orchestrator:
                     assert stop_decision.reason is not None
                     stop_reason = stop_decision.reason
                     break
+
+                # Soft cumulative-turn check (logs once; never aborts the dialog).
+                # Runs BEFORE the max_turns break so a single turn that trips both
+                # the hard cap and the soft target still emits the expected_turns
+                # warning before the dialog terminates.
+                self._check_expected_turns(iteration=turns_completed)
 
                 if turn_record.max_turns_exhausted:
                     self.result.max_turns_exhausted = True

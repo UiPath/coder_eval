@@ -116,6 +116,8 @@ pre { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
                  border-color: var(--status-failure); color: var(--status-failure); }
 .badge.error { background: color-mix(in srgb, var(--status-error) 20%, var(--bg-card-2));
                border-color: var(--status-error); color: var(--status-error); }
+.badge.warning { background: color-mix(in srgb, #f4a52810 20%, var(--bg-card-2));
+                 border-color: #f4a528; color: #f4a528; }
 .badge.neutral { color: var(--fg-muted); }
 .score-pill { display: inline-block; padding: 2px 8px; border-radius: 10px;
               font-size: 12px; font-weight: 700; min-width: 42px;
@@ -323,6 +325,8 @@ def _format_params(params: dict[str, Any]) -> str:
 
 
 def _render_header(result: EvaluationResult) -> str:
+    from .reports_stats import expected_turns_overage
+
     started = result.started_at.isoformat(timespec="seconds") if result.started_at else "—"
     duration = _format_duration(result.duration_seconds)
     score_badge = _score_pill(result.weighted_score) if result.weighted_score is not None else ""
@@ -333,6 +337,11 @@ def _render_header(result: EvaluationResult) -> str:
     cost_badge = ""
     if result.total_token_usage and result.total_token_usage.total_cost_usd is not None:
         cost_badge = f'<span class="badge neutral">${result.total_token_usage.total_cost_usd:.4f}</span>'
+    expected_turns_badge = ""
+    overage = expected_turns_overage(result)
+    if overage is not None:
+        actual, expected = overage
+        expected_turns_badge = f'<span class="badge warning">expected_turns exceeded ({actual}/{expected})</span>'
     return f"""
 <div class="header-bar">
   <div class="title-group">
@@ -345,6 +354,7 @@ def _render_header(result: EvaluationResult) -> str:
     <span class="badge neutral">{agent_type} · {model}</span>
     <span class="badge neutral">{_esc(duration)}</span>
     {cost_badge}
+    {expected_turns_badge}
     <span class="nav-toggle" onclick="toggleTheme()">Toggle theme</span>
   </div>
 </div>

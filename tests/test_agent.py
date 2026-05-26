@@ -1242,7 +1242,7 @@ async def test_communicate_persists_result_summary_on_turn_record():
                 duration_ms=0,
                 duration_api_ms=0,
                 is_error=False,
-                num_turns=1,
+                num_turns=4,
                 session_id="s1",
                 stop_reason="end_turn",
                 total_cost_usd=0.0,
@@ -1259,6 +1259,8 @@ async def test_communicate_persists_result_summary_on_turn_record():
         assert turn.result_summary.subtype == "success"
         assert turn.result_summary.stop_reason == "end_turn"
         assert turn.result_summary.result == "all good"
+        # SDK-reported num_turns propagated to TurnRecord.num_turns
+        assert turn.num_turns == 4
 
 
 @pytest.mark.asyncio
@@ -1303,6 +1305,8 @@ async def test_claude_agent_crash_preserves_partial_turn_record():
         assert partial is not None
         assert partial.crashed is True
         assert partial.max_turns_exhausted is False
+        # No ResultMessage arrived before the crash, so num_turns is None.
+        assert partial.num_turns is None
         # The Skill invocation that happened before the crash is preserved.
         assert len(partial.commands) == 1
         assert partial.commands[0].tool_name == "Skill"

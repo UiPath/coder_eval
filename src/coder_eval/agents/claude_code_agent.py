@@ -437,7 +437,7 @@ class ClaudeCodeAgent(Agent):
         # SDK ResultMessage token usage (captured from final message)
         sdk_result_usage: dict[str, Any] | None = None
         sdk_result_cost: float | None = None
-        sdk_num_turns: int | None = None
+        num_turns: int | None = None
         # Diagnostic summary of the final ResultMessage (status + error fields).
         # Populated on every ResultMessage (last one wins). Consumed by the
         # session-id retention branch, the debug-log path, and the error-path
@@ -472,6 +472,7 @@ class ClaudeCodeAgent(Agent):
                     messages_list=sdk_messages,
                     sdk_result_usage=sdk_result_usage,
                     sdk_result_cost=sdk_result_cost,
+                    num_turns=num_turns,
                     sdk_model_used=sdk_model_used,
                     sdk_result_summary=sdk_result_summary,
                     files_before=files_before,
@@ -713,7 +714,7 @@ class ClaudeCodeAgent(Agent):
                     elif _is_sdk_result_message(message):
                         sdk_result_usage = getattr(message, "usage", None)
                         sdk_result_cost = getattr(message, "total_cost_usd", None)
-                        sdk_num_turns = getattr(message, "num_turns", None)
+                        num_turns = getattr(message, "num_turns", None)
                         sdk_result_summary = self._summarize_result(message)
                         # Only advance session_id on clean turns. Resuming
                         # via --resume from an errored ResultMessage often
@@ -861,12 +862,12 @@ class ClaudeCodeAgent(Agent):
 
         # max_turns exhaustion: ResultMessage subtype OR num_turns > max_turns (strict; == is a normal completion).
         max_turns_exhausted = self._is_max_turns_result(sdk_result_summary) or (
-            max_turns is not None and sdk_num_turns is not None and sdk_num_turns > max_turns
+            max_turns is not None and num_turns is not None and num_turns > max_turns
         )
         if max_turns_exhausted:
             self._log.warning(
                 "Agent exhausted max_turns (%s/%s) — the SDK hit the turn limit before the agent completed.",
-                sdk_num_turns,
+                num_turns,
                 max_turns,
             )
 
@@ -888,6 +889,7 @@ class ClaudeCodeAgent(Agent):
             model_used=sdk_model_used,
             assistant_turn_count=assistant_turn_count,
             messages=sdk_messages,
+            num_turns=num_turns,
             max_turns_exhausted=max_turns_exhausted,
             result_summary=sdk_result_summary,
         )
@@ -989,6 +991,7 @@ class ClaudeCodeAgent(Agent):
         messages_list: list[UserMessageTelemetry | AssistantMessageTelemetry],
         sdk_result_usage: dict[str, Any] | None,
         sdk_result_cost: float | None,
+        num_turns: int | None,
         sdk_model_used: str | None,
         sdk_result_summary: ResultSummary | None,
         files_before: FileTree,
@@ -1037,6 +1040,7 @@ class ClaudeCodeAgent(Agent):
             model_used=sdk_model_used,
             assistant_turn_count=assistant_turn_count,
             messages=messages_list,
+            num_turns=num_turns,
             max_turns_exhausted=False,
             result_summary=sdk_result_summary,
             crashed=True,

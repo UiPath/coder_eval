@@ -1027,3 +1027,69 @@ def test_markdown_summary_crashed_partials_breakdown(task_turns, expected_line):
         assert "Crashed Partials" not in report_md
     else:
         assert expected_line in report_md
+
+
+def _summary_with_notes(
+    *,
+    max_turns_exhausted: bool = False,
+    expected_turns_overage: list[int] | None = None,
+) -> RunSummary:
+    task = _make_task_result("t1", "SUCCESS", 1.0, 10.0)
+    task["max_turns_exhausted"] = max_turns_exhausted
+    task["expected_turns_overage"] = expected_turns_overage
+    return RunSummary(
+        run_id="r",
+        start_time=datetime(2026, 5, 21, 12, 0, 0),
+        end_time=datetime(2026, 5, 21, 12, 0, 30),
+        total_duration_seconds=30.0,
+        tasks_run=1,
+        tasks_succeeded=1,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[task],
+        framework_version="0.1.0",
+        environment_info={"coder_eval": "0.1.0"},
+    )
+
+
+def test_generate_markdown_renders_expected_turns_marker_when_exceeded():
+    summary = _summary_with_notes(expected_turns_overage=[7, 5])
+    report_md = ReportGenerator.generate_markdown(summary)
+    assert "## Run-time Notes" in report_md
+    assert "expected_turns exceeded" in report_md
+    assert "7/5" in report_md
+
+
+def test_generate_markdown_no_expected_turns_marker_when_under():
+    # Under-budget: the dict carries no overage field — emit nothing.
+    summary = _summary_with_notes(expected_turns_overage=None)
+    report_md = ReportGenerator.generate_markdown(summary)
+    assert "expected_turns exceeded" not in report_md
+
+
+def test_generate_markdown_no_expected_turns_marker_when_unset():
+    summary = _summary_with_notes()
+    report_md = ReportGenerator.generate_markdown(summary)
+    assert "expected_turns exceeded" not in report_md
+    assert "## Run-time Notes" not in report_md
+
+
+def test_generate_markdown_renders_max_turns_exhausted_marker():
+    summary = _summary_with_notes(max_turns_exhausted=True)
+    report_md = ReportGenerator.generate_markdown(summary)
+    assert "## Run-time Notes" in report_md
+    assert "max_turns exhausted" in report_md
+
+
+def test_generate_markdown_no_max_turns_marker_when_not_exhausted():
+    summary = _summary_with_notes(max_turns_exhausted=False)
+    report_md = ReportGenerator.generate_markdown(summary)
+    assert "max_turns exhausted" not in report_md
+
+
+def test_generate_markdown_renders_both_markers_when_both_fire():
+    summary = _summary_with_notes(max_turns_exhausted=True, expected_turns_overage=[7, 5])
+    report_md = ReportGenerator.generate_markdown(summary)
+    assert "max_turns exhausted" in report_md
+    assert "expected_turns exceeded" in report_md
+    assert "7/5" in report_md

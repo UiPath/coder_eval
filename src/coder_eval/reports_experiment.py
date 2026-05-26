@@ -58,11 +58,32 @@ def eval_result_to_task_dict(
             from the source folder structure instead of guessing from tags.
         duration_override: Optional duration value (defaults to result.duration_seconds).
     """
+    from coder_eval.reports_stats import expected_turns_overage
+    from coder_eval.reports_stats import has_final_reply as _has_final_reply
+
     ref_similarity: float | None = None
     for cr in result.success_criteria_results:
         if cr.criterion_type == "reference_comparison":
             ref_similarity = cr.score
             break
+
+    overage = expected_turns_overage(result)
+
+    total_turns = sum((t.num_turns or 0) for t in result.iterations)
+
+    # Whether the agent emitted a text reply (becomes the trailing entry
+    # in the Turn timeline). Carried as a row-level boolean so evalboard
+    # grid/trends can compute the visible turn count without re-reading
+    # per-task content.
+    has_reply = _has_final_reply(result)
+
+    expected_turns_value: int | None = None
+    if result.task_config is not None:
+        rl = (result.task_config.resolved or {}).get("run_limits") or {}
+        if isinstance(rl, dict):
+            raw = rl.get("expected_turns")
+            if isinstance(raw, int) and raw >= 1:
+                expected_turns_value = raw
 
     d: dict[str, Any] = {
         "task_id": result.task_id,
@@ -101,6 +122,11 @@ def eval_result_to_task_dict(
         "agent_config": (result.agent_config.model_dump() if result.agent_config else None),
         "sdk_options": result.sdk_options,
         "installed_tools": result.environment_info.get("installed_tools"),
+        "max_turns_exhausted": result.max_turns_exhausted,
+        "expected_turns_overage": list(overage) if overage is not None else None,
+        "total_turns": total_turns,
+        "expected_turns": expected_turns_value,
+        "has_final_reply": has_reply,
     }
     d["variant_id"] = variant_id
     return d

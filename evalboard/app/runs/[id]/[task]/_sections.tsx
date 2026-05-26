@@ -5,6 +5,7 @@ import type {
     ToolCall,
 } from "@/lib/runs";
 import { StatusPill } from "@/lib/pills";
+import { displayedTurns } from "@/lib/turns";
 import { Expandable, KindChip, ResultPill, ToolChip } from "./_chips";
 
 export function FlowDebugSection({ flowDebug }: { flowDebug: FlowDebugResult }) {
@@ -122,16 +123,31 @@ export function CriteriaSection({ criteria }: { criteria: CriterionResult[] }) {
     );
 }
 
-export function ToolTimelineSection({ toolCalls }: { toolCalls: ToolCall[] }) {
+export function ToolTimelineSection({
+    toolCalls,
+    finalAssistantText,
+}: {
+    toolCalls: ToolCall[];
+    finalAssistantText: string | null;
+}) {
+    const toolCount = toolCalls.length;
+    const hasFinalReply = finalAssistantText != null;
+    // Single source of truth for the visible turn count, shared with
+    // grid / trends / detail-page TURNS stat. SDK num_turns is not
+    // consulted — a "turn" is one rendered row.
+    const headerCount =
+        displayedTurns(toolCount, hasFinalReply) ?? toolCount;
+    const finalIndex = toolCount + 1;
     return (
         <section className="space-y-2">
             <h2 className="text-sm font-semibold text-gray-900">
-                Command timeline ({toolCalls.length})
+                Turn timeline ({headerCount})
             </h2>
             <Expandable
                 header={
                     <span className="text-sm text-gray-700">
-                        agent tool calls in order
+                        {toolCount} tool call{toolCount === 1 ? "" : "s"} in order
+                        {hasFinalReply ? " + final reply" : ""}
                     </span>
                 }
             >
@@ -152,6 +168,24 @@ export function ToolTimelineSection({ toolCalls }: { toolCalls: ToolCall[] }) {
                             </span>
                         </li>
                     ))}
+                    {hasFinalReply && (
+                        <li
+                            key="final-reply"
+                            className="flex items-start gap-2 py-0.5"
+                        >
+                            <span className="text-gray-400 tabular-nums w-6 text-right shrink-0">
+                                {finalIndex}.
+                            </span>
+                            <span className="shrink-0">
+                                <span className="inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-600">
+                                    Reply
+                                </span>
+                            </span>
+                            <span className="text-gray-700 whitespace-pre-wrap break-words">
+                                {finalAssistantText}
+                            </span>
+                        </li>
+                    )}
                 </ol>
             </Expandable>
         </section>

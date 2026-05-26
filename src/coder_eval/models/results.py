@@ -327,6 +327,14 @@ class TurnRecord(BaseModel):
             "replay and analysis. May be empty for agents/modes that don't surface message detail."
         ),
     )
+    num_turns: int | None = Field(
+        default=None,
+        description=(
+            "Number of inner-loop turns the SDK reported for this communicate() call "
+            "(from ResultMessage.num_turns). None when the SDK did not emit a "
+            "ResultMessage (e.g. crash partial before the final message arrived)."
+        ),
+    )
     max_turns_exhausted: bool = Field(
         default=False,
         description="Whether the agent hit the max_turns limit without voluntarily completing",

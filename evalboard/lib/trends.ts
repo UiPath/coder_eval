@@ -21,6 +21,7 @@ export interface TaskTrend {
     avgDurationSeconds: number | null; // SUCCESS runs only
     avgCostUsd: number | null; // SUCCESS runs only
     avgActualCommands: number | null; // SUCCESS runs only
+    avgTotalTurns: number | null; // SUCCESS runs only
     // Status sequence newest-first, one entry per run in scope.
     recentStatuses: { runId: string; status: string | null }[];
     // Failure-only review tags aggregated across the slice. Secondary signal —
@@ -35,6 +36,9 @@ export interface TaskHistoryEntry {
     totalCostUsd: number | null;
     weightedScore: number | null;
     actualCommands: number | null;
+    totalTurns: number | null;
+    expectedTurns: number | null;
+    hasFinalReply: boolean;
     componentShas: ComponentSha[];
     failureTags: string[];
 }
@@ -46,7 +50,7 @@ function avg(nums: number[]): number | null {
     return nums.reduce((a, b) => a + b, 0) / nums.length;
 }
 
-function aggregate(perRun: PerRun[]): TaskTrend[] {
+export function aggregate(perRun: PerRun[]): TaskTrend[] {
     // Newest first so recentStatuses comes out chronological-descending.
     const sorted = [...perRun].sort((a, b) => b.id.localeCompare(a.id));
 
@@ -56,7 +60,8 @@ function aggregate(perRun: PerRun[]): TaskTrend[] {
         statuses: { runId: string; status: string | null }[];
         durations: number[]; // success only
         costs: number[]; // success only
-        commands: number[]; // success only
+        tools: number[]; // success only — actualCommands per run
+        totalTurns: number[]; // success only
         successCount: number;
         totalCount: number;
         tagCounts: Map<string, number>;
@@ -74,7 +79,8 @@ function aggregate(perRun: PerRun[]): TaskTrend[] {
                     statuses: [],
                     durations: [],
                     costs: [],
-                    commands: [],
+                    tools: [],
+                    totalTurns: [],
                     successCount: 0,
                     totalCount: 0,
                     tagCounts: new Map(),
@@ -89,7 +95,8 @@ function aggregate(perRun: PerRun[]): TaskTrend[] {
                 b.successCount += 1;
                 if (t.durationSeconds != null) b.durations.push(t.durationSeconds);
                 if (t.totalCostUsd != null) b.costs.push(t.totalCostUsd);
-                if (t.actualCommands != null) b.commands.push(t.actualCommands);
+                if (t.actualCommands != null) b.tools.push(t.actualCommands);
+                if (t.totalTurns != null) b.totalTurns.push(t.totalTurns);
             }
             const failTags = reviewTagsByTask[t.taskId];
             if (failTags) {
@@ -111,7 +118,8 @@ function aggregate(perRun: PerRun[]): TaskTrend[] {
             passRate: b.totalCount > 0 ? b.successCount / b.totalCount : 0,
             avgDurationSeconds: avg(b.durations),
             avgCostUsd: avg(b.costs),
-            avgActualCommands: avg(b.commands),
+            avgActualCommands: avg(b.tools),
+            avgTotalTurns: avg(b.totalTurns),
             recentStatuses: b.statuses,
             dominantFailureTags: [...b.tagCounts.entries()]
                 .map(([tag, count]) => ({ tag, count }))
@@ -159,7 +167,7 @@ export function trendMatchesTag(trend: TaskTrend, tag: string): boolean {
     return trend.dominantFailureTags.some((t) => t.tag === tag);
 }
 
-async function historyForTaskInner(
+export async function historyForTaskInner(
     taskId: string,
     limit: number,
 ): Promise<TaskHistoryEntry[]> {
@@ -176,6 +184,9 @@ async function historyForTaskInner(
             totalCostUsd: t.totalCostUsd,
             weightedScore: t.weightedScore,
             actualCommands: t.actualCommands,
+            totalTurns: t.totalTurns,
+            expectedTurns: t.expectedTurns,
+            hasFinalReply: t.hasFinalReply,
             componentShas: overview.componentShas,
             failureTags: reviewTagsByTask[taskId] ?? [],
         });

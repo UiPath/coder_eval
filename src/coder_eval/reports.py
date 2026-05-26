@@ -384,6 +384,28 @@ class ReportGenerator:
                 row += f" {eff_str} |"
             lines.append(row)
 
+        # Run-time notes: surface per-task max_turns exhaustion and expected_turns
+        # overage as plain blockquote one-liners. Same surface for both signals so
+        # the Markdown report has parity with the HTML report's badges.
+        notes: list[str] = []
+        for t in summary.task_results:
+            task_id = t.get("task_id", "?")
+            if t.get("max_turns_exhausted"):
+                notes.append(f"> **WARNING:** [{task_id}] max_turns exhausted")
+            overage_field = t.get("expected_turns_overage")
+            if (
+                isinstance(overage_field, (list, tuple))
+                and len(overage_field) == 2
+                and all(isinstance(x, int) for x in overage_field)
+            ):
+                actual, expected = overage_field
+                notes.append(
+                    f"> **WARNING:** [{task_id}] expected_turns exceeded: {actual}/{expected} (cumulative SDK turns)"
+                )
+        if notes:
+            lines.extend(["", "## Run-time Notes", ""])
+            lines.extend(notes)
+
         # Generation Metrics section
         if any(t.get("iterations") for t in summary.task_results):
             lines.extend(["", ""])

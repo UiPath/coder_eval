@@ -24,6 +24,18 @@ class RunLimits(BaseModel):
         gt=0,
         description="Max agent inner-loop turns per iteration. None = SDK default.",
     )
+    expected_turns: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Soft target for cumulative visible turns across a task. A 'turn' is one "
+            "entry in the Turn timeline: each tool call contributes 1, plus 1 for the "
+            "final reply when present (see docs/features/2026-05-22-visible-turns.md). "
+            "When the running total exceeds this, the orchestrator logs a one-shot "
+            "warning and the report renders a badge — the run is NOT aborted "
+            "(use max_turns for a hard cap). None disables the check."
+        ),
+    )
     task_timeout: int | None = Field(
         default=None,
         ge=30,

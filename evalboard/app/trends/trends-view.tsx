@@ -8,6 +8,13 @@ import {
 } from "@/lib/trends";
 import type { TagCount } from "@/lib/overview";
 import { fmtRunTime, fmtDuration, humanizeTaskId } from "@/lib/format";
+import {
+    displayedTurns,
+    fmtTurnsCount,
+    tintForRatio,
+    turnRatio,
+    turnsCellClasses,
+} from "@/lib/turns";
 import { ChipLegend, MergedTagRail } from "@/app/_overview/tag-rail";
 import { ChipButton } from "@/app/runs/[id]/chips";
 import { fetchTaskHistoryAction } from "./actions";
@@ -53,7 +60,7 @@ type SortKey =
 type SortDir = "asc" | "desc";
 
 // First-click direction per column — pass rate asc is the "worst first" view
-// users expect, and runs/duration/cost/turns are most informative high-to-low.
+// users expect, and runs/duration/cost/tools/turns are most informative high-to-low.
 const DEFAULT_DIR: Record<SortKey, SortDir> = {
     task: "asc",
     runs: "desc",
@@ -115,7 +122,11 @@ function sortTasks(
                 v = cmpNullable(a.avgCostUsd, b.avgCostUsd, dir);
                 break;
             case "avgTurns":
-                v = cmpNullable(a.avgActualCommands, b.avgActualCommands, dir);
+                v = cmpNullable(
+                    a.avgTotalTurns ?? a.avgActualCommands,
+                    b.avgTotalTurns ?? b.avgActualCommands,
+                    dir,
+                );
                 break;
         }
         if (v !== 0) return v;
@@ -259,9 +270,31 @@ function HistoryTable({
                             <td className="py-1 pr-3 text-right tabular-nums text-gray-700">
                                 {fmtUsd(e.totalCostUsd)}
                             </td>
-                            <td className="py-1 pr-3 text-right tabular-nums text-gray-700">
-                                {fmtCount(e.actualCommands)}
-                            </td>
+                            {(() => {
+                                const tint = tintForRatio(
+                                    turnRatio(
+                                        e.totalTurns,
+                                        e.expectedTurns,
+                                    ),
+                                );
+                                return (
+                                    <td
+                                        className={`py-1 pr-3 text-right tabular-nums font-medium ${turnsCellClasses(tint)}`}
+                                        title={
+                                            e.expectedTurns != null
+                                                ? `expected_turns target: ${e.expectedTurns}`
+                                                : "no expected_turns target set"
+                                        }
+                                    >
+                                        {fmtTurnsCount(
+                                            displayedTurns(
+                                                e.actualCommands,
+                                                e.hasFinalReply,
+                                            ),
+                                        )}
+                                    </td>
+                                );
+                            })()}
                             <td className="py-1 pr-3 text-right tabular-nums text-gray-700">
                                 {fmtScore(e.weightedScore)}
                             </td>
@@ -381,7 +414,7 @@ function TaskRow({
                     {fmtUsd(t.avgCostUsd)}
                 </td>
                 <td className="py-2 px-3 tabular-nums text-right text-gray-700">
-                    {fmtCount(t.avgActualCommands)}
+                    {fmtCount(t.avgTotalTurns ?? t.avgActualCommands)}
                 </td>
                 <td className="py-2 px-2 text-xs text-gray-400">
                     {expanded ? "▾" : "▸"}

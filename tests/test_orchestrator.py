@@ -1819,7 +1819,10 @@ async def test_run_batch_applies_max_turns_override(tmp_path):
     )
 
     task, _ = load_task(task_file)
-    assert task.run_limits is None  # Default
+    # hello_date.yaml ships a baseline run_limits.expected_turns; max_turns is
+    # the field this test exercises. CLI --max-turns must field-merge on top.
+    baseline_expected_turns = task.run_limits.expected_turns if task.run_limits else None
+    assert task.run_limits is None or task.run_limits.max_turns is None
 
     from coder_eval.models import RunLimits
 
@@ -1831,6 +1834,8 @@ async def test_run_batch_applies_max_turns_override(tmp_path):
 
     assert task.run_limits is not None
     assert task.run_limits.max_turns == 42
+    # Field-merge must preserve other run_limits keys from the task YAML.
+    assert task.run_limits.expected_turns == baseline_expected_turns
 
 
 # ==================== Duplicate Task ID Validation Tests ====================

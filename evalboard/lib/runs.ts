@@ -59,6 +59,12 @@ export interface TaskResultSummary {
     durationSeconds: number | null;
     totalCostUsd: number | null;
     actualCommands: number | null;
+    totalTurns: number | null;
+    expectedTurns: number | null;
+    // True when the agent's final iteration emitted a text reply
+    // (i.e. ResultMessage.result was non-empty). Lets grid/trends
+    // Turns cells inflate by +1 on legacy runs that lack total_turns.
+    hasFinalReply: boolean;
     tags: string[];
     // Derived primary group. See deriveSkill below for the resolution chain
     // (new runs use task_path; older runs fall back to a tag heuristic).
@@ -111,6 +117,10 @@ export interface TaskDetail extends TaskResultSummary {
     artifacts: ArtifactRef[];
     flowDebug: FlowDebugResult | null;
     toolCalls: ToolCall[];
+    // Final text-only assistant message (no tool call) — sourced from the
+    // last turn's ResultMessage.result. Renders as the trailing entry in
+    // the Turn timeline so the (5) header reconciles with the 4 tool calls.
+    finalAssistantText: string | null;
 }
 
 // ---------- run.json schema ----------
@@ -122,6 +132,14 @@ interface RawTaskResult {
     duration?: number;
     total_cost_usd?: number;
     actual_commands?: number;
+    // Cumulative SDK turn count + configured target. Absent on runs from
+    // before the dashboard-expected-turns PR; both fields are optional and
+    // null-fallback through the cell helpers in lib/turns.ts.
+    total_turns?: number;
+    expected_turns?: number | null;
+    // True iff the final iteration's ResultMessage.result was non-empty.
+    // Absent on legacy runs predating the field — treated as false.
+    has_final_reply?: boolean;
     tags?: string[];
     // Source YAML path. Persisted by coder-eval starting with the
     // task_path PR; absent on older runs (deriveSkill falls back to tags).
@@ -250,7 +268,7 @@ function deriveSkill(
     return null;
 }
 
-function toTaskRow(t: RawTaskResult): TaskResultSummary {
+export function toTaskRow(t: RawTaskResult): TaskResultSummary {
     const tags = t.tags ?? [];
     return {
         taskId: t.task_id ?? "",
@@ -259,6 +277,9 @@ function toTaskRow(t: RawTaskResult): TaskResultSummary {
         durationSeconds: t.duration ?? null,
         totalCostUsd: t.total_cost_usd ?? null,
         actualCommands: t.actual_commands ?? null,
+        totalTurns: t.total_turns ?? null,
+        expectedTurns: t.expected_turns ?? null,
+        hasFinalReply: t.has_final_reply ?? false,
         tags,
         skill: deriveSkill(t.task_path, tags),
     };
@@ -322,6 +343,9 @@ export interface RunOverviewTask {
     durationSeconds: number | null;
     weightedScore: number | null;
     actualCommands: number | null;
+    totalTurns: number | null;
+    expectedTurns: number | null;
+    hasFinalReply: boolean;
 }
 
 export interface RunOverview {
@@ -353,6 +377,9 @@ export async function readRunOverview(
                 durationSeconds: t.duration ?? null,
                 weightedScore: t.weighted_score ?? null,
                 actualCommands: t.actual_commands ?? null,
+                totalTurns: t.total_turns ?? null,
+                expectedTurns: t.expected_turns ?? null,
+                hasFinalReply: t.has_final_reply ?? false,
             };
         });
     const totalCost = taskResults.reduce(
@@ -538,6 +565,10 @@ interface CommandEntry {
 
 interface TurnEntry {
     commands?: CommandEntry[];
+    result_summary?: {
+        result?: string | null;
+        stop_reason?: string | null;
+    } | null;
 }
 
 function summarizeCommand(cmd: CommandEntry): string {
@@ -665,8 +696,25 @@ export async function readTaskDetail(
         task?.task_description ??
         null;
 
+    // The trailing text-only assistant message lives on the last turn's
+    // ResultMessage. Walk from the end so partial/crashed turns earlier
+    // in the run don't shadow it.
+    let finalAssistantText: string | null = null;
+    for (let i = (task?.turns?.length ?? 0) - 1; i >= 0; i--) {
+        const r = task?.turns?.[i]?.result_summary?.result;
+        if (typeof r === "string" && r.length > 0) {
+            finalAssistantText = r;
+            break;
+        }
+    }
+
     return {
         ...row,
+        // task.json is the richer source: it carries the trailing text
+        // even on legacy run.json files that predate has_final_reply.
+        // Overriding row.hasFinalReply here keeps detail TURNS, Turn
+        // timeline header, and the reply row in lockstep.
+        hasFinalReply: finalAssistantText != null,
         runId,
         finalStatus: task?.final_status ?? null,
         errorMessage: task?.error_message ?? null,
@@ -675,6 +723,7 @@ export async function readTaskDetail(
         artifacts,
         flowDebug,
         toolCalls,
+        finalAssistantText,
     };
 }
 

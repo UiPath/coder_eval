@@ -7,9 +7,22 @@ import type { ReviewIndexEntry } from "@/lib/reviews-types";
 import { humanizeTaskId } from "@/lib/format";
 import { StatusPill } from "@/lib/pills";
 import { statusSortRank } from "@/lib/status";
+import {
+    displayedTurns,
+    fmtTurnsCount,
+    tintForRatio,
+    turnRatio,
+    turnsCellClasses,
+} from "@/lib/turns";
 import { ChipButton } from "./chips";
 
-type SortKey = "task" | "status" | "score" | "duration" | "cost" | "tools";
+type SortKey =
+    | "task"
+    | "status"
+    | "score"
+    | "duration"
+    | "cost"
+    | "turns";
 
 function fmtTableDuration(s: number | null): string {
     if (s == null) return "—";
@@ -30,7 +43,7 @@ const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
     score: "desc",
     duration: "desc",
     cost: "desc",
-    tools: "desc",
+    turns: "desc",
 };
 
 function compare(
@@ -57,10 +70,12 @@ function compare(
             return (
                 (a.totalCostUsd ?? -Infinity) - (b.totalCostUsd ?? -Infinity)
             );
-        case "tools":
+        case "turns":
             return (
-                (a.actualCommands ?? -Infinity) -
-                (b.actualCommands ?? -Infinity)
+                (displayedTurns(a.actualCommands, a.hasFinalReply) ??
+                    -Infinity) -
+                (displayedTurns(b.actualCommands, b.hasFinalReply) ??
+                    -Infinity)
             );
     }
 }
@@ -75,7 +90,7 @@ const COLUMNS: Array<{
     { key: "score", header: "Score", align: "right" },
     { key: "duration", header: "Duration", align: "right" },
     { key: "cost", header: "Cost", align: "right" },
-    { key: "tools", header: "Tools", align: "right" },
+    { key: "turns", header: "Turns", align: "right" },
 ];
 
 export function TaskGrid({
@@ -175,6 +190,9 @@ export function TaskGrid({
                 <tbody>
                     {sorted.map((t) => {
                         const review = reviewsByTask?.get(t.taskId);
+                        const turnsTint = tintForRatio(
+                            turnRatio(t.totalTurns, t.expectedTurns),
+                        );
                         return (
                         <tr
                             key={t.taskId}
@@ -280,8 +298,20 @@ export function TaskGrid({
                             <td className="py-3 px-4 text-right tabular-nums text-gray-700">
                                 {fmtCost(t.totalCostUsd)}
                             </td>
-                            <td className="py-3 px-4 text-right tabular-nums text-gray-700">
-                                {t.actualCommands ?? "—"}
+                            <td
+                                className={`py-3 px-4 text-right tabular-nums font-medium ${turnsCellClasses(turnsTint)}`}
+                                title={
+                                    t.expectedTurns != null
+                                        ? `expected_turns target: ${t.expectedTurns}`
+                                        : "no expected_turns target set"
+                                }
+                            >
+                                {fmtTurnsCount(
+                                    displayedTurns(
+                                        t.actualCommands,
+                                        t.hasFinalReply,
+                                    ),
+                                )}
                             </td>
                         </tr>
                         );

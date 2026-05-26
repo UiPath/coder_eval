@@ -5,6 +5,8 @@ import { readTaskReview } from "@/lib/reviews";
 import { fmtRunTime, humanizeTaskId } from "@/lib/format";
 import { StatusPill } from "@/lib/pills";
 import { ChipButton } from "../chips";
+import { displayedTurns } from "@/lib/turns";
+import { ExpectedTurnsStat, TurnsStat } from "./turns-stat";
 import {
     ArtifactsSection,
     CriteriaSection,
@@ -52,7 +54,7 @@ export default async function TaskPage({
                 <div className="text-xs text-gray-500 tabular-nums font-mono">
                     {taskId} · run {id}
                 </div>
-                <dl className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm bg-gray-50 border border-gray-200 rounded-lg p-4">
+                <dl className="grid grid-cols-2 md:grid-cols-6 gap-4 text-sm bg-gray-50 border border-gray-200 rounded-lg p-4">
                     <div>
                         <dt className="text-xs text-gray-500 uppercase tracking-wide">
                             Score
@@ -89,14 +91,14 @@ export default async function TaskPage({
                             {task.finalStatus ?? "—"}
                         </dd>
                     </div>
-                    <div>
-                        <dt className="text-xs text-gray-500 uppercase tracking-wide">
-                            Tool calls
-                        </dt>
-                        <dd className="text-gray-900 font-medium mt-0.5 tabular-nums">
-                            {task.toolCalls.length}
-                        </dd>
-                    </div>
+                    <TurnsStat
+                        turns={displayedTurns(
+                            task.actualCommands,
+                            task.hasFinalReply,
+                        )}
+                        expectedTurns={task.expectedTurns}
+                    />
+                    <ExpectedTurnsStat expectedTurns={task.expectedTurns} />
                 </dl>
                 {task.tags.length > 0 && (
                     <div className="flex flex-wrap gap-1.5">
@@ -157,8 +159,11 @@ export default async function TaskPage({
 
             {flowDebug && <FlowDebugSection flowDebug={flowDebug} />}
             <CriteriaSection criteria={task.criteria} />
-            {task.toolCalls.length > 0 && (
-                <ToolTimelineSection toolCalls={task.toolCalls} />
+            {(task.toolCalls.length > 0 || task.finalAssistantText) && (
+                <ToolTimelineSection
+                    toolCalls={task.toolCalls}
+                    finalAssistantText={task.finalAssistantText}
+                />
             )}
             <ArtifactsSection runId={id} artifacts={task.artifacts} />
             <LogTailSection log={log} />

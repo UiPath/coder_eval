@@ -157,6 +157,57 @@ def cohens_d(a: list[float], b: list[float]) -> float | None:
 # ---------------------------------------------------------------------------
 
 
+def has_final_reply(result: EvaluationResult) -> bool:
+    """True iff any iteration emitted a non-empty ResultMessage.result.
+
+    Mirrors the evalboard rendering: a "final reply" is a text answer the
+    agent produced that becomes the trailing entry in the Turn timeline.
+    """
+    for t in result.iterations:
+        if t.result_summary is not None:
+            r = t.result_summary.result
+            if isinstance(r, str) and r.strip():
+                return True
+    return False
+
+
+def visible_turn_count(result: EvaluationResult) -> int:
+    """Count of agent actions visible in the timeline so far.
+
+    A "turn" here is one entry rendered in the Turn timeline: each tool
+    invocation contributes 1, plus 1 for the final assistant reply when
+    present. This is the canonical metric — distinct from the SDK's
+    ``num_turns`` which counts assistant *messages* and can bundle tool
+    use with trailing text into a single turn.
+
+    See docs/features/2026-05-22-visible-turns.md for the full rationale.
+    """
+    commands = sum(len(t.commands) for t in result.iterations)
+    return commands + (1 if has_final_reply(result) else 0)
+
+
+def expected_turns_overage(result: EvaluationResult) -> tuple[int, int] | None:
+    """Return ``(visible_turns, expected)`` when the visible-events turn
+    count strictly exceeds ``run_limits.expected_turns``; else ``None``.
+
+    Safe against missing ``task_config``, missing ``run_limits``, and
+    non-int ``expected_turns`` values.
+    """
+    task_cfg = result.task_config
+    if task_cfg is None:
+        return None
+    run_limits = (task_cfg.resolved or {}).get("run_limits") or {}
+    if not isinstance(run_limits, dict):
+        return None
+    expected = run_limits.get("expected_turns")
+    if not isinstance(expected, int) or expected < 1:
+        return None
+    actual = visible_turn_count(result)
+    if actual > expected:
+        return actual, expected
+    return None
+
+
 def describe_prompt_config(variant: ExperimentVariant) -> str:
     """Return a short description of the variant's prompt configuration.
 
