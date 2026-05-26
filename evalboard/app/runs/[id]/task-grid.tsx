@@ -190,8 +190,15 @@ export function TaskGrid({
                 <tbody>
                     {sorted.map((t) => {
                         const review = reviewsByTask?.get(t.taskId);
+                        // Color off the same visible-events count the cell
+                        // displays — not SDK num_turns (totalTurns), which the
+                        // visible-turns refactor dropped from the display and
+                        // is often null, leaving the cell silently uncolored.
                         const turnsTint = tintForRatio(
-                            turnRatio(t.totalTurns, t.expectedTurns),
+                            turnRatio(
+                                displayedTurns(t.actualCommands, t.hasFinalReply),
+                                t.expectedTurns,
+                            ),
                         );
                         return (
                         <tr

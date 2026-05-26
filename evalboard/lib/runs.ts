@@ -700,8 +700,8 @@ export async function readTaskDetail(
     // ResultMessage. Walk from the end so partial/crashed turns earlier
     // in the run don't shadow it.
     let finalAssistantText: string | null = null;
-    for (let i = (task?.turns?.length ?? 0) - 1; i >= 0; i--) {
-        const r = task?.turns?.[i]?.result_summary?.result;
+    for (let i = (task?.iterations?.length ?? 0) - 1; i >= 0; i--) {
+        const r = task?.iterations?.[i]?.result_summary?.result;
         if (typeof r === "string" && r.length > 0) {
             finalAssistantText = r;
             break;
