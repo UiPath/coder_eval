@@ -262,11 +262,19 @@ class LLMGatewayProxy:
                         "cache_read_input_tokens", 0
                     )
 
-            # message_delta contains output_tokens in usage
+            # message_delta carries CUMULATIVE output_tokens — each subsequent
+            # event reports the updated running total for the message, not a
+            # delta. See https://docs.anthropic.com/en/api/messages-streaming
+            # ("message_delta ... Usage values are cumulative.").
+            # Take the max instead of summing, which would over-count by ~Nx
+            # for an N-event stream and inflate Bedrock-proxied usage reports.
             elif event_type == "message_delta":
                 delta_usage = data.get("usage", {})
-                if delta_usage:
-                    usage["output_tokens"] = usage.get("output_tokens", 0) + delta_usage.get("output_tokens", 0)
+                if delta_usage and "output_tokens" in delta_usage:
+                    usage["output_tokens"] = max(
+                        usage.get("output_tokens", 0),
+                        delta_usage["output_tokens"],
+                    )
 
         if usage:
             self._track_usage(model, usage)

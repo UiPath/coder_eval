@@ -368,6 +368,31 @@ class TestSSEUsageExtraction:
         proxy._extract_usage_from_sse(sse, "model-a")
         assert proxy.usage.input_tokens == 300
 
+    def test_multiple_message_delta_events_take_final_cumulative(self):
+        """Per the Anthropic streaming spec, message_delta.usage.output_tokens
+        is the CUMULATIVE running total for the message. Multiple message_delta
+        events each carry the updated total — only the last one is the true
+        final. Summing them inflates the count by ~Nx for an N-event stream.
+        """
+        proxy = _make_proxy()
+        # 6 message_delta events with monotonically-increasing cumulative output_tokens.
+        # Final cumulative = 50. Summing the values yields 5+12+20+28+38+50 = 153.
+        sse = (
+            b'data: {"type": "message_start", "message": {"usage": {"input_tokens": 100}}}\n'
+            b'data: {"type": "message_delta", "usage": {"output_tokens": 5}}\n'
+            b'data: {"type": "message_delta", "usage": {"output_tokens": 12}}\n'
+            b'data: {"type": "message_delta", "usage": {"output_tokens": 20}}\n'
+            b'data: {"type": "message_delta", "usage": {"output_tokens": 28}}\n'
+            b'data: {"type": "message_delta", "usage": {"output_tokens": 38}}\n'
+            b'data: {"type": "message_delta", "usage": {"output_tokens": 50}}\n'
+        )
+        proxy._extract_usage_from_sse(sse, "model-a")
+        assert proxy.usage.output_tokens == 50, (
+            "Expected the final cumulative value (50), not the sum of all events (153)."
+        )
+        assert proxy.usage.input_tokens == 100
+        assert proxy.usage.requests == 1
+
 
 class TestSSEBufferCap:
     """Tests for _MAX_SSE_BUFFER_BYTES cap on streaming usage extraction."""
@@ -431,6 +456,23 @@ class TestBedrockEventStreamParsing:
         proxy._extract_usage_from_sse(raw, "model-a")
         assert proxy.usage.input_tokens == 100
         assert proxy.usage.output_tokens == 50
+        assert proxy.usage.requests == 1
+
+    def test_bedrock_multiple_message_delta_take_final_cumulative(self):
+        """Same cumulative-vs-summed invariant as the SSE path, exercised
+        against the Bedrock event-stream parser.
+        """
+        proxy = _make_proxy()
+        raw = (
+            _bedrock_frame({"type": "message_start", "message": {"usage": {"input_tokens": 100}}})
+            + _bedrock_frame({"type": "message_delta", "usage": {"output_tokens": 10}})
+            + _bedrock_frame({"type": "message_delta", "usage": {"output_tokens": 30}})
+            + _bedrock_frame({"type": "message_delta", "usage": {"output_tokens": 50}})
+        )
+        proxy._extract_usage_from_sse(raw, "model-a")
+        # Final cumulative = 50; the buggy sum would have been 90.
+        assert proxy.usage.output_tokens == 50
+        assert proxy.usage.input_tokens == 100
         assert proxy.usage.requests == 1
 
     def test_bedrock_invalid_base64_skipped(self):
