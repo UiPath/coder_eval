@@ -1,0 +1,124 @@
+task_id: flow-bindings-reconfigure-different-connection
+description: >
+  When the same connector node is reconfigured against a different connection,
+  the resulting .flow must reference ONLY the new connection — no stale
+  bindings from the previous configure should remain, and no empty-keyed
+  stubs should be left behind. This exercises the fallback-by-(name, resource)
+  path of `upsertConnectionResourceBinding` against a non-empty-keyed row.
+  See https://github.com/UiPath/cli/pull/2197.
+tags: [flow, connector, configure, bindings, regression, tier-4, integration]
+
+run_limits:
+  max_turns: 60
+  turn_timeout: 1500
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: tempdir
+  python: {}
+  node:
+    env_packages:
+      - "@uipath/cli@latest"
+
+initial_prompt: |
+  Load the uipath-maestro-flow skill and follow its workflow exactly.
+
+  Build a flow named "BindingsReconfigure" — Manual Trigger → IS connector
+  node → End — saved as `BindingsReconfigure/flow_files/BindingsReconfigure.flow`
+  with `BindingsReconfigure/project.uiproj`.
+
+  Pick two distinct connections (different connectionIds) backed by the same
+  connector — if the tenant only has one connection for a given connector,
+  fall back to any connector that has two live connections.
+
+  Record the ids at the sandbox root and snapshot the .flow after each configure:
+
+      echo '{"a":"<connection-a-id>","b":"<connection-b-id>"}' > conn_ids.json
+
+  After configuring with A:
+      cp BindingsReconfigure/flow_files/BindingsReconfigure.flow after_a.flow
+
+  After reconfiguring the SAME node with B:
+      cp BindingsReconfigure/flow_files/BindingsReconfigure.flow after_b.flow
+
+post_run:
+  - command: 'mkdir -p _outputs && find . -type d \( -name .uipath -o -name .claude -o -name .venv -o -name node_modules -o -name tools -o -name example -o -name _outputs -o -name .git -o -name .flow-run \) -prune -o -type f \( -name "*.flow" -o -name "*.fil" -o -name "bindings*.json" -o -name "conn_ids.json" \) -exec sh -c ''f="${1#./}"; mkdir -p "_outputs/$(dirname "$f")" && cp "$1" "_outputs/$f"'' _ {} \; && find _outputs -type f -exec chmod a-w {} +'
+    timeout: 30
+
+success_criteria:
+  - type: command_executed
+    description: "Agent called node configure at least twice"
+    tool_name: "Bash"
+    command_pattern: "uip.*maestro.*flow.*node.*configure"
+    min_count: 2
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_exists
+    description: "after_a.flow snapshot exists"
+    path: "after_a.flow"
+    weight: 0.5
+    pass_threshold: 1.0
+
+  - type: file_exists
+    description: "after_b.flow snapshot exists"
+    path: "after_b.flow"
+    weight: 0.5
+    pass_threshold: 1.0
+
+  - type: file_exists
+    description: "conn_ids.json records the two connection ids used"
+    path: "conn_ids.json"
+    weight: 0.5
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "conn_ids.json declares two distinct connection ids"
+    command: "python3 -c \"import json; d=json.load(open('conn_ids.json')); a,b=d['a'],d['b']; assert a and b and a!=b, f'Expected two distinct connection ids, got a={a} b={b}'\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "after_a.flow references connection A"
+    command: "python3 -c \"import json; d=json.load(open('conn_ids.json')); a=d['a']; bnds=json.load(open('after_a.flow')).get('bindings',[]); ks={x.get('resourceKey') for x in bnds if x.get('resource')=='Connection'}; assert a in ks, f'Connection A ({a}) not present in after_a.flow bindings: {ks}'\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "after_b.flow has zero references to connection A (no stale rows)"
+    command: "python3 -c \"import json; d=json.load(open('conn_ids.json')); a=d['a']; bnds=json.load(open('after_b.flow')).get('bindings',[]); leaked=[x for x in bnds if x.get('resourceKey')==a or x.get('default')==a]; assert leaked==[], f'Stale connection A binding(s) after reconfigure to B: {leaked}'\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 4.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "after_b.flow ConnectionId binding points at connection B"
+    command: "python3 -c \"import json; d=json.load(open('conn_ids.json')); b=d['b']; bnds=json.load(open('after_b.flow')).get('bindings',[]); conn=[x for x in bnds if x.get('resource')=='Connection' and x.get('propertyAttribute')=='ConnectionId']; assert conn, 'No ConnectionId binding'; assert all(x.get('resourceKey')==b for x in conn), f'Some ConnectionId binding still does not point at B={b}: {conn}'\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Reconfigure did not grow bindings count"
+    command: "python3 -c \"import json; a=json.load(open('after_a.flow')).get('bindings',[]); b=json.load(open('after_b.flow')).get('bindings',[]); assert len(a)==len(b), f'Bindings count changed: {len(a)} -> {len(b)} on reconfigure (should be equal)'\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "No empty-keyed Connection bindings in final snapshot"
+    command: "python3 -c \"import json; b=json.load(open('after_b.flow')).get('bindings',[]); empty=[x for x in b if x.get('resource')=='Connection' and not x.get('resourceKey')]; assert empty==[], f'Empty-keyed binding(s) after reconfigure: {empty}'\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
