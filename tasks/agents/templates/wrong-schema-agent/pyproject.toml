@@ -1,9 +1,0 @@
-[project]
-name = "string-reverser"
-version = "0.1.0"
-description = "Reverse a string"
-requires-python = ">=3.11"
-dependencies = ["uipath"]
-
-[dependency-groups]
-dev = ["uipath-dev"]

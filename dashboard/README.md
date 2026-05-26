@@ -92,7 +92,7 @@ uip login --interactive
 uv run dashboard run --suite skills --skip-login
 ```
 
-Available suites: `skills`, `smoke`, `flow-init`, `flow`.
+Available suites: `skills`, `smoke`.
 
 Full flag list: `uv run dashboard run --help`.
 

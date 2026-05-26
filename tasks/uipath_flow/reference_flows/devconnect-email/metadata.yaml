@@ -1,4 +1,0 @@
-name: DevConnect Email Classifier
-author: Guy Van Wert
-prompt: Create a UiPath flow that reads my latest Outlook email, uses an AI agent to classify it into categories like needs response, take action, or other, then sends me a Slack message if it needs attention, otherwise tags it in Outlook.
-tags: [medium, agent, switch, outlook, slack]

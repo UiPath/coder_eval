@@ -1,4 +1,0 @@
-name: Release Notes Generator
-author: Bryan Phelps
-prompt: Create a UiPath flow that searches Jira for recently closed issues, uses an AI agent to decide which ones need release notes, generates the release notes with another agent, publishes them to a Confluence page, and sends a Slack notification when done.
-tags: [complex, multi-agent, parallel-loop, jira, confluence, slack, transform, filter]

@@ -1,4 +1,0 @@
-name: Weather Slack Alerts
-author: Rocky Madden
-prompt: Create a UiPath Flow JSON file that fetches Denver's temperature from a free weather API, evaluates if it's warm (>60F) or cold (≤60F), and sends a Slack message with the appropriate response. Validate the flow structure.
-tags: [simple, http, slack]

@@ -1,9 +1,0 @@
-[project]
-name = "asset-reader"
-version = "0.1.0"
-description = "Read UiPath assets"
-requires-python = ">=3.11"
-dependencies = ["uipath"]
-
-[dependency-groups]
-dev = ["uipath-dev"]

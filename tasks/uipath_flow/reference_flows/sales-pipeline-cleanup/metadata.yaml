@@ -1,4 +1,0 @@
-name: Sales Pipeline Cleanup
-author: Gunter De Souter
-prompt: Create a UiPath flow that fetches all task records from Salesforce and deletes each one in parallel using a loop.
-tags: [simple, salesforce, parallel-loop]

@@ -1,4 +1,0 @@
-name: Calculator Multiply
-author: Bai Li
-prompt: Create a UiPath flow that takes two numbers as input and multiplies them together, returning the result.
-tags: [simple, script, variables, no-connectors]

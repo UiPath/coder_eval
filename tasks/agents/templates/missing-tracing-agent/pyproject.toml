@@ -1,9 +1,0 @@
-[project]
-name = "currency-converter"
-version = "0.1.0"
-description = "Convert USD to other currencies"
-requires-python = ">=3.11"
-dependencies = ["uipath"]
-
-[dependency-groups]
-dev = ["uipath-dev"]

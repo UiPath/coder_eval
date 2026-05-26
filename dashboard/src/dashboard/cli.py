@@ -31,14 +31,6 @@ SUITES: list[Suite] = [
     # which is tagged [smoke, smoke-fail] and is intentionally unsatisfiable. Including
     # it here would make the daily smoke pipeline report a guaranteed failure forever.
     Suite(name="smoke", task_patterns=["tasks/*.yaml"], tags="smoke-pass"),
-    Suite(name="flow-init", task_patterns=["tasks/uipath_flow/init_*.yaml"], tags="flow"),
-    Suite(
-        name="flow",
-        task_patterns=["tasks/uipath_flow/*.yaml"],
-        concurrency=2,
-        experiment="experiments/flow-folder-hint.yaml",
-        uip_login=True,
-    ),
 ]
 
 
@@ -83,7 +75,7 @@ def cli() -> None:
 @cli.command()
 @click.option("--model", default="claude-sonnet-4-6", help="Model to evaluate.")
 @click.option("--tags", default=None, help="Task tag filter (overrides suite defaults).")
-@click.option("--suite", default=None, help="Run only the named suite (e.g. 'skills', 'smoke', 'flow-init', 'flow').")
+@click.option("--suite", default=None, help="Run only the named suite (e.g. 'skills', 'smoke').")
 @click.option("--skip-pull", is_flag=True, help="Skip git pull steps.")
 @click.option("--skip-analysis", is_flag=True, help="Skip AI analysis generation.")
 @click.option("--skip-review", is_flag=True, help="Skip post-run task review (review.json) generation.")
