@@ -1,87 +1,16 @@
-"""Evaluation support functions for orchestrator.
+"""Reference-loading helpers for the orchestrator.
 
-This module provides helpers for:
-- Creating iteration snapshots with hybrid mode support
-- Loading reference code for comparison
-
-These were extracted from Orchestrator to reduce its complexity while
-maintaining the evaluation flow logic.
+Loads the reference solution (code / file / directory form) consumed by the
+``reference_comparison``, ``llm_judge``, and ``agent_judge`` criteria.
 """
 
-import asyncio
 import logging
 from pathlib import Path
 
-from ..models import SnapshotMode, TaskDefinition, TurnRecord
-from ..sandbox import Sandbox
+from ..models import TaskDefinition
 
 
 logger = logging.getLogger(__name__)
-
-
-async def create_iteration_snapshot(
-    sandbox: Sandbox,
-    snapshot_base_dir: Path,
-    task: TaskDefinition,
-    iteration: int,
-    turn_record: TurnRecord,
-) -> None:
-    """Create a snapshot of the sandbox after this iteration.
-
-    Implements hybrid mode: full snapshots at checkpoints, incremental otherwise.
-    Gracefully handles errors to prevent snapshot failures from breaking evaluation.
-
-    Args:
-        sandbox: Sandbox instance for accessing file state
-        snapshot_base_dir: Base directory for snapshot storage
-        task: Task definition with snapshot configuration
-        iteration: Current iteration number (1-indexed)
-        turn_record: TurnRecord to update with snapshot info
-    """
-    snapshot_config = task.sandbox.snapshots
-    if snapshot_config.mode == SnapshotMode.DISABLED:
-        return
-
-    try:
-        # Determine snapshot mode for this iteration
-        snapshot_dir = snapshot_base_dir / f"iteration_{iteration}"
-
-        # Hybrid mode: full at checkpoints, incremental otherwise
-        if snapshot_config.mode == SnapshotMode.HYBRID:
-            is_checkpoint = iteration % snapshot_config.checkpoint_frequency == 0
-            mode = SnapshotMode.FULL if is_checkpoint else SnapshotMode.INCREMENTAL
-        else:
-            # Use configured mode directly (FULL or INCREMENTAL)
-            mode = snapshot_config.mode
-
-        # Create snapshot
-        logger.debug(f"Creating {mode.value} snapshot for iteration {iteration}")
-
-        manifest = await sandbox.create_snapshot(
-            snapshot_dir=snapshot_dir,
-            mode=mode,
-            changed_files=turn_record.files_changed if mode == SnapshotMode.INCREMENTAL else None,
-            ignore_patterns=snapshot_config.ignore_patterns,
-        )
-
-        # Update manifest with correct iteration number
-        manifest.iteration = iteration
-
-        # Update turn record with snapshot info
-        turn_record.snapshot_path = str(snapshot_dir)
-        turn_record.snapshot_size_bytes = manifest.size_bytes
-
-        logger.info(
-            f"Snapshot created: {manifest.file_count} files, {manifest.size_bytes / 1024:.1f} KB, mode={mode.value}"
-        )
-
-    except asyncio.CancelledError:
-        # Re-raise to allow proper task cancellation
-        raise
-    except Exception as e:
-        # Log error but don't fail the evaluation
-        logger.warning(f"Failed to create snapshot for iteration {iteration}: {e}")
-        # Don't set snapshot_path on turn_record if snapshot failed
 
 
 def load_reference(

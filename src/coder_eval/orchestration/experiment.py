@@ -31,7 +31,6 @@ from ..models import (
     SandboxConfig,
     SimulationConfig,
     SkippedTask,
-    SnapshotMode,
     TaskDefinition,
     TaskExperimentSummary,
     TaskResult,
@@ -664,7 +663,6 @@ def _apply_cli_overrides(
         lineage: Optional lineage dict to update with CLI override entries.
     """
     from ..config import settings as app_settings
-    from ..models import SnapshotConfig
 
     def _record(key: str, value: Any, detail: str) -> None:
         if lineage is not None:
@@ -722,9 +720,6 @@ def _apply_cli_overrides(
     if config.plugins is not None:
         task.agent.plugins = config.plugins
         _record("agent.plugins", config.plugins, "--plugins")
-    if config.ignore_patterns is not None:
-        task.agent.ignore_patterns = config.ignore_patterns
-        _record("agent.ignore_patterns", config.ignore_patterns, "--ignore-patterns")
     if config.sdk_options:
         task.agent.sdk_options = {**task.agent.sdk_options, **config.sdk_options}
         for key, value in config.sdk_options.items():
@@ -735,24 +730,6 @@ def _apply_cli_overrides(
     if config.driver is not None:
         task.sandbox.driver = config.driver
         _record("sandbox.driver", config.driver, "--driver")
-
-    # Snapshot overrides
-    if config.snapshot_mode or config.snapshot_checkpoint_freq:
-        mode = SnapshotMode(config.snapshot_mode.lower()) if config.snapshot_mode else task.sandbox.snapshots.mode
-        checkpoint_freq = (
-            config.snapshot_checkpoint_freq
-            if config.snapshot_checkpoint_freq is not None
-            else task.sandbox.snapshots.checkpoint_frequency
-        )
-        task.sandbox.snapshots = SnapshotConfig(
-            mode=mode,
-            checkpoint_frequency=checkpoint_freq,
-            ignore_patterns=task.sandbox.snapshots.ignore_patterns,
-        )
-        if config.snapshot_mode:
-            _record("sandbox.snapshots.mode", mode, "--snapshot-mode")
-        if config.snapshot_checkpoint_freq is not None:
-            _record("sandbox.snapshots.checkpoint_frequency", checkpoint_freq, "--snapshot-checkpoint-freq")
 
     # Final guard: agent.type must be set after all 5 layers have merged.
     if task.agent.type is None:

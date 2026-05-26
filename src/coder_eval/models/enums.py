@@ -67,15 +67,3 @@ class AgentState(StrEnum):
     CODE_PROPOSAL = "code_proposal"
     FINISHED = "finished"
     ERROR = "error"
-
-
-class SnapshotMode(StrEnum):
-    """Snapshot mode for iteration snapshots.
-
-    Note: No separate 'enabled' flag needed - use DISABLED to disable snapshots.
-    """
-
-    DISABLED = "disabled"  # No snapshots
-    FULL = "full"  # Copy entire sandbox every iteration
-    INCREMENTAL = "incremental"  # Only changed files
-    HYBRID = "hybrid"  # Full at checkpoints, incremental otherwise

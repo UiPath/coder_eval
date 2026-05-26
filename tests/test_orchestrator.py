@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from coder_eval.models import BedrockRoute, DirectRoute, ProxyRoute, SandboxConfig
-from coder_eval.orchestration.evaluation import create_iteration_snapshot
 from coder_eval.orchestration.task_loader import load_task
 from coder_eval.orchestrator import Orchestrator, _format_routing
 from coder_eval.sandbox import Sandbox
@@ -520,7 +519,7 @@ async def test_orchestrator_setup_preserve_sandbox_uses_ephemeral_runtime_dir(tm
     from datetime import datetime
 
     from coder_eval import orchestrator as orchestrator_module
-    from coder_eval.models import AgentKind, ApiBackend, DirectRoute, EvaluationResult, SnapshotConfig, SnapshotMode
+    from coder_eval.models import AgentKind, ApiBackend, DirectRoute, EvaluationResult
     from coder_eval.sandbox import Sandbox
 
     class DummyAgent:
@@ -542,7 +541,6 @@ async def test_orchestrator_setup_preserve_sandbox_uses_ephemeral_runtime_dir(tm
     task_file = Path("tasks/hello_date.yaml")
     task, _ = load_task(task_file)
     task.sandbox.python = None
-    task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.DISABLED)
 
     run_dir = tmp_path / "test_run" / "hello_date"
     orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=True, variant_id="test-variant")
@@ -579,13 +577,12 @@ async def test_orchestrator_cleanup_persistent_sandbox(tmp_path):
     """Test that _cleanup with preserve_sandbox=True and a persistent sandbox skips copy."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult, SnapshotConfig, SnapshotMode
+    from coder_eval.models import AgentKind, EvaluationResult
     from coder_eval.sandbox import Sandbox
 
     task_file = Path("tasks/hello_date.yaml")
     task, _ = load_task(task_file)
     task.sandbox.python = None
-    task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.DISABLED)
 
     run_dir = tmp_path / "test_run" / "hello_date"
     orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=True, variant_id="test-variant")
@@ -627,13 +624,12 @@ async def test_orchestrator_cleanup_non_persistent_sandbox_with_preserve(tmp_pat
     """Test that _cleanup with preserve_sandbox=True and a non-persistent sandbox copies to artifacts."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult, SnapshotConfig, SnapshotMode
+    from coder_eval.models import AgentKind, EvaluationResult
     from coder_eval.sandbox import Sandbox
 
     task_file = Path("tasks/hello_date.yaml")
     task, _ = load_task(task_file)
     task.sandbox.python = None
-    task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.DISABLED)
 
     run_dir = tmp_path / "test_run" / "hello_date"
     orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=True, variant_id="test-variant")
@@ -669,451 +665,6 @@ async def test_orchestrator_cleanup_non_persistent_sandbox_with_preserve(tmp_pat
 
     # Original temp dir should be cleaned up
     assert not sandbox_dir.exists()
-
-
-# ==================== Snapshot Integration Tests ====================
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_snapshot_setup_disabled(tmp_path):
-    """Test that snapshot directory is not created when snapshots disabled."""
-    from coder_eval.models import SnapshotConfig, SnapshotMode
-
-    task_file = Path("tasks/hello_date.yaml")
-    task, _ = load_task(task_file)
-
-    # Explicitly disable snapshots; no venv needed for snapshot setup test
-    task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.DISABLED)
-    task.sandbox.python = None
-
-    run_dir = tmp_path / "test_run" / "hello_date"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
-
-    # Initialize result
-    from datetime import datetime
-
-    from coder_eval.models import AgentKind, EvaluationResult
-
-    orchestrator.result = EvaluationResult(
-        task_id=task.task_id,
-        task_description=task.description,
-        variant_id="test-variant",
-        agent_type=AgentKind.CLAUDE_CODE,
-        started_at=datetime.now(),
-        final_status="FAILURE",
-        iteration_count=0,
-        environment_info={},
-    )
-
-    await orchestrator._setup()
-
-    # Verify snapshot directory not created
-    assert orchestrator.snapshot_base_dir is None
-    snapshot_dir = run_dir / "snapshots"
-    assert not snapshot_dir.exists()
-
-    # Cleanup
-    await orchestrator._cleanup()
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_snapshot_setup_enabled(tmp_path):
-    """Test that snapshot directory is created when snapshots enabled."""
-    from coder_eval.models import SnapshotConfig, SnapshotMode
-
-    task_file = Path("tasks/hello_date.yaml")
-    task, _ = load_task(task_file)
-
-    # Enable full snapshots; no venv needed for snapshot setup test
-    task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.FULL)
-    task.sandbox.python = None
-
-    run_dir = tmp_path / "test_run" / "hello_date"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
-
-    # Initialize result
-    from datetime import datetime
-
-    from coder_eval.models import AgentKind, EvaluationResult
-
-    orchestrator.result = EvaluationResult(
-        task_id=task.task_id,
-        task_description=task.description,
-        variant_id="test-variant",
-        agent_type=AgentKind.CLAUDE_CODE,
-        started_at=datetime.now(),
-        final_status="FAILURE",
-        iteration_count=0,
-        environment_info={},
-    )
-
-    await orchestrator._setup()
-
-    # Verify snapshot directory created
-    assert orchestrator.snapshot_base_dir is not None
-    snapshot_dir = run_dir / "snapshots"
-    assert snapshot_dir.exists()
-    assert snapshot_dir.is_dir()
-
-    # Cleanup
-    await orchestrator._cleanup()
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_create_iteration_snapshot_disabled(tmp_path):
-    """Test that no snapshot is created when snapshots disabled."""
-    from coder_eval.models import SnapshotConfig, SnapshotMode, TurnRecord
-
-    task_file = Path("tasks/hello_date.yaml")
-    task, _ = load_task(task_file)
-
-    # Disable snapshots
-    task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.DISABLED)
-
-    run_dir = tmp_path / "test_run" / "hello_date"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
-
-    # Create dummy turn record
-    turn_record = TurnRecord(
-        iteration=1,
-        user_input="Test",
-        agent_output="Test output",
-        files_changed=[],
-    )
-
-    # Call snapshot creation (should do nothing)
-    await create_iteration_snapshot(
-        sandbox=orchestrator.sandbox,
-        snapshot_base_dir=orchestrator.snapshot_base_dir,
-        task=task,
-        iteration=1,
-        turn_record=turn_record,
-    )
-
-    # Verify no snapshot created
-    assert turn_record.snapshot_path is None
-    assert turn_record.snapshot_size_bytes is None
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_create_iteration_snapshot_full(tmp_path):
-    """Test full snapshot creation during evaluation."""
-    from coder_eval.models import SnapshotConfig, SnapshotMode, TurnRecord
-    from coder_eval.sandbox import Sandbox
-
-    task_file = Path("tasks/hello_date.yaml")
-    task, _ = load_task(task_file)
-
-    # Enable full snapshots
-    task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.FULL)
-    task.sandbox.python = None
-
-    run_dir = tmp_path / "test_run" / "hello_date"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
-
-    # Create snapshot directory
-    orchestrator.snapshot_base_dir = run_dir / "snapshots"
-    orchestrator.snapshot_base_dir.mkdir(parents=True, exist_ok=True)
-
-    # Create and setup sandbox
-    orchestrator.sandbox = Sandbox(task.sandbox, task_id=task.task_id)
-    sandbox_dir = orchestrator.sandbox.setup()
-
-    # Create a test file in sandbox
-    (sandbox_dir / "test.txt").write_text("Test content")
-
-    # Create dummy turn record
-    turn_record = TurnRecord(
-        iteration=1,
-        user_input="Test",
-        agent_output="Test output",
-        files_changed=[],
-    )
-
-    # Create snapshot
-    await create_iteration_snapshot(
-        sandbox=orchestrator.sandbox,
-        snapshot_base_dir=orchestrator.snapshot_base_dir,
-        task=task,
-        iteration=1,
-        turn_record=turn_record,
-    )
-
-    # Verify snapshot was created
-    assert turn_record.snapshot_path is not None
-    assert turn_record.snapshot_size_bytes is not None
-    assert turn_record.snapshot_size_bytes > 0
-
-    snapshot_path = Path(turn_record.snapshot_path)
-    assert snapshot_path.exists()
-    assert (snapshot_path / "test.txt").exists()
-    assert (snapshot_path / "manifest.json").exists()
-
-    # Cleanup
-    orchestrator.sandbox.cleanup()
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_create_iteration_snapshot_hybrid(tmp_path):
-    """Test hybrid snapshot mode with checkpoint logic."""
-    from coder_eval.models import FileChange, SnapshotConfig, SnapshotMode, TurnRecord
-    from coder_eval.sandbox import Sandbox
-
-    task_file = Path("tasks/hello_date.yaml")
-    task, _ = load_task(task_file)
-
-    # Enable hybrid snapshots with checkpoint every 2 iterations
-    task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.HYBRID, checkpoint_frequency=2)
-    task.sandbox.python = None
-
-    run_dir = tmp_path / "test_run" / "hello_date"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
-
-    # Create snapshot directory
-    orchestrator.snapshot_base_dir = run_dir / "snapshots"
-    orchestrator.snapshot_base_dir.mkdir(parents=True, exist_ok=True)
-
-    # Create and setup sandbox
-    orchestrator.sandbox = Sandbox(task.sandbox, task_id=task.task_id)
-    sandbox_dir = orchestrator.sandbox.setup()
-
-    # Create test files
-    (sandbox_dir / "file1.txt").write_text("Content 1")
-    (sandbox_dir / "file2.txt").write_text("Content 2")
-
-    # Iteration 1 (not a checkpoint) - should create incremental
-    turn_record_1 = TurnRecord(
-        iteration=1,
-        user_input="Test 1",
-        agent_output="Output 1",
-        files_changed=[FileChange(path="file1.txt", operation="created")],
-    )
-    await create_iteration_snapshot(
-        sandbox=orchestrator.sandbox,
-        snapshot_base_dir=orchestrator.snapshot_base_dir,
-        task=task,
-        iteration=1,
-        turn_record=turn_record_1,
-    )
-
-    # Iteration 2 (checkpoint) - should create full
-    turn_record_2 = TurnRecord(
-        iteration=2,
-        user_input="Test 2",
-        agent_output="Output 2",
-        files_changed=[FileChange(path="file2.txt", operation="created")],
-    )
-    await create_iteration_snapshot(
-        sandbox=orchestrator.sandbox,
-        snapshot_base_dir=orchestrator.snapshot_base_dir,
-        task=task,
-        iteration=2,
-        turn_record=turn_record_2,
-    )
-
-    # Verify both snapshots exist
-    assert turn_record_1.snapshot_path is not None
-    assert turn_record_2.snapshot_path is not None
-
-    snapshot_1 = Path(turn_record_1.snapshot_path)
-    snapshot_2 = Path(turn_record_2.snapshot_path)
-
-    assert snapshot_1.exists()
-    assert snapshot_2.exists()
-
-    # Read manifests to verify modes
-    import json
-
-    manifest_1_text = (snapshot_1 / "manifest.json").read_text()
-    manifest_1 = json.loads(manifest_1_text)
-    assert manifest_1["mode"] == "incremental"
-
-    manifest_2_text = (snapshot_2 / "manifest.json").read_text()
-    manifest_2 = json.loads(manifest_2_text)
-    assert manifest_2["mode"] == "full"
-
-    # Cleanup
-    orchestrator.sandbox.cleanup()
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_snapshot_error_handling(tmp_path):
-    """Test that snapshot errors don't crash evaluation."""
-    from coder_eval.models import SnapshotConfig, SnapshotMode, TurnRecord
-
-    task_file = Path("tasks/hello_date.yaml")
-    task, _ = load_task(task_file)
-
-    # Enable snapshots
-    task.sandbox.snapshots = SnapshotConfig(mode=SnapshotMode.FULL)
-
-    run_dir = tmp_path / "test_run" / "hello_date"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
-
-    # Create snapshot directory but DON'T setup sandbox (will cause error)
-    orchestrator.snapshot_base_dir = run_dir / "snapshots"
-    orchestrator.snapshot_base_dir.mkdir(parents=True, exist_ok=True)
-
-    # Don't create sandbox - this will trigger an error in snapshot creation
-
-    # Create dummy turn record
-    turn_record = TurnRecord(
-        iteration=1,
-        user_input="Test",
-        agent_output="Test output",
-        files_changed=[],
-    )
-
-    # Call snapshot creation - should handle error gracefully
-    await create_iteration_snapshot(
-        sandbox=orchestrator.sandbox,
-        snapshot_base_dir=orchestrator.snapshot_base_dir,
-        task=task,
-        iteration=1,
-        turn_record=turn_record,
-    )
-
-    # Verify snapshot fields remain None (error was handled)
-    assert turn_record.snapshot_path is None
-    assert turn_record.snapshot_size_bytes is None
-
-
-# ==================== CLI / BatchRunConfig Snapshot Tests ====================
-
-
-def test_batch_run_config_with_snapshot_overrides():
-    """Test that BatchRunConfig accepts snapshot override parameters."""
-    from coder_eval.orchestration.config import BatchRunConfig
-
-    config = BatchRunConfig(
-        run_dir=tmp_subdir("test_run"),
-        max_parallel=2,
-        preserve_sandbox=True,
-        snapshot_mode="hybrid",
-        snapshot_checkpoint_freq=3,
-    )
-
-    assert config.snapshot_mode == "hybrid"
-    assert config.snapshot_checkpoint_freq == 3
-
-
-def test_batch_run_config_snapshot_defaults():
-    """Test that BatchRunConfig has correct defaults for snapshot fields."""
-    from coder_eval.orchestration.config import BatchRunConfig
-
-    config = BatchRunConfig(
-        run_dir=tmp_subdir("test_run"),
-    )
-
-    assert config.snapshot_mode is None
-    assert config.snapshot_checkpoint_freq is None
-
-
-@pytest.mark.asyncio
-async def test_run_batch_applies_snapshot_mode_override(tmp_path):
-    """Test that run_batch applies snapshot mode override from config."""
-    from coder_eval.models import SnapshotMode
-    from coder_eval.orchestration.config import BatchRunConfig
-
-    task_file = Path("tasks/hello_date.yaml")
-    run_dir = tmp_path / "test_run"
-
-    # Create config with snapshot override
-    config = BatchRunConfig(
-        run_dir=run_dir,
-        snapshot_mode="full",  # Override to full mode
-    )
-
-    # Load task (which has disabled snapshots by default)
-    task, _ = load_task(task_file)
-    original_mode = task.sandbox.snapshots.mode
-
-    # Simulate what run_batch does with overrides
-    if config.snapshot_mode:
-        from coder_eval.models import SnapshotConfig
-
-        mode = SnapshotMode(config.snapshot_mode.lower())
-        task.sandbox.snapshots = SnapshotConfig(
-            mode=mode,
-            checkpoint_frequency=config.snapshot_checkpoint_freq or task.sandbox.snapshots.checkpoint_frequency,
-            ignore_patterns=task.sandbox.snapshots.ignore_patterns,
-        )
-
-    # Verify override was applied
-    assert task.sandbox.snapshots.mode == SnapshotMode.FULL
-    assert task.sandbox.snapshots.mode != original_mode  # Changed from default
-
-
-@pytest.mark.asyncio
-async def test_run_batch_applies_checkpoint_freq_override(tmp_path):
-    """Test that run_batch applies checkpoint frequency override."""
-    from coder_eval.models import SnapshotMode
-    from coder_eval.orchestration.config import BatchRunConfig
-
-    task_file = Path("tasks/hello_date.yaml")
-    run_dir = tmp_path / "test_run"
-
-    # Create config with checkpoint frequency override
-    config = BatchRunConfig(
-        run_dir=run_dir,
-        snapshot_mode="hybrid",
-        snapshot_checkpoint_freq=10,  # Override to 10
-    )
-
-    # Load task
-    task, _ = load_task(task_file)
-
-    # Apply overrides (simulating run_batch logic)
-    if config.snapshot_mode:
-        from coder_eval.models import SnapshotConfig
-
-        mode = SnapshotMode(config.snapshot_mode.lower())
-        task.sandbox.snapshots = SnapshotConfig(
-            mode=mode,
-            checkpoint_frequency=config.snapshot_checkpoint_freq or task.sandbox.snapshots.checkpoint_frequency,
-            ignore_patterns=task.sandbox.snapshots.ignore_patterns,
-        )
-
-    # Verify overrides were applied
-    assert task.sandbox.snapshots.mode == SnapshotMode.HYBRID
-    assert task.sandbox.snapshots.checkpoint_frequency == 10
-
-
-@pytest.mark.asyncio
-async def test_run_batch_preserves_ignore_patterns(tmp_path):
-    """Test that run_batch preserves task-specific ignore patterns when overriding."""
-    from coder_eval.models import SnapshotMode
-    from coder_eval.orchestration.config import BatchRunConfig
-
-    task_file = Path("tasks/test_snapshot_example.yaml")
-    run_dir = tmp_path / "test_run"
-
-    # Create config with snapshot mode override
-    config = BatchRunConfig(
-        run_dir=run_dir,
-        snapshot_mode="full",  # Override mode
-    )
-
-    # Load task (has custom ignore patterns in YAML)
-    task, _ = load_task(task_file)
-    original_patterns = task.sandbox.snapshots.ignore_patterns.copy()
-
-    # Apply overrides
-    if config.snapshot_mode:
-        from coder_eval.models import SnapshotConfig
-
-        mode = SnapshotMode(config.snapshot_mode.lower())
-        task.sandbox.snapshots = SnapshotConfig(
-            mode=mode,
-            checkpoint_frequency=config.snapshot_checkpoint_freq or task.sandbox.snapshots.checkpoint_frequency,
-            ignore_patterns=task.sandbox.snapshots.ignore_patterns,  # Preserve task patterns
-        )
-
-    # Verify mode was overridden but patterns preserved
-    assert task.sandbox.snapshots.mode == SnapshotMode.FULL
-    assert task.sandbox.snapshots.ignore_patterns == original_patterns
-    assert "*.log" in task.sandbox.snapshots.ignore_patterns
-    assert "temp_*" in task.sandbox.snapshots.ignore_patterns
 
 
 # ==================== get_version_info Tests ====================

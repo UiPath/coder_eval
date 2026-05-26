@@ -7,7 +7,6 @@ A robust, extensible framework for evaluating AI coding agents with comprehensiv
 - **Declarative Tasks** — Define evaluations in YAML with pinned dependencies and clear success criteria
 - **Continuous Scoring** — Weighted scoring system (0.0–1.0) with configurable thresholds and fractional credit
 - **Sandboxed Execution** — Isolated environments with virtual environments and resource limits
-- **Sandbox Snapshots** — Capture complete sandbox state after each iteration for debugging and analysis
 - **Agent Abstraction** — Generic agent interface (currently supports Claude Code, extensible to others)
 - **Dual Evaluation** — Objective success criteria plus optional qualitative LLM review
 - **14 Criterion Types** — From simple file checks to pytest scoring, pylint analysis, code similarity, and LLM-graded rubrics
@@ -142,9 +141,6 @@ coder-eval run tasks/hello_date.yaml --stream full
 | **Filtering**                |                                                                                               |
 | `--exclude-tags`             | Skip tasks matching any of these tags (comma-separated)                                       |
 | `--tags, -t`                 | Only run tasks matching any of these tags (comma-separated)                                   |
-| **Snapshots**                |                                                                                               |
-| `--snapshot-checkpoint-freq` | Checkpoint frequency for hybrid mode                                                          |
-| `--snapshot-mode`            | Override snapshot mode (`disabled`, `full`, `incremental`, `hybrid`)                          |
 | **Experiments**              |                                                                                               |
 | `--experiment, -e`           | Experiment definition YAML for multi-variant comparison (default: `experiments/default.yaml`) |
 | **Output & networking**      |                                                                                               |
@@ -279,7 +275,7 @@ success_criteria:
     description: "Script must execute successfully"
 ```
 
-For the full task definition reference — all 17 criterion types, scoring, templates, snapshots, and reference comparison — see **[docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_GUIDE.md)**.
+For the full task definition reference — all 17 criterion types, scoring, templates, and reference comparison — see **[docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_GUIDE.md)**.
 
 > **Tip:** When creating new tasks with Claude Code, point it at the guide:
 > _"Read `docs/TASK_DEFINITION_GUIDE.md` and use it as a reference to create a new task definition for ..."_
@@ -404,7 +400,6 @@ runs/
 │   │       └── 00/                    # Replicate index — one dir per replicate (set via `repeats:` or --repeats)
 │   │           ├── task.json          # Evaluation result
 │   │           ├── task.log           # Execution log
-│   │           ├── snapshots/         # Iteration snapshots (if enabled)
 │   │           └── artifacts/         # Preserved sandbox (if --preserve)
 │   └── ...
 └── latest -> 2026-02-26_14-30-00/     # Symlink to most recent run
@@ -439,7 +434,7 @@ coder_eval/
 ### Evaluation Flow
 
 1. **Setup**: Create sandbox, install packages, initialize agent
-2. **Run**: Send prompt to agent → record actions and file changes; create snapshot (if enabled); check all success criteria
+2. **Run**: Send prompt to agent → record actions; check all success criteria
 3. **Cleanup**: Stop agent, calculate scores, save results, generate reports
 
 ## Development
@@ -542,7 +537,6 @@ See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.
 ## Roadmap
 
 - [x] Continuous scoring system
-- [x] Snapshot system
 - [x] Command telemetry tracking
 - [x] Reference comparison
 - [x] Parallel execution

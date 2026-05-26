@@ -470,43 +470,6 @@ def test_sdk_options_pydantic_round_trip():
     assert restored == original
 
 
-def test_claude_agent_file_change_detection():
-    """Test file change detection logic."""
-    config = AgentConfig(
-        type=AgentKind.CLAUDE_CODE,
-        permission_mode="acceptEdits",
-    )
-
-    agent = ClaudeCodeAgent(config)
-
-    # Test detecting created files
-    before = {}
-    after = {"test.py": 1234567890.0}
-    changes = agent._detect_file_changes(before, after)
-
-    assert len(changes) == 1
-    assert changes[0].path == "test.py"
-    assert changes[0].operation == "created"
-
-    # Test detecting modified files
-    before = {"test.py": 1234567890.0}
-    after = {"test.py": 1234567891.0}
-    changes = agent._detect_file_changes(before, after)
-
-    assert len(changes) == 1
-    assert changes[0].path == "test.py"
-    assert changes[0].operation == "modified"
-
-    # Test detecting deleted files
-    before = {"test.py": 1234567890.0}
-    after = {}
-    changes = agent._detect_file_changes(before, after)
-
-    assert len(changes) == 1
-    assert changes[0].path == "test.py"
-    assert changes[0].operation == "deleted"
-
-
 def test_claude_agent_message_formatting():
     """Test message formatting logic with real SDK message objects.
 
@@ -561,25 +524,6 @@ def test_claude_agent_message_formatting():
     ]
     formatted = agent._format_messages(messages)
     assert "[RESULT - ERROR] File not found" in formatted
-
-
-def test_claude_agent_should_ignore_path():
-    """Test path ignoring logic."""
-    config = AgentConfig(
-        type=AgentKind.CLAUDE_CODE,
-        permission_mode="acceptEdits",
-    )
-
-    agent = ClaudeCodeAgent(config)
-
-    # Should ignore these paths
-    assert agent._should_ignore_path(Path(".venv/bin/python"))
-    assert agent._should_ignore_path(Path("__pycache__/module.pyc"))
-    assert agent._should_ignore_path(Path(".git/config"))
-
-    # Should not ignore these paths
-    assert not agent._should_ignore_path(Path("src/main.py"))
-    assert not agent._should_ignore_path(Path("tests/test_main.py"))
 
 
 @pytest.mark.asyncio

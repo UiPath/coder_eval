@@ -1,8 +1,7 @@
 # Default file/directory patterns to ignore during file operations
 # These patterns apply to:
 # - Template directory copying (sandbox setup)
-# - File change detection (agent tracking)
-# - Snapshot creation (incremental mode)
+# - Workspace copying into an agent_judge sub-agent sandbox
 
 # Virtual environments
 virtual_environments:

@@ -137,17 +137,6 @@ def run_command(
         "--log-file",
         help="Log to file in addition to console",
     ),
-    snapshot_mode: str | None = typer.Option(
-        None,
-        "--snapshot-mode",
-        help="Override snapshot mode for all tasks (disabled/full/incremental/hybrid)",
-    ),
-    snapshot_checkpoint_freq: int | None = typer.Option(
-        None,
-        "--snapshot-checkpoint-freq",
-        help="Checkpoint frequency for hybrid mode (default: 5)",
-        min=1,
-    ),
     tags: str | None = typer.Option(
         None,
         "--tags",
@@ -220,14 +209,6 @@ def run_command(
         None,
         "--plugins",
         help='Override plugins for all tasks (JSON array, e.g., \'[{"name": "my-plugin", "path": "/path"}]\')',
-    ),
-    ignore_patterns: str | None = typer.Option(
-        None,
-        "--ignore-patterns",
-        help=(
-            "Override agent file-change detection ignore patterns (comma-separated, e.g., '*.log,__pycache__')."
-            " Does not affect sandbox/snapshot ignore patterns."
-        ),
     ),
     sdk_option: list[str] = typer.Option(  # noqa: B008
         [],
@@ -313,7 +294,6 @@ def run_command(
     # Parse comma-separated list options
     allowed_tools_list = [t.strip() for t in allowed_tools.split(",") if t.strip()] if allowed_tools else None
     disallowed_tools_list = [t.strip() for t in disallowed_tools.split(",") if t.strip()] if disallowed_tools else None
-    ignore_patterns_list = [p.strip() for p in ignore_patterns.split(",") if p.strip()] if ignore_patterns else None
 
     # Parse plugins JSON and validate against SdkPluginConfig schema
     plugins_list: list[SdkPluginConfig] | None = None
@@ -356,8 +336,6 @@ def run_command(
                 preserve,
                 run_dir,
                 max_parallel,
-                snapshot_mode,
-                snapshot_checkpoint_freq,
                 include_tags,
                 exclude_tags_set,
                 agent_type,
@@ -370,7 +348,6 @@ def run_command(
                 allowed_tools_list,
                 disallowed_tools_list,
                 plugins_list,
-                ignore_patterns_list,
                 _parse_sdk_options(sdk_option),
                 experiment_path=resolved_experiment,
                 max_rows=sample,
@@ -389,8 +366,6 @@ async def _run_all_tasks(
     preserve: bool,
     run_dir: Path | None,
     max_parallel: int,
-    snapshot_mode: str | None,
-    snapshot_checkpoint_freq: int | None,
     include_tags: set[str] | None = None,
     exclude_tags: set[str] | None = None,
     agent_type: str | None = None,
@@ -403,7 +378,6 @@ async def _run_all_tasks(
     allowed_tools: list[str] | None = None,
     disallowed_tools: list[str] | None = None,
     plugins: list[SdkPluginConfig] | None = None,
-    ignore_patterns: list[str] | None = None,
     sdk_options: dict[str, Any] | None = None,
     experiment_path: Path | None = None,
     max_rows: int | None = None,
@@ -422,8 +396,6 @@ async def _run_all_tasks(
         preserve: Whether to preserve sandbox
         run_dir: Custom run directory (or None for auto-generated)
         max_parallel: Maximum number of concurrent tasks
-        snapshot_mode: Optional override for snapshot mode
-        snapshot_checkpoint_freq: Optional override for checkpoint frequency
         include_tags: Only run tasks matching any of these tags
         exclude_tags: Skip tasks matching any of these tags
         agent_model: Optional override for agent model
@@ -435,7 +407,6 @@ async def _run_all_tasks(
         allowed_tools: Optional override for allowed tools
         disallowed_tools: Optional override for disallowed tools
         plugins: Optional override for plugins (SdkPluginConfig objects)
-        ignore_patterns: Optional override for agent file change detection ignore patterns
         experiment_path: Optional path to experiment YAML (default: experiments/default.yaml)
     """
     # Prepare run directory
@@ -453,8 +424,6 @@ async def _run_all_tasks(
         run_dir=run_dir,
         max_parallel=max_parallel,
         preserve_sandbox=preserve,
-        snapshot_mode=snapshot_mode,
-        snapshot_checkpoint_freq=snapshot_checkpoint_freq,
         include_tags=include_tags,
         exclude_tags=exclude_tags,
         agent_type=agent_type,
@@ -464,7 +433,6 @@ async def _run_all_tasks(
         allowed_tools=allowed_tools,
         disallowed_tools=disallowed_tools,
         plugins=plugins,
-        ignore_patterns=ignore_patterns,
         sdk_options=sdk_options or {},
         task_timeout=task_timeout,
         turn_timeout=turn_timeout,

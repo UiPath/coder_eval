@@ -40,7 +40,6 @@ from coder_eval.models.enums import (
     AgentState,
     ApiBackend,
     FinalStatus,
-    SnapshotMode,
 )
 
 # Experiment
@@ -89,7 +88,6 @@ from coder_eval.models.results import (
     CriterionStats,
     EvaluationResult,
     FailedRowSummary,
-    FileChange,
     JudgeCriterionResult,
     JudgeTranscript,
     JudgeTranscriptToolCall,
@@ -124,8 +122,6 @@ from coder_eval.models.sandbox import (
     PythonEnvConfig,
     ResourceLimits,
     SandboxConfig,
-    SnapshotConfig,
-    SnapshotManifest,
     validate_template_sources_list,
 )
 
@@ -171,7 +167,6 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "AgentState",
     "ApiBackend",
     "FinalStatus",
-    "SnapshotMode",
     # Criteria
     "BaseSuccessCriterion",
     "ClassificationMatchCriterion",
@@ -216,8 +211,6 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "NodeEnvConfig",
     "PythonEnvConfig",
     "SandboxConfig",
-    "SnapshotConfig",
-    "SnapshotManifest",
     "ResourceLimits",
     "validate_template_sources_list",
     # Telemetry
@@ -239,7 +232,6 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "CriterionStats",
     "FailedRowSummary",
     "ThresholdCheck",
-    "FileChange",
     "JudgeCriterionResult",
     "JudgeTranscript",
     "JudgeTranscriptToolCall",
@@ -297,6 +289,4 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
 # ``EvaluationResult.success_criteria_results`` field type.
 type CriteriaResults = list[CriterionResultUnion]
 type SuccessCriteria = list[SuccessCriterion]
-type FileTree = dict[str, float]  # path -> modification time
-type FileChanges = list[FileChange]
 type TurnRecords = list[TurnRecord]

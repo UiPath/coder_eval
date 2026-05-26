@@ -1,14 +1,12 @@
-"""Sandbox configuration and snapshot models."""
+"""Sandbox configuration models."""
 
 from __future__ import annotations
 
 import warnings
-from datetime import datetime
 from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from coder_eval.models.enums import SnapshotMode
 from coder_eval.models.templates import TemplateSource
 from coder_eval.resources import normalize_ignore_pattern_entry
 from coder_eval.utils import get_default_docker_image_tag
@@ -46,48 +44,6 @@ class ResourceLimits(BaseModel):
     max_disk_mb: int | None = Field(
         default=None,
         description="Maximum disk usage in MB (reserved -- no portable docker knob).",
-    )
-
-
-class SnapshotConfig(BaseModel):
-    """Configuration for iteration snapshots.
-
-    Note: No 'enabled' flag - use mode=DISABLED to disable snapshots.
-    This avoids redundant state (e.g., enabled=False, mode=FULL).
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    mode: SnapshotMode = Field(
-        default=SnapshotMode.DISABLED, description="Snapshot mode (default: disabled for backward compatibility)"
-    )
-    checkpoint_frequency: int = Field(
-        default=5, ge=1, description="Full snapshot every N iterations (hybrid mode only)"
-    )
-    ignore_patterns: list[str] = Field(
-        default_factory=list, description="Additional file patterns to exclude (beyond sandbox defaults like .venv)"
-    )
-
-
-class SnapshotManifest(BaseModel):
-    """Metadata for a single snapshot.
-
-    Stored as manifest.json in each snapshot directory.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    created_at: datetime = Field(description="When this snapshot was created")
-    iteration: int = Field(description="Iteration number (0-indexed)")
-    mode: SnapshotMode = Field(description="Snapshot mode used (full/incremental)")
-    size_bytes: int = Field(description="Total size of snapshot in bytes")
-    file_count: int = Field(description="Number of files in snapshot")
-    changed_files: list[str] = Field(
-        default_factory=list,
-        description="List of changed file paths (for incremental snapshots, includes DELETED: markers)",
-    )
-    base_iteration: int | None = Field(
-        default=None, description="For incremental: which iteration to apply changes to (typically iteration - 1)"
     )
 
 
@@ -275,14 +231,11 @@ class SandboxConfig(BaseModel):
         ),
     )
 
-    # Snapshot configuration
-    snapshots: SnapshotConfig = Field(default_factory=SnapshotConfig, description="Iteration snapshot configuration")
-
     # Customizable ignore patterns
     ignore_patterns: list[str] = Field(
         default_factory=list,
         description=(
-            "Pattern overrides applied during template setup and snapshots. "
+            "Pattern overrides applied during template setup. "
             "Plain entries add to the defaults; entries prefixed with '!' "
             "remove a default (gitignore-style negation). Use e.g. ['!dist', "
             "'!node_modules'] to let vendored JS build outputs survive the "

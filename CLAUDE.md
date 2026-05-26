@@ -17,7 +17,7 @@ Project reference for AI assistants working on the `coder_eval` codebase.
 coder_eval/
 ├── agent.py                       # Agent ABC (start, communicate, stop, get_state)
 ├── config.py                      # Settings via pydantic-settings (.env loading)
-├── sandbox.py                     # Sandbox manager (tempdir, venv, templates, snapshots)
+├── sandbox.py                     # Sandbox manager (tempdir, venv, templates)
 ├── orchestrator.py                # Main evaluation loop
 ├── reports.py                     # Markdown/JSON report generation (run-level + per-suite rollup via write_suite_rollups)
 ├── reports_experiment.py          # Experiment/cross-variant report generation
@@ -31,14 +31,14 @@ coder_eval/
 │
 ├── models/                        # Pydantic data models (subpackage)
 │   ├── __init__.py                # Unified exports for all models
-│   ├── enums.py                   # AgentKind, AgentState, SnapshotMode, FinalStatus, ApiBackend
+│   ├── enums.py                   # AgentKind, AgentState, FinalStatus, ApiBackend
 │   ├── criteria.py                # 16 success criterion types + base + union
 │   ├── experiment.py              # ExperimentDefinition, ExperimentVariant, ResolvedTask, result models
 │   ├── gateway.py                 # DEFAULT_GATEWAY_MODEL constant (cycle-free leaf)
 │   ├── mutations.py               # PromptMutation variants (prefix/suffix/replace/template/rephrase)
 │   ├── results.py                 # CriterionResult (+ ClassificationCriterionResult), TurnRecord, EvaluationResult, CriterionAggregate, ThresholdCheck, SuiteRollup
 │   ├── routing.py                 # ApiRoute (DirectRoute/ProxyRoute/BedrockRoute)
-│   ├── sandbox.py                 # SandboxConfig, SnapshotConfig, ResourceLimits
+│   ├── sandbox.py                 # SandboxConfig, ResourceLimits
 │   ├── tasks.py                   # TaskDefinition, AgentConfig, Dataset (dataset fan-out + sample)
 │   ├── telemetry.py               # CommandTelemetry, CommandStatistics, TokenUsage
 │   └── templates.py               # RepoSource, TemplateDirSource, StarterFilesSource
@@ -186,8 +186,7 @@ Per-task (single iteration; simulation mode runs a multi-turn dialog):
         agent.communicate with execute_with_retry, per-attempt
         turn_timeout, and on_attempt_error → preserves crashed=True
         partial TurnRecords on AgentCrashError / TurnTimeoutError)
-  2. Create snapshot (if enabled)
-  3. SuccessChecker.check_all() → List[CriterionResult]
+  2. SuccessChecker.check_all() → List[CriterionResult]
 
 Cleanup: Stop agent, save EvaluationResult, generate reports
 ```

@@ -8,7 +8,7 @@ requiring scenario-specific implementations.
 from pathlib import Path
 
 from coder_eval.agent import Agent, AgentState
-from coder_eval.models import FileChange, TaskDefinition, TurnRecord
+from coder_eval.models import TaskDefinition, TurnRecord
 
 
 class MockAgent(Agent):
@@ -94,10 +94,8 @@ class MockAgent(Agent):
             user_input: The prompt from orchestrator
 
         Returns:
-            TurnRecord with successful completion and file changes
+            TurnRecord with successful completion
         """
-        file_changes = []
-
         # Inspect success criteria and create appropriate files
         for criterion in self.task.success_criteria:
             if criterion.type == "file_exists":
@@ -105,7 +103,6 @@ class MockAgent(Agent):
                 file_path = self.working_directory / criterion.path
                 file_path.parent.mkdir(parents=True, exist_ok=True)
                 file_path.write_text("Mock file content created by MockAgent")
-                file_changes.append(FileChange(path=criterion.path, operation="created"))
 
             elif criterion.type == "file_contains":
                 # Create file with content that matches includes
@@ -114,7 +111,6 @@ class MockAgent(Agent):
                 # Join all required includes to ensure they're all present
                 content = "\n".join(criterion.includes)
                 file_path.write_text(content)
-                file_changes.append(FileChange(path=criterion.path, operation="created"))
 
             # Can extend with other criterion types as needed
             # For now, file-based criteria cover most integration test needs
@@ -125,7 +121,6 @@ class MockAgent(Agent):
             iteration=self._iteration,
             user_input=user_input,
             agent_output="I've successfully completed all required file operations based on the task criteria.",
-            files_changed=file_changes,
         )
 
     def _failure_turn(self, user_input: str) -> TurnRecord:
@@ -143,7 +138,6 @@ class MockAgent(Agent):
             iteration=self._iteration,
             user_input=user_input,
             agent_output="I was unable to complete the task due to constraints.",
-            files_changed=[],
         )
 
     def _partial_turn(self, user_input: str) -> TurnRecord:
@@ -153,10 +147,8 @@ class MockAgent(Agent):
             user_input: The prompt from orchestrator
 
         Returns:
-            TurnRecord with partial completion and file changes with wrong content
+            TurnRecord with partial completion and files with wrong content
         """
-        file_changes = []
-
         # Create files but with incorrect content that won't satisfy criteria
         for criterion in self.task.success_criteria:
             if criterion.type in ("file_exists", "file_contains"):
@@ -164,7 +156,6 @@ class MockAgent(Agent):
                 file_path.parent.mkdir(parents=True, exist_ok=True)
                 # Write wrong content that won't match file_contains criteria
                 file_path.write_text("wrong content that doesn't match requirements")
-                file_changes.append(FileChange(path=criterion.path, operation="created"))
 
         self.state = AgentState.FINISHED
 
@@ -172,5 +163,4 @@ class MockAgent(Agent):
             iteration=self._iteration,
             user_input=user_input,
             agent_output="I've created files but they may not meet all requirements.",
-            files_changed=file_changes,
         )

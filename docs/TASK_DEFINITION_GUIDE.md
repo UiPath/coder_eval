@@ -23,7 +23,6 @@ Complete reference for defining evaluation tasks in coder_eval.
   - [uipath_eval](#uipath_eval)
   - [llm_judge](#llm_judge)
   - [agent_judge](#agent_judge)
-- [Sandbox Snapshots](#sandbox-snapshots)
 - [Reference Solutions](#reference-solutions)
 - [Pre-Run Commands](#pre-run-commands)
 - [Post-Run Commands](#post-run-commands)
@@ -150,7 +149,6 @@ sandbox:
       - pytest
       - pylint>=3.0
   template_sources: [ ... ]           # Optional: preset files (see below)
-  snapshots: { ... }                  # Optional: snapshot config (see below)
   ignore_patterns:                    # Optional: overrides for template-copy filtering
     - "!dist"                         #   `!`-prefix un-ignores a default pattern
     - "!node_modules"
@@ -674,44 +672,6 @@ The judge runs with the evaluator's API credentials and can execute arbitrary Ba
 - `TurnTimeoutError` (judge exceeded `turn_timeout`)
 - SDK subprocess failure (e.g. `claude` CLI missing)
 
-## Sandbox Snapshots
-
-Capture sandbox state after each agent iteration for debugging and analysis.
-
-```yaml
-sandbox:
-  snapshots:
-    mode: "hybrid"                    # disabled, full, incremental, hybrid
-    checkpoint_frequency: 5           # Full snapshot every N iterations (hybrid only)
-    ignore_patterns:                  # Optional: patterns to exclude
-      - "*.log"
-      - "temp_*"
-```
-
-**Modes:**
-- `disabled` (default) — No snapshots
-- `full` — Complete sandbox copy every iteration
-- `incremental` — Changed files only
-- `hybrid` — Full at checkpoints, incremental between (recommended for production)
-
-**CLI overrides:**
-
-```bash
-coder-eval run tasks/*.yaml --snapshot-mode full
-coder-eval run tasks/*.yaml --snapshot-mode hybrid --snapshot-checkpoint-freq 3
-```
-
-**Snapshot output:**
-
-```
-runs/{timestamp}/{task_id}/snapshots/
-├── iteration_1/
-│   ├── manifest.json                 # Metadata (timestamp, mode, file_count, etc.)
-│   └── [files...]
-├── iteration_2/
-│   └── ...
-```
-
 ## Reference Solutions
 
 Define a reference solution for `reference_comparison` criteria:
@@ -935,9 +895,6 @@ sandbox:
   template_sources:
     - type: "template_dir"
       path: "../templates/python-starter"
-  snapshots:
-    mode: "hybrid"
-    checkpoint_frequency: 3
 
 success_criteria:
   - type: "file_exists"

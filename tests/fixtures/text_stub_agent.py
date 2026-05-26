@@ -47,5 +47,4 @@ class TextStubAgent(Agent):
             iteration=self._iteration,
             user_input=user_input,
             agent_output=text,
-            files_changed=[],
         )

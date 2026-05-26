@@ -1,6 +1,5 @@
 """Sandbox manager for isolated execution environments."""
 
-import asyncio
 import fnmatch
 import json
 import logging
@@ -8,15 +7,11 @@ import os
 import shutil
 import subprocess
 import tempfile
-from datetime import datetime
 from pathlib import Path
 
 from .models import (
-    FileChange,
     RepoSource,
     SandboxConfig,
-    SnapshotManifest,
-    SnapshotMode,
     StarterFilesSource,
     TemplateDirSource,
 )
@@ -1023,173 +1018,3 @@ class Sandbox:
             shutil.rmtree(self.sandbox_dir)
             self.sandbox_dir = None
             self.venv_dir = None
-
-    # ============================================================================
-    # Snapshot Methods (Async for non-blocking I/O)
-    # ============================================================================
-
-    async def create_snapshot(
-        self,
-        snapshot_dir: Path,
-        mode: SnapshotMode,
-        changed_files: list[FileChange] | None = None,
-        ignore_patterns: list[str] | None = None,
-    ) -> SnapshotManifest:
-        """Create a snapshot of current sandbox state.
-
-        CRITICAL: This method is async to prevent blocking the event loop during
-        I/O operations. All file operations use asyncio.to_thread().
-
-        Args:
-            snapshot_dir: Target directory for snapshot
-            mode: Snapshot mode (full/incremental)
-            changed_files: List of changed files (required for incremental)
-            ignore_patterns: Additional patterns beyond sandbox defaults
-
-        Returns:
-            Manifest with snapshot metadata
-
-        Raises:
-            RuntimeError: If sandbox not initialized or snapshot fails
-        """
-        if not self.sandbox_dir:
-            raise RuntimeError("Sandbox not initialized")
-
-        # Create directory in thread pool (may block)
-        await asyncio.to_thread(snapshot_dir.mkdir, parents=True, exist_ok=True)
-
-        if mode == SnapshotMode.FULL:
-            manifest = await self._snapshot_full(snapshot_dir, ignore_patterns)
-        elif mode == SnapshotMode.INCREMENTAL:
-            if not changed_files:
-                changed_files = []
-            manifest = await self._snapshot_incremental(snapshot_dir, changed_files)
-        else:
-            raise ValueError(f"Unsupported snapshot mode: {mode}")
-
-        # Write manifest (async)
-        await self._write_manifest(manifest, snapshot_dir)
-
-        return manifest
-
-    async def _snapshot_full(
-        self,
-        snapshot_dir: Path,
-        ignore_patterns: list[str] | None = None,
-    ) -> SnapshotManifest:
-        """Create full snapshot (copy entire sandbox).
-
-        CRITICAL: Uses asyncio.to_thread() to prevent blocking the event loop.
-        This is essential for parallel task execution in batch runs.
-        """
-        assert self.sandbox_dir is not None, "Sandbox must be initialized"
-
-        # Combine sandbox ignore patterns with user-provided patterns
-        # This reuses existing _should_ignore_template_file logic (DRY principle)
-        def ignore_func(dir_path: str, names: list[str]) -> list[str]:
-            ignored = []
-            dir_path_obj = Path(dir_path)
-            for name in names:
-                file_path = dir_path_obj / name
-                # Use existing sandbox ignore logic
-                if self._should_ignore_template_file(file_path):
-                    ignored.append(name)
-                    continue
-                # Apply additional user patterns
-                if ignore_patterns:
-                    for pattern in ignore_patterns:
-                        if Path(name).match(pattern) or name == pattern:
-                            ignored.append(name)
-                            break
-            return ignored
-
-        # Copy entire sandbox in thread pool (blocking I/O)
-        await asyncio.to_thread(
-            shutil.copytree,
-            self.sandbox_dir,
-            snapshot_dir,
-            ignore=ignore_func,
-            dirs_exist_ok=True,
-        )
-
-        # Calculate size and count (also in thread pool)
-        def calc_size_and_count() -> tuple[int, int]:
-            size = sum(f.stat().st_size for f in snapshot_dir.rglob("*") if f.is_file())
-            count = sum(1 for _ in snapshot_dir.rglob("*") if _.is_file())
-            return size, count
-
-        size_bytes, file_count = await asyncio.to_thread(calc_size_and_count)
-
-        return SnapshotManifest(
-            created_at=datetime.now(),
-            iteration=0,  # Will be overridden by caller
-            mode=SnapshotMode.FULL,
-            size_bytes=size_bytes,
-            file_count=file_count,
-        )
-
-    async def _snapshot_incremental(
-        self,
-        snapshot_dir: Path,
-        changed_files: list[FileChange],
-    ) -> SnapshotManifest:
-        """Create incremental snapshot (only changed files).
-
-        CRITICAL: Uses asyncio.to_thread() for all file operations.
-        """
-        assert self.sandbox_dir is not None, "Sandbox must be initialized"
-
-        size_bytes = 0
-        file_count = 0
-        changed_paths = []
-
-        for file_change in changed_files:
-            source_path = self.sandbox_dir / file_change.path
-            dest_path = snapshot_dir / file_change.path
-
-            if file_change.operation == "deleted":
-                # Store deletion marker in manifest
-                changed_paths.append(f"DELETED:{file_change.path}")
-                continue
-
-            if source_path.exists() and source_path.is_file():
-                # Create parent directory in thread pool
-                await asyncio.to_thread(dest_path.parent.mkdir, parents=True, exist_ok=True)
-
-                # Copy file in thread pool
-                await asyncio.to_thread(shutil.copy2, source_path, dest_path)
-
-                # Get file size in thread pool
-                file_stat = await asyncio.to_thread(dest_path.stat)
-                size_bytes += file_stat.st_size
-                file_count += 1
-                changed_paths.append(file_change.path)
-
-        return SnapshotManifest(
-            created_at=datetime.now(),
-            iteration=0,  # Will be overridden by caller
-            mode=SnapshotMode.INCREMENTAL,
-            size_bytes=size_bytes,
-            file_count=file_count,
-            changed_files=changed_paths,
-        )
-
-    async def _write_manifest(self, manifest: SnapshotManifest, snapshot_dir: Path) -> None:
-        """Write manifest.json to snapshot directory.
-
-        CRITICAL: Uses asyncio.to_thread() to prevent blocking.
-        """
-        manifest_path = snapshot_dir / "manifest.json"
-        manifest_json = manifest.model_dump_json(indent=2)
-
-        await asyncio.to_thread(
-            manifest_path.write_text,
-            manifest_json,
-            encoding="utf-8",
-        )
-
-    async def _read_manifest(self, snapshot_dir: Path) -> SnapshotManifest:
-        """Read manifest.json from snapshot directory."""
-        manifest_path = snapshot_dir / "manifest.json"
-        manifest_text = await asyncio.to_thread(manifest_path.read_text, encoding="utf-8")
-        return SnapshotManifest.model_validate_json(manifest_text)

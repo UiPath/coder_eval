@@ -281,31 +281,6 @@ class TestApplyCliOverridesLineage:
         assert lineage["agent.model"].source_detail == "--model"
         assert lineage["agent.model"].value == "opus-override"
 
-    def test_snapshot_overrides_tracked(self):
-        from coder_eval.models import TaskDefinition
-
-        task = TaskDefinition(
-            task_id="test",
-            description="test",
-            initial_prompt="do",
-            agent={"type": "claude-code"},
-            sandbox={"driver": "tempdir"},
-            success_criteria=[{"type": "file_exists", "path": "t.py", "description": "x"}],
-        )
-        lineage: dict[str, ConfigLineageEntry] = {}
-        config = BatchRunConfig(
-            run_dir=tmp_subdir("run"), max_parallel=1, snapshot_mode="hybrid", snapshot_checkpoint_freq=2
-        )
-        with patch("coder_eval.config.settings") as mock_settings:
-            mock_settings.default_agent_model = None
-            mock_settings.default_permission_mode = None
-            mock_settings.default_max_turns = None
-            _apply_cli_overrides(task, config, lineage)
-        assert lineage["sandbox.snapshots.mode"].source == "cli"
-        assert lineage["sandbox.snapshots.mode"].source_detail == "--snapshot-mode"
-        assert lineage["sandbox.snapshots.checkpoint_frequency"].source == "cli"
-        assert lineage["sandbox.snapshots.checkpoint_frequency"].value == 2
-
     def test_cli_disallowed_tools_override(self):
         from coder_eval.models import TaskDefinition
 

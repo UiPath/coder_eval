@@ -111,9 +111,9 @@ class AgentConfig(BaseModel):
     ignore_patterns: list[str] = Field(
         default_factory=list,
         description=(
-            "Pattern overrides applied during file change detection. "
-            "Plain entries add to the defaults; entries prefixed with '!' "
-            "remove a default (gitignore-style negation)."
+            "Pattern overrides applied when copying the workspace into a judge "
+            "sub-agent sandbox. Plain entries add to the defaults; entries "
+            "prefixed with '!' remove a default (gitignore-style negation)."
         ),
         validation_alias=AliasChoices("ignore_patterns", "additional_ignore_patterns"),
     )

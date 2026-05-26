@@ -19,10 +19,6 @@ class BatchRunConfig(BaseModel):
     run_dir: Path = Field(description="Directory for this batch run")
     max_parallel: int = Field(default=1, ge=1, description="Max concurrent tasks")
     preserve_sandbox: bool = Field(default=True, description="Preserve sandbox after execution")
-    snapshot_mode: str | None = Field(default=None, description="Override snapshot mode for all tasks")
-    snapshot_checkpoint_freq: int | None = Field(
-        default=None, description="Override checkpoint frequency for hybrid mode"
-    )
     include_tags: set[str] | None = Field(default=None, description="Only run tasks matching any of these tags")
     exclude_tags: set[str] | None = Field(default=None, description="Skip tasks matching any of these tags")
 
@@ -37,7 +33,6 @@ class BatchRunConfig(BaseModel):
     plugins: list[SdkPluginConfig] | None = Field(
         default=None, description="Override plugins (SdkPluginConfig objects) for all tasks"
     )
-    ignore_patterns: list[str] | None = Field(default=None, description="Override ignore patterns for all tasks")
     sdk_options: dict[str, Any] = Field(
         default_factory=dict,
         description="Override SDK pass-through options for all tasks (key=value pairs from --sdk-option).",

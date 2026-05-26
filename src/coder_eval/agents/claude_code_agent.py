@@ -47,9 +47,6 @@ from coder_eval.models import (
     CommandTelemetry,
     ContentBlock,
     DirectRoute,
-    FileChange,
-    FileChanges,
-    FileTree,
     ProxyRoute,
     ResultSummary,
     TokenUsage,
@@ -62,7 +59,6 @@ from coder_eval.models import (
 from coder_eval.models import (
     UserMessage as UserMessageTelemetry,
 )
-from coder_eval.resources import get_ignore_patterns, should_ignore_path
 from coder_eval.streaming.callbacks import StreamCallback, safe_emit
 from coder_eval.streaming.events import TextChunkEvent, ToolCallEvent, ToolResultEvent
 
@@ -409,8 +405,6 @@ class ClaudeCodeAgent(Agent):
         # atomic under the GIL; no explicit lock needed here.
         timeout_hit = False
 
-        # Bump after _capture_file_tree so an OSError leaves the counter unchanged.
-        files_before = self._capture_file_tree()
         self._iteration += 1
         self._iteration_was_incremented = True
 
@@ -475,7 +469,6 @@ class ClaudeCodeAgent(Agent):
                     num_turns=num_turns,
                     sdk_model_used=sdk_model_used,
                     sdk_result_summary=sdk_result_summary,
-                    files_before=files_before,
                     turn_start_time=turn_start_time,
                     crash_reason=crash_reason,
                 )
@@ -855,8 +848,6 @@ class ClaudeCodeAgent(Agent):
         # PHASE 3: Finalize commands and build turn record
         commands = self._finalize_commands(pending_commands, messages)
         token_usage = self._build_token_usage(sdk_result_usage, sdk_result_cost)
-        files_after = self._capture_file_tree()
-        file_changes = self._detect_file_changes(files_before, files_after)
         agent_output = self._format_messages(messages)
         self._update_state_from_messages(messages)
 
@@ -882,7 +873,6 @@ class ClaudeCodeAgent(Agent):
             user_input=user_input,
             agent_output=agent_output,
             commands=commands,
-            files_changed=file_changes,
             timestamp=datetime.now(),
             duration_seconds=duration,
             token_usage=token_usage,
@@ -994,29 +984,17 @@ class ClaudeCodeAgent(Agent):
         num_turns: int | None,
         sdk_model_used: str | None,
         sdk_result_summary: ResultSummary | None,
-        files_before: FileTree,
         turn_start_time: float,
         crash_reason: str | None = None,
     ) -> TurnRecord:
         """Build a crashed=True TurnRecord from pre-crash telemetry.
 
-        File-tree OSError is tolerated; message-formatting failure substitutes a
-        placeholder. Other exceptions propagate to the caller.
+        Message-formatting failure substitutes a placeholder. Other exceptions
+        propagate to the caller.
         """
         commands = self._finalize_commands(pending_commands, messages)
         token_usage = self._build_token_usage(sdk_result_usage, sdk_result_cost)
         duration = time.monotonic() - turn_start_time
-
-        # Narrow to OSError so programming errors (AttributeError etc.) still surface.
-        try:
-            files_after = self._capture_file_tree()
-            file_changes: FileChanges = self._detect_file_changes(files_before, files_after)
-        except OSError:
-            logger.warning(
-                "Failed to capture file tree for partial turn record; continuing with empty file_changes",
-                exc_info=True,
-            )
-            file_changes = []
 
         # Broad handler: secondary failure here would defeat partial preservation.
         try:
@@ -1033,7 +1011,6 @@ class ClaudeCodeAgent(Agent):
             user_input=user_input,
             agent_output=agent_output,
             commands=commands,
-            files_changed=file_changes,
             timestamp=datetime.now(),
             duration_seconds=duration,
             token_usage=token_usage,
@@ -1442,69 +1419,6 @@ class ClaudeCodeAgent(Agent):
         if parts:
             return f"Result[is_error=True]: {' / '.join(parts)}"
         return None
-
-    def _capture_file_tree(self) -> FileTree:
-        """Capture the current state of files in the working directory.
-
-        Returns:
-            Dictionary mapping file paths to modification times
-        """
-        if not self.working_directory:
-            return {}
-
-        file_tree = {}
-        for path in self.working_directory.rglob("*"):
-            if path.is_file() and not self._should_ignore_path(path):
-                try:
-                    rel_path = path.relative_to(self.working_directory)
-                    file_tree[str(rel_path)] = path.stat().st_mtime
-                except (OSError, ValueError):
-                    # Skip files that can't be accessed
-                    continue
-
-        return file_tree
-
-    def _should_ignore_path(self, path: Path) -> bool:
-        """Check if a path should be ignored in file tracking.
-
-        Args:
-            path: Path to check
-
-        Returns:
-            True if path should be ignored
-        """
-        patterns = get_ignore_patterns(self.config.ignore_patterns)
-        return should_ignore_path(path, patterns)
-
-    def _detect_file_changes(
-        self,
-        before: FileTree,
-        after: FileTree,
-    ) -> FileChanges:
-        """Detect changes between two file trees.
-
-        Args:
-            before: File tree before the operation
-            after: File tree after the operation
-
-        Returns:
-            List of file changes
-        """
-        changes = []
-
-        # Find created and modified files
-        for path, mtime in after.items():
-            if path not in before:
-                changes.append(FileChange(path=path, operation="created"))
-            elif before[path] != mtime:
-                changes.append(FileChange(path=path, operation="modified"))
-
-        # Find deleted files
-        for path in before:
-            if path not in after:
-                changes.append(FileChange(path=path, operation="deleted"))
-
-        return changes
 
     def _format_messages(self, messages: list[Message]) -> str:
         # isinstance, not type-name equality: SystemMessage subclasses must hit

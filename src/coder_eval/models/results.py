@@ -257,14 +257,6 @@ CriterionResultUnion = Annotated[
 ]
 
 
-class FileChange(BaseModel):
-    """Record of a file change during agent execution."""
-
-    path: str = Field(description="Path to the changed file")
-    operation: Literal["created", "modified", "deleted"] = Field(description="Type of change")
-    timestamp: datetime = Field(default_factory=datetime.now, description="When the change occurred")
-
-
 class ResultSummary(BaseModel):
     """Diagnostic fields lifted from the SDK's final ResultMessage.
 
@@ -301,13 +293,8 @@ class TurnRecord(BaseModel):
     commands: list[CommandTelemetry] = Field(
         default_factory=list, description="Detailed telemetry for each command executed during this turn"
     )
-    files_changed: list[FileChange] = Field(default_factory=list, description="Files modified during this turn")
     timestamp: datetime = Field(default_factory=datetime.now, description="When this turn occurred")
     duration_seconds: float = Field(default=0.0, description="How long this turn took")
-    snapshot_path: str | None = Field(
-        default=None, description="Path to snapshot for this iteration (if snapshots enabled)"
-    )
-    snapshot_size_bytes: int | None = Field(default=None, description="Size of snapshot in bytes (if created)")
     token_usage: TokenUsage | None = Field(
         default=None, description="Token usage for this turn (if available from agent SDK)"
     )

@@ -47,7 +47,6 @@ from .models import (
     ResolvedTask,
     RunSummary,
     SimulationTelemetry,
-    SnapshotMode,
     TaskConfigRecord,
     TaskDefinition,
     TaskResult,
@@ -58,7 +57,7 @@ from .models import (
 )
 from .orchestration.batch import run_batch as run_batch_impl
 from .orchestration.config import BatchRunConfig
-from .orchestration.evaluation import create_iteration_snapshot, load_reference
+from .orchestration.evaluation import load_reference
 from .path_utils import format_task_log_id, task_log_path
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, UserSimulator, evaluate_stop
@@ -276,9 +275,6 @@ class Orchestrator:
         # orchestrator noise in between.
         self.conversation_log_path = self.run_dir / "conversation.log"
         # Note: artifacts directory (run_dir/artifacts) is created on-demand during sandbox preservation
-
-        # Snapshot directory (created on-demand if snapshots enabled)
-        self.snapshot_base_dir: Path | None = None
 
         # Components (initialized in run())
         self.agent: Agent | None = None
@@ -777,12 +773,6 @@ class Orchestrator:
         assert self.result is not None, "Result not initialized"
         self.result.sandbox_path = str(sandbox_dir)
 
-        # Create snapshot directory if snapshots enabled
-        if self.task.sandbox.snapshots.mode != SnapshotMode.DISABLED:
-            self.snapshot_base_dir = self.run_dir / "snapshots"
-            self.snapshot_base_dir.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
-            logger.info(f"Snapshots enabled: mode={self.task.sandbox.snapshots.mode.value}")
-
         # Determine API routing from settings.api_backend enum
         if settings.api_backend == ApiBackend.PROXY:
             from .proxy import LLMGatewayProxy
@@ -1143,16 +1133,6 @@ class Orchestrator:
 
         logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
 
-        # Create snapshot after this turn (if enabled)
-        if self.snapshot_base_dir and self.sandbox:
-            await create_iteration_snapshot(
-                sandbox=self.sandbox,
-                snapshot_base_dir=self.snapshot_base_dir,
-                task=self.task,
-                iteration=iteration,
-                turn_record=turn_record,
-            )
-
         # Check success criteria (pass reference code for reference_comparison criterion)
         logger.debug("Checking success criteria")
         reference_code, reference_dir, self._reference_code = load_reference(
@@ -1394,15 +1374,6 @@ class Orchestrator:
                 if turn_record.token_usage is not None:
                     usage = turn_record.token_usage
                     total_tokens_used += (usage.input_tokens or 0) + (usage.output_tokens or 0)
-
-                if self.snapshot_base_dir and self.sandbox:
-                    await create_iteration_snapshot(
-                        sandbox=self.sandbox,
-                        snapshot_base_dir=self.snapshot_base_dir,
-                        task=self.task,
-                        iteration=turns_completed,
-                        turn_record=turn_record,
-                    )
 
                 criteria_checked_this_turn = False
                 if check_every_turn:

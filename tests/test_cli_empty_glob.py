@@ -46,8 +46,6 @@ def test_cli_handles_empty_glob_results(tmp_path):
                     preserve=True,
                     run_dir=None,
                     max_parallel=1,
-                    snapshot_mode=None,
-                    snapshot_checkpoint_freq=None,
                 )
             )
 
@@ -84,8 +82,6 @@ def test_cli_handles_invalid_glob_pattern(tmp_path):
                     preserve=True,
                     run_dir=None,
                     max_parallel=1,
-                    snapshot_mode=None,
-                    snapshot_checkpoint_freq=None,
                 )
             )
 
@@ -148,8 +144,6 @@ success_criteria:
                 preserve=True,
                 run_dir=tmp_path / "run",
                 max_parallel=1,
-                snapshot_mode=None,
-                snapshot_checkpoint_freq=None,
             )
         )
 
@@ -214,8 +208,6 @@ success_criteria:
                 preserve=True,
                 run_dir=tmp_path / "run",
                 max_parallel=1,
-                snapshot_mode=None,
-                snapshot_checkpoint_freq=None,
             )
         )
 
