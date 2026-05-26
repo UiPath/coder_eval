@@ -1,0 +1,116 @@
+task_id: flow-bindings-multi-connector-independence
+description: >
+  Two distinct connector nodes (different connector keys) in the same flow,
+  each configured with its own connection, must produce independent Connection
+  bindings — no cross-aliasing between nodes, even when both manifests share
+  common binding `name`/`propertyAttribute` values like `ConnectionId` and
+  `FolderKey`. This is the cross-connector aliasing case that
+  flow-workbench#1726 had to harden against because stale empty-keyed rows
+  collided on `(resourceKey, propertyAttribute)`. With PR #2197 in place
+  there should be no empty rows at all and no aliasing should be possible
+  in the first place. See https://github.com/UiPath/cli/pull/2197 and
+  https://github.com/UiPath/flow-workbench/pull/1726.
+tags: [flow, connector, configure, bindings, regression, tier-4, integration]
+
+run_limits:
+  max_turns: 80
+  turn_timeout: 1500
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: tempdir
+  python: {}
+  node:
+    env_packages:
+      - "@uipath/cli@latest"
+
+initial_prompt: |
+  Load the uipath-maestro-flow skill and follow its workflow exactly.
+
+  Build a flow named "BindingsMulti" with TWO IS connector nodes backed
+  by DIFFERENT connector keys, saved as
+  `BindingsMulti/flow_files/BindingsMulti.flow` with
+  `BindingsMulti/project.uiproj`.
+
+  Configure each node with its own distinct connection. Record the
+  connection ids and connector keys at the sandbox root:
+
+      echo '{"a":"<conn-id-1>","ka":"<connector-key-1>","b":"<conn-id-2>","kb":"<connector-key-2>"}' > conn_ids.json
+
+post_run:
+  - command: 'mkdir -p _outputs && find . -type d \( -name .uipath -o -name .claude -o -name .venv -o -name node_modules -o -name tools -o -name example -o -name _outputs -o -name .git -o -name .flow-run \) -prune -o -type f \( -name "*.flow" -o -name "*.fil" -o -name "bindings*.json" -o -name "conn_ids.json" \) -exec sh -c ''f="${1#./}"; mkdir -p "_outputs/$(dirname "$f")" && cp "$1" "_outputs/$f"'' _ {} \; && find _outputs -type f -exec chmod a-w {} +'
+    timeout: 30
+
+success_criteria:
+  - type: command_executed
+    description: "Agent added two connector nodes"
+    tool_name: "Bash"
+    command_pattern: "uip.*maestro.*flow.*node.*add"
+    min_count: 2
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Agent configured two nodes"
+    tool_name: "Bash"
+    command_pattern: "uip.*maestro.*flow.*node.*configure"
+    min_count: 2
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: file_exists
+    description: "conn_ids.json records the two connections used"
+    path: "conn_ids.json"
+    weight: 0.5
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "conn_ids.json declares two distinct connection ids backed by different connector keys"
+    command: "python3 -c \"import json; d=json.load(open('conn_ids.json')); assert d['a']!=d['b'], 'connection ids must differ'; assert d['ka']!=d['kb'], 'connector keys must differ'\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Flow file exists and is valid JSON"
+    command: "python3 -c \"import json,glob; flows=glob.glob('**/BindingsMulti*.flow',recursive=True); assert flows, 'No flow found'; f=json.load(open(flows[0])); assert 'nodes' in f and 'bindings' in f\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Both connection ids appear in Connection bindings"
+    command: "python3 -c \"import json,glob; d=json.load(open('conn_ids.json')); a,b=d['a'],d['b']; flows=glob.glob('**/BindingsMulti*.flow',recursive=True); bnds=json.load(open(flows[0])).get('bindings',[]); ks={x.get('resourceKey') for x in bnds if x.get('resource')=='Connection'}; missing=[u for u in (a,b) if u not in ks]; assert not missing, f'Missing connection(s) in bindings: {missing}; got {ks}'\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "No empty-keyed Connection bindings (cross-node aliasing surface)"
+    command: "python3 -c \"import json,glob; flows=glob.glob('**/BindingsMulti*.flow',recursive=True); bnds=json.load(open(flows[0])).get('bindings',[]); empty=[x for x in bnds if x.get('resource')=='Connection' and not x.get('resourceKey')]; assert empty==[], f'Empty-keyed Connection binding(s) — would alias across nodes: {empty}'\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 4.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "No (name, propertyAttribute, resourceKey) triplet duplicates"
+    command: "python3 -c \"import json,glob; from collections import Counter; flows=glob.glob('**/BindingsMulti*.flow',recursive=True); bnds=json.load(open(flows[0])).get('bindings',[]); trips=[(x.get('name'),x.get('propertyAttribute'),x.get('resourceKey')) for x in bnds if x.get('resource')=='Connection']; dups=[k for k,c in Counter(trips).items() if c>1]; assert not dups, f'Duplicate Connection binding triplet(s): {dups}'\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Connection A and Connection B each have at least one ConnectionId binding"
+    command: "python3 -c \"import json,glob; d=json.load(open('conn_ids.json')); a,b=d['a'],d['b']; flows=glob.glob('**/BindingsMulti*.flow',recursive=True); bnds=json.load(open(flows[0])).get('bindings',[]); a_rows=[x for x in bnds if x.get('resource')=='Connection' and x.get('propertyAttribute')=='ConnectionId' and x.get('resourceKey')==a]; b_rows=[x for x in bnds if x.get('resource')=='Connection' and x.get('propertyAttribute')=='ConnectionId' and x.get('resourceKey')==b]; assert a_rows and b_rows, f'Missing ConnectionId bindings: A_rows={a_rows}, B_rows={b_rows}'\""
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
