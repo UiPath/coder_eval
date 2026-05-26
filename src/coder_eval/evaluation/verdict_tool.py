@@ -41,14 +41,19 @@ _SUBMIT_VERDICT_DESCRIPTION = (
 
 
 SUBMIT_VERDICT_LC_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": SUBMIT_VERDICT_TOOL_NAME,
-        "description": _SUBMIT_VERDICT_DESCRIPTION,
-        "parameters": JudgeVerdict.model_json_schema(),
-    },
+    "name": SUBMIT_VERDICT_TOOL_NAME,
+    "description": _SUBMIT_VERDICT_DESCRIPTION,
+    "parameters": JudgeVerdict.model_json_schema(),
 }
-"""LangChain / OpenAI-style tool spec for use with ``.bind_tools()``.
+"""LangChain tool spec for use with ``.bind_tools()``.
+
+Inner-only function shape (``name``/``description``/``parameters``) — NOT the
+OpenAI tools-API outer envelope (``{"type": "function", "function": {...}}``).
+LangChain's ``convert_to_openai_function`` (invoked by
+``uipath_llmgw_client.langchain.normalized.ChatNormalized.bind_tools``) does not
+accept the outer envelope and raises ``ValueError: Unsupported function`` at
+``.invoke()`` time. The shape is silently accepted at ``bind_tools`` time, so
+the bug only surfaces on the first judge call.
 
 Explicit ``name`` field — auto-deriving from a Pydantic class name would give
 ``JudgeVerdict`` which would NOT match the SDK side's ``submit_verdict``.

@@ -112,6 +112,14 @@ for env_file in "$REPO/.env" "$REPO/dashboard/.env"; do
   fi
 done
 
+# Multi-turn (simulation) tasks resume a session by ID across turns, but the
+# CLI persists that session store under ~/.claude, which docker_runner mounts
+# read-only from the host. Turn 2's --resume then fails with "No conversation
+# found with session ID". Opt out of the host ~/.claude mount so each container
+# gets its own writable ~/.claude; auth is unaffected because creds come from
+# AWS_BEARER_TOKEN_BEDROCK in the env, not the host's OAuth token.
+export CODER_EVAL_NO_CLAUDE_MOUNT=1
+
 # Resolve MODEL after sourcing .env so the default falls back to $BEDROCK_MODEL
 # (full Bedrock id). Caller-set MODEL still wins.
 MODEL="${MODEL:-${BEDROCK_MODEL:-}}"
@@ -159,7 +167,7 @@ echo "→ uip $(uip --version 2>/dev/null || echo unknown) ($UIP_PATH)"
 # eliminates Python-side stale-dep drift between runs.
 rm -rf .venv
 uv venv --python 3.13
-uv pip install --python .venv/bin/python -e ".[dev]" --quiet
+uv pip install --python .venv/bin/python -e ".[dev,uipath]" --quiet
 uv pip install --python .venv/bin/python -e "./dashboard" --quiet
 
 # Build the coder-eval-agent image. Mirrors skills/.github/workflows/smoke-skills.yml.

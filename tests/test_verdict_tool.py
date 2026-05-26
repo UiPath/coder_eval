@@ -257,11 +257,45 @@ def test_submit_verdict_tool_schema_marks_findings_optional() -> None:
     assert "rationale" in schema["properties"]
 
 
-def test_lc_tool_spec_has_explicit_name() -> None:
-    """Sanity-pin that the LangChain tool spec uses the exact tool name (not the Pydantic class name)."""
-    assert SUBMIT_VERDICT_LC_TOOL["function"]["name"] == "submit_verdict"
-    assert SUBMIT_VERDICT_LC_TOOL["type"] == "function"
-    assert "parameters" in SUBMIT_VERDICT_LC_TOOL["function"]
+def test_lc_tool_spec_is_inner_only_shape() -> None:
+    """LangChain tool spec must be the inner-only function shape, NOT the OpenAI tools-API envelope.
+
+    ``uipath_llmgw_client.langchain.normalized.ChatNormalized.bind_tools`` runs each
+    tool through LangChain's ``convert_to_openai_function``, which rejects the
+    outer ``{"type": "function", "function": {...}}`` envelope with
+    ``ValueError: Unsupported function`` at ``.invoke()`` time.
+    """
+    assert SUBMIT_VERDICT_LC_TOOL["name"] == "submit_verdict"
+    assert "parameters" in SUBMIT_VERDICT_LC_TOOL
+    assert "description" in SUBMIT_VERDICT_LC_TOOL
+    # Negative pin: the broken outer envelope must NOT be present.
+    assert "type" not in SUBMIT_VERDICT_LC_TOOL
+    assert "function" not in SUBMIT_VERDICT_LC_TOOL
+
+
+def test_lc_tool_spec_survives_langchain_convert_to_openai_function() -> None:
+    """End-to-end regression: the spec must round-trip through LangChain's converter.
+
+    This is the exact call that ``ChatNormalized.bind_tools`` makes internally.
+    Pre-fix this raised ``ValueError: Unsupported function`` — covering it here
+    means any future shape change to ``SUBMIT_VERDICT_LC_TOOL`` that breaks the
+    LLMGW judge transport will fail at unit-test time rather than at the first
+    nightly cron run with ANTHROPIC_API_KEY unset.
+
+    This pins LangChain's converter directly, which is a *proxy* for the real
+    consumer (``ChatNormalized.bind_tools`` at llm_judge.py:188,212). If this
+    test passes but the LLMGW judge still errors at ``.invoke()``, check whether
+    ``ChatNormalized`` still routes through ``convert_to_openai_function`` rather
+    than ``convert_to_openai_tool`` or a custom validator.
+    """
+    # langchain_core ships with the [uipath] extra; skip (don't error) the test
+    # when running without it (e.g. the no-uipath-extra path or bare `pytest tests/`).
+    pytest.importorskip("langchain_core")
+    from langchain_core.utils.function_calling import convert_to_openai_function
+
+    converted = convert_to_openai_function(SUBMIT_VERDICT_LC_TOOL)
+    assert converted["name"] == "submit_verdict"
+    assert "parameters" in converted
 
 
 def test_anthropic_tool_spec_has_input_schema() -> None:

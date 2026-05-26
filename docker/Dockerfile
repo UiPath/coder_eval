@@ -53,7 +53,7 @@ RUN --mount=type=secret,id=uv_index_username \
     UV_INDEX_UIPATH_PASSWORD=$(cat /run/secrets/uv_index_password 2>/dev/null || true) \
     UV_INDEX_UIPATH_USERNAME="$UV_INDEX_UIPATH_USERNAME" \
     UV_INDEX_UIPATH_PASSWORD="$UV_INDEX_UIPATH_PASSWORD" \
-    uv pip install --system .
+    uv pip install --system ".[uipath]"
 
 # Sanity check: the in-container entrypoint subcommand must be wired up.
 RUN coder-eval _run-task-internal --help > /dev/null
