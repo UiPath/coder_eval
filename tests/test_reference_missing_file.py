@@ -5,7 +5,13 @@ Tests ensure clear FileNotFoundError for missing reference files.
 
 import pytest
 
-from coder_eval.models import AgentConfig, FileExistsCriterion, ReferenceSource, SandboxConfig, TaskDefinition
+from coder_eval.models import (
+    FileExistsCriterion,
+    ReferenceSource,
+    SandboxConfig,
+    TaskDefinition,
+    parse_agent_config,
+)
 from coder_eval.orchestration.evaluation import load_reference_code
 
 
@@ -25,7 +31,7 @@ def test_load_reference_missing_file_raises(tmp_path):
         task_id="test_task",
         description="Test task",
         initial_prompt="Test",
-        agent=AgentConfig(type="claude-code"),
+        agent=parse_agent_config(type="claude-code"),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(path="output.txt", description="Check output exists")],
         reference=ReferenceSource(file="missing_reference.py"),  # File doesn't exist
@@ -54,7 +60,7 @@ def test_load_reference_inline_code_works(tmp_path):
         task_id="test_task",
         description="Test task",
         initial_prompt="Test",
-        agent=AgentConfig(type="claude-code"),
+        agent=parse_agent_config(type="claude-code"),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(path="output.txt", description="Check output exists")],
         reference=ReferenceSource(code="def solution():\n    return 42"),
@@ -84,7 +90,7 @@ def test_load_reference_existing_file_works(tmp_path):
         task_id="test_task",
         description="Test task",
         initial_prompt="Test",
-        agent=AgentConfig(type="claude-code"),
+        agent=parse_agent_config(type="claude-code"),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(path="output.txt", description="Check output exists")],
         reference=ReferenceSource(file="reference_solution.py"),
@@ -110,7 +116,7 @@ def test_load_reference_caches_result(tmp_path):
         task_id="test_task",
         description="Test task",
         initial_prompt="Test",
-        agent=AgentConfig(type="claude-code"),
+        agent=parse_agent_config(type="claude-code"),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(path="output.txt", description="Check output exists")],
         reference=ReferenceSource(file="reference.py"),
@@ -141,7 +147,7 @@ def test_load_reference_no_reference_returns_none(tmp_path):
         task_id="test_task",
         description="Test task",
         initial_prompt="Test",
-        agent=AgentConfig(type="claude-code"),
+        agent=parse_agent_config(type="claude-code"),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(path="output.txt", description="Check output exists")],
         reference=None,
@@ -166,7 +172,7 @@ def test_load_reference_without_task_file_raises(tmp_path):
         task_id="test_task",
         description="Test task",
         initial_prompt="Test",
-        agent=AgentConfig(type="claude-code"),
+        agent=parse_agent_config(type="claude-code"),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(path="output.txt", description="Check output exists")],
         reference=ReferenceSource(file="reference.py"),

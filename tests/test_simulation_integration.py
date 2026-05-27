@@ -14,7 +14,6 @@ import pytest
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.models import (
-    AgentConfig,
     AgentKind,
     FileExistsCriterion,
     SandboxConfig,
@@ -22,6 +21,7 @@ from coder_eval.models import (
     TaskDefinition,
     TokenUsage,
     TurnRecord,
+    parse_agent_config,
 )
 from coder_eval.orchestrator import Orchestrator
 from coder_eval.simulation.user_simulator import UserSimulator
@@ -49,7 +49,7 @@ def _build_task(
         task_id="sim-integration",
         description="Dialog-loop integration test",
         initial_prompt=initial_prompt,
-        agent=AgentConfig(type=AgentKind.CLAUDE_CODE),
+        agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(path="test.txt", description="file must exist")],
         simulation=SimulationConfig(**sim_kwargs),

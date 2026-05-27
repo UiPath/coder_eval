@@ -8,7 +8,7 @@ import logging
 import pytest
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
-from coder_eval.models import AgentConfig
+from coder_eval.models import parse_agent_config
 
 
 def create_mock_sdk_messages():
@@ -59,7 +59,7 @@ async def test_orphaned_result_message_marks_unknown(tmp_path):
     tool_use = tool_use_block_cls("tool_123", "Bash", {"command": "echo test"})
     assistant_msg = assistant_message_cls([tool_use])
 
-    config = AgentConfig(type="claude-code")
+    config = parse_agent_config(type="claude-code")
     agent = ClaudeCodeAgent(config)
 
     import coder_eval.agents.claude_code_agent as agent_module
@@ -106,7 +106,7 @@ async def test_duplicate_result_message_last_wins(tmp_path, caplog):
     # Second result: error (should overwrite)
     result_2 = result_message_cls("tool_456", True, "File not found")
 
-    config = AgentConfig(type="claude-code")
+    config = parse_agent_config(type="claude-code")
     agent = ClaudeCodeAgent(config)
 
     import coder_eval.agents.claude_code_agent as agent_module
@@ -159,7 +159,7 @@ async def test_pending_command_without_result_finalizes_unknown(tmp_path, caplog
     # Only first tool gets result, others are interrupted
     result_1 = result_message_cls("tool_001", False, "File written successfully")
 
-    config = AgentConfig(type="claude-code")
+    config = parse_agent_config(type="claude-code")
     agent = ClaudeCodeAgent(config)
 
     import coder_eval.agents.claude_code_agent as agent_module
@@ -214,7 +214,7 @@ async def test_orphaned_result_without_tool_use_logs_warning(tmp_path, caplog):
     # Only ResultMessage, no preceding ToolUseBlock
     orphan_result = result_message_cls("nonexistent_tool", False, "Unexpected result")
 
-    config = AgentConfig(type="claude-code")
+    config = parse_agent_config(type="claude-code")
     agent = ClaudeCodeAgent(config)
 
     import coder_eval.agents.claude_code_agent as agent_module
@@ -263,7 +263,7 @@ async def test_multiple_tools_with_mixed_results(tmp_path):
     result_2 = result_message_cls("tool_b", True, "Error: command failed")
     # tool_c gets no result
 
-    config = AgentConfig(type="claude-code")
+    config = parse_agent_config(type="claude-code")
     agent = ClaudeCodeAgent(config)
 
     import coder_eval.agents.claude_code_agent as agent_module

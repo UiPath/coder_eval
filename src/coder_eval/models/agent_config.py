@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from claude_agent_sdk import ClaudeAgentOptions, SdkPluginConfig, SettingSource
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from coder_eval.models.enums import AgentKind
+from coder_eval.models.enums import AgentKind, PermissionMode
 
 
 _VALID_SDK_OPTION_FIELDS: frozenset[str] = frozenset(f.name for f in dataclasses.fields(ClaudeAgentOptions))
@@ -39,7 +39,6 @@ _FRAMEWORK_OWNED_SDK_FIELDS: frozenset[str] = frozenset(
         "plugins",
         "system_prompt",
         "system_prompt_file",
-        "setting_sources",
         "settings",
         # transport / runtime — set by the agent, not the user:
         "cwd",
@@ -76,6 +75,7 @@ _FRAMEWORK_OWNED_SDK_FIELDS: frozenset[str] = frozenset(
         "sandbox",
         "skills",
         "add_dirs",
+        "setting_sources",  # framework-controlled to prevent hook injection
     }
 )
 # Precomputed user-visible allowlist (= valid SDK fields minus framework-owned).
@@ -83,20 +83,21 @@ _FRAMEWORK_OWNED_SDK_FIELDS: frozenset[str] = frozenset(
 _USER_VISIBLE_SDK_FIELDS: tuple[str, ...] = tuple(sorted(_VALID_SDK_OPTION_FIELDS - _FRAMEWORK_OWNED_SDK_FIELDS))
 
 
-class AgentConfig(BaseModel):
-    """Configuration for the coding agent."""
+class BaseAgentConfig(BaseModel):
+    """Base configuration for all agent types."""
 
     model_config = ConfigDict(validate_assignment=True, populate_by_name=True, extra="forbid")
 
     type: AgentKind | None = Field(
         default=None,
         description=(
-            "The type of agent to use (claude-code, aider, etc.). "
+            "The type of agent to use (claude-code, codex, etc.). "
             "May be omitted on the task and supplied via experiment defaults or --type."
         ),
     )
-    permission_mode: Literal["default", "acceptEdits", "plan", "bypassPermissions"] = Field(
-        default="acceptEdits", description="Permission mode for agent actions"
+    model: str | None = Field(default=None, description="Specific model to use (if applicable)")
+    permission_mode: PermissionMode = Field(
+        default=PermissionMode.ACCEPT_EDITS, description="Permission mode for agent actions"
     )
     allowed_tools: list[str] | None = Field(
         default=None, description="List of allowed tools (e.g., ['Read', 'Write', 'Bash'])"
@@ -104,8 +105,23 @@ class AgentConfig(BaseModel):
     disallowed_tools: list[str] | None = Field(
         default=None, description="List of disallowed tools (e.g., ['TodoWrite'])"
     )
-    model: str | None = Field(default=None, description="Specific model to use (if applicable)")
-    plugins: list[SdkPluginConfig] | None = Field(default=None, description="List of Claude Code plugins")
+    plugins: list[SdkPluginConfig] | None = Field(default=None, description="List of plugins")
+    system_prompt: str | None = Field(
+        default=None,
+        description=(
+            "Custom system prompt. Replaces the default system prompt. "
+            "Supports inline text or multi-line YAML strings. "
+            "Mutually exclusive with system_prompt_file."
+        ),
+    )
+    system_prompt_file: str | None = Field(
+        default=None,
+        description=(
+            "Path to a file containing the system prompt (relative to task YAML). "
+            "The file contents are loaded at task resolution time and set as system_prompt. "
+            "Mutually exclusive with system_prompt."
+        ),
+    )
 
     # Customizable ignore patterns for file tracking
     ignore_patterns: list[str] = Field(
@@ -118,6 +134,16 @@ class AgentConfig(BaseModel):
         validation_alias=AliasChoices("ignore_patterns", "additional_ignore_patterns"),
     )
 
+    setting_sources: list[SettingSource] | None = Field(
+        default=None,
+        description=(
+            "Claude Code setting sources to load (e.g., ['project', 'user']). "
+            "Set to [] for maximum isolation (no host settings or hooks) — used by judge agents and simulators. "
+            "Defaults to None, which at runtime becomes ['project'] so .mcp.json is discovered. "
+            "Users may override this value for custom setting loading behavior."
+        ),
+    )
+
     @field_validator("ignore_patterns")
     @classmethod
     def _validate_ignore_patterns(cls, values: list[str]) -> list[str]:
@@ -125,30 +151,19 @@ class AgentConfig(BaseModel):
 
         return [normalize_ignore_pattern_entry(v) for v in values]
 
-    system_prompt: str | None = Field(
-        default=None,
-        description=(
-            "Custom system prompt injected into the Claude Code agent. "
-            "Replaces the default system prompt. Supports inline text or multi-line YAML strings. "
-            "Mutually exclusive with system_prompt_file."
-        ),
-    )
-    system_prompt_file: str | None = Field(
-        default=None,
-        description=(
-            "Path to a file containing the system prompt (relative to task YAML). "
-            "The file contents are loaded at task resolution time and set as system_prompt. "
-            "Mutually exclusive with system_prompt."
-        ),
-    )
-    setting_sources: list[SettingSource] | None = Field(
-        default=None,
-        description=(
-            "Claude Code setting sources to load (e.g., ['project', 'user']). "
-            "Defaults to ['project'] so .mcp.json is discovered. Set to [] to disable all settings. "
-            "None means use the framework default (['project'])."
-        ),
-    )
+    @model_validator(mode="after")
+    def check_prompt_exclusivity(self) -> Self:
+        """Ensure system_prompt and system_prompt_file are mutually exclusive."""
+        if self.system_prompt is not None and self.system_prompt_file is not None:
+            raise ValueError("Only one of 'system_prompt' or 'system_prompt_file' can be provided, not both")
+        return self
+
+
+class ClaudeCodeAgentConfig(BaseAgentConfig):
+    """Claude Code agent configuration."""
+
+    type: Literal[AgentKind.CLAUDE_CODE]  # type: ignore[assignment]
+
     claude_settings: str | dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -184,9 +199,56 @@ class AgentConfig(BaseModel):
                 )
         return v
 
-    @model_validator(mode="after")
-    def check_prompt_exclusivity(self) -> Self:
-        """Ensure system_prompt and system_prompt_file are mutually exclusive."""
-        if self.system_prompt is not None and self.system_prompt_file is not None:
-            raise ValueError("Only one of 'system_prompt' or 'system_prompt_file' can be provided, not both")
-        return self
+
+class CodexAgentConfig(BaseAgentConfig):
+    """Codex agent configuration."""
+
+    type: Literal[AgentKind.CODEX]  # type: ignore[assignment]
+
+
+# Discriminated union type for type hints, validation, and YAML serialization
+# Only includes the concrete subclasses (not BaseAgentConfig) since the discriminator
+# must be a Literal type. BaseAgentConfig is returned by parse_agent_config when type=None.
+type AgentConfig = Annotated[
+    ClaudeCodeAgentConfig | CodexAgentConfig,
+    Field(discriminator="type"),
+]
+
+
+# Factory function for backward-compatible instantiation
+def parse_agent_config(**kwargs: Any) -> ClaudeCodeAgentConfig | CodexAgentConfig | BaseAgentConfig:
+    """Factory function for agent configuration with discriminated union dispatch.
+
+    Automatically routes to the appropriate config class (ClaudeCodeAgentConfig or
+    CodexAgentConfig) based on the `type` field. If type is not provided or is None,
+    defaults to ClaudeCodeAgentConfig (for backward compatibility).
+
+    This maintains the callable interface that tests and code expect while
+    using Pydantic's discriminated union validation for type-aware cases.
+
+    Args:
+        **kwargs: Configuration fields including 'type' discriminator
+
+    Returns:
+        ClaudeCodeAgentConfig, CodexAgentConfig, or BaseAgentConfig instance
+
+    Raises:
+        ValidationError: If configuration is invalid
+
+    Example:
+        >>> cfg = parse_agent_config(type="claude-code", model="claude-opus-4-7")
+        >>> isinstance(cfg, ClaudeCodeAgentConfig)
+        True
+    """
+    from pydantic import TypeAdapter
+
+    agent_type = kwargs.get("type")
+
+    if agent_type is None:
+        # No type specified - return BaseAgentConfig with type=None
+        # This allows type resolution to happen at the experiment/CLI layer
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k != "type"}
+        return BaseAgentConfig(**filtered_kwargs)
+
+    # Type specified - use discriminated union dispatch
+    return TypeAdapter(AgentConfig).validate_python(kwargs)

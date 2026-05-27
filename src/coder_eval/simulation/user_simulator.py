@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from coder_eval.models import AgentConfig, AgentKind, ApiRoute, SimulationConfig
+from coder_eval.models import AgentKind, ApiRoute, SimulationConfig, parse_agent_config
 
 
 if TYPE_CHECKING:
@@ -201,7 +201,9 @@ class UserSimulator:
         # allow-list silently means "allow everything" — every common tool is
         # named explicitly so a regression surfaces as a deny rather than as
         # a security failure.
-        self._agent_config = AgentConfig(
+        from coder_eval.models import ClaudeCodeAgentConfig
+
+        agent_config = parse_agent_config(
             type=AgentKind.CLAUDE_CODE,
             model=None,
             allowed_tools=[],
@@ -211,6 +213,9 @@ class UserSimulator:
             permission_mode="default",
             system_prompt=self._system_prompt,
         )
+        # parse_agent_config returns a union, but type=CLAUDE_CODE guarantees ClaudeCodeAgentConfig
+        assert isinstance(agent_config, ClaudeCodeAgentConfig)
+        self._agent_config = agent_config
 
         if route is not None:
             logger.info("User simulator: Claude Code agent backend (route=%s)", type(route).__name__)

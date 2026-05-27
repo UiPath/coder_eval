@@ -7,13 +7,13 @@ from claude_agent_sdk import AssistantMessage
 from claude_agent_sdk.types import TextBlock, ToolUseBlock
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
-from coder_eval.models import AgentConfig, AgentKind
+from coder_eval.models import AgentKind, parse_agent_config
 from tests._path_helpers import tmp_subdir
 
 
 @pytest.fixture
 def agent():
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     return ClaudeCodeAgent(config)
 
 

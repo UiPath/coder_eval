@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from coder_eval.models import (
-    AgentConfig,
     AgentKind,
     EvaluationResult,
     FileExistsCriterion,
@@ -17,6 +16,7 @@ from coder_eval.models import (
     PreRunCommand,
     SandboxConfig,
     TaskDefinition,
+    parse_agent_config,
 )
 from coder_eval.orchestrator import Orchestrator
 
@@ -123,7 +123,7 @@ def _make_task(pre_run: list[PreRunCommand] | None = None) -> TaskDefinition:
         task_id="pre_run_test",
         description="Test pre-run commands",
         initial_prompt="do something",
-        agent=AgentConfig(type=AgentKind.CLAUDE_CODE),
+        agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[DUMMY_CRITERION],
         pre_run=pre_run or [],

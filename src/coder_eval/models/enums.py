@@ -51,6 +51,15 @@ class ApiBackend(StrEnum):
     PROXY = "proxy"  # Local LLM Gateway proxy (OAuth2 S2S)
 
 
+class PermissionMode(StrEnum):
+    """Permission modes for agent tool access."""
+
+    DEFAULT = "default"
+    ACCEPT_EDITS = "acceptEdits"
+    PLAN = "plan"
+    BYPASS_PERMISSIONS = "bypassPermissions"
+
+
 class AgentKind(StrEnum):
     """Supported agent types."""
 

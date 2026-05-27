@@ -29,10 +29,10 @@ from dotenv import load_dotenv
 from coder_eval.criteria import init_criteria
 from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.models import (
-    AgentConfig,
     AgentJudgeCriterion,
     LLMJudgeCriterion,
     SandboxConfig,
+    parse_agent_config,
 )
 from coder_eval.models.routing import BedrockRoute, DirectRoute
 from coder_eval.sandbox import Sandbox
@@ -127,7 +127,7 @@ def test_agent_judge_sdk_tool_channel(hello_sandbox: Sandbox) -> None:
         prompt=_JUDGE_PROMPT,
         max_turns=6,
         turn_timeout=120,
-        agent=AgentConfig(
+        agent=parse_agent_config(
             type="claude-code",
             model="claude-haiku-4-5-20251001",
             allowed_tools=["Read", "Bash"],

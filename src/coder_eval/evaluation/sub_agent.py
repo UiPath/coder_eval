@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.evaluation.verdict_tool import VerdictCapture
-from coder_eval.models import AgentConfig
+from coder_eval.models import ClaudeCodeAgentConfig
 
 
 if TYPE_CHECKING:
@@ -69,7 +69,7 @@ class SubAgentRunner:
         self,
         *,
         sandbox: Sandbox,
-        agent_config: AgentConfig,
+        agent_config: ClaudeCodeAgentConfig,
         ignore_patterns: list[str],
         route: ApiRoute,
         reference_dir: Path | None = None,

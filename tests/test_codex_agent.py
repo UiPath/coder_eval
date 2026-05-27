@@ -1,4 +1,9 @@
-"""Tests for CodexAgent implementation using official OpenAI Codex SDK."""
+"""Tests for CodexAgent implementation using official OpenAI Codex SDK.
+
+REQUIRES: `pip install 'coder-eval[codex]'` (or `uv sync --extra codex`).
+The Codex SDK is an optional extra; this entire test module is skipped when
+it isn't installed, so `make test` / CI stay green without the extra.
+"""
 
 import pytest
 
@@ -14,7 +19,7 @@ from coder_eval.agents.codex_agent import (
     _PERMISSION_MODE_TO_SANDBOX,
     CodexAgent,
 )
-from coder_eval.models import AgentConfig, AgentKind
+from coder_eval.models import AgentConfig, AgentKind, parse_agent_config
 
 
 class TestCodexAgentInitialization:
@@ -22,7 +27,7 @@ class TestCodexAgentInitialization:
 
     def test_codex_agent_initialization(self):
         """Test that CodexAgent can be initialized with valid config."""
-        config = AgentConfig(
+        config = parse_agent_config(
             type=AgentKind.CODEX,
             permission_mode="acceptEdits",
             allowed_tools=["Bash", "Read", "Write"],
@@ -36,7 +41,7 @@ class TestCodexAgentInitialization:
 
     def test_codex_agent_with_disallowed_tools(self):
         """Test initialization with disallowed_tools."""
-        config = AgentConfig(
+        config = parse_agent_config(
             type=AgentKind.CODEX,
             permission_mode="acceptEdits",
             disallowed_tools=["Write", "Edit", "Bash"],
@@ -49,20 +54,20 @@ class TestCodexAgentInitialization:
     def test_codex_agent_with_all_permission_modes(self):
         """Test that all permission_mode values are accepted."""
         for mode in ["default", "acceptEdits", "plan", "bypassPermissions"]:
-            config = AgentConfig(type=AgentKind.CODEX, permission_mode=mode)
+            config = parse_agent_config(type=AgentKind.CODEX, permission_mode=mode)
             agent = CodexAgent(config)
             assert agent.config.permission_mode == mode
 
     def test_codex_agent_returns_working_state(self):
         """Test that new agent is in WORKING state."""
-        config = AgentConfig(type=AgentKind.CODEX)
+        config = parse_agent_config(type=AgentKind.CODEX)
         agent = CodexAgent(config)
 
         assert agent.get_state() == AgentState.WORKING
 
     def test_codex_agent_with_instance_name(self):
         """Test that agent can be initialized with a custom instance name."""
-        config = AgentConfig(type=AgentKind.CODEX)
+        config = parse_agent_config(type=AgentKind.CODEX)
         agent = CodexAgent(config, instance_name="custom_codex")
 
         # Just verify it doesn't crash with custom instance_name
@@ -157,14 +162,14 @@ class TestCodexEnvironmentConfiguration:
         monkeypatch.delenv("CODEX_API_KEY", raising=False)
         monkeypatch.setenv("CODEX_BASE_URL", "https://custom.api/v1")
 
-        agent = CodexAgent(AgentConfig(type=AgentKind.CODEX))
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         assert agent._build_codex_env() is None
 
     def test_build_codex_env_with_api_key(self, monkeypatch):
         """CODEX_API_KEY is delivered via env."""
         monkeypatch.setenv("CODEX_API_KEY", "test-key-123")
 
-        agent = CodexAgent(AgentConfig(type=AgentKind.CODEX))
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         env = agent._build_codex_env()
         assert env == {"CODEX_API_KEY": "test-key-123"}
 
@@ -173,7 +178,7 @@ class TestCodexEnvironmentConfiguration:
         monkeypatch.setenv("CODEX_API_KEY", "k")
         monkeypatch.setenv("CODEX_BASE_URL", "https://custom.api/v1")
 
-        agent = CodexAgent(AgentConfig(type=AgentKind.CODEX))
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         env = agent._build_codex_env()
         assert env == {"CODEX_API_KEY": "k"}
         assert "CODEX_BASE_URL" not in env
@@ -184,7 +189,7 @@ class TestCodexEnvironmentConfiguration:
         monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
         monkeypatch.setenv("AZURE_OPENAI_API_KEY", "azure-key")
 
-        agent = CodexAgent(AgentConfig(type=AgentKind.CODEX))
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         assert agent._build_codex_env() is None
 
 
@@ -193,14 +198,14 @@ class TestCustomProviderRouting:
 
     def test_no_base_url_means_no_provider(self, monkeypatch):
         monkeypatch.delenv("CODEX_BASE_URL", raising=False)
-        agent = CodexAgent(AgentConfig(type=AgentKind.CODEX, permission_mode="acceptEdits"))
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode="acceptEdits"))
         opts = agent._build_thread_options()
         assert "model_provider" not in opts
         assert "model_providers" not in opts.get("config", {})
 
     def test_base_url_injects_custom_provider(self, monkeypatch):
         monkeypatch.setenv("CODEX_BASE_URL", "https://gw.local/openai/v1")
-        agent = CodexAgent(AgentConfig(type=AgentKind.CODEX, model="gpt-5-codex"))
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5-codex"))
         opts = agent._build_thread_options()
         assert opts["model_provider"] == "custom"
         assert opts["model"] == "gpt-5-codex"
@@ -215,9 +220,9 @@ class TestCustomProviderRouting:
 
         monkeypatch.setattr(settings, "codex_model", "fallback-model")
         # No model on the config -> fallback.
-        assert CodexAgent(AgentConfig(type=AgentKind.CODEX))._effective_model() == "fallback-model"
+        assert CodexAgent(parse_agent_config(type=AgentKind.CODEX))._effective_model() == "fallback-model"
         # Explicit model wins over the fallback.
-        assert CodexAgent(AgentConfig(type=AgentKind.CODEX, model="pinned"))._effective_model() == "pinned"
+        assert CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="pinned"))._effective_model() == "pinned"
 
 
 class TestThreadOptions:
@@ -227,7 +232,7 @@ class TestThreadOptions:
         """_build_thread_options builds correct options for acceptEdits."""
         from openai_codex.api import ApprovalMode, SandboxMode
 
-        config = AgentConfig(
+        config = parse_agent_config(
             type=AgentKind.CODEX,
             permission_mode="acceptEdits",
         )
@@ -243,7 +248,7 @@ class TestThreadOptions:
         """_build_thread_options builds correct options for plan."""
         from openai_codex.api import ApprovalMode, SandboxMode
 
-        config = AgentConfig(
+        config = parse_agent_config(
             type=AgentKind.CODEX,
             permission_mode="plan",
         )
@@ -257,7 +262,7 @@ class TestThreadOptions:
 
     def test_build_thread_options_with_allowed_tools(self):
         """_build_thread_options includes enabled_tools from allowed_tools."""
-        config = AgentConfig(
+        config = parse_agent_config(
             type=AgentKind.CODEX,
             allowed_tools=["Bash", "Read", "Write"],
         )
@@ -271,7 +276,7 @@ class TestThreadOptions:
 
     def test_build_thread_options_with_disallowed_tools(self):
         """_build_thread_options includes disabled_tools from disallowed_tools."""
-        config = AgentConfig(
+        config = parse_agent_config(
             type=AgentKind.CODEX,
             disallowed_tools=["Write", "Edit", "Bash"],
         )
@@ -287,7 +292,7 @@ class TestThreadOptions:
         """_build_thread_options defaults to workspace_write/auto_review when no permission_mode set."""
         from openai_codex.api import ApprovalMode, SandboxMode
 
-        config = AgentConfig(type=AgentKind.CODEX)
+        config = parse_agent_config(type=AgentKind.CODEX)
         agent = CodexAgent(config)
 
         options = agent._build_thread_options()
@@ -300,7 +305,7 @@ class TestThreadOptions:
         """_build_thread_options combines permission_mode and tool config."""
         from openai_codex.api import ApprovalMode, SandboxMode
 
-        config = AgentConfig(
+        config = parse_agent_config(
             type=AgentKind.CODEX,
             permission_mode="plan",
             allowed_tools=["Read", "Bash"],
@@ -320,7 +325,7 @@ async def test_discard_pending_turn():
     """Test discard_pending_turn clears pending_turn and decrements iteration."""
     from coder_eval.models import TurnRecord
 
-    config = AgentConfig(type=AgentKind.CODEX)
+    config = parse_agent_config(type=AgentKind.CODEX)
     agent = CodexAgent(config)
 
     partial = TurnRecord(
@@ -340,7 +345,7 @@ async def test_discard_pending_turn():
 
 def test_get_state_returns_current_state():
     """Test get_state returns the agent's current state."""
-    config = AgentConfig(type=AgentKind.CODEX)
+    config = parse_agent_config(type=AgentKind.CODEX)
     agent = CodexAgent(config)
 
     assert agent.get_state() == AgentState.WORKING
@@ -452,7 +457,7 @@ class TestCommunicateHappyPath:
             _token_usage(100, 40, 8),
             _turn_completed(duration_ms=2000),
         ]
-        agent = _started_agent(AgentConfig(type=AgentKind.CODEX), notifications)
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
         record = await agent.communicate("do it")
 
@@ -471,7 +476,7 @@ class TestCommunicateHappyPath:
 
     async def test_state_resets_to_working_after_a_prior_error(self):
         notifications = [_delta("ok"), _turn_completed()]
-        agent = _started_agent(AgentConfig(type=AgentKind.CODEX), notifications)
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
         agent._state = AgentState.ERROR
 
         await agent.communicate("retry")
@@ -485,7 +490,7 @@ class TestCommunicateCrashFunnel:
     async def test_missing_turn_completed_raises_agent_crash_with_pending(self):
         # No turn/completed notification -> RuntimeError inside, surfaced as crash.
         notifications = [_delta("partial")]
-        agent = _started_agent(AgentConfig(type=AgentKind.CODEX), notifications)
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
         with pytest.raises(AgentCrashError):
             await agent.communicate("do it")
@@ -499,7 +504,7 @@ class TestCommunicateCrashFunnel:
         assert agent._iteration == 0
 
     async def test_thread_start_failure_funnels_through_crash(self):
-        agent = CodexAgent(AgentConfig(type=AgentKind.CODEX))
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         agent.working_directory = __import__("pathlib").Path(".")
         agent.codex_client = SimpleNamespace(close=lambda: None)
         agent.thread = None  # force thread_start path
@@ -536,7 +541,7 @@ class _BlockingStream:
 class TestCommunicateTimeoutFunnel:
     async def test_timeout_raises_turn_timeout_with_pending(self):
         handle = SimpleNamespace(stream=lambda: _BlockingStream(), interrupt=lambda: None)
-        agent = CodexAgent(AgentConfig(type=AgentKind.CODEX))
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         agent.working_directory = __import__("pathlib").Path(".")
         agent.codex_client = SimpleNamespace(close=lambda: None)
         agent.thread = SimpleNamespace(turn=lambda _u: handle)
@@ -551,7 +556,7 @@ class TestCommunicateTimeoutFunnel:
 
 class TestDiscardIdempotency:
     async def test_double_discard_only_rolls_back_once(self):
-        agent = CodexAgent(AgentConfig(type=AgentKind.CODEX))
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         agent._iteration = 3
         agent._iteration_was_incremented = True
 
@@ -565,7 +570,7 @@ class TestDiscardIdempotency:
 class TestTeardown:
     async def test_stop_closes_client(self):
         closed = {"n": 0}
-        agent = CodexAgent(AgentConfig(type=AgentKind.CODEX))
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         agent.codex_client = SimpleNamespace(close=lambda: closed.__setitem__("n", closed["n"] + 1))
 
         await agent.stop()
@@ -577,7 +582,7 @@ class TestTeardown:
     def test_kill_sync_interrupts_turn_and_closes(self):
         closed = {"n": 0}
         handle = _FakeTurnHandle([])
-        agent = CodexAgent(AgentConfig(type=AgentKind.CODEX))
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         agent.codex_client = SimpleNamespace(close=lambda: closed.__setitem__("n", closed["n"] + 1))
         agent._active_turn_handle = handle
 
@@ -597,7 +602,7 @@ class TestOrchestratorDispatch:
             description="dispatch test",
             initial_prompt="hi",
             success_criteria=[{"type": "file_exists", "path": "out.txt", "description": "out.txt must exist"}],
-            agent=AgentConfig(type=AgentKind.CODEX),
+            agent=parse_agent_config(type=AgentKind.CODEX),
         )
         orch = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="t")
         agent = await orch._create_agent()

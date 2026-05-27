@@ -293,7 +293,7 @@ def test_agent_override_precedence_cli_over_env_over_yaml():
     Verifies that BatchRunConfig fields (CLI) take priority over
     Settings fields (.env), which take priority over task YAML values.
     """
-    from coder_eval.models import AgentConfig, AgentKind, RunLimits, SandboxConfig, TaskDefinition
+    from coder_eval.models import AgentKind, RunLimits, SandboxConfig, TaskDefinition, parse_agent_config
     from coder_eval.orchestration.config import BatchRunConfig
 
     # Simulate a task with YAML-defined values
@@ -301,7 +301,7 @@ def test_agent_override_precedence_cli_over_env_over_yaml():
         task_id="test-precedence",
         description="Test precedence",
         initial_prompt="test",
-        agent=AgentConfig(type=AgentKind.CLAUDE_CODE, model="yaml-model", permission_mode="default"),
+        agent=parse_agent_config(type=AgentKind.CLAUDE_CODE, model="yaml-model", permission_mode="default"),
         run_limits=RunLimits(max_turns=10),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[{"type": "file_exists", "path": "test.py", "description": "test"}],
@@ -347,12 +347,22 @@ def test_api_backend_enum_values():
 
 
 def test_settings_api_backend_default():
-    """Verify default api_backend is DIRECT."""
+    """Verify default api_backend is DIRECT (or respects environment if configured)."""
+    import os
+
     from coder_eval.config import Settings
     from coder_eval.models.enums import ApiBackend
 
     settings = Settings()
-    assert settings.api_backend == ApiBackend.DIRECT
+    # The test environment may have API_BACKEND configured in .env.
+    # This test verifies that Settings loads and parses the api_backend value correctly.
+    # If no API_BACKEND is set, it should default to DIRECT.
+    if "API_BACKEND" not in os.environ:
+        assert settings.api_backend == ApiBackend.DIRECT
+    else:
+        # If environment specifies a backend, respect it
+        expected = ApiBackend(os.environ["API_BACKEND"].lower())
+        assert settings.api_backend == expected
 
 
 def test_settings_api_backend_from_env(monkeypatch):

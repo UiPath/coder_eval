@@ -15,6 +15,7 @@ from tqdm import tqdm
 from ..config import settings
 from ..logging_config import setup_logging
 from ..models import AgentKind, RunSummary
+from ..models.enums import PermissionMode
 from ..orchestration.config import BatchRunConfig
 from ..path_utils import create_latest_symlink, format_task_log_id
 from ..streaming.callbacks import CompositeStreamCallback
@@ -282,7 +283,7 @@ def run_command(
     """
     # Validate permission mode early for clear error message
     if permission_mode is not None:
-        allowed_modes = {"default", "acceptEdits", "plan", "bypassPermissions"}
+        allowed_modes = {m.value for m in PermissionMode}
         if permission_mode not in allowed_modes:
             raise typer.BadParameter(
                 f"Invalid --permission-mode '{permission_mode}'. Choose from: {', '.join(sorted(allowed_modes))}."
@@ -420,6 +421,11 @@ async def _run_all_tasks(
     # Expand glob patterns and collect task files
     all_task_files = expand_task_files(task_files)
 
+    # Convert permission_mode from string to enum if provided
+    permission_mode_enum = None
+    if permission_mode is not None:
+        permission_mode_enum = PermissionMode(permission_mode)
+
     # Configure batch execution
     config = BatchRunConfig(
         run_dir=run_dir,
@@ -429,7 +435,7 @@ async def _run_all_tasks(
         exclude_tags=exclude_tags,
         agent_type=agent_type,
         agent_model=agent_model,
-        permission_mode=permission_mode,
+        permission_mode=permission_mode_enum,
         max_turns=max_turns,
         allowed_tools=allowed_tools,
         disallowed_tools=disallowed_tools,

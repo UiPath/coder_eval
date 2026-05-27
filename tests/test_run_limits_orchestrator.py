@@ -11,8 +11,8 @@ import pytest
 
 from coder_eval.errors import BudgetExceededError
 from coder_eval.models import (
-    AgentConfig,
     AgentKind,
+    ClaudeCodeAgentConfig,
     CriterionResult,
     EvaluationResult,
     FileExistsCriterion,
@@ -27,7 +27,7 @@ from coder_eval.orchestrator import Orchestrator
 
 
 def _make_task(*, run_limits: RunLimits | None = None) -> TaskDefinition:
-    agent = AgentConfig.model_construct(
+    agent = ClaudeCodeAgentConfig.model_construct(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
         allowed_tools=None,

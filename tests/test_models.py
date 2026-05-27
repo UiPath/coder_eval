@@ -168,17 +168,17 @@ class TestAgentConfig:
         """Test that assigning invalid permission_mode via attribute raises ValidationError."""
         from pydantic import ValidationError
 
-        from coder_eval.models import AgentConfig, AgentKind
+        from coder_eval.models import AgentKind, parse_agent_config
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         with pytest.raises(ValidationError):
             config.permission_mode = "foobar"
 
     def test_valid_permission_mode_assignment_accepted(self):
         """Test that assigning valid permission_mode via attribute works."""
-        from coder_eval.models import AgentConfig, AgentKind
+        from coder_eval.models import AgentKind, parse_agent_config
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="default")
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="default")
         config.permission_mode = "bypassPermissions"
         assert config.permission_mode == "bypassPermissions"
 

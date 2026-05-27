@@ -80,8 +80,8 @@ def test_sandboxconfig_ignore_patterns_field_validator_strips_whitespace() -> No
 def test_agentconfig_ignore_patterns_field_validator_rejects_empty() -> None:
     from pydantic import ValidationError
 
-    from coder_eval.models.agent_config import AgentConfig
+    from coder_eval.models.agent_config import parse_agent_config
     from coder_eval.models.enums import AgentKind
 
     with pytest.raises(ValidationError, match="empty or whitespace"):
-        AgentConfig(type=AgentKind.CLAUDE_CODE, ignore_patterns=[""])
+        parse_agent_config(type=AgentKind.CLAUDE_CODE, ignore_patterns=[""])

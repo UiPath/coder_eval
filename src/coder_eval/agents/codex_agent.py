@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter
+from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
 from coder_eval.config import settings
 from coder_eval.errors import (
@@ -25,8 +26,9 @@ from coder_eval.errors import (
 )
 from coder_eval.formatting import format_payload, format_token_usage
 from coder_eval.models import (
-    AgentConfig,
+    AgentKind,
     ApiRoute,
+    CodexAgentConfig,
     CommandTelemetry,
     DirectRoute,
     TokenUsage,
@@ -83,12 +85,13 @@ def _get_item_root(notification: Any) -> Any:
     return getattr(item, "root", None)
 
 
-class CodexAgent(Agent):
+@AgentRegistry.register(AgentKind.CODEX, CodexAgentConfig)
+class CodexAgent(Agent[CodexAgentConfig]):
     """Implementation of the Agent interface for OpenAI Codex using the Codex SDK."""
 
     def __init__(
         self,
-        config: AgentConfig,
+        config: CodexAgentConfig,
         route: ApiRoute | None = None,
         *,
         instance_name: str = "codex",
@@ -150,8 +153,12 @@ class CodexAgent(Agent):
             # API-key runs (CI) would otherwise fail to authenticate.
             api_key = os.getenv("CODEX_API_KEY")
             if api_key:
-                with contextlib.suppress(Exception):
+                try:
                     await self._run_async(self.codex_client.login_api_key, api_key)
+                except Exception as exc:
+                    self._log.warning(
+                        "CodexAgent: login_api_key failed — agent will fall back to env-based auth: %s", exc
+                    )
 
             # Set up skills from plugin_tools_dir or plugins config
             self._setup_skills(plugin_tools_dir)
@@ -504,23 +511,20 @@ class CodexAgent(Agent):
             self._log.debug(f"Codex model pinned to {effective_model}")
 
         # Map permission_mode to sandbox and approval_mode
-        if self.config.permission_mode:
-            permission_mode = self.config.permission_mode
-            sandbox_mode_str = _PERMISSION_MODE_TO_SANDBOX.get(permission_mode, "workspace-write")
-            approval_mode_str = _PERMISSION_MODE_TO_APPROVAL.get(permission_mode, "auto_review")
+        permission_mode = self.config.permission_mode.value
+        sandbox_mode_str = _PERMISSION_MODE_TO_SANDBOX.get(permission_mode, "workspace-write")
+        approval_mode_str = _PERMISSION_MODE_TO_APPROVAL.get(permission_mode, "auto_review")
 
-            # Convert to Codex SDK enum values
-            # SandboxMode enum values use hyphens, ApprovalMode uses underscores
-            options["sandbox"] = SandboxMode(sandbox_mode_str)
-            options["approval_mode"] = ApprovalMode(approval_mode_str)
+        # Convert to Codex SDK enum values
+        # SandboxMode enum values use hyphens, ApprovalMode uses underscores
+        options["sandbox"] = SandboxMode(sandbox_mode_str)
+        options["approval_mode"] = ApprovalMode(approval_mode_str)
 
-            # For logging, use the enum names (which use underscores)
-            sandbox_name = options["sandbox"].name
-            approval_name = options["approval_mode"].name
+        # For logging, use the enum names (which use underscores)
+        sandbox_name = options["sandbox"].name
+        approval_name = options["approval_mode"].name
 
-            self._log.debug(
-                f"Permission mode {permission_mode} → sandbox={sandbox_name}, approval_mode={approval_name}"
-            )
+        self._log.debug(f"Permission mode {permission_mode} → sandbox={sandbox_name}, approval_mode={approval_name}")
 
         # Build config dict for tool enforcement
         tool_config: dict[str, Any] = {}
@@ -575,13 +579,12 @@ class CodexAgent(Agent):
         if self.config.disallowed_tools:
             self._log.debug(f"Disallowed tools: {', '.join(self.config.disallowed_tools)}")
 
-        if self.config.permission_mode:
-            self._log.debug(f"Permission mode: {self.config.permission_mode}")
-            if self.config.permission_mode == "bypassPermissions":
-                self._log.warning(
-                    "[SECURITY] bypassPermissions grants unrestricted sandbox access (danger-full-access). "
-                    + "Only use in fully isolated environments with untrusted code execution disabled."
-                )
+        self._log.debug(f"Permission mode: {self.config.permission_mode.value}")
+        if self.config.permission_mode.value == "bypassPermissions":
+            self._log.warning(
+                "[SECURITY] bypassPermissions grants unrestricted sandbox access (danger-full-access). "
+                + "Only use in fully isolated environments with untrusted code execution disabled."
+            )
 
     def _format_turn_result(self, turn_result: Any) -> str:
         """Format Codex turn result to readable string."""

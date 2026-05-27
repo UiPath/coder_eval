@@ -7,7 +7,7 @@ import pytest
 import typer
 
 from coder_eval.cli.plan_command import plan_command
-from coder_eval.models import AgentConfig, ExperimentDefinition, ExperimentVariant, TaskDefinition
+from coder_eval.models import AgentConfig, ExperimentDefinition, ExperimentVariant, TaskDefinition, parse_agent_config
 from coder_eval.models.enums import AgentKind
 
 
@@ -56,7 +56,7 @@ class TestPlanCommandAgentNone:
 
         task = _make_task(agent=None)
         experiment = _make_experiment(variants=[ExperimentVariant(variant_id="default")])
-        resolved_task = _make_task(agent=AgentConfig(type=AgentKind.CLAUDE_CODE))
+        resolved_task = _make_task(agent=parse_agent_config(type=AgentKind.CLAUDE_CODE))
 
         with (
             patch("coder_eval.cli.plan_command.check_tools"),
@@ -78,7 +78,7 @@ class TestPlanCommandAgentNone:
         task_file = tmp_path / "task.yaml"
         task_file.write_text("placeholder")
 
-        agent = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        agent = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         task = _make_task(agent=agent)
         experiment = _make_experiment(variants=[ExperimentVariant(variant_id="default")])
         resolved_task = _make_task(agent=agent)
@@ -104,10 +104,10 @@ class TestPlanCommandAgentNone:
         task_file.write_text("placeholder")
 
         # AgentConfig with model only — type deferred to experiment / --type.
-        agent = AgentConfig(model="claude-opus-4-7")
+        agent = parse_agent_config(model="claude-opus-4-7")
         task = _make_task(agent=agent)
         experiment = _make_experiment(variants=[ExperimentVariant(variant_id="default")])
-        resolved_task = _make_task(agent=AgentConfig(type=AgentKind.CLAUDE_CODE, model="claude-opus-4-7"))
+        resolved_task = _make_task(agent=parse_agent_config(type=AgentKind.CLAUDE_CODE, model="claude-opus-4-7"))
 
         with (
             patch("coder_eval.cli.plan_command.check_tools"),
@@ -137,7 +137,7 @@ class TestPlanCommandExperiment:
         task = _make_task(agent=None)
         experiment = _make_experiment()
 
-        resolved_task = _make_task(agent=AgentConfig(type=AgentKind.CLAUDE_CODE, model="sonnet-4"))
+        resolved_task = _make_task(agent=parse_agent_config(type=AgentKind.CLAUDE_CODE, model="sonnet-4"))
 
         with (
             patch("coder_eval.cli.plan_command.check_tools"),
@@ -166,8 +166,8 @@ class TestPlanCommandExperiment:
         task = _make_task(agent=None)
         experiment = _make_experiment()
 
-        resolved_sonnet = _make_task(agent=AgentConfig(type=AgentKind.CLAUDE_CODE, model="sonnet-4"))
-        resolved_opus = _make_task(agent=AgentConfig(type=AgentKind.CLAUDE_CODE, model="opus-4"))
+        resolved_sonnet = _make_task(agent=parse_agent_config(type=AgentKind.CLAUDE_CODE, model="sonnet-4"))
+        resolved_opus = _make_task(agent=parse_agent_config(type=AgentKind.CLAUDE_CODE, model="opus-4"))
 
         with (
             patch("coder_eval.cli.plan_command.check_tools"),
@@ -193,7 +193,7 @@ class TestPlanCommandExperiment:
 
         task = _make_task(agent=None)
         experiment = _make_experiment()
-        resolved_task = _make_task(agent=AgentConfig(type=AgentKind.CLAUDE_CODE, model="sonnet-4"))
+        resolved_task = _make_task(agent=parse_agent_config(type=AgentKind.CLAUDE_CODE, model="sonnet-4"))
 
         with (
             patch("coder_eval.cli.plan_command.check_tools"),
@@ -214,7 +214,7 @@ class TestPlanCommandExperiment:
         task_file = tmp_path / "task.yaml"
         task_file.write_text("placeholder")
 
-        agent = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        agent = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         task = _make_task(agent=agent)
 
         with (

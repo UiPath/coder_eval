@@ -8,7 +8,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from coder_eval.models.agent_config import AgentConfig
+from coder_eval.models.agent_config import AgentConfig, BaseAgentConfig
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.limits import RunLimits
 from coder_eval.models.sandbox import SandboxConfig
@@ -319,7 +319,7 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
             "the YAML — pair with a comment citing the blocker (e.g. Jira link, upstream dependency)."
         ),
     )
-    agent: AgentConfig | None = Field(
+    agent: AgentConfig | BaseAgentConfig | None = Field(
         default=None, description="Agent configuration (resolved from experiment if omitted)"
     )
     sandbox: SandboxConfig = Field(

@@ -1115,13 +1115,13 @@ class TestSdkOptionsMerge:
         """The same validator applies to AgentJudgeCriterion.agent.sdk_options."""
         from pydantic import ValidationError
 
-        from coder_eval.models import AgentConfig, AgentJudgeCriterion
+        from coder_eval.models import AgentJudgeCriterion, parse_agent_config
 
         # happy path
         c = AgentJudgeCriterion(
             description="x",
             prompt="grade",
-            agent=AgentConfig(type="claude-code", sdk_options={"effort": "low"}),
+            agent=parse_agent_config(type="claude-code", sdk_options={"effort": "low"}),
         )
         assert c.agent.sdk_options == {"effort": "low"}
 
@@ -1130,5 +1130,5 @@ class TestSdkOptionsMerge:
             AgentJudgeCriterion(
                 description="x",
                 prompt="grade",
-                agent=AgentConfig(type="claude-code", sdk_options={"hooks": {}}),
+                agent=parse_agent_config(type="claude-code", sdk_options={"hooks": {}}),
             )

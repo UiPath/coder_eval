@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,7 +14,7 @@ from coder_eval.evaluation.sub_agent import (
     SubAgentRunner,
     _ignore_patterns_and_symlinks,
 )
-from coder_eval.models import AgentConfig, AgentKind, TurnRecord
+from coder_eval.models import AgentKind, ClaudeCodeAgentConfig, TurnRecord, parse_agent_config
 from coder_eval.models.routing import DirectRoute
 from coder_eval.sandbox import Sandbox
 
@@ -36,14 +37,17 @@ def sandbox(tmp_path: Path) -> Sandbox:
     return sb
 
 
-def _make_agent_config() -> AgentConfig:
-    return AgentConfig(
-        type=AgentKind.CLAUDE_CODE,
-        model="claude-opus-4-6",
-        permission_mode="bypassPermissions",
-        allowed_tools=["Read"],
-        system_prompt="x",
-        setting_sources=[],  # security contract
+def _make_agent_config() -> ClaudeCodeAgentConfig:
+    return cast(
+        ClaudeCodeAgentConfig,
+        parse_agent_config(
+            type=AgentKind.CLAUDE_CODE,
+            model="claude-opus-4-6",
+            permission_mode="bypassPermissions",
+            allowed_tools=["Read"],
+            system_prompt="x",
+            setting_sources=[],  # security contract
+        ),
     )
 
 
@@ -324,7 +328,7 @@ def test_runner_propagates_turn_timeout(sandbox: Sandbox) -> None:
 @pytest.mark.parametrize("bad_sources", [None, ["project"]])
 def test_runner_asserts_setting_sources_empty(sandbox: Sandbox, bad_sources: list[str] | None) -> None:
     """Security contract: caller must build AgentConfig with setting_sources=[] explicitly."""
-    bad_config = AgentConfig(
+    bad_config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         model="claude-opus-4-6",
         permission_mode="bypassPermissions",

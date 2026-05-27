@@ -6,7 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from coder_eval.models import BedrockRoute, DirectRoute, ProxyRoute, SandboxConfig
+from coder_eval.models import (
+    AgentKind,
+    BedrockRoute,
+    ClaudeCodeAgentConfig,
+    DirectRoute,
+    FileExistsCriterion,
+    ProxyRoute,
+    SandboxConfig,
+    TaskDefinition,
+)
 from coder_eval.orchestration.task_loader import load_task
 from coder_eval.orchestrator import Orchestrator, _format_routing
 from coder_eval.sandbox import Sandbox
@@ -366,7 +375,7 @@ def test_generate_run_summary(tmp_path):
     """Test run summary generation."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult, TaskResult
+    from coder_eval.models import EvaluationResult, TaskResult
     from coder_eval.orchestration.batch import _generate_run_summary
 
     # Create mock results
@@ -425,7 +434,7 @@ def test_generate_run_summary_mixed_statuses(tmp_path):
     """Test that tasks_failed excludes ERROR tasks (counted separately in tasks_error)."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult, TaskResult
+    from coder_eval.models import EvaluationResult, TaskResult
     from coder_eval.orchestration.batch import _generate_run_summary
 
     results = [
@@ -519,7 +528,7 @@ async def test_orchestrator_setup_preserve_sandbox_uses_ephemeral_runtime_dir(tm
     from datetime import datetime
 
     from coder_eval import orchestrator as orchestrator_module
-    from coder_eval.models import AgentKind, ApiBackend, DirectRoute, EvaluationResult
+    from coder_eval.models import ApiBackend, DirectRoute, EvaluationResult
     from coder_eval.sandbox import Sandbox
 
     class DummyAgent:
@@ -577,7 +586,7 @@ async def test_orchestrator_cleanup_persistent_sandbox(tmp_path):
     """Test that _cleanup with preserve_sandbox=True and a persistent sandbox skips copy."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult
+    from coder_eval.models import EvaluationResult
     from coder_eval.sandbox import Sandbox
 
     task_file = Path("tasks/hello_date.yaml")
@@ -624,7 +633,7 @@ async def test_orchestrator_cleanup_non_persistent_sandbox_with_preserve(tmp_pat
     """Test that _cleanup with preserve_sandbox=True and a non-persistent sandbox copies to artifacts."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult
+    from coder_eval.models import EvaluationResult
     from coder_eval.sandbox import Sandbox
 
     task_file = Path("tasks/hello_date.yaml")
@@ -715,7 +724,7 @@ def test_evaluation_result_agent_config_default():
     """Test that EvaluationResult.agent_config defaults to None."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult
+    from coder_eval.models import EvaluationResult
 
     result = EvaluationResult(
         task_id="test",
@@ -734,9 +743,9 @@ def test_evaluation_result_agent_config_set():
     """Test that EvaluationResult.agent_config can be set from AgentConfig."""
     from datetime import datetime
 
-    from coder_eval.models import AgentConfig, AgentKind, EvaluationResult
+    from coder_eval.models import EvaluationResult, parse_agent_config
 
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="bypassPermissions",
         allowed_tools=["Read", "Write"],
@@ -764,9 +773,9 @@ def test_evaluation_result_serialization_roundtrip_with_agent_config():
     """Test that EvaluationResult with agent_config survives JSON roundtrip."""
     from datetime import datetime
 
-    from coder_eval.models import AgentConfig, AgentKind, EvaluationResult
+    from coder_eval.models import EvaluationResult, parse_agent_config
 
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
         allowed_tools=["Read"],
@@ -823,7 +832,7 @@ def test_batch_error_mapping_after_tag_filter(tmp_path):
     """Test that batch error results map to correct task file after tag filtering."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult, TaskResult
+    from coder_eval.models import EvaluationResult, TaskResult
     from coder_eval.orchestration.batch import _create_error_task_result
 
     # Simulate: 3 original tasks, filter removes task 0, leaving tasks 1 and 2
@@ -857,10 +866,10 @@ def test_generate_run_summary_includes_agent_config(tmp_path):
     """Test that _generate_run_summary includes agent_config in task results."""
     from datetime import datetime
 
-    from coder_eval.models import AgentConfig, AgentKind, EvaluationResult, TaskResult
+    from coder_eval.models import EvaluationResult, TaskResult, parse_agent_config
     from coder_eval.orchestration.batch import _generate_run_summary
 
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
         model="claude-sonnet-4-5-20250514",
@@ -903,7 +912,7 @@ def test_generate_run_summary_agent_config_none(tmp_path):
     """Test that _generate_run_summary handles None agent_config."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult, TaskResult
+    from coder_eval.models import EvaluationResult, TaskResult
     from coder_eval.orchestration.batch import _generate_run_summary
 
     results = [
@@ -937,7 +946,7 @@ def test_generate_run_summary_includes_task_path(tmp_path):
     """task_paths kwarg flows into task_results so evalboard can derive skill from path."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult, TaskResult
+    from coder_eval.models import EvaluationResult, TaskResult
     from coder_eval.orchestration.batch import _generate_run_summary
 
     results = [
@@ -990,7 +999,7 @@ def test_generate_run_summary_task_path_omitted(tmp_path):
     """When task_paths kwarg isn't passed, every task_result has task_path=None."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult, TaskResult
+    from coder_eval.models import EvaluationResult, TaskResult
     from coder_eval.orchestration.batch import _generate_run_summary
 
     results = [
@@ -1156,7 +1165,7 @@ def test_evaluation_result_sdk_options_default():
     """Test that EvaluationResult.sdk_options defaults to None."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult
+    from coder_eval.models import EvaluationResult
 
     result = EvaluationResult(
         task_id="test",
@@ -1232,7 +1241,7 @@ def test_generate_run_summary_includes_sdk_options(tmp_path):
     """Test that _generate_run_summary includes sdk_options in task results."""
     from datetime import datetime
 
-    from coder_eval.models import AgentKind, EvaluationResult, TaskResult
+    from coder_eval.models import EvaluationResult, TaskResult
     from coder_eval.orchestration.batch import _generate_run_summary
 
     sdk_opts = {
@@ -1277,9 +1286,9 @@ def test_generate_run_summary_includes_sdk_options(tmp_path):
 def test_claude_code_agent_get_sdk_options_before_communicate():
     """Test that get_sdk_options returns None before communicate() is called."""
     from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
-    from coder_eval.models import AgentConfig, AgentKind
+    from coder_eval.models import parse_agent_config
 
-    agent = ClaudeCodeAgent(AgentConfig(type=AgentKind.CLAUDE_CODE))
+    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
 
     assert agent.get_sdk_options() is None
 
@@ -1449,17 +1458,13 @@ async def test_evaluation_loop_breaks_on_max_turns_exhausted(tmp_path):
     from unittest.mock import AsyncMock, MagicMock, patch
 
     from coder_eval.models import (
-        AgentConfig,
-        AgentKind,
         CriterionResult,
         EvaluationResult,
-        FileExistsCriterion,
         SandboxConfig,
-        TaskDefinition,
         TurnRecord,
     )
 
-    agent_cfg = AgentConfig.model_construct(
+    agent_cfg = ClaudeCodeAgentConfig.model_construct(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
         allowed_tools=None,
@@ -1547,18 +1552,14 @@ async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
 
     from coder_eval.errors import AgentCrashError
     from coder_eval.models import (
-        AgentConfig,
-        AgentKind,
         CommandTelemetry,
         CriterionResult,
         EvaluationResult,
-        FileExistsCriterion,
         SandboxConfig,
-        TaskDefinition,
         TurnRecord,
     )
 
-    agent_cfg = AgentConfig.model_construct(
+    agent_cfg = ClaudeCodeAgentConfig.model_construct(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
         allowed_tools=None,
@@ -1674,17 +1675,13 @@ async def test_evaluation_loop_stamps_timeout_reason_on_partial(tmp_path):
 
     from coder_eval.errors import TurnTimeoutError
     from coder_eval.models import (
-        AgentConfig,
-        AgentKind,
         CriterionResult,
         EvaluationResult,
-        FileExistsCriterion,
         SandboxConfig,
-        TaskDefinition,
         TurnRecord,
     )
 
-    agent_cfg = AgentConfig.model_construct(
+    agent_cfg = ClaudeCodeAgentConfig.model_construct(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
         allowed_tools=None,
@@ -1776,17 +1773,13 @@ def test_aggregate_token_usage_includes_crashed_partials(tmp_path):
     from datetime import datetime
 
     from coder_eval.models import (
-        AgentConfig,
-        AgentKind,
         EvaluationResult,
-        FileExistsCriterion,
         SandboxConfig,
-        TaskDefinition,
         TokenUsage,
         TurnRecord,
     )
 
-    agent_cfg = AgentConfig.model_construct(
+    agent_cfg = ClaudeCodeAgentConfig.model_construct(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
         allowed_tools=None,
@@ -1856,19 +1849,16 @@ def _bootstrap_finalize_orchestrator(tmp_path, *, final_status, duration=None, s
     from datetime import datetime
 
     from coder_eval.models import (
-        AgentConfig,
-        AgentKind,
         EvaluationResult,
-        FileExistsCriterion,
         SandboxConfig,
-        TaskDefinition,
+        parse_agent_config,
     )
 
     task = TaskDefinition(
         task_id="summary_task",
         description="d",
         initial_prompt="p",
-        agent=AgentConfig(type=AgentKind.CLAUDE_CODE),
+        agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
         sandbox=SandboxConfig(),
         success_criteria=[FileExistsCriterion(description="x", path="x.py")],
     )
@@ -1985,20 +1975,16 @@ async def test_evaluation_loop_evaluate_only_loads_reference(tmp_path):
     from unittest.mock import MagicMock
 
     from coder_eval.models import (
-        AgentConfig,
-        AgentKind,
         CriterionResult,
         EvaluationResult,
-        FileExistsCriterion,
         ReferenceSource,
         SandboxConfig,
-        TaskDefinition,
     )
 
     ref_path = tmp_path / "reference.txt"
     ref_path.write_text("REFERENCE_CONTENT")
 
-    agent_cfg = AgentConfig.model_construct(
+    agent_cfg = ClaudeCodeAgentConfig.model_construct(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
         allowed_tools=None,

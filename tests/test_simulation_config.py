@@ -9,12 +9,12 @@ from pydantic import ValidationError
 
 from coder_eval.models import (
     DEFAULT_SIMULATION_STOP_TOKEN,
-    AgentConfig,
     AgentKind,
     FileExistsCriterion,
     SandboxConfig,
     SimulationConfig,
     TaskDefinition,
+    parse_agent_config,
 )
 
 
@@ -106,7 +106,7 @@ class TestSimulationOnTaskDefinition:
             "task_id": "sim-task",
             "description": "A simulated task",
             "initial_prompt": "Hello, I need help.",
-            "agent": AgentConfig(type=AgentKind.CLAUDE_CODE),
+            "agent": parse_agent_config(type=AgentKind.CLAUDE_CODE),
             "sandbox": SandboxConfig(driver="tempdir"),
             "success_criteria": [FileExistsCriterion(path="out.txt", description="file exists")],
         }

@@ -36,6 +36,7 @@ success_criteria:
     # so most runs verdict on turn 1.
     max_turns: 8
     agent:
+      type: "claude-code"
       # No model: override — falls back to _default_judge_agent_config's
       # sonnet-4-6, which is the id the main agent already uses successfully
       # via BEDROCK_MODEL. Previously pinned to haiku-4-5-20251001 for cost,

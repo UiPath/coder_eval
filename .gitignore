@@ -47,6 +47,7 @@ coverage.xml
 htmlcov/
 .ruff_cache/
 bandit-report.json
+*.log
 
 # UiPath specific
 .uipath/

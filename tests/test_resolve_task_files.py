@@ -5,7 +5,14 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from coder_eval.models import AgentConfig, AgentKind, SandboxConfig, TaskDefinition, TemplateDirSource
+from coder_eval.models import (
+    AgentConfig,
+    AgentKind,
+    SandboxConfig,
+    TaskDefinition,
+    TemplateDirSource,
+    parse_agent_config,
+)
 from coder_eval.orchestration.experiment import _merge_agent_dicts, resolve_task_files
 from coder_eval.orchestration.task_loader import (
     resolve_agent_system_prompt,
@@ -17,18 +24,18 @@ class TestAgentConfigValidation:
     """Test AgentConfig system_prompt / system_prompt_file validators."""
 
     def test_system_prompt_alone_valid(self):
-        c = AgentConfig(type=AgentKind.CLAUDE_CODE, system_prompt="You are a test agent.")
+        c = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt="You are a test agent.")
         assert c.system_prompt == "You are a test agent."
         assert c.system_prompt_file is None
 
     def test_system_prompt_file_alone_valid(self):
-        c = AgentConfig(type=AgentKind.CLAUDE_CODE, system_prompt_file="prompts/agent.md")
+        c = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_file="prompts/agent.md")
         assert c.system_prompt_file == "prompts/agent.md"
         assert c.system_prompt is None
 
     def test_both_raises(self):
         with pytest.raises(ValidationError, match="Only one of"):
-            AgentConfig(
+            parse_agent_config(
                 type=AgentKind.CLAUDE_CODE,
                 system_prompt="inline",
                 system_prompt_file="file.md",
@@ -36,33 +43,33 @@ class TestAgentConfigValidation:
 
     def test_neither_valid(self):
         """Both None is fine — system prompt is optional."""
-        c = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        c = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         assert c.system_prompt is None
         assert c.system_prompt_file is None
 
     def test_setting_sources_none_default(self):
-        c = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        c = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         assert c.setting_sources is None
 
     def test_setting_sources_empty_list(self):
-        c = AgentConfig(type=AgentKind.CLAUDE_CODE, setting_sources=[])
+        c = parse_agent_config(type=AgentKind.CLAUDE_CODE, setting_sources=[])
         assert c.setting_sources == []
 
     def test_setting_sources_custom(self):
-        c = AgentConfig(type=AgentKind.CLAUDE_CODE, setting_sources=["project", "user"])
+        c = parse_agent_config(type=AgentKind.CLAUDE_CODE, setting_sources=["project", "user"])
         assert c.setting_sources == ["project", "user"]
 
     def test_claude_settings_default_none(self):
-        c = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        c = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         assert c.claude_settings is None
 
     def test_claude_settings_dict(self):
         settings = {"permissions": {"deny": ["Read(/Users/religa/src/**)"]}}
-        c = AgentConfig(type=AgentKind.CLAUDE_CODE, claude_settings=settings)
+        c = parse_agent_config(type=AgentKind.CLAUDE_CODE, claude_settings=settings)
         assert c.claude_settings == settings
 
     def test_claude_settings_string_path(self):
-        c = AgentConfig(type=AgentKind.CLAUDE_CODE, claude_settings="/path/to/settings.json")
+        c = parse_agent_config(type=AgentKind.CLAUDE_CODE, claude_settings="/path/to/settings.json")
         assert c.claude_settings == "/path/to/settings.json"
 
 
@@ -156,18 +163,18 @@ class TestResolveAgentSystemPrompt:
     def test_resolves_relative_path(self, tmp_path):
         prompt_file = tmp_path / "system.md"
         prompt_file.write_text("System prompt content\n")
-        agent = AgentConfig(type=AgentKind.CLAUDE_CODE, system_prompt_file="system.md")
+        agent = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_file="system.md")
         resolve_agent_system_prompt(agent, tmp_path)
         assert agent.system_prompt == "System prompt content"
         assert agent.system_prompt_file is None
 
     def test_missing_file_raises(self, tmp_path):
-        agent = AgentConfig(type=AgentKind.CLAUDE_CODE, system_prompt_file="missing.md")
+        agent = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_file="missing.md")
         with pytest.raises(FileNotFoundError):
             resolve_agent_system_prompt(agent, tmp_path)
 
     def test_no_file_field_is_noop(self, tmp_path):
-        agent = AgentConfig(type=AgentKind.CLAUDE_CODE, system_prompt="inline")
+        agent = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt="inline")
         resolve_agent_system_prompt(agent, tmp_path)
         assert agent.system_prompt == "inline"
 
@@ -178,7 +185,7 @@ class TestResolveAgentSystemPrompt:
     def test_multiline_content_stripped(self, tmp_path):
         prompt_file = tmp_path / "system.md"
         prompt_file.write_text("\n  Line 1\n  Line 2\n\n")
-        agent = AgentConfig(type=AgentKind.CLAUDE_CODE, system_prompt_file="system.md")
+        agent = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_file="system.md")
         resolve_agent_system_prompt(agent, tmp_path)
         assert agent.system_prompt == "Line 1\n  Line 2"
 
@@ -212,7 +219,7 @@ class TestResolveTaskFiles:
         experiment_file = exp_dir / "experiment.yaml"
         experiment_file.touch()
 
-        agent = AgentConfig(type=AgentKind.CLAUDE_CODE, system_prompt_file="agent_prompt.md")
+        agent = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_file="agent_prompt.md")
         task = _make_task(agent=agent)
 
         resolve_task_files(task, task_file, experiment_file)
@@ -229,7 +236,7 @@ class TestResolveTaskFiles:
         task_file.parent.mkdir()
         task_file.touch()
 
-        agent = AgentConfig(type=AgentKind.CLAUDE_CODE, system_prompt_file=str(prompt))
+        agent = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_file=str(prompt))
         task = _make_task(agent=agent)
 
         resolve_task_files(task, task_file)
@@ -245,7 +252,7 @@ class TestResolveTaskFiles:
         task_file = tmp_path / "tasks" / "task.yaml"
         task_file.touch()
 
-        agent = AgentConfig(type=AgentKind.CLAUDE_CODE, system_prompt_file="local_prompt.md")
+        agent = parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt_file="local_prompt.md")
         task = _make_task(agent=agent)
 
         resolve_task_files(task, task_file)
@@ -308,7 +315,7 @@ class TestMergeAgentDictsPromptExclusivity:
 
         merged = _merge_agent_dicts(task_agent, variant_agent)
         # Should not crash AgentConfig validation
-        config = AgentConfig(**merged)
+        config = parse_agent_config(**merged)
         assert config.system_prompt_file == "variant_prompt.md"
         assert config.system_prompt is None
 
@@ -318,7 +325,7 @@ class TestMergeAgentDictsPromptExclusivity:
         variant_agent = {"system_prompt": "inline from variant"}
 
         merged = _merge_agent_dicts(task_agent, variant_agent)
-        config = AgentConfig(**merged)
+        config = parse_agent_config(**merged)
         assert config.system_prompt == "inline from variant"
         assert config.system_prompt_file is None
 

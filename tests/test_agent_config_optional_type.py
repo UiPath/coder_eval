@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from coder_eval.models import (
-    AgentConfig,
     AgentKind,
     ExperimentDefaults,
     ExperimentDefinition,
@@ -16,6 +15,7 @@ from coder_eval.models import (
     SandboxConfig,
     TaskDefinition,
 )
+from coder_eval.models.agent_config import parse_agent_config
 from coder_eval.orchestration.config import BatchRunConfig
 from coder_eval.orchestration.experiment import _apply_cli_overrides, resolve_task_for_variant
 
@@ -33,14 +33,14 @@ def _make_task(*, agent: dict | None = None) -> TaskDefinition:
         task_id="optional_type",
         description="optional_type",
         initial_prompt="x",
-        agent=AgentConfig(**agent) if agent is not None else None,
+        agent=parse_agent_config(**agent) if agent is not None else None,
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(type="file_exists", path="x.py", description="x.py exists")],
     )
 
 
 def test_agent_config_type_is_optional() -> None:
-    cfg = AgentConfig()
+    cfg = parse_agent_config()
     assert cfg.type is None
 
 

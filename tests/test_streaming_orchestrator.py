@@ -1,6 +1,6 @@
 """Tests for streaming callback integration in Orchestrator."""
 
-from coder_eval.models import AgentConfig, AgentKind, SandboxConfig, TaskDefinition
+from coder_eval.models import AgentKind, SandboxConfig, TaskDefinition, parse_agent_config
 from coder_eval.streaming.events import StreamEvent
 from tests._path_helpers import tmp_subdir
 
@@ -21,7 +21,7 @@ def _make_minimal_task() -> TaskDefinition:
         task_id="stream-test",
         description="test task",
         initial_prompt="do something",
-        agent=AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="bypassPermissions"),
+        agent=parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="bypassPermissions"),
         sandbox=SandboxConfig(),
         success_criteria=[
             {"type": "file_exists", "description": "test file exists", "path": "test.txt"},

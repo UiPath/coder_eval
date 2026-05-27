@@ -8,12 +8,12 @@ import pytest
 
 from coder_eval.errors import TaskTimeoutError
 from coder_eval.models import (
-    AgentConfig,
     AgentKind,
     FileExistsCriterion,
     FinalStatus,
     SandboxConfig,
     TaskDefinition,
+    parse_agent_config,
 )
 from coder_eval.orchestrator import Orchestrator
 
@@ -23,7 +23,7 @@ def _build_orchestrator(tmp_path: Path) -> Orchestrator:
         task_id="tail_capture_task",
         description="d",
         initial_prompt="p",
-        agent=AgentConfig(type=AgentKind.CLAUDE_CODE),
+        agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(description="x", path="x.py")],
     )

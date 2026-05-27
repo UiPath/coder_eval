@@ -22,7 +22,7 @@ import pytest
 pytest.importorskip("openai_codex")
 
 from coder_eval.agents.codex_agent import CodexAgent
-from coder_eval.models import AgentConfig, AgentKind
+from coder_eval.models import AgentKind, parse_agent_config
 
 
 _live = pytest.mark.live
@@ -37,7 +37,7 @@ pytestmark = [_live, pytest.mark.skipif(not _have_api_key(), reason=_skip_reason
 
 
 def _make_agent() -> CodexAgent:
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CODEX,
         permission_mode="bypassPermissions",  # full access so it can run shell + write files
         model=os.getenv("CODEX_MODEL"),

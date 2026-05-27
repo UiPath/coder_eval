@@ -8,6 +8,7 @@ tags:
 
 agent:
   type: codex
+  model: gpt-5-codex
   permission_mode: acceptEdits
   plugins:
     - type: local

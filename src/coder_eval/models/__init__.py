@@ -8,7 +8,13 @@ which submodule they're defined in.
 from claude_agent_sdk import SdkPluginConfig
 
 # Agent config
-from coder_eval.models.agent_config import AgentConfig
+from coder_eval.models.agent_config import (
+    AgentConfig,
+    BaseAgentConfig,
+    ClaudeCodeAgentConfig,
+    CodexAgentConfig,
+    parse_agent_config,
+)
 
 # Enums
 # Criteria
@@ -40,6 +46,7 @@ from coder_eval.models.enums import (
     AgentState,
     ApiBackend,
     FinalStatus,
+    PermissionMode,
 )
 
 # Experiment
@@ -162,11 +169,18 @@ from coder_eval.models.templates import (
 __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     # SDK Types
     "SdkPluginConfig",
+    # Agent config
+    "AgentConfig",
+    "BaseAgentConfig",
+    "ClaudeCodeAgentConfig",
+    "CodexAgentConfig",
+    "parse_agent_config",
     # Enums
     "AgentKind",
     "AgentState",
     "ApiBackend",
     "FinalStatus",
+    "PermissionMode",
     # Criteria
     "BaseSuccessCriterion",
     "ClassificationMatchCriterion",
@@ -253,7 +267,6 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     # Tasks
     "TaskDefinition",
     "DEFAULT_SIMULATION_STOP_TOKEN",
-    "AgentConfig",
     "CriteriaCheckTiming",
     "Dataset",
     "PostRunCommand",

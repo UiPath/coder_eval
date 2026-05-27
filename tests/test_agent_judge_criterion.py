@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json as _json
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -26,8 +27,10 @@ from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.evaluation.sub_agent import SubAgentRunner
 from coder_eval.models import (
     AgentJudgeCriterion,
+    ClaudeCodeAgentConfig,
     JudgeVerdict,
     TurnRecord,
+    parse_agent_config,
 )
 from coder_eval.models.routing import DirectRoute, ProxyRoute
 from coder_eval.sandbox import Sandbox
@@ -199,14 +202,13 @@ def test_agent_judge_turn_timeout_maps_to_zero(sandbox: Sandbox, direct_route: D
 
 
 def test_agent_judge_config_propagates(sandbox: Sandbox, direct_route: DirectRoute) -> None:
-    from coder_eval.models import AgentConfig
 
     criterion = AgentJudgeCriterion(
         description="x",
         prompt="grade",
         max_turns=3,
         turn_timeout=45,
-        agent=AgentConfig(
+        agent=parse_agent_config(
             type="claude-code",
             model="claude-sonnet-4-6",
             permission_mode="plan",
@@ -284,12 +286,11 @@ def test_agent_judge_build_agent_config_does_not_mutate_criterion(sandbox: Sandb
 
 def test_agent_judge_setting_sources_forced_empty(sandbox: Sandbox, direct_route: DirectRoute) -> None:
     """_build_agent_config always sets setting_sources=[] regardless of YAML."""
-    from coder_eval.models import AgentConfig
 
     criterion = AgentJudgeCriterion(
         description="x",
         prompt="grade",
-        agent=AgentConfig(type="claude-code", setting_sources=["project"]),
+        agent=parse_agent_config(type="claude-code", setting_sources=["project"]),
     )
     mock_agent = _make_mock_agent('{"score": 1.0, "rationale": "ok"}')
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent) as mock_cls:
@@ -306,12 +307,11 @@ def test_agent_judge_partial_agent_block_preserves_judge_defaults(sandbox: Sandb
     falling back to acceptEdits, ``allowed_tools=None`` (==> all tools), and
     ``ignore_patterns=[]`` — silently dropping the security floor.
     """
-    from coder_eval.models import AgentConfig
 
     criterion = AgentJudgeCriterion(
         description="x",
         prompt="grade",
-        agent=AgentConfig(type="claude-code", model="claude-haiku-4-5-20251001"),
+        agent=parse_agent_config(type="claude-code", model="claude-haiku-4-5-20251001"),
     )
     mock_agent = _make_mock_agent('{"score": 1.0, "rationale": "ok"}')
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent) as mock_cls:
@@ -359,7 +359,7 @@ def test_agent_judge_sdk_options_deep_merge_with_growing_defaults(
     criterion = AgentJudgeCriterion(
         description="x",
         prompt="grade",
-        agent=AgentConfig(type="claude-code", sdk_options={"include_partial_messages": True, "effort": "high"}),
+        agent=parse_agent_config(type="claude-code", sdk_options={"include_partial_messages": True, "effort": "high"}),
     )
     mock_agent = _make_mock_agent('{"score": 1.0, "rationale": "ok"}')
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent) as mock_cls:
@@ -375,12 +375,11 @@ def test_agent_judge_sdk_options_deep_merge_with_growing_defaults(
 
 def test_agent_judge_security_ignore_patterns_floor_enforced(sandbox: Sandbox, direct_route: DirectRoute) -> None:
     """User-supplied ignore_patterns are merged with the security floor, never replace it."""
-    from coder_eval.models import AgentConfig
 
     criterion = AgentJudgeCriterion(
         description="x",
         prompt="grade",
-        agent=AgentConfig(type="claude-code", ignore_patterns=["custom_dir"]),
+        agent=parse_agent_config(type="claude-code", ignore_patterns=["custom_dir"]),
     )
     mock_agent = _make_mock_agent('{"score": 1.0, "rationale": "ok"}')
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent) as mock_cls:
@@ -1034,7 +1033,7 @@ def test_agent_judge_integration_real_sdk(tmp_path: Path) -> None:
     if not api_key or api_key.startswith("sk-ant-test-"):
         pytest.skip("Needs a real ANTHROPIC_API_KEY to talk to the SDK")
 
-    from coder_eval.models import AgentConfig, SandboxConfig
+    from coder_eval.models import SandboxConfig
 
     (tmp_path / "hello.txt").write_text("Hello, world!\n")
     sb = Sandbox(SandboxConfig(driver="tempdir"), task_id="agent_judge_integration")
@@ -1048,7 +1047,7 @@ def test_agent_judge_integration_real_sdk(tmp_path: Path) -> None:
         ),
         max_turns=6,
         turn_timeout=90,
-        agent=AgentConfig(
+        agent=parse_agent_config(
             type="claude-code",
             model="claude-haiku-4-5-20251001",
             allowed_tools=["Read"],
@@ -1184,18 +1183,21 @@ def test_sub_agent_runner_forwards_extra_mcp_servers(tmp_path: Path) -> None:
     mutating sdk_options (mcp_servers is in _FRAMEWORK_OWNED_SDK_FIELDS)."""
     from coder_eval.evaluation.sub_agent import SubAgentRunner
     from coder_eval.evaluation.verdict_tool import VerdictCapture, build_submit_verdict_mcp_server
-    from coder_eval.models import AgentConfig, SandboxConfig
+    from coder_eval.models import SandboxConfig
 
     sb = Sandbox(SandboxConfig(driver="tempdir"), task_id="x")
     sb.sandbox_dir = tmp_path
     capture = VerdictCapture()
     server_name, server = build_submit_verdict_mcp_server(capture)
-    cfg = AgentConfig(
-        type="claude-code",
-        model="claude-haiku-4-5",
-        permission_mode="bypassPermissions",
-        setting_sources=[],
-        allowed_tools=["Read"],
+    cfg = cast(
+        ClaudeCodeAgentConfig,
+        parse_agent_config(
+            type="claude-code",
+            model="claude-haiku-4-5",
+            permission_mode="bypassPermissions",
+            setting_sources=[],
+            allowed_tools=["Read"],
+        ),
     )
     runner = SubAgentRunner(
         sandbox=sb,
@@ -1213,9 +1215,8 @@ def test_sub_agent_runner_forwards_extra_mcp_servers(tmp_path: Path) -> None:
 def test_claude_code_agent_accepts_extra_mcp_servers() -> None:
     """ClaudeCodeAgent stores extra_mcp_servers; merging into ClaudeAgentOptions is tested live."""
     from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
-    from coder_eval.models import AgentConfig
 
-    cfg = AgentConfig(type="claude-code", model="m", setting_sources=[])
+    cfg = parse_agent_config(type="claude-code", model="m", setting_sources=[])
     agent = ClaudeCodeAgent(cfg, extra_mcp_servers={"a": {"type": "sdk", "name": "a", "instance": object()}})
     assert agent._extra_mcp_servers == {
         "a": {"type": "sdk", "name": "a", "instance": agent._extra_mcp_servers["a"]["instance"]}

@@ -4,12 +4,12 @@ import pytest
 from pydantic import ValidationError
 
 from coder_eval.models import (
-    AgentConfig,
     FileExistsCriterion,
     ReferenceComparisonCriterion,
     ReferenceSource,
     SandboxConfig,
     TaskDefinition,
+    parse_agent_config,
 )
 
 
@@ -79,7 +79,7 @@ class TestTaskDefinition:
             task_id="test",
             description="Test task",
             initial_prompt="Do something",
-            agent=AgentConfig(type="claude-code"),
+            agent=parse_agent_config(type="claude-code"),
             sandbox=SandboxConfig(driver="tempdir"),
             success_criteria=[FileExistsCriterion(path="test.py", description="Test file exists")],
             reference=ReferenceSource(code="print('reference')"),
@@ -95,7 +95,7 @@ class TestTaskDefinition:
             task_id="test",
             description="Test task",
             initial_prompt="Do something",
-            agent=AgentConfig(type="claude-code"),
+            agent=parse_agent_config(type="claude-code"),
             sandbox=SandboxConfig(driver="tempdir"),
             success_criteria=[FileExistsCriterion(path="test.py", description="Test file exists")],
             reference=ReferenceSource(file="references/solution.py"),
@@ -111,7 +111,7 @@ class TestTaskDefinition:
             task_id="test",
             description="Test task",
             initial_prompt="Do something",
-            agent=AgentConfig(type="claude-code"),
+            agent=parse_agent_config(type="claude-code"),
             sandbox=SandboxConfig(driver="tempdir"),
             success_criteria=[FileExistsCriterion(path="test.py", description="Test file exists")],
         )

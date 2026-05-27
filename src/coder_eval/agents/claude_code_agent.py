@@ -33,6 +33,7 @@ from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITra
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter
+from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
 from coder_eval.errors import (
     AgentCrashError,
@@ -42,9 +43,10 @@ from coder_eval.errors import (
 )
 from coder_eval.formatting import format_payload, format_token_usage
 from coder_eval.models import (
-    AgentConfig,
+    AgentKind,
     ApiRoute,
     BedrockRoute,
+    ClaudeCodeAgentConfig,
     CommandTelemetry,
     ContentBlock,
     DirectRoute,
@@ -185,12 +187,13 @@ def _dump_sdk_options(opts: ClaudeAgentOptions) -> dict[str, Any]:
     return result
 
 
-class ClaudeCodeAgent(Agent):
+@AgentRegistry.register(AgentKind.CLAUDE_CODE, ClaudeCodeAgentConfig)
+class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     """Implementation of the Agent interface for Claude Code using the SDK."""
 
     def __init__(
         self,
-        config: AgentConfig,
+        config: ClaudeCodeAgentConfig,
         route: ApiRoute | None = None,
         *,
         instance_name: str = "coder",
@@ -486,7 +489,7 @@ class ClaudeCodeAgent(Agent):
             # paths, so a redirect like `> D:\foo\bar` ends up writing to "Dfoobar".
             options = ClaudeAgentOptions(
                 cwd=self.working_directory.as_posix(),
-                permission_mode=self.config.permission_mode,
+                permission_mode=self.config.permission_mode.value,
                 allowed_tools=self.config.allowed_tools or [],
                 disallowed_tools=disallowed_tools,
                 model=effective_model,

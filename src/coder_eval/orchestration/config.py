@@ -6,6 +6,8 @@ from typing import Any, Literal
 from claude_agent_sdk import SdkPluginConfig
 from pydantic import BaseModel, ConfigDict, Field
 
+from coder_eval.models import PermissionMode
+
 
 class BatchRunConfig(BaseModel):
     """Configuration for batch task execution.
@@ -25,7 +27,7 @@ class BatchRunConfig(BaseModel):
     # Agent overrides (CLI > .env > task YAML)
     agent_type: str | None = Field(default=None, description="Override agent type for all tasks (e.g., 'claude-code')")
     agent_model: str | None = Field(default=None, description="Override agent model for all tasks")
-    permission_mode: str | None = Field(default=None, description="Override permission mode for all tasks")
+    permission_mode: PermissionMode | None = Field(default=None, description="Override permission mode for all tasks")
     max_turns: int | None = Field(default=None, description="Override max turns for all tasks")
 
     allowed_tools: list[str] | None = Field(default=None, description="Override allowed tools for all tasks")

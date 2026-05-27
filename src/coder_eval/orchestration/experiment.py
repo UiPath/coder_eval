@@ -18,8 +18,6 @@ from typing import Any, Literal
 import yaml
 
 from ..models import (
-    AgentConfig,
-    AgentKind,
     ConfigLineageEntry,
     ExperimentDefinition,
     ExperimentResult,
@@ -40,6 +38,7 @@ from ..models import (
     apply_prompt_mutations,
     validate_template_sources_list,
 )
+from ..models.agent_config import parse_agent_config
 from ..path_utils import build_task_run_dir
 from .config import BatchRunConfig
 from .task_loader import (
@@ -465,7 +464,7 @@ def resolve_task_for_variant(
     # applied — see _apply_cli_overrides — so `--type` can satisfy the contract
     # for tasks that omit `agent.type` entirely.
     merged_agent_dict = _merge_agent_dicts(default_agent, exp_defaults_agent, task_agent, variant_agent_clean)
-    resolved_agent = AgentConfig(**merged_agent_dict)
+    resolved_agent = parse_agent_config(**merged_agent_dict)
 
     # Build agent lineage
     agent_lineage = _build_agent_lineage(
@@ -672,7 +671,12 @@ def _apply_cli_overrides(
     assert task.agent is not None, f"Task '{task.task_id}' has no agent config"
 
     if config.agent_type is not None:
-        task.agent.type = AgentKind(config.agent_type)  # validated by AgentKind enum
+        from coder_eval.models import parse_agent_config
+
+        # Re-parse the agent config with the new type to avoid Literal type mismatch
+        agent_dict = task.agent.model_dump(exclude_unset=True)
+        agent_dict["type"] = config.agent_type
+        task.agent = parse_agent_config(**agent_dict)
         _record("agent.type", config.agent_type, "--type")
 
     effective_model = config.agent_model if config.agent_model is not None else app_settings.default_agent_model
@@ -721,9 +725,17 @@ def _apply_cli_overrides(
         task.agent.plugins = config.plugins
         _record("agent.plugins", config.plugins, "--plugins")
     if config.sdk_options:
-        task.agent.sdk_options = {**task.agent.sdk_options, **config.sdk_options}
-        for key, value in config.sdk_options.items():
-            _record(f"agent.sdk_options.{key}", value, f"--sdk-option {key}={value}")
+        from coder_eval.models import ClaudeCodeAgentConfig
+
+        if isinstance(task.agent, ClaudeCodeAgentConfig):
+            task.agent.sdk_options = {**task.agent.sdk_options, **config.sdk_options}
+            for key, value in config.sdk_options.items():
+                _record(f"agent.sdk_options.{key}", value, f"--sdk-option {key}={value}")
+        else:
+            raise ValueError(
+                f"--sdk-option cannot be used with agent type {task.agent.type}. "
+                "This option is only supported for claude-code agents."
+            )
 
     # Sandbox driver override (CLI > task YAML). Driver value is already
     # Literal-validated upstream via BatchRunConfig; nothing to re-check.

@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
 
-from coder_eval.models.agent_config import AgentConfig
+from coder_eval.models.agent_config import AgentConfig, BaseAgentConfig
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind, FinalStatus
 from coder_eval.models.telemetry import (
@@ -443,7 +443,7 @@ class EvaluationResult(BaseModel):
     )
 
     # Agent configuration
-    agent_config: AgentConfig | None = Field(
+    agent_config: AgentConfig | BaseAgentConfig | None = Field(
         default=None,
         description="Agent configuration used for the evaluation (from task YAML)",
     )

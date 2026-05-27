@@ -31,7 +31,6 @@ from .errors.retry import create_error_context
 from .evaluation.checker import SuccessChecker, _short_failure_reason
 from .models import (
     ROUTE_NAMES,
-    AgentKind,
     ApiBackend,
     ApiRoute,
     BedrockRoute,
@@ -908,27 +907,23 @@ class Orchestrator:
             # choice is visible in run artifacts (and not just the startup log).
             self.result.environment_info["judge_transport"] = self.route.judge_transport or "none"
 
-    async def _create_agent(self) -> Agent:
+    async def _create_agent(self) -> Agent[Any]:
         """Create the appropriate agent based on task configuration.
+
+        Uses the AgentRegistry factory to dispatch to registered agent implementations.
 
         Returns:
             Agent instance
 
         Raises:
             ValueError: If agent type is not supported
+            TypeError: If config doesn't match agent's expected type
         """
+        from coder_eval.agents import create_agent
+
         assert self.task.agent is not None
-        if self.task.agent.type == AgentKind.CLAUDE_CODE:
-            from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
-
-            assert self.route is not None
-            return ClaudeCodeAgent(self.task.agent, route=self.route)
-        elif self.task.agent.type == AgentKind.CODEX:
-            from coder_eval.agents.codex_agent import CodexAgent
-
-            return CodexAgent(self.task.agent, route=self.route)
-        else:
-            raise ValueError(f"Unsupported agent type: {self.task.agent.type}")
+        assert self.task.agent.type is not None
+        return create_agent(self.task.agent.type, self.task.agent, route=self.route)
 
     async def _communicate_with_retry(
         self,

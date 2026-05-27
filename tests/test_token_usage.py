@@ -6,7 +6,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _is_sdk_result_message
-from coder_eval.models import AgentConfig, AgentKind, EvaluationResult, RunSummary, TokenUsage, TurnRecord
+from coder_eval.models import (
+    AgentKind,
+    EvaluationResult,
+    RunSummary,
+    TokenUsage,
+    TurnRecord,
+    parse_agent_config,
+)
 from coder_eval.reports import ReportGenerator
 
 
@@ -180,7 +187,7 @@ class TestAgentTokenCapture:
     @pytest.mark.asyncio
     async def test_communicate_captures_token_usage(self):
         """Verify that when SDK yields a ResultMessage with usage, TurnRecord.token_usage is populated."""
-        config = AgentConfig(
+        config = parse_agent_config(
             type=AgentKind.CLAUDE_CODE,
             permission_mode="acceptEdits",
             allowed_tools=["Read"],
@@ -226,7 +233,7 @@ class TestAgentTokenCapture:
     @pytest.mark.asyncio
     async def test_communicate_no_usage_when_not_present(self):
         """Verify that TurnRecord.token_usage is None when SDK doesn't yield usage."""
-        config = AgentConfig(
+        config = parse_agent_config(
             type=AgentKind.CLAUDE_CODE,
             permission_mode="acceptEdits",
             allowed_tools=["Read"],
@@ -254,7 +261,7 @@ class TestAgentTokenCapture:
     @pytest.mark.asyncio
     async def test_communicate_handles_none_cache_tokens(self):
         """Verify that None cache tokens in usage dict are treated as 0."""
-        config = AgentConfig(
+        config = parse_agent_config(
             type=AgentKind.CLAUDE_CODE,
             permission_mode="acceptEdits",
             allowed_tools=["Read"],

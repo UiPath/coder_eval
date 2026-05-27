@@ -7,7 +7,13 @@ all 5 merge layers. This file covers `BatchRunConfig.driver`.
 import pytest
 from pydantic import ValidationError
 
-from coder_eval.models import AgentConfig, AgentKind, FileExistsCriterion, SandboxConfig, TaskDefinition
+from coder_eval.models import (
+    AgentKind,
+    FileExistsCriterion,
+    SandboxConfig,
+    TaskDefinition,
+    parse_agent_config,
+)
 from coder_eval.orchestration.config import BatchRunConfig
 from coder_eval.orchestration.experiment import _apply_cli_overrides
 from tests._path_helpers import tmp_subdir
@@ -18,7 +24,7 @@ def _make_task(driver: str = "tempdir") -> TaskDefinition:
         task_id="t",
         description="x",
         initial_prompt="hi",
-        agent=AgentConfig(type=AgentKind.CLAUDE_CODE),
+        agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
         sandbox=SandboxConfig(driver=driver),  # type: ignore[arg-type]
         success_criteria=[FileExistsCriterion(description="x", path="f.txt")],
     )

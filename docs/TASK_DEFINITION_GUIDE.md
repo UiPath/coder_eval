@@ -114,16 +114,20 @@ agent:
 validated against the SDK's dataclass at YAML load; framework-managed keys
 (`model`, `allowed_tools`, `permission_mode`, `hooks`, `mcp_servers`, …)
 are rejected. Deep-merged across the 5-layer config chain. Override via
-CLI with the repeatable `--sdk-option KEY=VALUE`. See the
+CLI with the repeatable `--sdk-option KEY=VALUE`. **Requires `type: "claude-code"`**
+to function; on other agent types, `--sdk-option` raises an error. See the
 [SDK pass-through feature spec](features/2026-05-18-sdk-pass-through.md)
 for the full reference, including the valid keys list.
 
-
 **Permission Modes:**
-- `auto` — Agent decides when to ask for permission
+- `default` — Default permission handling
 - `acceptEdits` — Auto-accept file edits (recommended for evaluations)
 - `plan` — Agent proposes changes, waits for approval
 - `bypassPermissions` — No permission checks (use with caution)
+
+**Agent Types:**
+- `claude-code` (default) — Claude Code SDK agent. Supports `sdk_options`, `claude_settings`, and all permission modes.
+- `codex` — OpenAI Codex agent (requires `[codex]` extra; set `CODEX_API_KEY` and optional `CODEX_BASE_URL` environment variables).
 
 ### `max_turns`, `task_timeout`, `turn_timeout` location
 
@@ -509,6 +513,8 @@ Checks whether the agent executed specific tools/commands during evaluation. Ins
   description: "Agent must use curl to fetch weather"
 ```
 
+**Codex limitation.** Codex agents map `Read`, `Grep`, and `Glob` tools to `shell` commands (they execute via bash), so `tool_name: "Read"` on Codex returns no matches. Use `tool_name: "Bash"` or `tool_name: null` (any tool) for Codex-compatible checks. This criterion works correctly on Claude Code agents, which emit separate `Read`/`Grep`/`Glob` telemetry.
+
 ### `uipath_eval`
 
 Evaluates a UiPath agent against a named evaluation set. **Fractional scoring:** metrics passed / total metrics.
@@ -699,6 +705,8 @@ Observed label is `"yes"` when such a call is found, else `"no"`. Expected label
 **Classification metrics.** `skill_triggered` returns a `ClassificationCriterionResult`, so on a [dataset-backed task](#task-yaml-structure) the suite aggregator computes accuracy / precision / recall / F1 / confusion matrix across all rows. Gate the suite with `suite_thresholds` using any of: `accuracy`, `macro_f1`, `weighted_f1`, `micro_f1`, or per-label `precision.<label>` / `recall.<label>` / `f1.<label>` (labels are `yes` / `no`). The run exits non-zero if any listed metric falls below its minimum.
 
 **Typical pattern.** Label each dataset row with its true skill (`expected_skill`, `""` for negatives) and stack one `skill_triggered` criterion per skill against the same dataset — each gets its own confusion matrix from the same agent traces. This is the natural companion to a skill A/B experiment (skill plugin on vs. off); see the [A/B Experiment Guide](AB_EXPERIMENTS.md#recipe-ab-a-skill).
+
+**Claude-only.** Codex agents do not emit `Skill` tool records, so this criterion silently scores false-negative (always `score=0.0`) on Codex runs. Use only on tasks with `type: claude-code` agents.
 
 ## Reference Solutions
 

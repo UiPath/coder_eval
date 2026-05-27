@@ -3,12 +3,12 @@
 from pathlib import Path
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
-from coder_eval.models import AgentConfig, AgentKind
+from coder_eval.models import AgentKind, parse_agent_config
 
 
 def _agent() -> ClaudeCodeAgent:
     """Build a minimal ClaudeCodeAgent instance just to reach _process_plugins."""
-    return ClaudeCodeAgent(AgentConfig(type=AgentKind.CLAUDE_CODE))
+    return ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
 
 
 class TestProcessPlugins:

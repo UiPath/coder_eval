@@ -61,7 +61,7 @@ class ExperimentDefinition(BaseModel):
     experiment_id: str                     # kebab-case identifier
     description: str = ""
     defaults: ExperimentDefaults | None = None
-    variants: list[ExperimentVariant]      # >= 1 variant, unique variant_id
+    variants: list[ExperimentVariant]      # >= 1 variant, unique variant_ids
 ```
 
 Agent overrides are `dict[str, Any]` (partial dicts) rather than full `AgentConfig` — only specified keys participate in the merge.
@@ -91,6 +91,7 @@ defaults:
 
 variants:
   - variant_id: default
+    description: "Default configuration"
 ```
 
 **Always loaded as the baseline** — the experiment layer is unconditionally used for both `run` and `plan` commands. There is no "non-experiment" code path. All agent properties are listed explicitly so users know the baseline defaults. Tasks without an `agent` section inherit these defaults via the merge chain.
@@ -177,7 +178,7 @@ replacement — a variant setting `run_limits.max_turns` leaves the task's
 
 ```
 default.yaml      ->  agent: {type: claude-code, permission_mode: acceptEdits}
-experiment base   ->  agent: {permission_mode: bypassPermissions}
+experiment defaults ->  agent: {permission_mode: bypassPermissions}
 task.yaml         ->  agent: {allowed_tools: [Read, Write, Bash]}
 variant "opus"    ->  agent: {model: claude-opus-4-6}
 

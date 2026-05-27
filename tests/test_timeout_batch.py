@@ -6,7 +6,13 @@ shape (CLI flag surface) and patches into ``run_limits`` via field merge —
 the same wiring used in ``_apply_cli_overrides``.
 """
 
-from coder_eval.models import AgentConfig, FileExistsCriterion, RunLimits, SandboxConfig, TaskDefinition
+from coder_eval.models import (
+    FileExistsCriterion,
+    RunLimits,
+    SandboxConfig,
+    TaskDefinition,
+    parse_agent_config,
+)
 from coder_eval.orchestration.config import BatchRunConfig
 from tests._path_helpers import tmp_subdir
 
@@ -20,7 +26,7 @@ def _make_task(*, turn_timeout: int | None = None, task_timeout: int | None = No
         task_id="batch_timeout_test",
         description="Test task",
         initial_prompt="Do something",
-        agent=AgentConfig(type="claude-code"),
+        agent=parse_agent_config(type="claude-code"),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(type="file_exists", path="test.py", description="test.py must exist")],
         run_limits=run_limits,

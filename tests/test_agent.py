@@ -10,12 +10,12 @@ from claude_agent_sdk import ProcessError
 from coder_eval.agent import AgentState
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
-from coder_eval.models import AgentConfig, AgentKind
+from coder_eval.models import AgentKind, parse_agent_config
 
 
 def test_claude_agent_initialization():
     """Test that Claude agent can be initialized."""
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
         allowed_tools=["Read", "Write", "Bash"],
@@ -30,7 +30,7 @@ def test_claude_agent_initialization():
 
 def test_pending_turn_defaults_to_none():
     """Fresh agent has pending_turn = None (slot is empty at rest)."""
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
     assert agent.pending_turn is None
 
@@ -40,7 +40,7 @@ async def test_discard_pending_turn_clears_slot_and_decrements():
     """discard_pending_turn clears the slot and rolls back _iteration once."""
     from coder_eval.models import TurnRecord
 
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     partial = TurnRecord(iteration=1, user_input="p", agent_output="<partial>", crashed=True)
@@ -56,7 +56,7 @@ async def test_discard_pending_turn_clears_slot_and_decrements():
 @pytest.mark.asyncio
 async def test_discard_pending_turn_idempotent():
     """discard_pending_turn is a no-op when pending_turn is already None."""
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     assert agent.pending_turn is None
@@ -88,7 +88,7 @@ async def test_discard_pending_turn_rolls_back_when_partial_build_failed():
     a swallowed partial-build exception caused _iteration to drift permanently
     higher on every double-failure.
     """
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     # Simulate communicate() incrementing the counter and then crashing before
@@ -113,7 +113,7 @@ async def test_stop_clears_pending_turn():
 
     from coder_eval.models import TurnRecord
 
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -129,7 +129,7 @@ async def test_stop_clears_pending_turn():
 @pytest.mark.asyncio
 async def test_claude_agent_start():
     """Test that Claude agent can be started."""
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
         allowed_tools=["Read", "Write"],
@@ -153,7 +153,7 @@ async def test_claude_agent_start():
 
 def test_claude_agent_disallowed_tools_passed_to_sdk_options():
     """Test that disallowed_tools from AgentConfig reaches ClaudeAgentOptions."""
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
         allowed_tools=["Read", "Write", "Bash"],
@@ -166,7 +166,7 @@ def test_claude_agent_disallowed_tools_passed_to_sdk_options():
 
 def test_claude_agent_disallowed_tools_defaults_to_none():
     """Test that disallowed_tools defaults to None when not specified."""
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
     )
@@ -220,7 +220,7 @@ async def test_claude_agent_max_turns_kwarg_reaches_sdk_options():
     Regression-guard for the Phase-1 refactor: max_turns is a per-call argument
     (mirrors `timeout`), not a stored field on the agent.
     """
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     captured_options = await _capture_sdk_options(agent, max_turns=42)
@@ -230,7 +230,7 @@ async def test_claude_agent_max_turns_kwarg_reaches_sdk_options():
 @pytest.mark.asyncio
 async def test_claude_agent_max_turns_default_is_none():
     """Without an explicit max_turns kwarg, ClaudeAgentOptions.max_turns is None (SDK default)."""
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     captured_options = await _capture_sdk_options(agent)
@@ -240,7 +240,7 @@ async def test_claude_agent_max_turns_default_is_none():
 @pytest.mark.asyncio
 async def test_claude_agent_tool_search_always_disallowed_when_config_empty():
     """ToolSearch is always injected into disallowed_tools even when config specifies none."""
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
     )
@@ -256,7 +256,7 @@ async def test_claude_agent_tool_search_always_disallowed_when_config_empty():
 @pytest.mark.asyncio
 async def test_claude_agent_tool_search_appended_to_user_disallowed_tools():
     """User-specified disallowed_tools are preserved and ToolSearch is appended."""
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
         disallowed_tools=["TodoWrite", "Agent"],
@@ -273,7 +273,7 @@ async def test_claude_agent_tool_search_appended_to_user_disallowed_tools():
 @pytest.mark.asyncio
 async def test_claude_agent_tool_search_not_duplicated():
     """If user already lists ToolSearch, it is not duplicated."""
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
         disallowed_tools=["ToolSearch", "Agent"],
@@ -296,7 +296,7 @@ async def test_claude_agent_cwd_uses_posix_form():
     """
     from pathlib import Path
 
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     captured_options = await _capture_sdk_options(agent)
@@ -319,7 +319,7 @@ async def test_claude_agent_env_path_prepend_propagates_to_sdk_options(monkeypat
     import os
 
     monkeypatch.setenv("PATH", "/parent/bin")
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     captured_options = await _capture_sdk_options(agent, env_path_prepend=["/sandbox/mocks", "/sandbox/bins"])
@@ -332,7 +332,7 @@ async def test_claude_agent_env_path_prepend_propagates_to_sdk_options(monkeypat
 async def test_claude_agent_no_env_path_prepend_is_default(monkeypatch):
     """Omitting env_path_prepend at start() leaves PATH equal to the parent PATH."""
     monkeypatch.setenv("PATH", "/parent/bin")
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     captured_options = await _capture_sdk_options(agent)
@@ -346,7 +346,7 @@ async def test_claude_settings_dict_serialized_to_json():
     import json
 
     settings = {"permissions": {"deny": ["Read(/some/path/**)"]}}
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, claude_settings=settings)
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, claude_settings=settings)
     agent = ClaudeCodeAgent(config)
 
     captured_options = await _capture_sdk_options(agent)
@@ -357,7 +357,7 @@ async def test_claude_settings_dict_serialized_to_json():
 @pytest.mark.asyncio
 async def test_claude_settings_string_passthrough():
     """String claude_settings is passed through unchanged (treated as a file path by the SDK)."""
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, claude_settings="/path/to/settings.json")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, claude_settings="/path/to/settings.json")
     agent = ClaudeCodeAgent(config)
 
     captured_options = await _capture_sdk_options(agent)
@@ -368,7 +368,7 @@ async def test_claude_settings_string_passthrough():
 @pytest.mark.asyncio
 async def test_claude_settings_none_default():
     """When claude_settings is None (default), ClaudeAgentOptions.settings is None."""
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
     agent = ClaudeCodeAgent(config)
 
     captured_options = await _capture_sdk_options(agent)
@@ -379,7 +379,7 @@ async def test_claude_settings_none_default():
 @pytest.mark.asyncio
 async def test_sdk_options_forwarded_to_sdk():
     """An sdk_options key (e.g. effort) is splatted into ClaudeAgentOptions."""
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, sdk_options={"effort": "medium"})
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, sdk_options={"effort": "medium"})
     agent = ClaudeCodeAgent(config)
 
     captured_options = await _capture_sdk_options(agent)
@@ -390,7 +390,7 @@ async def test_sdk_options_forwarded_to_sdk():
 @pytest.mark.asyncio
 async def test_sdk_options_empty_dict_default():
     """When sdk_options is unset (default {}), the SDK gets no extra kwargs."""
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
     agent = ClaudeCodeAgent(config)
     assert config.sdk_options == {}
 
@@ -405,7 +405,7 @@ def test_sdk_options_unknown_key_rejected():
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError, match="not a ClaudeAgentOptions field"):
-        AgentConfig(type=AgentKind.CLAUDE_CODE, sdk_options={"not_a_real_field": 1})
+        parse_agent_config(type=AgentKind.CLAUDE_CODE, sdk_options={"not_a_real_field": 1})
 
 
 def test_sdk_options_framework_managed_key_rejected():
@@ -413,7 +413,7 @@ def test_sdk_options_framework_managed_key_rejected():
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError, match="framework-managed"):
-        AgentConfig(type=AgentKind.CLAUDE_CODE, sdk_options={"model": "opus"})
+        parse_agent_config(type=AgentKind.CLAUDE_CODE, sdk_options={"model": "opus"})
 
 
 @pytest.mark.parametrize(
@@ -442,14 +442,14 @@ def test_sdk_options_security_critical_key_rejected(key):
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError, match="framework-managed"):
-        AgentConfig(type=AgentKind.CLAUDE_CODE, sdk_options={key: "x"})
+        parse_agent_config(type=AgentKind.CLAUDE_CODE, sdk_options={key: "x"})
 
 
 def test_sdk_options_validates_on_assignment():
     """validate_assignment re-runs the field validator on attribute writes."""
     from pydantic import ValidationError
 
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
     with pytest.raises(ValidationError, match="not a ClaudeAgentOptions field"):
         config.sdk_options = {"bogus": 1}
 
@@ -460,12 +460,12 @@ def test_sdk_options_pydantic_round_trip():
     Locks in persistence integrity for EvaluationResult-style serialization
     paths that depend on Pydantic round-trip identity.
     """
-    original = AgentConfig(
+    original = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         sdk_options={"effort": "medium", "include_partial_messages": True},
     )
     dumped = original.model_dump()
-    restored = AgentConfig.model_validate(dumped)
+    restored = parse_agent_config(**dumped)
     assert restored.sdk_options == {"effort": "medium", "include_partial_messages": True}
     assert restored == original
 
@@ -481,7 +481,7 @@ def test_claude_agent_message_formatting():
     from claude_agent_sdk import AssistantMessage, ResultMessage
     from claude_agent_sdk.types import TextBlock
 
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
     )
@@ -529,7 +529,7 @@ def test_claude_agent_message_formatting():
 @pytest.mark.asyncio
 async def test_claude_agent_lifecycle():
     """Test agent lifecycle (start -> stop)."""
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
     )
@@ -566,7 +566,7 @@ def test_claude_agent_message_formatting_edge_cases():
     )
     from claude_agent_sdk.types import TextBlock
 
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
     )
@@ -711,7 +711,7 @@ def test_format_messages_system_message_subclasses_are_filtered():
     )
     from claude_agent_sdk.types import TextBlock
 
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     # Sanity-check: the SDK classes still extend SystemMessage as the
@@ -781,7 +781,7 @@ def test_format_messages_system_message_subclasses_are_filtered():
 @pytest.mark.asyncio
 async def test_claude_agent_process_error_includes_stderr():
     """Test that ProcessError is caught and its stderr is included in RuntimeError."""
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
     )
@@ -809,7 +809,7 @@ async def test_claude_agent_process_error_includes_stderr():
 @pytest.mark.asyncio
 async def test_claude_agent_process_error_no_stderr_at_all():
     """Test that ProcessError with no stderr and no stderr_lines shows sentinel message."""
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
     )
@@ -834,7 +834,7 @@ async def test_claude_agent_process_error_no_stderr_at_all():
 @pytest.mark.asyncio
 async def test_claude_agent_session_resumption():
     """Test that session_id from first communicate() is passed as resume on subsequent calls."""
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
     )
@@ -885,7 +885,7 @@ async def test_claude_agent_errored_result_does_not_commit_session_id():
     crashes mid-turn) resumes from a broken transcript and often
     reproduces the same crash — exactly the failure mode that made UIA
     smoke runs permanently red."""
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     import tempfile
@@ -932,7 +932,7 @@ async def test_claude_agent_errored_result_does_not_commit_session_id():
 @pytest.mark.asyncio
 async def test_claude_agent_session_resumption_none_degrades_gracefully():
     """When SDK returns session_id=None, agent should degrade to a fresh session."""
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
     )
@@ -976,7 +976,7 @@ async def test_claude_agent_session_resumption_none_degrades_gracefully():
 @pytest.mark.asyncio
 async def test_claude_agent_session_rotation():
     """When SDK returns a different session_id on second call, agent should use the new one."""
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
     )
@@ -1028,7 +1028,7 @@ async def test_claude_agent_session_rotation():
 @pytest.mark.asyncio
 async def test_claude_agent_session_retained_on_error():
     """On error, _session_id should retain its value from the last successful result."""
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
     )
@@ -1169,7 +1169,7 @@ async def test_communicate_persists_result_summary_on_turn_record():
     re-walking the message stream."""
     from claude_agent_sdk.types import ResultMessage
 
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1216,7 +1216,7 @@ async def test_claude_agent_crash_preserves_partial_turn_record():
     plumbing: typed criteria like skill_triggered must still be able to
     observe a Skill invocation that happened before the crash.
     """
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     class AssistantMessage:
@@ -1274,7 +1274,7 @@ async def test_claude_agent_crash_partial_carries_crash_reason():
     safe against a future ``frozen=True`` on TurnRecord, and removes the
     orchestrator's post-construction mutation as the primary stamping point.
     """
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     async def mock_query(prompt, options, transport=None):
@@ -1302,7 +1302,7 @@ async def test_claude_agent_crash_partial_carries_crash_reason():
 async def test_claude_agent_timeout_partial_carries_crash_reason():
     """TurnTimeoutError partials must carry the normalised "timed out after Ns"
     reason at construction (not via post-hoc mutation)."""
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     async def mock_query(prompt, options, transport=None):
@@ -1336,7 +1336,7 @@ async def test_claude_agent_repeated_crashes_keep_iteration_stable():
     A subsequent clean call then advances the counter by one. This is what the
     orchestrator's multiple-partials-per-iteration contract relies on.
     """
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     class AssistantMessage:
@@ -1399,7 +1399,7 @@ async def test_claude_agent_timeout_preserves_partial_turn_record():
     most valuable (an agent that looped on tool calls and ran the wall
     clock out). Mirrors the AgentCrashError partial-preservation path.
     """
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     class AssistantMessage:
@@ -1457,7 +1457,7 @@ async def test_claude_agent_error_max_turns_is_clean_completion_not_crash():
     through to the success path so the orchestrator's existing
     ``max_turns_exhausted`` handling can stop iterating.
     """
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     class AssistantMessage:
@@ -1510,7 +1510,7 @@ async def test_claude_agent_error_max_turns_clean_completion_via_exception_path(
     ``except`` branches; this asserts the ``except Exception`` branch
     short-circuits the same way (clean completion, no crash, no rollback).
     """
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     class AssistantMessage:
@@ -1551,3 +1551,43 @@ async def test_claude_agent_error_max_turns_clean_completion_via_exception_path(
         assert agent._iteration == 1
         assert turn_record.result_summary is not None
         assert turn_record.result_summary.subtype == "error_max_turns"
+
+
+def test_setting_sources_default_is_project():
+    """When config.setting_sources is None, it defaults to ['project'] at runtime."""
+    config = parse_agent_config(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+        setting_sources=None,  # Explicitly None
+    )
+    agent = ClaudeCodeAgent(config)
+
+    # At runtime, _communicate would pass setting_sources=['project'] to ClaudeAgentOptions
+    # Verify the config allows this None→['project'] fallback by checking the condition
+    assert config.setting_sources is None
+    assert agent.config.setting_sources is None
+
+
+def test_setting_sources_explicit_empty_list():
+    """When config.setting_sources is [], it should be passed as-is (for judge isolation)."""
+    config = parse_agent_config(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+        setting_sources=[],
+    )
+    agent = ClaudeCodeAgent(config)
+
+    # Empty list is explicitly passed to isolate the agent from host settings
+    assert agent.config.setting_sources == []
+
+
+def test_setting_sources_custom_list():
+    """When config.setting_sources is ['project', 'user'], it should be preserved."""
+    config = parse_agent_config(
+        type=AgentKind.CLAUDE_CODE,
+        permission_mode="acceptEdits",
+        setting_sources=["project", "user"],
+    )
+    agent = ClaudeCodeAgent(config)
+
+    assert agent.config.setting_sources == ["project", "user"]

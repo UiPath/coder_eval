@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
-from coder_eval.models import AgentConfig, AgentKind
+from coder_eval.models import AgentKind, parse_agent_config
 from coder_eval.streaming.callbacks import TaskScopedCallback
 from coder_eval.streaming.events import (
     StreamEvent,
@@ -99,7 +99,7 @@ async def test_communicate_emits_tool_call_event():
         _make_result_message(),
     ]
 
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="bypassPermissions", allowed_tools=["Bash"])
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="bypassPermissions", allowed_tools=["Bash"])
     agent = ClaudeCodeAgent(config)
     agent.working_directory = MagicMock()
 
@@ -132,7 +132,7 @@ async def test_communicate_emits_tool_result_event():
         _make_result_message(),
     ]
 
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="bypassPermissions", allowed_tools=["Read"])
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="bypassPermissions", allowed_tools=["Read"])
     agent = ClaudeCodeAgent(config)
     agent.working_directory = MagicMock()
 
@@ -164,7 +164,9 @@ async def test_communicate_emits_text_chunk_event():
         _make_result_message(),
     ]
 
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="bypassPermissions", allowed_tools=["Write"])
+    config = parse_agent_config(
+        type=AgentKind.CLAUDE_CODE, permission_mode="bypassPermissions", allowed_tools=["Write"]
+    )
     agent = ClaudeCodeAgent(config)
     agent.working_directory = MagicMock()
 
@@ -194,7 +196,7 @@ async def test_communicate_works_without_callback():
         _make_result_message(),
     ]
 
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="bypassPermissions", allowed_tools=["Bash"])
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="bypassPermissions", allowed_tools=["Bash"])
     agent = ClaudeCodeAgent(config)
     agent.working_directory = MagicMock()
 
@@ -221,7 +223,7 @@ async def test_task_scoped_callback_fixes_agent_task_id():
         _make_result_message(),
     ]
 
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="bypassPermissions", allowed_tools=["Bash"])
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="bypassPermissions", allowed_tools=["Bash"])
     agent = ClaudeCodeAgent(config)
     agent.working_directory = MagicMock()
 

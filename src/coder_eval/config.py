@@ -6,7 +6,7 @@ from pathlib import Path
 from dotenv import dotenv_values, load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from coder_eval.models import ApiBackend
+from coder_eval.models import ApiBackend, PermissionMode
 
 
 # Load .env file with override so .env values always win over shell environment
@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     # only writes onto task.agent.model when this is set, otherwise the task
     # YAML's value is preserved.
     default_agent_model: str | None = None
-    default_permission_mode: str | None = None
+    default_permission_mode: PermissionMode | None = None
     default_max_turns: int | None = None
 
     # API Backend routing

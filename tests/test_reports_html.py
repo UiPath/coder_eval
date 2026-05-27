@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from coder_eval.models import (
-    AgentConfig,
     AgentKind,
     CommandStatistics,
     CommandTelemetry,
@@ -26,6 +25,7 @@ from coder_eval.models import (
     TurnRecord,
     VariantAggregate,
     VariantResult,
+    parse_agent_config,
 )
 from coder_eval.reports_html import (
     HTMLReportGenerator,
@@ -779,7 +779,9 @@ def test_task_html_renders_agent_settings_from_sdk_options():
 
 def test_task_html_renders_agent_settings_from_agent_config_fallback():
     result = _make_result()
-    result.agent_config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits", model="some-model")
+    result.agent_config = parse_agent_config(
+        type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits", model="some-model"
+    )
     # No sdk_options — should fall back to agent_config
     html = HTMLReportGenerator.generate_task_html(result)
     assert "Agent Settings" in html

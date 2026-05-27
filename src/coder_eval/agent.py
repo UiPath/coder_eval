@@ -4,15 +4,22 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from .models import AgentState as AgentState
-from .models import TurnRecord
+from .models import BaseAgentConfig, TurnRecord
 from .streaming.callbacks import StreamCallback
 
 
-class Agent(ABC):
+class Agent[ConfigT: BaseAgentConfig](ABC):
     """Abstract base class for all coding agent implementations.
 
-    Concrete implementations should handle the specific SDK/CLI
-    interactions for different agents (Claude Code, Aider, etc.).
+    Generic over ConfigT (the agent's config type) to enforce type-safe
+    configuration binding at the agent level. Concrete implementations
+    specify their config type:
+
+        class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
+            def __init__(self, config: ClaudeCodeAgentConfig, ...):
+                ...
+
+    This ensures mypy enforces the correct config type for each agent.
     """
 
     pending_turn: TurnRecord | None = None

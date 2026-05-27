@@ -34,8 +34,8 @@ from coder_eval.evaluation.verdict_tool import (
     extract_verdict_from_capture,
 )
 from coder_eval.models import (
-    AgentConfig,
     AgentJudgeCriterion,
+    ClaudeCodeAgentConfig,
     CriterionResult,
     JudgeCriterionResult,
 )
@@ -221,7 +221,7 @@ def _build_agent_config(
     criterion: AgentJudgeCriterion,
     *,
     system_prompt: str,
-) -> AgentConfig:
+) -> ClaudeCodeAgentConfig:
     # When YAML supplies a partial `agent:` block (e.g. only ``model:``),
     # Pydantic constructs a fresh AgentConfig from those keys and the judge
     # defaults from _default_judge_agent_config never apply. Overlay the

@@ -7,7 +7,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from coder_eval.models.agent_config import AgentConfig
+from coder_eval.models.agent_config import AgentConfig, ClaudeCodeAgentConfig, parse_agent_config
 from coder_eval.models.enums import AgentKind
 from coder_eval.models.gateway import DEFAULT_GATEWAY_MODEL
 
@@ -42,7 +42,7 @@ def _reject_removed_verdict_channel(data: Any) -> Any:
     return data
 
 
-def _default_judge_agent_config() -> AgentConfig:
+def _default_judge_agent_config() -> ClaudeCodeAgentConfig:
     """Build the default judge AgentConfig.
 
     The returned ``ignore_patterns`` extend ``JUDGE_SECURITY_IGNORE_FLOOR``
@@ -52,13 +52,15 @@ def _default_judge_agent_config() -> AgentConfig:
     """
     # Developer-noise dirs first, security floor (single source of truth) last.
     developer_noise = [".git", "node_modules", "__pycache__", ".venv"]
-    return AgentConfig(
+    cfg = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         model="claude-sonnet-4-6",
         permission_mode="bypassPermissions",
         allowed_tools=["Bash", "Read", "Glob", "Grep"],
         ignore_patterns=[*developer_noise, *JUDGE_SECURITY_IGNORE_FLOOR],
     )
+    assert isinstance(cfg, ClaudeCodeAgentConfig)
+    return cfg
 
 
 class BaseSuccessCriterion(BaseModel, ABC):

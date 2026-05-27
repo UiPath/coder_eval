@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from coder_eval.models import (
-    AgentConfig,
     AgentKind,
     EvaluationResult,
     FileExistsCriterion,
@@ -17,6 +16,7 @@ from coder_eval.models import (
     PostRunResult,
     SandboxConfig,
     TaskDefinition,
+    parse_agent_config,
 )
 from coder_eval.orchestrator import Orchestrator
 
@@ -92,7 +92,7 @@ def _make_task(post_run: list[PostRunCommand] | None = None) -> TaskDefinition:
         task_id="post_run_test",
         description="Test post-run commands",
         initial_prompt="do something",
-        agent=AgentConfig(type=AgentKind.CLAUDE_CODE),
+        agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[DUMMY_CRITERION],
         post_run=post_run or [],

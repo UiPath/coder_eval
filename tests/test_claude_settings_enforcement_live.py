@@ -26,7 +26,7 @@ import pytest
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.config import Settings
-from coder_eval.models import AgentConfig, AgentKind, ApiBackend
+from coder_eval.models import AgentKind, ApiBackend, parse_agent_config
 from coder_eval.models.routing import ApiRoute, DirectRoute, resolve_route
 
 
@@ -66,7 +66,7 @@ def _read_calls(turn) -> list:
 
 async def _run_single_turn(sandbox_dir: Path, prompt: str, claude_settings: dict) -> tuple[ClaudeCodeAgent, object]:
     """Start an agent in sandbox_dir, run one turn with the given settings."""
-    config = AgentConfig(
+    config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
         # Intentionally omit allowed_tools: a populated --allowed-tools flag appears

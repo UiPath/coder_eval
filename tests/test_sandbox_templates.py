@@ -687,13 +687,13 @@ class TestMultiSourcePathResolution:
             ],
         )
 
-        from coder_eval.models import AgentConfig, AgentKind, FileExistsCriterion, TaskDefinition
+        from coder_eval.models import AgentKind, FileExistsCriterion, TaskDefinition, parse_agent_config
 
         task = TaskDefinition(
             task_id="test",
             description="test",
             initial_prompt="test",
-            agent=AgentConfig(type=AgentKind.CLAUDE_CODE),
+            agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
             sandbox=config,
             success_criteria=[FileExistsCriterion(description="test", path="test.txt")],
         )
@@ -724,13 +724,13 @@ class TestMultiSourcePathResolution:
             ],
         )
 
-        from coder_eval.models import AgentConfig, AgentKind, FileExistsCriterion, TaskDefinition
+        from coder_eval.models import AgentKind, FileExistsCriterion, TaskDefinition, parse_agent_config
 
         task = TaskDefinition(
             task_id="test",
             description="test",
             initial_prompt="test",
-            agent=AgentConfig(type=AgentKind.CLAUDE_CODE),
+            agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
             sandbox=config,
             success_criteria=[FileExistsCriterion(description="test", path="test.txt")],
         )

@@ -11,6 +11,7 @@ tags:
 
 agent:
   type: codex
+  model: gpt-5-codex
   permission_mode: acceptEdits
   allowed_tools:
     - Bash

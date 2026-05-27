@@ -242,6 +242,12 @@ When fixing a bug, ask: *could a custom lint rule have prevented this?* If the r
    `kill()` / `kill_sync()` teardown — `kill_sync()` is called from the
    watchdog's non-asyncio thread, so it must not await.
 
+**Registration pattern:** Unlike `criteria/` which uses `pkgutil` auto-discovery,
+`agents/` relies on an explicit import side-effect in `agents/__init__.py`. The
+`@AgentRegistry.register(...)` decorator runs at module import time. New agents
+must be imported in `agents/__init__.py` to trigger registration, and must be
+exposed in `__all__` for re-export.
+
 ## Task Definition
 
 Tasks are YAML files. See [docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_GUIDE.md) for the full reference. To compare configuration variants across the same tasks, see [docs/AB_EXPERIMENTS.md](docs/AB_EXPERIMENTS.md).

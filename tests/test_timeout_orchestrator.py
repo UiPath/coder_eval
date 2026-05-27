@@ -9,8 +9,8 @@ import pytest
 
 from coder_eval.errors.timeout import TaskTimeoutError, TurnTimeoutError
 from coder_eval.models import (
-    AgentConfig,
     AgentKind,
+    ClaudeCodeAgentConfig,
     CriterionResult,
     EvaluationResult,
     FileExistsCriterion,
@@ -29,7 +29,7 @@ def _make_task(*, turn_timeout: float | None = None, task_timeout: float | None 
     """
     from coder_eval.models import RunLimits
 
-    agent = AgentConfig.model_construct(
+    agent = ClaudeCodeAgentConfig.model_construct(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
         allowed_tools=None,
@@ -417,9 +417,9 @@ async def test_claude_agent_discard_pending_turn_rolls_back_iteration():
     only when pending_turn is set, and is idempotent when the slot is empty.
     """
     from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
-    from coder_eval.models import AgentConfig, AgentKind, TurnRecord
+    from coder_eval.models import AgentKind, TurnRecord, parse_agent_config
 
-    config = AgentConfig(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
     # Idle agent (no pending turn): discard is a no-op. Negative values would

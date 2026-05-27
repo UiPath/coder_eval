@@ -10,7 +10,15 @@ from typing import Any
 
 import yaml
 
-from ..models import AgentConfig, Dataset, ExperimentVariant, TaskDefinition, TemplateDirSource, TemplateSource
+from ..models import (
+    AgentConfig,
+    BaseAgentConfig,
+    Dataset,
+    ExperimentVariant,
+    TaskDefinition,
+    TemplateDirSource,
+    TemplateSource,
+)
 
 
 _ROW_VAR_PATTERN = re.compile(r"\$\{row\.([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -175,7 +183,7 @@ def resolve_variant_initial_prompt_file(variant: ExperimentVariant, base_dir: Pa
     variant.initial_prompt = content
 
 
-def resolve_agent_system_prompt(agent_config: AgentConfig | None, base_dir: Path) -> None:
+def resolve_agent_system_prompt(agent_config: AgentConfig | BaseAgentConfig | None, base_dir: Path) -> None:
     """Resolve system_prompt_file to inline system_prompt. Mutates in place."""
     if agent_config is None:
         return

@@ -7,12 +7,12 @@ from datetime import datetime
 from typing import Any
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
-from coder_eval.models import AgentConfig, AgentKind, CommandTelemetry
+from coder_eval.models import AgentKind, CommandTelemetry, parse_agent_config
 
 
 def _agent() -> ClaudeCodeAgent:
     """Build a minimal ClaudeCodeAgent instance just to reach _resolve_pending_command."""
-    return ClaudeCodeAgent(AgentConfig(type=AgentKind.CLAUDE_CODE))
+    return ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
 
 
 def _make_pending(tool_id: str, tool_name: str = "Bash") -> dict[str, dict[str, Any]]:

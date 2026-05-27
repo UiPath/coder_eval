@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from coder_eval.models import AgentConfig, AgentKind, AssistantMessage
+from coder_eval.models import AgentKind, AssistantMessage, parse_agent_config
 
 
 def create_mock_sdk_messages():
@@ -86,7 +86,7 @@ class TestCommandTelemetryStatus:
 
         import coder_eval.agents.claude_code_agent as agent_module
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
@@ -131,7 +131,7 @@ class TestCommandTelemetryStatus:
 
         import coder_eval.agents.claude_code_agent as agent_module
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
@@ -172,7 +172,7 @@ class TestCommandTelemetryStatus:
 
         import coder_eval.agents.claude_code_agent as agent_module
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
@@ -216,7 +216,7 @@ class TestCommandTelemetryStatus:
 
         import coder_eval.agents.claude_code_agent as agent_module
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
@@ -268,7 +268,7 @@ class TestCommandTelemetryStatus:
 
         import coder_eval.agents.claude_code_agent as agent_module
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
@@ -307,7 +307,7 @@ class TestCommandTelemetryStatus:
 
         import coder_eval.agents.claude_code_agent as agent_module
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
@@ -348,7 +348,7 @@ class TestCommandTelemetryStatus:
 
         import coder_eval.agents.claude_code_agent as agent_module
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
@@ -393,7 +393,7 @@ class TestCommandTelemetryStatus:
 
         import coder_eval.agents.claude_code_agent as agent_module
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
@@ -444,7 +444,7 @@ class TestCommandTelemetryStatus:
 
         import coder_eval.agents.claude_code_agent as agent_module
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
@@ -485,7 +485,7 @@ class TestCommandTelemetryStatus:
 
         import coder_eval.agents.claude_code_agent as agent_module
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         agent = agent_module.ClaudeCodeAgent(config)
 
         collected_events = []
@@ -534,7 +534,7 @@ class TestAssistantMessageTelemetry:
 
         import coder_eval.agents.claude_code_agent as agent_module
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
@@ -580,7 +580,7 @@ class TestAssistantMessageTelemetry:
 
         import coder_eval.agents.claude_code_agent as agent_module
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
@@ -627,7 +627,7 @@ class TestAssistantMessageTelemetry:
 
         import coder_eval.agents.claude_code_agent as agent_module
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
@@ -678,7 +678,7 @@ class TestAssistantMessageTelemetry:
 
         import coder_eval.agents.claude_code_agent as agent_module
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
@@ -732,7 +732,7 @@ class TestAssistantMessageTelemetry:
 
         import coder_eval.agents.claude_code_agent as agent_module
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
@@ -782,7 +782,7 @@ class TestAssistantMessageTelemetry:
 
         import coder_eval.agents.claude_code_agent as agent_module
 
-        config = AgentConfig(type=AgentKind.CLAUDE_CODE)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
         agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):

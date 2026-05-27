@@ -7,7 +7,7 @@ from claude_agent_sdk import ClaudeAgentOptions
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _dump_sdk_options
 from coder_eval.config import Settings
-from coder_eval.models import AgentConfig, AgentKind, BedrockRoute, DirectRoute, ProxyRoute
+from coder_eval.models import AgentKind, BedrockRoute, DirectRoute, ProxyRoute, parse_agent_config
 from coder_eval.models.enums import ApiBackend
 from coder_eval.models.routing import resolve_route, to_bedrock_inference_profile
 
@@ -218,7 +218,7 @@ class TestToBedrockInferenceProfile:
 
 
 def _make_agent(route, *, config_model: str | None = None) -> ClaudeCodeAgent:
-    return ClaudeCodeAgent(AgentConfig(type=AgentKind.CLAUDE_CODE, model=config_model), route=route)
+    return ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, model=config_model), route=route)
 
 
 class TestResolveRouteBedrockModel:

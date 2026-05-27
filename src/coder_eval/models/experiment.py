@@ -265,7 +265,7 @@ class ResolvedTask(BaseModel):
     """A fully-resolved task ready for batch execution.
 
     Created by the resolution phase after applying all 5 config layers
-    (default experiment -> experiment defaults -> task YAML -> variant -> CLI overrides).
+    (default → experiment defaults → task YAML → variant → CLI).
     Consumed by run_batch() as the sole input type.
     """
 
