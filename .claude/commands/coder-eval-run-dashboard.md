@@ -1,11 +1,11 @@
 ---
 allowed-tools: Bash(*), Read(*), Glob(*), Grep(*), Agent, Monitor, TaskCreate, TaskUpdate, TaskStop
-description: Run the dashboard pipeline (tests + blob upload + ADX ingest) and monitor progress
+description: Run the dashboard pipeline (tests + blob upload) and monitor progress
 ---
 
 ## Context
 
-Run the coder_eval dashboard pipeline: execute a test suite, upload results to Azure Blob Storage, and ingest into ADX. The dashboard lives at `dashboard/` and is invoked via `uv run dashboard run` from the `dashboard/` directory.
+Run the coder_eval dashboard pipeline: execute a test suite and upload results to Azure Blob Storage. The dashboard lives at `dashboard/` and is invoked via `uv run dashboard run` from the `dashboard/` directory.
 
 ## Arguments
 
@@ -63,7 +63,7 @@ Map arguments to flags:
     - `PASS`, `FAIL`, `Task timed out`, `Sandbox preserved`
     - `Starting iteration`, `Criterion … score:`, `All success criteria`
     - `→ uip`, `UiPath CLI login succeeded`
-    - `Blob upload complete`, `ADX ingest`, `tasks found`
+    - `Blob upload complete`, `tasks found`
     - `Traceback`, `ERROR`, `WARNING`
 
 5. Create a task with `TaskCreate` to track the overall run status, and update it via `TaskUpdate` as milestones are hit.
@@ -75,7 +75,7 @@ As monitor events arrive, maintain a running summary for the user:
 
 - When a task completes (passes or fails), update the running tally
 - When a task times out, note it and check which task it was
-- When upload/ingest events appear, report progress
+- When upload events appear, report progress
 - **When the background Bash task completes** (detected via `TaskGet` status transitioning to completed/failed, or a task-completion notification): immediately stop the monitor using `TaskStop` with the monitor's task ID, then provide a final summary. Do not use a wall-clock timeout to decide completion.
 
 ### Final Summary Format
@@ -100,7 +100,6 @@ When the run completes, report:
 | Test execution | X/Y passed |
 | Analysis | OK / Failed / Skipped |
 | Blob upload | Complete → <url> |
-| ADX ingest | Complete → X tasks, Y criteria |
 ```
 
 ## Principles

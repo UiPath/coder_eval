@@ -14,13 +14,9 @@ def test_coder_eval_dir_is_parent_of_dashboard():
 
 
 def test_config_loads_from_env(monkeypatch):
-    monkeypatch.setenv("ADX_CLUSTER_URI", "https://test-cluster")
-    monkeypatch.setenv("ADX_DATABASE", "test-db")
     monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "00000000-0000-0000-0000-000000000000")
     monkeypatch.setenv("AZURE_STORAGE_ACCOUNT", "teststorage")
     cfg = Config()
-    assert cfg.adx_cluster_uri == "https://test-cluster"
-    assert cfg.adx_database == "test-db"
     assert cfg.azure_storage_account == "teststorage"
     assert cfg.azure_blob_container == "runs"  # default
 

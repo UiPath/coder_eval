@@ -31,8 +31,6 @@ def _config():
     cfg.azure_storage_account = "x"
     cfg.azure_blob_container = "runs"
     cfg.azure_storage_key = ""
-    cfg.adx_cluster_uri = "https://x"
-    cfg.adx_database = "x"
     return cfg
 
 
@@ -43,7 +41,6 @@ def test_backfill_skips_existing(backfill):
         patch.object(backfill, "download_run") as mock_download,
         patch.object(backfill, "generate_reviews") as mock_generate,
         patch.object(backfill, "upload_review_artifacts") as mock_upload,
-        patch.object(backfill, "ingest_run") as mock_ingest,
     ):
         msg = backfill.backfill_run("2026-05-08_01-00-00", cfg, force=False, dry_run=False)
 
@@ -52,7 +49,6 @@ def test_backfill_skips_existing(backfill):
     mock_download.assert_not_called()
     mock_generate.assert_not_called()
     mock_upload.assert_not_called()
-    mock_ingest.assert_not_called()
 
 
 def test_backfill_force_regenerates(backfill):
@@ -68,7 +64,6 @@ def test_backfill_force_regenerates(backfill):
         patch.object(backfill, "download_run", side_effect=fake_download) as mock_download,
         patch.object(backfill, "generate_reviews") as mock_generate,
         patch.object(backfill, "upload_review_artifacts", return_value=3) as mock_upload,
-        patch.object(backfill, "ingest_run") as mock_ingest,
     ):
         msg = backfill.backfill_run("2026-05-08_01-00-00", cfg, force=True, dry_run=False)
 
@@ -76,12 +71,11 @@ def test_backfill_force_regenerates(backfill):
     mock_download.assert_called_once()
     mock_generate.assert_called_once()
     mock_upload.assert_called_once()
-    mock_ingest.assert_called_once()
     assert "OK" in msg
 
 
-def test_backfill_skips_ingest_when_no_artifacts(backfill):
-    """When upload_review_artifacts returns 0 (no review files), ingest is skipped."""
+def test_backfill_skips_when_no_artifacts(backfill):
+    """When upload_review_artifacts returns 0, the run reports skip."""
     cfg = _config()
 
     def fake_download(run_id, dest, account, container, account_key=""):
@@ -94,12 +88,10 @@ def test_backfill_skips_ingest_when_no_artifacts(backfill):
         patch.object(backfill, "download_run", side_effect=fake_download),
         patch.object(backfill, "generate_reviews"),
         patch.object(backfill, "upload_review_artifacts", return_value=0),
-        patch.object(backfill, "ingest_run") as mock_ingest,
     ):
         msg = backfill.backfill_run("2026-05-08_01-00-00", cfg, force=False, dry_run=False)
 
     assert "skip (no review artifacts" in msg
-    mock_ingest.assert_not_called()
 
 
 def test_backfill_az_subprocess_does_not_pass_key_in_argv(backfill):
@@ -130,7 +122,6 @@ def test_backfill_dry_run_no_writes(backfill):
         patch.object(backfill, "download_run") as mock_download,
         patch.object(backfill, "generate_reviews") as mock_generate,
         patch.object(backfill, "upload_review_artifacts") as mock_upload,
-        patch.object(backfill, "ingest_run") as mock_ingest,
     ):
         msg = backfill.backfill_run("2026-05-08_01-00-00", cfg, force=False, dry_run=True)
 
@@ -139,7 +130,6 @@ def test_backfill_dry_run_no_writes(backfill):
     mock_download.assert_not_called()
     mock_generate.assert_not_called()
     mock_upload.assert_not_called()
-    mock_ingest.assert_not_called()
 
 
 def test_list_run_ids_filters_to_timestamped_prefixes(backfill):

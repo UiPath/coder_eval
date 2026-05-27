@@ -1,8 +1,8 @@
 # coder-eval-dashboard
 
-Full pipeline for running coder-eval tests and publishing results to Azure Data Explorer and Blob Storage.
+Full pipeline for running coder-eval tests and publishing results to Azure Blob Storage.
 
-This is an independent package that lives alongside `coder-eval` in the same repo. It pulls repos, builds the UiPath CLI, runs coder-eval tests, uploads results to Blob Storage, and ingests them into ADX — all in a single command.
+This is an independent package that lives alongside `coder-eval` in the same repo. It pulls repos, builds the UiPath CLI, runs coder-eval tests, and uploads results to Blob Storage — all in a single command.
 
 ## Setup
 
@@ -16,8 +16,6 @@ cp .env.example .env   # then fill in your values
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `ADX_CLUSTER_URI` | ADX cluster endpoint | `https://kvc-xxx.southcentralus.kusto.windows.net` |
-| `ADX_DATABASE` | ADX database name | `coder-eval-runs-db` |
 | `AZURE_SUBSCRIPTION_ID` | Azure subscription ID | `5db48574-8a20-418f-b488-1fafd8d021df` |
 | `AZURE_STORAGE_ACCOUNT` | Storage account name | `coderevaltests` |
 | `AZURE_BLOB_CONTAINER` | Blob container (default: `runs`) | `runs` |
@@ -63,7 +61,6 @@ This runs the complete pipeline:
 3. **Run test suites** — invokes `coder-eval run` for each suite
 4. **Generate AI analysis** — invokes `/coder-eval-run-analysis` via Claude Code
 5. **Upload to Blob Storage** — archives the full run directory
-6. **Ingest into ADX** — parses results into SmokeRuns, TaskResults, CriteriaResults, RunAnalysis tables
 
 Options:
 
@@ -99,17 +96,8 @@ Full flag list: `uv run dashboard run --help`.
 ### Individual commands
 
 ```bash
-# Ingest a specific run into ADX
-uv run dashboard ingest ../runs/2026-03-23_17-41-23/
-
 # Upload a run to Blob Storage
 uv run dashboard upload ../runs/2026-03-23_17-41-23/
-
-# Drop and recreate ADX tables
-uv run dashboard schema
-
-# Drop tables only
-uv run dashboard schema --drop
 ```
 
 ### Pull a run from Blob Storage
@@ -127,7 +115,7 @@ dashboard/scripts/pull-run.sh --full <run-id>       # full pull (incl. per-task 
 dashboard/scripts/pull-run.sh --container <name> .. # override AZURE_BLOB_CONTAINER
 ```
 
-If `runs/<run-id>` already exists locally, the script warns and writes to `tmp/runs/<run-id>` instead. Note: this pulls only blob artifacts — structured run data already in ADX is not re-fetched.
+If `runs/<run-id>` already exists locally, the script warns and writes to `tmp/runs/<run-id>` instead.
 
 ### Alternative: `python -m`
 
@@ -135,27 +123,8 @@ All commands also work via:
 
 ```bash
 uv run python -m dashboard run
-uv run python -m dashboard ingest ../runs/2026-03-23_17-41-23/
+uv run python -m dashboard upload ../runs/2026-03-23_17-41-23/
 ```
-
-## ADX Dashboard
-
-The file `adx-dashboard.json` is an importable Azure Data Explorer dashboard definition. To use it:
-
-1. Go to [Azure Data Explorer Dashboards](https://dataexplorer.azure.com/dashboards)
-2. Click **Import dashboard from file**
-3. Select `adx-dashboard.json`
-
-Pages: Overview, Daily Trends, Task Deep Dive, Cost & Efficiency, Analysis.
-
-## ADX Tables
-
-| Table | Granularity | Key columns |
-|-------|-------------|-------------|
-| **SmokeRuns** | One row per run | run_id, success_rate, total_duration_seconds |
-| **TaskResults** | One row per task | task_id, weighted_score, total_cost_usd, token counts |
-| **CriteriaResults** | One row per criterion | criterion_type, score, details |
-| **RunAnalysis** | One row per analysis | analysis_markdown |
 
 ## Tests
 
@@ -169,20 +138,14 @@ uv run pytest
 dashboard/
 ├── pyproject.toml              # Package metadata and dependencies
 ├── .env.example                # Environment variable template
-├── adx-dashboard.json          # ADX dashboard definition (importable)
 ├── src/dashboard/
-│   ├── cli.py                  # Click CLI: run, ingest, upload, schema, config
+│   ├── cli.py                  # Click CLI: run, upload, config
 │   ├── config.py               # Pydantic settings from env vars
 │   ├── build.py                # UiPath CLI pull & build
 │   ├── run.py                  # coder-eval test invocation
 │   ├── analysis.py             # AI analysis generation via Claude Code
-│   ├── adx.py                  # Kusto client factory
-│   ├── blob.py                 # Azure Blob upload (az CLI)
-│   ├── ingest.py               # Parse run results → ADX ingestion
-│   └── schema.py               # ADX table DDL (create/drop)
+│   └── blob.py                 # Azure Blob upload (az CLI)
 ├── scripts/
 │   └── pull-run.sh             # Download a run from Azure Blob Storage (az CLI)
 └── tests/
-    ├── test_ingest.py
-    └── fixtures/               # Sample run.json, task.json for testing
 ```

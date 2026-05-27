@@ -207,8 +207,8 @@ class JudgeCriterionResult(CriterionResult):
 # Criterion types whose results are ``JudgeCriterionResult`` / ``ClassificationCriterionResult``.
 # Used by ``_criterion_result_discriminator`` to type-infer legacy ``task.json`` records that
 # lack the ``result_kind`` field. Listed here (not on each criterion class) because
-# ``model_validate_json`` runs without the criteria registry loaded — e.g. the dashboard
-# ingest pipeline imports ``coder_eval.models`` to deserialize ``task.json`` but does NOT
+# ``model_validate_json`` runs without the criteria registry loaded — consumers that import
+# ``coder_eval.models`` to deserialize ``task.json`` (e.g. ``coder-eval report``) do NOT
 # import ``coder_eval.criteria.*`` (which is where checkers self-register). Putting the
 # inference rule on criterion classes would force importing every checker just to deserialize
 # a row record, and would create a circular dependency since ``criteria/*.py`` already imports

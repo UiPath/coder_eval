@@ -8,34 +8,6 @@ from dashboard.cli import _build_activation_suite, _build_skills_suite, cli
 
 
 @patch("dashboard.cli.Config")
-@patch("dashboard.ingest.adx.get_client")
-def test_ingest_command(mock_get_client, mock_config_cls, tmp_path):
-    """Test that `dashboard ingest` calls ingest_run with config values."""
-    # Create minimal run fixture
-    run_dir = tmp_path / "test-run"
-    run_dir.mkdir()
-    (run_dir / "run.json").write_text(
-        '{"run_id":"r1","start_time":"2026-01-01T00:00:00Z","end_time":"2026-01-01T00:01:00Z",'
-        '"total_duration_seconds":60,"tasks_run":1,"tasks_succeeded":1,"tasks_failed":0,'
-        '"tasks_error":0,"task_results":[]}'
-    )
-
-    mock_cfg = MagicMock()
-    mock_cfg.adx_cluster_uri = "https://fake-cluster"
-    mock_cfg.adx_database = "fake-db"
-    mock_config_cls.return_value = mock_cfg
-
-    mock_client = MagicMock()
-    mock_get_client.return_value = mock_client
-
-    runner = CliRunner()
-    result = runner.invoke(cli, ["ingest", str(run_dir)])
-    assert result.exit_code == 0, result.output
-    assert "SmokeRuns OK" in result.output
-    mock_get_client.assert_called_with("https://fake-cluster")
-
-
-@patch("dashboard.cli.Config")
 @patch("dashboard.blob.upload_run")
 def test_upload_command(mock_upload_run, mock_config_cls, tmp_path):
     """Test that `dashboard upload` calls upload_run with the right args."""
@@ -56,48 +28,6 @@ def test_upload_command(mock_upload_run, mock_config_cls, tmp_path):
     assert "teststorage" in str(mock_upload_run.call_args)
 
 
-@patch("dashboard.cli.Config")
-@patch("dashboard.schema.adx.get_client")
-def test_schema_command(mock_get_client, mock_config_cls):
-    """Test that `dashboard schema` creates tables."""
-    mock_cfg = MagicMock()
-    mock_cfg.adx_cluster_uri = "https://fake-cluster"
-    mock_cfg.adx_database = "fake-db"
-    mock_config_cls.return_value = mock_cfg
-
-    mock_client = MagicMock()
-    mock_get_client.return_value = mock_client
-
-    runner = CliRunner()
-    result = runner.invoke(cli, ["schema"])
-    assert result.exit_code == 0, result.output
-    assert "Schema is ready" in result.output
-
-    # Should have called execute_mgmt for drop + create (4 tables each = 8 calls)
-    assert mock_client.execute_mgmt.call_count == 8
-
-
-@patch("dashboard.cli.Config")
-@patch("dashboard.schema.adx.get_client")
-def test_schema_drop_only(mock_get_client, mock_config_cls):
-    """Test that `dashboard schema --drop` only drops tables."""
-    mock_cfg = MagicMock()
-    mock_cfg.adx_cluster_uri = "https://fake-cluster"
-    mock_cfg.adx_database = "fake-db"
-    mock_config_cls.return_value = mock_cfg
-
-    mock_client = MagicMock()
-    mock_get_client.return_value = mock_client
-
-    runner = CliRunner()
-    result = runner.invoke(cli, ["schema", "--drop"])
-    assert result.exit_code == 0, result.output
-    assert "Tables dropped" in result.output
-
-    # Only 4 drop calls, no create
-    assert mock_client.execute_mgmt.call_count == 4
-
-
 def _setup_run_pipeline_mocks(mock_config_cls, tmp_path):
     """Configure shared mocks for `dashboard run` tests."""
     mock_cfg = MagicMock()
@@ -110,8 +40,6 @@ def _setup_run_pipeline_mocks(mock_config_cls, tmp_path):
     mock_cfg.azure_storage_account = "x"
     mock_cfg.azure_blob_container = "runs"
     mock_cfg.azure_storage_key = ""
-    mock_cfg.adx_cluster_uri = "https://x"
-    mock_cfg.adx_database = "x"
     mock_config_cls.return_value = mock_cfg
 
     latest_run = tmp_path / "run-1"
@@ -129,7 +57,6 @@ def test_cli_run_calls_review(mock_config_cls, tmp_path):
         patch("dashboard.analysis.generate_analysis") as mock_analysis,
         patch("dashboard.review.generate_reviews") as mock_review,
         patch("dashboard.blob.upload_run"),
-        patch("dashboard.ingest.ingest_run"),
     ):
         runner = CliRunner()
         result = runner.invoke(
@@ -152,7 +79,6 @@ def test_cli_skip_review(mock_config_cls, tmp_path):
         patch("dashboard.analysis.generate_analysis"),
         patch("dashboard.review.generate_reviews") as mock_review,
         patch("dashboard.blob.upload_run"),
-        patch("dashboard.ingest.ingest_run"),
     ):
         runner = CliRunner()
         result = runner.invoke(
@@ -181,7 +107,6 @@ def test_cli_warns_when_skip_analysis_without_skip_review(mock_config_cls, tmp_p
         patch("dashboard.run.run_tests", return_value=latest_run),
         patch("dashboard.review.generate_reviews"),
         patch("dashboard.blob.upload_run"),
-        patch("dashboard.ingest.ingest_run"),
     ):
         runner = CliRunner()
         result = runner.invoke(
@@ -202,7 +127,7 @@ def test_cli_warns_when_skip_analysis_without_skip_review(mock_config_cls, tmp_p
 
 @patch("dashboard.cli.Config")
 def test_cli_review_failure_does_not_abort(mock_config_cls, tmp_path):
-    """If review generation raises, upload_run and ingest_run still run."""
+    """If review generation raises, upload_run still runs."""
     _, latest_run = _setup_run_pipeline_mocks(mock_config_cls, tmp_path)
 
     with (
@@ -210,7 +135,6 @@ def test_cli_review_failure_does_not_abort(mock_config_cls, tmp_path):
         patch("dashboard.analysis.generate_analysis"),
         patch("dashboard.review.generate_reviews", side_effect=RuntimeError("boom")),
         patch("dashboard.blob.upload_run") as mock_upload,
-        patch("dashboard.ingest.ingest_run") as mock_ingest,
     ):
         runner = CliRunner()
         result = runner.invoke(
@@ -220,7 +144,6 @@ def test_cli_review_failure_does_not_abort(mock_config_cls, tmp_path):
 
     assert result.exit_code == 0, result.output
     mock_upload.assert_called_once()
-    mock_ingest.assert_called_once()
     assert "Task review generation failed" in result.output
 
 

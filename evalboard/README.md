@@ -19,19 +19,14 @@ in production (grant **Storage Blob Data Reader** on the storage account).
 
 ## Layout
 
-Evalboard is the **drill-down companion** to the ADX dashboard. ADX owns
-trends, heatmaps, and time-range filtering; evalboard owns the clickable
-path into a specific run's artifacts, criteria, and logs.
-
-- `/` — the 20 most recent runs, one row each, clickable.
+- `/` — the 20 most recent runs, one row each, clickable. Includes a
+  daily success-rate chart and tag rails for filtering.
 - `/trends` — per-task pass rate and avg duration/cost/turns across the
   last 10 runs, with a tag filter and expandable per-task history.
 - `/runs/latest` — shortcut that redirects to the newest run id.
-- `/runs/<run-id>` — run summary (pass rate, cost, duration) + one row per
-  task. Link this from the ADX dashboard's per-run cell.
+- `/runs/<run-id>` — run summary (pass rate, cost, duration) + one row per task.
 - `/runs/<run-id>/<task-id>` — per-task detail: success-criteria cards,
   artifact downloads, flow debug table, tool timeline, tail of `task.log`.
-  Link this from the ADX dashboard's per-task row.
 
 `<task-id>` is the same string the eval framework writes to
 `task_results[].task_id` (e.g., `skill-flow-calculator`) and equals the
@@ -48,9 +43,8 @@ thereafter. Cache lives at `./runs-remote` (gitignored). Run folders are
 immutable once uploaded, so the cache is never auto-invalidated. To
 force-refresh a run, delete `runs-remote/<run-id>/` and reload.
 
-Storage account (`coderevaltests`), container (`runs`), and the ADX
-dashboard URL are hardcoded in `lib/config.ts` and `lib/blob.ts` — no env
-file needed.
+Storage account (`coderevaltests`) and container (`runs`) are hardcoded
+in `lib/blob.ts` — no env file needed.
 
 ## Local mode
 

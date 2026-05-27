@@ -1,6 +1,5 @@
 import { Suspense, type ReactNode } from "react";
 import Image from "next/image";
-import { ADX_URL } from "@/lib/config";
 import { SearchBox } from "./_components/search-box";
 import "./globals.css";
 
@@ -44,15 +43,6 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                             className="text-gray-700 hover:text-studio-blue"
                         >
                             Trends
-                        </a>
-                        <a
-                            href={ADX_URL}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-1 text-gray-700 hover:text-studio-blue"
-                        >
-                            ADX dashboard
-                            <span className="text-xs">↗</span>
                         </a>
                     </div>
                 </header>

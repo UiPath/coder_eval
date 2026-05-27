@@ -5,17 +5,10 @@ For each run id in the configured blob container, the script:
   2. If `review_index.json` doesn't already exist (or `--force`), invokes
      :func:`dashboard.review.generate_reviews`.
   3. Uploads the new review_index.json plus every per-task review.json blob.
-  4. Re-ingests the run via :func:`dashboard.ingest.ingest_run` so
-     TaskResults rows pick up the review_tags / review_summary columns.
 
 Idempotent at the blob layer: skips runs that already have a
 ``review_index.json`` in blob unless ``--force`` is passed. ``--dry-run``
-prints planned actions without subprocess, upload, or ingest.
-
-ADX caveat: re-ingesting a run appends a fresh copy of TaskResults and
-CriteriaResults rows. Before a ``--force`` re-run, drop the touched
-extents or use ``dashboard schema --drop`` followed by ``dashboard
-schema`` and a full re-ingest of the affected runs.
+prints planned actions without subprocess or upload.
 """
 
 from __future__ import annotations
@@ -29,7 +22,6 @@ from pathlib import Path
 import click
 
 from dashboard.config import Config
-from dashboard.ingest import ingest_run
 from dashboard.review import generate_reviews
 
 
@@ -188,7 +180,7 @@ def backfill_run(
         return f"{run_id}: skip (already reviewed)"
 
     if dry_run:
-        return f"{run_id}: would review + upload + ingest"
+        return f"{run_id}: would review + upload"
 
     with tempfile.TemporaryDirectory() as td:
         stage = Path(td)
@@ -216,14 +208,8 @@ def backfill_run(
             )
         except Exception as exc:
             return f"{run_id}: error during upload: {exc}"
-        # No reviews produced (e.g. all-passing run) — skip ingest so we don't
-        # re-append duplicate TaskResults / CriteriaResults rows on every --force.
         if n == 0:
-            return f"{run_id}: skip (no review artifacts to upload or ingest)"
-        try:
-            ingest_run(str(run_path), cfg.adx_cluster_uri, cfg.adx_database)
-        except Exception as exc:
-            return f"{run_id}: error during ingest: {exc}"
+            return f"{run_id}: skip (no review artifacts to upload)"
     return f"{run_id}: backfilled OK ({n} review file(s) uploaded)"
 
 
@@ -258,7 +244,7 @@ def main(force: bool, dry_run: bool, limit: int | None, yes: bool) -> None:
         return
 
     if dry_run:
-        print("(dry-run mode — no subprocess, upload, or ingest will be invoked)")
+        print("(dry-run mode — no subprocess or upload will be invoked)")
     else:
         approx = len(run_ids)
         print(

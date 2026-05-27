@@ -1,1 +1,1 @@
-"""ADX dashboard ingestion and schema management for coder-eval results."""
+"""Dashboard pipeline for coder-eval: run tests, upload results to Azure Blob."""

@@ -69,23 +69,7 @@ There is **no CLI flag**. Override per-variant or per-task only.
 - **Evalboard trends view**: the per-task history sub-table renders
   the same tinted `Turns` column. The per-task summary row carries an
   `Avg turns` aggregate (mean tool-call count over successful runs).
-- **`total_turns` field**: persisted into `run.json` and into the ADX
-  `TaskResults.total_turns` column for future analytics. Not currently
-  surfaced in the evalboard UI — `actual_commands` is the easier-to-
-  interpret signal and the one we display.
-- **ADX `TaskResults` table**: two new columns `total_turns: int` and
-  `expected_turns: int`. Existing rows ingested before this PR carry
-  `null` — no historical backfill is performed (forward-only).
-
-### Migration note
-
-Existing ADX databases pick up the new columns via an additive
-`.alter-merge` migration. Run it once after deploying the new dashboard:
-
-```bash
-uv run dashboard migrate
-```
-
-This is non-destructive and idempotent. Fresh installs continue to use
-`uv run dashboard schema` (which creates the tables with the new columns
-already present).
+- **`total_turns` field**: persisted into `run.json` for future
+  analytics. Not currently surfaced in the evalboard UI —
+  `actual_commands` is the easier-to-interpret signal and the one we
+  display.

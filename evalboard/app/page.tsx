@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { getOverview, getRunListing, type TagCount } from "@/lib/overview";
 import { fmtDuration, fmtRunTime } from "@/lib/format";
-import { ADX_URL } from "@/lib/config";
 import { WindowSelector } from "./_components/window-selector";
 import { WINDOWS, type Window } from "@/lib/reviews-types";
 import { DailySuccessChart } from "./_overview/daily-chart";
@@ -125,17 +124,7 @@ export default async function Page({
                 </h1>
                 <p className="text-sm text-gray-500">
                     Click a run to drill into tasks, criteria, artifacts,
-                    and logs. For trends, heatmaps, and time-range filtering,{" "}
-                    <a
-                        href={ADX_URL}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-studio-blue hover:underline inline-flex items-center gap-0.5"
-                    >
-                        see the ADX dashboard
-                        <span className="text-xs">↗</span>
-                    </a>
-                    .
+                    and logs.
                 </p>
             </div>
 

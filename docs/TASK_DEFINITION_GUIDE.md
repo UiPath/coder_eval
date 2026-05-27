@@ -59,8 +59,8 @@ optionally be namespaced as `key:value` where both sides are kebab-case.
 tags: [smoke, golden, uipath-python, lifecycle:generate, connector:google-tasks]
 ```
 
-Namespaced tags let downstream tools slice on a single dimension (e.g. ADX queries like
-`where tag startswith "connector:"`). Bare tags continue to work with existing
+Namespaced tags let downstream tools slice on a single dimension (e.g. queries
+filtering on `connector:*`). Bare tags continue to work with existing
 `--tags` filters.
 
 **Well-known tags:**

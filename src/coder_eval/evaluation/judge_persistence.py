@@ -2,7 +2,7 @@
 
 The full judge transcript (tool calls, raw verdict, rendered prompt and
 system prompt) can run 10-100 KB. Inlining it into every ``task.json``
-inflates the row record for consumers (dashboard ingest, suite rollups)
+inflates the row record for consumers (suite rollups, report renderers)
 that don't need it. Spilling each transcript to a sibling
 ``judge-<idx>.yaml`` next to ``task.json`` keeps the row record lean and
 lets reviewers grep transcripts independently.
@@ -23,7 +23,7 @@ Two functions:
   callers strip it via ``exclude={...}``.
 
 - ``load_judge_transcripts``: called by re-render paths
-  (``coder-eval report``, dashboard ingest helpers, stats loaders) after
+  (``coder-eval report``, stats loaders) after
   ``EvaluationResult.model_validate_json``. For each result whose
   ``transcript_path`` points at an existing sibling file, reads it back
   and attaches it as a dict on ``transcript`` so renderers see the same

@@ -69,7 +69,7 @@ def _build_activation_suite(skills_dir: str) -> Suite:
 
 @click.group()
 def cli() -> None:
-    """Coder-eval dashboard: run tests, upload results, ingest into ADX."""
+    """Coder-eval dashboard: run tests, upload results to Azure Blob."""
 
 
 @cli.command()
@@ -105,12 +105,11 @@ def run(
     backend: str | None,
     concurrency: int | None,
 ) -> None:
-    """Full pipeline: pull repos, run tests, upload, ingest.
+    """Full pipeline: pull repos, run tests, upload to blob.
 
     uip CLI is expected to already be on PATH (installed via npm by the caller).
     """
     from .blob import upload_run
-    from .ingest import ingest_run
     from .run import pull_coder_eval, run_tests, uip_login
 
     cfg = Config()
@@ -150,7 +149,7 @@ def run(
             if not (s.uip_tenant or cfg.uip_tenant):
                 raise click.UsageError(f"Suite '{s.name}' requires uip login but no tenant is configured.")
 
-    # 3. Run each suite → login (if needed) → run → analyze → upload → ingest
+    # 3. Run each suite → login (if needed) → run → analyze → review → upload
     for s in suites_to_run:
         if s.uip_login and skip_login:
             print("Skipping UiPath CLI login (--skip-login); assuming already authenticated")
@@ -240,25 +239,7 @@ def run(
             traceback.print_exc()
             print("WARNING: Blob upload failed — continuing without upload (see traceback above)")
 
-        try:
-            ingest_run(str(latest_run), cfg.adx_cluster_uri, cfg.adx_database)
-        except Exception:
-            import traceback
-
-            traceback.print_exc()
-            print("WARNING: ADX ingest failed — continuing without ingest (see traceback above)")
-
     print(f"\n=== Run completed at {datetime.now(UTC).isoformat()} ===")
-
-
-@cli.command()
-@click.argument("run_dir", type=click.Path(exists=True))
-def ingest(run_dir: str) -> None:
-    """Ingest a run directory into ADX."""
-    from .ingest import ingest_run
-
-    cfg = Config()
-    ingest_run(run_dir, cfg.adx_cluster_uri, cfg.adx_database)
 
 
 @cli.command()
@@ -294,20 +275,3 @@ def config() -> None:
         else:
             display = "(not set)" if value in (None, "") else value
         print(f"  {field_name}: {display}")
-
-
-@cli.command()
-@click.option("--drop", is_flag=True, help="Drop tables only (no recreate).")
-def schema(drop: bool) -> None:
-    """Drop and recreate ADX tables."""
-    from .schema import create_tables, drop_tables
-
-    cfg = Config()
-    print("Dropping existing tables...")
-    drop_tables(cfg.adx_cluster_uri, cfg.adx_database)
-    if not drop:
-        print("Creating tables with new schema...")
-        create_tables(cfg.adx_cluster_uri, cfg.adx_database)
-        print("Done. Schema is ready.")
-    else:
-        print("Done. Tables dropped (--drop mode).")

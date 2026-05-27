@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-12
 **Plan:** `c/2026-05-12-judge-code-review-fixes.md` Phase 1
-**Affects:** `task.json` on-disk shape, dashboard ingest, HTML/MD report rendering.
+**Affects:** `task.json` on-disk shape, HTML/MD report rendering.
 
 ## What changed
 
@@ -58,20 +58,10 @@ Explicit `result_kind` always wins over inference, so a forward-compat writer
 that needs to downgrade a result shape (e.g. record an `llm_judge` as a base
 `CriterionResult`) can do so by emitting `"result_kind": "basic"`.
 
-## Dashboard / ingest compatibility
-
-`dashboard/src/dashboard/ingest.py::build_criteria_rows` selects keys from each
-result dict via `dict.get(...)`; the ADX `CriteriaResults` table has eight fixed
-columns (`run_id, task_id, variant_id, criterion_type, description, score,
-details, error`). The new `result_kind` field is silently ignored — **no
-coordination with the dashboard owner needed**.
-
 ## Convention for new criterion types
 
 When introducing a criterion whose result class is not the base
 `CriterionResult`, add its `criterion_type` value to the matching frozenset in
 `models/results.py` in the same PR. The frozensets live in `models/results.py`
 (not on each criterion class) so the inference rule is reachable at
-deserialization time without importing the checker registry — the dashboard
-ingest pipeline imports `coder_eval.models` to deserialize `task.json` but does
-NOT import `coder_eval.criteria.*`.
+deserialization time without importing the checker registry.

@@ -6,7 +6,7 @@ _Last verified: 2026-05-20_ · _Owner: bai.li@uipath.com_
 
 ## Overview
 
-Every weeknight at 04:00 UTC (21:00 PT prev day / 07:00 Romania) a `systemd --user` timer on a long-lived Azure VM kicks off `daily.sh`. The slot is chosen to finish ~06:00 UTC — fresh before Romania's 9 AM standup, after Bellevue's workday. The wrapper pulls `main` for `coder_eval` and `skills`, installs `@uipath/cli@alpha` from GitHub Packages (each merge to `cli/main` publishes a fresh `-alpha.<date>.<run>` prerelease under that dist-tag, so the eval tracks CLI HEAD — matching what skills smoke does in `skills/.github/workflows/smoke-skills.yml`), syncs Python deps, builds the `coder-eval-agent` docker image (skills#856 onwards, smoke-tagged tasks run inside containers), runs the `skills` suite in parallel via `dashboard run`, uploads the run directory to Azure Blob, ingests it into ADX, and (on credible full-suite runs only) posts a mechanical metrics summary to Slack. Auth to UiPath is via ROPC (`grant_type=password`) against a **dedicated bot user** (`coder-eval-bot@uipath-qa.com`) — a 50-min systemd timer mints a fresh access token from the bot's credentials stored in `.uipath-auth.env`. Auth to Azure Blob and ADX is via `bai.li@uipath.com`'s `az login` plus RBAC roles. A 4-hour systemd timeout and a `flock` on `/var/lock/uip-daily.lock` prevent runaway / overlapping runs.
+Every weeknight at 04:00 UTC (21:00 PT prev day / 07:00 Romania) a `systemd --user` timer on a long-lived Azure VM kicks off `daily.sh`. The slot is chosen to finish ~06:00 UTC — fresh before Romania's 9 AM standup, after Bellevue's workday. The wrapper pulls `main` for `coder_eval` and `skills`, installs `@uipath/cli@alpha` from GitHub Packages (each merge to `cli/main` publishes a fresh `-alpha.<date>.<run>` prerelease under that dist-tag, so the eval tracks CLI HEAD — matching what skills smoke does in `skills/.github/workflows/smoke-skills.yml`), syncs Python deps, builds the `coder-eval-agent` docker image (skills#856 onwards, smoke-tagged tasks run inside containers), runs the `skills` suite in parallel via `dashboard run`, uploads the run directory to Azure Blob, and (on credible full-suite runs only) posts a mechanical metrics summary to Slack. Auth to UiPath is via ROPC (`grant_type=password`) against a **dedicated bot user** (`coder-eval-bot@uipath-qa.com`) — a 50-min systemd timer mints a fresh access token from the bot's credentials stored in `.uipath-auth.env`. Auth to Azure Blob is via `bai.li@uipath.com`'s `az login` plus RBAC roles. A 4-hour systemd timeout and a `flock` on `/var/lock/uip-daily.lock` prevent runaway / overlapping runs.
 
 ## Where things live
 
@@ -20,7 +20,6 @@ Every weeknight at 04:00 UTC (21:00 PT prev day / 07:00 Romania) a `systemd --us
 | Auth file | `~/.uipath/.auth` (bot user access token; rewritten every 50 min by `uip-refresh-auth.timer`) |
 | Auth creds | `~/uipath/coder_eval/dashboard/scripts/ci/.uipath-auth.env` (bot username + password + client + tenant; mode 600, gitignored) |
 | Blob | `coderevaltests/runs` · `https://coderevaltests.blob.core.windows.net/runs/<run-id>/` |
-| ADX | cluster `kvc-6xx4u3sa8nz1hq7dxn.southcentralus.kusto.windows.net` · db `coder-eval-runs-db` |
 | Dashboard UI | `https://coder-evalboard.uipath-dev.com/runs/<run-id>` |
 | Slack | `#flow-skill-sandbox` (sandbox webhook). |
 | Versioned units | `dashboard/scripts/ci/{daily.sh, slack_summary.py, refresh-auth.sh, coder-eval-daily.service, coder-eval-daily.timer, uip-refresh-auth.service, uip-refresh-auth.timer}` |
@@ -31,12 +30,12 @@ Every weeknight at 04:00 UTC (21:00 PT prev day / 07:00 Romania) a `systemd --us
 The systemd timer fires the `coder-eval-daily.service` oneshot, which `ExecStart`s `daily.sh`. The wrapper does, in order:
 
 1. **`git pull main`** for `coder_eval` (or whatever `BRANCH` env override sets) and `skills`. Honors `flock` (one wrapper at a time).
-2. **Source `.env` files** — `~/uipath/coder_eval/.env` (bedrock keys, LLMGW, UV index password, `GH_NPM_REGISTRY_TOKEN`, optional Slack webhook) and `~/uipath/coder_eval/dashboard/.env` (ADX, Azure storage, optional storage key fallback). Done after the pull so newly-added keys upstream get picked up.
+2. **Source `.env` files** — `~/uipath/coder_eval/.env` (bedrock keys, LLMGW, UV index password, `GH_NPM_REGISTRY_TOKEN`, optional Slack webhook) and `~/uipath/coder_eval/dashboard/.env` (Azure storage, optional storage key fallback). Done after the pull so newly-added keys upstream get picked up.
 3. **Install `uip` CLI** — `npm install -g @uipath/cli@alpha` from GitHub Packages (`@uipath:registry=https://npm.pkg.github.com/`), run from a tempdir whose `.npmrc` carries the auth token. Matches the smoke workflow. `cli/main` publishes `-alpha.<date>.<run>` prereleases under the `alpha` dist-tag on every merge, so each nightly run picks up the freshest CLI; public npmjs `@latest` only moves on GitHub Releases (weeks behind main). Token comes from `GH_NPM_REGISTRY_TOKEN` in `.env` — a GitHub PAT with `read:packages` scope.
 4. **Sync Python deps** — `uv pip install -e ".[dev,uipath]"` and `-e "./dashboard"` against the in-tree `.venv`.
 5. **Docker preflight + image build** — fail fast if the daemon is unreachable; reap orphan `coder-eval-agent` containers and orphan `claude_agent_sdk/_bundled/claude` processes from prior crashed runs; then `make docker-image` (mirrors `smoke-skills.yml`). Required since skills#856 flipped the smoke-tagged tasks to `driver: docker`. Build needs only `UV_INDEX_UIPATH_PASSWORD` — Azure Artifacts accepts the PAT alone.
 6. **`dashboard run --suite skills`** under `flock -n -E 75`. Skills suite is every `.yaml` under `tests/tasks/**`. The `driver: docker` tasks (smoke-tagged since skills#856) run inside `coder-eval-agent` containers; the rest run in host tempdirs. Model `claude-sonnet-4-6`, resolved at runtime to `$BEDROCK_MODEL` (the full Bedrock id — the host CLI's short aliases don't resolve inside the container); backend `bedrock`; parallelism from `BatchRunConfig.max_parallel`. Task order is shuffled per run to surface cross-task resource pollution.
-7. **Blob upload + ADX ingest** — both wrapped in try/except inside `cli.py`. A failure prints a traceback and continues; metrics still land in `runs/latest/run.json` for the Slack step.
+7. **Blob upload** — wrapped in try/except inside `cli.py`. A failure prints a traceback and continues; metrics still land in `runs/latest/run.json` for the Slack step.
 8. **Slack post (conditional)** — `slack_summary.py` reads `runs/latest/run.json` and either emits a JSON payload (pass/fail counts, total cost, wall duration, configured parallelism, repo SHAs, dashboard URL) or prints empty stdout to suppress the ping. Suppression gates: `rc != 0` (any wrapper failure, including `flock` skip), missing `run.json` (e.g. `TASK_PATTERN` smoke mode), or `tasks_run < MIN_TASKS_FOR_PING` (the constant in `slack_summary.py` — guards against test runs and broken discovery). The webhook reaches a large channel, so the policy is biased toward silent-on-doubt. `daily.sh` curl-POSTs only when stdout is non-empty (still a full no-op if `SLACK_WEBHOOK_URL` itself is empty).
 
 Wall time and peak memory scale with task count and `max_parallel`; the VM has comfortable headroom under the current configuration.
@@ -61,7 +60,7 @@ Wall time and peak memory scale with task count and `max_parallel`; the VM has c
 
 ## Auth model
 
-Two independent credential surfaces: UiPath (for the eval tasks) and Azure (for blob + ADX).
+Two independent credential surfaces: UiPath (for the eval tasks) and Azure (for blob).
 
 ### UiPath: bot user + ROPC
 
@@ -98,18 +97,17 @@ A **dedicated bot user** authenticates via the OAuth2 Resource Owner Password Cr
      python3 -c "import json,sys; [print(f['DisplayName'], '-', f['FolderType']) for f in json.load(sys.stdin)['value']]"
    ```
 
-### Azure storage + ADX: user-scoped via `bai.li@uipath.com`
+### Azure storage: user-scoped via `bai.li@uipath.com`
 
-The VM is logged in to Azure CLI as `bai.li@uipath.com` (`az login --use-device-code`). Tomasz Religa granted Bai's user the two roles needed (2026-04-29):
+The VM is logged in to Azure CLI as `bai.li@uipath.com` (`az login --use-device-code`). Tomasz Religa granted Bai's user the role needed (2026-04-29):
 
 | Resource | Role | Path |
 |---|---|---|
 | Storage account `coderevaltests` | Storage Blob Data Contributor | `--auth-mode login` → blob upload + pull |
-| ADX database `coder-eval-runs-db` | Database Admin (Kusto-level, not Azure RBAC) | `AzureCliCredential` → schema + ingest |
 
 **Optional fallback for blob:** `AZURE_STORAGE_KEY` env var. When set, `blob.py` and `pull-run.sh` use `--auth-mode key` instead of `--auth-mode login`. Useful for environments where `az login` isn't available; documented in `dashboard/.env.example`.
 
-**Failure modes if either token chain expires:** blob upload + ADX ingest are wrapped in try/except. A run still completes, posts to Slack, and lands in `runs/`; it just doesn't appear on the dashboard / in Kusto. Recovery is `az login --use-device-code` on the VM.
+**Failure mode if the token chain expires:** blob upload is wrapped in try/except. A run still completes, posts to Slack, and lands in `runs/`; it just doesn't appear on the dashboard. Recovery is `az login --use-device-code` on the VM.
 
 ### Why not S2S service account
 
@@ -133,7 +131,7 @@ ROPC works because the access token carries the bot user's `sub` (so PW/personal
 
 A self-hosted runner would be cleaner from a PR-history perspective (workflow visible in GH UI, run logs auto-archived). Blocked by **UiPath InfoSec org policy**: `/settings/actions/runners*` and `/settings/actions/runner-groups*` URLs all 404 for non-admins, and the org has not carved out a single-repo exception. Filing one is a long-tail process.
 
-systemd-on-VM is mechanically equivalent — `daily.sh`'s body is essentially what would live inside a `dashboard.yml` workflow's `run:` step. We lose the UI and run-history page; we keep flock-serialized scheduling, Slack notifications, blob upload, and ADX ingest (all of which happen inside `daily.sh` / `dashboard run`). When/if the policy flexes, the migration is mechanical.
+systemd-on-VM is mechanically equivalent — `daily.sh`'s body is essentially what would live inside a `dashboard.yml` workflow's `run:` step. We lose the UI and run-history page; we keep flock-serialized scheduling, Slack notifications, and blob upload (all of which happen inside `daily.sh` / `dashboard run`). When/if the policy flexes, the migration is mechanical.
 
 ## Slack integration
 
@@ -179,8 +177,7 @@ Slack is intentionally silent on failure (see the suppression policy in the Slac
 
 - **Docker daemon unreachable** → `daily.sh` preflight fails the run before the dashboard wrapper starts. Wrapper log carries the error.
 - **flock contention** (`/var/lock/uip-daily.lock` held by another `uip` invocation) → `daily.sh` exits 75. Slack suppressed (rc != 0).
-- **Blob upload failure** (`az` not installed, RBAC revoked, key wrong) → traceback printed; run continues; ADX ingest still attempts; Slack posts metrics if `rc == 0` and `tasks_run` is above the floor; dashboard URL will 404 because nothing was uploaded.
-- **ADX ingest failure** (Kusto cluster unreachable, AzureCliCredential expired) → traceback printed; run continues; Slack posts metrics on the same conditions; row missing from ADX (backfill via `dashboard ingest <run_dir>`).
+- **Blob upload failure** (RBAC revoked, key wrong, container missing) → traceback printed; run continues; Slack posts metrics if `rc == 0` and `tasks_run` is above the floor; dashboard URL will 404 because nothing was uploaded.
 - **No `run.json`** (the eval itself crashed before completion) → Slack suppressed. `~/runs-ci/<latest>.log` carries the wrapper-level error.
 - **Systemd `TimeoutStartSec=4h` exceeded** → systemd SIGTERMs the wrapper. Slack suppressed (rc != 0).
 - **VM down** → no run, no Slack post (no heartbeat configured today).
@@ -244,7 +241,7 @@ systemctl --user daemon-reload
 systemctl --user start coder-eval-daily.service
 ```
 
-Single-task smoke mode: set `TASK_PATTERN=path/to/task.yaml` to skip the dashboard wrapper and run `coder-eval run` directly (no upload/ingest, no analysis).
+Single-task smoke mode: set `TASK_PATTERN=path/to/task.yaml` to skip the dashboard wrapper and run `coder-eval run` directly (no upload, no analysis).
 
 ### Diagnose a failed run
 
@@ -255,4 +252,3 @@ Single-task smoke mode: set `TASK_PATTERN=path/to/task.yaml` to skip the dashboa
 | Lock conflict suspected | Find the other `uip` invocation: `ps -ef \| grep -E 'uip\|flock'` |
 | Wrapper exited non-zero but tasks did run | `~/runs-ci/<latest>.log` for the wrapper-level error; `runs/latest/<task>/00/task.log` for per-task |
 | Dashboard URL 404s | Blob upload failed; re-run `dashboard upload runs/<run_id>` after fixing auth |
-| Run not in ADX | Ingest failed; re-run `dashboard ingest runs/<run_id>` after fixing auth |

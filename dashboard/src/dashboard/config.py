@@ -19,10 +19,6 @@ class Config(BaseSettings):
         extra="ignore",
     )
 
-    # ADX
-    adx_cluster_uri: str
-    adx_database: str
-
     # Azure
     azure_subscription_id: str = ""
     azure_storage_account: str

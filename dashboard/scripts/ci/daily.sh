@@ -17,7 +17,7 @@
 #                     when set, slack_summary.py auto-suppresses on
 #                     wrapper failure or low task count to avoid spamming
 #                     the channel with broken/test-run results)
-#   dashboard/.env: ADX_*, AZURE_STORAGE_ACCOUNT, AZURE_BLOB_CONTAINER,
+#   dashboard/.env: AZURE_STORAGE_ACCOUNT, AZURE_BLOB_CONTAINER,
 #                   AZURE_STORAGE_KEY (when using --auth-mode key)
 #
 # Host prerequisites: a working Docker daemon. Skills tasks since
@@ -27,7 +27,7 @@
 # Optional overrides (env, mostly for ad-hoc smoke tests):
 #   TASK_PATTERN  glob/path of a single task yaml. When set, runs
 #                 `coder-eval run <pattern>` directly and skips the
-#                 dashboard wrapper (no upload/ingest, no analysis).
+#                 dashboard wrapper (no upload, no analysis).
 #   SUITE / MODEL / BACKEND   override the daily defaults.
 #   BRANCH         coder_eval branch (default: main).
 #   SKILLS_BRANCH  skills branch (default: main). Set both when

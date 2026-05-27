@@ -1,11 +1,10 @@
 [project]
 name = "coder-eval-dashboard"
 version = "0.1.0"
-description = "ADX dashboard ingestion and schema management for coder-eval results"
+description = "Pipeline runner for coder-eval: runs test suites and uploads results to Azure Blob Storage"
 requires-python = ">=3.13"
 dependencies = [
     "azure-identity>=1.19.0",
-    "azure-kusto-data>=4.6.1",
     "azure-storage-blob>=12.24.0",
     "pydantic-settings>=2.13.1",
     "click>=8.1.0",
