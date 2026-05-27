@@ -1,5 +1,6 @@
 """Rich terminal renderer for streaming events."""
 
+import logging
 import threading
 
 from rich.console import Console
@@ -16,6 +17,9 @@ from coder_eval.streaming.events import (
     TurnCompleteEvent,
     TurnStartEvent,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # Budgets tuned so that a typical JSON payload (agent params + one tool
@@ -120,3 +124,62 @@ class RichStreamRenderer:
                     for extra in reason_lines[1:]:
                         lines.append(f"        [dim]{escape(extra)}[/dim]")
         return "\n".join(lines)
+
+
+class LoggingStreamRenderer:
+    """Logs streaming events to the task logger (for task.log file capture).
+
+    Converts stream events into DEBUG log lines, making them available for
+    task.log persistence. This replaces direct logging in agent code with
+    event-driven logging for consistency.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def on_event(self, event: StreamEvent) -> None:
+        """Log a streaming event to the task logger."""
+        line = self._format_event(event)
+        if line is None:
+            return
+
+        with self._lock:
+            logger.debug(line)
+
+    def _format_event(self, event: StreamEvent) -> str | None:
+        """Format a single event into a log line (plain text, no Rich markup).
+
+        Only logs "important" events: tool calls/results, turn boundaries, criteria checks.
+        Ignores TextChunkEvent to avoid cluttering task.log with streaming text chunks.
+        """
+        if isinstance(event, TurnStartEvent):
+            return f"[{event.task_id}] --- Iteration {event.iteration} ---"
+
+        if isinstance(event, ToolCallEvent):
+            # Format like: ">>> TOOL CALL: Write | id=<id> | params={...}"
+            params_str = format_payload(event.parameters, max_chars=_MAX_PARAMS_LEN)
+            return f"[{event.task_id}] >>> TOOL CALL: {event.tool_name} | id={event.tool_id} | params={params_str}"
+
+        if isinstance(event, ToolResultEvent):
+            # Format like: "<<< TOOL RESULT [OK/ERROR]: id=<id> | <preview>"
+            status = "OK" if event.success else "ERROR"
+            return f"[{event.task_id}] <<< TOOL RESULT [{status}]: id={event.tool_id} | {event.result_preview}"
+
+        if isinstance(event, TextChunkEvent):
+            # Skip text chunks to avoid cluttering logs with streaming text
+            return None
+
+        if isinstance(event, TurnCompleteEvent):
+            return (
+                f"[{event.task_id}] --- Turn complete: {event.command_count} commands, "
+                f"{event.duration_s:.1f}s, {event.token_usage_str} ---"
+            )
+
+        if isinstance(event, CriteriaCheckEvent):
+            details = " | ".join(event.details) if event.details else f"{event.passed}/{event.total}"
+            return (
+                f"[{event.task_id}] Criteria: {event.passed}/{event.total} passed "
+                f"(score: {event.weighted_score:.3f}) [{details}]"
+            )
+
+        return None

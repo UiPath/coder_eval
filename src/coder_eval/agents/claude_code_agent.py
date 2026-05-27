@@ -32,6 +32,7 @@ from claude_agent_sdk import (
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
 from coder_eval.agent import Agent, AgentState
+from coder_eval.agents._logging import PrefixedAdapter
 from coder_eval.agents.watchdog import ThreadedWatchdog
 from coder_eval.errors import (
     AgentCrashError,
@@ -39,7 +40,7 @@ from coder_eval.errors import (
     format_timeout_reason,
     truncate_crash_message,
 )
-from coder_eval.formatting import format_payload
+from coder_eval.formatting import format_payload, format_token_usage
 from coder_eval.models import (
     AgentConfig,
     ApiRoute,
@@ -60,23 +61,10 @@ from coder_eval.models import (
     UserMessage as UserMessageTelemetry,
 )
 from coder_eval.streaming.callbacks import StreamCallback, safe_emit
-from coder_eval.streaming.events import TextChunkEvent, ToolCallEvent, ToolResultEvent
+from coder_eval.streaming.events import TextChunkEvent, ToolCallEvent, ToolResultEvent, TurnCompleteEvent
 
 
 logger = logging.getLogger(__name__)
-
-
-class _PrefixedAdapter(logging.LoggerAdapter):  # type: ignore[type-arg]
-    """LoggerAdapter that prefixes every record with an ``[instance]`` tag.
-
-    Used to distinguish simultaneous Claude Code agents in the same run —
-    e.g. ``[coder]`` for the coding agent and ``[simulator]`` for the
-    tools-disabled user-simulator agent — without spinning up a separate
-    logger hierarchy per instance.
-    """
-
-    def process(self, msg, kwargs):  # type: ignore[override]
-        return f"[{self.extra['prefix']}] {msg}", kwargs  # type: ignore[index]
 
 
 # Type guards for SDK message types (using duck typing for robustness)
@@ -245,7 +233,7 @@ class ClaudeCodeAgent(Agent):
         self._active_transport: SubprocessCLITransport | None = None
         self._env_path_prepend: list[str] = []
         self._plugin_tools_dir: str | None = None
-        self._log = _PrefixedAdapter(logger, {"prefix": instance_name})
+        self._log = PrefixedAdapter(logger, {"prefix": instance_name})
         # Deduplicate "unhandled SDK message type" warnings per agent
         # instance — _format_messages runs many times per task and these
         # types are stable for the lifetime of a session.
@@ -868,6 +856,17 @@ class ClaudeCodeAgent(Agent):
         # increment stands. (Discard is no-op on a successful turn anyway, but stay tidy.)
         self._iteration_was_incremented = False
 
+        safe_emit(
+            stream_callback,
+            TurnCompleteEvent(
+                task_id=self.config.type.value,
+                iteration=self._iteration,
+                duration_s=duration,
+                command_count=len(commands),
+                token_usage_str=format_token_usage(token_usage),
+            ),
+        )
+
         return TurnRecord(
             iteration=self._iteration,
             user_input=user_input,
@@ -1135,29 +1134,18 @@ class ClaudeCodeAgent(Agent):
             content = getattr(message, "content", None)
             if content and isinstance(content, list):
                 for block in content:
-                    if _is_tool_use_block(block):
-                        params_str = format_payload(block.input, max_chars=800)
-                        self._log.debug(f">>> TOOL CALL: {block.name} | id={block.id} | params={params_str}")
-                    elif hasattr(block, "text"):
+                    if hasattr(block, "text"):
                         text = str(block.text)[:500]
                         self._log.debug(f">>> ASSISTANT: {text}")
                     else:
                         block_type = type(block).__name__
-                        self._log.debug(f">>> ASSISTANT BLOCK ({block_type}): {str(block)[:200]}")
+                        if block_type not in ("ToolUseBlock",):
+                            self._log.debug(f">>> ASSISTANT BLOCK ({block_type}): {str(block)[:200]}")
             elif content and isinstance(content, str):
                 self._log.debug(f">>> ASSISTANT: {content[:500]}")
 
         elif msg_type == "UserMessage":
-            content = getattr(message, "content", None)
-            if content and isinstance(content, list):
-                for block in content:
-                    if _is_tool_result_block(block):
-                        is_error = getattr(block, "is_error", False) or False
-                        status = "ERROR" if is_error else "OK"
-                        result_preview = (
-                            format_payload(block.content, max_chars=800) if block.content is not None else "(empty)"
-                        )
-                        self._log.debug(f"<<< TOOL RESULT [{status}]: id={block.tool_use_id} | {result_preview}")
+            pass
 
         elif msg_type == "ResultMessage":
             summary = self._summarize_result(message)
@@ -1166,11 +1154,7 @@ class ClaudeCodeAgent(Agent):
                 rendered = ", ".join(f"{k}={str(v)[:200]}" for k, v in fields.items()) if fields else "(no detail)"
                 self._log.debug(f"<<< RESULT [ERROR]: {rendered}")
             else:
-                usage = getattr(message, "usage", None)
-                cost = getattr(message, "total_cost_usd", None)
-                usage_str = str(usage)[:200] if usage else "n/a"
-                cost_str = f"${cost}" if cost is not None else "n/a"
-                self._log.debug(f"<<< RESULT: cost={cost_str}, usage={usage_str}")
+                pass
 
         elif msg_type == "SystemMessage":
             subtype = getattr(message, "subtype", None)

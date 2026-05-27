@@ -48,6 +48,13 @@ uipath = [
     "uipath>=2.10.31",
     "uipath-llmgw-client>=1.0.0",
 ]
+# Optional extra that enables Codex agent support:
+#   - CodexAgent implementation using official openai-codex SDK
+# Without this extra, the framework still installs and runs; Codex-dependent
+# code paths fail at dispatch with a clear hint pointing back here.
+codex = [
+    "openai-codex @ git+https://github.com/openai/codex.git@195ba3e#subdirectory=sdk/python",
+]
 
 [project.scripts]
 coder-eval = "coder_eval.cli:app"
@@ -62,6 +69,17 @@ packages = ["src/coder_eval"]
 [tool.hatch.build.targets.wheel.force-include]
 "src/coder_eval/resources" = "coder_eval/resources"
 "experiments/default.yaml" = "coder_eval/resources/default_experiment.yaml"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.uv]
+# The git-pinned openai-codex SDK hardpins `openai-codex-cli-bin==0.131.0a4`,
+# which only ships musllinux/macOS/Windows wheels — no glibc Linux wheel — so
+# the [codex] extra is otherwise uninstallable on standard CI/Linux runners.
+# Newer cli-bin builds (0.134.0) publish manylinux wheels and speak the same
+# JSON-RPC protocol to the SDK, so override the transitive pin to that build.
+override-dependencies = ["openai-codex-cli-bin==0.134.0"]
 
 [[tool.uv.index]]
 name = "uipath"

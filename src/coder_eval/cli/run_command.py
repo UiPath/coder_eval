@@ -17,7 +17,8 @@ from ..logging_config import setup_logging
 from ..models import AgentKind, RunSummary
 from ..orchestration.config import BatchRunConfig
 from ..path_utils import create_latest_symlink, format_task_log_id
-from ..streaming.renderers import RichStreamRenderer
+from ..streaming.callbacks import CompositeStreamCallback
+from ..streaming.renderers import LoggingStreamRenderer, RichStreamRenderer
 from .console import console
 from .run_helpers import (
     discover_default_tasks,
@@ -156,8 +157,8 @@ def run_command(
         # construct today. AgentKind has unsupported placeholder members; let
         # AgentKind() coercion fail at override time rather than silently
         # accepting them at the CLI boundary.
-        click_type=click.Choice([AgentKind.CLAUDE_CODE.value], case_sensitive=False),
-        help="Override agent type for all tasks (currently only 'claude-code')",
+        click_type=click.Choice([AgentKind.CLAUDE_CODE.value, AgentKind.CODEX.value], case_sensitive=False),
+        help="Override agent type for all tasks (e.g. 'claude-code', 'codex')",
     ),
     model: str | None = typer.Option(
         None,
@@ -481,8 +482,9 @@ async def _run_with_callbacks(
     """
     if stream_mode:
         batch_mode = task_count > 1
-        renderer = RichStreamRenderer(verbosity=stream_mode, batch_mode=batch_mode)
-        stream_callback_factory = lambda _task_id, r=renderer: r  # noqa: E731
+        rich_renderer = RichStreamRenderer(verbosity=stream_mode, batch_mode=batch_mode)
+        logging_renderer = LoggingStreamRenderer()
+        stream_callback_factory = lambda _task_id: CompositeStreamCallback([rich_renderer, logging_renderer])  # noqa: E731
         return await execute_fn(stream_callback_factory=stream_callback_factory)
 
     progress_bar: tqdm[Any] | None = None

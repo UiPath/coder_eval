@@ -1,6 +1,6 @@
 """Real-time streaming of agent events to the terminal."""
 
-from coder_eval.streaming.callbacks import StreamCallback, TaskScopedCallback, safe_emit
+from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback, TaskScopedCallback, safe_emit
 from coder_eval.streaming.events import (
     CriteriaCheckEvent,
     CriterionSummary,
@@ -11,12 +11,14 @@ from coder_eval.streaming.events import (
     TurnCompleteEvent,
     TurnStartEvent,
 )
-from coder_eval.streaming.renderers import RichStreamRenderer
+from coder_eval.streaming.renderers import LoggingStreamRenderer, RichStreamRenderer
 
 
 __all__ = [
+    "CompositeStreamCallback",
     "CriteriaCheckEvent",
     "CriterionSummary",
+    "LoggingStreamRenderer",
     "RichStreamRenderer",
     "StreamCallback",
     "StreamEvent",

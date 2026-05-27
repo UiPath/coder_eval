@@ -62,7 +62,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev --extra uipath
+        run: SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=openai-codex-cli-bin uv sync --frozen --extra dev --extra uipath --extra codex
 
       # PHASE 1: Fast checks (fail early)
       - name: Check code formatting (ruff format)
@@ -270,7 +270,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev --extra uipath
+        run: SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=openai-codex-cli-bin uv sync --frozen --extra dev --extra uipath --extra codex
 
       - name: Check code formatting (ruff format)
         run: .venv/Scripts/ruff format --check src/ tests/
@@ -722,6 +722,81 @@ jobs:
           path: |
             tmp/
             runs/
+          retention-days: 7
+
+  codex-live-tests:
+    name: Live Integration Tests (Codex)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Skip on fork PRs where secrets aren't available.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    env:
+      # Codex SDK auth. CODEX_API_KEY is the key; CODEX_BASE_URL routes to a
+      # custom OpenAI-/responses-compatible endpoint and CODEX_MODEL pins the
+      # model/deployment that endpoint expects.
+      CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+      CODEX_BASE_URL: ${{ secrets.CODEX_BASE_URL }}
+      CODEX_MODEL: ${{ secrets.CODEX_MODEL }}
+      # uv sync resolves named-index credentials from UV_INDEX_<NAME>_{USERNAME,PASSWORD}.
+      UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
+      UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
+      UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+
+      - name: Install project dependencies (with codex extra)
+        run: SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=openai-codex-cli-bin uv sync --frozen --extra dev --extra uipath --extra codex
+
+      - name: Verify required secrets are present
+        run: |
+          if [ -z "$CODEX_API_KEY" ]; then
+            echo "CODEX_API_KEY is not set."
+            exit 1
+          fi
+          echo "CODEX_API_KEY present."
+
+      - name: Run Codex live tests
+        run: |
+          mkdir -p tmp
+          .venv/bin/pytest tests/test_codex_agent_live.py \
+            -m live -v --tb=short --strict-markers -ra \
+            --junit-xml=tmp/junit-codex-live.xml
+
+      - name: Assert Codex live tests actually ran (not silently skipped)
+        run: |
+          python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse("tmp/junit-codex-live.xml").getroot()
+          suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+          total = sum(int(s.get("tests", 0)) for s in suites)
+          skipped = sum(int(s.get("skipped", 0)) for s in suites)
+          errors = sum(int(s.get("errors", 0)) for s in suites)
+          failures = sum(int(s.get("failures", 0)) for s in suites)
+          passed = total - skipped - errors - failures
+          print(f"codex-live passed={passed} skipped={skipped} errors={errors} failures={failures}")
+          if passed < 1:
+              sys.exit("test_codex_agent_live.py reported zero PASSED tests (missing API key / silent skip?)")
+          PY
+
+      - name: Upload Codex live-test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: codex-live-output
+          path: tmp/
           retention-days: 7
 
   validate-skills-yamls:

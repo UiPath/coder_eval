@@ -1,0 +1,30 @@
+task_id: codex_disallowed_tools_test
+description: |
+  Test that disallowed_tools (Write, Edit, Bash) prevents file creation.
+  NOTE: Currently skipped - Codex SDK doesn't enforce disabled_tools through config parameter.
+  This is a known limitation that requires Codex SDK enhancement.
+
+tags:
+  - codex
+  - permissions
+  - skipped
+
+skip: true
+
+agent:
+  type: codex
+  permission_mode: acceptEdits
+  disallowed_tools:
+    - Write
+    - Edit
+    - Bash
+
+initial_prompt: |
+  Please create a file called `restricted.txt` with the content "This should not exist".
+  You can use any tools available to you.
+
+success_criteria:
+  - type: run_command
+    description: File should NOT exist (disallowed tools enforcement test)
+    command: test ! -f restricted.txt
+    expected_exit_code: 0

@@ -68,3 +68,25 @@ def _truncate(text: str, max_chars: int) -> str:
         return text
     dropped = len(text) - max_chars
     return f"{text[:max_chars]}…({dropped} more chars)"
+
+
+def format_token_usage(usage: Any) -> str:
+    """Format TokenUsage into a short display string like 'in=1234, out=567'.
+
+    Returns empty string if usage is None or has no token counts.
+    Includes cache_read_input_tokens if non-zero.
+    """
+    if usage is None:
+        return ""
+    try:
+        input_tokens = getattr(usage, "input_tokens", 0) or 0
+        output_tokens = getattr(usage, "output_tokens", 0) or 0
+        if not input_tokens and not output_tokens:
+            return ""
+        parts = [f"in={input_tokens}", f"out={output_tokens}"]
+        cached = getattr(usage, "cache_read_input_tokens", 0) or 0
+        if cached:
+            parts.append(f"cached={cached}")
+        return ", ".join(parts)
+    except (AttributeError, TypeError):
+        return ""

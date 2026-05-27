@@ -33,6 +33,20 @@ class TaskScopedCallback:
         self._inner.on_event(event)
 
 
+class CompositeStreamCallback:
+    """Composite callback that forwards events to multiple handlers.
+
+    Useful for dispatching events to both logging and display renderers.
+    """
+
+    def __init__(self, callbacks: list[StreamCallback]) -> None:
+        self._callbacks = callbacks
+
+    def on_event(self, event: StreamEvent) -> None:
+        for callback in self._callbacks:
+            safe_emit(callback, event)
+
+
 def safe_emit(callback: StreamCallback | None, event: StreamEvent) -> None:
     """Emit an event to the callback, catching and logging any exceptions."""
     if callback is None:

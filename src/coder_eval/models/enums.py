@@ -55,6 +55,7 @@ class AgentKind(StrEnum):
     """Supported agent types."""
 
     CLAUDE_CODE = "claude-code"
+    CODEX = "codex"
     AIDER = "aider"
     UNKNOWN = "unknown"  # Used when agent type cannot be determined (e.g., task loading failure)
 

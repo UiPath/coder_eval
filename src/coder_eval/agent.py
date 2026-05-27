@@ -87,6 +87,13 @@ class Agent(ABC):
         was available) before raising — rollback of per-turn bookkeeping happens
         exclusively in ``discard_pending_turn``, which the caller invokes after
         every failed ``communicate()``.
+
+        Streaming contract: when ``stream_callback`` is provided, an
+        implementation MUST emit exactly one ``TurnCompleteEvent`` at the end of
+        a successful turn (the orchestrator emits ``TurnStartEvent`` before the
+        call, but owns no turn-end signal). Renderers and the task-log handler
+        rely on this boundary; omitting it silently drops the turn from the log
+        with no failing assertion.
         """
         pass
 

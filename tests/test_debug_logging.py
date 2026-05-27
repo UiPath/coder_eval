@@ -18,6 +18,8 @@ def agent():
 
 
 # --- Issue #2: Empty-string tool result content shows "(empty)" ---
+# NOTE: Tool result logging is now handled by ToolResultEvent and LoggingStreamRenderer
+# This test now verifies that _log_message_debug no longer directly logs UserMessages
 
 
 class _ToolResultBlock:
@@ -38,30 +40,32 @@ class _UserMessage:
 
 
 def test_log_debug_tool_result_empty_string(agent, caplog):
-    """Empty-string tool result content should NOT be logged as '(empty)'."""
+    """Tool result logging is now handled by events, not direct logs."""
     block = _ToolResultBlock(tool_use_id="t1", content="", is_error=False)
     msg = _UserMessage(content=[block])
 
     with caplog.at_level(logging.DEBUG, logger="coder_eval.agents.claude_code_agent"):
         agent._log_message_debug(msg, "UserMessage")
 
-    assert len(caplog.records) == 1
-    assert "(empty)" not in caplog.records[0].message
+    # No direct logging - handled by ToolResultEvent instead
+    assert len(caplog.records) == 0
 
 
 def test_log_debug_tool_result_none_content(agent, caplog):
-    """None tool result content should be logged as '(empty)'."""
+    """Tool result logging is now handled by events, not direct logs."""
     block = _ToolResultBlock(tool_use_id="t1", content=None, is_error=False)
     msg = _UserMessage(content=[block])
 
     with caplog.at_level(logging.DEBUG, logger="coder_eval.agents.claude_code_agent"):
         agent._log_message_debug(msg, "UserMessage")
 
-    assert len(caplog.records) == 1
-    assert "(empty)" in caplog.records[0].message
+    # No direct logging - handled by ToolResultEvent instead
+    assert len(caplog.records) == 0
 
 
 # --- Issue #3: cost=$None in debug output ---
+# NOTE: Result message logging is now handled by TurnCompleteEvent and LoggingStreamRenderer
+# This test now verifies that _log_message_debug no longer directly logs ResultMessages
 
 
 class _ResultMessage:
@@ -76,25 +80,25 @@ class _ResultMessage:
 
 
 def test_log_debug_result_cost_none(agent, caplog):
-    """When cost is None, debug log should NOT contain '$None'."""
+    """Result message logging is now handled by events, not direct logs."""
     msg = _ResultMessage(usage={"input_tokens": 100}, total_cost_usd=None)
 
     with caplog.at_level(logging.DEBUG, logger="coder_eval.agents.claude_code_agent"):
         agent._log_message_debug(msg, "ResultMessage")
 
-    assert len(caplog.records) == 1
-    assert "$None" not in caplog.records[0].message
+    # No direct logging - handled by TurnCompleteEvent instead
+    assert len(caplog.records) == 0
 
 
 def test_log_debug_result_cost_present(agent, caplog):
-    """When cost is present, debug log should show the dollar amount."""
+    """Result message logging is now handled by events, not direct logs."""
     msg = _ResultMessage(usage={"input_tokens": 100}, total_cost_usd=0.05)
 
     with caplog.at_level(logging.DEBUG, logger="coder_eval.agents.claude_code_agent"):
         agent._log_message_debug(msg, "ResultMessage")
 
-    assert len(caplog.records) == 1
-    assert "$0.05" in caplog.records[0].message
+    # No direct logging - handled by TurnCompleteEvent instead
+    assert len(caplog.records) == 0
 
 
 # --- Issue #4: _format_messages renders block-based AssistantMessage as raw list ---

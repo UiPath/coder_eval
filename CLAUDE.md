@@ -235,6 +235,12 @@ When fixing a bug, ask: *could a custom lint rule have prevented this?* If the r
    any per-turn bookkeeping (e.g. iteration counter). Must be idempotent.
 6. Clear `self.pending_turn = None` at the top of `communicate()` (defensive
    reset) and in `stop()` (cleanup).
+7. When `stream_callback` is provided, emit exactly one `TurnCompleteEvent` at
+   the end of a successful turn (the orchestrator emits `TurnStartEvent` but not
+   the end boundary). The task-log handler and renderers depend on it.
+8. If the agent shells out / holds OS resources, implement real `stop()` /
+   `kill()` / `kill_sync()` teardown — `kill_sync()` is called from the
+   watchdog's non-asyncio thread, so it must not await.
 
 ## Task Definition
 

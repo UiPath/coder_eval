@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     bedrock_model: str | None = None  # Cross-region model ID
     bedrock_small_model: str | None = None  # Cross-region small model ID
 
+    # Codex settings (CodexAgent). CODEX_MODEL is the fallback model/deployment
+    # used when a task doesn't pin agent.model; CODEX_BASE_URL routes to a custom
+    # OpenAI-/responses-compatible endpoint.
+    codex_model: str | None = None
+
     # Logging
     log_level: str = "INFO"  # Default log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     log_to_file: bool = False  # Whether to enable file logging

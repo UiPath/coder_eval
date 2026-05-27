@@ -62,7 +62,7 @@ from .path_utils import format_task_log_id, task_log_path
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, UserSimulator, evaluate_stop
 from .streaming.callbacks import StreamCallback, TaskScopedCallback, safe_emit
-from .streaming.events import CriteriaCheckEvent, CriterionSummary, TurnCompleteEvent, TurnStartEvent
+from .streaming.events import CriteriaCheckEvent, CriterionSummary, TurnStartEvent
 from .utils import get_version_info
 
 
@@ -923,6 +923,10 @@ class Orchestrator:
 
             assert self.route is not None
             return ClaudeCodeAgent(self.task.agent, route=self.route)
+        elif self.task.agent.type == AgentKind.CODEX:
+            from coder_eval.agents.codex_agent import CodexAgent
+
+            return CodexAgent(self.task.agent, route=self.route)
         else:
             raise ValueError(f"Unsupported agent type: {self.task.agent.type}")
 
@@ -1120,17 +1124,6 @@ class Orchestrator:
         self.result.iterations.append(turn_record)
         self._sync_sandbox_command_path_with_agent()
 
-        safe_emit(
-            self.stream_callback,
-            TurnCompleteEvent(
-                task_id=self._log_task_id,
-                iteration=iteration,
-                duration_s=turn_record.duration_seconds or 0.0,
-                command_count=len(turn_record.commands),
-                token_usage_str=str(turn_record.token_usage) if turn_record.token_usage else "",
-            ),
-        )
-
         logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
 
         # Check success criteria (pass reference code for reference_comparison criterion)
@@ -1202,7 +1195,7 @@ class Orchestrator:
              just happened, and return pass/fail.
 
         Emits the same streaming events as the single-shot loop
-        (``TurnStartEvent``, ``TurnCompleteEvent``, ``CriteriaCheckEvent``)
+        (``TurnStartEvent`` from orchestrator, ``TurnCompleteEvent`` + ``CriteriaCheckEvent`` from agents/orchestrator)
         so downstream UI renderers work unchanged. Simulator telemetry is
         recorded on ``self.result.simulation``.
         """
@@ -1361,16 +1354,6 @@ class Orchestrator:
                     metadata=", ".join(agent_meta_parts),
                 )
 
-                safe_emit(
-                    self.stream_callback,
-                    TurnCompleteEvent(
-                        task_id=self._log_task_id,
-                        iteration=turns_completed,
-                        duration_s=turn_record.duration_seconds or 0.0,
-                        command_count=len(turn_record.commands),
-                        token_usage_str=str(turn_record.token_usage) if turn_record.token_usage else "",
-                    ),
-                )
                 if turn_record.token_usage is not None:
                     usage = turn_record.token_usage
                     total_tokens_used += (usage.input_tokens or 0) + (usage.output_tokens or 0)
