@@ -23,6 +23,7 @@ Complete reference for defining evaluation tasks in coder_eval.
   - [uipath_eval](#uipath_eval)
   - [llm_judge](#llm_judge)
   - [agent_judge](#agent_judge)
+  - [skill_triggered](#skill_triggered)
 - [Reference Solutions](#reference-solutions)
 - [Pre-Run Commands](#pre-run-commands)
 - [Post-Run Commands](#post-run-commands)
@@ -671,6 +672,33 @@ The judge runs with the evaluator's API credentials and can execute arbitrary Ba
 - `score` missing / non-numeric / non-finite
 - `TurnTimeoutError` (judge exceeded `turn_timeout`)
 - SDK subprocess failure (e.g. `claude` CLI missing)
+
+### `skill_triggered`
+
+Binary classifier: **did the agent invoke a `Skill` tool during the run?** Scans the run's `turn_records` for any `Skill` tool call whose `skill` parameter matches `skill_name` (namespace prefixes like `plugin:skill` are stripped, so `skill_name: uipath-agents` matches `Skill(skill="uipath-coded-agents:uipath-agents")`).
+
+Observed label is `"yes"` when such a call is found, else `"no"`. Expected label is `"yes"` iff `expected_skill == skill_name`. **Binary scoring:** `1.0` when observed matches expected, else `0.0`.
+
+```yaml
+- type: "skill_triggered"
+  description: "uipath-agents activation"
+  skill_name: uipath-agents          # only count Skill calls matching this name
+  expected_skill: "${row.expected_skill}"   # the row's true skill; "" for negatives
+  suite_thresholds:
+    recall.yes: 0.70
+    precision.yes: 0.80
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `skill_name` | *required* | Only count `Skill` invocations whose `skill` parameter matches this name |
+| `expected_skill` | *required* | The row's expected skill (after `${row.*}` substitution); empty string `""` for negative rows where the skill should **not** fire |
+
+**Requires agent telemetry.** This criterion reads `turn_records`, so it only works against a real agent run (not a static check). With no turn records it reports `score=0.0` and an `error`.
+
+**Classification metrics.** `skill_triggered` returns a `ClassificationCriterionResult`, so on a [dataset-backed task](#task-yaml-structure) the suite aggregator computes accuracy / precision / recall / F1 / confusion matrix across all rows. Gate the suite with `suite_thresholds` using any of: `accuracy`, `macro_f1`, `weighted_f1`, `micro_f1`, or per-label `precision.<label>` / `recall.<label>` / `f1.<label>` (labels are `yes` / `no`). The run exits non-zero if any listed metric falls below its minimum.
+
+**Typical pattern.** Label each dataset row with its true skill (`expected_skill`, `""` for negatives) and stack one `skill_triggered` criterion per skill against the same dataset — each gets its own confusion matrix from the same agent traces. This is the natural companion to a skill A/B experiment (skill plugin on vs. off); see the [A/B Experiment Guide](AB_EXPERIMENTS.md#recipe-ab-a-skill).
 
 ## Reference Solutions
 

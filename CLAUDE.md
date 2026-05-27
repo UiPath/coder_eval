@@ -138,7 +138,7 @@ templates/                         # Sandbox template directories
 - **Strategy Pattern**: `Agent` ABC with implementations in `agents/`
 - **Separation of Concerns**: Data models (`models/`) are pure Pydantic; logic lives in `criteria/`, `evaluation/`, etc.
 - **Callback Streaming**: `StreamCallback` protocol with `TaskScopedCallback` wrapper for real-time LLM event output
-- **Experiment Layer**: Pre-processing config resolver (`ExperimentRunner`) that resolves task × variant combinations via 5-layer merge (default → experiment defaults → task → variant → CLI) before passing to `run_batch`
+- **Experiment Layer**: Pre-processing config resolver (`ExperimentRunner`) that resolves task × variant combinations via 5-layer merge (default → experiment defaults → task → variant → CLI) before passing to `run_batch`. For running A/B comparisons (model vs. model, skill on vs. off, prompt vs. prompt), see [docs/AB_EXPERIMENTS.md](docs/AB_EXPERIMENTS.md).
 - **All core models importable from `coder_eval.models`** regardless of submodule
 - **Dataset fan-out**: `TaskDefinition.dataset` (inline rows or JSONL path) expands a single task into N row-tasks with `${row.<field>}` substitution in `initial_prompt` and `success_criteria` string fields. Expansion runs in `task_loader.expand_dataset` **before** variant resolution, so variants cannot override the dataset. Row cap: CLI `--sample N` > task-level `dataset.sample`.
 - **Per-criterion aggregation**: Each `BaseCriterion` subclass exposes `aggregate(criterion, per_row_results) -> CriterionAggregate | None`. Default emits `count / mean / median / std / min / max` so every criterion is suite-thresholdable for free. Classification-style criteria return `ClassificationCriterionResult` (subclass of `CriterionResult`) and layer accuracy / P/R/F1 / confusion via the shared `overlay_classification_metrics` utility. `BaseSuccessCriterion.suite_thresholds` gates the suite on those metrics; CLI exits non-zero on any gate failure.
@@ -244,7 +244,7 @@ When fixing a bug, ask: *could a custom lint rule have prevented this?* If the r
 
 ## Task Definition
 
-Tasks are YAML files. See [docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_GUIDE.md) for the full reference.
+Tasks are YAML files. See [docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_GUIDE.md) for the full reference. To compare configuration variants across the same tasks, see [docs/AB_EXPERIMENTS.md](docs/AB_EXPERIMENTS.md).
 
 ## Dependencies
 
