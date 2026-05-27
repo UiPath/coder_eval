@@ -152,11 +152,19 @@ def resolve_route(settings: Settings) -> ApiRoute:
             # and task-YAML agent.model are resolved later in the agent layer (via
             # _apply_cli_overrides + _resolve_effective_model), which also handles
             # the anthropic.* + region prefix qualification on bare aliases.
+            # Fall back to the main model when no small/fast model is configured.
+            # Claude Code routes WebFetch's page-summarization (and other "small,
+            # fast" steps) through ANTHROPIC_SMALL_FAST_MODEL; on Bedrock that env
+            # var is only exported when small_model is set (see
+            # ClaudeCodeAgent._build_sdk_env). Leaving it unset made every
+            # WebFetch fail with "model issues" under the Bedrock backend. The main
+            # model is always a valid fallback, so default to it.
+            small_model = settings.bedrock_small_model or settings.bedrock_model
             return BedrockRoute(
                 bearer_token=settings.aws_bearer_token_bedrock,
                 region=settings.aws_region,
                 model=to_bedrock_inference_profile(settings.bedrock_model, settings.aws_region),
-                small_model=to_bedrock_inference_profile(settings.bedrock_small_model, settings.aws_region),
+                small_model=to_bedrock_inference_profile(small_model, settings.aws_region),
             )
         case ApiBackend.PROXY:
             msg = (

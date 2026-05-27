@@ -112,27 +112,32 @@ async function loadPerRunForId(id: string): Promise<PerRun> {
     return { id, overview, reviewTagCounts, reviewTagsByTask };
 }
 
+// Cache at per-run granularity, NOT per-window. A whole-window PerRun[] for
+// the 30d window exceeds unstable_cache's hard 2MB ceiling (≈400 tasks × ~20
+// runs), and on overflow Next.js drops the write AND hands back a truncated
+// payload — silently shearing off the newest runs (the 30d front page lost
+// "today"). One run's projection is well under 2MB, so keying the cache on the
+// run id keeps every entry cacheable and lets entries be reused across all
+// windows + the trends page. The cross-run aggregation downstream is cheap
+// in-memory work, so leaving it uncached costs nothing.
+const cachedLoadPerRun = unstable_cache(loadPerRunForId, ["evalboard-per-run"], {
+    revalidate: 300,
+});
+
 async function loadWindowDataInner(window: Window): Promise<PerRun[]> {
     const ids = await listRunIdsInWindow(window);
-    return mapWithConcurrency(ids, FETCH_CONCURRENCY, loadPerRunForId);
+    return mapWithConcurrency(ids, FETCH_CONCURRENCY, cachedLoadPerRun);
+}
+
+// Fetch the N most recent runs in PerRun shape. Recency-based (fixed count)
+// rather than date-bounded — used by the trends page.
+export function loadRecentRuns(limit: number): Promise<PerRun[]> {
+    return loadRecentRunsInner(limit);
 }
 
 async function loadRecentRunsInner(limit: number): Promise<PerRun[]> {
     const ids = (await listRunIds()).slice(0, limit);
-    return mapWithConcurrency(ids, FETCH_CONCURRENCY, loadPerRunForId);
-}
-
-const cachedLoadRecentRuns = unstable_cache(
-    loadRecentRunsInner,
-    ["evalboard-recent-runs"],
-    { revalidate: 300 },
-);
-
-// Fetch the N most recent runs in PerRun shape. Bypasses the
-// window-keyed cache used by getOverview because the trends page is
-// fixed-count, not date-bounded.
-export function loadRecentRuns(limit: number): Promise<PerRun[]> {
-    return cachedLoadRecentRuns(limit);
+    return mapWithConcurrency(ids, FETCH_CONCURRENCY, cachedLoadPerRun);
 }
 
 // Tag-count aggregation where each tag's count is the number of distinct
@@ -239,14 +244,12 @@ function aggregateTagCounts(perRun: PerRun[]): {
 }
 
 
-// Module-scope cache wrapper. Keying on the window arg means a single
-// request (Promise.all over getOverview+getRunListing) shares one fetch,
-// and cross-request results live for 5 minutes.
-const loadWindowData = unstable_cache(
-    loadWindowDataInner,
-    ["evalboard-window-data"],
-    { revalidate: 300 },
-);
+// Per-window assembly from the per-run cache. The expensive blob reads are
+// memoized per run inside cachedLoadPerRun; gathering them for a window is
+// cheap, so this stays uncached (and avoids the 2MB whole-window cache cap).
+function loadWindowData(window: Window): Promise<PerRun[]> {
+    return loadWindowDataInner(window);
+}
 
 export function taskMatchesTag(
     task: RunOverviewTask,

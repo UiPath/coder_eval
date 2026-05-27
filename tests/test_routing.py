@@ -261,6 +261,52 @@ class TestResolveRouteBedrockModel:
         assert isinstance(route, BedrockRoute)
         assert route.model == "us.anthropic.claude-opus-4-7"
 
+    def test_small_model_defaults_to_main_model(self):
+        """No BEDROCK_SMALL_MODEL → small_model falls back to the main model.
+
+        Keeps ANTHROPIC_SMALL_FAST_MODEL populated so WebFetch (and other
+        small/fast steps) work under the Bedrock backend instead of failing
+        with 'model issues'.
+        """
+        settings = Settings(
+            api_backend=ApiBackend.BEDROCK,
+            aws_bearer_token_bedrock="t",
+            aws_region="eu-north-1",
+            bedrock_model="anthropic.claude-sonnet-4-6",
+            bedrock_small_model=None,
+        )
+        route = resolve_route(settings)
+        assert isinstance(route, BedrockRoute)
+        assert route.small_model == "eu.anthropic.claude-sonnet-4-6"
+        assert route.small_model == route.model
+
+    def test_explicit_small_model_wins_over_main(self):
+        """An explicit BEDROCK_SMALL_MODEL is preserved, not overridden by the fallback."""
+        settings = Settings(
+            api_backend=ApiBackend.BEDROCK,
+            aws_bearer_token_bedrock="t",
+            aws_region="eu-north-1",
+            bedrock_model="anthropic.claude-sonnet-4-6",
+            bedrock_small_model="anthropic.claude-haiku-4-5",
+        )
+        route = resolve_route(settings)
+        assert isinstance(route, BedrockRoute)
+        assert route.small_model == "eu.anthropic.claude-haiku-4-5"
+
+    def test_small_model_none_when_no_models_set(self):
+        """Both unset → small_model stays None (nothing to fall back to)."""
+        settings = Settings(
+            api_backend=ApiBackend.BEDROCK,
+            aws_bearer_token_bedrock="t",
+            aws_region="eu-north-1",
+            bedrock_model=None,
+            bedrock_small_model=None,
+            default_agent_model=None,
+        )
+        route = resolve_route(settings)
+        assert isinstance(route, BedrockRoute)
+        assert route.small_model is None
+
 
 class TestResolveEffectiveModel:
     """Test ClaudeCodeAgent._resolve_effective_model() precedence + env sync + region prefix."""
