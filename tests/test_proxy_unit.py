@@ -549,6 +549,41 @@ class TestPricingCalculation:
         expected = (50_000 * 3.0 + 2_000 * 15.0) / 1_000_000
         assert cost == pytest.approx(expected)
 
+    def test_gpt5_codex_cost(self):
+        # gpt-5-codex: $1.25/MTok in, $10/MTok out
+        cost = calculate_cost("gpt-5-codex", input_tokens=1_000_000, output_tokens=0)
+        assert cost == pytest.approx(1.25)
+
+        cost = calculate_cost("gpt-5-codex", input_tokens=0, output_tokens=1_000_000)
+        assert cost == pytest.approx(10.0)
+
+    def test_gpt5_cost(self):
+        # gpt-5: same rates as gpt-5-codex ($1.25/MTok in, $10/MTok out)
+        cost = calculate_cost("gpt-5", input_tokens=1_000_000, output_tokens=0)
+        assert cost == pytest.approx(1.25)
+
+        cost = calculate_cost("gpt-5", input_tokens=0, output_tokens=1_000_000)
+        assert cost == pytest.approx(10.0)
+
+    def test_gpt5_3_codex_cost(self):
+        # gpt-5.3-codex: $1.75/MTok in, $14/MTok out
+        cost = calculate_cost("gpt-5.3-codex", input_tokens=1_000_000, output_tokens=0)
+        assert cost == pytest.approx(1.75)
+
+        cost = calculate_cost("gpt-5.3-codex", input_tokens=0, output_tokens=1_000_000)
+        assert cost == pytest.approx(14.0)
+
+    def test_gpt5_codex_cached_input(self):
+        # Mirrors CodexAgent._token_usage_from_sdk billing: non-cached input at
+        # the input rate, cached portion at the cache-read rate ($0.125/MTok).
+        cost = calculate_cost(
+            "gpt-5-codex",
+            input_tokens=1_000_000,
+            output_tokens=0,
+            cache_read_tokens=1_000_000,
+        )
+        assert cost == pytest.approx(1.25 + 0.125)
+
 
 # ---------------------------------------------------------------------------
 # get_total_cost

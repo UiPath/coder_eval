@@ -468,7 +468,11 @@ class TestCommunicateHappyPath:
         # Distinct sequence numbers (no collision / freeze).
         assert sorted(c.sequence_number for c in record.commands) == [0, 1]
         assert record.token_usage is not None
-        assert record.token_usage.input_tokens == 100
+        # input_tokens follows the non-cached convention: the SDK reports a full
+        # prompt count of 100 with 8 cached, so input_tokens is 100 - 8 = 92 and
+        # the cached portion is held separately (matches ClaudeCodeAgent and the
+        # orchestrator budget convention).
+        assert record.token_usage.input_tokens == 92
         assert record.token_usage.cache_read_input_tokens == 8
         assert agent.get_state() == AgentState.WORKING
         assert agent.pending_turn is None

@@ -42,6 +42,14 @@ _PRICING: dict[str, ModelPricing] = {
     "claude-3-sonnet-20240229": ModelPricing(3.0, 15.0, 3.75, 0.30),
     # Claude 3 Haiku
     "claude-3-haiku-20240307": ModelPricing(0.25, 1.25, 0.30, 0.03),
+    # OpenAI GPT-5 / Codex (direct or via Azure OpenAI). Released 2025-09-23.
+    # Source: https://openai.com/api/pricing (gpt-5-codex: $1.25/M in,
+    # $0.125/M cached in, $10/M out). OpenAI does not bill cache writes
+    # separately, so cache_write == input rate.
+    "gpt-5-codex": ModelPricing(1.25, 10.0, 1.25, 0.125),
+    "gpt-5": ModelPricing(1.25, 10.0, 1.25, 0.125),
+    # gpt-5.3-codex (2026-02-24): $1.75/M input, $0.175/M cached, $14/M output.
+    "gpt-5.3-codex": ModelPricing(1.75, 14.0, 1.75, 0.175),
 }
 
 

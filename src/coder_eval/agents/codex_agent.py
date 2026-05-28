@@ -34,6 +34,7 @@ from coder_eval.models import (
     TokenUsage,
     TurnRecord,
 )
+from coder_eval.proxy.pricing import calculate_cost
 from coder_eval.streaming.callbacks import StreamCallback, safe_emit
 from coder_eval.streaming.events import TextChunkEvent, ToolCallEvent, ToolResultEvent, TurnCompleteEvent
 
@@ -410,6 +411,15 @@ class CodexAgent(Agent[CodexAgentConfig]):
                         if plugin_path.exists() and plugin_path.is_dir():
                             skills_sources.append(plugin_path)
                             self._log.debug(f"Found skills from plugin: {plugin_path}")
+                        else:
+                            # Loud: an unresolved env var (e.g. unset
+                            # $SKILLS_REPO_PATH) or missing dir silently drops
+                            # the plugin's skills, so the agent runs blind.
+                            hint = "env var likely unset" if "$" in expanded_path else "path does not exist"
+                            self._log.warning(
+                                f"Plugin skills path did not resolve: {path_str!r} "
+                                f"→ {expanded_path!r} ({hint}); no skills linked from it"
+                            )
 
         # Also check plugin_tools_dir parameter
         if plugin_tools_dir:
@@ -426,10 +436,20 @@ class CodexAgent(Agent[CodexAgentConfig]):
         try:
             agents_skills_dir.mkdir(parents=True, exist_ok=True)
 
-            # Symlink or copy skills from all sources
+            # Symlink or copy skills from all sources. A source may either
+            # contain skill dirs directly (<source>/<skill>/SKILL.md) or be a
+            # Claude plugin-marketplace root whose skills live one level deeper
+            # (<source>/skills/<skill>/SKILL.md). Scan both layouts.
             for skills_source in skills_sources:
-                for skill_dir in skills_source.iterdir():
-                    if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
+                scan_dirs = [skills_source]
+                nested = skills_source / "skills"
+                if nested.is_dir():
+                    scan_dirs.append(nested)
+
+                for scan_dir in scan_dirs:
+                    for skill_dir in scan_dir.iterdir():
+                        if not (skill_dir.is_dir() and (skill_dir / "SKILL.md").exists()):
+                            continue
                         target = agents_skills_dir / skill_dir.name
                         if target.exists():
                             # Skip if already exists (first source wins)
@@ -444,7 +464,18 @@ class CodexAgent(Agent[CodexAgentConfig]):
                             shutil.copytree(skill_dir, target, dirs_exist_ok=True)
                             self._log.debug(f"Copied skill: {skill_dir.name}")
 
-            self._log.debug(f"Skills set up in {agents_skills_dir}")
+            linked = list(agents_skills_dir.iterdir())
+            if linked:
+                self._log.debug(f"Linked {len(linked)} skill(s) into {agents_skills_dir}")
+            else:
+                # Sources existed but no SKILL.md was found under them or their
+                # skills/ subdir — codex will run without any skill context.
+                self._log.warning(
+                    f"0 skills linked into {agents_skills_dir} despite "
+                    f"{len(skills_sources)} plugin source(s): "
+                    f"{[str(s) for s in skills_sources]}; "
+                    "check the plugin path points at a skills repo root"
+                )
 
         except Exception as e:
             self._log.warning(f"Failed to set up skills: {e}")
@@ -526,6 +557,14 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         # Build config dict for tool enforcement
         tool_config: dict[str, Any] = {}
+
+        # Codex's workspace-write sandbox disables network by default, so any
+        # tool the agent needs to install (npm/pip/etc.) fails with
+        # "fetch failed". Always open network in workspace-write — every task
+        # we exercise needs the UiPath CLI / package installs. Read-only and
+        # danger-full-access keep their built-in network defaults.
+        if sandbox_mode_str == "workspace-write":
+            tool_config["sandbox_workspace_write"] = {"network_access": True}
 
         if self.config.allowed_tools:
             enabled_tools = [_CLAUDE_TO_CODEX_TOOL_MAP.get(tool, tool) for tool in self.config.allowed_tools]
@@ -856,23 +895,47 @@ class CodexAgent(Agent[CodexAgentConfig]):
             self._log.debug(f"Failed to extract file-change telemetry: {e}")
             return None
 
-    @staticmethod
-    def _token_usage_from_sdk(sdk_token_usage: Any) -> TokenUsage | None:
+    def _token_usage_from_sdk(self, sdk_token_usage: Any) -> TokenUsage | None:
         """Convert the Codex SDK's ThreadTokenUsage to our TokenUsage.
 
         Single conversion site for both the TurnRecord and the TurnCompleteEvent,
         so cached-input tokens can't be captured in one path but dropped in the
-        other.
+        other. The Codex SDK does not surface cost, so we derive it from the
+        pricing table keyed on the effective model (None if the model is unpriced).
+
+        Harness convention: ``TokenUsage.input_tokens`` is the NON-cached prompt
+        portion, with the cached portion held separately in
+        ``cache_read_input_tokens`` — matching ``ClaudeCodeAgent`` (which stores
+        Anthropic's already-non-cached ``input_tokens``) and the budget
+        enforcement in ``orchestrator._enforce_token_budget`` (which sums
+        ``input_tokens`` alone and only adds ``cache_read_input_tokens`` when
+        ``count_cached_input=True``). The Codex SDK's ``input_tokens`` is the
+        FULL prompt count and includes the cached portion, so subtract it here.
+        Storing the full count would double-bill cached tokens under
+        ``count_cached_input`` and inflate Codex totals against Claude in reports.
         """
         if not sdk_token_usage:
             return None
         total = getattr(sdk_token_usage, "total", None)
         if not total:
             return None
+        input_tokens = getattr(total, "input_tokens", 0) or 0
+        output_tokens = getattr(total, "output_tokens", 0) or 0
+        cached_input = getattr(total, "cached_input_tokens", 0) or 0
+        # Normalize the SDK's full prompt count to the non-cached convention.
+        non_cached_input = max(input_tokens - cached_input, 0)
+        # Bill non-cached at the input rate and the cached portion at cache-read.
+        cost = calculate_cost(
+            self._effective_model() or "",
+            input_tokens=non_cached_input,
+            output_tokens=output_tokens,
+            cache_read_tokens=cached_input,
+        )
         return TokenUsage(
-            input_tokens=getattr(total, "input_tokens", 0) or 0,
-            output_tokens=getattr(total, "output_tokens", 0) or 0,
-            cache_read_input_tokens=getattr(total, "cached_input_tokens", 0) or 0,
+            input_tokens=non_cached_input,
+            output_tokens=output_tokens,
+            cache_read_input_tokens=cached_input,
+            total_cost_usd=cost,
         )
 
     @staticmethod
