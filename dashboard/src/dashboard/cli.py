@@ -244,8 +244,23 @@ def run(
 
 @cli.command()
 @click.argument("run_dir", type=click.Path(exists=True))
-def upload(run_dir: str) -> None:
-    """Upload a run directory to Azure Blob Storage."""
+@click.option("--title", default=None, help="Human-readable run title shown on the dashboard.")
+@click.option("--description", default=None, help="Longer notes shown on the run page.")
+@click.option(
+    "--adhoc",
+    is_flag=True,
+    default=False,
+    help="Mark as ad-hoc: excluded from the daily front-page metrics, listed in the Ad-hoc section.",
+)
+def upload(run_dir: str, title: str | None, description: str | None, adhoc: bool) -> None:
+    """Upload a run directory to Azure Blob Storage.
+
+    Pass --title / --description / --adhoc to attach run metadata, written as
+    meta.json in the run dir before upload. With NO metadata flag, nothing
+    extra is written — a daily-run re-upload (recovery) stays byte-for-byte
+    as before, so the evalboard treats it exactly like any pipeline run.
+    """
+    import json
     from pathlib import Path
 
     from .blob import upload_run
@@ -253,6 +268,16 @@ def upload(run_dir: str) -> None:
     cfg = Config()
     run_path = Path(run_dir).resolve()
     run_id = run_path.name
+
+    if title or description or adhoc:
+        meta: dict[str, object] = {"adhoc": adhoc}
+        if title:
+            meta["title"] = title
+        if description:
+            meta["description"] = description
+        (run_path / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+        print(f"Wrote {run_path / 'meta.json'} ({', '.join(meta)})")
+
     upload_run(
         run_path,
         run_id,

@@ -1,9 +1,13 @@
-import { describe, expect, test } from "vitest";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import {
     type ArtifactRef,
     isExcludedArtifact,
     sortArtifacts,
     toTaskRow,
+    walkArtifacts,
 } from "../runs";
 
 describe("toTaskRow", () => {
@@ -96,5 +100,45 @@ describe("sortArtifacts", () => {
         const input = [ref("b.txt", "txt"), ref("a.flow", "flow")];
         sortArtifacts(input);
         expect(input.map((a) => a.relPath)).toEqual(["b.txt", "a.flow"]);
+    });
+});
+
+describe("walkArtifacts", () => {
+    let root: string;
+    let target: string;
+
+    beforeAll(async () => {
+        // Layout mirrors a codex task workspace: a real deliverable, a nested
+        // dir, plus a symlink to an external skill dir (the `.agents/skills/*`
+        // scaffolding) and a symlink to a file. Both symlinks must be skipped.
+        root = await fs.mkdtemp(path.join(os.tmpdir(), "walk-art-"));
+        target = await fs.mkdtemp(path.join(os.tmpdir(), "walk-tgt-"));
+        await fs.writeFile(path.join(target, "SKILL.md"), "# skill\n");
+
+        await fs.writeFile(path.join(root, "main.flow"), "{}\n");
+        await fs.mkdir(path.join(root, "proj"));
+        await fs.writeFile(path.join(root, "proj", "app.cs"), "//\n");
+        await fs.mkdir(path.join(root, ".agents", "skills"), {
+            recursive: true,
+        });
+        await fs.symlink(target, path.join(root, ".agents", "skills", "uipath-rpa"));
+        await fs.symlink(
+            path.join(root, "main.flow"),
+            path.join(root, "alias.flow"),
+        );
+    });
+
+    afterAll(async () => {
+        await fs.rm(root, { recursive: true, force: true });
+        await fs.rm(target, { recursive: true, force: true });
+    });
+
+    test("skips symlinks (dir and file) and does not descend into them", async () => {
+        const rels = (await walkArtifacts(root)).map((a) => a.relPath).sort();
+        expect(rels).toEqual(["main.flow", "proj/app.cs"]);
+        // No symlink entry, and the symlinked skill dir's SKILL.md never appears.
+        expect(rels.some((r) => r.includes("uipath-rpa"))).toBe(false);
+        expect(rels.some((r) => r.includes("SKILL.md"))).toBe(false);
+        expect(rels).not.toContain("alias.flow");
     });
 });

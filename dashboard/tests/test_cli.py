@@ -26,6 +26,47 @@ def test_upload_command(mock_upload_run, mock_config_cls, tmp_path):
     assert "Uploaded" in result.output
     mock_upload_run.assert_called_once()
     assert "teststorage" in str(mock_upload_run.call_args)
+    # No metadata flag → no meta.json written (daily-run re-upload stays as-is).
+    assert not (run_dir / "meta.json").exists()
+
+
+@patch("dashboard.cli.Config")
+@patch("dashboard.blob.upload_run")
+def test_upload_command_writes_meta(mock_upload_run, mock_config_cls, tmp_path):
+    """--title/--description/--adhoc write a meta.json sidecar before upload."""
+    import json
+
+    run_dir = tmp_path / "codex-baseline"
+    run_dir.mkdir()
+
+    mock_cfg = MagicMock()
+    mock_cfg.azure_storage_account = "teststorage"
+    mock_cfg.azure_blob_container = "runs"
+    mock_cfg.azure_storage_key = ""
+    mock_config_cls.return_value = mock_cfg
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "upload",
+            str(run_dir),
+            "--title",
+            "Codex baseline",
+            "--description",
+            "53 tasks, j=10",
+            "--adhoc",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_upload_run.assert_called_once()
+
+    meta = json.loads((run_dir / "meta.json").read_text())
+    assert meta == {
+        "adhoc": True,
+        "title": "Codex baseline",
+        "description": "53 tasks, j=10",
+    }
 
 
 def _setup_run_pipeline_mocks(mock_config_cls, tmp_path):

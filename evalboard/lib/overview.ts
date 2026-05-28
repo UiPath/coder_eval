@@ -5,7 +5,9 @@
 import { unstable_cache } from "next/cache";
 import {
     listRunIds,
+    readRunMeta,
     readRunOverview,
+    type RunMeta,
     type RunOverview,
     type RunOverviewTask,
 } from "./runs";
@@ -71,6 +73,10 @@ export interface PerRun {
     reviewTagCounts: Record<string, number>;
     // taskId -> deduped list of review tags (for task-level filter matching).
     reviewTagsByTask: Record<string, string[]>;
+    // From the optional meta.json sidecar. Both optional so callers/tests that
+    // build a PerRun without metadata stay valid; absent === non-ad-hoc.
+    adhoc?: boolean;
+    title?: string | null;
 }
 
 async function loadPerRunForId(id: string): Promise<PerRun> {
@@ -81,14 +87,23 @@ async function loadPerRunForId(id: string): Promise<PerRun> {
     // proceed with the other runs.
     let overview: RunOverview | null = null;
     let reviewIndex: Awaited<ReturnType<typeof readRunReviewIndex>> = null;
+    let meta: RunMeta | null = null;
     try {
-        [overview, reviewIndex] = await Promise.all([
+        [overview, reviewIndex, meta] = await Promise.all([
             readRunOverview(id),
             readRunReviewIndex(id),
+            readRunMeta(id),
         ]);
     } catch (err) {
         console.error(`[evalboard] loadPerRunForId(${id}) failed:`, err);
-        return { id, overview: null, reviewTagCounts: {}, reviewTagsByTask: {} };
+        return {
+            id,
+            overview: null,
+            reviewTagCounts: {},
+            reviewTagsByTask: {},
+            adhoc: false,
+            title: null,
+        };
     }
     const reviewTagCounts: Record<string, number> = {};
     const tagSetByTask = new Map<string, Set<string>>();
@@ -109,7 +124,14 @@ async function loadPerRunForId(id: string): Promise<PerRun> {
     for (const [taskId, tags] of tagSetByTask) {
         reviewTagsByTask[taskId] = [...tags];
     }
-    return { id, overview, reviewTagCounts, reviewTagsByTask };
+    return {
+        id,
+        overview,
+        reviewTagCounts,
+        reviewTagsByTask,
+        adhoc: meta?.adhoc === true,
+        title: meta?.title ?? null,
+    };
 }
 
 // Cache at per-run granularity, NOT per-window. A whole-window PerRun[] for
@@ -136,8 +158,16 @@ export function loadRecentRuns(limit: number): Promise<PerRun[]> {
 }
 
 async function loadRecentRunsInner(limit: number): Promise<PerRun[]> {
-    const ids = (await listRunIds()).slice(0, limit);
-    return mapWithConcurrency(ids, FETCH_CONCURRENCY, cachedLoadPerRun);
+    // Trends is the daily-cadence view: only pipeline runs belong here. Prune
+    // to date-shaped ids BEFORE slicing (cheap, no IO) so ad-hoc runs — whose
+    // ids sort lexically above every `2026-…` daily id and would otherwise
+    // crowd out the real "recent N" — never occupy a slot. Then drop any
+    // date-named run explicitly flagged adhoc (rare edge case) post-load.
+    const ids = (await listRunIds())
+        .filter((id) => parseRunIdDate(id) != null)
+        .slice(0, limit);
+    const runs = await mapWithConcurrency(ids, FETCH_CONCURRENCY, cachedLoadPerRun);
+    return runs.filter((r) => !r.adhoc);
 }
 
 // Tag-count aggregation where each tag's count is the number of distinct
@@ -287,7 +317,10 @@ export async function getOverview(
     tag: string | null = null,
     q: string | null = null,
 ): Promise<OverviewData> {
-    const perRun = await loadWindowData(window);
+    // Ad-hoc runs never feed the daily chart or the tag rails — they're not
+    // pipeline cadence. (Non-date-named ones are already pruned upstream by
+    // listRunIdsInWindow; this also drops date-named runs flagged adhoc.)
+    const perRun = (await loadWindowData(window)).filter((r) => !r.adhoc);
     const needle = q?.trim().toLowerCase() || null;
 
     // ---- Per-run chart points ----
@@ -351,7 +384,10 @@ export async function getRunListing(
     q: string | null,
     limit: number | null, // null = unlimited
 ): Promise<RunListing> {
-    const perRun = await loadWindowData(window);
+    // Exclude ad-hoc runs from the main listing — they appear in their own
+    // section (getAdhocRunListing). totalInWindow therefore counts only
+    // pipeline runs, matching the chart above it.
+    const perRun = (await loadWindowData(window)).filter((r) => !r.adhoc);
     // Run IDs are timestamped — newest first by lexical compare.
     const sorted = [...perRun].sort((a, b) => b.id.localeCompare(a.id));
     const totalInWindow = sorted.length;
@@ -423,4 +459,37 @@ export async function getRunListing(
 
     const rows = limit == null ? matched : matched.slice(0, limit);
     return { rows, totalInWindow, matchedCount: matched.length };
+}
+
+export interface AdhocRunRow extends RunListingRow {
+    // From meta.json; null when the run predates the feature (then the UI
+    // falls back to the run id).
+    title: string | null;
+}
+
+// The Ad-hoc runs section (front page, below the daily listing). "Ad-hoc"
+// here means "not a daily-pipeline run" — i.e. the id isn't date-shaped, which
+// is exactly the set listRunIdsInWindow excludes from the chart and main table.
+// Bounded to the most recent `limit` candidates: the date-shape check is free
+// (no IO), and only the shown slice is loaded. Runs without a run.json (e.g.
+// aborted uploads that left only default/) are skipped.
+export async function getAdhocRunListing(limit: number): Promise<AdhocRunRow[]> {
+    const ids = (await listRunIds())
+        .filter((id) => parseRunIdDate(id) == null)
+        .slice(0, limit);
+    const perRun = await mapWithConcurrency(ids, FETCH_CONCURRENCY, cachedLoadPerRun);
+    const rows: AdhocRunRow[] = [];
+    for (const { id, overview, title } of perRun) {
+        if (!overview) continue;
+        rows.push({
+            id,
+            title: title ?? null,
+            tasksSucceeded: overview.tasks.filter((t) => t.status === "SUCCESS")
+                .length,
+            tasksRun: overview.tasks.length,
+            totalCostUsd: overview.totalCostUsd,
+            taskDurationSeconds: overview.taskDurationSeconds,
+        });
+    }
+    return rows;
 }

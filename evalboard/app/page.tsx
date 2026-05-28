@@ -1,5 +1,10 @@
 import Link from "next/link";
-import { getOverview, getRunListing, type TagCount } from "@/lib/overview";
+import {
+    getAdhocRunListing,
+    getOverview,
+    getRunListing,
+    type TagCount,
+} from "@/lib/overview";
 import { fmtDuration, fmtRunTime } from "@/lib/format";
 import { WindowSelector } from "./_components/window-selector";
 import { WINDOWS, type Window } from "@/lib/reviews-types";
@@ -9,6 +14,7 @@ import { ChipLegend, MergedTagRail } from "./_overview/tag-rail";
 export const dynamic = "force-dynamic";
 
 const DEFAULT_LIMIT = 20;
+const ADHOC_LIMIT = 25;
 
 function parseWindow(raw: string | string[] | undefined): Window {
     const v = Array.isArray(raw) ? raw[0] : raw;
@@ -92,9 +98,10 @@ export default async function Page({
     const limit = parseLimit(params.limit);
     const isFiltered = activeTag != null || q != null;
 
-    const [overview, listing] = await Promise.all([
+    const [overview, listing, adhocRows] = await Promise.all([
         getOverview(window, activeTag, q),
         getRunListing(window, activeTag, q, limit),
+        getAdhocRunListing(ADHOC_LIMIT),
     ]);
 
     const skills = filterTagsByQuery(overview.skills, q);
@@ -328,6 +335,105 @@ export default async function Page({
                     </div>
                 )}
             </div>
+
+            {adhocRows.length > 0 && (
+                <div className="space-y-2 pt-2">
+                    <div className="flex items-baseline gap-3 flex-wrap">
+                        <h2 className="text-sm font-semibold text-gray-900">
+                            Ad-hoc runs
+                        </h2>
+                        <span className="text-xs text-gray-500">
+                            Manually uploaded · excluded from the chart, run
+                            list, and trends above
+                        </span>
+                    </div>
+                    <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
+                        <table className="w-full text-sm">
+                            <thead>
+                                <tr className="bg-gray-50 border-b border-gray-200 text-left text-gray-600">
+                                    <th className="py-3 px-4 font-medium">
+                                        Run
+                                    </th>
+                                    <th className="py-3 px-4 font-medium">
+                                        Pass rate
+                                    </th>
+                                    <th className="py-3 px-4 font-medium text-right">
+                                        Tasks
+                                    </th>
+                                    <th className="py-3 px-4 font-medium text-right">
+                                        Cost
+                                    </th>
+                                    <th className="py-3 px-4 font-medium text-right">
+                                        Duration
+                                    </th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {adhocRows.map((r) => {
+                                    const total = r.tasksRun;
+                                    const pct = total
+                                        ? (r.tasksSucceeded / total) * 100
+                                        : null;
+                                    return (
+                                        <tr
+                                            key={r.id}
+                                            className="border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors"
+                                        >
+                                            <td className="py-3 px-4">
+                                                <Link
+                                                    href={`/runs/${r.id}`}
+                                                    className="text-studio-blue hover:underline"
+                                                >
+                                                    {r.title ? (
+                                                        <span className="font-medium text-gray-900">
+                                                            {r.title}
+                                                        </span>
+                                                    ) : (
+                                                        <span className="font-mono text-xs">
+                                                            {r.id}
+                                                        </span>
+                                                    )}
+                                                </Link>
+                                                {r.title && (
+                                                    <div className="font-mono text-[11px] text-gray-400">
+                                                        {r.id}
+                                                    </div>
+                                                )}
+                                            </td>
+                                            <td className="py-3 px-4 tabular-nums">
+                                                <span
+                                                    className={`font-medium ${passClass(
+                                                        pct,
+                                                        total > 0,
+                                                    )}`}
+                                                >
+                                                    {pct != null
+                                                        ? `${pct.toFixed(0)}%`
+                                                        : "—"}
+                                                </span>
+                                                <span className="text-xs text-gray-500 ml-2 tabular-nums">
+                                                    {r.tasksSucceeded}/{total}
+                                                </span>
+                                            </td>
+                                            <td className="py-3 px-4 text-right tabular-nums text-gray-700">
+                                                {total}
+                                            </td>
+                                            <td className="py-3 px-4 text-right tabular-nums text-gray-700">
+                                                {fmtCost(r.totalCostUsd)}
+                                            </td>
+                                            <td className="py-3 px-4 text-right tabular-nums text-gray-700">
+                                                {fmtDuration(
+                                                    r.taskDurationSeconds,
+                                                )}
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

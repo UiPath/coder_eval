@@ -2,8 +2,8 @@
 """Build the Slack JSON payload for the latest dashboard run.
 
 Reads ``runs/latest/run.json`` to compute mechanical metrics: pass / fail
-/ error counts, total cost, wall duration, configured parallelism, repo
-SHAs. No LLM — pure data-from-disk.
+/ error counts, wall duration, configured parallelism, repo SHAs. No LLM —
+pure data-from-disk.
 
 Prints a JSON object {"text": "..."} on stdout, ready to feed into the
 Slack Workflow Builder webhook. Suppresses output (empty stdout) when the
@@ -44,10 +44,6 @@ def load_run(run_dir: Path) -> dict | None:
         return json.loads((run_dir / "run.json").read_text())
     except (FileNotFoundError, json.JSONDecodeError):
         return None
-
-
-def total_cost(run: dict) -> float:
-    return sum(float(t.get("total_cost_usd") or 0) for t in run.get("task_results", []))
 
 
 _TASK_PATH_SKILL_RE = re.compile(r"(?:^|/)tasks/([^/]+)/")
@@ -139,7 +135,6 @@ def build_metrics(cur: dict, suite: str, model: str, backend: str) -> str:
     n_skip = len(skipped)
     pct = (n_pass / n_run * 100) if n_run else 0.0
     duration = fmt_duration(cur.get("total_duration_seconds") or 0)
-    cost = total_cost(cur)
     configured = configured_parallelism(cur)
     parallel_str = f" · {configured}x parallel" if configured else ""
 
@@ -155,8 +150,8 @@ def build_metrics(cur: dict, suite: str, model: str, backend: str) -> str:
     lines = [
         f":chart_with_upwards_trend: {suite or 'eval'} suite — {run_id} ({label})",
         f":white_check_mark: {n_pass}/{n_run} passed ({pct:.0f}%) · "
-        f":x: {fail_total} failed ({n_fail} fail + {n_err} error){skipped_line}",
-        f":moneybag: ${cost:.2f} · :stopwatch: {duration}{parallel_str}",
+        f":x: {fail_total} failed ({n_fail} fail + {n_err} error){skipped_line}"
+        f" · :stopwatch: {duration}{parallel_str}",
         f":package: coder_eval @ {coder} · skills @ {skills_sha} · uip @ {cli}",
         f":bar_chart: {DASHBOARD_BASE}/{run_id}",
     ]

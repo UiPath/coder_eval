@@ -159,6 +159,24 @@ export async function ensureRunAnalysis(
     });
 }
 
+// Optional run metadata sidecar (title / description / adhoc), written by
+// `dashboard upload --title/--description/--adhoc`. Absent on pipeline runs
+// and any run uploaded before this feature — 404 is swallowed like analysis.
+export async function ensureRunMeta(
+    runId: string,
+    destRoot: string,
+): Promise<void> {
+    assertValidId(runId, "runId");
+    if (LOCAL_RUNS_DIR) return;
+    return dedupe(`meta:${runId}`, async () => {
+        try {
+            await downloadBlob(`${runId}/meta.json`, destRoot);
+        } catch (err) {
+            if (!isNotFound(err)) throw err;
+        }
+    });
+}
+
 export async function ensureRunReviewIndex(
     runId: string,
     destRoot: string,

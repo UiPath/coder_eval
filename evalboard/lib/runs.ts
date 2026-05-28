@@ -3,6 +3,7 @@ import path from "node:path";
 import {
     LOCAL_RUNS_DIR,
     ensureRunAnalysis,
+    ensureRunMeta,
     ensureRunSummary,
     ensureTaskDir,
     isValidId,
@@ -471,7 +472,7 @@ export function sortArtifacts(artifacts: ArtifactRef[]): ArtifactRef[] {
     });
 }
 
-async function walkArtifacts(
+export async function walkArtifacts(
     root: string,
     prefix = "",
 ): Promise<ArtifactRef[]> {
@@ -482,6 +483,12 @@ async function walkArtifacts(
     for (const e of entries) {
         const full = path.join(root, e.name);
         const rel = prefix ? `${prefix}/${e.name}` : e.name;
+        // Skip symlinks: they're harness scaffolding, not deliverables. codex
+        // runs symlink every installed skill into `.agents/skills/uipath-*` so
+        // the agent can read SKILL.md off disk (no native Skill tool) — 20 per
+        // task, pure noise in the list. Skipping also avoids descending a
+        // symlinked dir and enumerating its target's contents.
+        if (e.isSymbolicLink()) continue;
         if (e.isDirectory()) {
             // Prune whole dirs (.venv, node_modules, ...) via a probe path so
             // the `*/dir/*` patterns alone decide what to descend into — no
@@ -800,6 +807,36 @@ export async function readRunAnalysis(runId: string): Promise<string | null> {
     return fs
         .readFile(path.join(RUNS_DIR, runId, "analysis.md"), "utf-8")
         .catch(() => null);
+}
+
+// ---------- run metadata (meta.json sidecar) ----------
+
+// Optional, user-supplied at upload time. Null on pipeline runs and any run
+// uploaded before the feature — every consumer must treat null as "no
+// metadata" (title falls back to the run id, adhoc defaults false).
+export interface RunMeta {
+    title: string | null;
+    description: string | null;
+    adhoc: boolean;
+}
+
+interface RawRunMeta {
+    title?: string | null;
+    description?: string | null;
+    adhoc?: boolean;
+}
+
+export async function readRunMeta(runId: string): Promise<RunMeta | null> {
+    await ensureRunMeta(runId, RUNS_DIR);
+    const raw = await readJson<RawRunMeta>(
+        path.join(RUNS_DIR, runId, "meta.json"),
+    );
+    if (!raw) return null;
+    return {
+        title: raw.title ?? null,
+        description: raw.description ?? null,
+        adhoc: raw.adhoc === true,
+    };
 }
 
 export async function readLogTail(

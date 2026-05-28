@@ -1,6 +1,11 @@
 import { Suspense } from "react";
 import { notFound } from "next/navigation";
-import { readRunAnalysis, readRunSummary, readRunTasks } from "@/lib/runs";
+import {
+    readRunAnalysis,
+    readRunMeta,
+    readRunSummary,
+    readRunTasks,
+} from "@/lib/runs";
 import { readRunReviewIndex, indexByTask, tagCountsForRun } from "@/lib/reviews";
 import { fmtRunTime } from "@/lib/format";
 import { AnalysisPanel } from "./analysis-panel";
@@ -14,23 +19,40 @@ export default async function RunPage({
     params: Promise<{ id: string }>;
 }) {
     const { id } = await params;
-    const [summary, tasks, analysis, reviewIndex] = await Promise.all([
+    const [summary, tasks, analysis, reviewIndex, meta] = await Promise.all([
         readRunSummary(id),
         readRunTasks(id),
         readRunAnalysis(id),
         readRunReviewIndex(id),
+        readRunMeta(id),
     ]);
     if (!summary || !tasks) notFound();
     const tagCounts = reviewIndex ? tagCountsForRun(reviewIndex) : [];
     const reviewsByTask = reviewIndex ? indexByTask(reviewIndex) : undefined;
+    const human = fmtRunTime(id);
 
     return (
         <div className="space-y-5">
             <div className="space-y-1">
-                <h1 className="text-xl font-semibold text-gray-900">Run</h1>
-                <div className="text-xs text-gray-500 tabular-nums font-mono">
-                    {id} · {fmtRunTime(id)}
+                <div className="flex items-center gap-2">
+                    <h1 className="text-xl font-semibold text-gray-900">
+                        {meta?.title ?? "Run"}
+                    </h1>
+                    {meta?.adhoc && (
+                        <span className="text-[10px] uppercase tracking-wide font-semibold text-amber-700 bg-amber-100 border border-amber-200 rounded px-1.5 py-0.5">
+                            Ad-hoc
+                        </span>
+                    )}
                 </div>
+                <div className="text-xs text-gray-500 tabular-nums font-mono">
+                    {id}
+                    {human !== id && ` · ${human}`}
+                </div>
+                {meta?.description && (
+                    <p className="text-sm text-gray-600 whitespace-pre-wrap pt-1">
+                        {meta.description}
+                    </p>
+                )}
                 {summary.componentShas.length > 0 && (
                     <div className="text-xs text-gray-500 font-mono pt-1 flex flex-wrap gap-x-3 gap-y-1">
                         {summary.componentShas.map((c) => (

@@ -5,9 +5,15 @@ export function humanizeTaskId(id: string | null | undefined): string {
     return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
+// Daily-pipeline run id: YYYY-MM-DD_HH-MM-SS. Only these reformat into a
+// readable timestamp; anything else (ad-hoc run names like
+// `codex_skills_full_v2`) is returned verbatim rather than mangled into a
+// bogus `codex · skills`.
+const DAILY_RUN_ID_RE = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/;
+
 export function fmtRunTime(id: string): string {
+    if (!DAILY_RUN_ID_RE.test(id)) return id;
     const [d, t] = id.split("_");
-    if (!d || !t) return id;
     return `${d} · ${t.replace(/-/g, ":")}`;
 }
 
