@@ -192,6 +192,45 @@ export function ToolTimelineSection({
     );
 }
 
+// Cap the always-visible list so a task that preserved a large tree (e.g. a
+// cloned fixture repo) doesn't render hundreds of rows. Overflow goes behind a
+// "show N more" disclosure. sortArtifacts already floats deliverables to top,
+// so the capped head holds the rows that matter.
+const ARTIFACT_CAP = 50;
+
+function ArtifactList({
+    runId,
+    items,
+}: {
+    runId: string;
+    items: ArtifactRef[];
+}) {
+    return (
+        <ul className="divide-y divide-gray-100 border border-gray-200 rounded-lg bg-white">
+            {items.map((a) => (
+                <li
+                    key={a.relPath}
+                    className="flex items-center gap-3 px-3 py-2 text-sm"
+                >
+                    <KindChip kind={a.kind} />
+                    <a
+                        href={`/api/file?run=${encodeURIComponent(
+                            runId,
+                        )}&path=${encodeURIComponent(a.relPath)}`}
+                        className="text-studio-blue hover:underline truncate"
+                        download
+                    >
+                        {a.relPath}
+                    </a>
+                    <span className="ml-auto text-xs text-gray-500 tabular-nums">
+                        {(a.sizeBytes / 1024).toFixed(1)} KB
+                    </span>
+                </li>
+            ))}
+        </ul>
+    );
+}
+
 export function ArtifactsSection({
     runId,
     artifacts,
@@ -199,34 +238,29 @@ export function ArtifactsSection({
     runId: string;
     artifacts: ArtifactRef[];
 }) {
+    const head = artifacts.slice(0, ARTIFACT_CAP);
+    const rest = artifacts.slice(ARTIFACT_CAP);
     return (
         <section className="space-y-2">
-            <h2 className="text-sm font-semibold text-gray-900">Artifacts</h2>
-            {artifacts.length === 0 && (
+            <h2 className="text-sm font-semibold text-gray-900">
+                Artifacts ({artifacts.length})
+            </h2>
+            {artifacts.length === 0 ? (
                 <div className="text-sm text-gray-500">none</div>
+            ) : (
+                <ArtifactList runId={runId} items={head} />
             )}
-            <ul className="divide-y divide-gray-100 border border-gray-200 rounded-lg bg-white">
-                {artifacts.map((a) => (
-                    <li
-                        key={a.relPath}
-                        className="flex items-center gap-3 px-3 py-2 text-sm"
-                    >
-                        <KindChip kind={a.kind} />
-                        <a
-                            href={`/api/file?run=${encodeURIComponent(
-                                runId,
-                            )}&path=${encodeURIComponent(a.relPath)}`}
-                            className="text-studio-blue hover:underline truncate"
-                            download
-                        >
-                            {a.relPath}
-                        </a>
-                        <span className="ml-auto text-xs text-gray-500 tabular-nums">
-                            {(a.sizeBytes / 1024).toFixed(1)} KB
+            {rest.length > 0 && (
+                <Expandable
+                    header={
+                        <span className="text-sm text-gray-700">
+                            Show {rest.length} more
                         </span>
-                    </li>
-                ))}
-            </ul>
+                    }
+                >
+                    <ArtifactList runId={runId} items={rest} />
+                </Expandable>
+            )}
         </section>
     );
 }

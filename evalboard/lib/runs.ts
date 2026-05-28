@@ -104,7 +104,9 @@ export interface ToolCall {
 
 export interface ArtifactRef {
     relPath: string;
-    kind: "flow" | "uipx" | "uiproj" | "other";
+    // Lowercased file extension without the dot ("flow", "md", "json"), or
+    // "file" when the name has no extension. Drives the KindChip label/color.
+    kind: string;
     sizeBytes: number;
 }
 
@@ -404,6 +406,71 @@ export async function readRunOverview(
     };
 }
 
+// Files matching any pattern are hidden from the Artifacts list — they're
+// reconstructible build artifacts, local state, or secrets, not deliverables.
+// Keep in sync with _EXCLUDE_PATTERNS in dashboard/src/dashboard/blob.py: the
+// upload filter and this display filter must agree on what counts as noise.
+export const ARTIFACT_EXCLUDE_PATTERNS = [
+    "*/.venv/*",
+    "*/__pycache__/*",
+    "*.pyc",
+    "*/bin/*",
+    "*/obj/*",
+    "*.dll",
+    "*.nupkg",
+    "*.pdb",
+    "*/node_modules/*",
+    "*/.npm-prefix/*",
+    "*.lock",
+    "*.db",
+    "*.db-wal",
+    "*.db-shm",
+    "*.env",
+];
+
+// fnmatch semantics (mirrors Python's fnmatch in blob.py): `*` matches any run
+// of characters including `/`, `?` matches one. Everything else is literal.
+function globToRegExp(glob: string): RegExp {
+    const escaped = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`^${escaped.replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+}
+
+const EXCLUDE_RES = ARTIFACT_EXCLUDE_PATTERNS.map(globToRegExp);
+
+export function isExcludedArtifact(relPath: string): boolean {
+    return EXCLUDE_RES.some((re) => re.test(relPath));
+}
+
+// Project deliverables float to the top of the list and get a colored chip.
+// Exported so KindChip colors exactly what artifactRank promotes — a single
+// source of truth keeps "float to top" and "color the chip" from drifting.
+export const DELIVERABLE_KINDS = new Set([
+    "flow",
+    "bpmn",
+    "uipx",
+    "uiproj",
+    "xaml",
+]);
+const DELIVERABLE_NAMES = new Set(["sdd.md", "recommendation.json"]);
+
+function artifactRank(a: ArtifactRef): number {
+    const base = (a.relPath.split("/").pop() ?? a.relPath).toLowerCase();
+    return DELIVERABLE_KINDS.has(a.kind) || DELIVERABLE_NAMES.has(base) ? 0 : 1;
+}
+
+// Deliverables first, then shallower paths (surfaces root-level sdd.md /
+// recommendation.json above deep fixture/scaffolding trees), then alpha.
+export function sortArtifacts(artifacts: ArtifactRef[]): ArtifactRef[] {
+    return [...artifacts].sort((x, y) => {
+        const r = artifactRank(x) - artifactRank(y);
+        if (r !== 0) return r;
+        const dx = x.relPath.split("/").length;
+        const dy = y.relPath.split("/").length;
+        if (dx !== dy) return dx - dy;
+        return x.relPath.localeCompare(y.relPath);
+    });
+}
+
 async function walkArtifacts(
     root: string,
     prefix = "",
@@ -413,22 +480,21 @@ async function walkArtifacts(
         .readdir(root, { withFileTypes: true })
         .catch(() => []);
     for (const e of entries) {
-        if (e.name === ".venv" || e.name === "node_modules") continue;
         const full = path.join(root, e.name);
         const rel = prefix ? `${prefix}/${e.name}` : e.name;
         if (e.isDirectory()) {
+            // Prune whole dirs (.venv, node_modules, ...) via a probe path so
+            // the `*/dir/*` patterns alone decide what to descend into — no
+            // hardcoded dir names that could drift from the exclude list.
+            if (isExcludedArtifact(`${rel}/_`)) continue;
             out.push(...(await walkArtifacts(full, rel)));
         } else {
-            const ext = path.extname(e.name).toLowerCase();
-            let kind: ArtifactRef["kind"] = "other";
-            if (ext === ".flow") kind = "flow";
-            else if (ext === ".uipx") kind = "uipx";
-            else if (ext === ".uiproj") kind = "uiproj";
-            if (kind === "other") continue;
+            if (isExcludedArtifact(rel)) continue;
+            const ext = path.extname(e.name).toLowerCase().replace(/^\./, "");
             const stat = await fs.stat(full).catch(() => null);
             out.push({
                 relPath: rel,
-                kind,
+                kind: ext || "file",
                 sizeBytes: stat?.size ?? 0,
             });
         }
@@ -685,7 +751,9 @@ export async function readTaskDetail(
         path.join(RUNS_DIR, runId),
         artifactRoot,
     );
-    const artifacts = await walkArtifacts(artifactRoot, artifactPrefix);
+    const artifacts = sortArtifacts(
+        await walkArtifacts(artifactRoot, artifactPrefix),
+    );
 
     const flowDebug = parseFlowDebug(criteria);
     const toolCalls = parseToolCalls(task?.iterations ?? []);

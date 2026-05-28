@@ -22,6 +22,37 @@ from .resources import get_ignore_patterns, should_ignore_path
 logger = logging.getLogger(__name__)
 
 
+def _grant_read_traverse(root: Path) -> None:
+    """Recursively apply ``chmod a+rX`` semantics under ``root``.
+
+    Preserved artifacts produced inside a root-owned ``driver:docker`` container
+    land on the host bind-mount owned by root, with mkdtemp's 0700 sandbox root.
+    The host user (a different uid) can't traverse that, so the blob upload and
+    any ``ls`` see an empty dir. This grants group+other read everywhere and
+    group+other execute only where the owner already has it (dirs, exec files),
+    matching ``a+rX``. Symlinks are skipped: their mode is ignored on Linux and
+    ``chmod`` would alter the target instead.
+    """
+
+    def _add_bits(path: str) -> None:
+        try:
+            if os.path.islink(path):
+                return
+            mode = os.stat(path).st_mode
+            new = mode | 0o044  # r for group + other
+            if mode & 0o100:  # owner-executable -> dir or exec file: add g+x, o+x
+                new |= 0o011
+            if new != mode:
+                os.chmod(path, new)
+        except OSError as e:
+            logger.debug("grant_read_traverse: could not chmod %s: %s", path, e)
+
+    _add_bits(str(root))
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in (*dirnames, *filenames):
+            _add_bits(os.path.join(dirpath, name))
+
+
 class Sandbox:
     """Manages sandboxed execution environments for agent tasks.
 
@@ -986,6 +1017,15 @@ class Sandbox:
 
         old_sandbox_dir = self.sandbox_dir
         shutil.move(str(old_sandbox_dir), str(preserve_path))
+
+        # mkdtemp creates the sandbox root at 0700. Under driver:docker the
+        # container runs as root, so the preserved tree lands on the host
+        # bind-mount owned by root with that 0700 top dir -- the host user
+        # (a different uid) then can't traverse it, so the blob upload and any
+        # `ls` see an empty dir and silently skip the artifacts. Grant a+rX on
+        # the preserved tree so artifacts are readable across the uid boundary.
+        # No-op-ish on the host path, where the sandbox is already owner-readable.
+        _grant_read_traverse(preserve_path)
 
         # Sandbox now lives at the artifact path -- redirect pointers so that a
         # subsequent cleanup() is a no-op. Venv absolute paths inside the venv

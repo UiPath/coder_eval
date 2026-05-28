@@ -4,8 +4,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 # Patterns applied to the blob name (relative to the run dir).
-# Files matching any pattern are skipped — they're reconstructible
-# build artifacts that bloat upload time without adding evalboard value.
+# Files matching any pattern are skipped — reconstructible build artifacts,
+# local state, or secrets that bloat upload without adding evalboard value.
+# Keep in sync with ARTIFACT_EXCLUDE_PATTERNS in evalboard/lib/runs.ts — the
+# upload filter and the display filter must agree on what counts as noise.
 _EXCLUDE_PATTERNS = [
     "*/.venv/*",
     "*/__pycache__/*",
@@ -17,6 +19,11 @@ _EXCLUDE_PATTERNS = [
     "*.pdb",
     "*/node_modules/*",
     "*/.npm-prefix/*",
+    "*.lock",  # uv.lock / Cargo.lock / poetry.lock — large, reconstructible
+    "*.db",  # local sqlite state, not a deliverable
+    "*.db-wal",
+    "*.db-shm",
+    "*.env",  # zero display value + secret-leak risk in a shared dashboard
 ]
 
 _MAX_WORKERS = 32

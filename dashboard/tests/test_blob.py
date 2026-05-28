@@ -37,3 +37,27 @@ def test_excluded_skips_build_artifacts():
     assert _excluded("proj/bin/thing.dll")
     assert _excluded("a.pyc")
     assert not _excluded("test-run/run.json")
+
+
+def test_excluded_skips_locks_state_and_secrets():
+    """Lockfiles, local sqlite state, and env files are noise/secrets, not deliverables."""
+    assert _excluded("proj/uv.lock")
+    assert _excluded("proj/Cargo.lock")
+    assert _excluded("task/state.db")
+    assert _excluded("task/state.db-wal")
+    assert _excluded("task/state.db-shm")
+    assert _excluded("task/.env")
+    assert _excluded("task/config.env")
+
+
+def test_not_excluded_keeps_deliverables():
+    """Run deliverables must survive the filter."""
+    for keep in (
+        "task/artifacts/sdd.md",
+        "task/artifacts/recommendation.json",
+        "task/artifacts/proj/main.flow",
+        "task/artifacts/proj/project.uiproj",
+        "task/artifacts/proj/workflow.xaml",
+        "task/artifacts/.env.example",
+    ):
+        assert not _excluded(keep), keep

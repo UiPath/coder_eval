@@ -728,6 +728,44 @@ def test_preserve_to_creates_parent_dirs_for_slashed_task_id(tmp_path):
         sandbox.cleanup()
 
 
+def test_preserve_to_makes_tree_group_other_readable(tmp_path):
+    """Preserved artifacts must be readable across a uid boundary.
+
+    mkdtemp creates the sandbox root at 0700. Under driver:docker the container
+    runs as root, so the preserved tree lands owned by root with a 0700 top dir
+    and the host user (a different uid) can't traverse it -- the blob upload
+    then silently skips the artifacts. preserve_to grants a+rX so the host user
+    can read them.
+    """
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="perm-task")
+
+    try:
+        original_dir = sandbox.setup()
+        # Reproduce mkdtemp's 0700 root + a restrictive subdir an agent might leave.
+        os.chmod(original_dir, 0o700)
+        (original_dir / "recommendation.json").write_text("{}\n")
+        sub = original_dir / "sub"
+        sub.mkdir()
+        (sub / "nested.txt").write_text("nested\n")
+        os.chmod(sub, 0o700)
+
+        preserved = sandbox.preserve_to(tmp_path / "artifacts")
+
+        # Every directory in the tree is group/other traversable, every file
+        # group/other readable -- no 0700 left to lock out a non-owner reader.
+        assert preserved.stat().st_mode & 0o055 == 0o055
+        for path in preserved.rglob("*"):
+            if path.is_symlink():
+                continue
+            mode = path.stat().st_mode
+            assert mode & 0o044 == 0o044, f"{path} not group/other readable"
+            if path.is_dir():
+                assert mode & 0o011 == 0o011, f"{path} not group/other traversable"
+    finally:
+        sandbox.cleanup()
+
+
 # ==================== Subprocess Logging Tests ====================
 
 

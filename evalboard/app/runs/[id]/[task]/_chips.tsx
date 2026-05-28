@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { DELIVERABLE_KINDS } from "@/lib/runs";
 
 export function Expandable({
     header,
@@ -39,8 +40,7 @@ export function ResultPill({ passed }: { passed: boolean }) {
 }
 
 export function KindChip({ kind }: { kind: string }) {
-    const isFlow = kind === "flow";
-    const cls = isFlow
+    const cls = DELIVERABLE_KINDS.has(kind)
         ? "bg-orange-50 text-uipath-orange border-orange-200"
         : "bg-gray-50 text-gray-700 border-gray-200";
     return (
