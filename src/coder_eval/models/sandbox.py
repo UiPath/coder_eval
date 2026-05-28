@@ -153,6 +153,14 @@ class DockerDriverConfig(BaseModel):
             # through Bedrock instead of falling back to ~/.claude OAuth.
             "CLAUDE_CODE_USE_BEDROCK",
             "ANTHROPIC_MODEL",
+            # Codex agent auth/routing — without these the in-container codex
+            # binary falls back to a ChatGPT login that doesn't exist in the
+            # container and auth fails. CODEX_API_KEY drives login_api_key;
+            # CODEX_BASE_URL routes to a custom endpoint (e.g. gateway);
+            # CODEX_MODEL selects the model when agent.model is unset.
+            "CODEX_API_KEY",
+            "CODEX_BASE_URL",
+            "CODEX_MODEL",
             # User HOME used to keep ~/.claude resolution symmetric with the host.
             # See docs/DOCKER_ISOLATION.md "HOME is forwarded by default" for the
             # contract. tl;dr: Path.home() inside the container returns the
