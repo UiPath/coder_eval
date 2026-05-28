@@ -62,7 +62,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=openai-codex-cli-bin uv sync --frozen --extra dev --extra uipath --extra codex
+        run: SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=openai-codex-cli-bin,openai-codex uv sync --frozen --extra dev --extra uipath --extra codex
 
       # PHASE 1: Fast checks (fail early)
       - name: Check code formatting (ruff format)
@@ -270,7 +270,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=openai-codex-cli-bin uv sync --frozen --extra dev --extra uipath --extra codex
+        run: SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=openai-codex-cli-bin,openai-codex uv sync --frozen --extra dev --extra uipath --extra codex
 
       - name: Check code formatting (ruff format)
         run: .venv/Scripts/ruff format --check src/ tests/
@@ -758,7 +758,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (with codex extra)
-        run: SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=openai-codex-cli-bin uv sync --frozen --extra dev --extra uipath --extra codex
+        run: SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=openai-codex-cli-bin,openai-codex uv sync --frozen --extra dev --extra uipath --extra codex
 
       - name: Verify required secrets are present
         run: |

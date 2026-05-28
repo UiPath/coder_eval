@@ -53,7 +53,7 @@ RUN --mount=type=secret,id=uv_index_username \
     UV_INDEX_UIPATH_PASSWORD=$(cat /run/secrets/uv_index_password 2>/dev/null || true) \
     UV_INDEX_UIPATH_USERNAME="$UV_INDEX_UIPATH_USERNAME" \
     UV_INDEX_UIPATH_PASSWORD="$UV_INDEX_UIPATH_PASSWORD" \
-    SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=openai-codex-cli-bin \
+    SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=openai-codex-cli-bin,openai-codex \
     uv pip install --system ".[uipath,codex]"
 
 # Sanity check: the in-container entrypoint subcommand must be wired up.

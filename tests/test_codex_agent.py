@@ -128,8 +128,8 @@ class TestPermissionModeMapping:
         assert _PERMISSION_MODE_TO_APPROVAL["plan"] == "deny_all"
 
     def test_bypass_permissions_sandbox_mode(self):
-        """bypassPermissions maps to danger-full-access."""
-        assert _PERMISSION_MODE_TO_SANDBOX["bypassPermissions"] == "danger-full-access"
+        """bypassPermissions maps to full-access."""
+        assert _PERMISSION_MODE_TO_SANDBOX["bypassPermissions"] == "full-access"
 
     def test_bypass_permissions_approval_mode(self):
         """bypassPermissions maps to auto_review approval mode."""
@@ -230,7 +230,7 @@ class TestThreadOptions:
 
     def test_build_thread_options_with_accept_edits(self):
         """_build_thread_options builds correct options for acceptEdits."""
-        from openai_codex.api import ApprovalMode, SandboxMode
+        from openai_codex.api import ApprovalMode, Sandbox  # pyright: ignore[reportPrivateImportUsage]
 
         config = parse_agent_config(
             type=AgentKind.CODEX,
@@ -241,12 +241,12 @@ class TestThreadOptions:
         options = agent._build_thread_options()
 
         assert options is not None
-        assert options["sandbox"] == SandboxMode.workspace_write
+        assert options["sandbox"] == Sandbox.workspace_write
         assert options["approval_mode"] == ApprovalMode.auto_review
 
     def test_build_thread_options_with_plan(self):
         """_build_thread_options builds correct options for plan."""
-        from openai_codex.api import ApprovalMode, SandboxMode
+        from openai_codex.api import ApprovalMode, Sandbox  # pyright: ignore[reportPrivateImportUsage]
 
         config = parse_agent_config(
             type=AgentKind.CODEX,
@@ -257,7 +257,7 @@ class TestThreadOptions:
         options = agent._build_thread_options()
 
         assert options is not None
-        assert options["sandbox"] == SandboxMode.read_only
+        assert options["sandbox"] == Sandbox.read_only
         assert options["approval_mode"] == ApprovalMode.deny_all
 
     def test_build_thread_options_with_allowed_tools(self):
@@ -290,7 +290,7 @@ class TestThreadOptions:
 
     def test_build_thread_options_with_no_permission_mode(self):
         """_build_thread_options defaults to workspace_write/auto_review when no permission_mode set."""
-        from openai_codex.api import ApprovalMode, SandboxMode
+        from openai_codex.api import ApprovalMode, Sandbox  # pyright: ignore[reportPrivateImportUsage]
 
         config = parse_agent_config(type=AgentKind.CODEX)
         agent = CodexAgent(config)
@@ -298,12 +298,12 @@ class TestThreadOptions:
         options = agent._build_thread_options()
 
         # Should have defaults even without explicit permission_mode
-        assert options["sandbox"] == SandboxMode.workspace_write
+        assert options["sandbox"] == Sandbox.workspace_write
         assert options["approval_mode"] == ApprovalMode.auto_review
 
     def test_build_thread_options_with_permission_and_tools(self):
         """_build_thread_options combines permission_mode and tool config."""
-        from openai_codex.api import ApprovalMode, SandboxMode
+        from openai_codex.api import ApprovalMode, Sandbox  # pyright: ignore[reportPrivateImportUsage]
 
         config = parse_agent_config(
             type=AgentKind.CODEX,
@@ -315,7 +315,7 @@ class TestThreadOptions:
         options = agent._build_thread_options()
 
         assert options is not None
-        assert options["sandbox"] == SandboxMode.read_only
+        assert options["sandbox"] == Sandbox.read_only
         assert options["approval_mode"] == ApprovalMode.deny_all
         assert options["config"]["enabled_tools"] == ["shell", "shell"]
 

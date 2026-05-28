@@ -15,7 +15,7 @@ pip install 'coder-eval[codex]'
 ```
 
 This installs:
-- `openai-codex` - The official Codex Python SDK (pinned via git in `pyproject.toml`)
+- `openai-codex` - The official Codex Python SDK (from PyPI)
 - `openai-codex-cli-bin` - Platform-specific Codex CLI binaries (pulled in transitively)
 
 ### 2. Authentication
@@ -152,11 +152,11 @@ On failure, the agent:
 
 ### Permission and Tool Mapping
 
-The agent maps `permission_mode` to the Codex SDK's `SandboxMode` and `ApprovalMode` when starting a thread:
+The agent maps `permission_mode` to the Codex SDK's `Sandbox` and `ApprovalMode` when starting a thread:
 
 | `permission_mode` | `sandbox` | `approval_mode` |
 |-------------------|-----------|-----------------|
-| `bypassPermissions` | `danger-full-access` | `auto_review` |
+| `bypassPermissions` | `full-access` | `auto_review` |
 | `acceptEdits` | `workspace-write` | `auto_review` |
 | `default` | `workspace-write` | `auto_review` |
 | `plan` | `read-only` | `deny_all` |

@@ -53,7 +53,7 @@ uipath = [
 # Without this extra, the framework still installs and runs; Codex-dependent
 # code paths fail at dispatch with a clear hint pointing back here.
 codex = [
-    "openai-codex @ git+https://github.com/openai/codex.git@195ba3e#subdirectory=sdk/python",
+    "openai-codex>=0.1.0b2",
 ]
 
 [project.scripts]
@@ -74,11 +74,11 @@ packages = ["src/coder_eval"]
 allow-direct-references = true
 
 [tool.uv]
-# The git-pinned openai-codex SDK hardpins `openai-codex-cli-bin==0.131.0a4`,
-# which only ships musllinux/macOS/Windows wheels — no glibc Linux wheel — so
-# the [codex] extra is otherwise uninstallable on standard CI/Linux runners.
-# Newer cli-bin builds (0.134.0) publish manylinux wheels and speak the same
-# JSON-RPC protocol to the SDK, so override the transitive pin to that build.
+# openai-codex 0.1.0b2 hardpins `openai-codex-cli-bin==0.132.0`, which only
+# ships musllinux/macOS/Windows wheels — no glibc Linux wheel — so the [codex]
+# extra is otherwise uninstallable on standard CI/Linux runners. Newer cli-bin
+# builds (0.134.0) publish manylinux wheels and speak the same JSON-RPC
+# protocol to the SDK, so override the transitive pin to that build.
 override-dependencies = ["openai-codex-cli-bin==0.134.0"]
 
 [[tool.uv.index]]

@@ -52,7 +52,7 @@ _CLAUDE_TO_CODEX_TOOL_MAP: dict[str, str] = {
 
 # Permission mode → sandbox mode mapping
 _PERMISSION_MODE_TO_SANDBOX: dict[str, str] = {
-    "bypassPermissions": "danger-full-access",
+    "bypassPermissions": "full-access",
     "acceptEdits": "workspace-write",
     "default": "workspace-write",
     "plan": "read-only",
@@ -137,12 +137,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._state = AgentState.WORKING
 
         try:
-            from openai_codex import Codex
-            from openai_codex.client import AppServerConfig
+            from openai_codex import Codex, CodexConfig
 
-            # Build AppServerConfig with environment variables for custom API configuration
+            # Build CodexConfig with environment variables for custom API configuration
             env_override = self._build_codex_env()
-            config = AppServerConfig(env=env_override) if env_override else None
+            config = CodexConfig(env=env_override) if env_override else None
 
             # Initialize the Codex client (context manager compatible)
             self.codex_client = Codex(config=config)
@@ -498,8 +497,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         Returns a dict with sandbox, approval_mode, and config parameters
         for thread_start() based on permission_mode, allowed_tools, and disallowed_tools.
         """
-        from openai_codex.api import ApprovalMode  # pyright: ignore[reportPrivateImportUsage]
-        from openai_codex.generated.v2_all import SandboxMode
+        from openai_codex.api import ApprovalMode, Sandbox  # pyright: ignore[reportPrivateImportUsage]
 
         options: dict[str, Any] = {}
 
@@ -516,8 +514,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
         approval_mode_str = _PERMISSION_MODE_TO_APPROVAL.get(permission_mode, "auto_review")
 
         # Convert to Codex SDK enum values
-        # SandboxMode enum values use hyphens, ApprovalMode uses underscores
-        options["sandbox"] = SandboxMode(sandbox_mode_str)
+        # Sandbox enum values use hyphens, ApprovalMode uses underscores
+        options["sandbox"] = Sandbox(sandbox_mode_str)
         options["approval_mode"] = ApprovalMode(approval_mode_str)
 
         # For logging, use the enum names (which use underscores)
@@ -582,7 +580,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._log.debug(f"Permission mode: {self.config.permission_mode.value}")
         if self.config.permission_mode.value == "bypassPermissions":
             self._log.warning(
-                "[SECURITY] bypassPermissions grants unrestricted sandbox access (danger-full-access). "
+                "[SECURITY] bypassPermissions grants unrestricted sandbox access (full-access). "
                 + "Only use in fully isolated environments with untrusted code execution disabled."
             )
 
