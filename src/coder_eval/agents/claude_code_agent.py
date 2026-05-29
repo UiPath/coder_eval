@@ -433,6 +433,30 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # Model identifier from AssistantMessage (last one wins)
         sdk_model_used: str | None = None
 
+        # Per-emission output_tokens recovered from raw stream events.
+        # The CLI emits AssistantMessage.usage.output_tokens with only a
+        # partial streaming snapshot (anthropics/claude-code#22686), but
+        # the corresponding ``message_delta`` stream event carries the
+        # final cumulative count. We capture it here and stamp it onto
+        # the next AssistantMessage we record.
+        pending_delta_output_tokens: int | None = None
+
+        # Anthropic's CLI splits one API call into multiple "assistant"
+        # JSON events (one per content-block kind) that all share the
+        # same ``message_id`` and repeat the SAME usage dict. Summing
+        # tokens across them double-counts. We populate tokens only on
+        # the first AssistantMessage for each id; subsequent ones for
+        # the same id get zeros so naive sums reconcile with the
+        # iteration aggregate.
+        seen_message_ids: set[str] = set()
+
+        # Whether the most recent AssistantMessage carried a ``message_id``.
+        # Used to gate the ResultMessage backfill *per-message* (not per-turn):
+        # if the SDK emits some events with an id and some without (mixed
+        # streams), we want the backfill to apply only to the last one when
+        # it lacked an id, and stay suppressed when it had one.
+        last_message_had_id: bool = False
+
         # Count of AssistantMessage objects in this turn
         assistant_turn_count = 0
 
@@ -497,6 +521,17 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 plugins=plugins,  # type: ignore[arg-type]
                 stderr=capture_stderr,  # Capture stderr for better error messages
                 env=env,
+                # Subscribe to raw stream events so we can recover the
+                # *cumulative* output_tokens for each emission from
+                # ``message_delta.usage`` events. Claude Code CLI ships
+                # AssistantMessage.usage.output_tokens with only a partial
+                # streaming snapshot (see anthropics/claude-code#22686),
+                # so summing per-message values undercounts by 10x+.
+                # ``message_delta`` carries the final per-emission output
+                # tally; we stamp that onto the next AssistantMessage we
+                # record. Without this flag StreamEvents are suppressed
+                # by the SDK.
+                include_partial_messages=True,
                 system_prompt=self.config.system_prompt,
                 setting_sources=self.config.setting_sources if self.config.setting_sources is not None else ["project"],
                 resume=self._session_id,
@@ -659,10 +694,55 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                                         ),
                                     )
 
-                        # Note: SDK intermediate AssistantMessages may have partial/cumulative token
-                        # usage during streaming. We'll populate the final AssistantMessage with the
-                        # accurate cumulative tokens from ResultMessage.
-                        # Intermediate AssistantMessages left at 0 (not reliable per-message counts).
+                        # Per-message token usage with two corrections layered on
+                        # the raw SDK values:
+                        #
+                        # 1. **Dedup by message_id.** Claude Code's CLI splits one
+                        #    Anthropic API call into multiple "assistant" JSON
+                        #    events (one per content-block kind) that share a
+                        #    ``message_id`` and repeat the SAME usage dict.
+                        #    Naively recording usage on each duplicates input /
+                        #    cache_creation / cache_read. We populate tokens
+                        #    only on the first AssistantMessage per id and
+                        #    write zeros on follow-ups so naive sums match the
+                        #    iteration aggregate.
+                        # 2. **Override output_tokens from message_delta.** The
+                        #    CLI's per-event ``usage.output_tokens`` is a
+                        #    streaming snapshot, not cumulative (see
+                        #    anthropics/claude-code#22686). We capture the
+                        #    final cumulative value from the
+                        #    ``message_delta`` stream event handler below and
+                        #    stamp it here. Falls back to the raw SDK value
+                        #    when ``include_partial_messages`` is off or the
+                        #    delta wasn't observed.
+                        msg_usage = getattr(message, "usage", None) or {}
+                        message_id = getattr(message, "message_id", None)
+                        is_duplicate_emission = isinstance(message_id, str) and message_id in seen_message_ids
+                        if isinstance(message_id, str):
+                            seen_message_ids.add(message_id)
+                            last_message_had_id = True
+                        else:
+                            last_message_had_id = False
+
+                        if is_duplicate_emission:
+                            # Same API call, additional content block — billing
+                            # was already accounted for on the first one.
+                            in_tok = out_tok = cw_tok = cr_tok = rt_tok = 0
+                        else:
+                            in_tok = int(msg_usage.get("input_tokens", 0) or 0)
+                            cw_tok = int(msg_usage.get("cache_creation_input_tokens", 0) or 0)
+                            cr_tok = int(msg_usage.get("cache_read_input_tokens", 0) or 0)
+                            rt_tok = int(msg_usage.get("reasoning_tokens", 0) or 0)
+                            # Prefer the stream-event delta value if we got one;
+                            # else fall back to the (partial) SDK value so we
+                            # don't regress relative to pre-fix behavior.
+                            if pending_delta_output_tokens is not None:
+                                out_tok = pending_delta_output_tokens
+                            else:
+                                out_tok = int(msg_usage.get("output_tokens", 0) or 0)
+                            # Consume the pending value; the next emission will
+                            # set its own via the StreamEvent handler.
+                            pending_delta_output_tokens = None
 
                         sdk_messages.append(
                             AssistantMessageTelemetry(
@@ -671,12 +751,11 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                                 generation_duration_ms=max(0.0, generation_duration_ms),
                                 content_blocks=turn_content_blocks,
                                 tool_use_ids=turn_tool_use_ids,
-                                # Tokens populated from ResultMessage on the last AssistantMessage.
-                                input_tokens=0,
-                                output_tokens=0,
-                                cache_creation_tokens=0,
-                                cache_read_tokens=0,
-                                reasoning_tokens=0,
+                                input_tokens=in_tok,
+                                output_tokens=out_tok,
+                                cache_creation_tokens=cw_tok,
+                                cache_read_tokens=cr_tok,
+                                reasoning_tokens=rt_tok,
                                 stop_reason=(
                                     getattr(message, "stop_reason", None)
                                     if isinstance(getattr(message, "stop_reason", None), str)
@@ -715,9 +794,20 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                                 self._log.debug("session_id changed: %s -> %s", self._session_id, new_session_id)
                             self._session_id = new_session_id
 
-                        # Populate the last AssistantMessage with accurate cumulative tokens
-                        # from the final ResultMessage.
-                        if last_assistant_message_index is not None and sdk_result_usage:
+                        # Fallback: retro-populate the last AssistantMessage
+                        # from ResultMessage.usage when per-message capture
+                        # was not in effect for *that specific message* —
+                        # i.e. it lacked a ``message_id`` (legacy SDKs / mock
+                        # streams). We gate per-message rather than per-turn
+                        # so mixed streams (some emissions with id, some
+                        # without) still backfill the trailing id-less one
+                        # without clobbering the id'd emissions whose tokens
+                        # were already captured correctly. When per-message
+                        # capture IS working, follow-up AssistantMessages
+                        # from the same API call are intentionally zeroed;
+                        # overwriting them with the ResultMessage cumulative
+                        # would double-count against the first message.
+                        if last_assistant_message_index is not None and sdk_result_usage and not last_message_had_id:
                             last_msg = sdk_messages[last_assistant_message_index]
                             if isinstance(last_msg, AssistantMessageTelemetry):
                                 last_msg.input_tokens = int(sdk_result_usage.get("input_tokens", 0) or 0)
@@ -729,6 +819,23 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                                     sdk_result_usage.get("cache_read_input_tokens", 0) or 0
                                 )
                                 last_msg.reasoning_tokens = int(sdk_result_usage.get("reasoning_tokens", 0) or 0)
+
+                    # Raw Anthropic stream events (only delivered when
+                    # ``include_partial_messages=True``). We use these
+                    # exclusively to recover the cumulative
+                    # ``output_tokens`` for each emission — the CLI's
+                    # AssistantMessage.usage.output_tokens carries only a
+                    # streaming snapshot (anthropics/claude-code#22686).
+                    # The ``message_delta`` event carries the final value
+                    # right before ``message_stop``; we stash it so the
+                    # next AssistantMessage we record can stamp it on.
+                    elif isinstance(getattr(message, "event", None), dict):
+                        evt: dict[str, Any] = getattr(message, "event", None) or {}
+                        if evt.get("type") == "message_delta":
+                            usage = evt.get("usage") or {}
+                            ot = usage.get("output_tokens")
+                            if isinstance(ot, int):
+                                pending_delta_output_tokens = ot
 
                     # PHASE 2: Process tool results from UserMessage content blocks.
                     # The SDK delivers tool results as UserMessage objects containing

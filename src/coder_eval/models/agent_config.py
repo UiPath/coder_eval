@@ -76,6 +76,12 @@ _FRAMEWORK_OWNED_SDK_FIELDS: frozenset[str] = frozenset(
         "skills",
         "add_dirs",
         "setting_sources",  # framework-controlled to prevent hook injection
+        # telemetry: required by ClaudeCodeAgent to recover per-emission
+        # output_tokens via message_delta stream events (works around
+        # anthropics/claude-code#22686 where the assistant event's
+        # output_tokens is a partial streaming snapshot). Letting YAML
+        # turn it off would silently drop per-message output accounting.
+        "include_partial_messages",
     }
 )
 # Precomputed user-visible allowlist (= valid SDK fields minus framework-owned).

@@ -462,11 +462,11 @@ def test_sdk_options_pydantic_round_trip():
     """
     original = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
-        sdk_options={"effort": "medium", "include_partial_messages": True},
+        sdk_options={"effort": "medium", "max_thinking_tokens": 1024},
     )
     dumped = original.model_dump()
     restored = parse_agent_config(**dumped)
-    assert restored.sdk_options == {"effort": "medium", "include_partial_messages": True}
+    assert restored.sdk_options == {"effort": "medium", "max_thinking_tokens": 1024}
     assert restored == original
 
 

@@ -972,7 +972,7 @@ class TestSdkOptionsMerge:
 
     Each layer can contribute or override individual SDK option keys; the merge
     is deep on this key so a higher layer adding ``effort`` doesn't wipe an
-    ``include_partial_messages`` set by a lower layer.
+    ``max_thinking_tokens`` set by a lower layer.
     """
 
     @staticmethod
@@ -1030,21 +1030,21 @@ class TestSdkOptionsMerge:
     def test_experiment_defaults_override_default_and_add_keys(self):
         resolved, lineage = self._resolve(
             default_opts={"effort": "low"},
-            exp_opts={"effort": "medium", "include_partial_messages": True},
+            exp_opts={"effort": "medium", "max_thinking_tokens": 1024},
         )
-        assert resolved.agent.sdk_options == {"effort": "medium", "include_partial_messages": True}
+        assert resolved.agent.sdk_options == {"effort": "medium", "max_thinking_tokens": 1024}
         assert lineage["agent.sdk_options.effort"].source == "experiment-defaults"
-        assert lineage["agent.sdk_options.include_partial_messages"].source == "experiment-defaults"
+        assert lineage["agent.sdk_options.max_thinking_tokens"].source == "experiment-defaults"
 
     def test_task_overrides_one_key_others_survive(self):
         resolved, lineage = self._resolve(
             default_opts={"effort": "low"},
-            exp_opts={"include_partial_messages": True},
+            exp_opts={"max_thinking_tokens": 1024},
             task_opts={"effort": "high"},
         )
-        assert resolved.agent.sdk_options == {"effort": "high", "include_partial_messages": True}
+        assert resolved.agent.sdk_options == {"effort": "high", "max_thinking_tokens": 1024}
         assert lineage["agent.sdk_options.effort"].source == "task"
-        assert lineage["agent.sdk_options.include_partial_messages"].source == "experiment-defaults"
+        assert lineage["agent.sdk_options.max_thinking_tokens"].source == "experiment-defaults"
 
     def test_variant_overrides_task(self):
         resolved, lineage = self._resolve(
@@ -1057,14 +1057,14 @@ class TestSdkOptionsMerge:
 
     def test_cli_overrides_all_lower_layers(self):
         resolved, lineage = self._resolve(
-            default_opts={"effort": "low", "include_partial_messages": True},
+            default_opts={"effort": "low", "max_thinking_tokens": 1024},
             cli_opts={"effort": "max"},
         )
-        assert resolved.agent.sdk_options == {"effort": "max", "include_partial_messages": True}
+        assert resolved.agent.sdk_options == {"effort": "max", "max_thinking_tokens": 1024}
         assert lineage["agent.sdk_options.effort"].source == "cli"
         assert lineage["agent.sdk_options.effort"].source_detail == "--sdk-option effort=max"
         # The unaffected key stays at its original source.
-        assert lineage["agent.sdk_options.include_partial_messages"].source == "default"
+        assert lineage["agent.sdk_options.max_thinking_tokens"].source == "default"
 
     def test_no_layer_sets_anything(self):
         resolved, lineage = self._resolve()
@@ -1091,11 +1091,11 @@ class TestSdkOptionsMerge:
 
         # task supplies ``{}``; experiment-defaults supplies a key → exp-defaults wins.
         resolved, lineage = self._resolve(
-            exp_opts={"include_partial_messages": True},
+            exp_opts={"max_thinking_tokens": 1024},
             task_opts={},
         )
-        assert resolved.agent.sdk_options == {"include_partial_messages": True}
-        assert lineage["agent.sdk_options.include_partial_messages"].source == "experiment-defaults"
+        assert resolved.agent.sdk_options == {"max_thinking_tokens": 1024}
+        assert lineage["agent.sdk_options.max_thinking_tokens"].source == "experiment-defaults"
 
     def test_validator_rejects_unknown_sdk_key_at_load(self):
         """An unknown SDK option in a task YAML fails Pydantic validation."""

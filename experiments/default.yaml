@@ -65,7 +65,7 @@ defaults:
     ignore_patterns: []
 
     # Claude Code SDK pass-through options — anything coder_eval doesn't own
-    # directly (e.g. `effort`, `include_partial_messages`). Keys must be
+    # directly (e.g. `effort`, `max_thinking_tokens`). Keys must be
     # ClaudeAgentOptions fields and must not be framework-managed (model,
     # allowed_tools, permission_mode, hooks, mcp_servers, ...). Deep-merged
     # across experiment / task / variant / --sdk-option layers, so a higher

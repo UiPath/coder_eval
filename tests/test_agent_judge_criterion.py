@@ -339,8 +339,8 @@ def test_agent_judge_sdk_options_deep_merge_with_growing_defaults(
 
     Today ``_default_judge_agent_config().sdk_options`` is empty, so the merge is
     a no-op. This test simulates a future where defaults add e.g. ``effort:
-    medium``, and locks in that a user supplying ``{include_partial_messages:
-    True}`` does NOT wipe the default's ``effort`` key.
+    medium``, and locks in that a user supplying ``{max_thinking_tokens:
+    1024}`` does NOT wipe the default's ``effort`` key.
     """
     from coder_eval.models import AgentConfig
     from coder_eval.models.criteria import _default_judge_agent_config
@@ -359,7 +359,7 @@ def test_agent_judge_sdk_options_deep_merge_with_growing_defaults(
     criterion = AgentJudgeCriterion(
         description="x",
         prompt="grade",
-        agent=parse_agent_config(type="claude-code", sdk_options={"include_partial_messages": True, "effort": "high"}),
+        agent=parse_agent_config(type="claude-code", sdk_options={"max_thinking_tokens": 1024, "effort": "high"}),
     )
     mock_agent = _make_mock_agent('{"score": 1.0, "rationale": "ok"}')
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent) as mock_cls:
@@ -367,7 +367,7 @@ def test_agent_judge_sdk_options_deep_merge_with_growing_defaults(
     (agent_config,) = mock_cls.call_args.args
     # User-set keys win; default keys not overridden survive.
     assert agent_config.sdk_options == {
-        "include_partial_messages": True,
+        "max_thinking_tokens": 1024,
         "effort": "high",
         "fallback_model": "claude-haiku-4-5-20251001",
     }

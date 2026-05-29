@@ -33,7 +33,9 @@ SDK call site with a clear error rather than being re-mirrored here.
 | Field | Owner | Where it goes |
 |---|---|---|
 | `model`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `plugins`, `system_prompt`, `system_prompt_file`, `setting_sources`, `claude_settings`, `ignore_patterns` | `AgentConfig` (typed) | Hand-mirrored because the orchestrator / judge / lineage tracker reasons about them (logs, A/B's, mutates). |
-| Everything else on `ClaudeAgentOptions` that is not framework-managed (e.g. `effort`, `include_partial_messages`, `max_budget_usd`, `betas`, `fallback_model`, `max_thinking_tokens`, `thinking`, …) | `sdk_options` (pass-through) | No coder_eval logic depends on them; the SDK is the source of truth. The exact allow-list is computed at runtime from `_VALID_SDK_OPTION_FIELDS - _FRAMEWORK_OWNED_SDK_FIELDS` (see `src/coder_eval/models/tasks.py`), so it tracks the installed SDK without needing a doc update on every bump. |
+| Everything else on `ClaudeAgentOptions` that is not framework-managed (e.g. `effort`, `betas`, `fallback_model`, `max_thinking_tokens`, `thinking`, …) | `sdk_options` (pass-through) | No coder_eval logic depends on them; the SDK is the source of truth. The exact allow-list is computed at runtime from `_VALID_SDK_OPTION_FIELDS - _FRAMEWORK_OWNED_SDK_FIELDS` (see `src/coder_eval/models/agent_config.py`), so it tracks the installed SDK without needing a doc update on every bump. |
+
+Note: `include_partial_messages` used to be in the pass-through bucket; it's now framework-owned. `ClaudeCodeAgent` always sets it to `True` so it can recover per-emission `output_tokens` from raw stream events — see `2026-05-28-per-message-token-recording.md`.
 
 ## How to configure
 
@@ -45,7 +47,7 @@ agent:
   model: "claude-sonnet-4-6"
   sdk_options:
     effort: high
-    include_partial_messages: true
+    max_thinking_tokens: 2048
 ```
 
 ### Experiment YAML (defaults or variant)
@@ -89,7 +91,7 @@ directly (or split into a per-variant judge spec) rather than passing
 ### CLI
 
 ```bash
-coder-eval run … --sdk-option effort=high --sdk-option include_partial_messages=true
+coder-eval run … --sdk-option effort=high --sdk-option max_thinking_tokens=2048
 ```
 
 `--sdk-option KEY=VALUE` is repeatable. Values are run through
@@ -108,8 +110,8 @@ default experiment defaults → experiment defaults → task YAML → variant �
 Each layer contributes / overrides individual SDK keys; missing keys
 are preserved from the lower layer. So setting
 `sdk_options: {effort: high}` at the default layer and
-`sdk_options: {include_partial_messages: true}` at the variant layer
-yields `{effort: high, include_partial_messages: true}` — not the
+`sdk_options: {max_thinking_tokens: 2048}` at the variant layer
+yields `{effort: high, max_thinking_tokens: 2048}` — not the
 variant's dict in isolation.
 
 ## Per-key lineage
@@ -118,7 +120,7 @@ Each `sdk_options` key gets its own lineage entry:
 
 ```
 agent.sdk_options.effort           → source=variant
-agent.sdk_options.include_partial_messages → source=default
+agent.sdk_options.max_thinking_tokens → source=default
 ```
 
 `--sdk-option effort=high` records `source=cli, source_detail="--sdk-option effort=high"`.

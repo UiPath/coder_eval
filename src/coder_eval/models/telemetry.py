@@ -119,8 +119,25 @@ class AssistantMessage(BaseModel):
         description="tool_use_id values from content_blocks, for joining with CommandTelemetry and tool_result blocks.",
     )
 
-    input_tokens: int = Field(default=0, description="Input prompt tokens for this LLM call.")
-    output_tokens: int = Field(default=0, description="Output tokens generated in this LLM call.")
+    input_tokens: int = Field(
+        default=0,
+        description=(
+            "Input prompt tokens for this LLM call. Zero on follow-up emissions that "
+            "share a message_id with an earlier AssistantMessage (the CLI splits one "
+            "API call into multiple emissions); billing is recorded on the first only. "
+            "Not authoritative for cost — use iteration.token_usage."
+        ),
+    )
+    output_tokens: int = Field(
+        default=0,
+        description=(
+            "Output tokens generated in this LLM call. Recovered from the "
+            "message_delta stream event when include_partial_messages is on; falls "
+            "back to the (often partial) SDK assistant-event value otherwise. "
+            "Per-emission only — do NOT sum across emissions for billing; use "
+            "iteration.token_usage as the authoritative aggregate."
+        ),
+    )
     cache_creation_tokens: int = Field(default=0, description="Tokens used to create prompt cache for this call.")
     cache_read_tokens: int = Field(default=0, description="Tokens read from prompt cache for this call.")
     reasoning_tokens: int = Field(default=0, description="Extended-thinking tokens; subset of output_tokens.")

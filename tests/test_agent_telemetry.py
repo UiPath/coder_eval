@@ -41,11 +41,13 @@ def create_mock_sdk_messages():
             self.signature = signature
 
     class AssistantMessage:
-        def __init__(self, content, usage=None):
+        def __init__(self, content, usage=None, message_id=None):
             self.content = content
             self.model = "mock-model"
             self.usage = usage or {}
             self.stop_reason = "end_turn"
+            if message_id is not None:
+                self.message_id = message_id
 
     class UserMessage:
         """Wraps ToolResultBlock(s) as the SDK does."""
@@ -803,5 +805,330 @@ class TestAssistantMessageTelemetry:
             assert turn.commands[0].assistant_turn_index == 0
             assert turn.commands[1].assistant_turn_index == 0
 
+        finally:
+            agent_module.query = original_query
+
+
+class _StreamEvent:
+    """Mock SDK StreamEvent — duck-typed by the agent via the ``event`` attribute."""
+
+    def __init__(self, event: dict):
+        self.event = event
+
+
+def _message_delta(output_tokens: int) -> _StreamEvent:
+    return _StreamEvent({"type": "message_delta", "usage": {"output_tokens": output_tokens}})
+
+
+class TestPerMessageTokenCapture:
+    """Tests for the per-message token state machine in ``ClaudeCodeAgent.communicate``.
+
+    Covers the two corrections layered on raw SDK values:
+    1. Dedup by ``message_id`` (CLI splits one API call into multiple events with shared id).
+    2. ``output_tokens`` override from ``message_delta`` stream events
+       (anthropics/claude-code#22686: assistant-event output_tokens is a partial snapshot).
+    Plus the legacy backfill path (no message_id) and the multi-turn / mixed-id edge cases.
+    """
+
+    @pytest.mark.asyncio
+    async def test_delta_override_beats_partial_assistant_usage(self, tmp_path):
+        """When a message_delta arrives before the AssistantMessage, the delta's output_tokens
+        wins over the (partial) value on the AssistantMessage.usage."""
+        _tool_use_block_cls, assistant_message_cls, _user_message_cls, text_block_cls, _, result_message_cls = (
+            create_mock_sdk_messages()
+        )
+
+        text = text_block_cls("hi")
+        # Assistant carries the streaming-snapshot output_tokens (partial = 7)
+        msg = assistant_message_cls(
+            [text],
+            usage={
+                "input_tokens": 100,
+                "output_tokens": 7,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 50,
+            },
+            message_id="msg_01",
+        )
+        result_msg = result_message_cls(usage={"input_tokens": 100, "output_tokens": 250})
+
+        import coder_eval.agents.claude_code_agent as agent_module
+
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
+        agent = agent_module.ClaudeCodeAgent(config)
+
+        async def mock_query(prompt, options):
+            # delta arrives BEFORE the assistant message (real CLI ordering)
+            yield _message_delta(250)
+            yield msg
+            yield result_msg
+
+        original_query = agent_module.query
+        agent_module.query = mock_query
+
+        try:
+            await agent.start(str(tmp_path))
+            turn = await agent.communicate("hi")
+            assert len(turn.messages) == 1
+            aturn = turn.messages[0]
+            assert isinstance(aturn, AssistantMessage)
+            # Delta's cumulative output (250) won over the partial 7.
+            assert aturn.output_tokens == 250
+            assert aturn.input_tokens == 100
+            assert aturn.cache_read_tokens == 50
+        finally:
+            agent_module.query = original_query
+
+    @pytest.mark.asyncio
+    async def test_same_message_id_dedupes_to_zero(self, tmp_path):
+        """A second AssistantMessage sharing message_id with the first records zeros for all
+        token fields — billing was already accounted for on the first emission."""
+        tool_use_block_cls, assistant_message_cls, user_message_cls, text_block_cls, _, result_message_cls = (
+            create_mock_sdk_messages()
+        )
+
+        text = text_block_cls("first block")
+        tool = tool_use_block_cls("toolu_1", "Read", {"file_path": "x"})
+
+        usage = {
+            "input_tokens": 1000,
+            "output_tokens": 5,
+            "cache_creation_input_tokens": 200,
+            "cache_read_input_tokens": 800,
+        }
+        # Two emissions with the SAME message_id — CLI splits text + tool_use into two events.
+        msg_a = assistant_message_cls([text], usage=usage, message_id="msg_dup")
+        msg_b = assistant_message_cls([tool], usage=usage, message_id="msg_dup")
+        user_msg = user_message_cls("toolu_1", False, "ok")
+        result_msg = result_message_cls(usage={"input_tokens": 1000, "output_tokens": 50})
+
+        import coder_eval.agents.claude_code_agent as agent_module
+
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
+        agent = agent_module.ClaudeCodeAgent(config)
+
+        async def mock_query(prompt, options):
+            yield _message_delta(50)
+            yield msg_a
+            yield msg_b
+            yield user_msg
+            yield result_msg
+
+        original_query = agent_module.query
+        agent_module.query = mock_query
+
+        try:
+            await agent.start(str(tmp_path))
+            turn = await agent.communicate("hi")
+            assert len(turn.messages) == 2
+            first, second = turn.messages
+            assert isinstance(first, AssistantMessage)
+            assert isinstance(second, AssistantMessage)
+            # First emission carries the billing.
+            assert first.input_tokens == 1000
+            assert first.output_tokens == 50  # from delta
+            assert first.cache_creation_tokens == 200
+            assert first.cache_read_tokens == 800
+            # Follow-up emission zeroed across the board.
+            assert second.input_tokens == 0
+            assert second.output_tokens == 0
+            assert second.cache_creation_tokens == 0
+            assert second.cache_read_tokens == 0
+            # Naive sum matches the per-API-call total (no double-count).
+            assert first.input_tokens + second.input_tokens == 1000
+        finally:
+            agent_module.query = original_query
+
+    @pytest.mark.asyncio
+    async def test_result_fallback_not_applied_when_message_ids_present(self, tmp_path):
+        """When per-message capture is active (message_id seen), the ResultMessage fallback
+        must NOT overwrite the last AssistantMessage — doing so would double-count zeros'd
+        follow-up emissions back onto the first."""
+        _tool_use_block_cls, assistant_message_cls, _user_message_cls, text_block_cls, _, result_message_cls = (
+            create_mock_sdk_messages()
+        )
+
+        text = text_block_cls("hi")
+        msg = assistant_message_cls(
+            [text],
+            usage={
+                "input_tokens": 100,
+                "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+            },
+            message_id="msg_keep",
+        )
+        # ResultMessage has DIFFERENT (cumulative) numbers — must NOT clobber.
+        result_msg = result_message_cls(usage={"input_tokens": 9999, "output_tokens": 7777})
+
+        import coder_eval.agents.claude_code_agent as agent_module
+
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
+        agent = agent_module.ClaudeCodeAgent(config)
+
+        async def mock_query(prompt, options):
+            yield _message_delta(42)
+            yield msg
+            yield result_msg
+
+        original_query = agent_module.query
+        agent_module.query = mock_query
+
+        try:
+            await agent.start(str(tmp_path))
+            turn = await agent.communicate("hi")
+            aturn = turn.messages[0]
+            assert isinstance(aturn, AssistantMessage)
+            # delta wins over partial 0; ResultMessage fallback is suppressed.
+            assert aturn.output_tokens == 42
+            assert aturn.input_tokens == 100
+        finally:
+            agent_module.query = original_query
+
+    @pytest.mark.asyncio
+    async def test_result_fallback_backfills_when_no_message_id(self, tmp_path):
+        """Legacy SDK / mock-stream path: AssistantMessages without message_id carry zeros,
+        and the ResultMessage usage backfills the last AssistantMessage (pre-fix behavior)."""
+        _tool_use_block_cls, assistant_message_cls, _user_message_cls, text_block_cls, _, result_message_cls = (
+            create_mock_sdk_messages()
+        )
+
+        text = text_block_cls("hi")
+        # No message_id, no usage — simulates a legacy stream.
+        msg = assistant_message_cls([text])
+        result_msg = result_message_cls(
+            usage={
+                "input_tokens": 123,
+                "output_tokens": 456,
+                "cache_creation_input_tokens": 10,
+                "cache_read_input_tokens": 20,
+            }
+        )
+
+        import coder_eval.agents.claude_code_agent as agent_module
+
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
+        agent = agent_module.ClaudeCodeAgent(config)
+
+        async def mock_query(prompt, options):
+            yield msg
+            yield result_msg
+
+        original_query = agent_module.query
+        agent_module.query = mock_query
+
+        try:
+            await agent.start(str(tmp_path))
+            turn = await agent.communicate("hi")
+            aturn = turn.messages[0]
+            assert isinstance(aturn, AssistantMessage)
+            # Backfilled from ResultMessage.
+            assert aturn.input_tokens == 123
+            assert aturn.output_tokens == 456
+            assert aturn.cache_creation_tokens == 10
+            assert aturn.cache_read_tokens == 20
+        finally:
+            agent_module.query = original_query
+
+    @pytest.mark.asyncio
+    async def test_delta_consumed_per_emission_not_carried_over(self, tmp_path):
+        """A pending delta value applies only to the next AssistantMessage; the emission
+        after must use its own delta (or fall back), not re-use the prior one."""
+        _tool_use_block_cls, assistant_message_cls, _user_message_cls, text_block_cls, _, result_message_cls = (
+            create_mock_sdk_messages()
+        )
+
+        text1 = text_block_cls("first turn")
+        text2 = text_block_cls("second turn")
+        msg1 = assistant_message_cls(
+            [text1],
+            usage={"input_tokens": 10, "output_tokens": 1},
+            message_id="msg_a",
+        )
+        msg2 = assistant_message_cls(
+            [text2],
+            usage={"input_tokens": 20, "output_tokens": 2},
+            message_id="msg_b",
+        )
+        # No delta before msg2 → it falls back to the partial usage value (2).
+        result_msg = result_message_cls(usage={"input_tokens": 30, "output_tokens": 999})
+
+        import coder_eval.agents.claude_code_agent as agent_module
+
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
+        agent = agent_module.ClaudeCodeAgent(config)
+
+        async def mock_query(prompt, options):
+            yield _message_delta(100)
+            yield msg1
+            yield msg2
+            yield result_msg
+
+        original_query = agent_module.query
+        agent_module.query = mock_query
+
+        try:
+            await agent.start(str(tmp_path))
+            turn = await agent.communicate("hi")
+            assert len(turn.messages) == 2
+            a1, a2 = turn.messages
+            assert isinstance(a1, AssistantMessage)
+            assert isinstance(a2, AssistantMessage)
+            assert a1.output_tokens == 100  # delta consumed
+            assert a2.output_tokens == 2  # fell back to partial; NOT 100, NOT 999
+        finally:
+            agent_module.query = original_query
+
+    @pytest.mark.asyncio
+    async def test_mixed_id_turn_backfills_only_trailing_idless_message(self, tmp_path):
+        """Mixed stream: first AssistantMessage has a message_id, second doesn't. The
+        ResultMessage fallback should backfill the id-less trailing message (which would
+        otherwise carry zero tokens) without clobbering the earlier id'd one whose tokens
+        were captured correctly."""
+        _tool_use_block_cls, assistant_message_cls, _user_message_cls, text_block_cls, _, result_message_cls = (
+            create_mock_sdk_messages()
+        )
+
+        text1 = text_block_cls("first")
+        text2 = text_block_cls("second (no id)")
+        msg_with_id = assistant_message_cls(
+            [text1],
+            usage={"input_tokens": 11, "output_tokens": 1},
+            message_id="msg_one",
+        )
+        msg_no_id = assistant_message_cls([text2])  # no usage, no id
+        result_msg = result_message_cls(
+            usage={"input_tokens": 500, "output_tokens": 999, "cache_read_input_tokens": 50},
+        )
+
+        import coder_eval.agents.claude_code_agent as agent_module
+
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
+        agent = agent_module.ClaudeCodeAgent(config)
+
+        async def mock_query(prompt, options):
+            yield _message_delta(42)
+            yield msg_with_id
+            yield msg_no_id
+            yield result_msg
+
+        original_query = agent_module.query
+        agent_module.query = mock_query
+
+        try:
+            await agent.start(str(tmp_path))
+            turn = await agent.communicate("hi")
+            assert len(turn.messages) == 2
+            first, second = turn.messages
+            assert isinstance(first, AssistantMessage)
+            assert isinstance(second, AssistantMessage)
+            # First emission keeps its captured values — NOT clobbered.
+            assert first.input_tokens == 11
+            assert first.output_tokens == 42  # from delta
+            # Second emission (no id) gets backfilled from ResultMessage.
+            assert second.input_tokens == 500
+            assert second.output_tokens == 999
+            assert second.cache_read_tokens == 50
         finally:
             agent_module.query = original_query

@@ -12,8 +12,8 @@ class TestParseSdkOptionsCoercion:
     """Value coercion: YAML 1.2 canonicals through, YAML 1.1 truthy aliases as strings."""
 
     def test_canonical_true_false_become_bool(self):
-        out = _parse_sdk_options(["include_partial_messages=true", "verbose=false"])
-        assert out == {"include_partial_messages": True, "verbose": False}
+        out = _parse_sdk_options(["some_flag=true", "verbose=false"])
+        assert out == {"some_flag": True, "verbose": False}
 
     def test_int_and_float_coerce(self):
         out = _parse_sdk_options(["max_thinking_tokens=2048", "ratio=0.5"])
