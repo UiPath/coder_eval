@@ -17,6 +17,17 @@ export function fmtRunTime(id: string): string {
     return `${d} · ${t.replace(/-/g, ":")}`;
 }
 
+// Compact human-readable count: 1234 -> "1.2k", 1_500_000 -> "1.5M".
+// Used by the task page token cell where dense numbers compete for space
+// with five other stats in the same dl grid.
+export function fmtCompact(n: number | null | undefined): string {
+    if (n == null) return "—";
+    const abs = Math.abs(n);
+    if (abs >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
+    if (abs >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "k";
+    return String(n);
+}
+
 export function fmtDuration(s: number | null): string {
     if (s == null) return "—";
     // Round once on the total to avoid `1m 60s` from rounding the remainder.

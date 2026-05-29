@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import type { TaskResultSummary } from "@/lib/runs";
 import type { ReviewIndexEntry } from "@/lib/reviews-types";
-import { humanizeTaskId } from "@/lib/format";
+import { fmtCompact, humanizeTaskId } from "@/lib/format";
 import { StatusPill } from "@/lib/pills";
 import { statusSortRank } from "@/lib/status";
 import {
@@ -22,7 +22,10 @@ type SortKey =
     | "score"
     | "duration"
     | "cost"
-    | "turns";
+    | "turns"
+    | "output"
+    | "cw"
+    | "cr";
 
 function fmtTableDuration(s: number | null): string {
     if (s == null) return "—";
@@ -44,6 +47,9 @@ const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
     duration: "desc",
     cost: "desc",
     turns: "desc",
+    output: "desc",
+    cw: "desc",
+    cr: "desc",
 };
 
 function compare(
@@ -77,6 +83,18 @@ function compare(
                 (displayedTurns(b.actualCommands, b.hasFinalReply) ??
                     -Infinity)
             );
+        case "output":
+            return (a.outputTokens ?? -Infinity) - (b.outputTokens ?? -Infinity);
+        case "cw":
+            return (
+                (a.cacheCreationTokens ?? -Infinity) -
+                (b.cacheCreationTokens ?? -Infinity)
+            );
+        case "cr":
+            return (
+                (a.cacheReadTokens ?? -Infinity) -
+                (b.cacheReadTokens ?? -Infinity)
+            );
     }
 }
 
@@ -91,6 +109,9 @@ const COLUMNS: Array<{
     { key: "duration", header: "Duration", align: "right" },
     { key: "cost", header: "Cost", align: "right" },
     { key: "turns", header: "Turns", align: "right" },
+    { key: "output", header: "Out", align: "right" },
+    { key: "cw", header: "Cache+", align: "right" },
+    { key: "cr", header: "Cache↺", align: "right" },
 ];
 
 export function TaskGrid({
@@ -319,6 +340,30 @@ export function TaskGrid({
                                         t.hasFinalReply,
                                     ),
                                 )}
+                            </td>
+                            <td
+                                className="py-3 px-4 text-right tabular-nums text-gray-700"
+                                title="output_tokens"
+                            >
+                                {t.outputTokens != null
+                                    ? fmtCompact(t.outputTokens)
+                                    : "—"}
+                            </td>
+                            <td
+                                className="py-3 px-4 text-right tabular-nums text-gray-700"
+                                title="cache_creation_input_tokens (tokens written to cache this task)"
+                            >
+                                {t.cacheCreationTokens != null
+                                    ? fmtCompact(t.cacheCreationTokens)
+                                    : "—"}
+                            </td>
+                            <td
+                                className="py-3 px-4 text-right tabular-nums text-gray-700"
+                                title="cache_read_input_tokens (cached tokens re-billed each turn — usually the dominant cost line)"
+                            >
+                                {t.cacheReadTokens != null
+                                    ? fmtCompact(t.cacheReadTokens)
+                                    : "—"}
                             </td>
                         </tr>
                         );

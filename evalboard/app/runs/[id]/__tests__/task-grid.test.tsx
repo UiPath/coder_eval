@@ -18,6 +18,9 @@ function row(
         totalTurns: null,
         expectedTurns,
         hasFinalReply: false,
+        outputTokens: null,
+        cacheCreationTokens: null,
+        cacheReadTokens: null,
         tags: [],
         skill: null,
     };
@@ -27,8 +30,8 @@ function turnsCellFor(taskId: string): HTMLElement {
     const link = screen.getByRole("link", { name: new RegExp(taskId, "i") });
     const tr = link.closest("tr")!;
     const cells = within(tr).getAllByRole("cell");
-    // Layout: Task, Status, Score, Duration, Cost, Turns
-    return cells.at(-1)!;
+    // Layout: Task, Status, Score, Duration, Cost, Turns, Out, Cache+, Cache↺
+    return cells[5]!;
 }
 
 describe("TaskGrid — Turns column", () => {
@@ -79,7 +82,7 @@ describe("TaskGrid — Turns column", () => {
         expect(cell.className).toContain("text-gray-900");
     });
 
-    test("table has 6 columns (Task, Status, Score, Duration, Cost, Turns)", () => {
+    test("table columns include perf + token stats", () => {
         render(<TaskGrid runId="r1" tasks={[row("x", 1, 1)]} />);
         const headers = screen.getAllByRole("columnheader");
         const labels = headers.map((h) => h.textContent?.trim() ?? "");
@@ -90,6 +93,9 @@ describe("TaskGrid — Turns column", () => {
             "Duration",
             "Cost",
             "Turns",
+            "Out",
+            "Cache+",
+            "Cache↺",
         ]);
     });
 });

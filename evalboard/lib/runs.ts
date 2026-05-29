@@ -66,6 +66,11 @@ export interface TaskResultSummary {
     // (i.e. ResultMessage.result was non-empty). Lets grid/trends
     // Turns cells inflate by +1 on legacy runs that lack total_turns.
     hasFinalReply: boolean;
+    // Per-task token totals from run.json. Null on legacy runs that
+    // don't record per-task token counts.
+    outputTokens: number | null;
+    cacheCreationTokens: number | null;
+    cacheReadTokens: number | null;
     tags: string[];
     // Derived primary group. See deriveSkill below for the resolution chain
     // (new runs use task_path; older runs fall back to a tag heuristic).
@@ -103,6 +108,42 @@ export interface ToolCall {
     summary: string;
 }
 
+// One assistant message in the SDK transcript. Captured per `iterations[i].
+// messages[j]` and used by the message-timeline view. Includes:
+//   - timing: generation_duration_ms, and any captured tool executions that
+//     this message kicked off (matched by tool_use_id).
+//   - content: a flattened list of typed blocks (thinking / tool_use / text).
+export interface MessageEvent {
+    index: number;                // 1-based order across the whole task
+    role: "assistant";            // user/system live in iteration metadata, not here
+    startedAt: string | null;
+    completedAt: string | null;
+    generationMs: number | null;  // LLM generation time for this message
+    blockTypes: ("thinking" | "tool_use" | "text")[];
+    thinkingText: string | null;  // concatenated thinking blocks
+    text: string | null;          // concatenated text blocks (final reply chunks)
+    toolUses: MessageToolUse[];   // resolved against iteration.commands by tool_use_id
+}
+
+export interface MessageToolUse {
+    toolName: string;
+    toolUseId: string | null;
+    // Human-friendly summary (description-first). Kept for compatibility with
+    // anything that already consumes the old single-string display.
+    summary: string;
+    // The actual operative argument the agent passed: shell command for Bash,
+    // file_path for Read/Write/Edit, skill id for Skill, pattern for Grep, etc.
+    // This is what you'd run to reproduce the call. Null only when no
+    // recognizable key was present.
+    argText: string | null;
+    // The optional `description` field on the tool call — agent's stated intent.
+    // Only set when distinct from argText and present in the params.
+    description: string | null;
+    durationMs: number | null;    // tool execution time (separate from generationMs)
+    isError: boolean;
+    resultPreview: string | null; // short truncated preview of the result
+}
+
 export interface ArtifactRef {
     relPath: string;
     // Lowercased file extension without the dot ("flow", "md", "json"), or
@@ -124,6 +165,13 @@ export interface TaskDetail extends TaskResultSummary {
     // last turn's ResultMessage.result. Renders as the trailing entry in
     // the Turn timeline so the (5) header reconciles with the 4 tool calls.
     finalAssistantText: string | null;
+    // Per-assistant-message timeline data. Empty array for legacy task.json
+    // files that don't have iterations[].messages; the message-timeline
+    // section then doesn't render.
+    messages: MessageEvent[];
+    // Per-task token totals summed across iterations. All zeros for legacy
+    // runs that don't record per-iteration token_usage.
+    tokens: TokenTotals;
 }
 
 // ---------- run.json schema ----------
@@ -134,6 +182,10 @@ interface RawTaskResult {
     weighted_score?: number;
     duration?: number;
     total_cost_usd?: number;
+    input_tokens?: number | null;
+    output_tokens?: number | null;
+    cache_creation_input_tokens?: number | null;
+    cache_read_input_tokens?: number | null;
     actual_commands?: number;
     // Cumulative SDK turn count + configured target. Absent on runs from
     // before the dashboard-expected-turns PR; both fields are optional and
@@ -283,6 +335,9 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
         totalTurns: t.total_turns ?? null,
         expectedTurns: t.expected_turns ?? null,
         hasFinalReply: t.has_final_reply ?? false,
+        outputTokens: t.output_tokens ?? null,
+        cacheCreationTokens: t.cache_creation_input_tokens ?? null,
+        cacheReadTokens: t.cache_read_input_tokens ?? null,
         tags,
         skill: deriveSkill(t.task_path, tags),
     };
@@ -633,15 +688,56 @@ function parseFlowDebug(
 
 interface CommandEntry {
     tool_name?: string;
+    tool_id?: string;
     parameters?: Record<string, unknown>;
+    duration_ms?: number;
+    result_status?: string;
+    result_summary?: unknown;
+    error_message?: string | null;
+}
+
+interface ContentBlockEntry {
+    block_type?: "thinking" | "tool_use" | "text";
+    text?: string | null;
+    thinking?: string | null;
+    tool_use_id?: string | null;
+    is_error?: boolean;
+}
+
+interface MessageEntry {
+    role?: string;
+    started_at?: string | null;
+    completed_at?: string | null;
+    generation_duration_ms?: number | null;
+    content_blocks?: ContentBlockEntry[];
 }
 
 interface TurnEntry {
     commands?: CommandEntry[];
+    messages?: MessageEntry[];
+    token_usage?: TokenUsageEntry | null;
     result_summary?: {
         result?: string | null;
         stop_reason?: string | null;
     } | null;
+}
+
+interface TokenUsageEntry {
+    input_tokens?: number | null;
+    output_tokens?: number | null;
+    cache_creation_input_tokens?: number | null;
+    cache_read_input_tokens?: number | null;
+    total_cost_usd?: number | null;
+}
+
+// Token counts summed across all iterations of a task. Optional so legacy
+// task.json files without per-iteration token_usage just expose zeros.
+export interface TokenTotals {
+    input: number;
+    output: number;
+    cacheCreation: number;
+    cacheRead: number;
+    total: number;
 }
 
 function summarizeCommand(cmd: CommandEntry): string {
@@ -670,6 +766,220 @@ function summarizeCommand(cmd: CommandEntry): string {
         return "";
     }
     return s.length > 140 ? s.slice(0, 137) + "…" : s;
+}
+
+// Cap message-level previews to keep payloads sane on long-running tasks.
+// Result previews are stored short anyway (the raw task.json truncates them
+// at ~200 chars for most non-Bash tools); we just need a deterministic ceiling.
+const RESULT_PREVIEW_CAP = 280;
+const TEXT_PREVIEW_CAP = 600;
+const THINKING_PREVIEW_CAP = 800;
+
+// Pick the operative arg the agent actually ran with. For Bash that's the
+// command string; for Read/Write/Edit it's file_path; for Skill it's the skill
+// id; for Grep it's pattern; for WebFetch it's url; etc. Falls through to the
+// first non-empty string param if no known key matched.
+function pickArgText(params: Record<string, unknown>): string | null {
+    const keys = [
+        "command",
+        "file_path",
+        "filePath",
+        "path",
+        "url",
+        "skill",
+        "pattern",
+        "query",
+    ];
+    for (const k of keys) {
+        const v = params[k];
+        if (typeof v === "string" && v.length > 0) return v;
+    }
+    for (const v of Object.values(params)) {
+        if (typeof v === "string" && v.length > 0) return v;
+    }
+    return null;
+}
+
+function pickDescription(params: Record<string, unknown>): string | null {
+    const v = params["description"];
+    return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+function previewString(value: unknown, cap: number): string | null {
+    if (value == null) return null;
+    let s: string;
+    if (typeof value === "string") {
+        s = value;
+    } else {
+        try {
+            s = JSON.stringify(value);
+        } catch {
+            return null;
+        }
+    }
+    s = s.replace(/[\r]+/g, "");
+    if (s.length > cap) s = s.slice(0, cap - 1) + "…";
+    return s.length > 0 ? s : null;
+}
+
+// Gap between one assistant message's completed_at and the next message's
+// started_at that we treat as "same model emission". coder_eval records each
+// content-block kind (thinking / tool_use / text) as its own MessageEntry,
+// so a single conceptual turn often spans 2-3 entries with gap≈0. Tool
+// execution sits *between* turns and adds 100ms+, so 100ms is a safe split
+// threshold. Anything below is grouped into one logical turn; this is also
+// how parallel tool_use blocks (whether one MessageEntry with N tool_use
+// blocks, or N MessageEntries emitted instantaneously) get folded together.
+const SAME_EMISSION_GAP_MS = 100;
+
+function tsMs(s: string | null | undefined): number | null {
+    if (!s) return null;
+    const t = Date.parse(s);
+    return Number.isNaN(t) ? null : t;
+}
+
+function parseMessages(turns: TurnEntry[]): MessageEvent[] {
+    const out: MessageEvent[] = [];
+    let order = 0;
+    for (const turn of turns) {
+        // Resolve tool_use_id -> CommandEntry per iteration (the id is locally
+        // unique). Used to pull execution time + result preview onto tool_use
+        // blocks.
+        const byToolUseId = new Map<string, CommandEntry>();
+        for (const cmd of turn.commands ?? []) {
+            if (cmd.tool_id) byToolUseId.set(cmd.tool_id, cmd);
+        }
+
+        // First pass: collect assistant messages with parsed block content.
+        type Raw = {
+            startedAt: string | null;
+            completedAt: string | null;
+            startMs: number | null;
+            endMs: number | null;
+            generationMs: number | null;
+            blockTypes: ("thinking" | "tool_use" | "text")[];
+            thinkingParts: string[];
+            textParts: string[];
+            toolUses: MessageToolUse[];
+        };
+        const raws: Raw[] = [];
+        for (const msg of turn.messages ?? []) {
+            if (msg.role !== "assistant") continue;
+            const r: Raw = {
+                startedAt: msg.started_at ?? null,
+                completedAt: msg.completed_at ?? null,
+                startMs: tsMs(msg.started_at),
+                endMs: tsMs(msg.completed_at),
+                generationMs:
+                    typeof msg.generation_duration_ms === "number"
+                        ? msg.generation_duration_ms
+                        : null,
+                blockTypes: [],
+                thinkingParts: [],
+                textParts: [],
+                toolUses: [],
+            };
+            for (const b of msg.content_blocks ?? []) {
+                if (b.block_type === "thinking") {
+                    r.blockTypes.push("thinking");
+                    if (b.thinking) r.thinkingParts.push(b.thinking);
+                } else if (b.block_type === "text") {
+                    r.blockTypes.push("text");
+                    if (b.text) r.textParts.push(b.text);
+                } else if (b.block_type === "tool_use") {
+                    r.blockTypes.push("tool_use");
+                    const id = b.tool_use_id ?? null;
+                    const cmd = id ? byToolUseId.get(id) : undefined;
+                    const params = cmd?.parameters ?? {};
+                    const argText = pickArgText(params);
+                    const description = pickDescription(params);
+                    r.toolUses.push({
+                        toolName: cmd?.tool_name ?? "unknown",
+                        toolUseId: id,
+                        summary: cmd ? summarizeCommand(cmd) : "",
+                        argText: previewString(argText, 400),
+                        description:
+                            description && description !== argText
+                                ? previewString(description, 200)
+                                : null,
+                        durationMs:
+                            typeof cmd?.duration_ms === "number"
+                                ? cmd.duration_ms
+                                : null,
+                        isError:
+                            b.is_error === true ||
+                            (cmd?.result_status != null &&
+                                cmd.result_status !== "success"),
+                        resultPreview: previewString(
+                            cmd?.result_summary ?? cmd?.error_message ?? null,
+                            RESULT_PREVIEW_CAP,
+                        ),
+                    });
+                }
+            }
+            raws.push(r);
+        }
+
+        // Second pass: collapse consecutive raws that share a model emission
+        // (tiny gap between prev.end and next.start). Parallel tool_use lives
+        // entirely inside one emission, so it ends up in one MessageEvent.
+        let group: Raw[] = [];
+        const flush = () => {
+            if (group.length === 0) return;
+            const head = group[0];
+            const tail = group[group.length - 1];
+            const blockTypes: MessageEvent["blockTypes"] = [];
+            const thinkingParts: string[] = [];
+            const textParts: string[] = [];
+            const toolUses: MessageToolUse[] = [];
+            let genSum = 0;
+            let haveGen = false;
+            for (const r of group) {
+                blockTypes.push(...r.blockTypes);
+                thinkingParts.push(...r.thinkingParts);
+                textParts.push(...r.textParts);
+                toolUses.push(...r.toolUses);
+                if (r.generationMs != null) {
+                    genSum += r.generationMs;
+                    haveGen = true;
+                }
+            }
+            out.push({
+                index: ++order,
+                role: "assistant",
+                startedAt: head.startedAt,
+                completedAt: tail.completedAt,
+                generationMs: haveGen ? genSum : null,
+                blockTypes,
+                thinkingText: previewString(
+                    thinkingParts.join("\n").trim(),
+                    THINKING_PREVIEW_CAP,
+                ),
+                text: previewString(textParts.join("\n").trim(), TEXT_PREVIEW_CAP),
+                toolUses,
+            });
+            group = [];
+        };
+        for (const r of raws) {
+            if (group.length === 0) {
+                group.push(r);
+                continue;
+            }
+            const prev = group[group.length - 1];
+            const gap =
+                prev.endMs != null && r.startMs != null
+                    ? r.startMs - prev.endMs
+                    : Number.POSITIVE_INFINITY;
+            if (gap <= SAME_EMISSION_GAP_MS) {
+                group.push(r);
+            } else {
+                flush();
+                group.push(r);
+            }
+        }
+        flush();
+    }
+    return out;
 }
 
 function parseToolCalls(turns: TurnEntry[], max = 200): ToolCall[] {
@@ -764,6 +1074,8 @@ export async function readTaskDetail(
 
     const flowDebug = parseFlowDebug(criteria);
     const toolCalls = parseToolCalls(task?.iterations ?? []);
+    const messages = parseMessages(task?.iterations ?? []);
+    const tokens = sumTokenTotals(task?.iterations ?? []);
 
     const taskDescription =
         task?.task_config?.resolved?.initial_prompt ??
@@ -799,6 +1111,30 @@ export async function readTaskDetail(
         flowDebug,
         toolCalls,
         finalAssistantText,
+        messages,
+        tokens,
+    };
+}
+
+function sumTokenTotals(turns: TurnEntry[]): TokenTotals {
+    let input = 0;
+    let output = 0;
+    let cacheCreation = 0;
+    let cacheRead = 0;
+    for (const t of turns) {
+        const tu = t.token_usage;
+        if (!tu) continue;
+        input += tu.input_tokens ?? 0;
+        output += tu.output_tokens ?? 0;
+        cacheCreation += tu.cache_creation_input_tokens ?? 0;
+        cacheRead += tu.cache_read_input_tokens ?? 0;
+    }
+    return {
+        input,
+        output,
+        cacheCreation,
+        cacheRead,
+        total: input + output + cacheCreation + cacheRead,
     };
 }
 

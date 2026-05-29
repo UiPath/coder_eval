@@ -2,11 +2,18 @@ import type {
     ArtifactRef,
     CriterionResult,
     FlowDebugResult,
+    MessageEvent,
     ToolCall,
 } from "@/lib/runs";
 import { StatusPill } from "@/lib/pills";
 import { displayedTurns } from "@/lib/turns";
 import { Expandable, KindChip, ResultPill, ToolChip } from "./_chips";
+
+// Thresholds for "this is slow" highlighting on the message timeline.
+// Generation > 10 s is unusual: turn 1 priming is ~7 s, steady state is ~2-3 s.
+// Tool execution > 5 s is the bar Anthropic SDK uses internally as "slow tool".
+const SLOW_GEN_MS = 10_000;
+const SLOW_TOOL_MS = 5_000;
 
 export function FlowDebugSection({ flowDebug }: { flowDebug: FlowDebugResult }) {
     return (
@@ -189,6 +196,303 @@ export function ToolTimelineSection({
                 </ol>
             </Expandable>
         </section>
+    );
+}
+
+function fmtMs(ms: number | null): string {
+    if (ms == null) return "—";
+    if (ms >= 60_000) return `${(ms / 60_000).toFixed(1)}m`;
+    if (ms >= 1_000) return `${(ms / 1_000).toFixed(1)}s`;
+    return `${Math.round(ms)}ms`;
+}
+
+function messageKind(blockTypes: MessageEvent["blockTypes"]): string {
+    const set = new Set(blockTypes);
+    if (set.size === 0) return "EMPTY";
+    if (set.size === 1) {
+        const only = blockTypes[0];
+        return only === "thinking" ? "THINKING" : only === "tool_use" ? "TOOL" : "TEXT";
+    }
+    return "MIXED";
+}
+
+function kindBadgeClass(kind: string): string {
+    switch (kind) {
+        case "THINKING":
+            return "bg-purple-100 text-purple-700 border-purple-200";
+        case "TOOL":
+            return "bg-blue-100 text-blue-700 border-blue-200";
+        case "TEXT":
+            return "bg-green-100 text-green-700 border-green-200";
+        case "MIXED":
+            return "bg-amber-100 text-amber-700 border-amber-200";
+        default:
+            return "bg-gray-100 text-gray-600 border-gray-200";
+    }
+}
+
+export function MessageTimelineSection({ messages }: { messages: MessageEvent[] }) {
+    if (messages.length === 0) return null;
+
+    // Roll-up stats for the summary strip.
+    const totalGenMs = messages.reduce((s, m) => s + (m.generationMs ?? 0), 0);
+    const thinkingMs = messages.reduce(
+        (s, m) => s + (m.blockTypes.includes("thinking") ? m.generationMs ?? 0 : 0),
+        0,
+    );
+    const toolExecMs = messages.reduce(
+        (s, m) => s + m.toolUses.reduce((a, t) => a + (t.durationMs ?? 0), 0),
+        0,
+    );
+    const slowGen = messages.filter(
+        (m) => (m.generationMs ?? 0) >= SLOW_GEN_MS,
+    ).length;
+    const slowTool = messages.reduce(
+        (s, m) =>
+            s + m.toolUses.filter((t) => (t.durationMs ?? 0) >= SLOW_TOOL_MS).length,
+        0,
+    );
+    const thinkingShare = totalGenMs > 0 ? thinkingMs / totalGenMs : 0;
+
+    return (
+        <section className="space-y-2">
+            <h2 className="text-sm font-semibold text-gray-900">
+                Message timeline ({messages.length})
+            </h2>
+            <p className="text-[10px] text-gray-500">
+                MIXED = multiple block types · red = slow (gen ≥10s, tool ≥5s)
+            </p>
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs bg-gray-50 border border-gray-200 rounded-lg p-3 tabular-nums">
+                <div>
+                    <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                        Messages
+                    </div>
+                    <div className="text-gray-900 font-medium">{messages.length}</div>
+                </div>
+                <div>
+                    <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                        Generation
+                    </div>
+                    <div className="text-gray-900 font-medium">
+                        {fmtMs(totalGenMs)}
+                    </div>
+                </div>
+                <div>
+                    <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                        Thinking
+                    </div>
+                    <div
+                        className={
+                            thinkingShare >= 0.4
+                                ? "text-red-700 font-medium"
+                                : "text-gray-900 font-medium"
+                        }
+                    >
+                        {fmtMs(thinkingMs)} ({Math.round(thinkingShare * 100)}%)
+                    </div>
+                </div>
+                <div>
+                    <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                        Tool exec
+                    </div>
+                    <div className="text-gray-900 font-medium">
+                        {fmtMs(toolExecMs)}
+                    </div>
+                </div>
+                <div>
+                    <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                        Slow events
+                    </div>
+                    <div
+                        className={
+                            slowGen + slowTool > 0
+                                ? "text-red-700 font-medium"
+                                : "text-gray-900 font-medium"
+                        }
+                    >
+                        {slowGen} gen · {slowTool} tool
+                    </div>
+                </div>
+            </div>
+            <ol className="space-y-1 text-xs font-mono">
+                {messages.map((m) => (
+                    <MessageRow key={m.index} m={m} />
+                ))}
+            </ol>
+        </section>
+    );
+}
+
+function firstLine(s: string | null, cap = 100): string {
+    if (!s) return "";
+    const line = s.split(/\r?\n/)[0].trim();
+    return line.length > cap ? line.slice(0, cap - 1) + "…" : line;
+}
+
+function summaryPreview(m: MessageEvent): string {
+    // One short line for the collapsed row: prefer tool arg, then text, then
+    // thinking. Truncated so wide tasks still fit on a single row.
+    if (m.toolUses.length > 0) {
+        const t = m.toolUses[0];
+        const head = firstLine(t.argText ?? t.description ?? t.summary, 90);
+        return m.toolUses.length > 1
+            ? `${head}   (+${m.toolUses.length - 1} more)`
+            : head;
+    }
+    if (m.text) return firstLine(m.text, 100);
+    if (m.thinkingText) return firstLine(m.thinkingText, 100);
+    return "";
+}
+
+function MessageRow({ m }: { m: MessageEvent }) {
+    const kind = messageKind(m.blockTypes);
+    const slowGen = (m.generationMs ?? 0) >= SLOW_GEN_MS;
+    const slowTool = m.toolUses.some((t) => (t.durationMs ?? 0) >= SLOW_TOOL_MS);
+    const slow = slowGen || slowTool;
+    const hasErrorTool = m.toolUses.some((t) => t.isError);
+    const preview = summaryPreview(m);
+    // Render full body only when something more than the summary exists.
+    const hasBody =
+        m.toolUses.length > 0 ||
+        (m.thinkingText != null && m.thinkingText.length > 0) ||
+        (m.text != null && m.text.length > preview.length);
+    return (
+        <li>
+            <details
+                className={
+                    "group rounded border " +
+                    (slow
+                        ? "border-red-300 bg-red-50/40"
+                        : hasErrorTool
+                            ? "border-red-200 bg-white"
+                            : "border-gray-200 bg-white")
+                }
+            >
+                <summary className="px-2 py-1 cursor-pointer list-none [&::-webkit-details-marker]:hidden flex items-start gap-2 flex-wrap hover:bg-gray-50">
+                    <span
+                        aria-hidden="true"
+                        className="inline-block w-3 text-gray-400 transition-transform group-open:rotate-90 shrink-0"
+                    >
+                        ▶
+                    </span>
+                    <span className="text-gray-400 tabular-nums w-8 text-right shrink-0">
+                        #{m.index}
+                    </span>
+                    <span
+                        className={
+                            "inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium shrink-0 " +
+                            kindBadgeClass(kind)
+                        }
+                    >
+                        {kind}
+                    </span>
+                    <span
+                        className={
+                            "tabular-nums shrink-0 " +
+                            (slowGen
+                                ? "text-red-700 font-medium"
+                                : "text-gray-500")
+                        }
+                    >
+                        {fmtMs(m.generationMs)}
+                    </span>
+                    {m.toolUses[0] && (
+                        <span className="shrink-0 flex items-center gap-1">
+                            <ToolChip tool={m.toolUses[0].toolName} />
+                            <span
+                                className={
+                                    "tabular-nums " +
+                                    (slowTool
+                                        ? "text-red-700 font-medium"
+                                        : "text-gray-500")
+                                }
+                            >
+                                {fmtMs(m.toolUses[0].durationMs)}
+                            </span>
+                        </span>
+                    )}
+                    {hasErrorTool && (
+                        <span className="inline-flex items-center rounded border border-red-200 bg-red-50 text-red-700 px-1 py-0.5 text-[10px]">
+                            error
+                        </span>
+                    )}
+                    <span className="text-gray-700 truncate min-w-0">
+                        {preview}
+                    </span>
+                </summary>
+                {hasBody && (
+                    <div className="px-3 py-2 border-t border-gray-100 space-y-2">
+                        {m.thinkingText && (
+                            <div className="border-l-2 border-purple-200 pl-2 text-gray-600 whitespace-pre-wrap break-words">
+                                <span className="text-[10px] uppercase tracking-wide text-purple-500 mr-1">
+                                    thinking
+                                </span>
+                                {m.thinkingText}
+                            </div>
+                        )}
+                        {m.toolUses.length > 0 && (
+                            <ul className="space-y-2">
+                                {m.toolUses.map((t, i) => (
+                                    <li key={`${m.index}-${i}`} className="space-y-1">
+                                        <div className="flex items-start gap-2 flex-wrap">
+                                            <ToolChip tool={t.toolName} />
+                                            <span
+                                                className={
+                                                    "tabular-nums shrink-0 " +
+                                                    ((t.durationMs ?? 0) >= SLOW_TOOL_MS
+                                                        ? "text-red-700 font-medium"
+                                                        : "text-gray-500")
+                                                }
+                                            >
+                                                {fmtMs(t.durationMs)}
+                                            </span>
+                                            {t.description && (
+                                                <span className="text-gray-500 italic">
+                                                    {t.description}
+                                                </span>
+                                            )}
+                                            {t.isError && (
+                                                <span className="inline-flex items-center rounded border border-red-200 bg-red-50 text-red-700 px-1 py-0.5 text-[10px]">
+                                                    error
+                                                </span>
+                                            )}
+                                        </div>
+                                        {t.argText && (
+                                            <div className="text-gray-800 whitespace-pre-wrap break-all bg-gray-50 border border-gray-200 rounded px-2 py-1">
+                                                {t.argText}
+                                            </div>
+                                        )}
+                                        {t.resultPreview && (
+                                            <div
+                                                className={
+                                                    "text-[11px] whitespace-pre-wrap break-words border rounded px-2 py-1 " +
+                                                    (t.isError
+                                                        ? "border-red-200 bg-red-50/40 text-red-800"
+                                                        : "border-gray-100 bg-white text-gray-600")
+                                                }
+                                            >
+                                                <span className="text-[10px] uppercase tracking-wide text-gray-400 mr-1">
+                                                    result
+                                                </span>
+                                                {t.resultPreview}
+                                            </div>
+                                        )}
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                        {m.text && (
+                            <div className="border-l-2 border-green-200 pl-2 text-gray-700 whitespace-pre-wrap break-words">
+                                <span className="text-[10px] uppercase tracking-wide text-green-600 mr-1">
+                                    text
+                                </span>
+                                {m.text}
+                            </div>
+                        )}
+                    </div>
+                )}
+            </details>
+        </li>
     );
 }
 

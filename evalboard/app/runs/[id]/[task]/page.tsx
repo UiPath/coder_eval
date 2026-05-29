@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { readLogTail, readTaskDetail } from "@/lib/runs";
 import { readTaskReview } from "@/lib/reviews";
-import { fmtRunTime, humanizeTaskId } from "@/lib/format";
+import { fmtCompact, fmtRunTime, humanizeTaskId } from "@/lib/format";
 import { StatusPill } from "@/lib/pills";
 import { ChipButton } from "../chips";
 import { displayedTurns } from "@/lib/turns";
@@ -12,6 +12,7 @@ import {
     CriteriaSection,
     FlowDebugSection,
     LogTailSection,
+    MessageTimelineSection,
     ToolTimelineSection,
 } from "./_sections";
 
@@ -54,7 +55,7 @@ export default async function TaskPage({
                 <div className="text-xs text-gray-500 tabular-nums font-mono">
                     {taskId} · run {id}
                 </div>
-                <dl className="grid grid-cols-2 md:grid-cols-6 gap-4 text-sm bg-gray-50 border border-gray-200 rounded-lg p-4">
+                <dl className="grid grid-cols-2 md:grid-cols-7 gap-4 text-sm bg-gray-50 border border-gray-200 rounded-lg p-4">
                     <div>
                         <dt className="text-xs text-gray-500 uppercase tracking-wide">
                             Score
@@ -99,6 +100,24 @@ export default async function TaskPage({
                         expectedTurns={task.expectedTurns}
                     />
                     <ExpectedTurnsStat expectedTurns={task.expectedTurns} />
+                    <div>
+                        <dt className="text-xs text-gray-500 uppercase tracking-wide">
+                            Tokens
+                        </dt>
+                        <dd className="text-gray-900 font-medium mt-0.5 tabular-nums">
+                            {task.tokens.total > 0
+                                ? fmtCompact(task.tokens.total)
+                                : "—"}
+                        </dd>
+                        {task.tokens.total > 0 && (
+                            <dd
+                                className="text-[10px] text-gray-500 mt-0.5 tabular-nums"
+                                title="in (uncached input) · out (output) · cw (cache-creation input) · cr (cache-read input)"
+                            >
+                                in {fmtCompact(task.tokens.input)} · out {fmtCompact(task.tokens.output)} · cw {fmtCompact(task.tokens.cacheCreation)} · cr {fmtCompact(task.tokens.cacheRead)}
+                            </dd>
+                        )}
+                    </div>
                 </dl>
                 {task.tags.length > 0 && (
                     <div className="flex flex-wrap gap-1.5">
@@ -159,6 +178,9 @@ export default async function TaskPage({
 
             {flowDebug && <FlowDebugSection flowDebug={flowDebug} />}
             <CriteriaSection criteria={task.criteria} />
+            {task.messages.length > 0 && (
+                <MessageTimelineSection messages={task.messages} />
+            )}
             {(task.toolCalls.length > 0 || task.finalAssistantText) && (
                 <ToolTimelineSection
                     toolCalls={task.toolCalls}
