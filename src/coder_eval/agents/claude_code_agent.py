@@ -762,6 +762,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                                     else None
                                 ),
                                 model=sdk_model_used,
+                                message_id=message_id if isinstance(message_id, str) else None,
                             )
                         )
                         # Track last AssistantMessage to populate with final tokens from ResultMessage
@@ -1271,6 +1272,11 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             data = getattr(message, "data", None)
             self._log.debug(f"--- SYSTEM ({subtype}): {str(data)[:200]}")
 
+        elif msg_type == "StreamEvent":
+            # StreamEvents drive token-delta capture (see message_delta
+            # handler) but are noisy in transcripts — skip the debug dump.
+            return
+
         else:
             self._log.debug(f"--- {msg_type}: {str(message)[:200]}")
 
@@ -1554,6 +1560,10 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 continue
 
             type_name = type(msg).__name__
+            # StreamEvent is a known SDK type used for token-delta capture
+            # elsewhere; don't surface it as an "unhandled" warning here.
+            if type_name == "StreamEvent":
+                continue
             if type_name not in self._warned_unknown_types:
                 self._warned_unknown_types.add(type_name)
                 self._log.warning(

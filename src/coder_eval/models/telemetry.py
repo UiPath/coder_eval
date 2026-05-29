@@ -145,6 +145,15 @@ class AssistantMessage(BaseModel):
     stop_reason: str | None = Field(default=None, description="SDK stop reason: 'tool_use', 'end_turn', etc.")
     model: str | None = Field(default=None, description="Model identifier that generated this turn.")
 
+    message_id: str | None = Field(
+        default=None,
+        description=(
+            "Anthropic API message_id. Multiple AssistantMessage records can share this id "
+            "when the Claude Code CLI splits one API response into per-block-kind events. "
+            "Downstream tooling can group by this id to recover one logical generation."
+        ),
+    )
+
 
 class CommandTelemetry(BaseModel):
     """Telemetry for a single command execution.

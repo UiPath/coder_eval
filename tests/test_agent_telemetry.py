@@ -563,6 +563,8 @@ class TestAssistantMessageTelemetry:
             assert aturn.output_tokens == 50
             assert aturn.stop_reason == "end_turn"
             assert aturn.model == "mock-model"
+            # No message_id on the mock → field is None (legacy/optional).
+            assert aturn.message_id is None
 
         finally:
             agent_module.query = original_query
@@ -936,6 +938,10 @@ class TestPerMessageTokenCapture:
             assert second.cache_read_tokens == 0
             # Naive sum matches the per-API-call total (no double-count).
             assert first.input_tokens + second.input_tokens == 1000
+            # Both emissions persist the shared message_id so downstream
+            # tooling can group splits back into one logical API call.
+            assert first.message_id == "msg_dup"
+            assert second.message_id == "msg_dup"
         finally:
             agent_module.query = original_query
 

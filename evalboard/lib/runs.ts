@@ -119,6 +119,9 @@ export interface MessageEvent {
     startedAt: string | null;
     completedAt: string | null;
     generationMs: number | null;  // LLM generation time for this message
+    thinkingMs: number | null;    // portion of generationMs attributable to thinking blocks
+    textMs: number | null;        // portion of generationMs attributable to text blocks
+    toolGenMs: number | null;     // portion of generationMs attributable to tool_use blocks
     blockTypes: ("thinking" | "tool_use" | "text")[];
     thinkingText: string | null;  // concatenated thinking blocks
     text: string | null;          // concatenated text blocks (final reply chunks)
@@ -139,6 +142,7 @@ export interface MessageToolUse {
     // The optional `description` field on the tool call — agent's stated intent.
     // Only set when distinct from argText and present in the params.
     description: string | null;
+    genMs: number | null;         // LLM generation time for this tool_use block
     durationMs: number | null;    // tool execution time (separate from generationMs)
     isError: boolean;
     resultPreview: string | null; // short truncated preview of the result
@@ -710,9 +714,14 @@ interface MessageEntry {
     completed_at?: string | null;
     generation_duration_ms?: number | null;
     content_blocks?: ContentBlockEntry[];
+    // Anthropic API message_id. The Claude Code CLI splits one API response
+    // into per-block-kind events that share this id; we collapse by id when
+    // present, falling back to a wall-clock gap heuristic for older runs that
+    // didn't record it.
+    message_id?: string | null;
 }
 
-interface TurnEntry {
+export interface TurnEntry {
     commands?: CommandEntry[];
     messages?: MessageEntry[];
     token_usage?: TokenUsageEntry | null;
@@ -838,7 +847,23 @@ function tsMs(s: string | null | undefined): number | null {
     return Number.isNaN(t) ? null : t;
 }
 
-function parseMessages(turns: TurnEntry[]): MessageEvent[] {
+// ~4 chars/token is the common rough estimate for English/code. The exact
+// constant doesn't matter for *splitting* time across parallel tools (it
+// cancels in the ratio), but using a real-ish number keeps the helper useful
+// if anyone wants a token estimate independently.
+const CHARS_PER_TOKEN = 4;
+
+export function approxTokens(params: Record<string, unknown> | null | undefined): number {
+    if (!params) return 0;
+    try {
+        const s = JSON.stringify(params);
+        return Math.ceil(s.length / CHARS_PER_TOKEN);
+    } catch {
+        return 0;
+    }
+}
+
+export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
     const out: MessageEvent[] = [];
     let order = 0;
     for (const turn of turns) {
@@ -857,10 +882,12 @@ function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             startMs: number | null;
             endMs: number | null;
             generationMs: number | null;
+            messageId: string | null;
             blockTypes: ("thinking" | "tool_use" | "text")[];
             thinkingParts: string[];
             textParts: string[];
             toolUses: MessageToolUse[];
+            toolTokenProxies: number[];
         };
         const raws: Raw[] = [];
         for (const msg of turn.messages ?? []) {
@@ -874,10 +901,12 @@ function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                     typeof msg.generation_duration_ms === "number"
                         ? msg.generation_duration_ms
                         : null,
+                messageId: typeof msg.message_id === "string" ? msg.message_id : null,
                 blockTypes: [],
                 thinkingParts: [],
                 textParts: [],
                 toolUses: [],
+                toolTokenProxies: [],
             };
             for (const b of msg.content_blocks ?? []) {
                 if (b.block_type === "thinking") {
@@ -893,6 +922,11 @@ function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                     const params = cmd?.parameters ?? {};
                     const argText = pickArgText(params);
                     const description = pickDescription(params);
+                    // Crude token proxy: serialized argument byte length. Used
+                    // below to weight per-tool generation time across parallel
+                    // tool_use blocks emitted in one raw.
+                    const tokenProxy = approxTokens(params);
+                    r.toolTokenProxies.push(tokenProxy);
                     r.toolUses.push({
                         toolName: cmd?.tool_name ?? "unknown",
                         toolUseId: id,
@@ -902,6 +936,8 @@ function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                             description && description !== argText
                                 ? previewString(description, 200)
                                 : null,
+                        // genMs set below after we know how many tool_uses share this raw
+                        genMs: null,
                         durationMs:
                             typeof cmd?.duration_ms === "number"
                                 ? cmd.duration_ms
@@ -915,6 +951,21 @@ function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                             RESULT_PREVIEW_CAP,
                         ),
                     });
+                }
+            }
+            // Split the raw's generation time across its tool_use blocks,
+            // weighted by an approximate token count (param payload size).
+            // The SDK only reports one generation_duration_ms per raw, so for
+            // parallel tool_uses we attribute proportional to argument size —
+            // larger calls plausibly cost more output tokens to generate. Falls
+            // back to even-split when all proxies are zero.
+            if (r.generationMs != null && r.toolUses.length > 0) {
+                const proxies = r.toolTokenProxies;
+                const total = proxies.reduce((a, b) => a + b, 0);
+                for (let i = 0; i < r.toolUses.length; i++) {
+                    const weight =
+                        total > 0 ? proxies[i] / total : 1 / r.toolUses.length;
+                    r.toolUses[i].genMs = r.generationMs * weight;
                 }
             }
             raws.push(r);
@@ -934,6 +985,15 @@ function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             const toolUses: MessageToolUse[] = [];
             let genSum = 0;
             let haveGen = false;
+            // Each raw is one content-block emission (see SAME_EMISSION_GAP_MS
+            // comment), so its generation_duration_ms attaches to whichever
+            // block kind it carries.
+            let thinkSum = 0;
+            let haveThink = false;
+            let textSum = 0;
+            let haveText = false;
+            let toolGenSum = 0;
+            let haveToolGen = false;
             for (const r of group) {
                 blockTypes.push(...r.blockTypes);
                 thinkingParts.push(...r.thinkingParts);
@@ -942,6 +1002,16 @@ function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 if (r.generationMs != null) {
                     genSum += r.generationMs;
                     haveGen = true;
+                    if (r.blockTypes.includes("thinking")) {
+                        thinkSum += r.generationMs;
+                        haveThink = true;
+                    } else if (r.blockTypes.includes("tool_use")) {
+                        toolGenSum += r.generationMs;
+                        haveToolGen = true;
+                    } else if (r.blockTypes.includes("text")) {
+                        textSum += r.generationMs;
+                        haveText = true;
+                    }
                 }
             }
             out.push({
@@ -950,6 +1020,9 @@ function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 startedAt: head.startedAt,
                 completedAt: tail.completedAt,
                 generationMs: haveGen ? genSum : null,
+                thinkingMs: haveThink ? thinkSum : null,
+                textMs: haveText ? textSum : null,
+                toolGenMs: haveToolGen ? toolGenSum : null,
                 blockTypes,
                 thinkingText: previewString(
                     thinkingParts.join("\n").trim(),
@@ -966,11 +1039,21 @@ function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 continue;
             }
             const prev = group[group.length - 1];
-            const gap =
-                prev.endMs != null && r.startMs != null
-                    ? r.startMs - prev.endMs
-                    : Number.POSITIVE_INFINITY;
-            if (gap <= SAME_EMISSION_GAP_MS) {
+            // Prefer message_id when both raws have one — that's the
+            // authoritative signal that the CLI split a single API response.
+            // Fall back to the wall-clock gap heuristic for older runs that
+            // didn't record message_id.
+            let sameEmission: boolean;
+            if (prev.messageId != null && r.messageId != null) {
+                sameEmission = prev.messageId === r.messageId;
+            } else {
+                const gap =
+                    prev.endMs != null && r.startMs != null
+                        ? r.startMs - prev.endMs
+                        : Number.POSITIVE_INFINITY;
+                sameEmission = gap <= SAME_EMISSION_GAP_MS;
+            }
+            if (sameEmission) {
                 group.push(r);
             } else {
                 flush();

@@ -236,10 +236,9 @@ export function MessageTimelineSection({ messages }: { messages: MessageEvent[] 
 
     // Roll-up stats for the summary strip.
     const totalGenMs = messages.reduce((s, m) => s + (m.generationMs ?? 0), 0);
-    const thinkingMs = messages.reduce(
-        (s, m) => s + (m.blockTypes.includes("thinking") ? m.generationMs ?? 0 : 0),
-        0,
-    );
+    const thinkingMs = messages.reduce((s, m) => s + (m.thinkingMs ?? 0), 0);
+    const textMs = messages.reduce((s, m) => s + (m.textMs ?? 0), 0);
+    const toolGenMs = messages.reduce((s, m) => s + (m.toolGenMs ?? 0), 0);
     const toolExecMs = messages.reduce(
         (s, m) => s + m.toolUses.reduce((a, t) => a + (t.durationMs ?? 0), 0),
         0,
@@ -262,7 +261,7 @@ export function MessageTimelineSection({ messages }: { messages: MessageEvent[] 
             <p className="text-[10px] text-gray-500">
                 MIXED = multiple block types · red = slow (gen ≥10s, tool ≥5s)
             </p>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs bg-gray-50 border border-gray-200 rounded-lg p-3 tabular-nums">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs bg-gray-50 border border-gray-200 rounded-lg p-3 tabular-nums">
                 <div>
                     <div className="text-gray-500 uppercase tracking-wide text-[10px]">
                         Messages
@@ -276,19 +275,49 @@ export function MessageTimelineSection({ messages }: { messages: MessageEvent[] 
                     <div className="text-gray-900 font-medium">
                         {fmtMs(totalGenMs)}
                     </div>
-                </div>
-                <div>
-                    <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                        Thinking
-                    </div>
-                    <div
-                        className={
-                            thinkingShare >= 0.4
-                                ? "text-red-700 font-medium"
-                                : "text-gray-900 font-medium"
-                        }
-                    >
-                        {fmtMs(thinkingMs)} ({Math.round(thinkingShare * 100)}%)
+                    <div className="mt-1 grid grid-cols-3 gap-2 text-[10px]">
+                        <div>
+                            <div className="text-gray-500">thinking</div>
+                            <div
+                                className={
+                                    thinkingShare >= 0.4
+                                        ? "text-red-700 font-medium tabular-nums"
+                                        : "text-gray-800 font-medium tabular-nums"
+                                }
+                            >
+                                {fmtMs(thinkingMs)}
+                                {totalGenMs > 0 && (
+                                    <span className="text-gray-400">
+                                        {" "}
+                                        ({Math.round(thinkingShare * 100)}%)
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+                        <div>
+                            <div className="text-gray-500">tool</div>
+                            <div className="text-gray-800 font-medium tabular-nums">
+                                {fmtMs(toolGenMs)}
+                                {totalGenMs > 0 && (
+                                    <span className="text-gray-400">
+                                        {" "}
+                                        ({Math.round((toolGenMs / totalGenMs) * 100)}%)
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+                        <div>
+                            <div className="text-gray-500">text</div>
+                            <div className="text-gray-800 font-medium tabular-nums">
+                                {fmtMs(textMs)}
+                                {totalGenMs > 0 && (
+                                    <span className="text-gray-400">
+                                        {" "}
+                                        ({Math.round((textMs / totalGenMs) * 100)}%)
+                                    </span>
+                                )}
+                            </div>
+                        </div>
                     </div>
                 </div>
                 <div>
@@ -427,6 +456,11 @@ function MessageRow({ m }: { m: MessageEvent }) {
                                 <span className="text-[10px] uppercase tracking-wide text-purple-500 mr-1">
                                     thinking
                                 </span>
+                                {m.thinkingMs != null && (
+                                    <span className="text-[10px] tabular-nums text-gray-500 mr-1">
+                                        gen {fmtMs(m.thinkingMs)}
+                                    </span>
+                                )}
                                 {m.thinkingText}
                             </div>
                         )}
@@ -436,6 +470,11 @@ function MessageRow({ m }: { m: MessageEvent }) {
                                     <li key={`${m.index}-${i}`} className="space-y-1">
                                         <div className="flex items-start gap-2 flex-wrap">
                                             <ToolChip tool={t.toolName} />
+                                            {t.genMs != null && (
+                                                <span className="tabular-nums shrink-0 text-gray-500">
+                                                    gen {fmtMs(t.genMs)}
+                                                </span>
+                                            )}
                                             <span
                                                 className={
                                                     "tabular-nums shrink-0 " +
@@ -444,7 +483,7 @@ function MessageRow({ m }: { m: MessageEvent }) {
                                                         : "text-gray-500")
                                                 }
                                             >
-                                                {fmtMs(t.durationMs)}
+                                                exec {fmtMs(t.durationMs)}
                                             </span>
                                             {t.description && (
                                                 <span className="text-gray-500 italic">
@@ -486,6 +525,11 @@ function MessageRow({ m }: { m: MessageEvent }) {
                                 <span className="text-[10px] uppercase tracking-wide text-green-600 mr-1">
                                     text
                                 </span>
+                                {m.textMs != null && (
+                                    <span className="text-[10px] tabular-nums text-gray-500 mr-1">
+                                        gen {fmtMs(m.textMs)}
+                                    </span>
+                                )}
                                 {m.text}
                             </div>
                         )}
