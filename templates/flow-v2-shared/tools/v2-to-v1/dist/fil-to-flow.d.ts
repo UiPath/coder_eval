@@ -13,7 +13,7 @@
  * 4. Auto-layout positions on a grid
  */
 import * as AST from 'fil-compiler/dist/ast';
-import { FlowFile, FlowOverrides } from 'v1-to-v2';
+import { FlowFile, FlowOverrides, NodeVariable } from 'v1-to-v2';
 /**
  * FIL name → v1 expression path. E.g. `userId → 'vars.userId'` for a flow
  * global, or `item → 'iterator.item'` for a for-of iterator. Phase A's
@@ -30,7 +30,11 @@ export declare function filToFlowWithScope(program: AST.Program, flowId?: string
     flow: FlowFile;
     scope: Scope;
 };
-/** Convert a FIL AST expression to a Flow expression string. */
+interface FlowExprConvertOptions {
+    scope?: Scope;
+    nodeVars?: NodeVariable[];
+    actionIds?: Map<string, string>;
+}
 /**
  * Convert a FIL AST expression into a v1 flow expression string (the
  * subset of JS the v1 Jint evaluator accepts for non-script value
@@ -43,7 +47,7 @@ export declare function filToFlowWithScope(program: AST.Program, flowId?: string
  * pass through verbatim — the legacy behavior, used only by call
  * sites that already pre-substitute via the script-body-emitter.
  */
-export declare function convertFILExprToFlowExpr(expr: AST.Expression, scope?: Scope): string;
+export declare function convertFILExprToFlowExpr(expr: AST.Expression, options?: Scope | FlowExprConvertOptions): string;
 /**
  * Strip the patch component from every `typeVersion` / definition `version`
  * string. The v2-to-v1 emitter hardcodes `1.0.0` at every node-mint site,
@@ -60,4 +64,5 @@ export declare function convertFILExprToFlowExpr(expr: AST.Expression, scope?: S
  * rebuilt from the canonical library.
  */
 export declare function normalizeTypeVersions(flow: FlowFile): void;
+export {};
 //# sourceMappingURL=fil-to-flow.d.ts.map

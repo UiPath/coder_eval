@@ -72,6 +72,9 @@ function expandNode(nodeId, node, opts, bindingLookup, missing) {
         if (isQueueNodeType(type)) {
             override.model = buildQueueModel(type, node, bindingLookup);
         }
+        if (type === 'core.trigger.scheduled') {
+            validateScheduledTriggerInputs(nodeId, node.rawInputs);
+        }
         // Non-integration: rawInputs is the v1 inputs blob, captured verbatim.
         if (node.rawInputs) {
             override.inputs = isQueueNodeType(type)
@@ -162,6 +165,20 @@ function expandNode(nodeId, node, opts, bindingLookup, missing) {
     detail.configuration = rehydrated.configString;
     override.inputs = { detail };
     return { typeRef, override };
+}
+function validateScheduledTriggerInputs(nodeId, rawInputs) {
+    if (!rawInputs?.entryPointId) {
+        throw new Error(`Scheduled trigger "${nodeId}" rawInputs.entryPointId is required.`);
+    }
+    if (rawInputs.timerType !== 'timeCycle') {
+        throw new Error(`Scheduled trigger "${nodeId}" rawInputs.timerType must be "timeCycle".`);
+    }
+    if (!rawInputs.timerPreset) {
+        throw new Error(`Scheduled trigger "${nodeId}" rawInputs.timerPreset is required.`);
+    }
+    if (rawInputs.timerPreset === 'custom' && !rawInputs.timerValue) {
+        throw new Error(`Scheduled trigger "${nodeId}" has timerPreset "custom", so rawInputs.timerValue is required.`);
+    }
 }
 const PROCESS_RESOURCE_SPECS = [
     {

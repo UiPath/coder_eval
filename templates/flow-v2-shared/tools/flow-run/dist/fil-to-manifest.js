@@ -17,6 +17,7 @@ exports.filProgramToManifest = filProgramToManifest;
 const TYPE_ALIASES = {
     // Triggers
     start: 'core.trigger.manual',
+    scheduled: 'core.trigger.scheduled',
     // Actions
     http: 'core.action.http',
     script: 'core.action.script',

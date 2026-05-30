@@ -62,6 +62,7 @@ flow order-notify {
 
 // (2) Triggers — at least one per flow.
 trigger manualStart: start;            // short alias for core.trigger.manual
+trigger scheduledStart: scheduled@1.1; // short alias for core.trigger.scheduled
 
 // (3) Actions — one per node you intend to invoke. Body fields are optional;
 //     every field below is per-instance v1 node metadata.
@@ -89,6 +90,7 @@ Short aliases are accepted in `action` and `trigger` type slots and expand to th
 | Alias       | Canonical type             | Notes                                                        |
 | ----------- | -------------------------- | ------------------------------------------------------------ |
 | `start`     | `core.trigger.manual`      | Manual entry-point                                            |
+| `scheduled` | `core.trigger.scheduled`   | Scheduled start entry-point                                   |
 | `http`      | `core.action.http`         | Raw HTTP — no connector needed                                |
 | `script`    | `core.action.script`       | JavaScript snippet evaluated in the v1 sandbox                |
 | `transform` | `core.action.transform`    | Transform/jq-style operations                                 |
@@ -122,6 +124,31 @@ The `{ … }` block on an `action` or `trigger` declaration accepts these fields
 | `fixture`              | Dry-run value returned by fixture-aware nodes such as `core.logic.mock`, published Agents, inline Agents, HITL quickform, Queue, Summarize, and Batch Transform. Any JSON shape is allowed. |
 
 Fields are constant-folded — literals, nested objects/arrays, and untagged template literals survive into the runtime manifest. Identifiers or arithmetic in a body field are dropped (use the runtime path via `executeNode` arguments for computed values).
+
+### Scheduled start triggers
+
+Scheduled starts use a `trigger` declaration. Put timer metadata in
+`rawInputs`, not `inputs`, so conversion to v1 preserves the trigger payload.
+Use exactly one start trigger per flow.
+
+```typescript
+trigger scheduledStart: scheduled@1.1 {
+  label: "Every Hour",
+  rawInputs: {
+    entryPointId: "11111111-2222-3333-4444-555555555555",
+    timerType: "timeCycle",
+    timerPreset: "R/PT1H",
+  },
+  outputs: {
+    output: { type: "object", source: "=result.response", var: "output" },
+  },
+};
+```
+
+Use `timerPreset: "custom"` only when you also provide `timerValue`
+(for example, `timerValue: "R/PT45M"`). Local `flow-run` enters `main()`
+directly, like a manual start; schedule activation happens after the converted
+v1 flow is deployed.
 
 ## OOTB Non-IS actions: HITL quickform
 
@@ -709,7 +736,7 @@ Published Agent bindings are process resource bindings, not connector bindings. 
 }
 ```
 
-`v2-to-v1` ships a built-in catalog of v1 `definitions[]` entries for the standard control-flow types (`core.trigger.manual`, `core.control.end`, `core.logic.decision`, `core.logic.merge`, `core.action.script`, `core.subflow`, …). You don't need to ship `embeddedDefinitions` for these — the converter fills them in. Connector definitions come from the canonical library cache. Published Agent definitions are synthesized from `resource` / `resourceBindings`; inline Agent definitions are synthesized from the `uipath.agent.autonomous` node shape. Embedded Agent definitions from a v1 conversion are still preserved and take precedence. Add `embeddedDefinitions` only for custom node types the converter cannot synthesize.
+`v2-to-v1` ships a built-in catalog of v1 `definitions[]` entries for the standard control-flow types (`core.trigger.manual`, `core.trigger.scheduled`, `core.control.end`, `core.logic.decision`, `core.logic.merge`, `core.action.script`, `core.subflow`, …). You don't need to ship `embeddedDefinitions` for these — the converter fills them in. Connector definitions come from the canonical library cache. Published Agent definitions are synthesized from `resource` / `resourceBindings`; inline Agent definitions are synthesized from the `uipath.agent.autonomous` node shape. Embedded Agent definitions from a v1 conversion are still preserved and take precedence. Add `embeddedDefinitions` only for custom node types the converter cannot synthesize.
 
 ## Worked example
 

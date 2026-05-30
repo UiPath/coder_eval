@@ -92,6 +92,7 @@ function convertV2ToV1(filSource, manifest, bindings, opts = {}) {
         }
         manifest = derived;
     }
+    validateStartTriggerDeclarations(program.triggers);
     // 2. Expand manifest entries → NodeOverrides for filToFlow. The manifest
     //    references bindings by symbolic ID; we need bindings.json so we can
     //    write the real UUIDs into v1's inputs.detail.connectionId.
@@ -160,6 +161,32 @@ function convertV2ToV1(filSource, manifest, bindings, opts = {}) {
         missingDefinitions: finalDefs.missing,
         inputExpressions,
     };
+}
+const TRIGGER_TYPE_ALIASES = {
+    start: 'core.trigger.manual',
+    scheduled: 'core.trigger.scheduled',
+};
+const START_TRIGGER_TYPES = new Set([
+    'core.trigger.manual',
+    'core.trigger.scheduled',
+]);
+function validateStartTriggerDeclarations(triggerDecls) {
+    const triggers = triggerDecls.map((decl) => ({
+        id: decl.name,
+        type: canonicalTriggerType(decl.typeRef.name),
+    }));
+    if (triggers.length === 0)
+        return;
+    if (triggers.length !== 1) {
+        throw new Error(`v2-to-v1 requires exactly one trigger declaration; found ${triggers.length}.`);
+    }
+    const trigger = triggers[0];
+    if (!START_TRIGGER_TYPES.has(trigger.type)) {
+        throw new Error(`v2-to-v1 start trigger must be core.trigger.manual or core.trigger.scheduled; got ${trigger.type} on "${trigger.id}".`);
+    }
+}
+function canonicalTriggerType(type) {
+    return TRIGGER_TYPE_ALIASES[type] ?? type;
 }
 /**
  * Lazily load the bundled `core-definitions.json` — a snapshot of v1's

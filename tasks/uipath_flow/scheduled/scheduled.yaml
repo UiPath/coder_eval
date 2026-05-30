@@ -1,0 +1,243 @@
+task_id: flow-json-scheduled
+description: >
+  Scheduled-start Flow v1 (.flow JSON) authoring task. Mirrors the v2
+  scheduled-start task so evaluator runs can compare hand-written JSON against
+  FIL authoring for the same hourly weather-alert scenario.
+tags: [flow, flow-json, generate, scheduled, http, decision]
+
+run_limits:
+  max_turns: 50
+  turn_timeout: 1200
+  task_timeout: 1200
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: tempdir
+  python: {}
+  node:
+    env_packages:
+      - "@uipath/cli@0.1.21"
+
+initial_prompt: |
+  Before starting, load the `uipath-maestro-flow` skill and read its
+  SKILL.md. Author the flow as JSON (do NOT use `$HOME/.bun/bin/uip maestro flow node add`
+  -- pure JSON authoring). Do NOT ask for approval, confirmation, or feedback.
+  Build the complete flow end-to-end in a single pass.
+
+  Create a UiPath Flow project named **ScheduledWeatherAlert** that runs every
+  hour, fetches Bellevue, WA weather from open-meteo, formats a summary with a
+  script, and uses a decision to return:
+
+  - `{ message: "nice day" }` when the current temperature is greater than 60F.
+  - `{ message: "bring a jacket" }` otherwise.
+
+  Bellevue, WA coordinates: latitude 47.6101, longitude -122.2015.
+  Use `temperature_unit=fahrenheit` on the open-meteo URL.
+
+  ## Scheduled trigger requirements
+
+  Use `uip maestro flow registry get core.trigger.scheduled --output json` to
+  get the current scheduled-trigger definition and type version. The start node
+  must be `core.trigger.scheduled`, not `core.trigger.manual`, and it must have:
+
+  ```json
+  {
+    "inputs": {
+      "entryPointId": "11111111-2222-3333-4444-555555555555",
+      "timerType": "timeCycle",
+      "timerPreset": "R/PT1H"
+    },
+    "outputs": {
+      "output": { "type": "object", "source": "=result.response", "var": "output" }
+    }
+  }
+  ```
+
+  Include the scheduled trigger's v1 definition in `definitions[]`, with BPMN
+  model type `bpmn:StartEvent` and event definition
+  `bpmn:TimerEventDefinition`.
+
+  ## Output
+
+  Save the flow as `ScheduledWeatherAlert/flow_files/ScheduledWeatherAlert.flow`
+  with a `ScheduledWeatherAlert/project.uiproj`.
+
+  ## Verifying your work
+
+  ```bash
+  uip maestro flow validate ScheduledWeatherAlert/flow_files/ScheduledWeatherAlert.flow
+  uip maestro flow format   ScheduledWeatherAlert/flow_files/ScheduledWeatherAlert.flow
+  ```
+
+  Iterate until validate prints `"Result": "Success"`. Do NOT run flow debug.
+
+post_run:
+  - command: 'mkdir -p _outputs && find . -type d \( -name .uipath -o -name .claude -o -name .venv -o -name node_modules -o -name tools -o -name example -o -name _outputs -o -name .git -o -name .flow-run \) -prune -o -type f \( -name "*.flow" -o -name "*.fil" -o -name "bindings*.json" \) -exec sh -c ''f="${1#./}"; mkdir -p "_outputs/$(dirname "$f")" && cp "$1" "_outputs/$f"'' _ {} \; && find _outputs -type f -exec chmod a-w {} +'
+    timeout: 30
+
+success_criteria:
+  - type: run_command
+    description: "Flow file exists and is valid JSON"
+    command: |
+      python3 -c "
+      import glob, json
+      flows = glob.glob('**/flow_files/ScheduledWeatherAlert.flow', recursive=True)
+      assert flows, 'No ScheduledWeatherAlert.flow file found'
+      f = json.load(open(flows[0]))
+      assert isinstance(f.get('nodes'), list), 'no nodes array'
+      assert isinstance(f.get('edges'), list), 'no edges array'
+      assert len(f['nodes']) >= 5, f'expected at least 5 nodes, got {len(f[\"nodes\"])}'
+      print(f'OK: {len(f[\"nodes\"])} nodes, {len(f[\"edges\"])} edges, {len(f.get(\"definitions\", []))} defs')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Flow has exactly one scheduled start trigger with hourly timer inputs"
+    command: |
+      python3 -c "
+      import glob, json
+      f = json.load(open(glob.glob('**/flow_files/ScheduledWeatherAlert.flow', recursive=True)[0]))
+      triggers = [n for n in f['nodes'] if str(n.get('type', '')).startswith('core.trigger.')]
+      assert len(triggers) == 1, f'expected exactly one trigger, got {[(n.get(\"id\"), n.get(\"type\")) for n in triggers]}'
+      t = triggers[0]
+      assert t.get('type') == 'core.trigger.scheduled', f'not scheduled: {t.get(\"type\")}'
+      inputs = t.get('inputs') or {}
+      assert inputs.get('entryPointId'), 'missing entryPointId'
+      assert inputs.get('timerType') == 'timeCycle', inputs
+      assert inputs.get('timerPreset') == 'R/PT1H', inputs
+      outputs = t.get('outputs') or {}
+      assert (outputs.get('output') or {}).get('source') == '=result.response', outputs
+      print('OK: scheduled trigger inputs and outputs present')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Flow has required node types: scheduled trigger, HTTP, script, decision, end"
+    command: |
+      python3 -c "
+      import glob, json
+      f = json.load(open(glob.glob('**/flow_files/ScheduledWeatherAlert.flow', recursive=True)[0]))
+      types = [n.get('type', '') for n in f['nodes']]
+      assert 'core.trigger.scheduled' in types, types
+      assert 'core.trigger.manual' not in types, 'manual trigger should not be used'
+      assert any(t.startswith('core.action.http') for t in types), f'no HTTP node: {types}'
+      required = {'core.action.script', 'core.logic.decision', 'core.control.end'}
+      missing = required - set(types)
+      assert not missing, f'missing node types: {missing}'
+      print('OK: required node types present')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Flow has open-meteo URL, 60F threshold, and both messages"
+    command: |
+      python3 -c "
+      import glob
+      content = open(glob.glob('**/flow_files/ScheduledWeatherAlert.flow', recursive=True)[0]).read().lower()
+      assert 'open-meteo' in content or 'openmeteo' in content, 'no open-meteo URL'
+      assert '60' in content, 'no 60F threshold'
+      assert 'nice day' in content or 'nice_day' in content or 'niceday' in content, 'no nice day message'
+      assert 'bring a jacket' in content or 'jacket' in content, 'no jacket message'
+      print('OK: weather logic markers present')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "All node types have matching definitions, including scheduled BPMN timer metadata"
+    command: |
+      python3 -c "
+      import glob, json
+      f = json.load(open(glob.glob('**/flow_files/ScheduledWeatherAlert.flow', recursive=True)[0]))
+      used = {n.get('type', '') for n in f['nodes']}
+      defs = f.get('definitions', [])
+      defined = {d.get('nodeType', '') for d in defs}
+      missing = used - defined
+      assert not missing, f'missing definitions for: {missing}'
+      scheduled = [d for d in defs if d.get('nodeType') == 'core.trigger.scheduled']
+      assert scheduled, 'missing scheduled trigger definition'
+      model = scheduled[0].get('model') or {}
+      assert model.get('type') == 'bpmn:StartEvent', model
+      assert model.get('eventDefinition') == 'bpmn:TimerEventDefinition', model
+      print('OK: definitions complete')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "Flow validates with uip maestro flow validate"
+    command: |
+      python3 -c "
+      import glob, subprocess, sys
+      flow = glob.glob('**/flow_files/ScheduledWeatherAlert.flow', recursive=True)[0]
+      r = subprocess.run(['uip', 'maestro', 'flow', 'validate', flow], capture_output=True, text=True)
+      print(r.stdout)
+      print(r.stderr, file=sys.stderr)
+      sys.exit(r.returncode)
+      "
+    timeout: 60
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+
+  - type: run_command
+    description: "uip maestro flow format succeeds"
+    command: |
+      python3 -c "
+      import glob, subprocess, sys
+      flow = glob.glob('**/flow_files/ScheduledWeatherAlert.flow', recursive=True)[0]
+      r = subprocess.run(['uip', 'maestro', 'flow', 'format', flow], capture_output=True, text=True)
+      print(r.stdout)
+      print(r.stderr, file=sys.stderr)
+      sys.exit(r.returncode)
+      "
+    timeout: 60
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Agent looked up scheduled trigger metadata via `uip maestro flow registry get`"
+    tool_name: "Bash"
+    command_pattern: "uip.*maestro.*flow.*registry.*get.*core\\.trigger\\.scheduled"
+    min_count: 1
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: llm_judge
+    description: "Flow implements the scheduled weather-alert behavior"
+    prompt: |
+      Did the agent author a v1 .flow JSON that:
+      (a) uses exactly one `core.trigger.scheduled` start trigger, not a manual
+          trigger, with hourly timer inputs (`timerType=timeCycle`,
+          `timerPreset=R/PT1H`, and an `entryPointId`);
+      (b) fetches Bellevue weather from open-meteo via a `core.action.http`
+          node;
+      (c) extracts or otherwise reads the current temperature;
+      (d) branches on whether temperature is greater than 60F;
+      (e) returns exactly `{ message: "nice day" }` on the warm branch and
+          `{ message: "bring a jacket" }` otherwise?
+
+      Wiring matters: the scheduled trigger should be the entry point, and the
+      decision branches should reach valid end/output nodes.
+    files:
+      - "ScheduledWeatherAlert/flow_files/ScheduledWeatherAlert.flow"
+    weight: 2.0
+    pass_threshold: 0.7

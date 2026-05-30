@@ -200,7 +200,9 @@ class FilToFlowConverter {
         // Otherwise fall back to the conventional `start`.
         const triggerDecl = this.program.triggers[0];
         const triggerId = triggerDecl ? resolveActionProtocolId(triggerDecl) : 'start';
-        const triggerNode = makeTriggerNode(triggerId, START_X, START_Y);
+        const triggerNode = triggerDecl
+            ? makeStartTriggerNode(triggerDecl, triggerId, START_X, START_Y)
+            : makeTriggerNode(triggerId, START_X, START_Y);
         this.applyNodeOverride(triggerNode);
         ctx.addNode(triggerNode);
         // Convert main body
@@ -273,6 +275,7 @@ class FilToFlowConverter {
                 id: param.name,
                 direction: 'in',
                 type: filTypeToFlow(param.type),
+                triggerNodeId: lastNodeId,
             });
             scope.set(param.name, `$vars.${param.name}`);
         }
@@ -894,7 +897,13 @@ class FilToFlowConverter {
             // it references `$vars`. Resolving via scope ensures bare globals
             // get rewritten to their v1 paths before we wrap.
             for (const prop of stmt.argument.properties) {
-                outputs[prop.key] = { source: `=js:${convertFILExprToFlowExpr(prop.value, scope)}` };
+                outputs[prop.key] = {
+                    source: `=js:${convertFILExprToFlowExpr(prop.value, {
+                        scope,
+                        nodeVars,
+                        actionIds: this.actionIds,
+                    })}`,
+                };
                 // Also register as output variable if not already present
                 if (!globals.find(g => g.id === prop.key && g.direction === 'out')) {
                     // Change existing inout to out, or add new out
@@ -910,7 +919,11 @@ class FilToFlowConverter {
         }
         else {
             // Single return value
-            const source = `=js:${convertFILExprToFlowExpr(stmt.argument, scope)}`;
+            const source = `=js:${convertFILExprToFlowExpr(stmt.argument, {
+                scope,
+                nodeVars,
+                actionIds: this.actionIds,
+            })}`;
             // Find an existing out variable, or promote an inout, or create one
             let outVar = globals.find(g => g.direction === 'out');
             if (!outVar) {
@@ -1276,7 +1289,13 @@ function extractLiteralValue(expr) {
         return expr.value;
     return undefined;
 }
-/** Convert a FIL AST expression to a Flow expression string. */
+function normalizeFlowExprConvertOptions(input) {
+    if (!input)
+        return {};
+    if (input instanceof Map)
+        return { scope: input };
+    return input;
+}
 /**
  * Convert a FIL AST expression into a v1 flow expression string (the
  * subset of JS the v1 Jint evaluator accepts for non-script value
@@ -1289,7 +1308,12 @@ function extractLiteralValue(expr) {
  * pass through verbatim — the legacy behavior, used only by call
  * sites that already pre-substitute via the script-body-emitter.
  */
-function convertFILExprToFlowExpr(expr, scope) {
+function convertFILExprToFlowExpr(expr, options) {
+    const opts = normalizeFlowExprConvertOptions(options);
+    const nodeOutput = tryConvertNodeOutputExpression(expr, opts.nodeVars, opts.actionIds);
+    if (nodeOutput)
+        return nodeOutput;
+    const { scope } = opts;
     switch (expr.kind) {
         case 'Identifier': {
             if (scope) {
@@ -1302,39 +1326,39 @@ function convertFILExprToFlowExpr(expr, scope) {
         case 'Literal':
             return expr.raw;
         case 'BinaryExpression':
-            return `${convertFILExprToFlowExpr(expr.left, scope)} ${expr.operator} ${convertFILExprToFlowExpr(expr.right, scope)}`;
+            return `${convertFILExprToFlowExpr(expr.left, opts)} ${expr.operator} ${convertFILExprToFlowExpr(expr.right, opts)}`;
         case 'LogicalExpression':
-            return `${convertFILExprToFlowExpr(expr.left, scope)} ${expr.operator} ${convertFILExprToFlowExpr(expr.right, scope)}`;
+            return `${convertFILExprToFlowExpr(expr.left, opts)} ${expr.operator} ${convertFILExprToFlowExpr(expr.right, opts)}`;
         case 'MemberExpression': {
-            const obj = convertFILExprToFlowExpr(expr.object, scope);
+            const obj = convertFILExprToFlowExpr(expr.object, opts);
             if (expr.computed) {
-                return `${obj}[${convertFILExprToFlowExpr(expr.property, scope)}]`;
+                return `${obj}[${convertFILExprToFlowExpr(expr.property, opts)}]`;
             }
             // Static property names pass through verbatim — they're keys, not
             // scope-resolvable identifiers (`obj.field`, not `obj.<resolved>`).
-            const propName = expr.property.kind === 'Identifier' ? expr.property.name : convertFILExprToFlowExpr(expr.property, scope);
+            const propName = expr.property.kind === 'Identifier' ? expr.property.name : convertFILExprToFlowExpr(expr.property, opts);
             return `${obj}.${propName}`;
         }
         case 'CallExpression': {
             // FIL DateTime/TimeSpan calls have no v1 equivalent — translate
             // to JS Date arithmetic. See datetime-translator.ts.
-            const dt = (0, datetime_translator_1.tryTranslateDateTimeCall)(expr, (e) => convertFILExprToFlowExpr(e, scope));
+            const dt = (0, datetime_translator_1.tryTranslateDateTimeCall)(expr, (e) => convertFILExprToFlowExpr(e, opts));
             if (dt !== null)
                 return dt;
-            const callee = convertFILExprToFlowExpr(expr.callee, scope);
-            const args = expr.arguments.map(a => convertFILExprToFlowExpr(a, scope)).join(', ');
+            const callee = convertFILExprToFlowExpr(expr.callee, opts);
+            const args = expr.arguments.map((arg) => convertFILExprToFlowExpr(arg, opts)).join(', ');
             return `${callee}(${args})`;
         }
         case 'AwaitExpression':
-            return convertFILExprToFlowExpr(expr.argument, scope);
+            return convertFILExprToFlowExpr(expr.argument, opts);
         case 'UnaryExpression':
             if (expr.prefix)
-                return `${expr.operator}${convertFILExprToFlowExpr(expr.argument, scope)}`;
-            return `${convertFILExprToFlowExpr(expr.argument, scope)}${expr.operator}`;
+                return `${expr.operator}${convertFILExprToFlowExpr(expr.argument, opts)}`;
+            return `${convertFILExprToFlowExpr(expr.argument, opts)}${expr.operator}`;
         case 'ConditionalExpression':
-            return `${convertFILExprToFlowExpr(expr.test, scope)} ? ${convertFILExprToFlowExpr(expr.consequent, scope)} : ${convertFILExprToFlowExpr(expr.alternate, scope)}`;
+            return `${convertFILExprToFlowExpr(expr.test, opts)} ? ${convertFILExprToFlowExpr(expr.consequent, opts)} : ${convertFILExprToFlowExpr(expr.alternate, opts)}`;
         case 'TypeAssertion':
-            return convertFILExprToFlowExpr(expr.expression, scope);
+            return convertFILExprToFlowExpr(expr.expression, opts);
         case 'ObjectExpression': {
             const props = expr.properties.map(p => {
                 if (p.shorthand) {
@@ -1348,15 +1372,59 @@ function convertFILExprToFlowExpr(expr, scope) {
                     }
                     return p.key;
                 }
-                return `${p.key}: ${convertFILExprToFlowExpr(p.value, scope)}`;
+                return `${p.key}: ${convertFILExprToFlowExpr(p.value, opts)}`;
             }).join(', ');
             return `{ ${props} }`;
         }
         case 'ArrayExpression':
-            return `[${expr.elements.map(e => convertFILExprToFlowExpr(e, scope)).join(', ')}]`;
+            return `[${expr.elements.map((element) => convertFILExprToFlowExpr(element, opts)).join(', ')}]`;
         default:
             return '/* unknown */';
     }
+}
+function tryConvertNodeOutputExpression(expr, nodeVars, actionIds) {
+    const path = [];
+    let current = expr;
+    while (current.kind === 'MemberExpression' && !current.computed) {
+        if (current.property.kind !== 'Identifier')
+            return null;
+        path.unshift(current.property.name);
+        current = current.object;
+    }
+    if (current.kind !== 'CallExpression')
+        return null;
+    const callee = current.callee;
+    if (callee.kind !== 'MemberExpression' ||
+        callee.computed ||
+        callee.object.kind !== 'Identifier' ||
+        callee.object.name !== 'JSON' ||
+        callee.property.kind !== 'Identifier' ||
+        callee.property.name !== 'parse') {
+        return null;
+    }
+    const arg = current.arguments[0];
+    if (!arg || arg.kind !== 'Identifier')
+        return null;
+    const nodeVar = nodeVars?.find((v) => v.id === arg.name);
+    if (nodeVar) {
+        const suffix = path.length > 0 ? `.${path.join('.')}` : '';
+        return `$vars.${nodeVar.binding.nodeId}.${nodeVar.binding.outputId}${suffix}`;
+    }
+    const inferred = inferNodeOutputBindingFromDataIdentifier(arg.name, actionIds);
+    if (!inferred)
+        return null;
+    const suffix = path.length > 0 ? `.${path.join('.')}` : '';
+    return `$vars.${inferred.nodeId}.${inferred.outputId}${suffix}`;
+}
+function inferNodeOutputBindingFromDataIdentifier(name, actionIds) {
+    if (!actionIds || !name.endsWith('Data'))
+        return null;
+    const candidate = name.slice(0, -'Data'.length);
+    for (const nodeId of actionIds.values()) {
+        if (nodeId === candidate)
+            return { nodeId, outputId: 'output' };
+    }
+    return null;
 }
 /**
  * For each edge whose `sourcePort` doesn't match any source handle on the
@@ -1479,6 +1547,39 @@ function makeTriggerNode(id, x, y) {
         },
         inputs: {},
     };
+}
+function makeStartTriggerNode(decl, id, x, y) {
+    switch (canonicalTriggerType(decl.typeRef)) {
+        case v1_to_v2_1.NODE_TYPES.TRIGGER_SCHEDULED:
+            return makeScheduledTriggerNode(id, decl.typeRef.version ?? '1.1', x, y);
+        case v1_to_v2_1.NODE_TYPES.TRIGGER_MANUAL:
+        default:
+            return makeTriggerNode(id, x, y);
+    }
+}
+function makeScheduledTriggerNode(id, typeVersion, x, y) {
+    return {
+        id,
+        type: v1_to_v2_1.NODE_TYPES.TRIGGER_SCHEDULED,
+        typeVersion,
+        ui: {
+            position: { x, y },
+            size: { width: NODE_WIDTH, height: NODE_HEIGHT },
+        },
+        display: {
+            label: 'Scheduled trigger',
+            icon: 'calendar-clock',
+            shape: 'circle',
+        },
+        inputs: {},
+    };
+}
+function canonicalTriggerType(typeRef) {
+    if (typeRef.name === 'start')
+        return v1_to_v2_1.NODE_TYPES.TRIGGER_MANUAL;
+    if (typeRef.name === 'scheduled')
+        return v1_to_v2_1.NODE_TYPES.TRIGGER_SCHEDULED;
+    return typeRef.name;
 }
 function makeActionNode(id, x, y) {
     return {
@@ -1929,6 +2030,7 @@ function filTypeToFlow(t) {
             case 'i32': return 'number';
             case 'i64': return 'number';
             case 'bool': return 'boolean';
+            case 'file': return 'file';
             // FIL `json` and `void` map to `any` so the v1 type checker
             // accepts assignments from `unknown`-typed expressions
             // (e.g. `$vars.<scriptId>.output.<key>`). Using `object`

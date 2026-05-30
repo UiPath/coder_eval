@@ -54,24 +54,52 @@ const path = __importStar(require("path"));
 function buildDefinitions(typeRefs, opts, embedded) {
     const definitions = [];
     const missing = [];
+    const seenDefinitions = new Set();
     for (const typeRef of typeRefs) {
         // 1. Embedded definitions (manifest fallback) win — they came from the
         //    original v1 file, so they're guaranteed correct for round-trip.
-        if (embedded && embedded[typeRef]) {
-            definitions.push(embedded[typeRef]);
+        const embeddedDefinition = findEmbeddedDefinition(embedded, typeRef);
+        if (embeddedDefinition) {
+            addDefinition(definitions, seenDefinitions, embeddedDefinition);
             continue;
         }
         // 2. Otherwise, look up the canonical library v1def sidecar.
         const [nodeType, version = '1.0.0'] = typeRef.split('@');
         const def = loadV1Definition(opts.libraryDir, nodeType, version);
         if (def) {
-            definitions.push(def);
+            addDefinition(definitions, seenDefinitions, def);
         }
         else {
             missing.push(typeRef);
         }
     }
     return { definitions, missing };
+}
+function findEmbeddedDefinition(embedded, typeRef) {
+    if (!embedded)
+        return null;
+    const exact = embedded[typeRef];
+    if (exact)
+        return exact;
+    const stripped = typeRef.replace(/@(\d+\.\d+)\.\d+$/, '@$1');
+    if (stripped !== typeRef && embedded[stripped]) {
+        return embedded[stripped];
+    }
+    const expanded = typeRef.replace(/@(\d+\.\d+)$/, '@$1.0');
+    if (expanded !== typeRef && embedded[expanded]) {
+        return embedded[expanded];
+    }
+    return null;
+}
+function addDefinition(definitions, seenDefinitions, def) {
+    const key = `${def.nodeType}@${normalizeVersion(def.version)}`;
+    if (seenDefinitions.has(key))
+        return;
+    seenDefinitions.add(key);
+    definitions.push(def);
+}
+function normalizeVersion(version) {
+    return (version ?? '1.0.0').replace(/^(\d+\.\d+)\.\d+$/, '$1');
 }
 function loadV1Definition(libraryDir, nodeType, version) {
     // Mirror the layout of generate_connectors.py: the `.v1def.json` lives
