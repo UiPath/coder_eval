@@ -12,6 +12,8 @@ export interface LoadedProject {
      */
     manifest: FlowManifest;
     bindings?: BindingsFile;
+    /** Trigger declaration name → effective protocol id, honoring `id` overrides. */
+    triggerAliases?: Record<string, string>;
 }
 export declare function loadProject(projectDir: string, opts?: {
     filPath?: string;

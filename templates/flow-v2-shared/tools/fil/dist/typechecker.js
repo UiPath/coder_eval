@@ -56,6 +56,37 @@ const NON_DETERMINISTIC_MEMBERS = {
 // Bare-call non-deterministic globals: `Date()` returns the current time as
 // a string. Both `Date()` and `new Date()` (no args) hit this.
 const NON_DETERMINISTIC_BARE_CALLS = new Set(['Date']);
+const TRIGGER_TYPE_ALIASES = {
+    start: 'core.trigger.manual',
+    scheduled: 'core.trigger.scheduled',
+    webhook: 'core.trigger.webhook',
+};
+const START_TRIGGER_TYPES = new Set([
+    'core.trigger.manual',
+    'core.trigger.scheduled',
+]);
+function canonicalTriggerType(type) {
+    return TRIGGER_TYPE_ALIASES[type] ?? type;
+}
+function isWaitOnTriggerCall(expr) {
+    return expr.kind === 'CallExpression' &&
+        expr.callee.kind === 'Identifier' &&
+        expr.callee.name === 'waitOnTrigger';
+}
+function containsWaitOnTriggerCall(expr) {
+    let found = false;
+    const visit = (node) => {
+        if (found)
+            return;
+        if (node.kind === 'CallExpression' && isWaitOnTriggerCall(node)) {
+            found = true;
+            return;
+        }
+        visitChildren(node, visit);
+    };
+    visit(expr);
+    return found;
+}
 function checkScriptHelperDeterminism(fn) {
     const errors = [];
     const visit = (node) => {
@@ -306,6 +337,16 @@ class TypeChecker {
         this.actionNames = new Set();
         /** Names of top-level `trigger` declarations. Triggers cannot be invoked via executeNode. */
         this.triggerNames = new Set();
+        /** Trigger declaration name → canonical `core.trigger.*` type. */
+        this.triggerTypes = new Map();
+        /** Trigger declarations that are valid flow entry/start triggers. */
+        this.startTriggerNames = new Set();
+        /** Trigger declarations that can be awaited via waitOnTrigger. */
+        this.eventTriggerNames = new Set();
+        /** Count of `waitOnTrigger(<eventTrigger>)` call sites per event trigger. */
+        this.triggerWaitCounts = new Map();
+        /** Nonzero while inferring the direct callee under an AwaitExpression. */
+        this.allowWaitOnTriggerCall = 0;
         /**
          * Count of `executeNode(<action>, …)` call sites per declared action.
          *
@@ -321,11 +362,22 @@ class TypeChecker {
         this.actionInvocationCounts = new Map();
     }
     check(program) {
+        this.functions = new Map();
+        this.scopeStack = [];
+        this.actionNames = new Set();
+        this.triggerNames = new Set();
+        this.triggerTypes = new Map();
+        this.startTriggerNames = new Set();
+        this.eventTriggerNames = new Set();
+        this.actionInvocationCounts = new Map();
+        this.triggerWaitCounts = new Map();
+        this.allowWaitOnTriggerCall = 0;
         // Register top-level node declarations first.
         for (const a of program.actions)
             this.actionNames.add(a.name);
         for (const t of program.triggers)
-            this.triggerNames.add(t.name);
+            this.registerTrigger(t);
+        this.validateTriggerTopology(program.triggers);
         // First pass: register all functions
         for (const fn of program.functions) {
             this.functions.set(fn.name, {
@@ -338,10 +390,6 @@ class TypeChecker {
         // Validate main exists
         if (!this.functions.has('main')) {
             throw new Error('FIL program must define a main() function');
-        }
-        const main = this.functions.get('main');
-        if (main.params.length > 0) {
-            throw new Error('main() must take no parameters');
         }
         // Second pass: type check each function
         for (const fn of program.functions) {
@@ -367,6 +415,46 @@ class TypeChecker {
                     `"${action.name}1", "${action.name}2", …) with its own inputs/bindings, ` +
                     `or refactor so the action is only called from one position.`);
             }
+        }
+        for (const triggerName of this.eventTriggerNames) {
+            const count = this.triggerWaitCounts.get(triggerName) ?? 0;
+            if (count === 0) {
+                throw new Error(`event trigger "${triggerName}" is declared but never waited on via waitOnTrigger. ` +
+                    `Either remove the declaration or add an \`await waitOnTrigger(${triggerName})\` call.`);
+            }
+            if (count > 1) {
+                throw new Error(`event trigger "${triggerName}" is waited on ${count} times via waitOnTrigger, ` +
+                    `but each event trigger must be waited on exactly once. Declare a separate ` +
+                    `event trigger per wait site.`);
+            }
+        }
+    }
+    registerTrigger(trigger) {
+        this.triggerNames.add(trigger.name);
+        const canonicalType = canonicalTriggerType(trigger.typeRef.name);
+        this.triggerTypes.set(trigger.name, canonicalType);
+        if (START_TRIGGER_TYPES.has(canonicalType)) {
+            this.startTriggerNames.add(trigger.name);
+            return;
+        }
+        if (canonicalType.startsWith('core.trigger.')) {
+            this.eventTriggerNames.add(trigger.name);
+            return;
+        }
+        throw new Error(`trigger "${trigger.name}" has unsupported trigger type "${trigger.typeRef.name}". ` +
+            `Use a core.trigger.* type or a supported alias.`);
+    }
+    validateTriggerTopology(triggers) {
+        // Legacy tests and old snippets often omit triggers entirely. Preserve
+        // that compatibility; once a program declares triggers, classify them.
+        if (triggers.length === 0)
+            return;
+        if (this.startTriggerNames.size > 1) {
+            throw new Error(`FIL programs may declare exactly one start trigger; found ${this.startTriggerNames.size}.`);
+        }
+        if (this.eventTriggerNames.size > 0 && this.startTriggerNames.size !== 1) {
+            throw new Error(`FIL programs with event triggers must declare exactly one start trigger ` +
+                `(${[...START_TRIGGER_TYPES].join(' or ')}).`);
         }
     }
     checkFunction(fn) {
@@ -686,6 +774,9 @@ class TypeChecker {
                 break;
             }
             case 'CallExpression': {
+                if (isWaitOnTriggerCall(expr) && this.allowWaitOnTriggerCall === 0) {
+                    throw new Error('waitOnTrigger must be awaited directly: use `await waitOnTrigger(triggerRef)`.');
+                }
                 t = this.inferCallType(expr);
                 break;
             }
@@ -717,7 +808,18 @@ class TypeChecker {
                 break;
             }
             case 'AwaitExpression': {
-                const innerType = this.inferExpr(expr.argument);
+                if (isWaitOnTriggerCall(expr.argument)) {
+                    this.allowWaitOnTriggerCall++;
+                }
+                let innerType;
+                try {
+                    innerType = this.inferExpr(expr.argument);
+                }
+                finally {
+                    if (isWaitOnTriggerCall(expr.argument)) {
+                        this.allowWaitOnTriggerCall--;
+                    }
+                }
                 if (AST.isPromiseType(innerType)) {
                     t = innerType.inner;
                 }
@@ -784,6 +886,9 @@ class TypeChecker {
                     this.inferExpr(a);
                 return { kind: 'Promise', inner: 'DateTime' };
             }
+            if (name === 'waitOnTrigger') {
+                return this.inferWaitOnTriggerCall(expr);
+            }
             if (name === 'getDateTime') {
                 return 'DateTime';
             }
@@ -812,14 +917,51 @@ class TypeChecker {
             this.inferExpr(a);
         return 'json';
     }
+    inferWaitOnTriggerCall(expr) {
+        if (expr.arguments.length !== 1) {
+            throw new Error('waitOnTrigger requires exactly one trigger identifier argument');
+        }
+        const first = expr.arguments[0];
+        if (first.kind !== 'Identifier') {
+            throw new Error(`waitOnTrigger's argument must be a trigger identifier (got ${first.kind}).`);
+        }
+        if (this.actionNames.has(first.name)) {
+            throw new Error(`waitOnTrigger requires a trigger identifier; "${first.name}" is an action. ` +
+                `Use executeNode(${first.name}, ...) for actions.`);
+        }
+        if (!this.triggerNames.has(first.name)) {
+            throw new Error(`waitOnTrigger: "${first.name}" is not a declared trigger. ` +
+                `Add a \`trigger ${first.name}: core.trigger.<type> { ... };\` declaration.`);
+        }
+        if (this.startTriggerNames.has(first.name)) {
+            const type = this.triggerTypes.get(first.name) ?? 'unknown';
+            throw new Error(`waitOnTrigger can only target an event trigger; "${first.name}" is a start trigger (${type}).`);
+        }
+        if (!this.eventTriggerNames.has(first.name)) {
+            const type = this.triggerTypes.get(first.name) ?? 'unknown';
+            throw new Error(`waitOnTrigger can only target an event trigger; "${first.name}" has type ${type}.`);
+        }
+        this.triggerWaitCounts.set(first.name, (this.triggerWaitCounts.get(first.name) ?? 0) + 1);
+        return { kind: 'Promise', inner: 'string' };
+    }
     inferMethodCallType(member, args) {
-        for (const a of args)
-            this.inferExpr(a);
         const obj = member.object;
         const propExpr = member.property;
-        if (propExpr.kind !== 'Identifier')
+        if (propExpr.kind !== 'Identifier') {
+            for (const a of args)
+                this.inferExpr(a);
             return 'json';
+        }
         const prop = propExpr.name;
+        if (obj.kind === 'Identifier' &&
+            obj.name === 'Promise' &&
+            (prop === 'all' || prop === 'any') &&
+            args.some(containsWaitOnTriggerCall)) {
+            throw new Error(`Promise.${prop} does not support waitOnTrigger entries yet. ` +
+                `Await waitOnTrigger separately before any Promise.${prop} race/fan-out.`);
+        }
+        for (const a of args)
+            this.inferExpr(a);
         // Check for namespace calls: Math.xxx, JSON.xxx, Number.xxx, Object.xxx, Array.xxx, String.xxx, console.xxx
         if (obj.kind === 'Identifier') {
             const ns = obj.name;
@@ -890,10 +1032,9 @@ class TypeChecker {
                 // Promise.any returns just the winner index (i32). The winner's value
                 // is not exposed directly — callers are expected to structure their
                 // post-race code so they don't need it (e.g. SLA escalation paths).
-                if (prop === 'all')
-                    return { kind: 'Promise', inner: 'json' };
-                if (prop === 'any')
-                    return { kind: 'Promise', inner: 'i32' };
+                if (prop === 'all' || prop === 'any') {
+                    return { kind: 'Promise', inner: prop === 'all' ? 'json' : 'i32' };
+                }
                 return 'json';
             }
         }

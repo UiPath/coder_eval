@@ -257,6 +257,7 @@ class Parser {
                 case 'boolean': return 'bool';
                 case 'string': return 'string';
                 case 'json': return 'json';
+                case 'file': return 'file';
                 case 'void': return 'void';
                 case 'number': return 'f64';
                 case 'bigint': return 'i64';

@@ -42,7 +42,7 @@ class WatEmitter {
     constructor(functions, stateMachines, lifter) {
         this.strings = [];
         this.stringMap = new Map(); // value -> addr
-        this.nextStringAddr = 256; // start static pool at 0x100
+        this.nextStringAddr = 0x200; // start static pool after fixed protocol literals
         this.asyncFuncNames = [];
         // Track which built-ins are actually used
         this.usedBuiltins = new Set();
@@ -53,6 +53,11 @@ class WatEmitter {
          * having to make the FIL identifier itself dashed).
          */
         this.actionIds = new Map();
+        /**
+         * Map from trigger identifier → effective protocol id. Mirrors actionIds
+         * for waitOnTrigger(<triggerRef>) lowering.
+         */
+        this.triggerIds = new Map();
         this.functions = functions;
         this.stateMachines = stateMachines;
         this.lifter = lifter;
@@ -111,7 +116,11 @@ class WatEmitter {
         for (const a of program.actions) {
             this.actionIds.set(a.name, resolveActionId(a));
         }
-        // Pre-scan all strings to build the string pool (starts at 0x100)
+        this.triggerIds = new Map();
+        for (const t of program.triggers) {
+            this.triggerIds.set(t.name, resolveTriggerId(t));
+        }
+        // Pre-scan all strings to build the string pool (starts at 0x200)
         this.preScanStrings(program);
         const out = [];
         out.push('(module');
@@ -175,6 +184,10 @@ class WatEmitter {
         out.push('  ;; Phase 6 — deterministic host-call records');
         out.push('  (data (i32.const 0xe6) "now: ")');
         out.push('  (data (i32.const 0xeb) "uuid: ")');
+        out.push('  ;; Phase 7 — waitOnTrigger');
+        out.push('  (data (i32.const 0xf1) "waitOnTrigger:\\0a  trigger: ")');
+        out.push('  (data (i32.const 0x10b) "triggerEvent: ")');
+        out.push('  (data (i32.const 0x119) "\\0a  payload: ")');
         out.push('');
         // Generate all code first so that internString() calls in builtins are captured
         const allocFn = [];
@@ -195,10 +208,24 @@ class WatEmitter {
         }
         const entryLines = [];
         entryLines.push('  ;; Entry point');
-        const mainFn = program.functions.find(f => f.name === 'main');
         entryLines.push('  (func $fil_start (export "start")');
         entryLines.push('    (call $init_io)');
-        entryLines.push('    (call $main)');
+        const mainFn = program.functions.find(f => f.name === 'main');
+        if (mainFn) {
+            // Flow-level main params model trigger inputs for conversion; flow-run
+            // does not inject an event payload yet, so local execution starts with
+            // zero/default placeholders.
+            for (const p of mainFn.params) {
+                const defaultValue = this.defaultValueForType(p.type);
+                if (defaultValue)
+                    entryLines.push(`    ${defaultValue}`);
+            }
+            entryLines.push('    (call $main)');
+            const mainRet = this.watType(mainFn.returnType);
+            if (mainRet !== 'void' && mainRet !== '') {
+                entryLines.push('    drop');
+            }
+        }
         entryLines.push(`    (call $out_write_raw (i32.const ${WatEmitter.P_FLOW_DONE}) (i32.const ${WatEmitter.P_FLOW_LEN}))`);
         entryLines.push('    (call $out_flush)');
         entryLines.push('  )');
@@ -327,6 +354,21 @@ class WatEmitter {
         // P_OUTPUT begins with '\n', so we do NOT skip the line here.
         lines.push(`    (drop (call $stdin_check_bytes (i32.const ${E.P_OUTPUT}) (i32.const ${E.P_OUTPUT_LEN})))`);
         // Read inline output value until newline
+        lines.push('    (call $stdin_read_until_newline)');
+        lines.push('  )');
+        lines.push('');
+        // $protocol_wait_trigger — event-trigger decision protocol
+        // Stdout: "waitOnTrigger:\n  trigger: <name>\n\n"
+        // Stdin: "triggerEvent: <name>\n  payload: <json>\n" → raw payload string
+        lines.push('  (func $protocol_wait_trigger (param $name i32) (result i32)');
+        lines.push(`    (call $out_write_raw (i32.const ${E.P_WAIT_TRIGGER}) (i32.const ${E.P_WAIT_TRIGGER_LEN}))`);
+        lines.push('    (call $out_write_str (local.get $name))');
+        lines.push(`    (call $out_write_raw (i32.const ${E.P_END}) (i32.const ${E.P_END_LEN}))`);
+        lines.push(`    (if (i32.eqz (call $stdin_check_bytes (i32.const ${E.P_TRIGGER_EVENT}) (i32.const ${E.P_TRIGGER_EVENT_LEN})))`);
+        lines.push('      (then (call $out_flush) (call $wasi_proc_exit (i32.const 0)) (unreachable)))');
+        lines.push('    (if (i32.eqz (call $stdin_str_match (local.get $name)))');
+        lines.push('      (then (call $out_flush) (call $wasi_proc_exit (i32.const 0)) (unreachable)))');
+        lines.push(`    (drop (call $stdin_check_bytes (i32.const ${E.P_PAYLOAD}) (i32.const ${E.P_PAYLOAD_LEN})))`);
         lines.push('    (call $stdin_read_until_newline)');
         lines.push('  )');
         lines.push('');
@@ -2059,6 +2101,23 @@ class WatEmitter {
                 if (stmt.argument) {
                     const argLines = this.emitExpr(stmt.argument, ctx);
                     ctx.lines.push(...argLines.map(l => ind + l));
+                    // Insert a WAT-level numeric coercion when the argument's
+                    // produced type doesn't match the function's declared return
+                    // type. The most common trigger is helper-function bodies
+                    // that reference `$vars.X` — those lower to placeholder
+                    // pointers, but arithmetic on them types as `i32` and the
+                    // function may declare `f64` (e.g. `function __script_*(): f64
+                    // { return $vars.a * $vars.b; }`). At v1 runtime the script
+                    // body is re-evaluated as JS so the placeholder math doesn't
+                    // matter; at FIL compile time we only need the WAT to validate.
+                    const argType = stmt.argument.filType;
+                    const want = ctx.fnReturnType !== undefined ? this.watType(ctx.fnReturnType) : '';
+                    const got = argType !== undefined ? this.watType(argType) : '';
+                    if (want && got && want !== got && want !== 'void') {
+                        const coerce = this.coerceWatType(got, want);
+                        if (coerce)
+                            ctx.lines.push(`${ind}${coerce}`);
+                    }
                     ctx.lines.push(`${ind}(return)`);
                 }
                 else {
@@ -3413,6 +3472,16 @@ class WatEmitter {
                 lines.push(')');
                 return lines;
             }
+            if (callee.kind === 'Identifier' && callee.name === 'waitOnTrigger') {
+                const triggerArg = arg.arguments[0];
+                lines.push('(call $protocol_wait_trigger');
+                if (triggerArg)
+                    lines.push(...this.emitTriggerNameArg(triggerArg, ctx).map(l => '  ' + l));
+                else
+                    lines.push(`  (i32.const ${this.internString('')})`);
+                lines.push(')');
+                return lines;
+            }
             // Promise.all([...]) and Promise.any([...]) (Phases 4 and 5)
             if (callee.kind === 'MemberExpression' &&
                 callee.object.kind === 'Identifier' && callee.object.name === 'Promise' &&
@@ -3454,6 +3523,20 @@ class WatEmitter {
     emitActionNameArg(expr, ctx) {
         if (expr.kind === 'Identifier') {
             const id = this.actionIds.get(expr.name);
+            if (id !== undefined) {
+                const addr = this.internString(id);
+                return [`(i32.const ${addr})`];
+            }
+        }
+        return this.emitExpr(expr, ctx);
+    }
+    /**
+     * Emit the WAT that loads the trigger-name string for waitOnTrigger's
+     * argument, honoring a trigger declaration's optional `id` override.
+     */
+    emitTriggerNameArg(expr, ctx) {
+        if (expr.kind === 'Identifier') {
+            const id = this.triggerIds.get(expr.name);
             if (id !== undefined) {
                 const addr = this.internString(id);
                 return [`(i32.const ${addr})`];
@@ -3632,6 +3715,41 @@ class WatEmitter {
         return `(local.set $${name})`;
     }
     // ─── WAT type mapping ─────────────────────────────────────────────────────
+    /**
+     * Emit a numeric coercion op (or empty string) to convert a value of
+     * WAT type `from` into one of WAT type `to`. Used at boundaries where
+     * the FIL emitter would otherwise produce a `(return)` / `(local.set)`
+     * with mismatched types — most commonly when a `$vars.X` placeholder
+     * (which compiles to an i32 stub) is used in a numeric expression
+     * whose surrounding context expects an i64 / f64.
+     *
+     * Returns null if no safe coercion exists (caller should fall through
+     * to whatever it would have done — typically a wabt validation error
+     * that surfaces the real type mismatch).
+     */
+    coerceWatType(from, to) {
+        if (from === to)
+            return null;
+        if (to === 'f64') {
+            if (from === 'i32')
+                return '(f64.convert_i32_s)';
+            if (from === 'i64')
+                return '(f64.convert_i64_s)';
+        }
+        if (to === 'i64') {
+            if (from === 'i32')
+                return '(i64.extend_i32_s)';
+            if (from === 'f64')
+                return '(i64.trunc_f64_s)';
+        }
+        if (to === 'i32') {
+            if (from === 'i64')
+                return '(i32.wrap_i64)';
+            if (from === 'f64')
+                return '(i32.trunc_f64_s)';
+        }
+        return null;
+    }
     watType(t) {
         if (typeof t === 'string') {
             switch (t) {
@@ -3658,6 +3776,19 @@ class WatEmitter {
         if (t.kind === 'array')
             return 'i32'; // pointer
         return 'i32';
+    }
+    defaultValueForType(t) {
+        const wat = this.watType(t);
+        switch (wat) {
+            case 'i64': return '(i64.const 0)';
+            case 'f64': return '(f64.const 0)';
+            case 'void': return '';
+            case '':
+                return '';
+            case 'i32':
+            default:
+                return '(i32.const 0)';
+        }
     }
     // ─── Collect local variables ──────────────────────────────────────────────
     collectLocals(block, ctx) {
@@ -3811,6 +3942,9 @@ class WatEmitter {
         for (const a of program.actions) {
             this.internString(resolveActionId(a));
         }
+        for (const t of program.triggers) {
+            this.internString(resolveTriggerId(t));
+        }
     }
 }
 exports.WatEmitter = WatEmitter;
@@ -3864,6 +3998,13 @@ WatEmitter.P_NOW = 0x00e6; // "now: "                            5 bytes
 WatEmitter.P_NOW_LEN = 5;
 WatEmitter.P_UUID = 0x00eb; // "uuid: "                           6 bytes
 WatEmitter.P_UUID_LEN = 6;
+// --- Phase 7: waitOnTrigger ---
+WatEmitter.P_WAIT_TRIGGER = 0x00f1; // "waitOnTrigger:\n  trigger: "     26 bytes
+WatEmitter.P_WAIT_TRIGGER_LEN = 26;
+WatEmitter.P_TRIGGER_EVENT = 0x010b; // "triggerEvent: "                 14 bytes
+WatEmitter.P_TRIGGER_EVENT_LEN = 14;
+WatEmitter.P_PAYLOAD = 0x0119; // "\n  payload: "                    12 bytes
+WatEmitter.P_PAYLOAD_LEN = 12;
 /**
  * Resolve an action's protocol id: the `id` field in its body (a string
  * literal) when present, otherwise the action's declared identifier.
@@ -3876,5 +4017,18 @@ function resolveActionId(action) {
         return idProp.value.value;
     }
     return action.name;
+}
+/**
+ * Resolve a trigger's protocol id: the `id` field in its body (a string
+ * literal) when present, otherwise the trigger's declared identifier.
+ */
+function resolveTriggerId(trigger) {
+    if (!trigger.fields)
+        return trigger.name;
+    const idProp = trigger.fields.properties.find((p) => p.key === 'id');
+    if (idProp && idProp.value.kind === 'Literal' && typeof idProp.value.value === 'string') {
+        return idProp.value.value;
+    }
+    return trigger.name;
 }
 //# sourceMappingURL=wat_emitter.js.map

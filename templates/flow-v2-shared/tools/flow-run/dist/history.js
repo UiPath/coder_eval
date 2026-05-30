@@ -75,6 +75,10 @@ function appendEvent(history, event) {
         throw new Error(`node "${event.name}" output contains newlines, which would break the FIL replay parser. ` +
             `Outputs must be single-line JSON.`);
     }
+    if (event.kind === 'trigger-fired' && /[\r\n]/.test(event.payload)) {
+        throw new Error(`trigger "${event.name}" payload contains newlines, which would break the FIL replay parser. ` +
+            `Payloads must be single-line JSON.`);
+    }
     history.events.push(event);
 }
 // ─── Serialization ───────────────────────────────────────────────────────────
@@ -88,6 +92,7 @@ function serializeHistory(h) {
     const body = h.events.map(e => {
         switch (e.kind) {
             case 'node': return `node: ${e.name}\n  output: ${e.output}\n`;
+            case 'trigger-fired': return `triggerEvent: ${e.name}\n  payload: ${e.payload}\n`;
             case 'timer': return `timer: ${e.deadline}\n`;
             case 'all-marker': return `all: ${e.n}\n`;
             case 'race-marker': return `race: ${e.n} winner=${e.winner}\n`;
@@ -129,6 +134,16 @@ function parseHistory(text) {
             if (!om)
                 throw new Error(`expected "  output: ..." after "node: ${name}"`);
             events.push({ kind: 'node', name, output: om[1] });
+            i++;
+            continue;
+        }
+        if ((m = line.match(/^triggerEvent:\s*(\S+)\s*$/))) {
+            const name = m[1];
+            const next = lines[i + 1] ?? '';
+            const pm = next.match(/^\s\s+payload:\s*(.*)$/);
+            if (!pm)
+                throw new Error(`expected "  payload: ..." after "triggerEvent: ${name}"`);
+            events.push({ kind: 'trigger-fired', name, payload: pm[1] });
             i++;
             continue;
         }

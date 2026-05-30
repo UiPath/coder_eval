@@ -50,6 +50,7 @@ async function runFlow(project, resolved, opts) {
     const byNodeId = new Map();
     for (const r of resolved)
         byNodeId.set(r.nodeId, r);
+    const byTriggerId = buildTriggerLookup(project);
     const wasm = await (0, wasi_host_1.compileFil)(project.filSource);
     let history;
     if (opts.resume) {
@@ -165,6 +166,30 @@ async function runFlow(project, resolved, opts) {
             writeDecisions(opts, project, history, decisions, false);
             continue;
         }
+        // ── Solo: waitOnTrigger ────────────────────────────────────────────────
+        if (pending.event.kind === 'waitOnTrigger') {
+            const ev = pending.event;
+            const result = resolveTriggerPayload(ev, byTriggerId, opts);
+            if (!result.ok) {
+                return failWith(opts, project, history, decisions, step, result.error);
+            }
+            const dispatchedAt = new Date().toISOString();
+            log(opts, `[step ${step}] -> trigger ${ev.name}`);
+            decisions.push({
+                step,
+                nodeId: result.trigger.nodeId,
+                nodeType: result.trigger.nodeType,
+                kind: 'trigger',
+                input: { trigger: ev.name },
+                output: tryParseJson(result.payload),
+                dispatchedAt,
+                durationMs: 0,
+            });
+            (0, history_1.appendEvent)(history, { kind: 'trigger-fired', name: ev.name, payload: result.payload });
+            (0, history_1.saveHistory)(opts.historyPath, history);
+            writeDecisions(opts, project, history, decisions, false);
+            continue;
+        }
         // ── Solo: executeNode ──────────────────────────────────────────────────
         if (pending.event.kind !== 'executeNode') {
             // Should be unreachable — flowCompleted handled above, all/race/timer
@@ -223,6 +248,87 @@ async function runFlow(project, resolved, opts) {
         success: false, steps: opts.maxSteps, history, decisions,
         error: `max-steps (${opts.maxSteps}) reached without flowCompleted`,
     };
+}
+function buildTriggerLookup(project) {
+    const byTriggerId = new Map();
+    const aliases = project.triggerAliases ?? {};
+    for (const [nodeId, node] of Object.entries(project.manifest.nodes)) {
+        const nodeType = stripTypeVersion(node.type);
+        if (!nodeType.startsWith('core.trigger.'))
+            continue;
+        if (nodeType === 'core.trigger.manual' || nodeType === 'core.trigger.scheduled')
+            continue;
+        const triggerAliases = Object.entries(aliases)
+            .filter(([, effectiveId]) => effectiveId === nodeId)
+            .map(([declName]) => declName)
+            .filter((declName) => declName !== nodeId);
+        const trigger = {
+            nodeId,
+            nodeType,
+            fixture: node.fixture,
+            aliases: triggerAliases,
+        };
+        byTriggerId.set(nodeId, trigger);
+        for (const alias of triggerAliases)
+            byTriggerId.set(alias, trigger);
+    }
+    return byTriggerId;
+}
+function stripTypeVersion(type) {
+    const at = type.lastIndexOf('@');
+    return at >= 0 ? type.slice(0, at) : type;
+}
+function resolveTriggerPayload(ev, byTriggerId, opts) {
+    const trigger = byTriggerId.get(ev.name);
+    if (!trigger) {
+        return {
+            ok: false,
+            error: `pending waitOnTrigger references trigger "${ev.name}", but the manifest has no ` +
+                `event trigger with that effective id or declaration name.`,
+        };
+    }
+    const injected = findInjectedPayload(ev.name, trigger, opts.triggerEvents ?? {});
+    if (injected !== undefined) {
+        return { ok: true, trigger, payload: minifyJsonPayload(injected, `trigger event "${ev.name}"`) };
+    }
+    if (opts.dryRun) {
+        return { ok: true, trigger, payload: renderTriggerFixture(trigger.fixture) };
+    }
+    return {
+        ok: false,
+        error: `live trigger wait is not supported yet for trigger "${ev.name}" — ` +
+            `subscription/activation is unimplemented. Use --trigger-event <name>=<file.json> ` +
+            `or --dry-run with a trigger fixture.`,
+    };
+}
+function findInjectedPayload(eventName, trigger, triggerEvents) {
+    const keys = [eventName, trigger.nodeId, ...trigger.aliases];
+    for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(triggerEvents, key))
+            return triggerEvents[key];
+    }
+    return undefined;
+}
+function renderTriggerFixture(fixture) {
+    if (fixture === undefined)
+        return '{}';
+    if (typeof fixture === 'string') {
+        const trimmed = fixture.trim();
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+            return minifyJsonPayload(trimmed, 'trigger fixture');
+        }
+        return JSON.stringify(fixture);
+    }
+    return JSON.stringify(fixture);
+}
+function minifyJsonPayload(payload, label) {
+    try {
+        return JSON.stringify(JSON.parse(payload));
+    }
+    catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`${label} payload is not valid JSON: ${msg}`);
+    }
 }
 /**
  * Promise.all: every entry must complete. Returns the history records to

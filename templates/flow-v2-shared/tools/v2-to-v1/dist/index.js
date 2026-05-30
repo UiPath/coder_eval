@@ -71,14 +71,15 @@ Object.defineProperty(exports, "filToFlow", { enumerable: true, get: function ()
 Object.defineProperty(exports, "filToFlowWithScope", { enumerable: true, get: function () { return fil_to_flow_2.filToFlowWithScope; } });
 Object.defineProperty(exports, "normalizeTypeVersions", { enumerable: true, get: function () { return fil_to_flow_2.normalizeTypeVersions; } });
 function convertV2ToV1(filSource, manifest, bindings, opts = {}) {
+    // 1. Parse FIL → AST.
+    const parser = new parser_1.Parser(filSource);
+    const program = parser.parse();
+    assertNoWaitOnTrigger(program);
     const library = opts.library ?? (0, v1_to_v2_1.loadDefaultLibrary)();
     const libraryDir = opts.libraryDir ?? (0, v1_to_v2_1.defaultLibraryDir)();
     const cache = opts.fieldsCache === null
         ? undefined
         : (opts.fieldsCache ?? (0, v1_to_v2_1.loadDefaultFieldsCache)());
-    // 1. Parse FIL → AST.
-    const parser = new parser_1.Parser(filSource);
-    const program = parser.parse();
     // 1b. If no manifest was supplied, synthesize one from the FIL's
     //     top-level `flow`/`action`/`trigger` declarations. The declarations
     //     are the source of truth for per-node metadata; in-memory manifest
@@ -187,6 +188,32 @@ function validateStartTriggerDeclarations(triggerDecls) {
 }
 function canonicalTriggerType(type) {
     return TRIGGER_TYPE_ALIASES[type] ?? type;
+}
+function assertNoWaitOnTrigger(program) {
+    if (!containsWaitOnTriggerCall(program))
+        return;
+    throw new Error('waitOnTrigger cannot be converted to v1 until mid-flow catch-event mapping is implemented.');
+}
+function containsWaitOnTriggerCall(node) {
+    if (!node || typeof node !== 'object')
+        return false;
+    const record = node;
+    if (record.kind === 'CallExpression') {
+        const callee = record.callee;
+        if (callee?.kind === 'Identifier' && callee.name === 'waitOnTrigger') {
+            return true;
+        }
+    }
+    for (const value of Object.values(record)) {
+        if (Array.isArray(value)) {
+            if (value.some(containsWaitOnTriggerCall))
+                return true;
+        }
+        else if (containsWaitOnTriggerCall(value)) {
+            return true;
+        }
+    }
+    return false;
 }
 /**
  * Lazily load the bundled `core-definitions.json` — a snapshot of v1's

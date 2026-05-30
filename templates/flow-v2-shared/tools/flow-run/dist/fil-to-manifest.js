@@ -18,6 +18,7 @@ const TYPE_ALIASES = {
     // Triggers
     start: 'core.trigger.manual',
     scheduled: 'core.trigger.scheduled',
+    webhook: 'core.trigger.webhook',
     // Actions
     http: 'core.action.http',
     script: 'core.action.script',

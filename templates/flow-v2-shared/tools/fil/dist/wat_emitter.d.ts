@@ -55,6 +55,12 @@ export declare class WatEmitter {
     static readonly P_NOW_LEN = 5;
     static readonly P_UUID = 235;
     static readonly P_UUID_LEN = 6;
+    static readonly P_WAIT_TRIGGER = 241;
+    static readonly P_WAIT_TRIGGER_LEN = 26;
+    static readonly P_TRIGGER_EVENT = 267;
+    static readonly P_TRIGGER_EVENT_LEN = 14;
+    static readonly P_PAYLOAD = 281;
+    static readonly P_PAYLOAD_LEN = 12;
     /**
      * Map from action identifier → effective protocol id. The protocol id is
      * the action's identifier by default, or the `id` string literal from the
@@ -62,6 +68,11 @@ export declare class WatEmitter {
      * having to make the FIL identifier itself dashed).
      */
     private actionIds;
+    /**
+     * Map from trigger identifier → effective protocol id. Mirrors actionIds
+     * for waitOnTrigger(<triggerRef>) lowering.
+     */
+    private triggerIds;
     emit(program: AST.Program): string;
     private emitProtocolHelpers;
     private emitBuiltins;
@@ -123,6 +134,11 @@ export declare class WatEmitter {
      * expression emission.
      */
     private emitActionNameArg;
+    /**
+     * Emit the WAT that loads the trigger-name string for waitOnTrigger's
+     * argument, honoring a trigger declaration's optional `id` override.
+     */
+    private emitTriggerNameArg;
     private decisionShape;
     private emitDecisionWrite;
     private emitPromiseAll;
@@ -131,7 +147,21 @@ export declare class WatEmitter {
     private getLocalName;
     private getLocalRef;
     private getLocalSet;
+    /**
+     * Emit a numeric coercion op (or empty string) to convert a value of
+     * WAT type `from` into one of WAT type `to`. Used at boundaries where
+     * the FIL emitter would otherwise produce a `(return)` / `(local.set)`
+     * with mismatched types — most commonly when a `$vars.X` placeholder
+     * (which compiles to an i32 stub) is used in a numeric expression
+     * whose surrounding context expects an i64 / f64.
+     *
+     * Returns null if no safe coercion exists (caller should fall through
+     * to whatever it would have done — typically a wabt validation error
+     * that surfaces the real type mismatch).
+     */
+    private coerceWatType;
     private watType;
+    private defaultValueForType;
     private collectLocals;
     private preScanStrings;
 }

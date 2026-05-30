@@ -63,6 +63,7 @@ flow order-notify {
 // (2) Triggers — at least one per flow.
 trigger manualStart: start;            // short alias for core.trigger.manual
 trigger scheduledStart: scheduled@1.1; // short alias for core.trigger.scheduled
+trigger webhookTrigger: webhook@1.0;   // short alias for core.trigger.webhook event waits
 
 // (3) Actions — one per node you intend to invoke. Body fields are optional;
 //     every field below is per-instance v1 node metadata.
@@ -91,6 +92,7 @@ Short aliases are accepted in `action` and `trigger` type slots and expand to th
 | ----------- | -------------------------- | ------------------------------------------------------------ |
 | `start`     | `core.trigger.manual`      | Manual entry-point                                            |
 | `scheduled` | `core.trigger.scheduled`   | Scheduled start entry-point                                   |
+| `webhook`   | `core.trigger.webhook`     | Event trigger for `waitOnTrigger`                             |
 | `http`      | `core.action.http`         | Raw HTTP — no connector needed                                |
 | `script`    | `core.action.script`       | JavaScript snippet evaluated in the v1 sandbox                |
 | `transform` | `core.action.transform`    | Transform/jq-style operations                                 |
@@ -149,6 +151,61 @@ Use `timerPreset: "custom"` only when you also provide `timerValue`
 (for example, `timerValue: "R/PT45M"`). Local `flow-run` enters `main()`
 directly, like a manual start; schedule activation happens after the converted
 v1 flow is deployed.
+
+### Waiting on event triggers
+
+`waitOnTrigger(<triggerRef>)` waits for a declared event trigger and returns
+the event payload as a raw JSON string. A flow with event triggers still needs
+exactly one start trigger (`start` or `scheduled`), and each event trigger must
+be waited on exactly once.
+
+```typescript
+trigger manualStart: start;
+trigger webhookTrigger: webhook@1.0 {
+  id: "customer-update",
+  rawInputs: { path: "/customer-update" },
+  fixture: { customerId: "C-1001", status: "updated" },
+};
+
+action processEvent: mock {
+  fixture: { accepted: true },
+};
+
+async function main(): Promise<void> {
+  const eventRaw: string = await waitOnTrigger(webhookTrigger);
+  const event: json = JSON.parse(eventRaw);
+  await executeNode(processEvent, JSON.stringify({
+    customerId: event.customerId,
+    status: event.status,
+  }));
+}
+```
+
+`waitOnTrigger` must appear directly under `await`; do not assign or call it
+without `await`. It is not supported inside `Promise.all` or `Promise.any` yet.
+
+Local verification can use the trigger's `fixture`:
+
+```bash
+./verify.sh
+```
+
+Or inject an explicit event payload with the effective trigger id (the `id`
+field) or the FIL declaration name:
+
+```bash
+./verify.sh --trigger-event customer-update=event.json
+./verify.sh --trigger-event webhookTrigger=event.json
+```
+
+The payload file must be valid JSON. `flow-run` records it in
+`.flow-run/history.yaml` as a single-line `triggerEvent:` record, and `--resume`
+replays the recorded event before any newly supplied `--trigger-event` value.
+
+`waitOnTrigger` currently has no v1 catch-event conversion. `./convert.sh`
+fails intentionally with `waitOnTrigger cannot be converted to v1 until
+mid-flow catch-event mapping is implemented`; use `./verify.sh` as the proof
+for event-wait flows until that mapping lands.
 
 ## OOTB Non-IS actions: HITL quickform
 

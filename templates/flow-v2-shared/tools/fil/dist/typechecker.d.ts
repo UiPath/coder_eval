@@ -17,6 +17,16 @@ export declare class TypeChecker {
     private actionNames;
     /** Names of top-level `trigger` declarations. Triggers cannot be invoked via executeNode. */
     private triggerNames;
+    /** Trigger declaration name → canonical `core.trigger.*` type. */
+    private triggerTypes;
+    /** Trigger declarations that are valid flow entry/start triggers. */
+    private startTriggerNames;
+    /** Trigger declarations that can be awaited via waitOnTrigger. */
+    private eventTriggerNames;
+    /** Count of `waitOnTrigger(<eventTrigger>)` call sites per event trigger. */
+    private triggerWaitCounts;
+    /** Nonzero while inferring the direct callee under an AwaitExpression. */
+    private allowWaitOnTriggerCall;
     /**
      * Count of `executeNode(<action>, …)` call sites per declared action.
      *
@@ -31,6 +41,8 @@ export declare class TypeChecker {
      */
     private actionInvocationCounts;
     check(program: AST.Program): void;
+    private registerTrigger;
+    private validateTriggerTopology;
     private checkFunction;
     private pushScope;
     private popScope;
@@ -40,6 +52,7 @@ export declare class TypeChecker {
     private checkStatement;
     inferExpr(expr: AST.Expression): AST.FILType;
     private inferCallType;
+    private inferWaitOnTriggerCall;
     private inferMethodCallType;
     getFunctions(): Map<string, FunctionInfo>;
 }

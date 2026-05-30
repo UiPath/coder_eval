@@ -56,6 +56,8 @@ function printUsage() {
         `  --history <path>      History file (default: <dir>/.flow-run/history.yaml)\n` +
         `  --decisions <path>    Decisions JSON (default: <dir>/.flow-run/decisions.json)\n` +
         `  --input <json>        Trigger input payload (default: {})\n` +
+        `  --trigger-event <name>=<file.json>\n` +
+        `                        Inject a local waitOnTrigger payload (repeatable)\n` +
         `  --resume              Continue from existing history file\n` +
         `  --dry-run             Print dispatches; do not execute live calls (required for process-resource nodes)\n` +
         `  --skip-connection-check\n` +
@@ -74,6 +76,7 @@ function parseArgs(argv) {
         verbose: false,
         maxSteps: 1000,
         realTime: false,
+        triggerEvents: [],
     };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
@@ -100,6 +103,9 @@ function parseArgs(argv) {
                 break;
             case '--input':
                 args.input = argv[++i];
+                break;
+            case '--trigger-event':
+                args.triggerEvents.push(argv[++i]);
                 break;
             case '--resume':
                 args.resume = true;
@@ -153,6 +159,26 @@ function findLibraryDir(projectDir) {
         }
         cur = parent;
     }
+}
+function loadTriggerEvents(specs) {
+    const events = {};
+    for (const spec of specs) {
+        const eq = spec.indexOf('=');
+        if (eq <= 0 || eq === spec.length - 1) {
+            throw new Error(`--trigger-event must be <name>=<file.json> (got "${spec}")`);
+        }
+        const name = spec.slice(0, eq);
+        const file = spec.slice(eq + 1);
+        const text = fs.readFileSync(file, 'utf8');
+        try {
+            events[name] = JSON.stringify(JSON.parse(text));
+        }
+        catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            throw new Error(`--trigger-event ${name}=${file}: payload file is not valid JSON: ${msg}`);
+        }
+    }
+    return events;
 }
 async function main() {
     const args = parseArgs(process.argv.slice(2));
@@ -255,6 +281,7 @@ async function main() {
         libraryDir,
         verifyConnections: !args.skipConnectionCheck,
         realTime: args.realTime,
+        triggerEvents: loadTriggerEvents(args.triggerEvents),
     };
     let runReport;
     try {

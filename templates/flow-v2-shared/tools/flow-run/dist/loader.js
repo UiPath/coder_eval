@@ -79,6 +79,7 @@ function loadProject(projectDir, opts = {}) {
     const filSource = fs.readFileSync(filPath, 'utf8');
     const program = new parser_1.Parser(filSource).parse();
     const manifest = (0, fil_to_manifest_1.filProgramToManifest)(program);
+    const triggerAliases = buildTriggerAliases(program);
     const bindingsPath = opts.bindingsPath ?? path.join(projectDir, 'bindings.json');
     let bindings;
     if (fs.existsSync(bindingsPath)) {
@@ -93,7 +94,24 @@ function loadProject(projectDir, opts = {}) {
         flowVersion: manifest.flowVersion,
         manifest,
         bindings,
+        triggerAliases,
     };
+}
+function buildTriggerAliases(program) {
+    const aliases = {};
+    for (const trigger of program.triggers) {
+        aliases[trigger.name] = resolveTriggerId(trigger);
+    }
+    return aliases;
+}
+function resolveTriggerId(trigger) {
+    if (!trigger.fields)
+        return trigger.name;
+    const idProp = trigger.fields.properties.find((p) => p.key === 'id');
+    if (idProp && idProp.value.kind === 'Literal' && typeof idProp.value.value === 'string') {
+        return idProp.value.value;
+    }
+    return trigger.name;
 }
 function autodiscoverFil(dir) {
     const all = fs.readdirSync(dir);

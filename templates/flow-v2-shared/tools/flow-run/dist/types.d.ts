@@ -108,6 +108,10 @@ export type HistoryEvent = {
     name: string;
     output: string;
 } | {
+    kind: 'trigger-fired';
+    name: string;
+    payload: string;
+} | {
     kind: 'timer';
     deadline: string;
 } | {
@@ -133,7 +137,7 @@ export interface DecisionRecord {
     step: number;
     nodeId: string;
     nodeType: string;
-    /** 'connector' | 'http' | 'mock' | 'script' | 'agent' | 'api-workflow' | 'rpa-workflow' | 'agentic-process' | 'inline-agent' | 'hitl' | 'summarize' | 'batch-transform' | 'queue' | 'timer' */
+    /** 'connector' | 'http' | 'mock' | 'script' | 'agent' | 'api-workflow' | 'rpa-workflow' | 'agentic-process' | 'inline-agent' | 'hitl' | 'summarize' | 'batch-transform' | 'queue' | 'trigger' | 'timer' */
     kind: string;
     connectorKey?: string;
     verb?: string;
@@ -356,4 +360,6 @@ export interface RunOptions {
     verifyConnections: boolean;
     /** When true, executeTimer decisions actually sleep (default: record the deadline immediately). */
     realTime: boolean;
+    /** Local event payloads keyed by effective trigger id or declaration name. Values are minified JSON strings. */
+    triggerEvents?: Record<string, string>;
 }

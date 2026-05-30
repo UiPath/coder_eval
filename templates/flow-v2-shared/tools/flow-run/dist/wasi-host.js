@@ -190,6 +190,15 @@ function parseProtocolEvents(stdout) {
             events.push({ kind: 'executeNode', name, input });
             continue;
         }
+        if (line === 'waitOnTrigger:') {
+            const triggerLine = lines[i + 1] ?? '';
+            const tm = triggerLine.match(/^  trigger: (\S+)$/);
+            if (!tm)
+                continue;
+            events.push({ kind: 'waitOnTrigger', name: tm[1] });
+            i += 1;
+            continue;
+        }
         if (line === 'executeTimer:') {
             const detail = lines[i + 1] ?? '';
             const dur = detail.match(/^  duration: (\d+)$/);
@@ -234,7 +243,8 @@ function findPending(stdout, history) {
 }
 function matches(ev, h) {
     switch (ev.kind) {
-        case 'executeNode': return h.kind === 'node' || h.kind === 'node-cancelled';
+        case 'executeNode': return (h.kind === 'node' && h.name === ev.name) || h.kind === 'node-cancelled';
+        case 'waitOnTrigger': return h.kind === 'trigger-fired' && h.name === ev.name;
         case 'executeTimer': return h.kind === 'timer' || h.kind === 'timer-cancelled';
         case 'all': return h.kind === 'all-marker' && h.n === ev.n;
         case 'race': return h.kind === 'race-marker' && h.n === ev.n;
@@ -245,6 +255,7 @@ function matches(ev, h) {
  * Build the stdin text the FIL replay parser will consume.
  *
  *   node:           → "node: <name>\n  output: <json>\n"
+ *   trigger-fired:  → "triggerEvent: <name>\n  payload: <json>\n"
  *   timer:          → "timer: <ISO>\n"
  *   all-marker:     → "all: N\n"
  *   race-marker:    → "race: N winner=K\n"
@@ -257,6 +268,7 @@ function buildStdin(events) {
     return events.map(e => {
         switch (e.kind) {
             case 'node': return `node: ${e.name}\n  output: ${e.output}\n`;
+            case 'trigger-fired': return `triggerEvent: ${e.name}\n  payload: ${e.payload}\n`;
             case 'timer': return `timer: ${e.deadline}\n`;
             case 'all-marker': return `all: ${e.n}\n`;
             case 'race-marker': return `race: ${e.n} winner=${e.winner}\n`;
@@ -273,6 +285,8 @@ function parsePendingDecision(stdout) {
         const ev = events[i];
         if (ev.kind === 'executeNode')
             return { kind: 'executeNode', name: ev.name };
+        if (ev.kind === 'waitOnTrigger')
+            return { kind: 'waitOnTrigger', name: ev.name };
         if (ev.kind === 'executeTimer')
             return { kind: 'executeTimer', durationMs: ev.durationMs, deadline: ev.deadline };
     }

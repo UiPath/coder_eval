@@ -30,6 +30,9 @@ export type ProtocolEvent = {
     name: string;
     input: string;
 } | {
+    kind: 'waitOnTrigger';
+    name: string;
+} | {
     kind: 'executeTimer';
     durationMs?: number;
     deadline?: string;
@@ -65,6 +68,7 @@ export declare function findPending(stdout: string, history: HistoryEvent[]): Pe
  * Build the stdin text the FIL replay parser will consume.
  *
  *   node:           → "node: <name>\n  output: <json>\n"
+ *   trigger-fired:  → "triggerEvent: <name>\n  payload: <json>\n"
  *   timer:          → "timer: <ISO>\n"
  *   all-marker:     → "all: N\n"
  *   race-marker:    → "race: N winner=K\n"
@@ -76,6 +80,9 @@ export declare function findPending(stdout: string, history: HistoryEvent[]): Pe
 export declare function buildStdin(events: HistoryEvent[]): string;
 export type PendingDecision = {
     kind: 'executeNode';
+    name: string;
+} | {
+    kind: 'waitOnTrigger';
     name: string;
 } | {
     kind: 'executeTimer';
