@@ -90,6 +90,42 @@ def _is_text_block(block: Any) -> bool:
     return hasattr(block, "text") and not hasattr(block, "thinking")
 
 
+def _distribute_output_tokens(total: int, weights: list[int]) -> list[int]:
+    """Split a call's output_tokens across its block-emissions by content weight.
+
+    The Anthropic API reports output_tokens per API *call*, not per content
+    block, but the CLI surfaces one call as several per-block emissions. To make
+    each emission's recorded output sensible (rather than dumping the whole
+    call on the first block and zeroing the rest), we apportion the call total
+    across emissions by a content-length proxy (thinking/text length, or tool
+    name + serialized args length).
+
+    Uses the largest-remainder (Hamilton) method so the returned integers sum
+    EXACTLY to ``total`` — per-message output stays reconcilable with the
+    iteration aggregate. Falls back to an even split when all weights are zero.
+    """
+    n = len(weights)
+    if n == 0:
+        return []
+    if total <= 0:
+        return [0] * n
+    tw = sum(weights)
+    if tw <= 0:
+        base = total // n
+        out = [base] * n
+        for i in range(total - base * n):
+            out[i] += 1
+        return out
+    raw = [total * w / tw for w in weights]
+    floors = [int(r) for r in raw]
+    remainder = total - sum(floors)
+    # Hand the leftover (from flooring) to the largest fractional parts.
+    order = sorted(range(n), key=lambda i: (raw[i] - floors[i], weights[i]), reverse=True)
+    for i in range(remainder):
+        floors[order[i]] += 1
+    return floors
+
+
 def _is_user_message(message: Any) -> bool:
     """Check if message is a UserMessage (which may contain tool results) using duck typing."""
     return hasattr(message, "content") and hasattr(message, "tool_use_result")
@@ -435,11 +471,28 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         # Per-emission output_tokens recovered from raw stream events.
         # The CLI emits AssistantMessage.usage.output_tokens with only a
-        # partial streaming snapshot (anthropics/claude-code#22686), but
-        # the corresponding ``message_delta`` stream event carries the
-        # final cumulative count. We capture it here and stamp it onto
-        # the next AssistantMessage we record.
+        # partial streaming snapshot (anthropics/claude-code#22686); the
+        # authoritative cumulative count for an API call arrives later, on
+        # that call's ``message_delta`` stream event.
+        #
+        # The ``message_delta`` event has no message_id, but the preceding
+        # ``message_start`` does, and both bracket the same API call. So we
+        # track the in-flight message_id (current_stream_message_id) and, when
+        # the delta arrives, split the call's cumulative output_tokens across
+        # that call's block-emissions (emissions_by_id) by a content-length
+        # proxy (emission_proxies_by_id) via _distribute_output_tokens. This
+        # fixes both the off-by-one of the old "stamp on the next message"
+        # scheme (which credited call N's output to call N+1) and the
+        # all-on-the-first-block dump (which left tool emissions reading 0).
+        # input / cache stay on the first emission only — those are per-call
+        # read costs, not generated per block.
+        #
+        # pending_delta_output_tokens is retained only as a fallback for
+        # streams that never surface a message_start id (legacy SDKs / mocks).
         pending_delta_output_tokens: int | None = None
+        current_stream_message_id: str | None = None
+        emissions_by_id: dict[str, list[AssistantMessageTelemetry]] = {}
+        emission_proxies_by_id: dict[str, list[int]] = {}
 
         # Anthropic's CLI splits one API call into multiple "assistant"
         # JSON events (one per content-block kind) that all share the
@@ -616,6 +669,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                         content = getattr(message, "content", None)
                         turn_content_blocks: list[ContentBlock] = []
                         turn_tool_use_ids: list[str] = []
+                        # Length of generated content in this emission, used to
+                        # weight its share of the call's output_tokens.
+                        emission_content_chars = 0
 
                         # Content can be a list of blocks (text, thinking, tool_use, etc.)
                         if content and isinstance(content, list):
@@ -623,6 +679,10 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                                 block_seq = len(turn_content_blocks)
 
                                 if _is_tool_use_block(block):
+                                    tool_args = block.input if isinstance(block.input, dict) else {"raw": block.input}
+                                    emission_content_chars += len(str(getattr(block, "name", "") or "")) + len(
+                                        json.dumps(tool_args, default=str)
+                                    )
                                     command_start_time = time.monotonic()  # Precise command start time
 
                                     telemetry = CommandTelemetry(
@@ -669,6 +729,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                                     )
                                 elif _is_thinking_block(block):
                                     thinking_text = getattr(block, "thinking", None)
+                                    if thinking_text:
+                                        emission_content_chars += len(str(thinking_text))
                                     turn_content_blocks.append(
                                         ContentBlock(
                                             block_type="thinking",
@@ -679,6 +741,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                                     )
                                 elif _is_text_block(block):
                                     text_value = str(block.text)
+                                    emission_content_chars += len(text_value)
                                     turn_content_blocks.append(
                                         ContentBlock(
                                             block_type="text",
@@ -744,27 +807,32 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                             # set its own via the StreamEvent handler.
                             pending_delta_output_tokens = None
 
-                        sdk_messages.append(
-                            AssistantMessageTelemetry(
-                                started_at=generation_started_wall,
-                                completed_at=message_arrival_wall,
-                                generation_duration_ms=max(0.0, generation_duration_ms),
-                                content_blocks=turn_content_blocks,
-                                tool_use_ids=turn_tool_use_ids,
-                                input_tokens=in_tok,
-                                output_tokens=out_tok,
-                                cache_creation_tokens=cw_tok,
-                                cache_read_tokens=cr_tok,
-                                reasoning_tokens=rt_tok,
-                                stop_reason=(
-                                    getattr(message, "stop_reason", None)
-                                    if isinstance(getattr(message, "stop_reason", None), str)
-                                    else None
-                                ),
-                                model=sdk_model_used,
-                                message_id=message_id if isinstance(message_id, str) else None,
-                            )
+                        assistant_telemetry = AssistantMessageTelemetry(
+                            started_at=generation_started_wall,
+                            completed_at=message_arrival_wall,
+                            generation_duration_ms=max(0.0, generation_duration_ms),
+                            content_blocks=turn_content_blocks,
+                            tool_use_ids=turn_tool_use_ids,
+                            input_tokens=in_tok,
+                            output_tokens=out_tok,
+                            cache_creation_tokens=cw_tok,
+                            cache_read_tokens=cr_tok,
+                            reasoning_tokens=rt_tok,
+                            stop_reason=(
+                                getattr(message, "stop_reason", None)
+                                if isinstance(getattr(message, "stop_reason", None), str)
+                                else None
+                            ),
+                            model=sdk_model_used,
+                            message_id=message_id if isinstance(message_id, str) else None,
                         )
+                        sdk_messages.append(assistant_telemetry)
+                        # Register every block-emission of this id (with its
+                        # content-length proxy) so the matching ``message_delta``
+                        # can split the call's output_tokens across them.
+                        if isinstance(message_id, str):
+                            emissions_by_id.setdefault(message_id, []).append(assistant_telemetry)
+                            emission_proxies_by_id.setdefault(message_id, []).append(emission_content_chars)
                         # Track last AssistantMessage to populate with final tokens from ResultMessage
                         last_assistant_message_index = len(sdk_messages) - 1
 
@@ -832,11 +900,35 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                     # next AssistantMessage we record can stamp it on.
                     elif isinstance(getattr(message, "event", None), dict):
                         evt: dict[str, Any] = getattr(message, "event", None) or {}
-                        if evt.get("type") == "message_delta":
+                        evt_type = evt.get("type")
+                        if evt_type == "message_start":
+                            # Opens an API call; carries the message_id that the
+                            # call's later message_delta (which has none) belongs to.
+                            mid = (evt.get("message") or {}).get("id")
+                            current_stream_message_id = mid if isinstance(mid, str) else None
+                        elif evt_type == "message_delta":
+                            # Carries the authoritative cumulative output_tokens
+                            # for the in-flight call. Split it across that call's
+                            # block-emissions by content length so each emission
+                            # reads a sensible share (and the parts sum exactly).
+                            # Fall back to the stamp-on-next scheme only when we
+                            # never saw a message_start id (legacy SDKs / mocks).
                             usage = evt.get("usage") or {}
                             ot = usage.get("output_tokens")
                             if isinstance(ot, int):
-                                pending_delta_output_tokens = ot
+                                records: list[AssistantMessageTelemetry] | None = None
+                                proxies: list[int] = []
+                                if current_stream_message_id is not None:
+                                    records = emissions_by_id.get(current_stream_message_id)
+                                    proxies = emission_proxies_by_id.get(current_stream_message_id, [])
+                                if records:
+                                    shares = _distribute_output_tokens(ot, proxies)
+                                    for record, share in zip(records, shares, strict=False):
+                                        record.output_tokens = share
+                                else:
+                                    # No message_start id to attribute the delta to:
+                                    # fall back to stamping it on the next emission.
+                                    pending_delta_output_tokens = ot
 
                     # PHASE 2: Process tool results from UserMessage content blocks.
                     # The SDK delivers tool results as UserMessage objects containing

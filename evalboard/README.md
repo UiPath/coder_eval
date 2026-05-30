@@ -26,7 +26,10 @@ in production (grant **Storage Blob Data Reader** on the storage account).
 - `/runs/latest` — shortcut that redirects to the newest run id.
 - `/runs/<run-id>` — run summary (pass rate, cost, duration) + one row per task.
 - `/runs/<run-id>/<task-id>` — per-task detail: success-criteria cards,
-  artifact downloads, flow debug table, tool timeline, tail of `task.log`.
+  artifact downloads, flow debug table, tool timeline, message timeline
+  (per-message generation / exec time and output / cache-write / cache-read
+  tokens, with each row expandable into thinking / tool / text sub-rows),
+  tail of `task.log`.
 
 `<task-id>` is the same string the eval framework writes to
 `task_results[].task_id` (e.g., `skill-flow-calculator`) and equals the

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { TaskResultSummary } from "@/lib/runs";
 import type { ReviewIndexEntry } from "@/lib/reviews-types";
 import { fmtCompact, humanizeTaskId } from "@/lib/format";
@@ -26,6 +26,71 @@ type SortKey =
     | "output"
     | "cw"
     | "cr";
+
+// ---- Token-column help: what the number is, what drives it up, how to bring
+// it down. Rendered as a static, selectable popover from an ⓘ next to the
+// header (click to open, click-outside / Esc to close).
+type ColHelp = {
+    title: string;
+    body: string;
+    causes?: string; // common causes of high values
+    fix?: string; // potential fixes
+};
+
+const COLUMN_HELP: Partial<Record<SortKey, ColHelp>> = {
+    output: {
+        title: "Output tokens",
+        body: "Text, code, tool arguments and reasoning the model generated.",
+        causes: "verbose final answers, large file rewrites, heavy reasoning.",
+        fix: "ask for concise output, scope edits to smaller diffs, cap max_output_tokens / max_turns.",
+    },
+    cw: {
+        title: "Cache-write tokens",
+        body: "Context written into the prompt cache this task (cache_creation_input_tokens).",
+        causes: "the cached prefix keeps changing — new files read mid-run, a growing transcript — so it's re-written instead of reused.",
+        fix: "keep stable content (system prompt, skills, instructions) at the front of the prompt; don't inject volatile content early; reuse sessions.",
+    },
+    cr: {
+        title: "Cache-read tokens",
+        body: "Cached input re-billed every turn (cache_read_input_tokens). Usually the dominant cost line.",
+        causes: "large context (big files, long transcript, many skills/tools) replayed on every turn × many turns.",
+        fix: "put less in context (smaller file reads, fewer files), shorten the run (fewer turns), trim system/skill payloads, compact long transcripts.",
+    },
+};
+
+function HelpPopover({ help, align }: { help: ColHelp; align: "left" | "right" }) {
+    return (
+        <div
+            role="tooltip"
+            // Anchor under the ⓘ; align to the same edge as the column text so
+            // it stays inside the table on the right-aligned token columns.
+            className={`absolute top-full z-20 mt-1.5 w-72 cursor-auto rounded-md border border-gray-200 bg-white p-3 text-left text-xs font-normal leading-snug text-gray-600 shadow-lg ${
+                align === "right" ? "right-0" : "left-0"
+            }`}
+            // Keep clicks inside the card from sorting / closing.
+            onClick={(e) => e.stopPropagation()}
+        >
+            <div className="font-semibold text-gray-900">{help.title}</div>
+            <p className="mt-1">{help.body}</p>
+            {help.causes && (
+                <p className="mt-2">
+                    <span className="font-medium text-gray-700">
+                        Common causes:
+                    </span>{" "}
+                    {help.causes}
+                </p>
+            )}
+            {help.fix && (
+                <p className="mt-1">
+                    <span className="font-medium text-gray-700">
+                        Reduce by:
+                    </span>{" "}
+                    {help.fix}
+                </p>
+            )}
+        </div>
+    );
+}
 
 function fmtTableDuration(s: number | null): string {
     if (s == null) return "—";
@@ -138,6 +203,26 @@ export function TaskGrid({
         dir: "asc" | "desc";
     } | null>(null);
 
+    // Which column's help popover is open (one at a time). Dismissed by a click
+    // outside any popover/trigger or by Escape.
+    const [openHelp, setOpenHelp] = useState<SortKey | null>(null);
+    useEffect(() => {
+        if (openHelp == null) return;
+        const onDown = (e: MouseEvent) => {
+            const el = e.target as Element | null;
+            if (!el?.closest("[data-col-help]")) setOpenHelp(null);
+        };
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === "Escape") setOpenHelp(null);
+        };
+        document.addEventListener("mousedown", onDown);
+        document.addEventListener("keydown", onKey);
+        return () => {
+            document.removeEventListener("mousedown", onDown);
+            document.removeEventListener("keydown", onKey);
+        };
+    }, [openHelp]);
+
     const sorted = useMemo(() => {
         const arr = [...tasks];
         if (sort) {
@@ -187,22 +272,70 @@ export function TaskGrid({
                                         ? "ascending"
                                         : "descending"
                                     : "none";
+                            const help = COLUMN_HELP[col.key];
                             return (
                                 <th
                                     key={col.key}
                                     aria-sort={ariaSort}
                                     className={`py-3 px-4 font-medium ${alignCls}`}
                                 >
-                                    <button
-                                        type="button"
-                                        onClick={() => onSort(col.key)}
-                                        className="inline-flex items-center gap-1 hover:text-gray-900"
+                                    <span
+                                        className={`inline-flex items-center gap-1 ${
+                                            col.align === "right"
+                                                ? "flex-row-reverse"
+                                                : ""
+                                        }`}
                                     >
-                                        {col.header}
-                                        <span className="text-xs text-gray-400 w-3">
-                                            {arrow}
-                                        </span>
-                                    </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => onSort(col.key)}
+                                            className="inline-flex items-center gap-1 hover:text-gray-900"
+                                        >
+                                            {col.header}
+                                            <span className="text-xs text-gray-400 w-3">
+                                                {arrow}
+                                            </span>
+                                        </button>
+                                        {help && (
+                                            <span
+                                                data-col-help
+                                                className="relative inline-flex"
+                                            >
+                                                <button
+                                                    type="button"
+                                                    aria-label={`What is ${col.header}?`}
+                                                    aria-expanded={
+                                                        openHelp === col.key
+                                                    }
+                                                    onClick={() =>
+                                                        setOpenHelp((cur) =>
+                                                            cur === col.key
+                                                                ? null
+                                                                : col.key,
+                                                        )
+                                                    }
+                                                    className={`flex h-4 w-4 items-center justify-center rounded-full border text-[10px] font-semibold leading-none transition-colors ${
+                                                        openHelp === col.key
+                                                            ? "border-studio-blue text-studio-blue"
+                                                            : "border-gray-300 text-gray-400 hover:border-gray-400 hover:text-gray-600"
+                                                    }`}
+                                                >
+                                                    i
+                                                </button>
+                                                {openHelp === col.key && (
+                                                    // All help columns sit on
+                                                    // the right side of the
+                                                    // table; open leftward so
+                                                    // the card stays inside the
+                                                    // overflow-hidden container.
+                                                    <HelpPopover
+                                                        help={help}
+                                                        align="right"
+                                                    />
+                                                )}
+                                            </span>
+                                        )}
+                                    </span>
                                 </th>
                             );
                         })}

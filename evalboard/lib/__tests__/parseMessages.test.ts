@@ -282,6 +282,262 @@ describe("parseMessages — message_id collapsing", () => {
     });
 });
 
+describe("parseMessages — per-message token aggregation", () => {
+    test("threads input/output/cache/reasoning tokens onto the event", () => {
+        const turns: TurnEntry[] = [
+            {
+                messages: [
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:00.000Z",
+                        completed_at: "2026-01-01T00:00:01.000Z",
+                        generation_duration_ms: 1000,
+                        message_id: "msg_1",
+                        input_tokens: 12,
+                        output_tokens: 200,
+                        cache_creation_tokens: 5_000,
+                        cache_read_tokens: 80_000,
+                        reasoning_tokens: 40,
+                        content_blocks: [{ block_type: "text", text: "hi" }],
+                    },
+                ],
+            },
+        ];
+        const [e] = parseMessages(turns);
+        expect(e.inputTokens).toBe(12);
+        expect(e.outputTokens).toBe(200);
+        expect(e.cacheWriteTokens).toBe(5_000);
+        expect(e.cacheReadTokens).toBe(80_000);
+        expect(e.reasoningTokens).toBe(40);
+    });
+
+    test("sums per-message token fields across same-emission splits", () => {
+        // Two raws sharing one message_id collapse into one MessageEvent — the
+        // CLI splits content blocks across rows but the tokens are reported on
+        // each row, so the event should carry the sum.
+        const turns: TurnEntry[] = [
+            {
+                messages: [
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:00.000Z",
+                        completed_at: "2026-01-01T00:00:01.000Z",
+                        generation_duration_ms: 1000,
+                        message_id: "msg_x",
+                        input_tokens: 2,
+                        output_tokens: 100,
+                        cache_creation_tokens: 1_000,
+                        cache_read_tokens: 10_000,
+                        reasoning_tokens: 50,
+                        content_blocks: [{ block_type: "thinking", thinking: "T" }],
+                    },
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:01.020Z",
+                        completed_at: "2026-01-01T00:00:01.500Z",
+                        generation_duration_ms: 480,
+                        message_id: "msg_x",
+                        input_tokens: 1,
+                        output_tokens: 30,
+                        cache_creation_tokens: 200,
+                        cache_read_tokens: 0,
+                        reasoning_tokens: 0,
+                        content_blocks: [{ block_type: "text", text: "hi" }],
+                    },
+                ],
+            },
+        ];
+        const [e] = parseMessages(turns);
+        expect(e.inputTokens).toBe(3);
+        expect(e.outputTokens).toBe(130);
+        expect(e.cacheWriteTokens).toBe(1_200);
+        expect(e.cacheReadTokens).toBe(10_000);
+        expect(e.reasoningTokens).toBe(50);
+    });
+
+    test("legacy messages (no per-message tokens) leave token fields null", () => {
+        const turns: TurnEntry[] = [
+            {
+                messages: [
+                    msg("text", {
+                        startedAt: "2026-01-01T00:00:00.000Z",
+                        completedAt: "2026-01-01T00:00:01.000Z",
+                        genMs: 1000,
+                    }),
+                ],
+            },
+        ];
+        const [e] = parseMessages(turns);
+        expect(e.inputTokens).toBeNull();
+        expect(e.outputTokens).toBeNull();
+        expect(e.cacheWriteTokens).toBeNull();
+        expect(e.cacheReadTokens).toBeNull();
+        expect(e.reasoningTokens).toBeNull();
+        expect(e.textOutputTokens).toBeNull();
+    });
+});
+
+describe("parseMessages — per-block output-token attribution", () => {
+    test("text-only message attributes all output to text (no thinking block)", () => {
+        const turns: TurnEntry[] = [
+            {
+                messages: [
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:00.000Z",
+                        completed_at: "2026-01-01T00:00:01.000Z",
+                        generation_duration_ms: 1000,
+                        message_id: "msg_t",
+                        output_tokens: 120,
+                        content_blocks: [{ block_type: "text", text: "ok" }],
+                    },
+                ],
+            },
+        ];
+        const [e] = parseMessages(turns);
+        // No thinking block → nothing carved out; all output is the text share.
+        expect(e.thinkingOutputTokens).toBeNull();
+        expect(e.textOutputTokens).toBe(120);
+    });
+
+    test("tool-only message attributes output across tools by gen weight", () => {
+        // Same emission with two parallel tool_uses; outputTokens should
+        // split by argument-size weight (the genMs split used elsewhere).
+        const turns: TurnEntry[] = [
+            {
+                messages: [
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:00.000Z",
+                        completed_at: "2026-01-01T00:00:01.000Z",
+                        generation_duration_ms: 1000,
+                        message_id: "msg_tools",
+                        output_tokens: 220,
+                        content_blocks: [
+                            { block_type: "tool_use", tool_use_id: "small" },
+                            { block_type: "tool_use", tool_use_id: "big" },
+                        ],
+                    },
+                ],
+                commands: [
+                    {
+                        tool_name: "Bash",
+                        tool_id: "small",
+                        parameters: { command: "ls" },
+                    },
+                    {
+                        tool_name: "Write",
+                        tool_id: "big",
+                        parameters: { file_path: "x", content: "x".repeat(400) },
+                    },
+                ],
+            },
+        ];
+        const [e] = parseMessages(turns);
+        expect(e.textOutputTokens).toBeNull();
+        const [small, big] = e.toolUses;
+        expect(small.outputTokens).not.toBeNull();
+        expect(big.outputTokens).not.toBeNull();
+        // No thinking block → full 220 goes to the tool budget.
+        expect(
+            (small.outputTokens ?? 0) + (big.outputTokens ?? 0),
+        ).toBeCloseTo(220, 0);
+        expect(big.outputTokens!).toBeGreaterThan(small.outputTokens!);
+    });
+
+    test("mixed message: thinking taken from its emission, rest split by gen-time", () => {
+        // Post-fix shape: the agent distributes the call's output across its
+        // block-emissions, so each carries its own output_tokens (40 thinking
+        // + 50 tool + 150 text = 240). Each block's share is read straight from
+        // its emission — no gen-time re-splitting.
+        const turns: TurnEntry[] = [
+            {
+                messages: [
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:00.000Z",
+                        completed_at: "2026-01-01T00:00:08.000Z",
+                        generation_duration_ms: 8000,
+                        message_id: "msg_mix",
+                        output_tokens: 40,
+                        content_blocks: [{ block_type: "thinking", thinking: "T" }],
+                    },
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:08.010Z",
+                        completed_at: "2026-01-01T00:00:08.500Z",
+                        generation_duration_ms: 500,
+                        message_id: "msg_mix",
+                        output_tokens: 50,
+                        content_blocks: [
+                            { block_type: "tool_use", tool_use_id: "tu_1" },
+                        ],
+                    },
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:08.520Z",
+                        completed_at: "2026-01-01T00:00:10.020Z",
+                        generation_duration_ms: 1500,
+                        message_id: "msg_mix",
+                        output_tokens: 150,
+                        content_blocks: [{ block_type: "text", text: "hi" }],
+                    },
+                ],
+                commands: [
+                    {
+                        tool_name: "Bash",
+                        tool_id: "tu_1",
+                        parameters: { command: "ls" },
+                    },
+                ],
+            },
+        ];
+        const [e] = parseMessages(turns);
+        // Sanity: collapsed into one event with all three block kinds.
+        expect(e.blockTypes).toEqual(["thinking", "tool_use", "text"]);
+        expect(e.outputTokens).toBe(240);
+        // Thinking is the thinking emission's real output (40), not gen-time.
+        expect(e.thinkingOutputTokens).toBe(40);
+        const nonThinking = 240 - 40;
+        // text share = 1500/(1500+500) = 0.75 of the remaining budget.
+        expect(e.textOutputTokens).toBe(Math.round(nonThinking * 0.75));
+        const toolSum = e.toolUses.reduce(
+            (s, t) => s + (t.outputTokens ?? 0),
+            0,
+        );
+        expect(toolSum).toBe(nonThinking - (e.textOutputTokens ?? 0));
+    });
+
+    test("missing output_tokens leaves per-block approximations null", () => {
+        const turns: TurnEntry[] = [
+            {
+                messages: [
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:00.000Z",
+                        completed_at: "2026-01-01T00:00:01.000Z",
+                        generation_duration_ms: 1000,
+                        message_id: "msg_n",
+                        content_blocks: [
+                            { block_type: "tool_use", tool_use_id: "tu_1" },
+                        ],
+                    },
+                ],
+                commands: [
+                    {
+                        tool_name: "Bash",
+                        tool_id: "tu_1",
+                        parameters: { command: "ls" },
+                    },
+                ],
+            },
+        ];
+        const [e] = parseMessages(turns);
+        expect(e.textOutputTokens).toBeNull();
+        expect(e.toolUses[0].outputTokens).toBeNull();
+    });
+});
+
 describe("approxTokens", () => {
     test("scales with serialized argument size", () => {
         const small = approxTokens({ cmd: "ls" });

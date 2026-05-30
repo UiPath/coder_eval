@@ -822,6 +822,50 @@ def _message_delta(output_tokens: int) -> _StreamEvent:
     return _StreamEvent({"type": "message_delta", "usage": {"output_tokens": output_tokens}})
 
 
+def _message_start(message_id: str) -> _StreamEvent:
+    """Opens an API call. The real CLI emits this (carrying the message_id) before
+    the assistant events; the call's message_delta — which has no id — comes after."""
+    return _StreamEvent({"type": "message_start", "message": {"id": message_id, "usage": {"output_tokens": 1}}})
+
+
+class TestDistributeOutputTokens:
+    """Unit tests for the content-weighted split of a call's output_tokens."""
+
+    def test_sums_exactly_to_total(self):
+        import coder_eval.agents.claude_code_agent as agent_module
+
+        for total, weights in [
+            (179, [10, 27]),
+            (213, [5, 5, 5]),
+            (100, [1, 1, 1]),  # 100/3 — remainder must be placed, not dropped
+            (7, [3, 0, 0]),
+            (0, [4, 4]),
+        ]:
+            shares = agent_module._distribute_output_tokens(total, weights)
+            assert sum(shares) == total
+            assert all(s >= 0 for s in shares)
+            assert len(shares) == len(weights)
+
+    def test_proportional_to_weight(self):
+        import coder_eval.agents.claude_code_agent as agent_module
+
+        # Heavier content gets the larger share.
+        shares = agent_module._distribute_output_tokens(100, [10, 90])
+        assert shares[1] > shares[0]
+        assert shares == [10, 90]
+
+    def test_zero_weights_split_evenly(self):
+        import coder_eval.agents.claude_code_agent as agent_module
+
+        # No content signal (all-zero weights) → even split, remainder to earliest.
+        assert agent_module._distribute_output_tokens(10, [0, 0, 0]) == [4, 3, 3]
+
+    def test_empty_weights(self):
+        import coder_eval.agents.claude_code_agent as agent_module
+
+        assert agent_module._distribute_output_tokens(50, []) == []
+
+
 class TestPerMessageTokenCapture:
     """Tests for the per-message token state machine in ``ClaudeCodeAgent.communicate``.
 
@@ -834,8 +878,8 @@ class TestPerMessageTokenCapture:
 
     @pytest.mark.asyncio
     async def test_delta_override_beats_partial_assistant_usage(self, tmp_path):
-        """When a message_delta arrives before the AssistantMessage, the delta's output_tokens
-        wins over the (partial) value on the AssistantMessage.usage."""
+        """Fallback path: with no message_start id, a delta seen before the AssistantMessage
+        is stamped onto it, beating the (partial) value on the AssistantMessage.usage."""
         _tool_use_block_cls, assistant_message_cls, _user_message_cls, text_block_cls, _, result_message_cls = (
             create_mock_sdk_messages()
         )
@@ -860,7 +904,8 @@ class TestPerMessageTokenCapture:
         agent = agent_module.ClaudeCodeAgent(config)
 
         async def mock_query(prompt, options):
-            # delta arrives BEFORE the assistant message (real CLI ordering)
+            # No message_start id + delta-before-assistant → exercises the
+            # legacy stamp-on-next fallback (not the message_id back-fill path).
             yield _message_delta(250)
             yield msg
             yield result_msg
@@ -878,6 +923,89 @@ class TestPerMessageTokenCapture:
             assert aturn.output_tokens == 250
             assert aturn.input_tokens == 100
             assert aturn.cache_read_tokens == 50
+        finally:
+            agent_module.query = original_query
+
+    @pytest.mark.asyncio
+    async def test_delta_distributes_across_blocks_by_content_no_offbyone(self, tmp_path):
+        """Real CLI ordering across two API calls: message_start (with id) → assistant
+        emission(s) → message_delta (no id). The delta's cumulative output is split
+        across that call's block-emissions by content length (summing exactly), and is
+        attributed to the call that just finished — NOT stamped onto the next call.
+
+        Covers two regressions at once:
+        - off-by-one: call N's output must not leak onto call N+1 (call B keeps 34).
+        - all-on-first-block: a tool emission must get its share, not 0."""
+        tool_use_block_cls, assistant_message_cls, user_message_cls, text_block_cls, _, result_message_cls = (
+            create_mock_sdk_messages()
+        )
+
+        # Call A: a "thinking-ish" text emission + a tool_use, sharing one id. The
+        # assistant events carry only a partial snapshot (8); the call's true
+        # cumulative output (179) arrives on the trailing delta.
+        a_text = text_block_cls("brief plan")
+        a_tool = tool_use_block_cls("toolu_a", "Bash", {"command": "sleep 10"})
+        a_usage = {
+            "input_tokens": 2,
+            "output_tokens": 8,
+            "cache_creation_input_tokens": 20000,
+            "cache_read_input_tokens": 0,
+        }
+        msg_a1 = assistant_message_cls([a_text], usage=a_usage, message_id="msg_A")
+        msg_a2 = assistant_message_cls([a_tool], usage=a_usage, message_id="msg_A")
+        user_a = user_message_cls("toolu_a", False, "ok")
+
+        # Call B: the text reply, its own id, partial snapshot 5, true total 34.
+        b_text = text_block_cls("done")
+        b_usage = {
+            "input_tokens": 37,
+            "output_tokens": 5,
+            "cache_creation_input_tokens": 100,
+            "cache_read_input_tokens": 20000,
+        }
+        msg_b = assistant_message_cls([b_text], usage=b_usage, message_id="msg_B")
+
+        result_msg = result_message_cls(usage={"input_tokens": 39, "output_tokens": 213})
+
+        import coder_eval.agents.claude_code_agent as agent_module
+
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE)
+        agent = agent_module.ClaudeCodeAgent(config)
+
+        async def mock_query(prompt, options):
+            yield _message_start("msg_A")
+            yield msg_a1
+            yield msg_a2
+            yield _message_delta(179)
+            yield user_a
+            yield _message_start("msg_B")
+            yield msg_b
+            yield _message_delta(34)
+            yield result_msg
+
+        original_query = agent_module.query
+        agent_module.query = mock_query
+        try:
+            await agent.start(str(tmp_path))
+            turn = await agent.communicate("hi")
+            assistants = [m for m in turn.messages if isinstance(m, AssistantMessage)]
+            assert len(assistants) == 3  # A-text, A-tool, B-text
+            a_text, a_tool, b_text = assistants
+            # Call A's 179 is split across its two block-emissions (not dumped on
+            # the first), and the parts sum exactly to the call total.
+            assert a_text.output_tokens + a_tool.output_tokens == 179
+            # The tool emission gets a real share — not 0 — and a larger one than
+            # the short "brief plan" text, since its name+args is longer content.
+            assert a_tool.output_tokens > 0
+            assert a_tool.output_tokens > a_text.output_tokens
+            # input / cache stay on the call's first emission only (per-call read
+            # costs, not generated per block).
+            assert a_text.input_tokens > 0
+            assert a_tool.input_tokens == 0 and a_tool.cache_read_tokens == 0
+            # Call B keeps its OWN total (34), not call A's — no off-by-one leak.
+            assert b_text.output_tokens == 34
+            # Per-message output reconciles exactly with the iteration aggregate.
+            assert sum(a.output_tokens for a in assistants) == 213
         finally:
             agent_module.query = original_query
 

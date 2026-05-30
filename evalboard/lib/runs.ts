@@ -126,6 +126,26 @@ export interface MessageEvent {
     thinkingText: string | null;  // concatenated thinking blocks
     text: string | null;          // concatenated text blocks (final reply chunks)
     toolUses: MessageToolUse[];   // resolved against iteration.commands by tool_use_id
+    // Per-message token usage from the Anthropic API. Summed across grouped
+    // raws (one logical emission may span multiple MessageEntry rows when
+    // the CLI splits content blocks). null when no raw in the group carried
+    // a usage figure — older runs predating per-message tokens.
+    inputTokens: number | null;
+    outputTokens: number | null;
+    cacheWriteTokens: number | null;
+    cacheReadTokens: number | null;
+    // Anthropic's `reasoning_tokens`. ~Always 0 from the SDK, so it is NOT
+    // used to attribute thinking output — see thinkingOutputTokens. Kept for
+    // completeness. null when no raw in the group recorded it.
+    reasoningTokens: number | null;
+    // Output tokens attributed to the thinking block(s), taken from the real
+    // per-emission output_tokens of the thinking emission (the agent splits a
+    // call's output across its blocks by content length). null when no output
+    // was recorded or the group has no thinking block.
+    thinkingOutputTokens: number | null;
+    // Output tokens attributed to the text block(s) — the text emission's own
+    // recorded output_tokens. Null when there's no output figure or no text block.
+    textOutputTokens: number | null;
 }
 
 export interface MessageToolUse {
@@ -146,6 +166,11 @@ export interface MessageToolUse {
     durationMs: number | null;    // tool execution time (separate from generationMs)
     isError: boolean;
     resultPreview: string | null; // short truncated preview of the result
+    // Output tokens for this tool_use — the tool emission's recorded
+    // output_tokens (the agent records output per block-emission). Only when a
+    // single emission carries multiple parallel tool_uses is it split among
+    // them (by arg-size proxy). null when no output_tokens was recorded.
+    outputTokens: number | null;
 }
 
 export interface ArtifactRef {
@@ -388,9 +413,7 @@ export async function readRunTasks(
 ): Promise<TaskResultSummary[] | null> {
     const data = await readRunJson(id);
     if (!data) return null;
-    return (data.task_results ?? [])
-        .filter((t) => t.task_id)
-        .map(toTaskRow);
+    return (data.task_results ?? []).filter((t) => t.task_id).map(toTaskRow);
 }
 
 // Minimal per-task / per-run projection used by the front-page overview
@@ -719,6 +742,11 @@ interface MessageEntry {
     // present, falling back to a wall-clock gap heuristic for older runs that
     // didn't record it.
     message_id?: string | null;
+    input_tokens?: number | null;
+    output_tokens?: number | null;
+    cache_creation_tokens?: number | null;
+    cache_read_tokens?: number | null;
+    reasoning_tokens?: number | null;
 }
 
 export interface TurnEntry {
@@ -888,6 +916,11 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             textParts: string[];
             toolUses: MessageToolUse[];
             toolTokenProxies: number[];
+            inputTokens: number | null;
+            outputTokens: number | null;
+            cacheWriteTokens: number | null;
+            cacheReadTokens: number | null;
+            reasoningTokens: number | null;
         };
         const raws: Raw[] = [];
         for (const msg of turn.messages ?? []) {
@@ -907,6 +940,22 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 textParts: [],
                 toolUses: [],
                 toolTokenProxies: [],
+                inputTokens:
+                    typeof msg.input_tokens === "number" ? msg.input_tokens : null,
+                outputTokens:
+                    typeof msg.output_tokens === "number" ? msg.output_tokens : null,
+                cacheWriteTokens:
+                    typeof msg.cache_creation_tokens === "number"
+                        ? msg.cache_creation_tokens
+                        : null,
+                cacheReadTokens:
+                    typeof msg.cache_read_tokens === "number"
+                        ? msg.cache_read_tokens
+                        : null,
+                reasoningTokens:
+                    typeof msg.reasoning_tokens === "number"
+                        ? msg.reasoning_tokens
+                        : null,
             };
             for (const b of msg.content_blocks ?? []) {
                 if (b.block_type === "thinking") {
@@ -950,6 +999,7 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                             cmd?.result_summary ?? cmd?.error_message ?? null,
                             RESULT_PREVIEW_CAP,
                         ),
+                        outputTokens: null,
                     });
                 }
             }
@@ -966,6 +1016,27 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                     const weight =
                         total > 0 ? proxies[i] / total : 1 / r.toolUses.length;
                     r.toolUses[i].genMs = r.generationMs * weight;
+                }
+            }
+            // Per-tool output tokens. The agent records output_tokens per
+            // emission, so a tool emission's output_tokens belongs to its
+            // tool_use block(s) directly — no gen-time guesswork. Only when a
+            // single emission carries multiple parallel tool_uses do we split
+            // it (by arg-size proxy, exact remainder on the last tool).
+            if (r.outputTokens != null && r.toolUses.length > 0) {
+                const proxies = r.toolTokenProxies;
+                const total = proxies.reduce((a, b) => a + b, 0);
+                let assigned = 0;
+                for (let i = 0; i < r.toolUses.length; i++) {
+                    if (i === r.toolUses.length - 1) {
+                        r.toolUses[i].outputTokens = r.outputTokens - assigned;
+                    } else {
+                        const weight =
+                            total > 0 ? proxies[i] / total : 1 / r.toolUses.length;
+                        const share = Math.round(r.outputTokens * weight);
+                        r.toolUses[i].outputTokens = share;
+                        assigned += share;
+                    }
                 }
             }
             raws.push(r);
@@ -994,6 +1065,26 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             let haveText = false;
             let toolGenSum = 0;
             let haveToolGen = false;
+            let inputTokSum = 0;
+            let haveInputTok = false;
+            let outputTokSum = 0;
+            let haveOutputTok = false;
+            let cacheWriteSum = 0;
+            let haveCacheWrite = false;
+            let cacheReadSum = 0;
+            let haveCacheRead = false;
+            let reasoningSum = 0;
+            let haveReasoning = false;
+            // Real per-emission output attributed to thinking: the agent
+            // distributes a call's output_tokens across its block-emissions by
+            // content length, so a thinking-only emission's output_tokens IS
+            // the thinking share (reasoning_tokens is ~always 0 from the SDK,
+            // so we don't rely on it). Mirrors the gen-time attribution below.
+            let thinkingOutSum = 0;
+            let haveThinkingOut = false;
+            // Likewise for text: a text emission's output_tokens is its share.
+            let textOutSum = 0;
+            let haveTextOut = false;
             for (const r of group) {
                 blockTypes.push(...r.blockTypes);
                 thinkingParts.push(...r.thinkingParts);
@@ -1013,7 +1104,43 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                         haveText = true;
                     }
                 }
+                if (r.inputTokens != null) {
+                    inputTokSum += r.inputTokens;
+                    haveInputTok = true;
+                }
+                if (r.outputTokens != null) {
+                    outputTokSum += r.outputTokens;
+                    haveOutputTok = true;
+                    // Attribute the emission's output to its block kind (each
+                    // raw is one kind; priority mirrors the gen-time split).
+                    // Tool output is attached per-tool in the first pass.
+                    if (r.blockTypes.includes("thinking")) {
+                        thinkingOutSum += r.outputTokens;
+                        haveThinkingOut = true;
+                    } else if (r.blockTypes.includes("text")) {
+                        textOutSum += r.outputTokens;
+                        haveTextOut = true;
+                    }
+                }
+                if (r.cacheWriteTokens != null) {
+                    cacheWriteSum += r.cacheWriteTokens;
+                    haveCacheWrite = true;
+                }
+                if (r.cacheReadTokens != null) {
+                    cacheReadSum += r.cacheReadTokens;
+                    haveCacheRead = true;
+                }
+                if (r.reasoningTokens != null) {
+                    reasoningSum += r.reasoningTokens;
+                    haveReasoning = true;
+                }
             }
+            // Per-block output comes straight from each emission's recorded
+            // output_tokens (thinking + text here, tools in the first pass) —
+            // the agent already split the call total across blocks by content
+            // length, so there's no re-approximation to do. These sum to the
+            // group's outputTokens.
+            const textOutputTokens = haveTextOut ? textOutSum : null;
             out.push({
                 index: ++order,
                 role: "assistant",
@@ -1030,6 +1157,13 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 ),
                 text: previewString(textParts.join("\n").trim(), TEXT_PREVIEW_CAP),
                 toolUses,
+                inputTokens: haveInputTok ? inputTokSum : null,
+                outputTokens: haveOutputTok ? outputTokSum : null,
+                cacheWriteTokens: haveCacheWrite ? cacheWriteSum : null,
+                cacheReadTokens: haveCacheRead ? cacheReadSum : null,
+                reasoningTokens: haveReasoning ? reasoningSum : null,
+                thinkingOutputTokens: haveThinkingOut ? thinkingOutSum : null,
+                textOutputTokens,
             });
             group = [];
         };

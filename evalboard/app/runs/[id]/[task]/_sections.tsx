@@ -206,6 +206,21 @@ function fmtMs(ms: number | null): string {
     return `${Math.round(ms)}ms`;
 }
 
+function fmtTokens(n: number | null): string {
+    if (n == null) return "—";
+    if (n === 0) return "0";
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 10_000) return `${(n / 1_000).toFixed(0)}k`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+    return n.toString();
+}
+
+// Shared grid template for the message-timeline table. The header row uses
+// these exact columns, and every message summary row aligns to them.
+const MSG_GRID =
+    "grid items-center gap-2 px-2 py-1 " +
+    "grid-cols-[1.5rem_2.5rem_3.5rem_3.5rem_minmax(0,1fr)_3.5rem_3.5rem_3.5rem]";
+
 function messageKind(blockTypes: MessageEvent["blockTypes"]): string {
     const set = new Set(blockTypes);
     if (set.size === 0) return "EMPTY";
@@ -343,11 +358,28 @@ export function MessageTimelineSection({ messages }: { messages: MessageEvent[] 
                     </div>
                 </div>
             </div>
-            <ol className="space-y-1 text-xs font-mono">
-                {messages.map((m) => (
-                    <MessageRow key={m.index} m={m} />
-                ))}
-            </ol>
+            <div className="border border-gray-200 rounded-lg overflow-hidden bg-white text-xs font-mono">
+                <div
+                    className={
+                        MSG_GRID +
+                        " bg-gray-50 border-b border-gray-200 text-[10px] uppercase tracking-wide text-gray-500 font-sans"
+                    }
+                >
+                    <span aria-hidden="true" />
+                    <span className="text-right">#</span>
+                    <span className="text-right">Gen</span>
+                    <span className="text-right">Exec</span>
+                    <span>Content</span>
+                    <span className="text-right">Out</span>
+                    <span className="text-right">Cache W</span>
+                    <span className="text-right">Cache R</span>
+                </div>
+                <ol>
+                    {messages.map((m) => (
+                        <MessageRow key={m.index} m={m} />
+                    ))}
+                </ol>
+            </div>
         </section>
     );
 }
@@ -373,165 +405,230 @@ function summaryPreview(m: MessageEvent): string {
     return "";
 }
 
+// One sub-block row inside an expanded MessageRow. Aligns to the same MSG_GRID
+// columns as the parent so Gen / Exec / Content / Out line up. The Out cell
+// carries the block's own recorded per-emission output_tokens; Cache W / Cache R
+// stay blank — they're input-side and not attributable per block.
+function SubRow({
+    kind,
+    genMs,
+    execMs,
+    isError,
+    toolName,
+    outputTokens,
+    children,
+}: {
+    kind: "thinking" | "tool" | "text";
+    genMs: number | null;
+    execMs: number | null;
+    isError: boolean;
+    toolName?: string;
+    // Per-block output tokens. For thinking it's the thinking emission's real
+    // output_tokens; for text/tool it's an approximation split from the
+    // remaining output by gen-time weight. Cache W/R don't apply per-block.
+    outputTokens: number | null;
+    children: React.ReactNode;
+}) {
+    const slowExec = (execMs ?? 0) >= SLOW_TOOL_MS;
+    const label =
+        kind === "thinking" ? (
+            <span className="inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium shrink-0 bg-purple-100 text-purple-700 border-purple-200">
+                thinking
+            </span>
+        ) : kind === "text" ? (
+            <span className="inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium shrink-0 bg-green-100 text-green-700 border-green-200">
+                text
+            </span>
+        ) : (
+            <span className="shrink-0 flex items-center gap-1">
+                <ToolChip tool={toolName ?? "unknown"} />
+                {isError && (
+                    <span className="inline-flex items-center rounded border border-red-200 bg-red-50 text-red-700 px-1 py-0.5 text-[10px]">
+                        error
+                    </span>
+                )}
+            </span>
+        );
+    return (
+        <div className={MSG_GRID + " items-start"}>
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+            <span className="tabular-nums text-right text-gray-500">
+                {fmtMs(genMs)}
+            </span>
+            <span
+                className={
+                    "tabular-nums text-right " +
+                    (slowExec ? "text-red-700 font-medium" : "text-gray-500")
+                }
+            >
+                {execMs != null ? fmtMs(execMs) : "—"}
+            </span>
+            <div className="min-w-0 space-y-1">
+                <div>{label}</div>
+                {children}
+            </div>
+            <span className="tabular-nums text-right text-gray-500">
+                {fmtTokens(outputTokens)}
+            </span>
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+        </div>
+    );
+}
+
 function MessageRow({ m }: { m: MessageEvent }) {
     const kind = messageKind(m.blockTypes);
     const slowGen = (m.generationMs ?? 0) >= SLOW_GEN_MS;
     const slowTool = m.toolUses.some((t) => (t.durationMs ?? 0) >= SLOW_TOOL_MS);
-    const slow = slowGen || slowTool;
     const hasErrorTool = m.toolUses.some((t) => t.isError);
     const preview = summaryPreview(m);
+    // Sum tool exec time for this message — matches the rollup strip.
+    const execMs = m.toolUses.reduce((a, t) => a + (t.durationMs ?? 0), 0);
+    const hasExec = m.toolUses.some((t) => t.durationMs != null);
     // Render full body only when something more than the summary exists.
     const hasBody =
         m.toolUses.length > 0 ||
         (m.thinkingText != null && m.thinkingText.length > 0) ||
         (m.text != null && m.text.length > preview.length);
+    const rowTint = hasErrorTool
+        ? "border-red-100 bg-red-50/30"
+        : "border-gray-100";
     return (
-        <li>
-            <details
-                className={
-                    "group rounded border " +
-                    (slow
-                        ? "border-red-300 bg-red-50/40"
-                        : hasErrorTool
-                            ? "border-red-200 bg-white"
-                            : "border-gray-200 bg-white")
-                }
-            >
-                <summary className="px-2 py-1 cursor-pointer list-none [&::-webkit-details-marker]:hidden flex items-start gap-2 flex-wrap hover:bg-gray-50">
+        <li className={"border-b last:border-b-0 " + rowTint}>
+            <details className="group">
+                <summary
+                    className={
+                        MSG_GRID +
+                        " cursor-pointer list-none [&::-webkit-details-marker]:hidden hover:bg-gray-50"
+                    }
+                >
                     <span
                         aria-hidden="true"
-                        className="inline-block w-3 text-gray-400 transition-transform group-open:rotate-90 shrink-0"
+                        className="inline-block w-3 text-gray-400 transition-transform group-open:rotate-90"
                     >
                         ▶
                     </span>
-                    <span className="text-gray-400 tabular-nums w-8 text-right shrink-0">
-                        #{m.index}
+                    <span className="text-gray-500 tabular-nums text-right">
+                        {m.index}
                     </span>
                     <span
                         className={
-                            "inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium shrink-0 " +
-                            kindBadgeClass(kind)
-                        }
-                    >
-                        {kind}
-                    </span>
-                    <span
-                        className={
-                            "tabular-nums shrink-0 " +
+                            "tabular-nums text-right " +
                             (slowGen
                                 ? "text-red-700 font-medium"
-                                : "text-gray-500")
+                                : "text-gray-600")
                         }
                     >
                         {fmtMs(m.generationMs)}
                     </span>
-                    {m.toolUses[0] && (
-                        <span className="shrink-0 flex items-center gap-1">
-                            <ToolChip tool={m.toolUses[0].toolName} />
-                            <span
-                                className={
-                                    "tabular-nums " +
-                                    (slowTool
-                                        ? "text-red-700 font-medium"
-                                        : "text-gray-500")
-                                }
-                            >
-                                {fmtMs(m.toolUses[0].durationMs)}
+                    <span
+                        className={
+                            "tabular-nums text-right " +
+                            (slowTool
+                                ? "text-red-700 font-medium"
+                                : "text-gray-600")
+                        }
+                    >
+                        {hasExec ? fmtMs(execMs) : "—"}
+                    </span>
+                    <span className="flex items-center gap-2 min-w-0">
+                        <span
+                            className={
+                                "inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium shrink-0 " +
+                                kindBadgeClass(kind)
+                            }
+                        >
+                            {kind}
+                        </span>
+                        {m.toolUses[0] && (
+                            <span className="shrink-0">
+                                <ToolChip tool={m.toolUses[0].toolName} />
                             </span>
+                        )}
+                        {hasErrorTool && (
+                            <span className="inline-flex items-center rounded border border-red-200 bg-red-50 text-red-700 px-1 py-0.5 text-[10px] shrink-0">
+                                error
+                            </span>
+                        )}
+                        <span className="text-gray-700 truncate min-w-0">
+                            {preview}
                         </span>
-                    )}
-                    {hasErrorTool && (
-                        <span className="inline-flex items-center rounded border border-red-200 bg-red-50 text-red-700 px-1 py-0.5 text-[10px]">
-                            error
-                        </span>
-                    )}
-                    <span className="text-gray-700 truncate min-w-0">
-                        {preview}
+                    </span>
+                    <span className="tabular-nums text-right text-gray-600">
+                        {fmtTokens(m.outputTokens)}
+                    </span>
+                    <span className="tabular-nums text-right text-gray-600">
+                        {fmtTokens(m.cacheWriteTokens)}
+                    </span>
+                    <span className="tabular-nums text-right text-gray-600">
+                        {fmtTokens(m.cacheReadTokens)}
                     </span>
                 </summary>
                 {hasBody && (
-                    <div className="px-3 py-2 border-t border-gray-100 space-y-2">
+                    <div className="border-t border-gray-100 bg-gray-50/40 divide-y divide-gray-100">
                         {m.thinkingText && (
-                            <div className="border-l-2 border-purple-200 pl-2 text-gray-600 whitespace-pre-wrap break-words">
-                                <span className="text-[10px] uppercase tracking-wide text-purple-500 mr-1">
-                                    thinking
-                                </span>
-                                {m.thinkingMs != null && (
-                                    <span className="text-[10px] tabular-nums text-gray-500 mr-1">
-                                        gen {fmtMs(m.thinkingMs)}
-                                    </span>
+                            <SubRow
+                                kind="thinking"
+                                genMs={m.thinkingMs}
+                                execMs={null}
+                                isError={false}
+                                outputTokens={m.thinkingOutputTokens}
+                            >
+                                <div className="text-gray-600 whitespace-pre-wrap break-words">
+                                    {m.thinkingText}
+                                </div>
+                            </SubRow>
+                        )}
+                        {m.toolUses.map((t, i) => (
+                            <SubRow
+                                key={`${m.index}-tool-${i}`}
+                                kind="tool"
+                                genMs={t.genMs}
+                                execMs={t.durationMs}
+                                isError={t.isError}
+                                toolName={t.toolName}
+                                outputTokens={t.outputTokens}
+                            >
+                                {t.description && (
+                                    <div className="text-gray-500 italic mb-1">
+                                        {t.description}
+                                    </div>
                                 )}
-                                {m.thinkingText}
-                            </div>
-                        )}
-                        {m.toolUses.length > 0 && (
-                            <ul className="space-y-2">
-                                {m.toolUses.map((t, i) => (
-                                    <li key={`${m.index}-${i}`} className="space-y-1">
-                                        <div className="flex items-start gap-2 flex-wrap">
-                                            <ToolChip tool={t.toolName} />
-                                            {t.genMs != null && (
-                                                <span className="tabular-nums shrink-0 text-gray-500">
-                                                    gen {fmtMs(t.genMs)}
-                                                </span>
-                                            )}
-                                            <span
-                                                className={
-                                                    "tabular-nums shrink-0 " +
-                                                    ((t.durationMs ?? 0) >= SLOW_TOOL_MS
-                                                        ? "text-red-700 font-medium"
-                                                        : "text-gray-500")
-                                                }
-                                            >
-                                                exec {fmtMs(t.durationMs)}
-                                            </span>
-                                            {t.description && (
-                                                <span className="text-gray-500 italic">
-                                                    {t.description}
-                                                </span>
-                                            )}
-                                            {t.isError && (
-                                                <span className="inline-flex items-center rounded border border-red-200 bg-red-50 text-red-700 px-1 py-0.5 text-[10px]">
-                                                    error
-                                                </span>
-                                            )}
-                                        </div>
-                                        {t.argText && (
-                                            <div className="text-gray-800 whitespace-pre-wrap break-all bg-gray-50 border border-gray-200 rounded px-2 py-1">
-                                                {t.argText}
-                                            </div>
-                                        )}
-                                        {t.resultPreview && (
-                                            <div
-                                                className={
-                                                    "text-[11px] whitespace-pre-wrap break-words border rounded px-2 py-1 " +
-                                                    (t.isError
-                                                        ? "border-red-200 bg-red-50/40 text-red-800"
-                                                        : "border-gray-100 bg-white text-gray-600")
-                                                }
-                                            >
-                                                <span className="text-[10px] uppercase tracking-wide text-gray-400 mr-1">
-                                                    result
-                                                </span>
-                                                {t.resultPreview}
-                                            </div>
-                                        )}
-                                    </li>
-                                ))}
-                            </ul>
-                        )}
+                                {t.argText && (
+                                    <div className="text-gray-800 whitespace-pre-wrap break-all bg-white border border-gray-200 rounded px-2 py-1">
+                                        {t.argText}
+                                    </div>
+                                )}
+                                {t.resultPreview && (
+                                    <div
+                                        className={
+                                            "mt-1 text-[11px] whitespace-pre-wrap break-words border rounded px-2 py-1 " +
+                                            (t.isError
+                                                ? "border-red-200 bg-red-50/40 text-red-800"
+                                                : "border-gray-100 bg-white text-gray-600")
+                                        }
+                                    >
+                                        <span className="text-[10px] uppercase tracking-wide text-gray-400 mr-1">
+                                            result
+                                        </span>
+                                        {t.resultPreview}
+                                    </div>
+                                )}
+                            </SubRow>
+                        ))}
                         {m.text && (
-                            <div className="border-l-2 border-green-200 pl-2 text-gray-700 whitespace-pre-wrap break-words">
-                                <span className="text-[10px] uppercase tracking-wide text-green-600 mr-1">
-                                    text
-                                </span>
-                                {m.textMs != null && (
-                                    <span className="text-[10px] tabular-nums text-gray-500 mr-1">
-                                        gen {fmtMs(m.textMs)}
-                                    </span>
-                                )}
-                                {m.text}
-                            </div>
+                            <SubRow
+                                kind="text"
+                                genMs={m.textMs}
+                                execMs={null}
+                                isError={false}
+                                outputTokens={m.textOutputTokens}
+                            >
+                                <div className="text-gray-700 whitespace-pre-wrap break-words">
+                                    {m.text}
+                                </div>
+                            </SubRow>
                         )}
                     </div>
                 )}
