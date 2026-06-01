@@ -552,3 +552,72 @@ describe("approxTokens", () => {
         expect(approxTokens({})).toBe(1);
     });
 });
+
+describe("parseMessages — per-message token summing", () => {
+    // The CLI repeats one usage dict across every event sharing a message_id,
+    // and only the first event carries real values; the rest are zeroed. A
+    // straight sum across the collapsed group must therefore recover the call's
+    // true usage (no double-counting).
+    test("sums token fields across one message_id group", () => {
+        const turns: TurnEntry[] = [
+            {
+                messages: [
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:00.000Z",
+                        completed_at: "2026-01-01T00:00:05.000Z",
+                        generation_duration_ms: 5000,
+                        message_id: "msg_1",
+                        input_tokens: 3,
+                        output_tokens: 120,
+                        cache_creation_tokens: 50,
+                        cache_read_tokens: 9000,
+                        reasoning_tokens: 0,
+                        model: "claude-sonnet-4-6",
+                        content_blocks: [{ block_type: "thinking", thinking: "T" }],
+                    },
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:05.010Z",
+                        completed_at: "2026-01-01T00:00:05.020Z",
+                        generation_duration_ms: 10,
+                        message_id: "msg_1",
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cache_creation_tokens: 0,
+                        cache_read_tokens: 0,
+                        reasoning_tokens: 0,
+                        model: "claude-sonnet-4-6",
+                        content_blocks: [{ block_type: "tool_use", tool_use_id: null }],
+                    },
+                ],
+            },
+        ];
+        const [e] = parseMessages(turns);
+        expect(e.outputTokens).toBe(120);
+        expect(e.cacheReadTokens).toBe(9000);
+        expect(e.cacheWriteTokens).toBe(50);
+        expect(e.inputTokens).toBe(3);
+        expect(e.model).toBe("claude-sonnet-4-6");
+    });
+
+    test("legacy messages with no token fields surface null", () => {
+        const turns: TurnEntry[] = [
+            {
+                messages: [
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:00.000Z",
+                        completed_at: "2026-01-01T00:00:05.000Z",
+                        generation_duration_ms: 5000,
+                        content_blocks: [{ block_type: "thinking", thinking: "T" }],
+                    },
+                ],
+            },
+        ];
+        const [e] = parseMessages(turns);
+        expect(e.outputTokens).toBeNull();
+        expect(e.cacheReadTokens).toBeNull();
+        expect(e.model).toBeNull();
+    });
+});

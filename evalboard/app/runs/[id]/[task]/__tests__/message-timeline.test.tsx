@@ -24,6 +24,7 @@ function makeMessage(overrides: Partial<MessageEvent> = {}): MessageEvent {
         reasoningTokens: null,
         thinkingOutputTokens: null,
         textOutputTokens: 1200,
+        model: null,
         ...overrides,
     };
 }

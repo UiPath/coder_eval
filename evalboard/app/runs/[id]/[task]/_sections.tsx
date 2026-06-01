@@ -3,11 +3,14 @@ import type {
     CriterionResult,
     FlowDebugResult,
     MessageEvent,
+    TokenTotals,
     ToolCall,
 } from "@/lib/runs";
+import { buildThinkingModel } from "@/lib/thinkingSim";
 import { StatusPill } from "@/lib/pills";
 import { displayedTurns } from "@/lib/turns";
 import { Expandable, KindChip, ResultPill, ToolChip } from "./_chips";
+import { ThinkingSimulator } from "./thinking-simulator";
 
 // Thresholds for "this is slow" highlighting on the message timeline.
 // Generation > 10 s is unusual: turn 1 priming is ~7 s, steady state is ~2-3 s.
@@ -380,6 +383,39 @@ export function MessageTimelineSection({ messages }: { messages: MessageEvent[] 
                     ))}
                 </ol>
             </div>
+        </section>
+    );
+}
+
+export function ThinkingCostSection({
+    messages,
+    tokens,
+    recordedCostUsd,
+}: {
+    messages: MessageEvent[];
+    tokens: TokenTotals;
+    recordedCostUsd: number | null;
+}) {
+    const model = buildThinkingModel(messages, tokens, recordedCostUsd);
+    return (
+        <section className="space-y-2">
+            <h2 className="text-sm font-semibold text-gray-900">
+                Cost simulator
+            </h2>
+            <p className="text-[10px] text-gray-500">
+                Project this run&apos;s cost if it had thought more or less, or
+                if tools had returned more or less. Both account for the cache
+                cascade — trimming early content shrinks the transcript every
+                later call re-reads.
+            </p>
+            {model ? (
+                <ThinkingSimulator model={model} />
+            ) : (
+                <div className="text-sm text-gray-500 border border-gray-200 rounded-lg p-3 bg-white">
+                    Can&apos;t project — no recognized model pricing for this
+                    run&apos;s messages.
+                </div>
+            )}
         </section>
     );
 }

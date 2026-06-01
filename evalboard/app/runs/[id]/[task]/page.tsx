@@ -13,6 +13,7 @@ import {
     FlowDebugSection,
     LogTailSection,
     MessageTimelineSection,
+    ThinkingCostSection,
     ToolTimelineSection,
 } from "./_sections";
 
@@ -189,6 +190,13 @@ export default async function TaskPage({
             <CriteriaSection criteria={task.criteria} />
             {task.messages.length > 0 && (
                 <MessageTimelineSection messages={task.messages} />
+            )}
+            {task.messages.length > 0 && task.tokens.total > 0 && (
+                <ThinkingCostSection
+                    messages={task.messages}
+                    tokens={task.tokens}
+                    recordedCostUsd={task.totalCostUsd}
+                />
             )}
             {(task.toolCalls.length > 0 || task.finalAssistantText) && (
                 <ToolTimelineSection

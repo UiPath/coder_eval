@@ -147,6 +147,10 @@ export interface MessageEvent {
     // Output tokens attributed to the text block(s) — the text emission's own
     // recorded output_tokens. Null when there's no output figure or no text block.
     textOutputTokens: number | null;
+    // Model id on the emission (e.g. "claude-sonnet-4-6"). Consumed by the
+    // cascade-aware thinking-cost simulator to price each message. null when
+    // no raw in the group recorded it.
+    model: string | null;
 }
 
 export interface MessageToolUse {
@@ -743,11 +747,15 @@ interface MessageEntry {
     // present, falling back to a wall-clock gap heuristic for older runs that
     // didn't record it.
     message_id?: string | null;
+    // Per-message token usage (recorded since coder_eval #336). Absent on
+    // legacy runs. cache_* keys here are the message-record names, distinct
+    // from the iteration token_usage's cache_*_input_tokens.
     input_tokens?: number | null;
     output_tokens?: number | null;
     cache_creation_tokens?: number | null;
     cache_read_tokens?: number | null;
     reasoning_tokens?: number | null;
+    model?: string | null;
 }
 
 export interface TurnEntry {
@@ -922,6 +930,7 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             cacheWriteTokens: number | null;
             cacheReadTokens: number | null;
             reasoningTokens: number | null;
+            model: string | null;
         };
         const raws: Raw[] = [];
         for (const msg of turn.messages ?? []) {
@@ -957,6 +966,7 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                     typeof msg.reasoning_tokens === "number"
                         ? msg.reasoning_tokens
                         : null,
+                model: typeof msg.model === "string" ? msg.model : null,
             };
             for (const b of msg.content_blocks ?? []) {
                 if (b.block_type === "thinking") {
@@ -1086,11 +1096,15 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             // Likewise for text: a text emission's output_tokens is its share.
             let textOutSum = 0;
             let haveTextOut = false;
+            // First non-null model id in the group — consumed by the
+            // cascade-aware thinking-cost simulator to price each message.
+            let model: string | null = null;
             for (const r of group) {
                 blockTypes.push(...r.blockTypes);
                 thinkingParts.push(...r.thinkingParts);
                 textParts.push(...r.textParts);
                 toolUses.push(...r.toolUses);
+                if (model == null && r.model != null) model = r.model;
                 if (r.generationMs != null) {
                     genSum += r.generationMs;
                     haveGen = true;
@@ -1165,6 +1179,7 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 reasoningTokens: haveReasoning ? reasoningSum : null,
                 thinkingOutputTokens: haveThinkingOut ? thinkingOutSum : null,
                 textOutputTokens,
+                model,
             });
             group = [];
         };
@@ -1293,7 +1308,11 @@ export async function readTaskDetail(
     const flowDebug = parseFlowDebug(criteria);
     const toolCalls = parseToolCalls(task?.iterations ?? []);
     const messages = parseMessages(task?.iterations ?? []);
-    const tokens = sumTokenTotals(task?.iterations ?? []);
+    // Prefer the authoritative iteration token_usage. Some runs (e.g. partial
+    // CLI captures) never recorded it; fall back to the collapsed per-message
+    // tokens so the cost simulator + token columns still have a baseline.
+    let tokens = sumTokenTotals(task?.iterations ?? []);
+    if (tokens.total === 0) tokens = sumMessageTokens(messages);
 
     const taskDescription =
         task?.task_config?.resolved?.initial_prompt ??
@@ -1346,6 +1365,30 @@ function sumTokenTotals(turns: TurnEntry[]): TokenTotals {
         output += tu.output_tokens ?? 0;
         cacheCreation += tu.cache_creation_input_tokens ?? 0;
         cacheRead += tu.cache_read_input_tokens ?? 0;
+    }
+    return {
+        input,
+        output,
+        cacheCreation,
+        cacheRead,
+        total: input + output + cacheCreation + cacheRead,
+    };
+}
+
+// Fallback token totals from the collapsed per-message stream, for runs whose
+// iteration token_usage was never recorded. MessageEvent tokens are already
+// summed per message_id group (see parseMessages), so they don't double-count
+// the CLI's repeated usage dicts the way summing raw MessageEntry rows would.
+function sumMessageTokens(messages: MessageEvent[]): TokenTotals {
+    let input = 0;
+    let output = 0;
+    let cacheCreation = 0;
+    let cacheRead = 0;
+    for (const m of messages) {
+        input += m.inputTokens ?? 0;
+        output += m.outputTokens ?? 0;
+        cacheCreation += m.cacheWriteTokens ?? 0;
+        cacheRead += m.cacheReadTokens ?? 0;
     }
     return {
         input,
