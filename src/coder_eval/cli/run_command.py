@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from ..config import settings
 from ..logging_config import setup_logging
-from ..models import AgentKind, RunSummary
+from ..models import AgentKind, ResolvedTask, RunSummary, TaskResult
 from ..models.enums import PermissionMode
 from ..orchestration.config import BatchRunConfig
 from ..path_utils import create_latest_symlink, format_task_log_id
@@ -120,6 +120,19 @@ def run_command(
         None,
         "--run-dir",
         help="Custom run directory (default: auto-generated timestamped directory in runs/)",
+    ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help=(
+            "Resume an interrupted run: skip tasks already finalized in --run-dir and "
+            "run only the rest, folding prior results into run.json. A task counts as "
+            "finalized once it has ANY final status — including FAILED/ERROR — so resume "
+            "does NOT retry failures (delete a task's task.json to force a re-run). "
+            "Requires --run-dir. A config mismatch (model/backend/flags) is warned, not "
+            "refused — the resumed tasks keep their original-config results, so the run "
+            "mixes configs; use a fresh --run-dir to keep configs separate."
+        ),
     ),
     max_parallel: int = typer.Option(
         1,
@@ -281,6 +294,10 @@ def run_command(
 
         coder-eval run tasks/*.yaml --tags golden,basic --exclude-tags example
     """
+    # --resume needs an explicit run dir to resume into (auto-generated dirs are always fresh).
+    if resume and run_dir is None:
+        raise typer.BadParameter("--resume requires --run-dir pointing at the run to continue.")
+
     # Validate permission mode early for clear error message
     if permission_mode is not None:
         allowed_modes = {m.value for m in PermissionMode}
@@ -356,6 +373,7 @@ def run_command(
                 repeats=repeats,
                 driver=driver,
                 verbose=verbose,
+                resume=resume,
             )
         )
     except KeyboardInterrupt:
@@ -386,6 +404,7 @@ async def _run_all_tasks(
     repeats: int | None = None,
     driver: str | None = None,
     verbose: bool = False,
+    resume: bool = False,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -451,7 +470,7 @@ async def _run_all_tasks(
 
     # Always run through experiment layer (defaults to experiments/default.yaml)
     summary, failed_suite_gates = await _run_with_experiment(
-        all_task_files, config, experiment_path, stream_mode, max_parallel
+        all_task_files, config, experiment_path, stream_mode, max_parallel, resume=resume
     )
 
     # Aggregate task logs into run.log
@@ -522,6 +541,7 @@ async def _run_with_experiment(
     experiment_path: Path | None,
     stream_mode: str | None,
     max_parallel: int,
+    resume: bool = False,
 ) -> tuple[RunSummary, int]:
     """Run tasks through the experiment resolution layer.
 
@@ -538,7 +558,14 @@ async def _run_with_experiment(
     Returns:
         RunSummary with aggregated results.
     """
-    from ..orchestration.batch import run_batch
+    from ..orchestration.batch import (
+        compute_run_fingerprint,
+        fingerprint_diff,
+        partition_for_resume,
+        read_run_fingerprint,
+        run_batch,
+        write_run_fingerprint,
+    )
     from ..orchestration.experiment import (
         DEFAULT_EXPERIMENT_PATH,
         aggregate_results,
@@ -578,12 +605,53 @@ async def _run_with_experiment(
             + "(load errors or `skip: true` — see run.json `skipped_tasks` for reasons)"
         )
 
+    # Warn (don't refuse) when a --resume config differs from the original run. The
+    # per-task path key (variant/task_id/NN) doesn't encode the run config, so resumed
+    # tasks keep their original-config results — surfacing the mismatch makes the
+    # resulting mixed-config run.json visible instead of silent. Best-effort and
+    # informational: a missing stamp (run predates this feature) is tolerated.
+    current_fingerprint = compute_run_fingerprint(
+        config, experiment.experiment_id, settings.api_backend.value, settings.bedrock_model
+    )
+    if resume:
+        prior_fingerprint = read_run_fingerprint(config.run_dir)
+        if prior_fingerprint is not None:
+            diffs = fingerprint_diff(prior_fingerprint, current_fingerprint)
+            if diffs:
+                detail = "; ".join(f"{k}: {old!r} → {new!r}" for k, (old, new) in sorted(diffs.items()))
+                console.print(
+                    f"[yellow]⚠[/] --resume into {config.run_dir} but the run config changed ({detail}). "
+                    + "Already-finalized tasks keep their original-config results, so this run mixes "
+                    + "configs — use a fresh --run-dir to keep them separate."
+                )
+    write_run_fingerprint(config.run_dir, current_fingerprint)
+
+    # On --resume, peel off tasks already finalized in the run dir. They are not
+    # re-executed but are folded back into run.json (and all downstream reports)
+    # via prior_results so the summary covers the whole run. `resolved` stays the
+    # full set — suite rollups below need every task, run or not.
+    to_run: list[ResolvedTask] = resolved
+    prior_results: list[TaskResult] = []
+    prior_resolved: list[ResolvedTask] = []
+    if resume:
+        to_run, prior_results, prior_resolved = partition_for_resume(resolved)
+        console.print(
+            f"[cyan]↻ Resume:[/] {len(prior_results)} task(s) already complete, " + f"running {len(to_run)} remaining"
+        )
+
     # Print execution mode
-    print_execution_mode(len(resolved), max_parallel)
+    print_execution_mode(len(to_run), max_parallel)
 
     summary, task_results = await _run_with_callbacks(
-        execute_fn=lambda **kwargs: run_batch(resolved_tasks=resolved, config=config, skipped_tasks=skipped, **kwargs),
-        task_count=len(resolved),
+        execute_fn=lambda **kwargs: run_batch(
+            resolved_tasks=to_run,
+            config=config,
+            skipped_tasks=skipped,
+            prior_results=prior_results,
+            prior_resolved=prior_resolved,
+            **kwargs,
+        ),
+        task_count=len(to_run),
         stream_mode=stream_mode,
     )
 

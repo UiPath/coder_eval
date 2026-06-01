@@ -11,6 +11,7 @@ upstream by resolve_all_tasks() in experiment.py.
 # pyright: reportImportCycles=false
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable
 from datetime import datetime
@@ -43,6 +44,8 @@ async def run_batch(
     on_batch_start: Callable[[int], None] | None = None,
     stream_callback_factory: Callable[[str], StreamCallback] | None = None,
     skipped_tasks: list[SkippedTask] | None = None,
+    prior_results: list[TaskResult] | None = None,
+    prior_resolved: list[ResolvedTask] | None = None,
 ) -> tuple[RunSummary, list[TaskResult]]:
     """Run resolved tasks in batch with optional parallelism.
 
@@ -57,9 +60,15 @@ async def run_batch(
         stream_callback_factory: Optional factory for streaming callbacks.
         skipped_tasks: Task YAMLs that failed to load upstream and should be
             recorded in the run summary (informational; they don't run).
+        prior_results: Already-complete TaskResults (loaded from disk on
+            --resume) to fold into run.json so the summary covers the whole
+            run, not just this batch. These are not re-executed.
+        prior_resolved: ResolvedTasks matching prior_results — used only to
+            populate tags/source-path in the summary's per-task entries.
 
     Returns:
-        Tuple of (RunSummary, list[TaskResult]).
+        Tuple of (RunSummary, list[TaskResult]) — results cover this batch
+        plus any prior_results.
     """
     from ..orchestrator import Orchestrator
 
@@ -69,8 +78,11 @@ async def run_batch(
         on_batch_start(len(resolved_tasks))
 
     semaphore = asyncio.Semaphore(config.max_parallel)
-    task_tags: dict[str, list[str]] = {rt.task.task_id: rt.task.tags for rt in resolved_tasks}
-    task_paths: dict[str, str] = {rt.task.task_id: str(rt.task_file) for rt in resolved_tasks}
+    # Tags/paths cover both freshly-run and resumed-prior tasks so every entry
+    # in run.json carries its metadata.
+    metadata_tasks = [*resolved_tasks, *(prior_resolved or [])]
+    task_tags: dict[str, list[str]] = {rt.task.task_id: rt.task.tags for rt in metadata_tasks}
+    task_paths: dict[str, str] = {rt.task.task_id: str(rt.task_file) for rt in metadata_tasks}
 
     async def run_single(rt: ResolvedTask) -> TaskResult:
         """Run a single resolved task with semaphore for concurrency control."""
@@ -158,9 +170,12 @@ async def run_batch(
             processed.append(result)
 
     end_time = datetime.now()
+    # Fold in any already-complete results (--resume) so run.json and all
+    # downstream reports describe the whole run, not just this batch.
+    all_results = [*(prior_results or []), *processed]
     summary = _generate_run_summary(
         config.run_dir,
-        processed,
+        all_results,
         start_time,
         end_time,
         task_tags,
@@ -168,7 +183,7 @@ async def run_batch(
         max_parallel=config.max_parallel,
         skipped_tasks=skipped_tasks or [],
     )
-    return summary, processed
+    return summary, all_results
 
 
 def _safe_notify(callback: Callable[[TaskResult], None] | None, result: TaskResult) -> None:
@@ -226,6 +241,127 @@ def _create_error_task_result(
         row_id=row_id,
         replicate_index=replicate_index,
     )
+
+
+def partition_for_resume(
+    resolved_tasks: list[ResolvedTask],
+) -> tuple[list[ResolvedTask], list[TaskResult], list[ResolvedTask]]:
+    """Split resolved tasks into (to_run, prior_results, prior_resolved) for --resume.
+
+    A task is already-complete when its task.json exists, parses, and carries a
+    final_status. task.json is written atomically at end-of-run, so any parseable
+    file with a status is a finished task (no partial-write ambiguity). Complete
+    tasks are reloaded into TaskResults (to fold into run.json) and excluded from
+    to_run; everything else — including failed-to-parse — re-runs.
+
+    Args:
+        resolved_tasks: Fully-resolved tasks for the whole run.
+
+    Returns:
+        (to_run, prior_results, prior_resolved):
+          - to_run: tasks still needing execution
+          - prior_results: reloaded results for already-complete tasks
+          - prior_resolved: the ResolvedTask for each prior_result (same order)
+    """
+    to_run: list[ResolvedTask] = []
+    prior_results: list[TaskResult] = []
+    prior_resolved: list[ResolvedTask] = []
+    for rt in resolved_tasks:
+        tr = _load_completed_result(rt)
+        if tr is None:
+            to_run.append(rt)
+        else:
+            prior_results.append(tr)
+            prior_resolved.append(rt)
+    return to_run, prior_results, prior_resolved
+
+
+def _load_completed_result(rt: ResolvedTask) -> TaskResult | None:
+    """Reconstruct a TaskResult from a finalized task.json, or None if absent/incomplete."""
+    report_path = rt.run_dir / "task.json"
+    try:
+        text = report_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        result = EvaluationResult.model_validate_json(text)
+    except ValueError:
+        # Malformed JSON or schema mismatch (pydantic ValidationError subclasses
+        # ValueError) → treat as not-yet-complete so the task re-runs.
+        return None
+    if not result.final_status:
+        return None
+    return TaskResult(
+        task_id=rt.task.task_id,
+        variant_id=rt.variant_id,
+        result=result,
+        duration=result.duration_seconds or 0.0,
+        suite_id=rt.task.suite_id,
+        row_id=rt.task.row_id,
+        replicate_index=rt.replicate_index,
+    )
+
+
+# --- resume config fingerprint ------------------------------------------------
+# The per-task path key (variant_id/task_id/NN) does NOT encode result-affecting
+# run config like the model or backend. So --resume, which matches finalized tasks
+# purely by that path, would otherwise fold results produced under a *different*
+# config into the new run (e.g. resuming a Sonnet run with --model opus keeps the
+# Sonnet results for already-finalized tasks). We stamp the config on every run and
+# warn (don't refuse) when a resume's config differs (in _run_with_experiment) so
+# the resulting mixed-config run.json is surfaced rather than silent.
+RESUME_FINGERPRINT_FILE = "resume_fingerprint.json"
+
+
+def compute_run_fingerprint(
+    config: BatchRunConfig,
+    experiment_id: str,
+    backend: str,
+    bedrock_model: str | None,
+) -> dict[str, object]:
+    """Snapshot the run config for the --resume drift warning.
+
+    Dumps the whole config plus the model-selection context that lives outside it.
+    Best-effort and informational only — any difference on resume produces a
+    warning (resume always proceeds), so this is intentionally not exhaustive about
+    which keys are "result-affecting". A benign diff (e.g. --max-parallel) just
+    warns harmlessly. mode="json" yields JSON-comparable scalars that match what is
+    written to / read back from disk.
+    """
+    return config.model_dump(mode="json") | {
+        "experiment_id": experiment_id,
+        "backend": backend,
+        "bedrock_model": bedrock_model,
+    }
+
+
+def write_run_fingerprint(run_dir: Path, fingerprint: dict[str, object]) -> None:
+    """Stamp the run config at the run root for a future --resume to validate against."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / RESUME_FINGERPRINT_FILE).write_text(json.dumps(fingerprint, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def read_run_fingerprint(run_dir: Path) -> dict[str, object] | None:
+    """Load a prior run's config stamp, or None if absent/unreadable (e.g. a pre-feature run).
+
+    A stamp that parses to a non-object (a bare number/string/list from external
+    corruption) is folded into the tolerated missing-stamp path rather than reaching
+    fingerprint_diff, where a non-dict would raise TypeError or silently no-op the guard.
+    """
+    try:
+        data = json.loads((run_dir / RESUME_FINGERPRINT_FILE).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def fingerprint_diff(prior: dict[str, object], current: dict[str, object]) -> dict[str, tuple[object, object]]:
+    """Keys present in BOTH stamps that disagree, as ``{key: (prior, current)}``.
+
+    Only keys present in ``prior`` are compared, so adding fingerprint fields in a
+    later version never false-flags a resume of an older run.
+    """
+    return {k: (prior[k], current[k]) for k in current if k in prior and prior[k] != current[k]}
 
 
 def _generate_run_summary(
