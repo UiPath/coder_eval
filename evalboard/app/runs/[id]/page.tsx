@@ -9,6 +9,7 @@ import {
 import { readRunReviewIndex, indexByTask, tagCountsForRun } from "@/lib/reviews";
 import { fmtRunTime } from "@/lib/format";
 import { AnalysisPanel } from "./analysis-panel";
+import { RefreshButton } from "./refresh-button";
 import { RunView } from "./run-view";
 
 export const dynamic = "force-dynamic";
@@ -43,13 +44,16 @@ export default async function RunPage({
                             Ad-hoc
                         </span>
                     )}
-                    <a
-                        href={`/api/download?run=${encodeURIComponent(id)}`}
-                        className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 hover:text-studio-blue"
-                        download
-                    >
-                        ↓ Download run (.zip)
-                    </a>
+                    <div className="ml-auto flex items-center gap-2">
+                        <RefreshButton runId={id} />
+                        <a
+                            href={`/api/download?run=${encodeURIComponent(id)}`}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 hover:text-studio-blue"
+                            download
+                        >
+                            ↓ Download run (.zip)
+                        </a>
+                    </div>
                 </div>
                 <div className="text-xs text-gray-500 tabular-nums font-mono">
                     {id}

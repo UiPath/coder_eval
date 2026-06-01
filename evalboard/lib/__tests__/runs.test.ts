@@ -1,9 +1,18 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import {
+    afterAll,
+    afterEach,
+    beforeAll,
+    beforeEach,
+    describe,
+    expect,
+    test,
+} from "vitest";
 import {
     type ArtifactRef,
+    clearRunCacheDir,
     isExcludedArtifact,
     sortArtifacts,
     toTaskRow,
@@ -140,5 +149,45 @@ describe("walkArtifacts", () => {
         expect(rels.some((r) => r.includes("uipath-rpa"))).toBe(false);
         expect(rels.some((r) => r.includes("SKILL.md"))).toBe(false);
         expect(rels).not.toContain("alias.flow");
+    });
+});
+
+describe("clearRunCacheDir", () => {
+    let root: string;
+
+    beforeEach(async () => {
+        root = await fs.mkdtemp(path.join(os.tmpdir(), "clear-cache-"));
+    });
+    afterEach(async () => {
+        await fs.rm(root, { recursive: true, force: true });
+    });
+
+    test("removes the run's cache dir for a valid id", async () => {
+        const runDir = path.join(root, "20260601T120000");
+        await fs.mkdir(runDir, { recursive: true });
+        await fs.writeFile(path.join(runDir, "run.json"), "{}\n");
+
+        expect(await clearRunCacheDir(root, "20260601T120000")).toBe(true);
+        await expect(fs.access(runDir)).rejects.toThrow();
+    });
+
+    test("never-cached run is a harmless no-op (still true)", async () => {
+        expect(await clearRunCacheDir(root, "absent-run")).toBe(true);
+    });
+
+    test('rejects "." and ".." so rm cannot escape root', async () => {
+        const marker = path.join(root, "keep.txt");
+        await fs.writeFile(marker, "x");
+
+        expect(await clearRunCacheDir(root, ".")).toBe(false);
+        expect(await clearRunCacheDir(root, "..")).toBe(false);
+        // Root (and thus its contents) untouched.
+        await expect(fs.access(marker)).resolves.toBeUndefined();
+        await expect(fs.access(root)).resolves.toBeUndefined();
+    });
+
+    test("rejects ids with path separators", async () => {
+        expect(await clearRunCacheDir(root, "a/b")).toBe(false);
+        expect(await clearRunCacheDir(root, "../sibling")).toBe(false);
     });
 });

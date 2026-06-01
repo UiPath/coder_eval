@@ -1531,3 +1531,21 @@ export async function resolveSafePath(
     }
     return candidateReal;
 }
+
+// Delete a run's locally-cached blob copy under `root` so the next view
+// re-downloads it from storage. `force: true` makes a never-cached run a
+// harmless no-op. Returns false (deleting nothing) for an unsafe id — note
+// isValidId still admits "." and ".." (dots are word-ish), so require the
+// resolved target to be a strict child of `root` before rm can run, or a "."
+// id would nuke the cache root and ".." its parent.
+export async function clearRunCacheDir(
+    root: string,
+    id: string,
+): Promise<boolean> {
+    if (!isValidId(id)) return false;
+    const base = path.resolve(root);
+    const dir = path.resolve(base, id);
+    if (dir === base || !dir.startsWith(base + path.sep)) return false;
+    await fs.rm(dir, { recursive: true, force: true });
+    return true;
+}
