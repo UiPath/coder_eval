@@ -17,7 +17,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from coder_eval.isolation.docker_runner import CONTAINER_OUTPUT_DIR, DockerRunner, _validate_extra_mount
+from coder_eval.isolation.docker_runner import (
+    CONTAINER_OUTPUT_DIR,
+    DockerRunner,
+    _sanitize_container_name_component,
+    _validate_extra_mount,
+)
 from coder_eval.models import FileExistsCriterion, SandboxConfig, TaskDefinition
 
 
@@ -164,6 +169,18 @@ class TestDockerRunnerUserAndOutput:
                 # Should be the container-side path, not the host path
                 assert output_arg == str(CONTAINER_OUTPUT_DIR)
                 assert str(output_dir) not in output_arg
+
+
+class TestStagingPrefixSanitized:
+    """Dataset fan-out ids are ``suite_id/row_id``; the ``/`` must be stripped from the
+    staging mkdtemp prefix (as ``run()`` does) or task setup dies at 0s."""
+
+    def test_sanitized_dataset_row_id_creates_staging_dir(self):
+        safe = _sanitize_container_name_component("skill-flow-ixp-activation/explicit")
+        assert "/" not in safe
+        staging = tempfile.mkdtemp(prefix=f"coder_eval_docker_{safe}_")
+        assert Path(staging).is_dir()
+        Path(staging).rmdir()
 
 
 class TestWindowsDriveLetterSource:

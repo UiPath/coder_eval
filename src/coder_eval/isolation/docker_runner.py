@@ -308,7 +308,9 @@ class DockerRunner:
         # the container so the in-container Orchestrator writes
         # task.json/task.log/task.html/artifacts/ straight into the host
         # filesystem -- no copy step, paths are symmetric inside and out.
-        staging = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix=f"coder_eval_docker_{self.rt.task.task_id}_"))
+        # Sanitize task_id: dataset ids are ``suite_id/row_id`` and the ``/`` breaks mkdtemp (missing parent dir).
+        safe_staging_id = _sanitize_container_name_component(self.rt.task.task_id)
+        staging = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix=f"coder_eval_docker_{safe_staging_id}_"))
         input_dir = staging / "input"
         await asyncio.to_thread(input_dir.mkdir)
         output_dir = self.rt.run_dir.resolve()
