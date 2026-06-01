@@ -4,7 +4,9 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import type { TaskResultSummary } from "@/lib/runs";
 import type { ReviewIndexEntry } from "@/lib/reviews-types";
-import { fmtCompact, humanizeTaskId } from "@/lib/format";
+import { fmtCompact, fmtUsd, humanizeTaskId } from "@/lib/format";
+import { tokenBucketUsd, type TokenKind } from "@/lib/pricing";
+import { type Unit, UnitToggle } from "@/app/_components/unit-toggle";
 import { StatusPill } from "@/lib/pills";
 import { statusSortRank } from "@/lib/status";
 import {
@@ -15,6 +17,11 @@ import {
     turnsCellClasses,
 } from "@/lib/turns";
 import { ChipButton } from "./chips";
+import {
+    type ColHelp,
+    HelpPopover,
+    TOKEN_COLUMN_HELP,
+} from "@/app/_components/col-help";
 
 type SortKey =
     | "task"
@@ -27,70 +34,18 @@ type SortKey =
     | "cw"
     | "cr";
 
-// ---- Token-column help: what the number is, what drives it up, how to bring
-// it down. Rendered as a static, selectable popover from an ⓘ next to the
-// header (click to open, click-outside / Esc to close).
-type ColHelp = {
-    title: string;
-    body: string;
-    causes?: string; // common causes of high values
-    fix?: string; // potential fixes
-};
-
+// Per-column help shown from an ⓘ next to the header. Token-column copy is
+// shared with the message timeline via TOKEN_COLUMN_HELP; Cost is grid-specific
+// (the authoritative SDK total for the task).
 const COLUMN_HELP: Partial<Record<SortKey, ColHelp>> = {
-    output: {
-        title: "Output tokens",
-        body: "Text, code, tool arguments and reasoning the model generated.",
-        causes: "verbose final answers, large file rewrites, heavy reasoning.",
-        fix: "ask for concise output, scope edits to smaller diffs, cap max_output_tokens / max_turns.",
-    },
-    cw: {
-        title: "Cache-write tokens",
-        body: "Context written into the prompt cache this task (cache_creation_input_tokens).",
-        causes: "the cached prefix keeps changing — new files read mid-run, a growing transcript — so it's re-written instead of reused.",
-        fix: "keep stable content (system prompt, skills, instructions) at the front of the prompt; don't inject volatile content early; reuse sessions.",
-    },
-    cr: {
-        title: "Cache-read tokens",
-        body: "Cached input re-billed every turn (cache_read_input_tokens). Usually the dominant cost line.",
-        causes: "large context (big files, long transcript, many skills/tools) replayed on every turn × many turns.",
-        fix: "put less in context (smaller file reads, fewer files), shorten the run (fewer turns), trim system/skill payloads, compact long transcripts.",
+    ...TOKEN_COLUMN_HELP,
+    cost: {
+        title: "Cost (USD)",
+        body: "Total billed cost for this task, reported by the SDK (summed across turns).",
+        causes: "long runs, large context replayed each turn, verbose output, or an expensive model.",
+        fix: "fewer turns, less context, more concise output; use a cheaper model where acceptable.",
     },
 };
-
-function HelpPopover({ help, align }: { help: ColHelp; align: "left" | "right" }) {
-    return (
-        <div
-            role="tooltip"
-            // Anchor under the ⓘ; align to the same edge as the column text so
-            // it stays inside the table on the right-aligned token columns.
-            className={`absolute top-full z-20 mt-1.5 w-72 cursor-auto rounded-md border border-gray-200 bg-white p-3 text-left text-xs font-normal leading-snug text-gray-600 shadow-lg ${
-                align === "right" ? "right-0" : "left-0"
-            }`}
-            // Keep clicks inside the card from sorting / closing.
-            onClick={(e) => e.stopPropagation()}
-        >
-            <div className="font-semibold text-gray-900">{help.title}</div>
-            <p className="mt-1">{help.body}</p>
-            {help.causes && (
-                <p className="mt-2">
-                    <span className="font-medium text-gray-700">
-                        Common causes:
-                    </span>{" "}
-                    {help.causes}
-                </p>
-            )}
-            {help.fix && (
-                <p className="mt-1">
-                    <span className="font-medium text-gray-700">
-                        Reduce by:
-                    </span>{" "}
-                    {help.fix}
-                </p>
-            )}
-        </div>
-    );
-}
 
 function fmtTableDuration(s: number | null): string {
     if (s == null) return "—";
@@ -103,6 +58,18 @@ function fmtTableDuration(s: number | null): string {
 function fmtCost(c: number | null): string {
     if (c == null) return "—";
     return `$${c.toFixed(3)}`;
+}
+
+// Render a token column either as a compact token count or, in USD mode, as the
+// estimated dollar value of that bucket priced from the task's model.
+function tokenCell(
+    unit: Unit,
+    model: string | null,
+    tokens: number | null,
+    kind: TokenKind,
+): string {
+    if (unit === "usd") return fmtUsd(tokenBucketUsd(model, tokens, kind));
+    return tokens != null ? fmtCompact(tokens) : "—";
 }
 
 const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
@@ -174,9 +141,9 @@ const COLUMNS: Array<{
     { key: "duration", header: "Duration", align: "right" },
     { key: "cost", header: "Cost", align: "right" },
     { key: "turns", header: "Turns", align: "right" },
+    { key: "cr", header: "Cache R", align: "right" },
+    { key: "cw", header: "Cache W", align: "right" },
     { key: "output", header: "Out", align: "right" },
-    { key: "cw", header: "Cache+", align: "right" },
-    { key: "cr", header: "Cache↺", align: "right" },
 ];
 
 export function TaskGrid({
@@ -202,6 +169,9 @@ export function TaskGrid({
         key: SortKey;
         dir: "asc" | "desc";
     } | null>(null);
+
+    // Token columns can be shown as counts or as their estimated USD value.
+    const [unit, setUnit] = useState<Unit>("tokens");
 
     // Which column's help popover is open (one at a time). Dismissed by a click
     // outside any popover/trigger or by Escape.
@@ -251,7 +221,11 @@ export function TaskGrid({
     };
 
     return (
-        <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
+        <div className="space-y-2">
+            <div className="flex justify-end">
+                <UnitToggle value={unit} onChange={setUnit} />
+            </div>
+            <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
             <table className="w-full text-sm">
                 <thead>
                     <tr className="bg-gray-50 border-b border-gray-200 text-left text-gray-600">
@@ -476,27 +450,36 @@ export function TaskGrid({
                             </td>
                             <td
                                 className="py-3 px-4 text-right tabular-nums text-gray-700"
-                                title="output_tokens"
+                                title="cache_read_input_tokens (cached tokens re-billed each turn — usually the dominant cost line)"
                             >
-                                {t.outputTokens != null
-                                    ? fmtCompact(t.outputTokens)
-                                    : "—"}
+                                {tokenCell(
+                                    unit,
+                                    t.model,
+                                    t.cacheReadTokens,
+                                    "cacheRead",
+                                )}
                             </td>
                             <td
                                 className="py-3 px-4 text-right tabular-nums text-gray-700"
                                 title="cache_creation_input_tokens (tokens written to cache this task)"
                             >
-                                {t.cacheCreationTokens != null
-                                    ? fmtCompact(t.cacheCreationTokens)
-                                    : "—"}
+                                {tokenCell(
+                                    unit,
+                                    t.model,
+                                    t.cacheCreationTokens,
+                                    "cacheWrite",
+                                )}
                             </td>
                             <td
                                 className="py-3 px-4 text-right tabular-nums text-gray-700"
-                                title="cache_read_input_tokens (cached tokens re-billed each turn — usually the dominant cost line)"
+                                title="output_tokens"
                             >
-                                {t.cacheReadTokens != null
-                                    ? fmtCompact(t.cacheReadTokens)
-                                    : "—"}
+                                {tokenCell(
+                                    unit,
+                                    t.model,
+                                    t.outputTokens,
+                                    "output",
+                                )}
                             </td>
                         </tr>
                         );
@@ -513,6 +496,7 @@ export function TaskGrid({
                     )}
                 </tbody>
             </table>
+            </div>
         </div>
     );
 }

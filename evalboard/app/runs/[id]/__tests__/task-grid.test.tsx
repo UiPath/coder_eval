@@ -7,6 +7,7 @@ function row(
     taskId: string,
     actualCommands: number | null,
     expectedTurns: number | null,
+    extra: Partial<TaskResultSummary> = {},
 ): TaskResultSummary {
     return {
         taskId,
@@ -21,8 +22,10 @@ function row(
         outputTokens: null,
         cacheCreationTokens: null,
         cacheReadTokens: null,
+        model: null,
         tags: [],
         skill: null,
+        ...extra,
     };
 }
 
@@ -97,9 +100,9 @@ describe("TaskGrid — Turns column", () => {
             "Duration",
             "Cost",
             "Turns",
+            "Cache R",
+            "Cache W",
             "Out",
-            "Cache+",
-            "Cache↺",
         ]);
     });
 });
@@ -108,7 +111,7 @@ describe("TaskGrid — column help popover", () => {
     test("ⓘ toggles a static help card; Escape closes it", () => {
         render(<TaskGrid runId="r1" tasks={[row("x", 1, 1)]} />);
         const trigger = screen.getByRole("button", {
-            name: /What is Cache↺/i,
+            name: /What is Cache R/i,
         });
 
         expect(screen.queryByRole("tooltip")).toBeNull();
@@ -129,10 +132,52 @@ describe("TaskGrid — column help popover", () => {
         expect(screen.getByRole("tooltip")).toHaveTextContent("Output tokens");
 
         fireEvent.click(
-            screen.getByRole("button", { name: /What is Cache↺/i }),
+            screen.getByRole("button", { name: /What is Cache R/i }),
         );
         const card = screen.getByRole("tooltip");
         expect(card).toHaveTextContent("Cache-read tokens");
         expect(card).not.toHaveTextContent("Output tokens");
+    });
+});
+
+describe("TaskGrid — Tokens↔USD toggle", () => {
+    const priced = row("x", 1, 1, {
+        model: "claude-sonnet-4-6",
+        outputTokens: 2000,
+        cacheCreationTokens: 1000,
+        cacheReadTokens: 80_000,
+    });
+
+    test("shows token counts by default, no 'estimated' badge", () => {
+        render(<TaskGrid runId="r1" tasks={[priced]} />);
+        expect(screen.getByText("2k")).toBeInTheDocument();
+        expect(screen.queryByText(/estimated/i)).toBeNull();
+    });
+
+    test("USD mode prices each bucket and shows an 'estimated' badge", () => {
+        render(<TaskGrid runId="r1" tasks={[priced]} />);
+        fireEvent.click(screen.getByRole("button", { name: "USD" }));
+        // output: 2000 · 15 / 1e6 = 0.03 → "$0.0300"
+        expect(screen.getByText("$0.0300")).toBeInTheDocument();
+        // cache-read: 80000 · 0.3 / 1e6 = 0.024 → "$0.0240"
+        expect(screen.getByText("$0.0240")).toBeInTheDocument();
+        expect(screen.getByText(/estimated/i)).toBeInTheDocument();
+        // token counts no longer shown
+        expect(screen.queryByText("2k")).toBeNull();
+    });
+
+    test("USD mode shows em-dash for an unpriced model", () => {
+        const unpriced = row("y", 1, 1, {
+            model: null,
+            outputTokens: 2000,
+            cacheCreationTokens: 1000,
+            cacheReadTokens: 80_000,
+        });
+        render(<TaskGrid runId="r1" tasks={[unpriced]} />);
+        fireEvent.click(screen.getByRole("button", { name: "USD" }));
+        // Estimated mode is active, but an unpriced model can't value the
+        // buckets — they fall back to em-dash rather than the priced figure.
+        expect(screen.getByText(/estimated/i)).toBeInTheDocument();
+        expect(screen.queryByText("$0.0300")).toBeNull();
     });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import type { MessageEvent } from "@/lib/runs";
 import { MessageTimelineSection } from "../_sections";
 
@@ -25,6 +25,7 @@ function makeMessage(overrides: Partial<MessageEvent> = {}): MessageEvent {
         thinkingOutputTokens: null,
         textOutputTokens: 1200,
         model: null,
+        costUsd: null,
         ...overrides,
     };
 }
@@ -35,7 +36,7 @@ describe("MessageTimelineSection — table layout", () => {
         expect(container.firstChild).toBeNull();
     });
 
-    test("renders a single header row with the seven columns", () => {
+    test("renders a single header row with the eight columns", () => {
         render(<MessageTimelineSection messages={[makeMessage()]} />);
         // Column labels are case-sensitive matches against the rendered header.
         expect(screen.getByText("#")).toBeInTheDocument();
@@ -45,6 +46,7 @@ describe("MessageTimelineSection — table layout", () => {
         expect(screen.getByText("Out")).toBeInTheDocument();
         expect(screen.getByText("Cache W")).toBeInTheDocument();
         expect(screen.getByText("Cache R")).toBeInTheDocument();
+        expect(screen.getByText("Cost")).toBeInTheDocument();
         // …and only once each — adding more rows should not duplicate headers.
         render(
             <MessageTimelineSection
@@ -67,10 +69,58 @@ describe("MessageTimelineSection — table layout", () => {
             outputTokens: null,
             cacheWriteTokens: null,
             cacheReadTokens: null,
+            costUsd: null,
         });
         render(<MessageTimelineSection messages={[m]} />);
-        // Three em-dashes for the three blank token cells.
-        expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(3);
+        // Four em-dashes for the three blank token cells plus the cost cell.
+        expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(4);
+    });
+
+    test("USD toggle prices the token columns and shows an 'estimated' badge", () => {
+        // output 2000 · 15/MTok = 0.03 on claude-sonnet-4-6.
+        const m = makeMessage({
+            model: "claude-sonnet-4-6",
+            outputTokens: 2000,
+            cacheWriteTokens: null,
+            cacheReadTokens: null,
+        });
+        render(<MessageTimelineSection messages={[m]} />);
+        // Default: token count shown (fmtTokens(2000) = "2.0k"), no badge.
+        expect(screen.getByText("2.0k")).toBeInTheDocument();
+        expect(screen.queryByText(/estimated/i)).toBeNull();
+        // Toggle to USD: the Out column shows the priced value + estimated badge.
+        fireEvent.click(screen.getByRole("button", { name: "USD" }));
+        expect(screen.getByText("$0.0300")).toBeInTheDocument();
+        expect(screen.getByText(/estimated/i)).toBeInTheDocument();
+        expect(screen.queryByText("2.0k")).toBeNull();
+    });
+
+    test("per-message cost renders as USD when priced", () => {
+        // costUsd is computed upstream (lib/pricing.ts); the row just formats it.
+        const m = makeMessage({ costUsd: 0.0123 });
+        render(<MessageTimelineSection messages={[m]} />);
+        expect(screen.getByText("$0.0123")).toBeInTheDocument();
+    });
+
+    test("Cost header has an ⓘ help bubble explaining per-message cost", () => {
+        render(<MessageTimelineSection messages={[makeMessage()]} />);
+        const trigger = screen.getByRole("button", {
+            name: /What is Per-message cost/i,
+        });
+        expect(screen.queryByRole("tooltip")).toBeNull();
+        fireEvent.click(trigger);
+        const card = screen.getByRole("tooltip");
+        expect(card).toHaveTextContent("Per-message cost");
+        expect(card).toHaveTextContent("authoritative SDK number");
+    });
+
+    test("unpriced message shows an em-dash for cost, not $0.00", () => {
+        const m = makeMessage({ costUsd: null });
+        const { container } = render(
+            <MessageTimelineSection messages={[m]} />,
+        );
+        // No "$" anywhere — the cost cell falls back to em-dash.
+        expect(container.textContent).not.toContain("$");
     });
 
     test("renders one row per message (index column)", () => {

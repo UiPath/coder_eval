@@ -19,7 +19,9 @@ class ModelPricing:
 # Official Anthropic pricing as of 2025
 # Key: CLI model name (before gateway mapping)
 _PRICING: dict[str, ModelPricing] = {
-    # Claude 4.6 / 4.5 / 4 Opus
+    # Claude 4.8 / 4.7 / 4.6 / 4.5 / 4 Opus
+    "claude-opus-4-8": ModelPricing(15.0, 75.0, 18.75, 1.50),
+    "claude-opus-4-7": ModelPricing(15.0, 75.0, 18.75, 1.50),
     "claude-opus-4-6": ModelPricing(15.0, 75.0, 18.75, 1.50),
     "claude-opus-4-6-20250514": ModelPricing(15.0, 75.0, 18.75, 1.50),
     "claude-opus-4-5-20251101": ModelPricing(15.0, 75.0, 18.75, 1.50),

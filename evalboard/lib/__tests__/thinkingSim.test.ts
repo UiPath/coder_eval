@@ -3,10 +3,10 @@ import type { MessageEvent, TokenTotals } from "../runs";
 import {
     buildThinkingModel,
     projectThinking,
-    resolvePricing,
     thinkingAmplification,
     toolAmplification,
 } from "../thinkingSim";
+import { resolvePricing } from "../pricing";
 
 // Minimal assistant emission. Only the fields the simulator reads matter;
 // thinkingMs/generationMs drive the thinking-token estimate, outputTokens
@@ -45,6 +45,7 @@ function call(opts: {
                 : opts.thinkingOutputTokens,
         textOutputTokens: null,
         model: opts.model ?? "claude-sonnet-4-6",
+        costUsd: null,
     };
 }
 

@@ -31,7 +31,7 @@ export function fmtCompact(n: number | null | undefined): string {
 // USD with enough precision to read sub-cent differences as the thinking
 // slider moves — small task runs land in the $0.0xx range.
 export function fmtUsd(n: number | null | undefined): string {
-    if (n == null) return "—";
+    if (n == null || !Number.isFinite(n)) return "—";
     const abs = Math.abs(n);
     const digits = abs >= 1 ? 2 : abs >= 0.1 ? 3 : 4;
     return `$${n.toFixed(digits)}`;

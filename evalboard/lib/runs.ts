@@ -10,6 +10,8 @@ import {
     isValidId,
     listRunIdsRemote,
 } from "./blob";
+import { DELIVERABLE_KINDS, DELIVERABLE_NAMES } from "./artifact-kinds";
+import { messageCostUsd } from "./pricing";
 
 // Resolution order:
 //   1. EVALBOARD_LOCAL_RUNS_DIR — local mode, points at a coder_eval runs dir
@@ -72,6 +74,9 @@ export interface TaskResultSummary {
     outputTokens: number | null;
     cacheCreationTokens: number | null;
     cacheReadTokens: number | null;
+    // Model the task ran on (run.json `model_used`). Used to price token
+    // buckets as USD for the Tokens↔USD column toggle. Null on legacy runs.
+    model: string | null;
     tags: string[];
     // Derived primary group. See deriveSkill below for the resolution chain
     // (new runs use task_path; older runs fall back to a tag heuristic).
@@ -151,6 +156,12 @@ export interface MessageEvent {
     // cascade-aware thinking-cost simulator to price each message. null when
     // no raw in the group recorded it.
     model: string | null;
+    // True cost in USD for this message's API call, priced from the per-message
+    // token buckets and model against the shared rate table (lib/pricing.ts).
+    // The SDK only reports a cumulative per-turn cost, so this is the
+    // rate-accurate per-message attribution. null when the model is unpriced or
+    // no token figure was recorded (older runs).
+    costUsd: number | null;
 }
 
 export interface MessageToolUse {
@@ -233,6 +244,9 @@ interface RawTaskResult {
     // Source YAML path. Persisted by coder-eval starting with the
     // task_path PR; absent on older runs (deriveSkill falls back to tags).
     task_path?: string | null;
+    // Model the task ran on (e.g. "claude-sonnet-4-6"). Used to price token
+    // buckets as USD. Absent on legacy runs.
+    model_used?: string | null;
 }
 
 interface RawRunJson {
@@ -372,6 +386,7 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
         outputTokens: t.output_tokens ?? null,
         cacheCreationTokens: t.cache_creation_input_tokens ?? null,
         cacheReadTokens: t.cache_read_input_tokens ?? null,
+        model: t.model_used ?? null,
         tags,
         skill: deriveSkill(t.task_path, tags),
     };
@@ -528,18 +543,6 @@ const EXCLUDE_RES = ARTIFACT_EXCLUDE_PATTERNS.map(globToRegExp);
 export function isExcludedArtifact(relPath: string): boolean {
     return EXCLUDE_RES.some((re) => re.test(relPath));
 }
-
-// Project deliverables float to the top of the list and get a colored chip.
-// Exported so KindChip colors exactly what artifactRank promotes — a single
-// source of truth keeps "float to top" and "color the chip" from drifting.
-export const DELIVERABLE_KINDS = new Set([
-    "flow",
-    "bpmn",
-    "uipx",
-    "uiproj",
-    "xaml",
-]);
-const DELIVERABLE_NAMES = new Set(["sdd.md", "recommendation.json"]);
 
 function artifactRank(a: ArtifactRef): number {
     const base = (a.relPath.split("/").pop() ?? a.relPath).toLowerCase();
@@ -1180,6 +1183,13 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 thinkingOutputTokens: haveThinkingOut ? thinkingOutSum : null,
                 textOutputTokens,
                 model,
+                costUsd: messageCostUsd({
+                    model,
+                    inputTokens: haveInputTok ? inputTokSum : null,
+                    outputTokens: haveOutputTok ? outputTokSum : null,
+                    cacheWriteTokens: haveCacheWrite ? cacheWriteSum : null,
+                    cacheReadTokens: haveCacheRead ? cacheReadSum : null,
+                }),
             });
             group = [];
         };

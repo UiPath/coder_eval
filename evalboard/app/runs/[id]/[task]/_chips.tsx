@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { DELIVERABLE_KINDS } from "@/lib/runs";
+import { DELIVERABLE_KINDS } from "@/lib/artifact-kinds";
 
 export function Expandable({
     header,

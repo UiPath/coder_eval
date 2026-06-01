@@ -1,3 +1,6 @@
+"use client";
+
+import { useState } from "react";
 import type {
     ArtifactRef,
     CriterionResult,
@@ -7,6 +10,14 @@ import type {
     ToolCall,
 } from "@/lib/runs";
 import { buildThinkingModel } from "@/lib/thinkingSim";
+import { fmtUsd } from "@/lib/format";
+import { tokenBucketUsd, type TokenKind } from "@/lib/pricing";
+import {
+    type ColHelp,
+    ColHelpIcon,
+    TOKEN_COLUMN_HELP,
+} from "@/app/_components/col-help";
+import { type Unit, UnitToggle } from "@/app/_components/unit-toggle";
 import { StatusPill } from "@/lib/pills";
 import { displayedTurns } from "@/lib/turns";
 import { Expandable, KindChip, ResultPill, ToolChip } from "./_chips";
@@ -222,7 +233,27 @@ function fmtTokens(n: number | null): string {
 // these exact columns, and every message summary row aligns to them.
 const MSG_GRID =
     "grid items-center gap-2 px-2 py-1 " +
-    "grid-cols-[1.5rem_2.5rem_3.5rem_3.5rem_minmax(0,1fr)_3.5rem_3.5rem_3.5rem]";
+    "grid-cols-[1.5rem_2.5rem_3.5rem_3.5rem_minmax(0,1fr)_3.5rem_3.5rem_3.5rem_4.5rem]";
+
+// Per-message Cost help (grid-specific: this is a rate-derived per-call figure,
+// not the SDK's cumulative per-turn cost). Token-column help is shared via
+// TOKEN_COLUMN_HELP so the timeline and the run grid stay consistent.
+const MESSAGE_COST_HELP: ColHelp = {
+    title: "Per-message cost",
+    body: "This message's recorded tokens priced at list rates — the cost of this single API call. The SDK reports only a cumulative per-turn figure, so these need not sum exactly to the task's total cost (the authoritative SDK number) shown above. Blank when the model is unpriced or no per-message tokens were recorded.",
+};
+
+// A right-aligned message-timeline header cell with an ⓘ help bubble. Label sits
+// at the right edge with the icon to its left (flex-row-reverse), matching the
+// run-grid headers.
+function MsgHeadHelp({ label, help }: { label: string; help: ColHelp }) {
+    return (
+        <span className="inline-flex items-center justify-end gap-1 flex-row-reverse">
+            {label}
+            <ColHelpIcon help={help} align="right" />
+        </span>
+    );
+}
 
 function messageKind(blockTypes: MessageEvent["blockTypes"]): string {
     const set = new Set(blockTypes);
@@ -250,6 +281,9 @@ function kindBadgeClass(kind: string): string {
 }
 
 export function MessageTimelineSection({ messages }: { messages: MessageEvent[] }) {
+    // Token columns can be shown as counts or as their estimated USD value.
+    const [unit, setUnit] = useState<Unit>("tokens");
+
     if (messages.length === 0) return null;
 
     // Roll-up stats for the summary strip.
@@ -273,9 +307,12 @@ export function MessageTimelineSection({ messages }: { messages: MessageEvent[] 
 
     return (
         <section className="space-y-2">
-            <h2 className="text-sm font-semibold text-gray-900">
-                Message timeline ({messages.length})
-            </h2>
+            <div className="flex items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold text-gray-900">
+                    Message timeline ({messages.length})
+                </h2>
+                <UnitToggle value={unit} onChange={setUnit} />
+            </div>
             <p className="text-[10px] text-gray-500">
                 MIXED = multiple block types · red = slow (gen ≥10s, tool ≥5s)
             </p>
@@ -373,13 +410,31 @@ export function MessageTimelineSection({ messages }: { messages: MessageEvent[] 
                     <span className="text-right">Gen</span>
                     <span className="text-right">Exec</span>
                     <span>Content</span>
-                    <span className="text-right">Out</span>
-                    <span className="text-right">Cache W</span>
-                    <span className="text-right">Cache R</span>
+                    <span className="text-right">
+                        <MsgHeadHelp
+                            label="Cache R"
+                            help={TOKEN_COLUMN_HELP.cr}
+                        />
+                    </span>
+                    <span className="text-right">
+                        <MsgHeadHelp
+                            label="Cache W"
+                            help={TOKEN_COLUMN_HELP.cw}
+                        />
+                    </span>
+                    <span className="text-right">
+                        <MsgHeadHelp
+                            label="Out"
+                            help={TOKEN_COLUMN_HELP.output}
+                        />
+                    </span>
+                    <span className="text-right">
+                        <MsgHeadHelp label="Cost" help={MESSAGE_COST_HELP} />
+                    </span>
                 </div>
                 <ol>
                     {messages.map((m) => (
-                        <MessageRow key={m.index} m={m} />
+                        <MessageRow key={m.index} m={m} unit={unit} />
                     ))}
                 </ol>
             </div>
@@ -443,8 +498,9 @@ function summaryPreview(m: MessageEvent): string {
 
 // One sub-block row inside an expanded MessageRow. Aligns to the same MSG_GRID
 // columns as the parent so Gen / Exec / Content / Out line up. The Out cell
-// carries the block's own recorded per-emission output_tokens; Cache W / Cache R
-// stay blank — they're input-side and not attributable per block.
+// carries the block's own recorded per-emission output_tokens; Cache R / Cache W
+// / Cost stay blank — they're per-call (input-side / whole-message) and not
+// attributable to an individual block.
 function SubRow({
     kind,
     genMs,
@@ -452,6 +508,7 @@ function SubRow({
     isError,
     toolName,
     outputTokens,
+    fmtOut,
     children,
 }: {
     kind: "thinking" | "tool" | "text";
@@ -463,6 +520,9 @@ function SubRow({
     // output_tokens; for text/tool it's an approximation split from the
     // remaining output by gen-time weight. Cache W/R don't apply per-block.
     outputTokens: number | null;
+    // Formats the Out cell — token count or estimated USD, matching the row's
+    // unit toggle. Passed down so the sub-row aligns with the parent.
+    fmtOut: (tokens: number | null) => string;
     children: React.ReactNode;
 }) {
     const slowExec = (execMs ?? 0) >= SLOW_TOOL_MS;
@@ -504,16 +564,24 @@ function SubRow({
                 <div>{label}</div>
                 {children}
             </div>
-            <span className="tabular-nums text-right text-gray-500">
-                {fmtTokens(outputTokens)}
-            </span>
             <span aria-hidden="true" />
+            <span aria-hidden="true" />
+            <span className="tabular-nums text-right text-gray-500">
+                {fmtOut(outputTokens)}
+            </span>
             <span aria-hidden="true" />
         </div>
     );
 }
 
-function MessageRow({ m }: { m: MessageEvent }) {
+function MessageRow({ m, unit }: { m: MessageEvent; unit: Unit }) {
+    // Token columns render as counts or, in USD mode, the estimated dollar
+    // value of that bucket priced from this message's model.
+    const fmtTok = (tokens: number | null, kind: TokenKind) =>
+        unit === "usd"
+            ? fmtUsd(tokenBucketUsd(m.model, tokens, kind))
+            : fmtTokens(tokens);
+    const fmtOut = (tokens: number | null) => fmtTok(tokens, "output");
     const kind = messageKind(m.blockTypes);
     const slowGen = (m.generationMs ?? 0) >= SLOW_GEN_MS;
     const slowTool = m.toolUses.some((t) => (t.durationMs ?? 0) >= SLOW_TOOL_MS);
@@ -592,13 +660,16 @@ function MessageRow({ m }: { m: MessageEvent }) {
                         </span>
                     </span>
                     <span className="tabular-nums text-right text-gray-600">
-                        {fmtTokens(m.outputTokens)}
+                        {fmtTok(m.cacheReadTokens, "cacheRead")}
                     </span>
                     <span className="tabular-nums text-right text-gray-600">
-                        {fmtTokens(m.cacheWriteTokens)}
+                        {fmtTok(m.cacheWriteTokens, "cacheWrite")}
                     </span>
                     <span className="tabular-nums text-right text-gray-600">
-                        {fmtTokens(m.cacheReadTokens)}
+                        {fmtTok(m.outputTokens, "output")}
+                    </span>
+                    <span className="tabular-nums text-right text-gray-600">
+                        {fmtUsd(m.costUsd)}
                     </span>
                 </summary>
                 {hasBody && (
@@ -610,6 +681,7 @@ function MessageRow({ m }: { m: MessageEvent }) {
                                 execMs={null}
                                 isError={false}
                                 outputTokens={m.thinkingOutputTokens}
+                                fmtOut={fmtOut}
                             >
                                 <div className="text-gray-600 whitespace-pre-wrap break-words">
                                     {m.thinkingText}
@@ -625,6 +697,7 @@ function MessageRow({ m }: { m: MessageEvent }) {
                                 isError={t.isError}
                                 toolName={t.toolName}
                                 outputTokens={t.outputTokens}
+                                fmtOut={fmtOut}
                             >
                                 {t.description && (
                                     <div className="text-gray-500 italic mb-1">
@@ -660,6 +733,7 @@ function MessageRow({ m }: { m: MessageEvent }) {
                                 execMs={null}
                                 isError={false}
                                 outputTokens={m.textOutputTokens}
+                                fmtOut={fmtOut}
                             >
                                 <div className="text-gray-700 whitespace-pre-wrap break-words">
                                     {m.text}

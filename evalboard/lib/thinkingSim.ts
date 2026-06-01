@@ -52,66 +52,10 @@
 // recorded token mix exactly.
 
 import type { MessageEvent, TokenTotals } from "@/lib/runs";
-
-// Per-million-token prices. Ported from src/coder_eval/proxy/pricing.py — keep
-// in sync when that table changes. Source: Anthropic / OpenAI public pricing.
-export interface Pricing {
-    inputPerMTok: number;
-    outputPerMTok: number;
-    cacheWritePerMTok: number;
-    cacheReadPerMTok: number;
-}
-
-const PRICING: Record<string, Pricing> = {
-    "claude-opus-4-6": p(15, 75, 18.75, 1.5),
-    "claude-opus-4-6-20250514": p(15, 75, 18.75, 1.5),
-    "claude-opus-4-5-20251101": p(15, 75, 18.75, 1.5),
-    "claude-opus-4-20250514": p(15, 75, 18.75, 1.5),
-    "claude-sonnet-4-6": p(3, 15, 3.75, 0.3),
-    "claude-sonnet-4-6-20250514": p(3, 15, 3.75, 0.3),
-    "claude-sonnet-4-5-20250929": p(3, 15, 3.75, 0.3),
-    "claude-sonnet-4-20250514": p(3, 15, 3.75, 0.3),
-    "claude-haiku-4-5-20251001": p(0.8, 4, 1, 0.08),
-    "claude-3-7-sonnet-20250219": p(3, 15, 3.75, 0.3),
-    "claude-3-5-sonnet-20241022": p(3, 15, 3.75, 0.3),
-    "claude-3-5-sonnet-20240620": p(3, 15, 3.75, 0.3),
-    "claude-3-opus-20240229": p(15, 75, 18.75, 1.5),
-    "claude-3-sonnet-20240229": p(3, 15, 3.75, 0.3),
-    "claude-3-haiku-20240307": p(0.25, 1.25, 0.3, 0.03),
-    "gpt-5-codex": p(1.25, 10, 1.25, 0.125),
-    "gpt-5": p(1.25, 10, 1.25, 0.125),
-    "gpt-5.3-codex": p(1.75, 14, 1.75, 0.175),
-};
-
-function p(
-    input: number,
-    output: number,
-    cacheWrite: number,
-    cacheRead: number,
-): Pricing {
-    return {
-        inputPerMTok: input,
-        outputPerMTok: output,
-        cacheWritePerMTok: cacheWrite,
-        cacheReadPerMTok: cacheRead,
-    };
-}
-
-// Resolve pricing for a model id, tolerating undated aliases (the recorded
-// model is usually the canonical id like "claude-sonnet-4-6", but be lenient
-// about a trailing date suffix either way).
-export function resolvePricing(model: string | null): Pricing | null {
-    if (!model) return null;
-    if (PRICING[model]) return PRICING[model];
-    // Try stripping a trailing -YYYYMMDD date.
-    const undated = model.replace(/-\d{8}$/, "");
-    if (PRICING[undated]) return PRICING[undated];
-    // Try a prefix match (handles e.g. a future dated alias we didn't list).
-    for (const key of Object.keys(PRICING)) {
-        if (model.startsWith(key) || key.startsWith(model)) return PRICING[key];
-    }
-    return null;
-}
+// Rates and resolution live in lib/pricing.ts (the single source of truth,
+// ported from src/coder_eval/proxy/pricing.py). Import directly from there;
+// this module no longer re-exports them.
+import { type Pricing, resolvePricing } from "@/lib/pricing";
 
 // Plain, serializable model handed from the server section to the client
 // slider. No methods — projectThinking() below is the pure projector the

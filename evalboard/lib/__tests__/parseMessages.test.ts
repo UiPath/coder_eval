@@ -377,6 +377,114 @@ describe("parseMessages — per-message token aggregation", () => {
     });
 });
 
+describe("parseMessages — per-message cost", () => {
+    test("prices the threaded tokens against the message's model", () => {
+        // claude-sonnet-4-6: input 3, output 15, cacheWrite 3.75, cacheRead 0.3 /MTok.
+        // (12·3 + 200·15 + 5000·3.75 + 80000·0.3)/1e6 = 0.045786
+        const turns: TurnEntry[] = [
+            {
+                messages: [
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:00.000Z",
+                        completed_at: "2026-01-01T00:00:01.000Z",
+                        generation_duration_ms: 1000,
+                        message_id: "msg_1",
+                        input_tokens: 12,
+                        output_tokens: 200,
+                        cache_creation_tokens: 5_000,
+                        cache_read_tokens: 80_000,
+                        model: "claude-sonnet-4-6",
+                        content_blocks: [{ block_type: "text", text: "hi" }],
+                    },
+                ],
+            },
+        ];
+        const [e] = parseMessages(turns);
+        expect(e.costUsd).toBeCloseTo(0.045786, 9);
+    });
+
+    test("prices the summed tokens across same-emission splits", () => {
+        // Two splits collapse to one event; cost is over the summed tokens:
+        // input 3, output 130, cacheWrite 1200, cacheRead 10000.
+        // (3·3 + 130·15 + 1200·3.75 + 10000·0.3)/1e6 = 0.009459
+        const turns: TurnEntry[] = [
+            {
+                messages: [
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:00.000Z",
+                        completed_at: "2026-01-01T00:00:01.000Z",
+                        generation_duration_ms: 1000,
+                        message_id: "msg_x",
+                        input_tokens: 2,
+                        output_tokens: 100,
+                        cache_creation_tokens: 1_000,
+                        cache_read_tokens: 10_000,
+                        model: "claude-sonnet-4-6",
+                        content_blocks: [{ block_type: "thinking", thinking: "T" }],
+                    },
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:01.020Z",
+                        completed_at: "2026-01-01T00:00:01.500Z",
+                        generation_duration_ms: 480,
+                        message_id: "msg_x",
+                        input_tokens: 1,
+                        output_tokens: 30,
+                        cache_creation_tokens: 200,
+                        cache_read_tokens: 0,
+                        model: "claude-sonnet-4-6",
+                        content_blocks: [{ block_type: "text", text: "hi" }],
+                    },
+                ],
+            },
+        ];
+        const [e] = parseMessages(turns);
+        expect(e.costUsd).toBeCloseTo(0.009459, 9);
+    });
+
+    test("costUsd is null when the model is absent (legacy runs)", () => {
+        const turns: TurnEntry[] = [
+            {
+                messages: [
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:00.000Z",
+                        completed_at: "2026-01-01T00:00:01.000Z",
+                        generation_duration_ms: 1000,
+                        message_id: "msg_1",
+                        input_tokens: 12,
+                        output_tokens: 200,
+                        cache_creation_tokens: 5_000,
+                        cache_read_tokens: 80_000,
+                        // no model recorded
+                        content_blocks: [{ block_type: "text", text: "hi" }],
+                    },
+                ],
+            },
+        ];
+        const [e] = parseMessages(turns);
+        expect(e.costUsd).toBeNull();
+    });
+
+    test("costUsd is null when no per-message tokens were recorded", () => {
+        const turns: TurnEntry[] = [
+            {
+                messages: [
+                    msg("text", {
+                        startedAt: "2026-01-01T00:00:00.000Z",
+                        completedAt: "2026-01-01T00:00:01.000Z",
+                        genMs: 1000,
+                    }),
+                ],
+            },
+        ];
+        const [e] = parseMessages(turns);
+        expect(e.costUsd).toBeNull();
+    });
+});
+
 describe("parseMessages — per-block output-token attribution", () => {
     test("text-only message attributes all output to text (no thinking block)", () => {
         const turns: TurnEntry[] = [
