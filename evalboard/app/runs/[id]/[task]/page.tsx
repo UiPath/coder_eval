@@ -51,6 +51,15 @@ export default async function TaskPage({
                         {humanizeTaskId(taskId)}
                     </h1>
                     <StatusPill status={task.status} relabel />
+                    <a
+                        href={`/api/download?run=${encodeURIComponent(
+                            id,
+                        )}&task=${encodeURIComponent(taskId)}`}
+                        className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 hover:text-studio-blue"
+                        download
+                    >
+                        ↓ Download folder (.zip)
+                    </a>
                 </div>
                 <div className="text-xs text-gray-500 tabular-nums font-mono">
                     {taskId} · run {id}

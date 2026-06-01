@@ -3,6 +3,7 @@ import path from "node:path";
 import {
     LOCAL_RUNS_DIR,
     ensureRunAnalysis,
+    ensureRunDir,
     ensureRunMeta,
     ensureRunSummary,
     ensureTaskDir,
@@ -1404,6 +1405,39 @@ export async function readLogTail(
     const raw = await fs.readFile(logPath, "utf-8").catch(() => "");
     if (raw.length <= maxBytes) return raw;
     return `… (truncated, showing last ${maxBytes} bytes)\n\n${raw.slice(-maxBytes)}`;
+}
+
+// Collect every file under a task's folder (`default/<taskId>/`) for the
+// download-as-zip button on the task page. Reuses walkArtifacts so the same
+// noise filter (`.venv`, `node_modules`, `*.pyc`, lockfiles, secrets) and
+// symlink skip that drive the Artifacts list also shape the zip — plus
+// task.json / task.log at the task root, which aren't excluded by any pattern.
+// Returns null for an invalid id or a missing/empty task dir.
+export async function collectTaskFiles(
+    runId: string,
+    taskId: string,
+): Promise<{ relPath: string; abs: string }[] | null> {
+    if (!isValidId(runId) || !isValidId(taskId)) return null;
+    await ensureTaskDir(runId, taskId, RUNS_DIR);
+    const taskDir = path.join(RUNS_DIR, runId, "default", taskId);
+    const refs = await walkArtifacts(taskDir);
+    if (refs.length === 0) return null;
+    return refs.map((r) => ({ relPath: r.relPath, abs: path.join(taskDir, r.relPath) }));
+}
+
+// Collect every file under a whole run (`<runId>/`) for the download-as-zip
+// button on the run page. Same noise filter / symlink skip as collectTaskFiles,
+// applied across all task subdirs plus run-level files (run.json, analysis.md,
+// meta.json, …). Returns null for an invalid id or a missing/empty run dir.
+export async function collectRunFiles(
+    runId: string,
+): Promise<{ relPath: string; abs: string }[] | null> {
+    if (!isValidId(runId)) return null;
+    await ensureRunDir(runId, RUNS_DIR);
+    const runDir = path.join(RUNS_DIR, runId);
+    const refs = await walkArtifacts(runDir);
+    if (refs.length === 0) return null;
+    return refs.map((r) => ({ relPath: r.relPath, abs: path.join(runDir, r.relPath) }));
 }
 
 export async function resolveSafePath(

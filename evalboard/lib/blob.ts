@@ -192,6 +192,29 @@ export async function ensureRunReviewIndex(
     });
 }
 
+// Full fetch: every blob under the run prefix. Used by the "download whole
+// run" button, which needs all task subdirs at once (the narrow per-task /
+// summary fetches only cache what their page reads). `.venv` trees are
+// skipped for the same reason as ensureTaskDir — no page reads them and they
+// dwarf the real deliverables.
+export async function ensureRunDir(
+    runId: string,
+    destRoot: string,
+): Promise<void> {
+    assertValidId(runId, "runId");
+    if (LOCAL_RUNS_DIR) return;
+    return dedupe(`run:${runId}`, async () => {
+        const c = getContainer();
+        const ops: Promise<void>[] = [];
+        const prefix = `${runId}/`;
+        for await (const blob of c.listBlobsFlat({ prefix })) {
+            if (blob.name.includes("/.venv/")) continue;
+            ops.push(downloadBlob(blob.name, destRoot));
+        }
+        await Promise.all(ops);
+    });
+}
+
 // Narrow fetch: run.json + just one task subdir. Used by the per-task
 // detail page so opening a deep link to a 50-task run doesn't pull every
 // task's artifacts.
