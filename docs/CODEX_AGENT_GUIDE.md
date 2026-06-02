@@ -152,14 +152,16 @@ On failure, the agent:
 
 ### Permission and Tool Mapping
 
-The agent maps `permission_mode` to the Codex SDK's `Sandbox` and `ApprovalMode` when starting a thread:
+The agent maps `permission_mode` to the Codex SDK's `Sandbox`. The approval mode is **uniformly `deny_all`** for every mode — the trust boundary is the sandbox, which does vary by mode:
 
 | `permission_mode` | `sandbox` | `approval_mode` |
 |-------------------|-----------|-----------------|
-| `bypassPermissions` | `full-access` | `auto_review` |
-| `acceptEdits` | `workspace-write` | `auto_review` |
-| `default` | `workspace-write` | `auto_review` |
+| `bypassPermissions` | `full-access` | `deny_all` |
+| `acceptEdits` | `workspace-write` | `deny_all` |
+| `default` | `workspace-write` | `deny_all` |
 | `plan` | `read-only` | `deny_all` |
+
+`deny_all` means *run autonomously, never prompt, no server-side reviewer*: in-sandbox operations execute directly and only escalations beyond the sandbox are refused. `coder_eval` uses it for every mode because the alternative (`auto_review`) adds a server-side reviewer that can spuriously return `declined` under gateway load.
 
 `allowed_tools` / `disallowed_tools` are normalized (`Bash` → `shell`, `Write`/`Edit` → `apply_patch`, etc.) and passed as `enabled_tools` / `disabled_tools` in the thread `config`. **Note:** the Codex SDK does not currently enforce `disabled_tools`; do not rely on it as a security boundary (the agent logs a warning when it is set).
 
@@ -191,7 +193,7 @@ The Codex SDK is synchronous. The agent uses `_run_async()` helper to detect and
 ## Known Limitations
 
 1. **Tool-name collapse** - Codex reports shell tools (`Read`/`Grep`/`Bash`) all as shell commands, surfaced as `Bash` telemetry; name-keyed criteria that distinguish these tools aren't meaningful across agents.
-2. **`skill_triggered` criterion** - Codex invokes skills as shell commands (no distinct `Skill` tool), so a `tool_name == "Skill"` match will not fire for Codex.
+2. **`skill_triggered` criterion** - Codex has no distinct `Skill` tool (it engages a skill by reading its files via shell), so the criterion detects Codex engagement from that file-read signal (a command referencing `skills/<name>/`) instead of a `Skill` tool call. The file-read signal is weaker than Claude's explicit invocation.
 3. **`disallowed_tools`** - passed to the SDK but not enforced; not a security boundary.
 4. **Authentication** - Requires `CODEX_API_KEY` or `OPENAI_API_KEY` (or Azure equivalents) in the environment; the agent calls `login_api_key` when a key is present.
 5. **Model field** - `TurnRecord.model_used` reflects the pinned `agent.model`; the Codex `Turn` payload itself doesn't carry the resolved model.
@@ -200,7 +202,7 @@ The Codex SDK is synchronous. The agent uses `_run_async()` helper to detect and
 ## Future Enhancements
 
 - [ ] Implement session-based resume (thread ID tracking)
-- [ ] Surface a `Skill`-typed signal so `skill_triggered` works for Codex
+- [ ] Strengthen the Codex `skill_triggered` signal — it currently infers engagement from a file read, weaker than Claude's `Skill` tool call
 - [ ] Capture the resolved model from the SDK (vs. the pinned config value)
 
 ## Testing
@@ -248,16 +250,16 @@ def test_tool_name_mapping():
     assert _CLAUDE_TO_CODEX_TOOL_MAP["Read"] == "shell"
 
 def test_permission_mode_mapping():
-    """Verify permission_mode values map to ThreadOptions."""
+    """Verify permission_mode maps to a sandbox; approval is uniformly deny_all."""
     from coder_eval.agents.codex_agent import (
+        _CODEX_APPROVAL_MODE,
         _PERMISSION_MODE_TO_SANDBOX,
-        _PERMISSION_MODE_TO_APPROVAL,
     )
 
     assert _PERMISSION_MODE_TO_SANDBOX["acceptEdits"] == "workspace-write"
-    assert _PERMISSION_MODE_TO_APPROVAL["acceptEdits"] == "auto_review"
     assert _PERMISSION_MODE_TO_SANDBOX["plan"] == "read-only"
-    assert _PERMISSION_MODE_TO_APPROVAL["plan"] == "deny_all"
+    # Approval is the same for every permission mode — no per-mode mapping.
+    assert _CODEX_APPROVAL_MODE == "deny_all"
 ```
 
 ## References

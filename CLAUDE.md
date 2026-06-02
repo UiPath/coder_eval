@@ -61,7 +61,7 @@ coder_eval/
 │   ├── pytest_criterion.py
 │   ├── reference_comparison.py
 │   ├── run_command.py
-│   ├── skill_triggered.py         # Binary: did the agent invoke a Skill tool?
+│   ├── skill_triggered.py         # Binary: did the agent engage the target skill (Skill tool / file read)?
 │   └── uipath_eval.py
 │
 ├── evaluation/                    # Evaluation orchestration
@@ -164,7 +164,7 @@ templates/                         # Sandbox template directories
 | `import_check` | Fractional | AST-based import extraction + importlib validation |
 | `uipath_eval` | Fractional | UiPath agent evaluation results |
 | `classification_match` | Binary | File-based label match (observed vs expected) with `(none)`/`(other)` sentinels; emits `ClassificationCriterionResult` for suite-level P/R/F1 |
-| `skill_triggered` | Binary | Did the agent invoke a `Skill` tool during the run? Emits `ClassificationCriterionResult` for suite-level P/R/F1 |
+| `skill_triggered` | Binary | Did the agent engage the target skill? Agent-agnostic — Claude's `Skill` tool call, or (Codex) reading the skill's files off disk. Emits `ClassificationCriterionResult` for suite-level P/R/F1 |
 | `llm_judge` | Continuous | LLM grades artifacts + optional trajectory + optional reference via UiPath LLM Gateway |
 | `agent_judge` | Continuous | Spawns a Claude Code SDK agent in an isolated sandbox copy; judge uses tools (Bash/Read/Grep/…) to investigate and returns a JSON verdict. Expensive; runs with evaluator credentials — see SECURITY note in the criterion docstring. |
 

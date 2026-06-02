@@ -1,4 +1,10 @@
-"""Skill-triggered criterion checker: did the agent invoke a Skill tool?"""
+"""Skill-triggered criterion checker: did the agent engage the target skill?
+
+Agent-agnostic. Claude Code engages a skill via an explicit ``Skill`` tool call;
+Codex has no such tool — it auto-discovers skills under ``.agents/skills/`` and
+engages one by reading its ``SKILL.md`` / references off disk via shell. Both
+signals are detected here so the criterion scores identically across agents.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +24,7 @@ from coder_eval.models import (
 if TYPE_CHECKING:
     from coder_eval.criteria.base import CheckContext
     from coder_eval.models.results import TurnRecord
+    from coder_eval.models.telemetry import CommandTelemetry
     from coder_eval.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
@@ -26,9 +33,29 @@ _YES = "yes"
 _NO = "no"
 
 
+def _engaged_skill(cmd: CommandTelemetry, skill_name: str) -> bool:
+    """True when one command engaged ``skill_name`` — agent-agnostically.
+
+    Claude: an explicit ``Skill`` tool call carries the skill in
+    ``parameters['skill']`` (optionally namespaced, e.g. ``plugin:uipath-agents``).
+
+    Codex (and any non-Claude agent): no ``Skill`` tool exists, so the skill is
+    engaged by reading its files off disk via shell. Both the repo layout
+    (``.../skills/<skill_name>/...``) and the sandbox symlink
+    (``.agents/skills/<skill_name>/...``) contain the substring
+    ``skills/<skill_name>/``, which appears in the recorded command string
+    (Bash ``parameters['command']``) or a file-path parameter. The trailing
+    slash prevents prefix collisions (``uipath-agents`` vs ``uipath-agents-foo``).
+    """
+    if cmd.tool_name == "Skill" and cmd.parameters.get("skill", "").split(":")[-1] == skill_name:
+        return True
+    needle = f"skills/{skill_name}/"
+    return any(isinstance(v, str) and needle in v for v in cmd.parameters.values())
+
+
 @register_criterion
 class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
-    """Binary classifier: observed='yes' when the agent invoked a Skill tool.
+    """Binary classifier: observed='yes' when the agent engaged the target skill.
 
     Returns a ``ClassificationCriterionResult`` so the suite aggregator can
     compute accuracy / recall / F1 / confusion matrix across all rows.
@@ -55,9 +82,7 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
             )
 
         triggered: bool = any(
-            cmd.tool_name == "Skill" and cmd.parameters.get("skill", "").split(":")[-1] == criterion.skill_name
-            for turn in turn_records
-            for cmd in turn.commands
+            _engaged_skill(cmd, criterion.skill_name) for turn in turn_records for cmd in turn.commands
         )
         expected_yes: bool = criterion.expected_skill == criterion.skill_name
         score = 1.0 if triggered == expected_yes else 0.0

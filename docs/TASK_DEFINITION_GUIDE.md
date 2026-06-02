@@ -684,14 +684,14 @@ The judge runs with the evaluator's API credentials and can execute arbitrary Ba
 
 ### `skill_triggered`
 
-Binary classifier: **did the agent invoke a `Skill` tool during the run?** Scans the run's `turn_records` for any `Skill` tool call whose `skill` parameter matches `skill_name` (namespace prefixes like `plugin:skill` are stripped, so `skill_name: uipath-agents` matches `Skill(skill="uipath-coded-agents:uipath-agents")`).
+Binary classifier: **did the agent engage the target skill during the run?** Agent-agnostic — scans the run's `turn_records` for either signal: Claude's explicit `Skill` tool call whose `skill` parameter matches `skill_name` (namespace prefixes like `plugin:skill` are stripped, so `skill_name: uipath-agents` matches `Skill(skill="uipath-coded-agents:uipath-agents")`), or — for an agent with no `Skill` tool, e.g. Codex — a command that reads the skill's files off disk (a parameter contains `skills/<skill_name>/`, matching both the repo path and the `.agents/skills/` symlink).
 
-Observed label is `"yes"` when such a call is found, else `"no"`. Expected label is `"yes"` iff `expected_skill == skill_name`. **Binary scoring:** `1.0` when observed matches expected, else `0.0`.
+Observed label is `"yes"` when either signal is found, else `"no"`. Expected label is `"yes"` iff `expected_skill == skill_name`. **Binary scoring:** `1.0` when observed matches expected, else `0.0`.
 
 ```yaml
 - type: "skill_triggered"
   description: "uipath-agents activation"
-  skill_name: uipath-agents          # only count Skill calls matching this name
+  skill_name: uipath-agents          # the skill to detect (Skill call or file read)
   expected_skill: "${row.expected_skill}"   # the row's true skill; "" for negatives
   suite_thresholds:
     recall.yes: 0.70
@@ -700,7 +700,7 @@ Observed label is `"yes"` when such a call is found, else `"no"`. Expected label
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `skill_name` | *required* | Only count `Skill` invocations whose `skill` parameter matches this name |
+| `skill_name` | *required* | The skill to detect — a `Skill` call whose `skill` parameter matches, or a file read under `skills/<skill_name>/` |
 | `expected_skill` | *required* | The row's expected skill (after `${row.*}` substitution); empty string `""` for negative rows where the skill should **not** fire |
 
 **Requires agent telemetry.** This criterion reads `turn_records`, so it only works against a real agent run (not a static check). With no turn records it reports `score=0.0` and an `error`.

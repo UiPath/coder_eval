@@ -59,17 +59,54 @@ _PERMISSION_MODE_TO_SANDBOX: dict[str, str] = {
     "plan": "read-only",
 }
 
-# Permission mode → approval mode mapping
-_PERMISSION_MODE_TO_APPROVAL: dict[str, str] = {
-    "bypassPermissions": "auto_review",
-    "acceptEdits": "auto_review",
-    "default": "auto_review",
-    "plan": "deny_all",
-}
+# Approval mode — the SAME for every permission mode (no per-mode mapping).
+#
+# The Codex SDK exposes exactly two approval modes:
+#   - auto_review → AskForApproval.on_request + a SERVER-SIDE ApprovalsReviewer.
+#     The reviewer (an extra app-server/gateway decision) adjudicates each
+#     apply_patch/shell escalation. Under gateway load it can spuriously return
+#     "declined" — files silently not written. Claude has no analog: its
+#     Write/Edit permissions are decided CLIENT-SIDE with no model/reviewer in
+#     the loop, so it never hits this failure mode.
+#   - deny_all → AskForApproval.never + NO reviewer. Despite the name, this is
+#     the "run autonomously, never prompt, no reviewer" mode: in-sandbox
+#     operations (apply_patch within cwd, shell) execute directly; only
+#     escalations BEYOND the sandbox are refused.
+#
+# An eval harness never wants a reviewer that can flake, so EVERY permission mode
+# uses deny_all. The trust boundary is the sandbox (_PERMISSION_MODE_TO_SANDBOX),
+# which DOES vary by mode: `plan` stays read-only, `bypassPermissions` is
+# full-access (intended for isolated Docker runs).
+_CODEX_APPROVAL_MODE = "deny_all"
 
 # Provider id registered in thread config when CODEX_BASE_URL routes to a
 # custom endpoint.
 _CUSTOM_PROVIDER_ID = "custom"
+
+# Codex apply_patch (Write/Edit) statuses that mean the patch did not apply.
+# PatchApplyStatus enum values are inProgress/completed/failed/declined — never
+# the literal "error" the code used to compare against, so a failed patch was
+# silently recorded as a successful Write. We use this only to classify the
+# Write TELEMETRY honestly (failed → error). We do NOT fail or retry the turn on
+# it: "declined" can only come from an approval reviewer, and every permission
+# mode uses deny_all (no reviewer; see _CODEX_APPROVAL_MODE), so
+# in-sandbox apply_patch is applied directly and "declined" should not occur;
+# "failed" (diff context mismatch) is self-healed by the model within the turn,
+# and grading checks the actual files regardless.
+_FILE_CHANGE_FAILURE_STATUSES = frozenset({"failed", "declined"})
+
+# Sentinel returned by ``next(stream_iter, _STREAM_DONE)`` at stream end. We pass
+# a default rather than catching StopIteration because a StopIteration raised
+# inside ``asyncio.to_thread`` is converted by asyncio into a TypeError
+# ("StopIteration interacts badly with generators…") that escapes ``except
+# StopIteration`` — masking the real turn-failure reason on the stream-end path.
+_STREAM_DONE = object()
+
+
+def _status_value(status: Any) -> str:
+    """Normalize a Codex status (enum or str) to its lowercase string value."""
+    value = getattr(status, "value", status)
+    return str(value).lower() if value is not None else ""
 
 
 def _get_item_root(notification: Any) -> Any:
@@ -542,7 +579,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         # Map permission_mode to sandbox and approval_mode
         permission_mode = self.config.permission_mode.value
         sandbox_mode_str = _PERMISSION_MODE_TO_SANDBOX.get(permission_mode, "workspace-write")
-        approval_mode_str = _PERMISSION_MODE_TO_APPROVAL.get(permission_mode, "auto_review")
+        approval_mode_str = _CODEX_APPROVAL_MODE
 
         # Convert to Codex SDK enum values
         # Sandbox enum values use hyphens, ApprovalMode uses underscores
@@ -624,12 +661,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
             )
 
     def _format_turn_result(self, turn_result: Any) -> str:
-        """Format Codex turn result to readable string."""
-        try:
-            final_response = getattr(turn_result, "final_response", None)
-            if final_response:
-                return str(final_response)
+        """Format a Codex Turn to a readable string — fallback when no text streamed.
 
+        The Turn payload has no ``final_response`` field; assistant text arrives as
+        agentMessage deltas during streaming. This only fires when streaming produced
+        nothing, dumping the raw Turn for debugging.
+        """
+        try:
             result_dict = turn_result.model_dump() if hasattr(turn_result, "model_dump") else vars(turn_result)
             return json.dumps(result_dict, indent=2, default=str)
         except Exception as e:
@@ -677,9 +715,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 # Offload the blocking SDK iteration to a worker thread so the
                 # event loop stays free (parallel agents don't serialize) and the
                 # watchdog's task.cancel() can actually land at this await point.
-                try:
-                    notification = await asyncio.to_thread(next, stream_iter)
-                except StopIteration:
+                notification: Any = await asyncio.to_thread(next, stream_iter, _STREAM_DONE)
+                if notification is _STREAM_DONE:
                     break
 
                 method = notification.method
@@ -751,7 +788,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
                             change_id = getattr(root, "id", f"change_{next_sequence}")
                             seq = seq_by_id.get(change_id, next_sequence)
                             changes = getattr(root, "changes", [])
-                            status = getattr(root, "status", "success")
+                            status_str = _status_value(getattr(root, "status", "completed"))
+                            failed = status_str in _FILE_CHANGE_FAILURE_STATUSES
 
                             safe_emit(
                                 stream_callback,
@@ -759,15 +797,19 @@ class CodexAgent(Agent[CodexAgentConfig]):
                                     task_id=task_id,
                                     tool_id=change_id,
                                     tool_name="Write",
-                                    success=status != "error",
-                                    result_preview=f"{len(changes)} file(s) changed",
+                                    success=not failed,
+                                    result_preview=(
+                                        f"{len(changes)} file(s) changed"
+                                        if not failed
+                                        else f"apply_patch {status_str}: {len(changes)} file(s) NOT written"
+                                    ),
                                 ),
                             )
 
                             # Record the edit as telemetry so name-keyed criteria
                             # (command_executed) and commands_efficiency count file
                             # changes, matching how Claude counts Write/Edit calls.
-                            telemetry = self._extract_file_change_telemetry(change_id, changes, status, seq)
+                            telemetry = self._extract_file_change_telemetry(change_id, changes, status_str, seq)
                             if telemetry:
                                 commands.append(telemetry)
 
@@ -875,19 +917,28 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         Recorded as a ``Write`` tool call so cross-agent criteria that count or
         match file edits (``command_executed``, ``commands_efficiency``) see the
-        same signal they get from Claude's Write/Edit tool calls.
+        same signal they get from Claude's Write/Edit tool calls. A failed/declined
+        apply_patch is recorded as an ``error`` (the old ``status != "error"``
+        test never matched the real PatchApplyStatus values, so failed patches
+        were scored as successful writes).
         """
         try:
             paths = [str(c.path) for c in changes if hasattr(c, "path")] if changes else []
+            status_str = _status_value(status)
+            failed = status_str in _FILE_CHANGE_FAILURE_STATUSES
             return CommandTelemetry(
                 tool_name="Write",
                 tool_id=change_id,
                 timestamp=datetime.now(),
                 duration_ms=None,
                 parameters={"paths": paths},
-                result_status="success" if status != "error" else "error",
-                result_summary=f"{len(paths)} file(s) changed",
-                error_message=None if status != "error" else "File change failed",
+                result_status="error" if failed else "success",
+                result_summary=(
+                    f"{len(paths)} file(s) changed"
+                    if not failed
+                    else f"apply_patch {status_str}: {len(paths)} file(s) not written"
+                ),
+                error_message=f"apply_patch {status_str}" if failed else None,
                 result_data=None,
                 sequence_number=sequence,
             )

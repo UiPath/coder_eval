@@ -15,7 +15,7 @@ pytest.importorskip("openai_codex")
 from coder_eval.agent import AgentState
 from coder_eval.agents.codex_agent import (
     _CLAUDE_TO_CODEX_TOOL_MAP,
-    _PERMISSION_MODE_TO_APPROVAL,
+    _CODEX_APPROVAL_MODE,
     _PERMISSION_MODE_TO_SANDBOX,
     CodexAgent,
 )
@@ -115,43 +115,36 @@ class TestPermissionModeMapping:
         """acceptEdits maps to workspace-write."""
         assert _PERMISSION_MODE_TO_SANDBOX["acceptEdits"] == "workspace-write"
 
-    def test_accept_edits_approval_mode(self):
-        """acceptEdits maps to auto_review approval mode."""
-        assert _PERMISSION_MODE_TO_APPROVAL["acceptEdits"] == "auto_review"
-
     def test_plan_sandbox_mode(self):
         """plan maps to read-only."""
         assert _PERMISSION_MODE_TO_SANDBOX["plan"] == "read-only"
-
-    def test_plan_approval_mode(self):
-        """plan maps to deny_all approval mode."""
-        assert _PERMISSION_MODE_TO_APPROVAL["plan"] == "deny_all"
 
     def test_bypass_permissions_sandbox_mode(self):
         """bypassPermissions maps to full-access."""
         assert _PERMISSION_MODE_TO_SANDBOX["bypassPermissions"] == "full-access"
 
-    def test_bypass_permissions_approval_mode(self):
-        """bypassPermissions maps to auto_review approval mode."""
-        assert _PERMISSION_MODE_TO_APPROVAL["bypassPermissions"] == "auto_review"
-
     def test_default_sandbox_mode(self):
         """default maps to workspace-write."""
         assert _PERMISSION_MODE_TO_SANDBOX["default"] == "workspace-write"
-
-    def test_default_approval_mode(self):
-        """default maps to auto_review approval mode."""
-        assert _PERMISSION_MODE_TO_APPROVAL["default"] == "auto_review"
 
     def test_all_modes_have_sandbox_mapping(self):
         """All permission modes have sandbox_mode mapping."""
         modes = {"default", "acceptEdits", "plan", "bypassPermissions"}
         assert set(_PERMISSION_MODE_TO_SANDBOX.keys()) == modes
 
-    def test_all_modes_have_approval_mapping(self):
-        """All permission modes have approval_policy mapping."""
-        modes = {"default", "acceptEdits", "plan", "bypassPermissions"}
-        assert set(_PERMISSION_MODE_TO_APPROVAL.keys()) == modes
+    def test_approval_mode_constant_is_deny_all(self):
+        """Approval is a single constant (deny_all) — no per-mode mapping; the
+        sandbox is the trust boundary. Per-mode ApprovalMode.deny_all resolution
+        is covered behaviorally in TestBuildThreadOptions."""
+        assert _CODEX_APPROVAL_MODE == "deny_all"
+
+    def test_every_permission_mode_resolves_to_deny_all(self):
+        """Regardless of permission_mode, _build_thread_options yields deny_all."""
+        from openai_codex.api import ApprovalMode  # pyright: ignore[reportPrivateImportUsage]
+
+        for mode in ("default", "acceptEdits", "plan", "bypassPermissions"):
+            agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode=mode))
+            assert agent._build_thread_options()["approval_mode"] == ApprovalMode.deny_all
 
 
 class TestCodexEnvironmentConfiguration:
@@ -242,7 +235,7 @@ class TestThreadOptions:
 
         assert options is not None
         assert options["sandbox"] == Sandbox.workspace_write
-        assert options["approval_mode"] == ApprovalMode.auto_review
+        assert options["approval_mode"] == ApprovalMode.deny_all
 
     def test_build_thread_options_with_plan(self):
         """_build_thread_options builds correct options for plan."""
@@ -289,7 +282,7 @@ class TestThreadOptions:
         assert options["config"]["disabled_tools"] == ["apply_patch", "apply_patch", "shell"]
 
     def test_build_thread_options_with_no_permission_mode(self):
-        """_build_thread_options defaults to workspace_write/auto_review when no permission_mode set."""
+        """_build_thread_options defaults to workspace_write/deny_all when no permission_mode set."""
         from openai_codex.api import ApprovalMode, Sandbox  # pyright: ignore[reportPrivateImportUsage]
 
         config = parse_agent_config(type=AgentKind.CODEX)
@@ -299,7 +292,7 @@ class TestThreadOptions:
 
         # Should have defaults even without explicit permission_mode
         assert options["sandbox"] == Sandbox.workspace_write
-        assert options["approval_mode"] == ApprovalMode.auto_review
+        assert options["approval_mode"] == ApprovalMode.deny_all
 
     def test_build_thread_options_with_permission_and_tools(self):
         """_build_thread_options combines permission_mode and tool config."""
@@ -396,6 +389,16 @@ def _turn_completed(duration_ms: int = 1500) -> SimpleNamespace:
     )
     payload = TurnCompletedNotification(thread_id="th_1", turn=turn)
     return SimpleNamespace(method="turn/completed", payload=payload)
+
+
+def _file_change(status: str, path: str = "out.txt", change_id: str = "fc_1") -> SimpleNamespace:
+    """A fileChange item root with the given PatchApplyStatus value string."""
+    return SimpleNamespace(
+        type="fileChange",
+        id=change_id,
+        changes=[SimpleNamespace(path=path)],
+        status=status,
+    )
 
 
 class _FakeTurnHandle:
@@ -524,6 +527,33 @@ class TestCommunicateCrashFunnel:
         assert agent.pending_turn is not None
         await agent.discard_pending_turn()
         assert agent._iteration == 0
+
+
+class TestApplyPatchTelemetryHonesty:
+    """A failed apply_patch must be recorded as an error in telemetry, not
+    silently scored as a successful Write (the old ``status != "error"`` test
+    never matched the real PatchApplyStatus values). It does NOT fail or retry
+    the turn — apply_patch is always accepted now (deny_all, no reviewer), so
+    "declined" should not occur, and "failed" (diff mismatch) self-heals within
+    the turn; grading checks the actual files."""
+
+    async def test_failed_file_change_records_error_telemetry_without_crashing(self):
+        fc = _file_change("failed", path="out.txt")
+        notifications = [
+            _item_notification("item/started", fc),
+            _item_notification("item/completed", fc),
+            _delta("apply_patch failed once"),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("write out.txt")
+
+        # Turn completes normally (no crash / no retry), but the Write telemetry
+        # honestly reflects the failure.
+        assert agent.get_state() == AgentState.WORKING
+        writes = [c for c in record.commands if c.tool_name == "Write"]
+        assert writes and all(c.result_status == "error" for c in writes)
 
 
 class _BlockingStream:

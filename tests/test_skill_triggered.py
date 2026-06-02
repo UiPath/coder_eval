@@ -98,6 +98,78 @@ class TestSkillTriggeredChecker:
         assert result.error is not None
 
 
+class TestSkillTriggeredCodex:
+    """Codex has no ``Skill`` tool — it engages a skill by reading its files via shell.
+
+    The detectable signal is a command whose recorded text references the skill's
+    directory, ``skills/<skill_name>/`` (present in both the repo path and the
+    ``.agents/skills/`` symlink).
+    """
+
+    def _sed(self, path: str) -> CommandTelemetry:
+        return _cmd("Bash", {"command": f"/bin/zsh -lc \"sed -n '1,220p' {path}\""})
+
+    def test_codex_reads_skill_md_repo_path_tp(self) -> None:
+        result = _check(
+            expected_skill="uipath-agents",
+            skill_name="uipath-agents",
+            commands=[self._sed("/Users/x/uipath/skills/skills/uipath-agents/SKILL.md")],
+        )
+        assert result.score == 1.0 and result.observed_label == "yes" and result.expected_label == "yes"
+
+    def test_codex_reads_skill_reference_repo_path_tp(self) -> None:
+        result = _check(
+            expected_skill="uipath-agents",
+            skill_name="uipath-agents",
+            commands=[self._sed("/Users/x/uipath/skills/skills/uipath-agents/references/context-grounding.md")],
+        )
+        assert result.score == 1.0 and result.observed_label == "yes"
+
+    def test_codex_reads_skill_md_agents_symlink_tp(self) -> None:
+        result = _check(
+            expected_skill="uipath-agents",
+            skill_name="uipath-agents",
+            commands=[self._sed(".agents/skills/uipath-agents/SKILL.md")],
+        )
+        assert result.score == 1.0 and result.observed_label == "yes"
+
+    def test_codex_reads_wrong_skill_not_counted(self) -> None:
+        # Read uipath-rpa's SKILL.md, but criterion filters on uipath-agents -> observed="no".
+        result = _check(
+            expected_skill="",
+            skill_name="uipath-agents",
+            commands=[self._sed("/Users/x/uipath/skills/skills/uipath-rpa/SKILL.md")],
+        )
+        assert result.observed_label == "no" and result.score == 1.0
+
+    def test_codex_prefix_collision_guarded(self) -> None:
+        # Reading "uipath-agents-extra" must NOT match skill_name "uipath-agents" (trailing slash).
+        result = _check(
+            expected_skill="uipath-agents",
+            skill_name="uipath-agents",
+            commands=[self._sed("/Users/x/uipath/skills/skills/uipath-agents-extra/SKILL.md")],
+        )
+        assert result.observed_label == "no" and result.score == 0.0
+
+    def test_codex_listing_skills_dir_not_counted(self) -> None:
+        # `ls .agents/skills/` references no specific skill -> observed="no".
+        result = _check(
+            expected_skill="",
+            skill_name="uipath-agents",
+            commands=[_cmd("Bash", {"command": "ls .agents/skills/"})],
+        )
+        assert result.observed_label == "no" and result.score == 1.0
+
+    def test_read_tool_with_skill_path_counts(self) -> None:
+        # Agent-agnostic over param values: a Read whose file_path is inside the skill dir counts.
+        result = _check(
+            expected_skill="uipath-agents",
+            skill_name="uipath-agents",
+            commands=[_cmd("Read", {"file_path": "/x/skills/uipath-agents/SKILL.md"})],
+        )
+        assert result.observed_label == "yes" and result.score == 1.0
+
+
 class TestSkillTriggeredCriterionValidation:
     def test_requires_expected_skill_and_skill_name(self) -> None:
         with pytest.raises(ValueError):

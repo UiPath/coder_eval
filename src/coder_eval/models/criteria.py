@@ -616,11 +616,13 @@ class ClassificationMatchCriterion(BaseSuccessCriterion):
 
 
 class SkillTriggeredCriterion(BaseSuccessCriterion):
-    """Binary classifier: did the agent invoke a Skill tool during the run?
+    """Binary classifier: did the agent engage the target skill during the run?
 
-    Observed label is ``"yes"`` when any ``Skill`` tool invocation matching
-    ``skill_name`` is recorded in ``turn_records``, otherwise ``"no"``.
-    Expected label is ``"yes"`` iff ``expected_skill == skill_name``.
+    Agent-agnostic. Observed label is ``"yes"`` when ``turn_records`` show the
+    skill engaged under ``skill_name`` — Claude via an explicit ``Skill`` tool
+    call, or any agent without that tool (e.g. Codex) by reading the skill's
+    files off disk (a command parameter contains ``skills/<skill_name>/``).
+    Otherwise ``"no"``. Expected label is ``"yes"`` iff ``expected_skill == skill_name``.
 
     Stack one criterion per skill against a single dataset labeled with
     ``expected_skill`` (the row's true skill, ``""`` for negatives) to get
