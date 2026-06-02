@@ -68,7 +68,13 @@ build-backend = "hatchling.build"
 packages = ["src/coder_eval"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"src/coder_eval/resources" = "coder_eval/resources"
+# `packages = ["src/coder_eval"]` above already maps `src/coder_eval/resources/`
+# into the wheel as `coder_eval/resources/`, so a `force-include` for the same
+# directory is a duplicate file path. Newer hatchling raises `ValueError: A
+# second file is being added to the wheel archive at the same path:
+# coder_eval/resources/__init__.py` and aborts the build. Only force-include
+# files that live OUTSIDE the package tree (experiments/default.yaml is at the
+# repo root and needs to ship inside the wheel as default_experiment.yaml).
 "experiments/default.yaml" = "coder_eval/resources/default_experiment.yaml"
 
 [tool.hatch.metadata]
