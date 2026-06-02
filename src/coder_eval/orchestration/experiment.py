@@ -11,9 +11,8 @@ from __future__ import annotations
 import importlib.resources
 import logging
 import re
-import warnings
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import yaml
 
@@ -26,7 +25,6 @@ from ..models import (
     PromptRephrase,
     ResolvedTask,
     RunLimits,
-    SandboxConfig,
     SimulationConfig,
     SkippedTask,
     TaskDefinition,
@@ -36,11 +34,10 @@ from ..models import (
     VariantAggregate,
     VariantResult,
     apply_prompt_mutations,
-    validate_template_sources_list,
 )
-from ..models.agent_config import parse_agent_config
 from ..path_utils import build_task_run_dir
 from .config import BatchRunConfig
+from .config_merge import ConfigSource, Layer, merge_layers, resolve_root
 from .task_loader import (
     expand_dataset,
     load_task,
@@ -126,98 +123,6 @@ def load_experiment(experiment_file: Path) -> ExperimentDefinition:
         raise ValueError(f"Invalid experiment definition: {e}") from e
 
 
-def _hoist_agent_timing_dict(
-    agent_dict: dict[str, Any] | None,
-    *,
-    layer_label: str,
-) -> tuple[dict[str, Any] | None, dict[str, int]]:
-    """Pop legacy ``max_turns``/``turn_timeout`` out of an agent dict.
-
-    Mirrors ``TaskDefinition._hoist_legacy_agent_timing`` for experiment-side
-    agent dicts (``ExperimentDefaults.agent``, ``ExperimentVariant.agent``)
-    which are typed ``dict[str, Any]`` and bypass Pydantic validation.
-
-    Emits a single ``DeprecationWarning`` per hoisted field. ``layer_label``
-    is included in the warning text so users can pinpoint which layer is on
-    the legacy shape (e.g. ``"experiment defaults"``, ``"variant 'sonnet'"``).
-    Scheduled removal: 2026-05-20.
-
-    Returns:
-        Tuple of ``(cleaned_dict_or_None, run_limits_patch)``. The cleaned
-        dict is ``None`` when the input was ``None`` or when removing the
-        timing keys leaves it empty. ``run_limits_patch`` is a partial dict
-        keyed by ``RunLimits`` field names; empty when no hoisting occurred.
-    """
-    if agent_dict is None:
-        return None, {}
-    cleaned = dict(agent_dict)
-    patch: dict[str, int] = {}
-    for name in ("max_turns", "turn_timeout"):
-        if name in cleaned:
-            val = cleaned.pop(name)
-            if val is None:
-                continue
-            patch[name] = val
-            warnings.warn(
-                f"{name!r} under {layer_label} agent: is deprecated and will be removed on "
-                + f"2026-05-20; move it to run_limits.{name}.",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-    return (cleaned or None), patch
-
-
-def _merge_agent_dicts(*layers: dict[str, Any] | None) -> dict[str, Any]:
-    """Merge multiple partial agent config dicts (left to right, later wins).
-
-    Shallow merge for every key except ``sdk_options``, which is deep-merged
-    so a higher-priority layer adding a single SDK key doesn't wipe keys set
-    by lower-priority layers. Lists and other nested dicts are still replaced.
-    None layers are skipped.
-
-    ``sdk_options`` semantics are intentionally additive-only: explicit empty
-    dicts and missing dicts are both no-ops. There is no syntax for "clear all
-    inherited SDK options at this layer" — the merge composes individual keys.
-    To suppress a specific key, override it with a new value at a higher layer.
-
-    Handles mutually exclusive prompt fields: when a layer sets system_prompt,
-    the previously merged system_prompt_file is cleared, and vice versa.
-    """
-    merged: dict[str, Any] = {}
-    sdk_options_merged: dict[str, Any] = {}
-    for layer in layers:
-        if layer is None:
-            continue
-        if layer.get("system_prompt") is not None:
-            merged.pop("system_prompt_file", None)
-        if layer.get("system_prompt_file") is not None:
-            merged.pop("system_prompt", None)
-        # Presence-based check (not truthy): explicit `{}` and missing both
-        # cleanly no-op via dict.update({}). Avoids the silent-drop foot-gun
-        # where a layer's explicit `sdk_options: {}` looks meaningful but
-        # isn't distinguished from "layer didn't set this key".
-        layer_sdk_options = layer.get("sdk_options")
-        if isinstance(layer_sdk_options, dict):
-            sdk_options_merged.update(layer_sdk_options)
-        # everything else replaces (shallow):
-        merged.update({k: v for k, v in layer.items() if k != "sdk_options"})
-    if sdk_options_merged:
-        merged["sdk_options"] = sdk_options_merged
-    return merged
-
-
-type ConfigSource = Literal[
-    "default",
-    "task",
-    "experiment-defaults",
-    "variant",
-    "cli",
-    "default-agent-deprecated",
-    "experiment-defaults-agent-deprecated",
-    "variant-agent-deprecated",
-]
-
-
 def _resolve_simulation(
     default_experiment: ExperimentDefinition,
     experiment: ExperimentDefinition,
@@ -236,74 +141,34 @@ def _resolve_simulation(
     Any layer can be None (absent). When every layer is absent, the
     resolved value is None — single-shot mode is preserved.
 
-    The merge is a shallow dict merge (same semantics as agent merge):
-    each layer's keys overwrite earlier ones, lists are replaced not
-    appended. After merging, the final dict is validated by constructing
-    a SimulationConfig.
+    The merge runs through the generic resolver (``merge_layers`` over
+    ``SimulationConfig``): every field uses the type-aware default — scalars and
+    the ``constraints`` list all ``replace`` — so each layer's keys overwrite
+    earlier ones, matching the historical shallow merge. After merging, the dict
+    is validated by constructing a ``SimulationConfig`` (which raises a helpful
+    error if a required ``persona``/``goal`` was never supplied). Lineage stays
+    coarse: a single ``simulation`` entry crediting the most-specific source.
     """
-    default_sim = default_experiment.defaults.simulation if default_experiment.defaults else None
-    exp_sim = experiment.defaults.simulation if experiment.defaults else None
-    task_sim_dict = task.simulation.model_dump(exclude_unset=True) if task.simulation else None
-    variant_sim = variant.simulation
-
-    layers = [default_sim, exp_sim, task_sim_dict, variant_sim]
-    if all(layer is None for layer in layers):
+    sim_specs: list[tuple[ConfigSource, dict[str, Any] | None]] = [
+        ("default", default_experiment.defaults.simulation if default_experiment.defaults else None),
+        ("experiment-defaults", experiment.defaults.simulation if experiment.defaults else None),
+        ("task", task.simulation.model_dump(exclude_unset=True) if task.simulation else None),
+        ("variant", variant.simulation),
+    ]
+    sim_layers = [Layer(source=src, patch=patch) for src, patch in sim_specs if patch is not None]
+    if not sim_layers:
         return None
 
-    merged: dict[str, Any] = {}
-    for layer in layers:
-        if layer is not None:
-            merged.update(layer)
-
-    # Persona and goal are required by the model. If no layer provided them
-    # (e.g. an experiment enables simulation defaults without a persona), the
-    # resulting SimulationConfig construction will raise with a helpful error.
+    # No lineage passed → merge_layers emits no per-field entries; we record the
+    # single coarse `simulation` entry below instead.
+    merged = merge_layers((SimulationConfig,), sim_layers, lineage_root="simulation")
     resolved = SimulationConfig(**merged)
 
-    # Track lineage — record the most-specific (highest-precedence) non-None
-    # source explicitly via reversed iteration, so the recorded source is
-    # correct regardless of the order ``sim_layers`` is declared in.
-    sim_layers: list[tuple[ConfigSource, dict[str, Any] | None]] = [
-        ("default", default_sim),
-        ("experiment-defaults", exp_sim),
-        ("task", task_sim_dict),
-        ("variant", variant_sim),
-    ]
-    most_specific: ConfigSource | None = next(
-        (source_name for source_name, layer in reversed(sim_layers) if layer),
-        None,
-    )
+    most_specific: ConfigSource | None = next((src for src, patch in reversed(sim_specs) if patch is not None), None)
     if most_specific is not None:
         lineage["simulation"] = ConfigLineageEntry(value=merged, source=most_specific)
 
     return resolved
-
-
-def _build_agent_lineage(
-    layers: list[tuple[ConfigSource, dict[str, Any] | None]],
-) -> dict[str, ConfigLineageEntry]:
-    """Replay the agent merge and record which layer set each key.
-
-    Args:
-        layers: List of (source_name, agent_dict) tuples in precedence order (later wins).
-
-    Returns:
-        Dict mapping dotted keys like "agent.model" to ConfigLineageEntry.
-    """
-    lineage: dict[str, ConfigLineageEntry] = {}
-    for source_name, layer in layers:
-        if layer is None:
-            continue
-        for key, value in layer.items():
-            if key == "sdk_options" and isinstance(value, dict):
-                # sdk_options is deep-merged across layers; record per-key provenance
-                # so a higher layer contributing one SDK key doesn't shadow lineage
-                # for the others.
-                for sdk_key, sdk_value in value.items():
-                    lineage[f"agent.sdk_options.{sdk_key}"] = ConfigLineageEntry(value=sdk_value, source=source_name)
-            else:
-                lineage[f"agent.{key}"] = ConfigLineageEntry(value=value, source=source_name)
-    return lineage
 
 
 def _resolve_repeats(
@@ -411,6 +276,64 @@ def _apply_prompt_overrides(
     lineage["initial_prompt"] = ConfigLineageEntry(value="(mutated)", source="mutation", source_detail=detail)
 
 
+def _build_sandbox_layers(
+    default_experiment: ExperimentDefinition,
+    experiment: ExperimentDefinition,
+    task: TaskDefinition,
+    variant: ExperimentVariant,
+) -> list[Layer]:
+    """Build the ordered ``Layer`` list for the sandbox root (layers 1-4).
+
+    Constructs the sandbox layer list from default/exp-defaults/task SandboxConfig
+    dumps, plus synthetic layers for the experiment/variant TOP-LEVEL driver
+    (replace) and template_sources (append). `template_sources` is popped from
+    EVERY sandbox dump and re-added as dedicated synthetic layers, because its
+    append order is NOT layer order: per the field docs ("appended after task's
+    base templates") the task's own templates are the BASE and experiment-defaults
+    + variant are overlays appended after — i.e. task -> exp-defaults -> variant.
+    `driver` is kept in the dumps: the top-level `driver` field is layered AFTER,
+    so it overrides a nested `sandbox.driver` while a nested-only driver still
+    contributes. env_passthrough_extra appends in layer order via its strategy.
+
+    Returns the layer list; the caller passes it to ``resolve_root("sandbox", …)``.
+    """
+    sandbox_layers: list[Layer] = []
+    if default_experiment.defaults and default_experiment.defaults.sandbox:
+        p = default_experiment.defaults.sandbox.model_dump(exclude_unset=True)
+        p.pop("template_sources", None)
+        if p:
+            sandbox_layers.append(Layer(source="default", patch=p))
+    if experiment.defaults and experiment.defaults.sandbox:
+        p = experiment.defaults.sandbox.model_dump(exclude_unset=True)
+        p.pop("template_sources", None)
+        if p:
+            sandbox_layers.append(Layer(source="experiment-defaults", patch=p))
+    if experiment.defaults and experiment.defaults.driver is not None:
+        sandbox_layers.append(Layer(source="experiment-defaults", patch={"driver": experiment.defaults.driver}))
+    task_sandbox_patch = task.sandbox.model_dump(exclude_unset=True)
+    task_template_sources = task_sandbox_patch.pop("template_sources", None)
+    if task_sandbox_patch:
+        sandbox_layers.append(Layer(source="task", patch=task_sandbox_patch))
+    if variant.driver is not None:
+        sandbox_layers.append(Layer(source="variant", patch={"driver": variant.driver}, detail=variant.variant_id))
+    # template_sources synthetic layers, in documented task-first append order:
+    # task base, then experiment-defaults overlay, then variant overlay.
+    if task_template_sources:
+        sandbox_layers.append(Layer(source="task", patch={"template_sources": task_template_sources}))
+    if experiment.defaults and experiment.defaults.template_sources:
+        sandbox_layers.append(
+            Layer(
+                source="experiment-defaults",
+                patch={"template_sources": [s.model_dump() for s in experiment.defaults.template_sources]},
+            )
+        )
+    if variant.template_sources:
+        sandbox_layers.append(
+            Layer(source="variant", patch={"template_sources": [s.model_dump() for s in variant.template_sources]})
+        )
+    return sandbox_layers
+
+
 def resolve_task_for_variant(
     default_experiment: ExperimentDefinition,
     task: TaskDefinition,
@@ -439,180 +362,86 @@ def resolve_task_for_variant(
     Returns:
         Tuple of (resolved TaskDefinition, config lineage dict, effective_repeats).
     """
-    # Layer 1-4 raw agent dicts. Hoist legacy max_turns/turn_timeout out of the
-    # experiment-side dicts up front (task.agent is already pre-hoisted by
-    # TaskDefinition._hoist_legacy_agent_timing into task.run_limits). The
-    # hoisted patches feed into the field-merge accumulator below alongside
-    # the canonical RunLimits blocks.
-    default_agent, default_agent_rl_patch = _hoist_agent_timing_dict(
-        default_experiment.defaults.agent if default_experiment.defaults else None,
-        layer_label="default experiment defaults",
-    )
-    exp_defaults_agent, exp_defaults_agent_rl_patch = _hoist_agent_timing_dict(
-        experiment.defaults.agent if experiment.defaults else None,
-        layer_label="experiment defaults",
-    )
-    variant_agent_clean, variant_agent_rl_patch = _hoist_agent_timing_dict(
-        variant.agent,
-        layer_label=f"variant '{variant.variant_id}'",
-    )
-
-    # Layer 3: task agent (only explicitly-set fields, not Pydantic defaults)
+    # Layer 1-4 raw agent dicts. Experiment-side dicts are dict[str, Any] (passed
+    # through verbatim); the task agent is dumped with exclude_unset so Pydantic
+    # defaults don't leak into the merge. Timing (max_turns/turn_timeout) belongs
+    # under run_limits — a legacy max_turns under agent: now fails loudly via the
+    # agent model's extra="forbid" rather than being silently hoisted.
+    default_agent = default_experiment.defaults.agent if default_experiment.defaults else None
+    exp_defaults_agent = experiment.defaults.agent if experiment.defaults else None
+    variant_agent_clean = variant.agent
     task_agent = task.agent.model_dump(exclude_unset=True) if task.agent else None
 
-    # Merge agent dicts. Type is enforced after CLI overrides (layer 5) are
-    # applied — see _apply_cli_overrides — so `--type` can satisfy the contract
-    # for tasks that omit `agent.type` entirely.
-    merged_agent_dict = _merge_agent_dicts(default_agent, exp_defaults_agent, task_agent, variant_agent_clean)
-    resolved_agent = parse_agent_config(**merged_agent_dict)
+    # Resolve all three `-D`-reachable roots through the SAME generic resolver
+    # the CLI layer uses (config_merge.resolve_root) — one merge implementation,
+    # one set of per-field strategies, lineage emitted as a side effect into the
+    # shared `lineage` dict. Type is enforced after CLI overrides (layer 5) so
+    # `--type` can satisfy the contract for tasks that omit `agent.type`.
+    lineage: dict[str, ConfigLineageEntry] = {}
 
-    # Build agent lineage
-    agent_lineage = _build_agent_lineage(
-        [
-            ("default", default_agent),
-            ("experiment-defaults", exp_defaults_agent),
-            ("task", task_agent),
-            ("variant", variant_agent_clean),
-        ]
-    )
+    # --- agent: layers default -> exp-defaults -> task -> variant ---
+    agent_layers: list[Layer] = []
+    agent_specs: list[tuple[ConfigSource, dict[str, Any] | None]] = [
+        ("default", default_agent),
+        ("experiment-defaults", exp_defaults_agent),
+        ("task", task_agent),
+        ("variant", variant_agent_clean),
+    ]
+    for source, patch in agent_specs:
+        if patch:
+            agent_layers.append(Layer(source=source, patch=patch))
+    resolved_agent = resolve_root("agent", agent_layers, lineage=lineage)
+    assert resolved_agent is not None  # parse_agent_config always returns a model
 
-    # Resolve run_limits via field-merge across all 4 layers. Later layers
-    # overwrite individual keys; absent keys leave earlier values intact.
-    scalar_lineage: dict[str, ConfigLineageEntry] = {}
-    rl_accum: dict[str, Any] = {}
-    rl_lineage: dict[str, ConfigSource] = {}
+    # --- run_limits: the canonical RunLimits blocks across the 4 layers. ---
+    rl_layers: list[Layer] = []
 
-    def _merge_rl(
-        layer_rl: RunLimits | dict[str, Any] | None,
-        source: ConfigSource,
-    ) -> None:
-        if layer_rl is None:
+    def _add_rl(rl: RunLimits | None, source: ConfigSource) -> None:
+        if rl is None:
             return
-        if isinstance(layer_rl, RunLimits):
-            # exclude_unset (not exclude_none): non-Optional fields like
-            # count_cached_input have a default of False, so exclude_none
-            # would always include them in the patch, clobbering a True from
-            # a lower-precedence layer that DID set it. exclude_unset emits
-            # only the fields the caller explicitly provided.
-            patch = layer_rl.model_dump(exclude_unset=True)
-        else:
-            patch = {k: v for k, v in layer_rl.items() if v is not None}
-        for k, v in patch.items():
-            rl_accum[k] = v
-            rl_lineage[k] = source
+        # exclude_unset (not exclude_none): count_cached_input defaults to False;
+        # exclude_none would write it back, clobbering a True from a lower layer.
+        patch = rl.model_dump(exclude_unset=True)
+        if patch:
+            rl_layers.append(Layer(source=source, patch=patch))
 
-    # Within each layer, merge the legacy agent-hoisted patch FIRST so the
-    # canonical run_limits block wins on conflict (preserves the existing
-    # "top-level wins over agent-hoisted in the same layer" precedence rule).
-    # Layer 1: default experiment defaults
-    _merge_rl(default_agent_rl_patch, "default-agent-deprecated")
     if default_experiment.defaults:
-        _merge_rl(default_experiment.defaults.run_limits, "default")
-    # Layer 2: experiment defaults
-    _merge_rl(exp_defaults_agent_rl_patch, "experiment-defaults-agent-deprecated")
+        _add_rl(default_experiment.defaults.run_limits, "default")
     if experiment.defaults:
-        _merge_rl(experiment.defaults.run_limits, "experiment-defaults")
-    # Layer 3: task (its own agent-level hoist already happened inside
-    # TaskDefinition._hoist_legacy_agent_timing).
-    _merge_rl(task.run_limits, "task")
-    # Layer 4: variant
-    _merge_rl(variant_agent_rl_patch, "variant-agent-deprecated")
-    _merge_rl(variant.run_limits, "variant")
+        _add_rl(experiment.defaults.run_limits, "experiment-defaults")
+    _add_rl(task.run_limits, "task")
+    _add_rl(variant.run_limits, "variant")
+    resolved_run_limits = resolve_root("run_limits", rl_layers, lineage=lineage)
 
-    resolved_run_limits = RunLimits(**rl_accum) if rl_accum else None
+    # --- sandbox: synthetic-layer construction (driver precedence + task-first
+    # template_sources ordering) lives in _build_sandbox_layers. ---
+    sandbox_layers = _build_sandbox_layers(default_experiment, experiment, task, variant)
+    # resolve_root returns None only when no layer set anything; fall back to the
+    # task's own (default) sandbox so resolved_task.sandbox is never None.
+    resolved_sandbox = resolve_root("sandbox", sandbox_layers, lineage=lineage) or task.sandbox
 
-    for k, source in rl_lineage.items():
-        scalar_lineage[f"run_limits.{k}"] = ConfigLineageEntry(value=rl_accum[k], source=source)
-
-    # Resolve sandbox via field-merge across all 4 layers (default → exp-defaults → task → variant).
-    # Later layers overwrite individual keys; absent keys leave earlier values intact.
-    # Special case: env_passthrough_extra lists are appended (not overridden).
-    sandbox_accum: dict[str, Any] = {}
-    sandbox_docker_extras: list[str] = []
-
-    def _merge_sandbox(layer_sandbox: SandboxConfig | None) -> None:
-        nonlocal sandbox_docker_extras
-        if layer_sandbox is None:
-            return
-        # Extract only explicitly-set fields using exclude_unset
-        patch = layer_sandbox.model_dump(exclude_unset=True)
-        # Handle env_passthrough_extra specially: append instead of override
-        if "docker" in patch and patch["docker"] and "env_passthrough_extra" in patch["docker"]:
-            sandbox_docker_extras.extend(patch["docker"]["env_passthrough_extra"])
-            del patch["docker"]["env_passthrough_extra"]
-        # Merge remaining fields (later layers win)
-        for k, v in patch.items():
-            sandbox_accum[k] = v
-
-    # Layer 1: default experiment defaults
-    if default_experiment.defaults and default_experiment.defaults.sandbox:
-        _merge_sandbox(default_experiment.defaults.sandbox)
-    # Layer 2: experiment defaults
-    if experiment.defaults and experiment.defaults.sandbox:
-        _merge_sandbox(experiment.defaults.sandbox)
-    # Layer 3: task
-    _merge_sandbox(task.sandbox)
-    # Layer 4: variant (variant.sandbox is not yet a field, but future-proofing)
-    # For now, variant overrides come via driver and template_sources only.
-
-    # If env_passthrough_extra was accumulated, merge it into docker config
-    if sandbox_docker_extras:
-        docker_config = sandbox_accum.get("docker") or {}
-        existing_extras = docker_config.get("env_passthrough_extra") or []
-        docker_config["env_passthrough_extra"] = existing_extras + sandbox_docker_extras
-        sandbox_accum["docker"] = docker_config
-
-    # Resolve template_sources: task base + experiment defaults + variant (append semantics)
-    base_sources: list[TemplateSource] = list(task.sandbox.template_sources or [])
-    exp_defaults_sources: list[TemplateSource] = (
-        list(experiment.defaults.template_sources)
-        if experiment.defaults and experiment.defaults.template_sources
-        else []
-    )
-    variant_sources: list[TemplateSource] = list(variant.template_sources) if variant.template_sources else []
-    combined_sources = base_sources + exp_defaults_sources + variant_sources
-    if exp_defaults_sources or variant_sources:
-        validate_template_sources_list(combined_sources)
-        sandbox_accum["template_sources"] = combined_sources
-
-    # Driver resolution: layer 2 (experiment defaults) → layer 3 (task) → layer 4 (variant).
-    if experiment.defaults and experiment.defaults.driver is not None:
-        sandbox_accum["driver"] = experiment.defaults.driver
-        scalar_lineage["sandbox.driver"] = ConfigLineageEntry(
-            value=experiment.defaults.driver, source="experiment-defaults"
-        )
-    if "driver" in task.sandbox.model_fields_set:
-        sandbox_accum["driver"] = task.sandbox.driver
-        scalar_lineage["sandbox.driver"] = ConfigLineageEntry(value=task.sandbox.driver, source="task")
-    if variant.driver is not None:
-        sandbox_accum["driver"] = variant.driver
-        scalar_lineage["sandbox.driver"] = ConfigLineageEntry(
-            value=variant.driver, source="variant", source_detail=variant.variant_id
-        )
-
-    # Reconstruct sandbox with proper model validation to handle nested objects
-    if sandbox_accum:
-        resolved_sandbox = SandboxConfig(**{**task.sandbox.model_dump(), **sandbox_accum})
-    else:
-        resolved_sandbox = task.sandbox
-
-    # Resolve post_run: task-level commands first, experiment defaults appended after.
-    # Experiment defaults are typically tenant/sandbox cleanup that should run last,
-    # after any task-specific artifact extraction.
-    exp_defaults_post_run = (
-        list(experiment.defaults.post_run) if experiment.defaults and experiment.defaults.post_run else []
-    )
-    resolved_post_run = list(task.post_run) + exp_defaults_post_run
-
-    # Resolve pre_run: experiment defaults run first (baseline environment setup),
-    # task commands appended after (task-specific augmentation).
-    exp_defaults_pre_run = (
-        list(experiment.defaults.pre_run) if experiment.defaults and experiment.defaults.pre_run else []
-    )
-    resolved_pre_run = exp_defaults_pre_run + list(task.pre_run)
-
-    # Combine lineage
-    lineage = {**agent_lineage, **scalar_lineage}
+    # Resolve pre_run / post_run through the same engine via their declared append
+    # strategies: pre_run appends in layer order (exp-defaults setup first, then the
+    # task's); post_run uses append_order="reverse" (the task's commands first, then
+    # experiment-defaults cleanup-last). Only exp-defaults + task contribute.
+    prepost_layers: list[Layer] = []
+    exp_patch: dict[str, Any] = {}
+    if experiment.defaults and experiment.defaults.pre_run:
+        exp_patch["pre_run"] = list(experiment.defaults.pre_run)
+    if experiment.defaults and experiment.defaults.post_run:
+        exp_patch["post_run"] = list(experiment.defaults.post_run)
+    if exp_patch:
+        prepost_layers.append(Layer(source="experiment-defaults", patch=exp_patch))
+    task_patch: dict[str, Any] = {}
+    if task.pre_run:
+        task_patch["pre_run"] = list(task.pre_run)
+    if task.post_run:
+        task_patch["post_run"] = list(task.post_run)
+    if task_patch:
+        prepost_layers.append(Layer(source="task", patch=task_patch))
+    prepost = merge_layers((TaskDefinition,), prepost_layers, lineage_root="task") if prepost_layers else {}
+    resolved_pre_run = prepost.get("pre_run", [])
+    resolved_post_run = prepost.get("post_run", [])
 
     # Resolve simulation: shallow-merge across default → experiment-defaults → task → variant.
     # Mirrors agent merge semantics — a later layer's keys overwrite earlier ones, and
@@ -654,7 +483,10 @@ def _apply_cli_overrides(
 ) -> None:
     """Apply CLI and .env overrides (layer 5) to a task definition in-place.
 
-    Override precedence: CLI > .env > experiment layers 1-4.
+    Override precedence within layer 5 (low → high): ``.env`` defaults < CLI
+    overrides (``-D``/``--set`` and the bespoke flag aliases). The actual merge
+    + re-validation is delegated to ``orchestration.overrides.apply_overrides``;
+    this function only overlays the ``.env`` defaults and records their lineage.
 
     Args:
         task: The task definition to mutate.
@@ -662,86 +494,30 @@ def _apply_cli_overrides(
         lineage: Optional lineage dict to update with CLI override entries.
     """
     from ..config import settings as app_settings
+    from .overrides import apply_overrides
 
-    def _record(key: str, value: Any, detail: str) -> None:
-        if lineage is not None:
-            lineage[key] = ConfigLineageEntry(value=value, source="cli", source_detail=detail)
-
-    # Agent overrides (CLI > .env > task)
     assert task.agent is not None, f"Task '{task.task_id}' has no agent config"
 
-    if config.agent_type is not None:
-        from coder_eval.models import parse_agent_config
+    # `.env` defaults are the lowest-precedence layer-5 contributor. Only the
+    # three historical DEFAULT_* knobs map to override paths.
+    env_defaults: dict[str, Any] = {}
+    env_detail: dict[str, str] = {}
+    if app_settings.default_agent_model is not None:
+        env_defaults["agent.model"] = app_settings.default_agent_model
+        env_detail["agent.model"] = ".env DEFAULT_AGENT_MODEL"
+    if app_settings.default_permission_mode is not None:
+        env_defaults["agent.permission_mode"] = app_settings.default_permission_mode
+        env_detail["agent.permission_mode"] = ".env DEFAULT_PERMISSION_MODE"
+    if app_settings.default_max_turns is not None:
+        env_defaults["run_limits.max_turns"] = app_settings.default_max_turns
+        env_detail["run_limits.max_turns"] = ".env DEFAULT_MAX_TURNS"
 
-        # Re-parse the agent config with the new type to avoid Literal type mismatch
-        agent_dict = task.agent.model_dump(exclude_unset=True)
-        agent_dict["type"] = config.agent_type
-        task.agent = parse_agent_config(**agent_dict)
-        _record("agent.type", config.agent_type, "--type")
-
-    effective_model = config.agent_model if config.agent_model is not None else app_settings.default_agent_model
-    if effective_model is not None:
-        task.agent.model = effective_model
-        detail = "--model" if config.agent_model is not None else ".env DEFAULT_AGENT_MODEL"
-        _record("agent.model", effective_model, detail)
-
-    effective_perm = (
-        config.permission_mode if config.permission_mode is not None else app_settings.default_permission_mode
-    )
-    if effective_perm is not None:
-        task.agent.permission_mode = effective_perm  # type: ignore[assignment]  # validated by Pydantic via validate_assignment
-        detail = "--permission-mode" if config.permission_mode is not None else ".env DEFAULT_PERMISSION_MODE"
-        _record("agent.permission_mode", effective_perm, detail)
-
-    # Run-limits overrides (CLI > .env > task YAML). Field-merge into the
-    # existing run_limits block so a CLI flag for one key doesn't drop others.
-    # exclude_unset preserves user-set Booleans like count_cached_input
-    # without polluting rl_base with default-False values that would survive
-    # the {**rl_base, **rl_patch} merge below.
-    rl_base = task.run_limits.model_dump(exclude_unset=True) if task.run_limits else {}
-    rl_patch: dict[str, Any] = {}
-    effective_max_turns = config.max_turns if config.max_turns is not None else app_settings.default_max_turns
-    if effective_max_turns is not None:
-        rl_patch["max_turns"] = effective_max_turns
-        detail = "--max-turns" if config.max_turns is not None else ".env DEFAULT_MAX_TURNS"
-        _record("run_limits.max_turns", effective_max_turns, detail)
-    if config.task_timeout is not None:
-        rl_patch["task_timeout"] = config.task_timeout
-        _record("run_limits.task_timeout", config.task_timeout, "--task-timeout")
-    if config.turn_timeout is not None:
-        rl_patch["turn_timeout"] = config.turn_timeout
-        _record("run_limits.turn_timeout", config.turn_timeout, "--turn-timeout")
-    if rl_patch:
-        task.run_limits = RunLimits(**{**rl_base, **rl_patch})
-
-    # Tool/plugin overrides
-    if config.allowed_tools is not None:
-        task.agent.allowed_tools = config.allowed_tools
-        _record("agent.allowed_tools", config.allowed_tools, "--allowed-tools")
-    if config.disallowed_tools is not None:
-        task.agent.disallowed_tools = config.disallowed_tools
-        _record("agent.disallowed_tools", config.disallowed_tools, "--disallowed-tools")
-    if config.plugins is not None:
-        task.agent.plugins = config.plugins
-        _record("agent.plugins", config.plugins, "--plugins")
-    if config.sdk_options:
-        from coder_eval.models import ClaudeCodeAgentConfig
-
-        if isinstance(task.agent, ClaudeCodeAgentConfig):
-            task.agent.sdk_options = {**task.agent.sdk_options, **config.sdk_options}
-            for key, value in config.sdk_options.items():
-                _record(f"agent.sdk_options.{key}", value, f"--sdk-option {key}={value}")
-        else:
-            raise ValueError(
-                f"--sdk-option cannot be used with agent type {task.agent.type}. "
-                "This option is only supported for claude-code agents."
-            )
-
-    # Sandbox driver override (CLI > task YAML). Driver value is already
-    # Literal-validated upstream via BatchRunConfig; nothing to re-check.
-    if config.driver is not None:
-        task.sandbox.driver = config.driver
-        _record("sandbox.driver", config.driver, "--driver")
+    effective = {**env_defaults, **config.overrides}
+    # `.env`-sourced provenance is intrinsic now: pass a per-path detail map for
+    # the `.env` keys the CLI did NOT override (CLI-set paths auto-derive their
+    # `-D <path>` detail in the resolver). No write-then-relabel pass needed.
+    detail = {key: env_detail[key] for key in env_defaults if key not in config.overrides}
+    apply_overrides(task, effective, agent_type=config.agent_type, lineage=lineage, detail=detail)
 
     # Final guard: agent.type must be set after all 5 layers have merged.
     if task.agent.type is None:

@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from coder_eval.models.agent_config import AgentConfig, BaseAgentConfig
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.limits import RunLimits
+from coder_eval.models.merge_strategy import MergeField
 from coder_eval.models.sandbox import SandboxConfig
 
 
@@ -69,7 +70,8 @@ class SimulationConfig(BaseModel):
             "You can optionally withhold information (see ``constraints``) to force clarification behavior."
         ),
     )
-    constraints: list[str] = Field(
+    constraints: list[str] = MergeField(
+        strategy="replace",  # each layer's constraints wholesale-replace lower layers'
         default_factory=list,
         description=(
             "Optional behavioral rules the simulator must follow "
@@ -304,7 +306,8 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
             "Mutually exclusive with initial_prompt."
         ),
     )
-    tags: list[str] = Field(
+    tags: list[str] = MergeField(
+        strategy="replace",  # not layer-merged today; replace = the engine default if it ever is
         default_factory=list,
         description=(
             "Tags for categorizing and filtering tasks. Each tag is kebab-case, optionally namespaced "
@@ -326,7 +329,10 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         default_factory=SandboxConfig,
         description="Sandbox configuration (defaults to tempdir if omitted)",
     )
-    success_criteria: list[SuccessCriterion] = Field(description="List of criteria that must all pass for task success")
+    success_criteria: list[SuccessCriterion] = MergeField(
+        strategy="replace",  # not layer-merged today; replace = the engine default if it ever is
+        description="List of criteria that must all pass for task success",
+    )
     run_limits: RunLimits | None = Field(
         default=None,
         description=(
@@ -345,17 +351,24 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         ge=1,
         description="Expected number of tool commands for orchestrator-level efficiency tracking",
     )
-    pre_run: list[PreRunCommand] = Field(
+    pre_run: list[PreRunCommand] = MergeField(
+        strategy="append",
         default_factory=list,
         description=(
             "Commands to execute before agent evaluation starts. "
             "By default a failing command aborts evaluation with FinalStatus.ERROR. "
-            "Set fail_on_error=False per command to make it informational."
+            "Set fail_on_error=False per command to make it informational. "
+            "Experiment-defaults pre_run runs first (baseline setup), then the task's."
         ),
     )
-    post_run: list[PostRunCommand] = Field(
+    post_run: list[PostRunCommand] = MergeField(
+        strategy="append",
+        append_order="reverse",
         default_factory=list,
-        description="Commands to execute after evaluation completes. Do not affect pass/fail.",
+        description=(
+            "Commands to execute after evaluation completes. Do not affect pass/fail. "
+            "The task's commands run first, then experiment-defaults post_run (cleanup-last)."
+        ),
     )
     dataset: Dataset | None = Field(
         default=None,
@@ -404,7 +417,6 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         if not isinstance(data, dict):
             return data
         known = set(cls.model_fields)
-        # Also accept the deprecated agent-nested timing fields handled below.
         unknown = [k for k in data if k not in known]
         for key in unknown:
             warnings.warn(
@@ -414,100 +426,6 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
                 UnknownTaskFieldWarning,
                 stacklevel=2,
             )
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def _hoist_legacy_agent_timing(cls, data: Any) -> Any:
-        """Back-compat shim for legacy task-YAML timing shapes.
-
-        Two jobs, both scheduled for removal on 2026-05-20:
-
-        1. Lift ``max_turns`` / ``turn_timeout`` from ``agent:`` to
-           ``run_limits:`` (the original c/2026-05-07 migration).
-        2. Lift top-level ``task_timeout`` / ``max_turns`` / ``turn_timeout``
-           into ``run_limits.*`` (the c/2026-05-12 unify-run-limits migration).
-
-        Other stale fields (``max_iterations``, ``llm_reviewer``, …) are now
-        surfaced generically by ``_warn_on_unknown_fields`` above — no
-        special-cased silent-drop branch is needed here.
-
-        See plan c/2026-05-12-unify-run-limits.md.
-        """
-        if not isinstance(data, dict):
-            return data
-
-        # Normalize the optional run_limits sub-block so all three jobs below
-        # can append into the same dict regardless of input shape.
-        run_limits = data.get("run_limits")
-        if run_limits is None:
-            run_limits = {}
-        elif isinstance(run_limits, RunLimits):
-            # exclude_unset (not exclude_none): non-Optional fields like
-            # count_cached_input default to False; exclude_none would write
-            # that default back into the dict, marking it explicit on the
-            # rebuilt RunLimits and clobbering a True set in a lower layer
-            # via _merge_rl's exclude_unset dump.
-            run_limits = run_limits.model_dump(exclude_unset=True)
-        elif isinstance(run_limits, dict):
-            run_limits = dict(run_limits)
-        else:
-            # Unrecognized type — leave it to Pydantic to reject downstream.
-            return data
-
-        # Track which keys came from a user-written run_limits: block vs.
-        # were hoisted from a deprecated location — drives the precise error
-        # message when Job 2 detects a conflict (top-level vs agent: vs run_limits:).
-        canonical_keys = set(run_limits)
-        agent_hoisted_keys: set[str] = set()
-
-        # Job 1: hoist legacy agent.{max_turns,turn_timeout}.
-        agent = data.get("agent")
-        if isinstance(agent, dict) and any(f in agent for f in ("max_turns", "turn_timeout")):
-            # Defensive: don't mutate the caller's agent dict — a programmatic
-            # caller may reuse kwargs across multiple TaskDefinition(**kw) calls.
-            agent = dict(agent)
-            for field in ("max_turns", "turn_timeout"):
-                if field in agent:
-                    if field in canonical_keys:
-                        raise ValueError(
-                            f"{field!r} set both under agent: and in run_limits: — "
-                            + "remove the one under agent: (deprecated location)."
-                        )
-                    run_limits[field] = agent.pop(field)
-                    agent_hoisted_keys.add(field)
-                    warnings.warn(
-                        f"{field!r} under agent: is deprecated and will be removed on 2026-05-20; "
-                        + f"move it to run_limits.{field}.",
-                        DeprecationWarning,
-                        stacklevel=2,
-                    )
-            data["agent"] = agent
-
-        # Job 2: hoist top-level task_timeout / max_turns / turn_timeout
-        # (their pre-2026-05-12 home on TaskDefinition).
-        for field in ("task_timeout", "max_turns", "turn_timeout"):
-            if field in data:
-                if field in agent_hoisted_keys:
-                    raise ValueError(
-                        f"{field!r} set both at top level and under agent: — "
-                        + "both are deprecated locations; pick one (preferably move into run_limits:)."
-                    )
-                if field in canonical_keys:
-                    raise ValueError(
-                        f"{field!r} set both at top level and in run_limits: — "
-                        + "remove the top-level entry (deprecated location)."
-                    )
-                run_limits[field] = data.pop(field)
-                warnings.warn(
-                    f"Top-level {field!r} on TaskDefinition is deprecated and will be removed on "
-                    + f"2026-05-20; move it to run_limits.{field}.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-
-        if run_limits:
-            data["run_limits"] = run_limits
         return data
 
     @model_validator(mode="after")

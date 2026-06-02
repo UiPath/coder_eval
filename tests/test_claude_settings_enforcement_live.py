@@ -69,7 +69,7 @@ async def _run_single_turn(sandbox_dir: Path, prompt: str, claude_settings: dict
     config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
-        # Intentionally omit allowed_tools: a populated --allowed-tools flag appears
+        # Intentionally omit allowed_tools: a populated allowed_tools list appears
         # to short-circuit settings-level permissions.deny in the CLI.
         model=_model_for_env(),
         claude_settings=claude_settings,

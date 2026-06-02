@@ -672,3 +672,154 @@ def test_ce013_would_have_caught_parse_judge_verdict_regex(write_eval_py):
     path = write_eval_py(source)
     violations = check_file(path, rules=[NoTranscriptRegexInEval])
     assert len(violations) == 1, "rule must catch the historical [RESULT - …] pattern"
+
+
+# ---------- CE014 merge-strategy declared on list fields ----------
+
+
+@pytest.fixture
+def write_sandbox_py(tmp_path: Path):
+    """Write a file at the scoped models/sandbox.py path with a merge-root class
+    (``SandboxConfig``) so CE014 activates on both the file and the class name."""
+
+    def _write(source: str) -> Path:
+        target = tmp_path / "src" / "coder_eval" / "models"
+        target.mkdir(parents=True, exist_ok=True)
+        path = target / "sandbox.py"
+        path.write_text(source, encoding="utf-8")
+        return path
+
+    return _write
+
+
+@pytest.fixture
+def write_tasks_py(tmp_path: Path):
+    """Write a file at the scoped models/tasks.py path so CE014 activates for the
+    two models merged outside the -D roots (TaskDefinition / SimulationConfig)."""
+
+    def _write(source: str) -> Path:
+        target = tmp_path / "src" / "coder_eval" / "models"
+        target.mkdir(parents=True, exist_ok=True)
+        path = target / "tasks.py"
+        path.write_text(source, encoding="utf-8")
+        return path
+
+    return _write
+
+
+def test_ce014_flags_list_field_with_plain_field(write_sandbox_py):
+    from tests.lint.rules.ce014_merge_strategy_declared import MergeStrategyDeclared
+
+    source = "class SandboxConfig(BaseModel):\n    items: list[str] = Field(default_factory=list)\n"
+    path = write_sandbox_py(source)
+    violations = check_file(path, rules=[MergeStrategyDeclared])
+    assert len(violations) == 1
+    assert violations[0].rule_id == "CE014"
+
+
+def test_ce014_flags_optional_list_field_with_plain_field(write_sandbox_py):
+    from tests.lint.rules.ce014_merge_strategy_declared import MergeStrategyDeclared
+
+    source = "class SandboxConfig(BaseModel):\n    items: list[str] | None = Field(default=None)\n"
+    path = write_sandbox_py(source)
+    violations = check_file(path, rules=[MergeStrategyDeclared])
+    assert len(violations) == 1
+
+
+def test_ce014_allows_list_field_with_mergefield(write_sandbox_py):
+    from tests.lint.rules.ce014_merge_strategy_declared import MergeStrategyDeclared
+
+    source = (
+        'class SandboxConfig(BaseModel):\n    items: list[str] = MergeField(strategy="append", default_factory=list)\n'
+    )
+    path = write_sandbox_py(source)
+    violations = check_file(path, rules=[MergeStrategyDeclared])
+    assert violations == []
+
+
+def test_ce014_flags_annotated_list_field_with_plain_field(write_sandbox_py):
+    """Annotated[list[...], ...] must also be caught (it's still a list under the hood)."""
+    from tests.lint.rules.ce014_merge_strategy_declared import MergeStrategyDeclared
+
+    source = 'class SandboxConfig(BaseModel):\n    items: Annotated[list[str], "x"] = Field(default_factory=list)\n'
+    path = write_sandbox_py(source)
+    violations = check_file(path, rules=[MergeStrategyDeclared])
+    assert len(violations) == 1
+
+
+def test_ce014_flags_bare_list_field_with_plain_field(write_sandbox_py):
+    """A bare ``list`` annotation is also a list field."""
+    from tests.lint.rules.ce014_merge_strategy_declared import MergeStrategyDeclared
+
+    source = "class SandboxConfig(BaseModel):\n    items: list = Field(default_factory=list)\n"
+    path = write_sandbox_py(source)
+    violations = check_file(path, rules=[MergeStrategyDeclared])
+    assert len(violations) == 1
+
+
+def test_ce014_allows_nested_model_field_with_plain_field(write_sandbox_py):
+    """Nested-model fields may rely on the deep type-default — plain Field is fine."""
+    from tests.lint.rules.ce014_merge_strategy_declared import MergeStrategyDeclared
+
+    source = (
+        "class SandboxConfig(BaseModel):\n    docker: DockerDriverConfig = Field(default_factory=DockerDriverConfig)\n"
+    )
+    path = write_sandbox_py(source)
+    violations = check_file(path, rules=[MergeStrategyDeclared])
+    assert violations == []
+
+
+def test_ce014_allows_dict_field_with_plain_field(write_sandbox_py):
+    """Free-form dict fields may rely on the deep type-default — plain Field is fine."""
+    from tests.lint.rules.ce014_merge_strategy_declared import MergeStrategyDeclared
+
+    source = "class SandboxConfig(BaseModel):\n    opts: dict[str, Any] = Field(default_factory=dict)\n"
+    path = write_sandbox_py(source)
+    violations = check_file(path, rules=[MergeStrategyDeclared])
+    assert violations == []
+
+
+def test_ce014_skips_files_outside_scope(write_py):
+    """A list field with plain Field in a non-scoped file is not flagged."""
+    from tests.lint.rules.ce014_merge_strategy_declared import MergeStrategyDeclared
+
+    source = "class SandboxConfig(BaseModel):\n    items: list[str] = Field(default_factory=list)\n"
+    path = write_py(source, name="other.py")
+    violations = check_file(path, rules=[MergeStrategyDeclared])
+    assert violations == []
+
+
+def test_ce014_noqa_suppresses(write_sandbox_py):
+    from tests.lint.rules.ce014_merge_strategy_declared import MergeStrategyDeclared
+
+    source = (
+        "class SandboxConfig(BaseModel):\n"
+        "    items: list[str] = Field(default_factory=list)  # noqa: CE014 -- intentional\n"
+    )
+    path = write_sandbox_py(source)
+    violations = check_file(path, rules=[MergeStrategyDeclared])
+    assert violations == []
+
+
+@pytest.mark.parametrize("root_class", ["TaskDefinition", "SimulationConfig"])
+def test_ce014_covers_task_merge_roots(write_tasks_py, root_class: str):
+    """The two models merged outside the -D roots are in scope, so an undeclared
+    list field on either must fire — guarding the historical CE014 blind spot."""
+    from tests.lint.rules.ce014_merge_strategy_declared import MergeStrategyDeclared
+
+    source = f"class {root_class}(BaseModel):\n    things: list[str] = Field(default_factory=list)\n"
+    path = write_tasks_py(source)
+    violations = check_file(path, rules=[MergeStrategyDeclared])
+    assert len(violations) == 1
+    assert violations[0].rule_id == "CE014"
+
+
+def test_ce014_ignores_non_root_class_in_scoped_file(write_tasks_py):
+    """A non-root class sharing a scoped file (e.g. PreRunCommand in tasks.py) is
+    NOT a merge root, so its list fields are not flagged."""
+    from tests.lint.rules.ce014_merge_strategy_declared import MergeStrategyDeclared
+
+    source = "class PreRunCommand(BaseModel):\n    args: list[str] = Field(default_factory=list)\n"
+    path = write_tasks_py(source)
+    violations = check_file(path, rules=[MergeStrategyDeclared])
+    assert violations == []

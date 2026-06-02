@@ -71,6 +71,18 @@ from coder_eval.models.judge import JudgeVerdict
 # Limits
 from coder_eval.models.limits import RunLimits
 
+# Merge strategy
+from coder_eval.models.merge_strategy import (
+    APPEND_ORDER_KEY,
+    MERGE_STRATEGY_KEY,
+    AppendOrder,
+    MergeField,
+    MergeStrategy,
+    append_order_of,
+    classify_annotation,
+    merge_strategy_of,
+)
+
 # Mutations
 from coder_eval.models.mutations import (
     PromptMutation,
@@ -264,6 +276,15 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "JudgeVerdict",
     # Limits
     "RunLimits",
+    # Merge strategy
+    "MERGE_STRATEGY_KEY",
+    "APPEND_ORDER_KEY",
+    "AppendOrder",
+    "MergeField",
+    "MergeStrategy",
+    "append_order_of",
+    "classify_annotation",
+    "merge_strategy_of",
     # Tasks
     "TaskDefinition",
     "DEFAULT_SIMULATION_STOP_TOKEN",

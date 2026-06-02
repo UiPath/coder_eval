@@ -13,7 +13,7 @@ from coder_eval.models import (
     TemplateDirSource,
     parse_agent_config,
 )
-from coder_eval.orchestration.experiment import _merge_agent_dicts, resolve_task_files
+from coder_eval.orchestration.experiment import resolve_task_files
 from coder_eval.orchestration.task_loader import (
     resolve_agent_system_prompt,
     resolve_initial_prompt_file,
@@ -302,37 +302,3 @@ class TestResolveTaskFiles:
         resolve_task_files(task, task_file)
 
         assert task.agent is None
-
-
-class TestMergeAgentDictsPromptExclusivity:
-    """Test that _merge_agent_dicts handles mutually exclusive prompt fields."""
-
-    def test_variant_system_prompt_file_overrides_resolved_system_prompt(self):
-        """When task has resolved system_prompt (from file), variant system_prompt_file wins."""
-        # Simulates what model_dump(exclude_unset=True) produces after load_task resolves the file
-        task_agent = {"type": "claude-code", "system_prompt": "resolved content", "system_prompt_file": None}
-        variant_agent = {"system_prompt_file": "variant_prompt.md"}
-
-        merged = _merge_agent_dicts(task_agent, variant_agent)
-        # Should not crash AgentConfig validation
-        config = parse_agent_config(**merged)
-        assert config.system_prompt_file == "variant_prompt.md"
-        assert config.system_prompt is None
-
-    def test_variant_system_prompt_overrides_task_system_prompt_file(self):
-        """When task has system_prompt_file, variant inline system_prompt wins."""
-        task_agent = {"type": "claude-code", "system_prompt_file": "task.md"}
-        variant_agent = {"system_prompt": "inline from variant"}
-
-        merged = _merge_agent_dicts(task_agent, variant_agent)
-        config = parse_agent_config(**merged)
-        assert config.system_prompt == "inline from variant"
-        assert config.system_prompt_file is None
-
-    def test_no_prompt_fields_unaffected(self):
-        """Merge without prompt fields works as before."""
-        layer1 = {"type": "claude-code", "model": "opus"}
-        layer2 = {"model": "sonnet", "max_turns": 5}
-
-        merged = _merge_agent_dicts(layer1, layer2)
-        assert merged == {"type": "claude-code", "model": "sonnet", "max_turns": 5}

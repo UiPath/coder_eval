@@ -1035,15 +1035,19 @@ def test_agent_judge_integration_real_sdk(tmp_path: Path) -> None:
 
     from coder_eval.models import SandboxConfig
 
-    (tmp_path / "hello.txt").write_text("Hello, world!\n")
+    # Content matches the prompt's target exactly (no trailing newline) so the
+    # judge has an unambiguous pass case — a trailing "\n" made small models
+    # flip between a strict and lenient reading of "contains", flaking the score.
+    (tmp_path / "hello.txt").write_text("Hello, world!")
     sb = Sandbox(SandboxConfig(driver="tempdir"), task_id="agent_judge_integration")
     sb.sandbox_dir = tmp_path
 
     criterion = AgentJudgeCriterion(
         description="integration smoke",
         prompt=(
-            "Check hello.txt in your working directory. If it contains exactly "
-            "'Hello, world!' return score=1.0, otherwise 0.0. Reply with ONLY the JSON verdict."
+            "Read hello.txt in your working directory. If its contents include the "
+            "text 'Hello, world!' return score=1.0, otherwise score=0.0. "
+            "Reply with ONLY the JSON verdict."
         ),
         max_turns=6,
         turn_timeout=90,

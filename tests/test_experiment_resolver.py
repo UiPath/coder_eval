@@ -343,8 +343,9 @@ class TestDefaultExperimentScalarOverrides:
 class TestTurnTimeoutResolution:
     """Regression tests for turn_timeout flowing through the field-merge resolver."""
 
-    def test_turn_timeout_in_agent_dict_hoists_to_run_limits(self):
-        """Legacy turn_timeout inside the agent dict hoists into run_limits.turn_timeout."""
+    def test_turn_timeout_in_agent_dict_now_rejected(self):
+        """Legacy turn_timeout under agent: is no longer hoisted — it fails loudly
+        via the agent model's extra='forbid' (the hoist shim was removed)."""
         default_exp = ExperimentDefinition(
             experiment_id="default",
             defaults=ExperimentDefaults(agent={"type": "claude-code", "turn_timeout": 300}),
@@ -356,10 +357,8 @@ class TestTurnTimeoutResolution:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        with pytest.warns(DeprecationWarning):
-            resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
-        assert resolved.run_limits is not None
-        assert resolved.run_limits.turn_timeout == 300
+        with pytest.raises(ValueError, match="turn_timeout"):
+            resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
 
     def test_default_yaml_turn_timeout_preserved(self):
         """Regression: turn_timeout from actual default.yaml must survive resolution."""
@@ -380,14 +379,14 @@ class TestTurnTimeoutResolution:
         assert resolved.run_limits is not None
         assert resolved.run_limits.turn_timeout == expected_timeout
 
-    def test_run_limits_turn_timeout_overrides_agent_dict_in_same_layer(self):
-        """run_limits.turn_timeout merged after agent-hoist within the same layer wins."""
+    def test_run_limits_turn_timeout_from_canonical_block(self):
+        """A canonical run_limits.turn_timeout resolves through the field-merge."""
         from coder_eval.models import RunLimits
 
         default_exp = ExperimentDefinition(
             experiment_id="default",
             defaults=ExperimentDefaults(
-                agent={"type": "claude-code", "turn_timeout": 200},
+                agent={"type": "claude-code"},
                 run_limits=RunLimits(turn_timeout=400),
             ),
             variants=[ExperimentVariant(variant_id="default")],
@@ -398,10 +397,8 @@ class TestTurnTimeoutResolution:
             variants=[ExperimentVariant(variant_id="v1")],
         )
 
-        with pytest.warns(DeprecationWarning):
-            resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
+        resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.run_limits is not None
-        # agent-deprecated is merged BEFORE run_limits within the same layer, so run_limits wins.
         assert resolved.run_limits.turn_timeout == 400
 
 
@@ -409,7 +406,9 @@ class TestTemplateSourcesOverlay:
     """Tests for variant-level template_sources overlay (append semantics)."""
 
     def test_full_template_sources_precedence_chain(self):
-        """Task + base + variant template_sources are concatenated in order."""
+        """template_sources concatenate task-first: the task's base templates, then
+        experiment-defaults and variant overlays appended after (per the field
+        docs "appended after task's base templates")."""
         default_exp = _make_default_experiment()
         task = _make_task(
             agent={"type": "claude-code"},
@@ -432,7 +431,7 @@ class TestTemplateSourcesOverlay:
         resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.sandbox.template_sources is not None
         paths = [s.path for s in resolved.sandbox.template_sources]
-        assert paths == ["/task", "/base", "/variant"]
+        assert paths == ["/task", "/base", "/variant"]  # task base first, then overlays
 
     def test_no_template_sources_anywhere(self):
         """When no layer has template_sources, sandbox.template_sources is unchanged."""
@@ -1017,7 +1016,8 @@ class TestSdkOptionsMerge:
         resolved, lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
 
         if cli_opts is not None:
-            cli_cfg = BatchRunConfig(run_dir=Path("/tmp/run"), sdk_options=cli_opts)
+            cli_overrides = {f"agent.sdk_options.{k}": v for k, v in cli_opts.items()}
+            cli_cfg = BatchRunConfig(run_dir=Path("/tmp/run"), overrides=cli_overrides)
             _apply_cli_overrides(resolved, cli_cfg, lineage)
 
         return resolved, lineage
@@ -1062,7 +1062,7 @@ class TestSdkOptionsMerge:
         )
         assert resolved.agent.sdk_options == {"effort": "max", "max_thinking_tokens": 1024}
         assert lineage["agent.sdk_options.effort"].source == "cli"
-        assert lineage["agent.sdk_options.effort"].source_detail == "--sdk-option effort=max"
+        assert lineage["agent.sdk_options.effort"].source_detail == "-D agent.sdk_options.effort"
         # The unaffected key stays at its original source.
         assert lineage["agent.sdk_options.max_thinking_tokens"].source == "default"
 
@@ -1078,8 +1078,8 @@ class TestSdkOptionsMerge:
 
         The merge contract is additive-only: there is no "clear all inherited
         SDK options" syntax. An explicit ``{}`` MUST NOT silently wipe lower-
-        layer values, and it MUST NOT raise. This locks the documented
-        semantics in ``_merge_agent_dicts`` against accidental regression.
+        layer values, and it MUST NOT raise. This locks the deep-dict merge
+        semantics (config_merge.resolve_root) against accidental regression.
         """
         # variant supplies ``{}``; default supplies effort=low → default wins.
         resolved, lineage = self._resolve(

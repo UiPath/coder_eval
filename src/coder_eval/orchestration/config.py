@@ -1,12 +1,9 @@
 """Configuration models for orchestration."""
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
-from claude_agent_sdk import SdkPluginConfig
 from pydantic import BaseModel, ConfigDict, Field
-
-from coder_eval.models import PermissionMode
 
 
 class BatchRunConfig(BaseModel):
@@ -24,25 +21,21 @@ class BatchRunConfig(BaseModel):
     include_tags: set[str] | None = Field(default=None, description="Only run tasks matching any of these tags")
     exclude_tags: set[str] | None = Field(default=None, description="Skip tasks matching any of these tags")
 
-    # Agent overrides (CLI > .env > task YAML)
+    # Agent type override stays a dedicated field: it requires re-parsing the
+    # discriminated union (not a simple field-merge), so it is injected into the
+    # generic agent patch by apply_overrides rather than living in `overrides`.
     agent_type: str | None = Field(default=None, description="Override agent type for all tasks (e.g., 'claude-code')")
-    agent_model: str | None = Field(default=None, description="Override agent model for all tasks")
-    permission_mode: PermissionMode | None = Field(default=None, description="Override permission mode for all tasks")
-    max_turns: int | None = Field(default=None, description="Override max turns for all tasks")
 
-    allowed_tools: list[str] | None = Field(default=None, description="Override allowed tools for all tasks")
-    disallowed_tools: list[str] | None = Field(default=None, description="Override disallowed tools for all tasks")
-    plugins: list[SdkPluginConfig] | None = Field(
-        default=None, description="Override plugins (SdkPluginConfig objects) for all tasks"
-    )
-    sdk_options: dict[str, Any] = Field(
+    # Generic layer-5 task-config overrides. Built from -D/--set and the surviving
+    # flag aliases (--model, --driver) in run_command, then applied to the resolved
+    # TaskDefinition by orchestration.overrides.
+    overrides: dict[str, Any] = Field(
         default_factory=dict,
-        description="Override SDK pass-through options for all tasks (key=value pairs from --sdk-option).",
+        description=(
+            "Generic layer-5 task-config overrides (dotted path -> typed value) "
+            "from -D/--set and the surviving flag aliases (--model, --driver)."
+        ),
     )
-
-    # Timeout overrides (CLI > task YAML)
-    task_timeout: int | None = Field(default=None, ge=30, description="Override task timeout for all tasks")
-    turn_timeout: int | None = Field(default=None, ge=10, description="Override turn timeout for all tasks")
 
     # Dataset sampling (for cheap smoke runs on dataset-backed tasks)
     max_rows: int | None = Field(
@@ -56,12 +49,6 @@ class BatchRunConfig(BaseModel):
         default=None,
         ge=1,
         description="CLI override for replicates per (task, variant). None = defer to experiment layers.",
-    )
-
-    # Sandbox driver override (CLI > task YAML)
-    driver: Literal["tempdir", "docker"] | None = Field(
-        default=None,
-        description="Override sandbox driver for all tasks.",
     )
 
     # Logging

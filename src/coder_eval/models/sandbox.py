@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from coder_eval.models.merge_strategy import MergeField
 from coder_eval.models.templates import TemplateSource
 from coder_eval.resources import normalize_ignore_pattern_entry
 from coder_eval.utils import get_default_docker_image_tag
@@ -52,7 +53,7 @@ class PythonEnvConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    env_packages: list[str] = Field(default_factory=list, description="Packages to install")
+    env_packages: list[str] = MergeField(strategy="replace", default_factory=list, description="Packages to install")
 
 
 class NodeEnvConfig(BaseModel):
@@ -60,8 +61,8 @@ class NodeEnvConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    env_packages: list[str] = Field(
-        default_factory=list, description="npm packages to install (e.g., '@uipath/cli@0.1.5')"
+    env_packages: list[str] = MergeField(
+        strategy="replace", default_factory=list, description="npm packages to install (e.g., '@uipath/cli@0.1.5')"
     )
 
 
@@ -123,7 +124,8 @@ class DockerDriverConfig(BaseModel):
         default="bridge",
         description="Container network. 'bridge' for tasks needing LLM/pkg access; 'none' for fully sealed runs.",
     )
-    env_passthrough: list[str] = Field(
+    env_passthrough: list[str] = MergeField(
+        strategy="replace",
         default_factory=lambda: [
             "ANTHROPIC_API_KEY",
             # Selects routing: direct Anthropic vs. LLM Gateway proxy vs. Bedrock.
@@ -176,15 +178,17 @@ class DockerDriverConfig(BaseModel):
             "(keeps ~/.claude path symmetric with host); see docs/DOCKER_ISOLATION.md for details."
         ),
     )
-    env_passthrough_extra: list[str] = Field(
+    env_passthrough_extra: list[str] = MergeField(
+        strategy="append",
         default_factory=list,
         description=(
             "Additional environment variables to forward beyond the default allowlist. Merged with env_passthrough "
             "at runtime. Use this to add one or two custom vars (e.g., MY_API_TOKEN) without replacing the defaults. "
-            "Example: env_passthrough_extra: ['MY_CUSTOM_TOKEN', 'DEBUG_MODE']"
+            "Example: env_passthrough_extra: ['MY_CUSTOM_TOKEN', 'DEBUG_MODE']. Appended across config layers."
         ),
     )
-    extra_mounts: list[str] = Field(
+    extra_mounts: list[str] = MergeField(
+        strategy="replace",
         default_factory=list,
         description="Extra `-v src:dst[:ro]` mount specs forwarded to `docker run`. Validated for basic syntax.",
     )
@@ -223,11 +227,14 @@ class SandboxConfig(BaseModel):
     limits: ResourceLimits = Field(default_factory=ResourceLimits, description="Resource limits for execution")
 
     # Multi-source template support
-    template_sources: list[TemplateSource] | None = Field(
-        default=None, description="Sequential list of template sources to apply"
+    template_sources: list[TemplateSource] | None = MergeField(
+        strategy="append",
+        default=None,
+        description="Sequential list of template sources to apply. Appended across config layers.",
     )
 
-    mock_path_dirs: list[str] | None = Field(
+    mock_path_dirs: list[str] | None = MergeField(
+        strategy="replace",
         default=None,
         description=(
             "Sandbox-relative directories whose contents act as PATH-prepended mock "
@@ -240,7 +247,8 @@ class SandboxConfig(BaseModel):
     )
 
     # Customizable ignore patterns
-    ignore_patterns: list[str] = Field(
+    ignore_patterns: list[str] = MergeField(
+        strategy="replace",
         default_factory=list,
         description=(
             "Pattern overrides applied during template setup. "

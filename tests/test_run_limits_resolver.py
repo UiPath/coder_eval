@@ -130,26 +130,23 @@ class TestRunLimitsResolver:
         assert resolved.run_limits is not None
         assert resolved.run_limits.max_usd == 5.0
 
-    def test_legacy_agent_max_turns_field_merges(self):
-        """Legacy variant.agent.max_turns hoists into run_limits.max_turns and field-merges."""
+    def test_legacy_agent_max_turns_now_rejected(self):
+        """Legacy variant.agent.max_turns is no longer hoisted — it fails loudly via
+        the agent model's extra='forbid' (the hoist shim was removed)."""
         default_exp = _default_exp()
         task = _make_task()
-        with pytest.warns(DeprecationWarning):
-            exp = ExperimentDefinition(
-                experiment_id="e",
-                variants=[
-                    ExperimentVariant(
-                        variant_id="v",
-                        agent={"type": "claude-code", "max_turns": 7},
-                        run_limits=RunLimits(max_usd=0.5),
-                    )
-                ],
-            )
-            resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
-        assert resolved.run_limits is not None
-        assert resolved.run_limits.max_turns == 7
-        assert resolved.run_limits.max_usd == 0.5
-        assert lineage["run_limits.max_turns"].source == "variant-agent-deprecated"
+        exp = ExperimentDefinition(
+            experiment_id="e",
+            variants=[
+                ExperimentVariant(
+                    variant_id="v",
+                    agent={"type": "claude-code", "max_turns": 7},
+                    run_limits=RunLimits(max_usd=0.5),
+                )
+            ],
+        )
+        with pytest.raises(ValueError, match="max_turns"):
+            resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
 
     def test_no_run_limits_anywhere(self):
         default_exp = _default_exp()
@@ -207,16 +204,13 @@ class TestRunLimitsResolver:
             lineage["run_limits.count_cached_input"].source == "task"
         )
 
-    def test_hoist_shim_preserves_unset_marker_on_runlimits_instance(self):
+    def test_empty_runlimits_instance_preserves_unset_marker(self):
         """Programmatic ``TaskDefinition(run_limits=RunLimits())`` must not leak defaults.
 
-        Regression guard: the hoist shim normalizes a ``RunLimits`` instance back
-        into a dict so the three legacy-shape jobs can append into it. If that
-        dump uses ``exclude_none=True`` instead of ``exclude_unset=True``, the
-        default ``count_cached_input=False`` is written into the dict, then
-        Pydantic re-validates and marks it as explicit on the rebuilt model.
-        ``_merge_rl(task.run_limits, "task")`` then clobbers a True set in
-        the default-experiment layer.
+        Regression guard: the resolver dumps each layer with ``exclude_unset=True``,
+        so an empty ``RunLimits()`` at the task layer contributes no keys (in
+        particular not the default ``count_cached_input=False``) and therefore
+        cannot clobber a ``True`` set in the default-experiment layer.
         """
         default_exp = _default_exp(RunLimits(count_cached_input=True))
         # Task constructed with an empty RunLimits instance — no user-set fields.

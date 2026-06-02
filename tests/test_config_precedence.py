@@ -287,17 +287,10 @@ def test_config_direct_skips_bedrock_validation():
     settings.validate_api_keys("claude-code")
 
 
-def test_agent_override_precedence_cli_over_env_over_yaml():
-    """Test CLI > .env > task YAML precedence for agent overrides.
-
-    Verifies that BatchRunConfig fields (CLI) take priority over
-    Settings fields (.env), which take priority over task YAML values.
-    """
+def _precedence_task():
     from coder_eval.models import AgentKind, RunLimits, SandboxConfig, TaskDefinition, parse_agent_config
-    from coder_eval.orchestration.config import BatchRunConfig
 
-    # Simulate a task with YAML-defined values
-    task = TaskDefinition(
+    return TaskDefinition(
         task_id="test-precedence",
         description="Test precedence",
         initial_prompt="test",
@@ -307,33 +300,81 @@ def test_agent_override_precedence_cli_over_env_over_yaml():
         success_criteria=[{"type": "file_exists", "path": "test.py", "description": "test"}],
     )
 
-    # CLI value should win over .env and YAML
+
+def test_agent_override_precedence_cli_over_env_over_yaml(monkeypatch):
+    """Test CLI (-D/alias) > .env > task YAML precedence for agent overrides.
+
+    With .env defaults cleared, CLI overrides win over the task YAML values.
+    """
+    from coder_eval.config import settings as app_settings
+    from coder_eval.orchestration.config import BatchRunConfig
+    from coder_eval.orchestration.experiment import _apply_cli_overrides
+
+    # Clear .env defaults so CLI-vs-YAML precedence is deterministic.
+    monkeypatch.setattr(app_settings, "default_agent_model", None)
+    monkeypatch.setattr(app_settings, "default_permission_mode", None)
+    monkeypatch.setattr(app_settings, "default_max_turns", None)
+
+    task = _precedence_task()
     config = BatchRunConfig(
         run_dir=Path("runs/test"),
-        agent_model="cli-model",
-        permission_mode="bypassPermissions",
-        max_turns=99,
+        overrides={
+            "agent.model": "cli-model",
+            "agent.permission_mode": "bypassPermissions",
+            "run_limits.max_turns": 99,
+        },
     )
 
-    # Apply overrides (simulating batch.py logic)
-    effective_model = config.agent_model or None  # CLI value
-    if effective_model:
-        task.agent.model = effective_model
-
-    effective_perm = config.permission_mode or None
-    if effective_perm:
-        task.agent.permission_mode = effective_perm
-
-    effective_max_turns = config.max_turns if config.max_turns is not None else None
-    if effective_max_turns is not None:
-        base = task.run_limits.model_dump(exclude_none=True) if task.run_limits else {}
-        base["max_turns"] = effective_max_turns
-        task.run_limits = RunLimits(**base)
+    _apply_cli_overrides(task, config)
 
     assert task.agent.model == "cli-model"
     assert task.agent.permission_mode == "bypassPermissions"
     assert task.run_limits is not None
     assert task.run_limits.max_turns == 99
+
+
+def test_env_default_applies_without_cli_override(monkeypatch):
+    """A .env DEFAULT_MAX_TURNS applies when no -D override targets that path."""
+    from coder_eval.config import settings as app_settings
+    from coder_eval.models import ConfigLineageEntry
+    from coder_eval.orchestration.config import BatchRunConfig
+    from coder_eval.orchestration.experiment import _apply_cli_overrides
+
+    monkeypatch.setattr(app_settings, "default_agent_model", None)
+    monkeypatch.setattr(app_settings, "default_permission_mode", None)
+    monkeypatch.setattr(app_settings, "default_max_turns", 17)
+
+    task = _precedence_task()
+    config = BatchRunConfig(run_dir=Path("runs/test"))
+    lineage: dict[str, ConfigLineageEntry] = {}
+
+    _apply_cli_overrides(task, config, lineage=lineage)
+
+    assert task.run_limits is not None
+    assert task.run_limits.max_turns == 17
+    assert lineage["run_limits.max_turns"].source_detail == ".env DEFAULT_MAX_TURNS"
+
+
+def test_cli_override_wins_over_env_default(monkeypatch):
+    """A -D run_limits.max_turns override wins over the .env DEFAULT_MAX_TURNS."""
+    from coder_eval.config import settings as app_settings
+    from coder_eval.models import ConfigLineageEntry
+    from coder_eval.orchestration.config import BatchRunConfig
+    from coder_eval.orchestration.experiment import _apply_cli_overrides
+
+    monkeypatch.setattr(app_settings, "default_agent_model", None)
+    monkeypatch.setattr(app_settings, "default_permission_mode", None)
+    monkeypatch.setattr(app_settings, "default_max_turns", 17)
+
+    task = _precedence_task()
+    config = BatchRunConfig(run_dir=Path("runs/test"), overrides={"run_limits.max_turns": 7})
+    lineage: dict[str, ConfigLineageEntry] = {}
+
+    _apply_cli_overrides(task, config, lineage=lineage)
+
+    assert task.run_limits is not None
+    assert task.run_limits.max_turns == 7
+    assert lineage["run_limits.max_turns"].source_detail == "-D run_limits.max_turns"
 
 
 def test_api_backend_enum_values():

@@ -9,13 +9,11 @@ from typing import Any
 
 import click
 import typer
-from claude_agent_sdk import SdkPluginConfig
 from tqdm import tqdm
 
 from ..config import settings
 from ..logging_config import setup_logging
 from ..models import AgentKind, ResolvedTask, RunSummary, TaskResult
-from ..models.enums import PermissionMode
 from ..orchestration.config import BatchRunConfig
 from ..path_utils import create_latest_symlink, format_task_log_id
 from ..streaming.callbacks import CompositeStreamCallback
@@ -67,42 +65,74 @@ def _resolve_experiment_path(experiment: Path | None) -> Path | None:
     raise typer.BadParameter(f"Experiment not found: {experiment}.{hint}")
 
 
-# YAML 1.1 truthy aliases that PyYAML coerces to bool. We keep these as
-# strings so e.g. ``--sdk-option region=on`` doesn't become ``region=True``
-# — any string-valued SDK field that happens to collide with a YAML keyword
-# would otherwise silently miscoerce. Explicit ``true``/``false`` (YAML 1.2
-# canonical) still go through normally.
-_YAML_TRUTHY_ALIASES = frozenset({"y", "n", "yes", "no", "on", "off"})
+def _build_overrides(
+    *,
+    model: str | None,
+    driver: str | None,
+    set_overrides: list[str],
+    deprecated: list[tuple[str, str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Translate the surviving alias flags (``--model`` / ``--driver``) +
+    ``-D``/``--set`` entries into one validated override map (dotted path ->
+    typed value).
 
+    Alias flags and ``-D`` share the same engine path. A path set by both an
+    alias and ``-D`` (or by two ``-D`` entries) is a hard error so they never
+    silently last-win against each other. Every resulting path is validated
+    against the schema; ``OverrideError`` is wrapped into ``typer.BadParameter``
+    at this CLI boundary. All other task-config knobs (permission mode, turn
+    limits, timeouts, tools, plugins, SDK options) are expressed via ``-D``.
 
-def _parse_sdk_options(pairs: list[str]) -> dict[str, Any]:
-    """Parse repeatable ``--sdk-option KEY=VALUE`` flags into a dict.
-
-    Values pass through ``yaml.safe_load`` so ints / floats / null / explicit
-    ``true``/``false`` coerce naturally. YAML 1.1 truthy aliases
-    (``on``/``off``/``yes``/``no``/``y``/``n``, case-insensitive) are kept as
-    strings to avoid the foot-gun where a string-valued SDK field colliding
-    with a YAML keyword is silently turned into a bool. Duplicate keys: last
-    specified wins. Key validation happens at AgentConfig construction.
+    ``deprecated`` carries ``(flag, dotted_path, value)`` tuples for the legacy
+    bespoke flags retired in favour of ``-D``; a supplied one emits a one-line
+    stderr deprecation hint and is then treated exactly like an alias (so it
+    still collision-checks against ``-D``).
     """
-    import yaml
+    from ..orchestration.config_merge import MergeError, validate_paths
+    from ..orchestration.overrides import OverrideError, parse_override
 
-    out: dict[str, Any] = {}
-    for pair in pairs:
-        if "=" not in pair:
-            raise typer.BadParameter(f"--sdk-option must be key=value, got: {pair!r}")
-        key, _, value = pair.partition("=")
-        key = key.strip()
-        if not key:
-            raise typer.BadParameter(f"--sdk-option key cannot be empty: {pair!r}")
+    overrides: dict[str, Any] = {}
+    sources: dict[str, str] = {}  # path -> originating flag, for collision messages
+
+    def _add_alias(path: str, value: Any, flag: str) -> None:
+        overrides[path] = value
+        sources[path] = flag
+
+    if model is not None:
+        _add_alias("agent.model", model, "--model")
+    if driver is not None:
+        _add_alias("sandbox.driver", driver, "--driver")
+
+    # Retired bespoke flags: emit the equivalent -D as a deprecation hint, then
+    # route them through the same alias path (so an alias+-D collision still errors).
+    for flag, path, value in deprecated or []:
+        if value is None:
+            continue
+        typer.echo(f"warning: {flag} is deprecated; use -D {path}={value} instead.", err=True)
+        _add_alias(path, value, flag)
+
+    # -D / --set entries (hard error on collision with an alias or another -D).
+    for raw in set_overrides:
         try:
-            parsed = yaml.safe_load(value)
-        except yaml.YAMLError as e:
-            raise typer.BadParameter(f"--sdk-option value for {key!r} is not valid YAML: {e}") from e
-        if isinstance(parsed, bool) and value.strip().lower() in _YAML_TRUTHY_ALIASES:
-            parsed = value
-        out[key] = parsed
-    return out
+            path, value = parse_override(raw)
+        except OverrideError as e:
+            raise typer.BadParameter(str(e)) from e
+        if path in sources:
+            prior = sources[path]
+            if prior == "-D":
+                raise typer.BadParameter(f"{path!r} set by -D more than once; specify it once")
+            raise typer.BadParameter(f"{path!r} set by both {prior} and -D; specify it once")
+        overrides[path] = value
+        sources[path] = "-D"
+
+    # Validate every path against the resolved-TaskDefinition schema (the same
+    # walk the resolver uses). MergeError carries the did-you-mean suggestion.
+    try:
+        validate_paths(list(overrides))
+    except MergeError as e:
+        raise typer.BadParameter(str(e)) from e
+
+    return overrides
 
 
 def run_command(
@@ -180,59 +210,12 @@ def run_command(
         "-m",
         help="Override agent model for all tasks (e.g., claude-sonnet-4-20250514)",
     ),
-    permission_mode: str | None = typer.Option(
-        None,
-        "--permission-mode",
-        help="Override permission mode for all tasks (default/acceptEdits/plan/bypassPermissions)",
-    ),
-    max_turns: int | None = typer.Option(
-        None,
-        "--max-turns",
-        help="Override max agent inner-loop turns per iteration for all tasks",
-        min=1,
-    ),
-    task_timeout: int | None = typer.Option(
-        None,
-        "--task-timeout",
-        help="Override task timeout (seconds) for all tasks. Covers the evaluation loop.",
-        min=30,
-    ),
-    turn_timeout: int | None = typer.Option(
-        None,
-        "--turn-timeout",
-        help="Override turn timeout (seconds) for all tasks. Per agent.communicate() call.",
-        min=10,
-    ),
     stream: str | None = typer.Option(
         None,
         "--stream",
         "-s",
         click_type=click.Choice(["full", "minimal"], case_sensitive=False),
         help="Stream LLM events to terminal: 'full' or 'minimal' (turn-level only). Disables progress bar.",
-    ),
-    allowed_tools: str | None = typer.Option(
-        None,
-        "--allowed-tools",
-        help="Override allowed tools for all tasks (comma-separated, e.g., 'Read,Write,Bash')",
-    ),
-    disallowed_tools: str | None = typer.Option(
-        None,
-        "--disallowed-tools",
-        help="Override disallowed tools for all tasks (comma-separated, e.g., 'TodoWrite,Agent')",
-    ),
-    plugins: str | None = typer.Option(
-        None,
-        "--plugins",
-        help='Override plugins for all tasks (JSON array, e.g., \'[{"name": "my-plugin", "path": "/path"}]\')',
-    ),
-    sdk_option: list[str] = typer.Option(  # noqa: B008
-        [],
-        "--sdk-option",
-        help=(
-            "Pass-through Claude Code SDK option, e.g. --sdk-option effort=high. "
-            "Repeatable. Values are YAML-parsed (true/false/null/numbers coerced). "
-            "Keys must be ClaudeAgentOptions fields and must not be framework-managed."
-        ),
     ),
     backend: str | None = typer.Option(
         None,
@@ -269,6 +252,36 @@ def run_command(
         click_type=click.Choice(["tempdir", "docker"], case_sensitive=False),
         help="Override sandbox driver for all tasks. 'docker' runs each task in a fresh container.",
     ),
+    set_overrides: list[str] = typer.Option(  # noqa: B008
+        [],
+        "--set",
+        "-D",
+        metavar="PATH=VALUE",
+        help=(
+            "Override any resolved task-config field under agent/run_limits/sandbox, "
+            "e.g. -D run_limits.max_turns=30 -D agent.permission_mode=plan "
+            "-D agent.sdk_options.effort=high -D sandbox.docker.network=none. "
+            "Repeatable. Validated against the schema. A path set by both an alias "
+            "and -D is an error; values are YAML-parsed (on/off/yes/no stay strings). "
+            "(--model and --driver are shorthand aliases for -D agent.model / "
+            "-D sandbox.driver.)"
+        ),
+    ),
+    # Deprecated, hidden aliases for the retired bespoke flags. Each emits the
+    # equivalent `-D` plus a one-line "use -D ... instead" hint so existing run
+    # scripts don't hit a bare "No such option" cliff. Prefer `-D` going forward.
+    deprecated_max_turns: int | None = typer.Option(
+        None, "--max-turns", hidden=True, min=1, help="Deprecated: use -D run_limits.max_turns=N."
+    ),
+    deprecated_turn_timeout: int | None = typer.Option(
+        None, "--turn-timeout", hidden=True, help="Deprecated: use -D run_limits.turn_timeout=SECONDS."
+    ),
+    deprecated_task_timeout: int | None = typer.Option(
+        None, "--task-timeout", hidden=True, help="Deprecated: use -D run_limits.task_timeout=SECONDS."
+    ),
+    deprecated_permission_mode: str | None = typer.Option(
+        None, "--permission-mode", hidden=True, help="Deprecated: use -D agent.permission_mode=MODE."
+    ),
 ) -> None:
     """Run evaluation tasks (optionally in parallel).
 
@@ -298,38 +311,23 @@ def run_command(
     if resume and run_dir is None:
         raise typer.BadParameter("--resume requires --run-dir pointing at the run to continue.")
 
-    # Validate permission mode early for clear error message
-    if permission_mode is not None:
-        allowed_modes = {m.value for m in PermissionMode}
-        if permission_mode not in allowed_modes:
-            raise typer.BadParameter(
-                f"Invalid --permission-mode '{permission_mode}'. Choose from: {', '.join(sorted(allowed_modes))}."
-            )
-
     # Parse tag filters
     include_tags = {t.strip() for t in tags.split(",") if t.strip()} if tags else None
     exclude_tags_set = {t.strip() for t in exclude_tags.split(",") if t.strip()} if exclude_tags else None
 
-    # Parse comma-separated list options
-    allowed_tools_list = [t.strip() for t in allowed_tools.split(",") if t.strip()] if allowed_tools else None
-    disallowed_tools_list = [t.strip() for t in disallowed_tools.split(",") if t.strip()] if disallowed_tools else None
-
-    # Parse plugins JSON and validate against SdkPluginConfig schema
-    plugins_list: list[SdkPluginConfig] | None = None
-    if plugins is not None:
-        import json
-
-        from pydantic import TypeAdapter, ValidationError
-
-        try:
-            raw = json.loads(plugins)
-        except json.JSONDecodeError as e:
-            raise typer.BadParameter(f"--plugins must be valid JSON: {e}") from e
-
-        try:
-            plugins_list = TypeAdapter(list[SdkPluginConfig]).validate_python(raw)
-        except ValidationError as e:
-            raise typer.BadParameter(f"--plugins validation failed: {e}") from e
+    # Translate the surviving alias flags + -D/--set into one validated override
+    # map (layer 5). All other task-config knobs are expressed via -D.
+    overrides = _build_overrides(
+        model=model,
+        driver=driver,
+        set_overrides=set_overrides,
+        deprecated=[
+            ("--max-turns", "run_limits.max_turns", deprecated_max_turns),
+            ("--turn-timeout", "run_limits.turn_timeout", deprecated_turn_timeout),
+            ("--task-timeout", "run_limits.task_timeout", deprecated_task_timeout),
+            ("--permission-mode", "agent.permission_mode", deprecated_permission_mode),
+        ],
+    )
 
     # Override API backend if --backend was passed
     if backend is not None:
@@ -358,20 +356,11 @@ def run_command(
                 include_tags,
                 exclude_tags_set,
                 agent_type,
-                model,
-                permission_mode,
-                max_turns,
-                task_timeout,
-                turn_timeout,
+                overrides,
                 stream,
-                allowed_tools_list,
-                disallowed_tools_list,
-                plugins_list,
-                _parse_sdk_options(sdk_option),
                 experiment_path=resolved_experiment,
                 max_rows=sample,
                 repeats=repeats,
-                driver=driver,
                 verbose=verbose,
                 resume=resume,
             )
@@ -389,28 +378,18 @@ async def _run_all_tasks(
     include_tags: set[str] | None = None,
     exclude_tags: set[str] | None = None,
     agent_type: str | None = None,
-    agent_model: str | None = None,
-    permission_mode: str | None = None,
-    max_turns: int | None = None,
-    task_timeout: int | None = None,
-    turn_timeout: int | None = None,
+    overrides: dict[str, Any] | None = None,
     stream_mode: str | None = None,
-    allowed_tools: list[str] | None = None,
-    disallowed_tools: list[str] | None = None,
-    plugins: list[SdkPluginConfig] | None = None,
-    sdk_options: dict[str, Any] | None = None,
     experiment_path: Path | None = None,
     max_rows: int | None = None,
     repeats: int | None = None,
-    driver: str | None = None,
     verbose: bool = False,
     resume: bool = False,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
-    When --experiment is provided (or experiments/default.yaml exists), tasks are
-    resolved through the experiment layer and executed via run_batch.
-    Otherwise, the legacy run_batch path is used for backward compatibility.
+    Tasks are resolved through the experiment layer (defaulting to
+    experiments/default.yaml) and executed via run_batch.
 
     Args:
         task_files: List of task file paths or glob patterns
@@ -419,15 +398,10 @@ async def _run_all_tasks(
         max_parallel: Maximum number of concurrent tasks
         include_tags: Only run tasks matching any of these tags
         exclude_tags: Skip tasks matching any of these tags
-        agent_model: Optional override for agent model
-        permission_mode: Optional override for permission mode
-        max_turns: Optional override for max agent turns
-        task_timeout: Optional override for task timeout (seconds)
-        turn_timeout: Optional override for turn timeout (seconds)
+        agent_type: Optional override for agent type (re-parses the union)
+        overrides: Generic layer-5 task-config overrides (path -> typed value)
+            from -D/--set and the bespoke flag aliases
         stream_mode: Optional stream mode ('full' or 'minimal') for real-time output
-        allowed_tools: Optional override for allowed tools
-        disallowed_tools: Optional override for disallowed tools
-        plugins: Optional override for plugins (SdkPluginConfig objects)
         experiment_path: Optional path to experiment YAML (default: experiments/default.yaml)
     """
     # Prepare run directory
@@ -440,11 +414,6 @@ async def _run_all_tasks(
     # Expand glob patterns and collect task files
     all_task_files = expand_task_files(task_files)
 
-    # Convert permission_mode from string to enum if provided
-    permission_mode_enum = None
-    if permission_mode is not None:
-        permission_mode_enum = PermissionMode(permission_mode)
-
     # Configure batch execution
     config = BatchRunConfig(
         run_dir=run_dir,
@@ -453,18 +422,9 @@ async def _run_all_tasks(
         include_tags=include_tags,
         exclude_tags=exclude_tags,
         agent_type=agent_type,
-        agent_model=agent_model,
-        permission_mode=permission_mode_enum,
-        max_turns=max_turns,
-        allowed_tools=allowed_tools,
-        disallowed_tools=disallowed_tools,
-        plugins=plugins,
-        sdk_options=sdk_options or {},
-        task_timeout=task_timeout,
-        turn_timeout=turn_timeout,
+        overrides=overrides or {},
         max_rows=max_rows,
         repeats=repeats,
-        driver=driver,  # type: ignore[arg-type]  # narrowed at runtime by click.Choice
         verbose=verbose,
     )
 
@@ -554,6 +514,8 @@ async def _run_with_experiment(
         experiment_path: Explicit experiment path or None for default.
         stream_mode: Optional stream mode for real-time output.
         max_parallel: Maximum parallel tasks (for batch_mode detection).
+        resume: Skip tasks already finalized in the run dir, folding their prior
+            results back into the summary.
 
     Returns:
         RunSummary with aggregated results.
@@ -590,14 +552,20 @@ async def _run_with_experiment(
     else:
         default_experiment = experiment  # fall back to custom as its own baseline
 
-    # Resolve tasks through experiment layer (applies all 5 config layers)
-    resolved, skipped = resolve_all_tasks(
-        task_files=all_task_files,
-        experiment=experiment,
-        default_experiment=default_experiment,
-        config=config,
-        experiment_file=exp_path,
-    )
+    # Resolve tasks through experiment layer (applies all 5 config layers).
+    # Layer-5 override failures (invalid -D value/path, sdk_options on a
+    # non-claude agent, the agent.type guard) and duplicate-task-id checks raise
+    # ValueError here; surface them as a clean CLI error instead of a traceback.
+    try:
+        resolved, skipped = resolve_all_tasks(
+            task_files=all_task_files,
+            experiment=experiment,
+            default_experiment=default_experiment,
+            config=config,
+            experiment_file=exp_path,
+        )
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
 
     if skipped:
         console.print(

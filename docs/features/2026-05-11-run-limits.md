@@ -62,10 +62,16 @@ did whole-object replace.)
 
 ### CLI overrides
 
-The structural caps additionally accept CLI flags:
-`--max-turns` / `--task-timeout` / `--turn-timeout`. They patch into
-`run_limits.*` via the same field merge. Budget caps (tokens, USD)
-remain YAML-only by design.
+The structural caps are set from the CLI via the generic `-D`/`--set`
+override mechanism — `-D run_limits.max_turns=30`,
+`-D run_limits.task_timeout=600`, `-D run_limits.turn_timeout=120`. They
+patch into `run_limits.*` via the same field merge. Budget caps are set
+the same way, e.g. `-D run_limits.max_usd=5`.
+
+(The original dedicated `--max-turns` / `--task-timeout` / `--turn-timeout`
+flags were removed on 2026-06-01 in favor of `-D`; only `--model` and
+`--driver` survive as shorthand aliases.) See
+[2026-06-01-generic-d-overrides.md](2026-06-01-generic-d-overrides.md).
 
 ### Task-level
 
@@ -216,3 +222,19 @@ Per-variant (experiment runs): `experiment.json`, `experiment.md`,
 feature end-to-end with an unsatisfiable `max_input_tokens: 1`. CI
 asserts the task lands in `tasks_failed`, guarding against regressions
 that silently disable the budget gate.
+
+## Legacy timing shapes removed (2026-06-01)
+
+The back-compat hoist shims that lifted `max_turns` / `turn_timeout` from
+`agent:` (and top-level `task_timeout` / `max_turns` / `turn_timeout`) into
+`run_limits:` have been **removed** (their stated removal date 2026-05-20 passed).
+`run_limits:` is now the only accepted shape:
+
+- `agent.max_turns` / `agent.turn_timeout` in a task or experiment YAML now
+  **fails loudly** via the agent model's `extra="forbid"`.
+- A top-level `task_timeout` / `max_turns` / `turn_timeout` is now an unknown
+  top-level field: warned (`UnknownTaskFieldWarning`) and dropped.
+
+This is a breaking change for external task files still on the legacy shape — move
+those fields under `run_limits:`. The 12 in-repo task YAMLs were migrated. See
+[2026-06-01-declarative-merge-strategies.md](2026-06-01-declarative-merge-strategies.md).

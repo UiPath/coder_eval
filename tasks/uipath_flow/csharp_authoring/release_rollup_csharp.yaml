@@ -7,14 +7,14 @@ description: >
 tags: [flow-csharp, csharp, generate, http, decision, loop, multi-connector, complex]
 
 run_limits:
+  max_turns: 120
+  turn_timeout: 1800
   task_timeout: 1800
 
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 120
-  turn_timeout: 1800
 
 sandbox:
   driver: tempdir

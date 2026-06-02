@@ -6,7 +6,9 @@ Run each evaluation task inside its own fresh container. Strong host isolation a
 
 ## When to use
 
-Set `sandbox.driver: docker` on a task (or pass `--driver docker` on the CLI) when you want:
+Set `sandbox.driver: docker` on a task (or pass `--driver docker` on the CLI —
+a thin alias for `-D sandbox.driver=docker`; see the
+[generic `-D` overrides spec](features/2026-06-01-generic-d-overrides.md)) when you want:
 
 - **Isolation from the host filesystem/network** — agent-generated code can't reach files outside the sandbox.
 - **A pinned toolchain** — the image bakes in Python 3.13, Node 22 LTS, `@anthropic-ai/claude-code`, `uv`, and the matching `coder_eval` version, so results don't drift with host upgrades.

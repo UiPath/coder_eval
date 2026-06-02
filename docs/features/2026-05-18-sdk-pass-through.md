@@ -80,23 +80,28 @@ fields the user didn't set. A security floor (`.claude`, `.mcp.json`,
 `_reference` ignore patterns, `setting_sources=[]`) is enforced by
 `_build_agent_config` regardless of YAML.
 
-**Scope of `--sdk-option` and the 5-layer merge:** both apply *only* to
-the top-level `AgentConfig.sdk_options` consumed by the coder agent.
+**Scope of SDK-option overrides and the 5-layer merge:** they apply *only*
+to the top-level `AgentConfig.sdk_options` consumed by the coder agent.
 Judge SDK options stay YAML-only — `criterion.agent.sdk_options` is
 bound at task-load time and not re-merged at CLI / experiment / variant
 layers. To vary judge options across an experiment, edit the task YAML
-directly (or split into a per-variant judge spec) rather than passing
-`--sdk-option` on the command line.
+directly (or split into a per-variant judge spec) rather than overriding
+on the command line.
 
 ### CLI
 
 ```bash
-coder-eval run … --sdk-option effort=high --sdk-option max_thinking_tokens=2048
+coder-eval run … -D agent.sdk_options.effort=high -D agent.sdk_options.max_thinking_tokens=2048
 ```
 
-`--sdk-option KEY=VALUE` is repeatable. Values are run through
+Each `-D agent.sdk_options.KEY=VALUE` is repeatable. Values are run through
 `yaml.safe_load`, so `true`/`false`/`null`/numbers coerce naturally;
-strings pass through unchanged. Duplicate keys: last wins.
+strings pass through unchanged.
+
+As of 2026-06-01, SDK options are set through the generic `-D`/`--set`
+override mechanism (`-D agent.sdk_options.k=v`); the original dedicated
+`--sdk-option` flag was removed in favor of it. See
+[2026-06-01-generic-d-overrides.md](2026-06-01-generic-d-overrides.md).
 
 ## Deep-merge across the 5 layers
 
@@ -123,14 +128,14 @@ agent.sdk_options.effort           → source=variant
 agent.sdk_options.max_thinking_tokens → source=default
 ```
 
-`--sdk-option effort=high` records `source=cli, source_detail="--sdk-option effort=high"`.
+`-D agent.sdk_options.effort=high` records `source=cli, source_detail="-D agent.sdk_options.effort=high"`.
 
 ## Pointers
 
 - Splat site: `src/coder_eval/agents/claude_code_agent.py` —
   `ClaudeAgentOptions(... **self.config.sdk_options)`.
-- Merge site: `src/coder_eval/orchestration/experiment.py` —
-  `_merge_agent_dicts` deep-merges this key.
+- Merge site: `src/coder_eval/orchestration/config_merge.py` — the generic
+  resolver deep-merges this key (free-form `dict` → `deep` strategy).
 - CLI parse: `src/coder_eval/cli/run_command.py:_parse_sdk_options`.
 - Validator: `AgentConfig._validate_sdk_options_keys` with module
   constants `_VALID_SDK_OPTION_FIELDS` /

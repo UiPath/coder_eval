@@ -6,12 +6,14 @@ description: >
   after conversion) and that simple arithmetic round-trips through FIL.
 tags: [flow-csharp, csharp, generate, variables]
 
+run_limits:
+  max_turns: 50
+  turn_timeout: 1200
+
 agent:
   type: claude-code
   permission_mode: acceptEdits
   allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-  max_turns: 50
-  turn_timeout: 1200
 
 sandbox:
   driver: tempdir

@@ -143,7 +143,7 @@ async def test_run_batch_folds_prior_into_run_json(tmp_path):
 
 def test_fingerprint_roundtrip_and_no_diff_when_unchanged(tmp_path):
     """Stamp round-trips through disk and matches an identical recompute."""
-    config = BatchRunConfig(run_dir=tmp_path, agent_model="sonnet", max_turns=30)
+    config = BatchRunConfig(run_dir=tmp_path, overrides={"agent.model": "sonnet", "run_limits.max_turns": 30})
     fp = compute_run_fingerprint(config, "exp1", "bedrock", "model-x")
     write_run_fingerprint(tmp_path, fp)
 
@@ -155,13 +155,13 @@ def test_fingerprint_roundtrip_and_no_diff_when_unchanged(tmp_path):
 
 def test_fingerprint_flags_result_affecting_changes(tmp_path):
     """A changed model or backend shows up in the diff (the resume guard's signal)."""
-    base = BatchRunConfig(run_dir=tmp_path, agent_model="sonnet")
+    base = BatchRunConfig(run_dir=tmp_path, overrides={"agent.model": "sonnet"})
     write_run_fingerprint(tmp_path, compute_run_fingerprint(base, "exp1", "bedrock", "m"))
     prior = read_run_fingerprint(tmp_path)
 
-    changed = BatchRunConfig(run_dir=tmp_path, agent_model="opus")
+    changed = BatchRunConfig(run_dir=tmp_path, overrides={"agent.model": "opus"})
     diffs = fingerprint_diff(prior, compute_run_fingerprint(changed, "exp1", "direct", "m"))
-    assert diffs["agent_model"] == ("sonnet", "opus")
+    assert diffs["overrides"] == ({"agent.model": "sonnet"}, {"agent.model": "opus"})
     assert diffs["backend"] == ("bedrock", "direct")
 
 
@@ -179,14 +179,20 @@ def test_fingerprint_diff_ignores_keys_absent_in_prior():
 
 def test_fingerprint_covers_whole_config(tmp_path):
     """Dumping the whole config means any override (incl. tools/SDK) surfaces as a diff."""
-    base = BatchRunConfig(run_dir=tmp_path, allowed_tools=["Bash"], sdk_options={"k": "v1"})
+    base = BatchRunConfig(
+        run_dir=tmp_path, overrides={"agent.allowed_tools": ["Bash"], "agent.sdk_options": {"k": "v1"}}
+    )
     write_run_fingerprint(tmp_path, compute_run_fingerprint(base, "exp1", "bedrock", "m"))
     prior = read_run_fingerprint(tmp_path)
 
-    changed = BatchRunConfig(run_dir=tmp_path, allowed_tools=["Bash", "Read"], sdk_options={"k": "v2"})
+    changed = BatchRunConfig(
+        run_dir=tmp_path, overrides={"agent.allowed_tools": ["Bash", "Read"], "agent.sdk_options": {"k": "v2"}}
+    )
     diffs = fingerprint_diff(prior, compute_run_fingerprint(changed, "exp1", "bedrock", "m"))
-    assert diffs["allowed_tools"] == (["Bash"], ["Bash", "Read"])
-    assert diffs["sdk_options"] == ({"k": "v1"}, {"k": "v2"})
+    assert diffs["overrides"] == (
+        {"agent.allowed_tools": ["Bash"], "agent.sdk_options": {"k": "v1"}},
+        {"agent.allowed_tools": ["Bash", "Read"], "agent.sdk_options": {"k": "v2"}},
+    )
 
 
 def test_read_fingerprint_non_dict_returns_none(tmp_path):
@@ -211,15 +217,15 @@ def test_resume_requires_run_dir():
 async def test_resume_warns_on_config_drift_but_proceeds(tmp_path):
     """A resume whose config drifts from the stamp warns and proceeds — it does NOT refuse.
 
-    Stamps a minimal prior fingerprint ({agent_model: sonnet}); fingerprint_diff only
-    compares keys present in both, so the freshly-computed opus config drifts on exactly
-    agent_model. With no tasks left to run, _run_with_experiment completes a no-op run
+    Stamps a minimal prior fingerprint ({overrides: {agent.model: sonnet}}); fingerprint_diff
+    only compares keys present in both, so the freshly-computed opus config drifts on exactly
+    overrides. With no tasks left to run, _run_with_experiment completes a no-op run
     rather than raising — proving drift is informational, not fatal.
     """
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    write_run_fingerprint(run_dir, {"agent_model": "sonnet"})
+    write_run_fingerprint(run_dir, {"overrides": {"agent.model": "sonnet"}})
 
-    config = BatchRunConfig(run_dir=run_dir, agent_model="opus", preserve_sandbox=False)
+    config = BatchRunConfig(run_dir=run_dir, overrides={"agent.model": "opus"}, preserve_sandbox=False)
     summary, _ = await _run_with_experiment([], config, None, None, 1, resume=True)
     assert summary.tasks_run == 0

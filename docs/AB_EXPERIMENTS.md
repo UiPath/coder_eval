@@ -80,21 +80,32 @@ Every resolved task is built by merging five layers, **later wins**:
 | 2   | Experiment defaults | `defaults:` block in your experiment YAML                 |
 | 3   | Task config         | `tasks/<task>.yaml` (`agent:`, `run_limits:`, …)          |
 | 4   | Variant overrides   | the per-variant block in your experiment YAML             |
-| 5   | CLI flags           | `--model`, `--max-turns`, `--sdk-option`, … (always wins) |
+| 5   | CLI flags           | `-D path=value` / `--set` and its two aliases (`--model`, `--driver`) — always wins |
 
-Merge semantics:
+Merge semantics: all five layers merge through **one** resolver
+(`orchestration/config_merge.py`), where each field declares *how it merges* once
+on the model. A given field merges identically regardless of which layer supplied
+it (the unification invariant). The per-field strategy is:
 
-- **`agent` dicts** — shallow-merged per key; `sdk_options` is **deep**-merged so
-  a higher layer adding one SDK key doesn't wipe keys set below it.
-- **List fields** (`allowed_tools`, `plugins`) — **atomic replace**. A variant's
-  `allowed_tools: ["Read"]` replaces the lower layer's list entirely rather than
-  appending.
-- **`run_limits`** — **field-merge** (per-key); a variant setting
-  `run_limits.max_turns` leaves the task's `task_timeout` intact. (`sandbox` is
-  field-merged the same way, but only at the experiment-defaults level — a variant
-  can switch the sandbox driver via `driver:`, not set a full `sandbox` block.)
-- **`template_sources`** — variant entries are **appended** after the task's base
-  templates (used for overlay directories).
+- **scalars** (`agent.model`, `agent.permission_mode`, `run_limits.*`) and
+  **most lists** (`allowed_tools`, `disallowed_tools`, `plugins`, …) — **replace**
+  (last layer wins; a variant's `allowed_tools: ["Read"]` replaces the lower list
+  entirely). `run_limits` is per-field replace, so a variant setting
+  `run_limits.max_turns` leaves the task's `task_timeout` intact.
+- **nested models** (`sandbox.docker`, `python`, `node`, `limits`) and **free-form
+  dicts** (`agent.sdk_options`) — **deep**-merge: a higher layer touching one
+  sub-key (e.g. `docker.network`) preserves siblings set below it (e.g.
+  `docker.image`).
+- **append lists** — overlays accumulate. `sandbox.docker.env_passthrough_extra`
+  appends in layer order (`default → exp-defaults → task → variant`).
+  `sandbox.template_sources` appends **task-first** (the task's base templates,
+  then experiment-defaults and variant overlays after — "appended after task's
+  base templates").
+
+Variants set the sandbox driver via `driver:` and add templates via
+`template_sources:` (top-level fields); they don't set a full `sandbox:` block.
+See [docs/features/2026-06-01-declarative-merge-strategies.md](features/2026-06-01-declarative-merge-strategies.md)
+for the full strategy table.
 
 ## What a Variant Can Override
 
@@ -267,7 +278,9 @@ if any listed metric is below its minimum.
 | `--driver tempdir\|docker`                                                                                                                                        | Override sandbox driver for all tasks.                                                                 |
 | `-j, --max-parallel N`                                                                                                                                            | Run up to N tasks concurrently.                                                                        |
 | `-t, --tags` / `--exclude-tags`                                                                                                                                   | Filter which tasks run.                                                                                |
-| `--model`, `--type`, `--permission-mode`, `--max-turns`, `--task-timeout`, `--turn-timeout`, `--allowed-tools`, `--disallowed-tools`, `--plugins`, `--sdk-option` | Layer-5 overrides applied to **every** variant (use sparingly — they erase the contrast between arms). |
+| `-D path=value` / `--set` | Generic layer-5 override of any resolved task-config field, applied to **every** variant — e.g. `-D agent.model=opus -D run_limits.max_turns=30`. Repeatable; schema-validated. |
+| `--model`, `--driver` | Thin aliases for `-D` (`--model` ≡ `-D agent.model`, `--driver` ≡ `-D sandbox.driver`). All other task-config knobs (permission mode, turn/timeout limits, tools, plugins, SDK options) are set via `-D`. Layer-5 overrides apply to **every** variant (use sparingly — they erase the contrast between arms). |
+| `--type` | Dedicated flag for agent type, applied to every variant (re-parses the agent discriminated union). |
 
 Layer-5 flags win over variant config, so overriding the very thing you're
 A/B-testing (e.g. `--model` on a model-comparison experiment) collapses all arms

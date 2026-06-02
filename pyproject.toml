@@ -100,7 +100,7 @@ constraint-dependencies = [
     "langgraph>=1.0.10",
     "langsmith>=0.6.3",
     "orjson>=3.11.6",
-    "pyjwt>=2.12.0",
+    "pyjwt>=2.13.0",
     "python-multipart>=0.0.22",
     "requests>=2.33.0",
     "starlette>=1.0.1",
@@ -250,6 +250,7 @@ markers = [
     "requires_api_key: marks tests that need real API keys",
     "live: marks tests that hit real external services (LLM Gateway, etc.)",
     "lint: marks tests that enforce custom architectural lint rules",
+    "divergence: pins a layer-4-vs-layer-5 merge divergence (or crash) that the declarative-merge refactor intentionally flips; see tests/test_merge_characterization.py",
 ]
 
 # Test discovery patterns

@@ -114,8 +114,10 @@ agent:
 validated against the SDK's dataclass at YAML load; framework-managed keys
 (`model`, `allowed_tools`, `permission_mode`, `hooks`, `mcp_servers`, …)
 are rejected. Deep-merged across the 5-layer config chain. Override via
-CLI with the repeatable `--sdk-option KEY=VALUE`. **Requires `type: "claude-code"`**
-to function; on other agent types, `--sdk-option` raises an error. See the
+CLI with the repeatable `-D agent.sdk_options.KEY=VALUE` (see the
+[generic `-D` overrides spec](features/2026-06-01-generic-d-overrides.md)).
+**Requires `type: "claude-code"`** to function; on other agent types it raises
+an error. See the
 [SDK pass-through feature spec](features/2026-05-18-sdk-pass-through.md)
 for the full reference, including the valid keys list.
 
@@ -137,10 +139,11 @@ model, etc.) is conceptually separate. See
 [`docs/features/2026-05-11-run-limits.md`](features/2026-05-11-run-limits.md)
 for the full reference.
 
-> **Migration callout:** Setting `max_turns` or `turn_timeout` under
-> `agent:` still works via a deprecation shim that hoists them into
-> `run_limits.*` and emits a `DeprecationWarning`. **The shim is removed
-> on 2026-05-20.** Move both fields out of `agent:` before that date.
+> **No longer supported:** `max_turns` / `turn_timeout` (and top-level
+> `task_timeout`) under `agent:` or at the task top level are rejected —
+> the agent model's `extra="forbid"` raises a clear validation error.
+> They must live under `run_limits:`. (A deprecation shim hoisted them
+> automatically until it was removed on 2026-06-01.)
 
 ## Sandbox Configuration
 

@@ -128,16 +128,10 @@ coder-eval run tasks/hello_date.yaml --stream full
 | `--max-parallel, -j`         | Concurrent tasks (default: 1)                                                                 |
 | `--preserve / --no-preserve` | Preserve sandbox after execution (default: preserve)                                          |
 | `--run-dir`                  | Custom run directory (default: timestamped in `runs/`)                                        |
-| **Agent overrides**          |                                                                                               |
-| `--allowed-tools`            | Override allowed tools (comma-separated, e.g., `Read,Write,Bash`)                             |
-| `--ignore-patterns`          | Override ignore patterns (comma-separated, e.g., `*.log,__pycache__`)                         |
-| `--max-turns`                | Override max agent inner-loop turns per iteration                                             |
-| `--model, -m`                | Override agent model for all tasks (e.g., `claude-sonnet-4-20250514`)                         |
-| `--permission-mode`          | Override permission mode (`default`, `acceptEdits`, `plan`, `bypassPermissions`)              |
-| `--plugins`                  | Override plugins (JSON array, e.g., `'[{"name":"x","path":"/y"}]'`)                           |
-| **Timeouts**                 |                                                                                               |
-| `--task-timeout`             | Override task timeout in seconds (covers the evaluation loop)                                 |
-| `--turn-timeout`             | Override turn timeout in seconds (per agent communicate call)                                 |
+| **Config overrides**         |                                                                                               |
+| `-D path=value` / `--set`    | Override any resolved task-config field (`agent`/`run_limits`/`sandbox` roots), e.g. `-D run_limits.max_turns=30 -D agent.permission_mode=plan -D agent.sdk_options.effort=high`. Repeatable; schema-validated. This is the way to set permission mode, turn/timeout limits, tools, plugins, and SDK options. |
+| `--model, -m`                | Shorthand alias for `-D agent.model=…` (e.g., `claude-sonnet-4-20250514`)                     |
+| `--driver`                   | Shorthand alias for `-D sandbox.driver=…` (`tempdir` or `docker`)                             |
 | **Filtering**                |                                                                                               |
 | `--exclude-tags`             | Skip tasks matching any of these tags (comma-separated)                                       |
 | `--tags, -t`                 | Only run tasks matching any of these tags (comma-separated)                                   |

@@ -148,29 +148,29 @@ class TestRunLimitsOnTaskDefinition:
         assert task.run_limits is not None
         assert task.run_limits.max_turns is None
 
-    def test_top_level_max_turns_hoisted_with_warning(self):
-        """Top-level max_turns was removed in 2026-05-12 — hoist shim lifts it into run_limits."""
-        with pytest.warns(DeprecationWarning, match=r"Top-level 'max_turns'.*2026-05-20"):
+    def test_top_level_max_turns_now_dropped_with_unknown_field_warning(self):
+        """The hoist shim is gone: top-level max_turns is now an unknown top-level
+        field — warned and dropped (NOT hoisted into run_limits)."""
+        with pytest.warns(DeprecationWarning, match=r"unknown top-level field 'max_turns'"):
             task = _minimal_task(max_turns=20)
-        assert task.run_limits is not None
-        assert task.run_limits.max_turns == 20
+        assert task.run_limits is None
 
-    def test_top_level_task_timeout_hoisted_with_warning(self):
-        with pytest.warns(DeprecationWarning, match=r"Top-level 'task_timeout'.*2026-05-20"):
+    def test_top_level_task_timeout_now_dropped_with_unknown_field_warning(self):
+        with pytest.warns(DeprecationWarning, match=r"unknown top-level field 'task_timeout'"):
             task = _minimal_task(task_timeout=600)
-        assert task.run_limits is not None
-        assert task.run_limits.task_timeout == 600
+        assert task.run_limits is None
 
-    def test_top_level_turn_timeout_hoisted_with_warning(self):
-        with pytest.warns(DeprecationWarning, match=r"Top-level 'turn_timeout'.*2026-05-20"):
+    def test_top_level_turn_timeout_now_dropped_with_unknown_field_warning(self):
+        with pytest.warns(DeprecationWarning, match=r"unknown top-level field 'turn_timeout'"):
             task = _minimal_task(turn_timeout=120)
-        assert task.run_limits is not None
-        assert task.run_limits.turn_timeout == 120
+        assert task.run_limits is None
 
-    def test_top_level_and_run_limits_conflict_raises(self):
-        """Setting same key both top-level and in run_limits is an error."""
-        with pytest.raises(ValidationError, match=r"max_turns.*both at top level"):
-            _minimal_task(max_turns=20, run_limits={"max_turns": 5})
+    def test_top_level_timing_alongside_run_limits_keeps_canonical_block(self):
+        """Top-level timing is dropped (unknown field); the canonical run_limits block stands."""
+        with pytest.warns(DeprecationWarning, match=r"unknown top-level field 'max_turns'"):
+            task = _minimal_task(max_turns=20, run_limits={"max_turns": 5})
+        assert task.run_limits is not None
+        assert task.run_limits.max_turns == 5
 
     def test_max_iterations_dropped_with_warning(self):
         """max_iterations was removed in PR #191; the soft-launch hook flags it."""

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, ClassVar, Literal, Self
 
 from claude_agent_sdk import ClaudeAgentOptions, SdkPluginConfig, SettingSource
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from coder_eval.models.enums import AgentKind, PermissionMode
+from coder_eval.models.merge_strategy import MergeField
 
 
 _VALID_SDK_OPTION_FIELDS: frozenset[str] = frozenset(f.name for f in dataclasses.fields(ClaudeAgentOptions))
@@ -94,6 +95,11 @@ class BaseAgentConfig(BaseModel):
 
     model_config = ConfigDict(validate_assignment=True, populate_by_name=True, extra="forbid")
 
+    # Cross-field merge exclusion: setting either prompt field at any layer clears
+    # the sibling (the generic resolver honors this uniformly). ClassVar -> not a
+    # model field; Pydantic does not validate/assign it.
+    _merge_exclusive_groups: ClassVar[tuple[tuple[str, ...], ...]] = (("system_prompt", "system_prompt_file"),)
+
     type: AgentKind | None = Field(
         default=None,
         description=(
@@ -105,13 +111,13 @@ class BaseAgentConfig(BaseModel):
     permission_mode: PermissionMode = Field(
         default=PermissionMode.ACCEPT_EDITS, description="Permission mode for agent actions"
     )
-    allowed_tools: list[str] | None = Field(
-        default=None, description="List of allowed tools (e.g., ['Read', 'Write', 'Bash'])"
+    allowed_tools: list[str] | None = MergeField(
+        strategy="replace", default=None, description="List of allowed tools (e.g., ['Read', 'Write', 'Bash'])"
     )
-    disallowed_tools: list[str] | None = Field(
-        default=None, description="List of disallowed tools (e.g., ['TodoWrite'])"
+    disallowed_tools: list[str] | None = MergeField(
+        strategy="replace", default=None, description="List of disallowed tools (e.g., ['TodoWrite'])"
     )
-    plugins: list[SdkPluginConfig] | None = Field(default=None, description="List of plugins")
+    plugins: list[SdkPluginConfig] | None = MergeField(strategy="replace", default=None, description="List of plugins")
     system_prompt: str | None = Field(
         default=None,
         description=(
@@ -130,7 +136,8 @@ class BaseAgentConfig(BaseModel):
     )
 
     # Customizable ignore patterns for file tracking
-    ignore_patterns: list[str] = Field(
+    ignore_patterns: list[str] = MergeField(
+        strategy="replace",
         default_factory=list,
         description=(
             "Pattern overrides applied when copying the workspace into a judge "
@@ -140,7 +147,8 @@ class BaseAgentConfig(BaseModel):
         validation_alias=AliasChoices("ignore_patterns", "additional_ignore_patterns"),
     )
 
-    setting_sources: list[SettingSource] | None = Field(
+    setting_sources: list[SettingSource] | None = MergeField(
+        strategy="replace",
         default=None,
         description=(
             "Claude Code setting sources to load (e.g., ['project', 'user']). "
@@ -170,12 +178,14 @@ class ClaudeCodeAgentConfig(BaseAgentConfig):
 
     type: Literal[AgentKind.CLAUDE_CODE]  # type: ignore[assignment]
 
-    claude_settings: str | dict[str, Any] | None = Field(
+    claude_settings: str | dict[str, Any] | None = MergeField(
+        strategy="deep",
         default=None,
         description=(
             "Claude Code settings passed via --settings. Accepts a JSON-serializable dict "
             "(inlined) or a file path string. Use permissions.deny to block tool access to "
-            'specific paths: {"permissions": {"deny": ["Read(/some/path/**)"]}}.'
+            'specific paths: {"permissions": {"deny": ["Read(/some/path/**)"]}}. '
+            "Merged deeply across config layers when both sides are dicts; a str/None value replaces."
         ),
     )
     sdk_options: dict[str, Any] = Field(

@@ -318,7 +318,7 @@ class DockerRunner:
         try:
             # Always serialise the *post-override* TaskDefinition. We can't use
             # rt.source_yaml because that's the raw on-disk text -- _apply_cli_overrides
-            # has since mutated rt.task in-memory (e.g. --model, --max-turns), and the
+            # has since mutated rt.task in-memory (e.g. --model, -D run_limits.max_turns), and the
             # container needs to see those mutations.
             task_yaml_in = input_dir / "task.yaml"
 

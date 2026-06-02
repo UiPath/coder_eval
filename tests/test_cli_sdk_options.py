@@ -1,31 +1,43 @@
-"""Tests for the ``--sdk-option KEY=VALUE`` CLI parser."""
+"""Tests for ``agent.sdk_options.*`` overrides via the generic ``-D`` flag.
+
+``--sdk-option`` was removed in the surface-reduction refactor; SDK pass-through
+options are now expressed as ``-D agent.sdk_options.<key>=<value>``. These tests
+assert the same observable value coercion (YAML 1.2 canonicals through, YAML 1.1
+truthy aliases kept as strings) holds end-to-end through ``_build_overrides``.
+"""
 
 from __future__ import annotations
 
 import pytest
-import typer
 
-from coder_eval.cli.run_command import _parse_sdk_options
+from coder_eval.cli.run_command import _build_overrides
 
 
-class TestParseSdkOptionsCoercion:
+def _sdk_opts(pairs: list[str]) -> dict[str, object]:
+    """Build overrides from ``key=value`` SDK pairs (via ``-D``) and return the sdk sub-map."""
+    prefix = "agent.sdk_options."
+    overrides = _build_overrides(
+        model=None,
+        driver=None,
+        set_overrides=[f"{prefix}{p}" for p in pairs],
+    )
+    return {k[len(prefix) :]: v for k, v in overrides.items() if k.startswith(prefix)}
+
+
+class TestSdkOptionCoercion:
     """Value coercion: YAML 1.2 canonicals through, YAML 1.1 truthy aliases as strings."""
 
     def test_canonical_true_false_become_bool(self):
-        out = _parse_sdk_options(["some_flag=true", "verbose=false"])
-        assert out == {"some_flag": True, "verbose": False}
+        assert _sdk_opts(["some_flag=true", "verbose=false"]) == {"some_flag": True, "verbose": False}
 
     def test_int_and_float_coerce(self):
-        out = _parse_sdk_options(["max_thinking_tokens=2048", "ratio=0.5"])
-        assert out == {"max_thinking_tokens": 2048, "ratio": 0.5}
+        assert _sdk_opts(["max_thinking_tokens=2048", "ratio=0.5"]) == {"max_thinking_tokens": 2048, "ratio": 0.5}
 
     def test_null_coerces_to_none(self):
-        out = _parse_sdk_options(["fallback_model=null"])
-        assert out == {"fallback_model": None}
+        assert _sdk_opts(["fallback_model=null"]) == {"fallback_model": None}
 
     def test_plain_string_passes_through(self):
-        out = _parse_sdk_options(["effort=high"])
-        assert out == {"effort": "high"}
+        assert _sdk_opts(["effort=high"]) == {"effort": "high"}
 
     @pytest.mark.parametrize(
         "raw",
@@ -33,27 +45,11 @@ class TestParseSdkOptionsCoercion:
     )
     def test_yaml_1_1_truthy_aliases_stay_strings(self, raw):
         """Foot-gun: yaml.safe_load("on") returns True in YAML 1.1. Keep as string."""
-        out = _parse_sdk_options([f"some_field={raw}"])
-        assert out == {"some_field": raw}, f"Expected {raw!r} to stay a string"
+        assert _sdk_opts([f"some_field={raw}"]) == {"some_field": raw}, f"Expected {raw!r} to stay a string"
 
     def test_string_containing_truthy_alias_not_affected(self):
         """Only the bare YAML 1.1 keywords are stringified — not substrings."""
-        out = _parse_sdk_options(["mode=yesterday"])
-        assert out == {"mode": "yesterday"}
-
-
-class TestParseSdkOptionsValidation:
-    def test_missing_equals_raises(self):
-        with pytest.raises(typer.BadParameter, match="must be key=value"):
-            _parse_sdk_options(["bareword"])
-
-    def test_empty_key_raises(self):
-        with pytest.raises(typer.BadParameter, match="key cannot be empty"):
-            _parse_sdk_options(["=value"])
-
-    def test_duplicate_key_last_wins(self):
-        out = _parse_sdk_options(["effort=low", "effort=high"])
-        assert out == {"effort": "high"}
+        assert _sdk_opts(["mode=yesterday"]) == {"mode": "yesterday"}
 
     def test_empty_list_is_empty_dict(self):
-        assert _parse_sdk_options([]) == {}
+        assert _sdk_opts([]) == {}

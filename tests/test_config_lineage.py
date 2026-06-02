@@ -14,7 +14,6 @@ from coder_eval.models import (
 from coder_eval.orchestration.config import BatchRunConfig
 from coder_eval.orchestration.experiment import (
     _apply_cli_overrides,
-    _build_agent_lineage,
     resolve_all_tasks,
     resolve_task_for_variant,
 )
@@ -50,36 +49,6 @@ def _make_default_experiment() -> ExperimentDefinition:
         ),
         variants=[ExperimentVariant(variant_id="default")],
     )
-
-
-class TestBuildAgentLineage:
-    def test_single_layer(self):
-        lineage = _build_agent_lineage([("default", {"type": "claude-code", "model": "sonnet"})])
-        assert lineage["agent.type"].source == "default"
-        assert lineage["agent.model"].value == "sonnet"
-
-    def test_later_layer_wins(self):
-        lineage = _build_agent_lineage(
-            [
-                ("default", {"type": "claude-code", "model": "sonnet"}),
-                ("variant", {"model": "opus"}),
-            ]
-        )
-        assert lineage["agent.type"].source == "default"
-        assert lineage["agent.model"].source == "variant"
-        assert lineage["agent.model"].value == "opus"
-
-    def test_none_layers_skipped(self):
-        lineage = _build_agent_lineage(
-            [
-                ("default", {"type": "claude-code"}),
-                ("task", None),
-                ("variant", {"model": "opus"}),
-            ]
-        )
-        assert len(lineage) == 2
-        assert "agent.type" in lineage
-        assert "agent.model" in lineage
 
 
 class TestScalarLineage:
@@ -271,14 +240,14 @@ class TestApplyCliOverridesLineage:
             success_criteria=[{"type": "file_exists", "path": "t.py", "description": "x"}],
         )
         lineage: dict[str, ConfigLineageEntry] = {}
-        config = BatchRunConfig(run_dir=tmp_subdir("run"), max_parallel=1, agent_model="opus-override")
+        config = BatchRunConfig(run_dir=tmp_subdir("run"), max_parallel=1, overrides={"agent.model": "opus-override"})
         with patch("coder_eval.config.settings") as mock_settings:
             mock_settings.default_agent_model = None
             mock_settings.default_permission_mode = None
             mock_settings.default_max_turns = None
             _apply_cli_overrides(task, config, lineage)
         assert lineage["agent.model"].source == "cli"
-        assert lineage["agent.model"].source_detail == "--model"
+        assert lineage["agent.model"].source_detail == "-D agent.model"
         assert lineage["agent.model"].value == "opus-override"
 
     def test_cli_disallowed_tools_override(self):
@@ -293,7 +262,9 @@ class TestApplyCliOverridesLineage:
             success_criteria=[{"type": "file_exists", "path": "t.py", "description": "x"}],
         )
         lineage: dict[str, ConfigLineageEntry] = {}
-        config = BatchRunConfig(run_dir=tmp_subdir("run"), max_parallel=1, disallowed_tools=["TodoWrite", "Agent"])
+        config = BatchRunConfig(
+            run_dir=tmp_subdir("run"), max_parallel=1, overrides={"agent.disallowed_tools": ["TodoWrite", "Agent"]}
+        )
         with patch("coder_eval.config.settings") as mock_settings:
             mock_settings.default_agent_model = None
             mock_settings.default_permission_mode = None
@@ -301,7 +272,7 @@ class TestApplyCliOverridesLineage:
             _apply_cli_overrides(task, config, lineage)
         assert task.agent.disallowed_tools == ["TodoWrite", "Agent"]
         assert lineage["agent.disallowed_tools"].source == "cli"
-        assert lineage["agent.disallowed_tools"].source_detail == "--disallowed-tools"
+        assert lineage["agent.disallowed_tools"].source_detail == "-D agent.disallowed_tools"
 
     def test_cli_sdk_option_override(self):
         from coder_eval.models import TaskDefinition
@@ -315,7 +286,9 @@ class TestApplyCliOverridesLineage:
             success_criteria=[{"type": "file_exists", "path": "t.py", "description": "x"}],
         )
         lineage: dict[str, ConfigLineageEntry] = {}
-        config = BatchRunConfig(run_dir=Path("/tmp/run"), max_parallel=1, sdk_options={"effort": "high"})
+        config = BatchRunConfig(
+            run_dir=Path("/tmp/run"), max_parallel=1, overrides={"agent.sdk_options.effort": "high"}
+        )
         with patch("coder_eval.config.settings") as mock_settings:
             mock_settings.default_agent_model = None
             mock_settings.default_permission_mode = None
@@ -323,7 +296,7 @@ class TestApplyCliOverridesLineage:
             _apply_cli_overrides(task, config, lineage)
         assert task.agent.sdk_options == {"effort": "high"}
         assert lineage["agent.sdk_options.effort"].source == "cli"
-        assert lineage["agent.sdk_options.effort"].source_detail == "--sdk-option effort=high"
+        assert lineage["agent.sdk_options.effort"].source_detail == "-D agent.sdk_options.effort"
 
     def test_task_yaml_model_preserved_when_no_cli_or_env(self, monkeypatch):
         """Regression: task YAML's agent.model survives when no --model and no DEFAULT_AGENT_MODEL.

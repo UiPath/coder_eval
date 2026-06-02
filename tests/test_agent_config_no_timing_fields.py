@@ -31,3 +31,19 @@ def test_agent_config_no_timing_fields_in_schema() -> None:
 def test_agent_config_succeeds_without_timing_fields() -> None:
     cfg = parse_agent_config(type=AgentKind.CLAUDE_CODE)
     assert cfg.type == AgentKind.CLAUDE_CODE
+
+
+def test_task_yaml_with_agent_max_turns_fails_loudly() -> None:
+    """The legacy hoist shim is gone: ``agent.max_turns`` in a task definition now
+    raises a clear extra='forbid' error instead of being silently hoisted."""
+    from coder_eval.models import FileExistsCriterion, SandboxConfig, TaskDefinition
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="go",
+            agent={"type": "claude-code", "max_turns": 10},
+            sandbox=SandboxConfig(driver="tempdir"),
+            success_criteria=[FileExistsCriterion(path="f.py", description="d")],
+        )
