@@ -43,3 +43,28 @@ def test_create_agent_wrong_config_type_raises_with_hint():
 
     with pytest.raises(TypeError, match=r"--type.*mismatch"):
         create_agent(AgentKind.CODEX, claude_config)
+
+
+def test_all_criterion_checkers_accept_context_kwarg():
+    """Every registered criterion checker's ``_check_impl`` must accept the
+    uniform ``context`` keyword (a CheckContext bundle). This prevents a new
+    checker from regressing the uniform signature that replaced the old
+    route/reference_dir/proxy kwarg train + inspect-based signature filter.
+    """
+    import inspect
+
+    from coder_eval.criteria import CriterionRegistry, init_criteria
+
+    init_criteria(validate=False)
+    checkers = {t: CriterionRegistry.get_checker(t) for t in CriterionRegistry.list_types()}
+    assert checkers, "registry discovered no checkers"
+    for criterion_type, checker_cls in checkers.items():
+        params = inspect.signature(checker_cls._check_impl).parameters
+        assert "context" in params, (
+            f"{checker_cls.__name__} (_check_impl for '{criterion_type}') missing 'context' kwarg"
+        )
+        # No checker should still declare the removed route/reference_dir/proxy kwargs.
+        for removed in ("route", "reference_dir", "proxy"):
+            assert removed not in params, (
+                f"{checker_cls.__name__} still declares removed '{removed}' kwarg; use context.{removed} instead"
+            )

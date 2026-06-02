@@ -5,13 +5,12 @@ import re
 import shlex
 from typing import TYPE_CHECKING
 
-from coder_eval.criteria.base import BaseCriterion, register_criterion
+from coder_eval.criteria.base import BaseCriterion, CheckContext, register_criterion
 from coder_eval.models import CriterionResult, PytestCriterion
 
 
 if TYPE_CHECKING:
     from coder_eval.models.results import TurnRecord
-    from coder_eval.models.routing import ApiRoute
     from coder_eval.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
@@ -30,8 +29,9 @@ class PytestChecker(BaseCriterion[PytestCriterion]):
         criterion: PytestCriterion,
         sandbox: "Sandbox",
         reference_code: str | None = None,
+        *,
         turn_records: list["TurnRecord"] | None = None,
-        route: "ApiRoute | None" = None,
+        context: CheckContext | None = None,
     ) -> CriterionResult:
         """Run pytest and check results.
 

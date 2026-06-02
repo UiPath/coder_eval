@@ -39,6 +39,7 @@ from .models import (
     DirectRoute,
     EvaluationResult,
     FinalStatus,
+    JudgeCriterionResult,
     PostRunCommand,
     PostRunResult,
     PreRunCommand,
@@ -49,6 +50,7 @@ from .models import (
     TaskConfigRecord,
     TaskDefinition,
     TaskResult,
+    TokenUsage,
     TurnRecord,
     UserMessage,
     proxy_config_from_settings,
@@ -687,9 +689,24 @@ class Orchestrator:
             self._expected_turns_warning_emitted = True
 
     def _aggregate_token_usage(self) -> None:
-        """Aggregate token usage from turns and proxy, storing on self.result."""
+        """Aggregate token usage from turns, storing on self.result.
+
+        Per-turn ``TurnRecord.token_usage`` is filled by:
+
+        - the agent SDK's ResultMessage on DirectRoute / BedrockRoute (the
+          bundled CLI parses the response's ``usage`` field), or
+        - ``_communicate_with_retry``'s snapshot/diff on ProxyRoute, which
+          attributes the proxy delta for each iteration to the appended
+          TurnRecord (the CLI reports zeros on LLMGW because it cannot
+          parse Bedrock's event-stream usage shape).
+
+        Either way, every iteration carries the right per-turn value here,
+        and we just sum them. Judge / sub-agent token usage is captured on
+        the corresponding ``JudgeCriterionResult.token_usage`` and is
+        intentionally NOT included in this aggregate — it represents the
+        main agent's bill, not the eval-machinery overhead.
+        """
         assert self.result is not None
-        from .models.telemetry import TokenUsage
 
         # Include crashed=True partials: each API call is billed independently.
         if self.result.iterations:
@@ -704,19 +721,49 @@ class Orchestrator:
                     total_cost_usd=sum(costs) if costs else None,
                 )
 
-        # Override with proxy usage when SDK reports zeros
-        if self.proxy is not None:
-            pu = self.proxy.usage
-            sdk_usage = self.result.total_token_usage
-            sdk_is_zero = sdk_usage is None or (sdk_usage.input_tokens == 0 and sdk_usage.output_tokens == 0)
-            if sdk_is_zero and (pu.input_tokens > 0 or pu.output_tokens > 0):
-                self.result.total_token_usage = TokenUsage(
-                    input_tokens=pu.input_tokens,
-                    output_tokens=pu.output_tokens,
-                    cache_creation_input_tokens=pu.cache_creation_input_tokens,
-                    cache_read_input_tokens=pu.cache_read_input_tokens,
-                    total_cost_usd=self.proxy.get_total_cost(),
+        # Reconcile against the proxy's independent counter (ProxyRoute only).
+        # Runs last: needs total_token_usage populated above AND the finalized
+        # judge results. Diagnostic-only — never raises, never fails a run.
+        self._reconcile_proxy_usage()
+
+    def _reconcile_proxy_usage(self) -> None:
+        """Reconcile attributed usage against the proxy's ground-truth counter.
+
+        Proxy-only: the proxy is the single component with an independent token
+        counter spanning the whole run, so it's the only route where a
+        reconciliation invariant is meaningful. On Direct / Bedrock there is no
+        such counter and SDK/response numbers are trusted by construction.
+
+        DIAGNOSTIC ONLY — this MUST NOT raise or fail a run. A non-zero gap is
+        an observability signal (agent-startup handshakes, MCP-server probing,
+        and older-retried-partials are legitimately unattributable), not an
+        eval-correctness failure. The whole body is wrapped so a bug in
+        reconciliation itself can never abort a run.
+        """
+        if self.proxy is None or self.result is None:
+            return
+        try:
+            main = self.result.total_token_usage or TokenUsage()
+            judge_sum = TokenUsage()
+            for cr in self.result.success_criteria_results or []:
+                if isinstance(cr, JudgeCriterionResult) and cr.token_usage is not None:
+                    judge_sum = judge_sum + cr.token_usage
+            attributed = main + judge_sum
+            total = self.proxy.usage_total()
+            gap = total.total_tokens - attributed.total_tokens
+            if gap == 0:
+                logger.info("proxy usage reconciled: %d tokens fully attributed", total.total_tokens)
+            else:
+                logger.warning(
+                    "proxy usage gap: %d unattributed tokens (total=%d, main=%d, judges=%d) "
+                    "— likely agent startup / MCP probing / dropped retried partials",
+                    gap,
+                    total.total_tokens,
+                    main.total_tokens,
+                    judge_sum.total_tokens,
                 )
+        except Exception:
+            logger.warning("proxy usage reconciliation failed (non-fatal)", exc_info=True)
 
     async def _setup(self) -> None:
         """Set up all components for evaluation.
@@ -744,7 +791,7 @@ class Orchestrator:
             else:
                 self.route = resolve_route(settings)
             logger.info("API routing: %s", _format_routing(self.route))
-            self.success_checker = SuccessChecker(self.sandbox, route=self.route)
+            self.success_checker = SuccessChecker(self.sandbox, route=self.route, proxy=self.proxy)
             self._record_route_environment_info()
             return
 
@@ -784,7 +831,7 @@ class Orchestrator:
         else:
             self.route = resolve_route(settings)
         logger.info("API routing: %s", _format_routing(self.route))
-        self.success_checker = SuccessChecker(self.sandbox, route=self.route)
+        self.success_checker = SuccessChecker(self.sandbox, route=self.route, proxy=self.proxy)
 
         # Create and start agent with retry logic
         self.agent = await self._create_agent()
@@ -1025,16 +1072,119 @@ class Orchestrator:
                     iteration=iteration,
                 ) from None
 
-        return await execute_with_retry(
-            operation=_communicate_attempt,
-            operation_name=operation_label,
-            context={
-                "task_id": self.task.task_id,
-                "component": "agent",
-                "agent_name": self.task.agent.type.value,
-            },
-            on_attempt_error=_on_attempt_failure,
-        )
+        # Attribute the proxy delta for this iteration to its TurnRecord on
+        # LLMGW (ProxyRoute), where the bundled Claude Code CLI cannot parse
+        # Bedrock's event-stream usage and reports zero in the SDK's
+        # ResultMessage. On DirectRoute / BedrockRoute the proxy is None and
+        # ``measure_proxy`` yields a getter that returns None — the SDK-parsed
+        # usage on the TurnRecord flows through unchanged.
+        #
+        # `pre_iteration_count` lets us spot any partials drained by
+        # ``_on_attempt_failure`` so we can attribute to the latest partial
+        # when the retry loop terminates with an exception (no return value).
+        from .proxy.server import measure_proxy  # local import: avoid module-load order
+
+        pre_iteration_count = len(self.result.iterations)
+        turn_record: TurnRecord | None = None
+        with measure_proxy(self.proxy) as proxy_delta:
+            try:
+                turn_record = await execute_with_retry(
+                    operation=_communicate_attempt,
+                    operation_name=operation_label,
+                    context={
+                        "task_id": self.task.task_id,
+                        "component": "agent",
+                        "agent_name": self.task.agent.type.value,
+                    },
+                    on_attempt_error=_on_attempt_failure,
+                )
+                assert turn_record is not None  # execute_with_retry returns the turn or raises
+                return turn_record
+            finally:
+                delta = proxy_delta()
+                if delta is not None:
+                    self._attribute_proxy_delta_to_iteration(
+                        returned_turn=turn_record,
+                        appended_partials=self.result.iterations[pre_iteration_count:],
+                        delta=delta,
+                    )
+
+    @staticmethod
+    def _attribute_proxy_delta_to_iteration(
+        *,
+        returned_turn: "TurnRecord | None",
+        appended_partials: list["TurnRecord"],
+        delta: TokenUsage,
+    ) -> None:
+        """Attach this iteration's proxy delta to the TurnRecord that best
+        represents it on the LLMGW path.
+
+        The bundled Claude Code CLI cannot parse Bedrock's event-stream
+        ``usage`` shape, so the SDK ``ResultMessage`` carries zeros and every
+        ``TurnRecord.token_usage`` is zero on LLMGW. The proxy delta —
+        captured by snapshotting :class:`ProxyUsage` before and after the
+        retry loop — is the truthful value.
+
+        Precedence: prefer the successfully-returned turn, otherwise the
+        latest partial drained by ``_on_attempt_failure`` (terminal-failure
+        path). Older partials in a retried iteration keep their zero
+        ``token_usage`` — acceptable minor under-attribution on the rare
+        retry case; the suite-level aggregate still reconciles.
+
+        No-op when there is nothing to attribute to, so we don't blow away a
+        legitimate non-zero value on the OAUTH / Bedrock-direct fallthrough
+        (the caller already gates on a non-None ``delta`` — which
+        ``measure_proxy`` only yields on ProxyRoute with real traffic —
+        before invoking this).
+        """
+        if returned_turn is not None:
+            target = returned_turn
+        elif appended_partials:
+            target = appended_partials[-1]
+        else:
+            return
+
+        existing = target.token_usage
+        if existing is None or existing.is_empty():
+            target.token_usage = delta
+
+    @staticmethod
+    def _accumulate_judge_usage(
+        criteria_results: list[CriterionResult],
+        accum: dict[tuple[int, str], TokenUsage],
+    ) -> None:
+        """Fold each turn's per-judge token usage into a dialog-wide running total.
+
+        In simulation ``every_turn`` / ``both`` mode the orchestrator replaces
+        ``success_criteria_results`` on every turn, and each fresh
+        ``JudgeCriterionResult.token_usage`` carries only that turn's judge call
+        (the snapshot/diff is taken per check). Without accumulation only the
+        final turn's slice would survive on the persisted result. We keep a
+        per-criterion running sum and rewrite each judge result's
+        ``token_usage`` to the cumulative total so persisted billing reflects
+        every judge call across the dialog.
+
+        Ledger key is ``(position, criterion_type)`` — a stable criterion
+        identity. ``check_all`` rebuilds ``success_criteria_results`` in the
+        same order as ``task.success_criteria`` every turn (the positional
+        alignment ``calculate_weighted_score`` enforces via ``zip(strict=True)``),
+        so ``position`` is stable across turns; pairing it with the type makes
+        the identity self-documenting and keeps two same-type judges distinct.
+        """
+        for i, r in enumerate(criteria_results):
+            if not isinstance(r, JudgeCriterionResult):
+                continue
+            key = (i, r.criterion_type)
+            prior = accum.get(key)
+            turn_usage = r.token_usage
+            if turn_usage is not None and not turn_usage.is_empty():
+                combined = prior + turn_usage if prior is not None else turn_usage
+                accum[key] = combined
+                r.token_usage = combined
+            elif prior is not None:
+                # No fresh judge tokens this check — carry the running total
+                # forward so it isn't dropped from the latest results list.
+                r.token_usage = prior
 
     async def _evaluation_loop(self) -> bool:
         """Run the main evaluation loop.
@@ -1299,6 +1449,13 @@ class Orchestrator:
 
             check_every_turn = sim_config.check_criteria in ("every_turn", "both")
 
+            # Dialog-wide running total of each judge's token usage. The per-turn
+            # check replaces ``success_criteria_results`` wholesale, so we fold
+            # each turn's judge slice into this accumulator (see
+            # ``_accumulate_judge_usage``) to avoid dropping earlier judge calls.
+            # Keyed by (position, criterion_type) — a stable criterion identity.
+            judge_usage_accum: dict[tuple[int, str], TokenUsage] = {}
+
             # turns_completed advances in lockstep with the agent's _iteration:
             # one _communicate_with_retry call per sim turn keeps partials
             # and the successful retry on the same iteration number.
@@ -1367,6 +1524,7 @@ class Orchestrator:
                         reference_dir=reference_dir,
                         turn_records=self.result.iterations,
                     )
+                    self._accumulate_judge_usage(criteria_results, judge_usage_accum)
                     self.result.success_criteria_results = criteria_results
                     self.result.calculate_weighted_score(self.task.success_criteria)
                     criteria_checked_this_turn = True
@@ -1395,6 +1553,7 @@ class Orchestrator:
                             reference_dir=reference_dir,
                             turn_records=self.result.iterations,
                         )
+                        self._accumulate_judge_usage(criteria_results, judge_usage_accum)
                         self.result.success_criteria_results = criteria_results
                         self.result.calculate_weighted_score(self.task.success_criteria)
                     raise
@@ -1484,6 +1643,7 @@ class Orchestrator:
                     reference_dir=reference_dir,
                     turn_records=self.result.iterations,
                 )
+                self._accumulate_judge_usage(criteria_results, judge_usage_accum)
                 self.result.success_criteria_results = criteria_results
                 self.result.calculate_weighted_score(self.task.success_criteria)
                 all_passed = all(

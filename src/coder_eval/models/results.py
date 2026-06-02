@@ -182,6 +182,20 @@ class JudgeCriterionResult(CriterionResult):
         default_factory=list,
         description="Bullet observations the judge cited from the artifacts. Scrubbed before persistence.",
     )
+    token_usage: TokenUsage | None = Field(
+        default=None,
+        description=(
+            "Token usage for the judge's LLM call(s) — kept distinct from the "
+            "main agent's ``EvaluationResult.total_token_usage``. Populated on "
+            "all routes when the model reports usage: on ProxyRoute (LLMGW) it "
+            "is the proxy delta captured around the judge's work (preferred when "
+            "present); on DirectRoute (Anthropic) it comes from the Anthropic "
+            "response ``usage``; on Bedrock from the ``/invoke`` JSON ``usage``; "
+            "on the LangChain/LLMGW transport from ``AIMessage.usage_metadata``. "
+            "``None`` means the backend surfaced no usage (kept distinct from a "
+            "zero TokenUsage). Independent of ``capture_transcript``."
+        ),
+    )
     transcript: JudgeTranscript | None = Field(
         default=None,
         description=(

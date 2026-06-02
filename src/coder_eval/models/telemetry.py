@@ -22,6 +22,31 @@ class TokenUsage(BaseModel):
         """Total tokens consumed (input + output)."""
         return self.input_tokens + self.output_tokens
 
+    def is_empty(self) -> bool:
+        """True when every token counter is zero (cost is ignored).
+
+        Used to decide whether a proxy delta or SDK-parsed usage carries any
+        real traffic before attributing it to a turn/judge.
+        """
+        return (
+            self.input_tokens == 0
+            and self.output_tokens == 0
+            and self.cache_creation_input_tokens == 0
+            and self.cache_read_input_tokens == 0
+        )
+
+    def __add__(self, other: TokenUsage) -> TokenUsage:
+        """Field-wise sum. Cost is summed only over the non-None operands
+        (stays None when neither carries a cost)."""
+        costs = [c for c in (self.total_cost_usd, other.total_cost_usd) if c is not None]
+        return TokenUsage(
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            cache_creation_input_tokens=self.cache_creation_input_tokens + other.cache_creation_input_tokens,
+            cache_read_input_tokens=self.cache_read_input_tokens + other.cache_read_input_tokens,
+            total_cost_usd=sum(costs) if costs else None,
+        )
+
 
 class ContentBlock(BaseModel):
     """One content block within a message, in emission order.

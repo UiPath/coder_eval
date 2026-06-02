@@ -10,12 +10,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..criteria import BaseCriterion, CriterionRegistry, init_criteria
+from ..criteria.base import CheckContext
 from ..models import CriteriaResults, CriterionResult, SuccessCriteria, SuccessCriterion, TurnRecords
 from ..sandbox import Sandbox
 
 
 if TYPE_CHECKING:
     from ..models.routing import ApiRoute
+    from ..proxy.server import LLMGatewayProxy
 
 
 # Get module logger
@@ -67,6 +69,7 @@ class SuccessChecker:
         init_registry: bool = True,
         validate_registry: bool = True,
         route: "ApiRoute | None" = None,
+        proxy: "LLMGatewayProxy | None" = None,
     ):
         """Initialize the success checker.
 
@@ -79,6 +82,12 @@ class SuccessChecker:
                 ``agent_judge``) can route through the same backend (Direct /
                 Proxy / Bedrock) as the main coding agent. ``None`` is acceptable
                 for non-sub-agent criteria; ``agent_judge`` requires a route.
+            proxy: Optional reference to the active ``LLMGatewayProxy``. Only set
+                when ``route`` is a ``ProxyRoute``; ``None`` on Direct / Bedrock.
+                Forwarded to checkers so judges (``agent_judge``, ``llm_judge``)
+                can snapshot proxy usage and attribute their own slice instead
+                of having their tokens pooled into the main agent's total via
+                the orchestrator's zero-SDK fallback.
         """
         self.sandbox = sandbox
         self._checker_instances: dict[str, BaseCriterion[Any]] = {}
@@ -92,6 +101,7 @@ class SuccessChecker:
         # Cached turn records - set by check()/check_all() when provided
         self._turn_records: TurnRecords | None = None
         self.route = route
+        self.proxy = proxy
 
         # V3: Lazy initialization - registry loaded here, not at import
         if init_registry:
@@ -203,13 +213,13 @@ class SuccessChecker:
         try:
             # Get cached instance
             checker = self._get_checker_instance(criterion_type)
+            context = CheckContext(route=self.route, reference_dir=reference_dir, proxy=self.proxy)
             result = checker.check(
                 criterion,
                 self.sandbox,
                 reference_code,
                 turn_records=turn_records,
-                route=self.route,
-                reference_dir=reference_dir,
+                context=context,
             )
             result.pass_threshold = criterion.pass_threshold
 

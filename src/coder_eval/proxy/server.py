@@ -6,6 +6,8 @@ import contextlib
 import json
 import logging
 import re
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -15,6 +17,7 @@ from aiohttp.client_exceptions import ClientConnectionResetError
 
 from coder_eval.errors.categories import RetryConfig
 from coder_eval.errors.retry import compute_backoff
+from coder_eval.models import TokenUsage
 
 from .auth import TokenManager
 from .config import DEFAULT_MODEL_MAP, ProxyConfig
@@ -61,6 +64,83 @@ class ProxyUsage:
     requests: int = 0
     models_used: dict[str, int] = field(default_factory=dict)  # model -> request count
     total_cost: float = 0.0
+
+    def snapshot(self) -> "ProxyUsage":
+        """Return an immutable point-in-time copy of the current usage.
+
+        The proxy mutates this object in place from inside aiohttp request
+        handlers, so callers that want a stable "before" marker for a
+        snapshot/diff comparison MUST snapshot — never hold a reference to
+        the live instance.
+
+        Used by :func:`usage_between` to attribute a slice of total proxy
+        traffic to a single consumer (main-agent turn, sub-agent judge,
+        llm_judge call, simulator utterance, ...).
+        """
+        return ProxyUsage(
+            input_tokens=self.input_tokens,
+            output_tokens=self.output_tokens,
+            cache_creation_input_tokens=self.cache_creation_input_tokens,
+            cache_read_input_tokens=self.cache_read_input_tokens,
+            requests=self.requests,
+            models_used=dict(self.models_used),
+            total_cost=self.total_cost,
+        )
+
+
+def usage_between(before: ProxyUsage, after: ProxyUsage) -> TokenUsage:
+    """Return the proxy traffic that landed between two snapshots as a TokenUsage.
+
+    Use to attribute a slice of total proxy usage to a single consumer.
+    Typical pattern::
+
+        pre = proxy.usage.snapshot()
+        ... do work that may send requests through the proxy ...
+        delta = usage_between(pre, proxy.usage)
+
+    Cost diff is surfaced only when positive — a negative delta would
+    indicate a bug or an out-of-order snapshot pair and should not silently
+    appear as a credit on the consumer's bill (we'd rather see the issue
+    via a follow-up audit than misattribute a refund). The token deltas
+    are returned verbatim; with monotonic accumulation they're already
+    non-negative.
+    """
+    cost_diff = after.total_cost - before.total_cost
+    return TokenUsage(
+        input_tokens=after.input_tokens - before.input_tokens,
+        output_tokens=after.output_tokens - before.output_tokens,
+        cache_creation_input_tokens=(after.cache_creation_input_tokens - before.cache_creation_input_tokens),
+        cache_read_input_tokens=(after.cache_read_input_tokens - before.cache_read_input_tokens),
+        total_cost_usd=cost_diff if cost_diff > 0 else None,
+    )
+
+
+@contextmanager
+def measure_proxy(proxy: "LLMGatewayProxy | None") -> Iterator[Callable[[], TokenUsage | None]]:
+    """Attribute the proxy traffic inside this block to one consumer.
+
+    Yields a getter returning the attributed TokenUsage (None when the proxy is
+    absent or the window carried no traffic). CORRECT ONLY because work on a
+    given proxy is serialized — one agent turn or one judge call at a time;
+    cross-task isolation is guaranteed by each Orchestrator owning its own
+    per-task proxy (orchestrator.py:743,783). This docstring is the single home
+    for that non-overlapping-window invariant.
+
+    The getter re-reads live usage on each call and applies the
+    ``is_empty() -> None`` drop, so no caller re-implements it; it returns the
+    delta even when the measured block raised (the ``finally``-equivalent
+    semantics of the prior hand-rolled snapshot/diff sites).
+    """
+    if proxy is None:
+        yield lambda: None
+        return
+    before = proxy.usage.snapshot()
+
+    def delta() -> TokenUsage | None:
+        d = usage_between(before, proxy.usage)
+        return None if d.is_empty() else d
+
+    yield delta
 
 
 class LLMGatewayProxy:
@@ -554,6 +634,23 @@ class LLMGatewayProxy:
             status = 504 if isinstance(exc, httpx.TimeoutException) else 502
             self._logger.warning("Upstream request failed (%d): %s", status, exc)
             return self._upstream_error_response(exc, status)
+
+    def usage_total(self) -> TokenUsage:
+        """Live accumulator as a TokenUsage (ground truth for reconciliation).
+
+        Unlike :func:`usage_between` (a delta between two snapshots), this is
+        the proxy's cumulative total across every request it has handled —
+        the independent counter the orchestrator reconciles attributed
+        per-consumer usage against (see ``_reconcile_proxy_usage``).
+        """
+        u = self._usage
+        return TokenUsage(
+            input_tokens=u.input_tokens,
+            output_tokens=u.output_tokens,
+            cache_creation_input_tokens=u.cache_creation_input_tokens,
+            cache_read_input_tokens=u.cache_read_input_tokens,
+            total_cost_usd=u.total_cost,
+        )
 
     def get_total_cost(self) -> float | None:
         """Calculate total cost from accumulated usage using official Anthropic pricing.

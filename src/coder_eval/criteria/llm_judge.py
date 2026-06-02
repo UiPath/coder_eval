@@ -1,11 +1,9 @@
 """LLM-as-a-judge success criterion checker."""
 
-from __future__ import annotations
-
 import logging
 from typing import TYPE_CHECKING
 
-from coder_eval.criteria.base import BaseCriterion, register_criterion
+from coder_eval.criteria.base import BaseCriterion, CheckContext, register_criterion
 from coder_eval.evaluation.judge_anthropic import invoke_anthropic_judge
 from coder_eval.evaluation.judge_bedrock import invoke_bedrock_judge
 from coder_eval.evaluation.judge_context import (
@@ -15,6 +13,10 @@ from coder_eval.evaluation.judge_context import (
     build_judge_transcript,
     format_details,
     scrub_reference,
+)
+from coder_eval.evaluation.judge_usage import (
+    token_usage_from_anthropic_dict,
+    token_usage_from_langchain_message,
 )
 from coder_eval.evaluation.llmgw import get_llmgw_chat_model
 from coder_eval.evaluation.verdict_tool import (
@@ -33,6 +35,7 @@ from coder_eval.models import (
     JudgeVerdict,
     LLMJudgeCriterion,
     ProxyRoute,
+    TokenUsage,
 )
 
 
@@ -63,11 +66,16 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
     def _check_impl(
         self,
         criterion: LLMJudgeCriterion,
-        sandbox: Sandbox,
+        sandbox: "Sandbox",
         reference_code: str | None = None,
-        turn_records: list[TurnRecord] | None = None,
-        route: ApiRoute | None = None,
+        *,
+        turn_records: "list[TurnRecord] | None" = None,
+        context: CheckContext | None = None,
     ) -> CriterionResult:
+        ctx = context or CheckContext()
+        route = ctx.route
+        proxy = ctx.proxy
+
         # Master enablement gate. Skipped criteria don't make an LLM call and don't
         # affect cost; weighted score includes them as 1.0 so they don't penalize.
         # Authors who want them excluded from weighted score should remove the
@@ -80,7 +88,7 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
                 details="(skipped: enabled=false)",
             )
 
-        context = JudgeContextBuilder(
+        judge_ctx = JudgeContextBuilder(
             files=criterion.files,
             include_reference=criterion.include_reference,
             include_agent_output=criterion.include_agent_output,
@@ -90,7 +98,7 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
             max_file_chars=criterion.max_file_chars,
         ).build(sandbox, reference_code, turn_records)
 
-        user_msg = _render_user_message(criterion.prompt, context)
+        user_msg = _render_user_message(criterion.prompt, judge_ctx)
 
         # Transport-unconfigured arm needs to short-circuit BEFORE backend dispatch.
         if isinstance(route, DirectRoute) and route.judge_transport is None:
@@ -110,12 +118,26 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
             )
 
         scrub_key = reference_code if criterion.include_reference else None
-        verdict, parse_error, raw_verdict_text = _invoke_tool_channel(
-            criterion=criterion,
-            route=route,
-            system_msg=_SYSTEM_PROMPT,
-            user_msg=user_msg,
-        )
+
+        # Attribute the judge's API call to ``JudgeCriterionResult.token_usage``
+        # instead of pooling it into the main agent's total via the
+        # orchestrator's zero-SDK fallback (on ProxyRoute, llm_judge talks to
+        # the same proxy as the main agent - judge_anthropic.py:47-52). On
+        # Direct / Bedrock the proxy is None and ``measure_proxy`` yields a
+        # getter returning None.
+        from coder_eval.proxy.server import measure_proxy  # local import: avoid cycles
+
+        with measure_proxy(proxy) as proxy_delta:
+            verdict, parse_error, raw_verdict_text, response_usage = _invoke_tool_channel(
+                criterion=criterion,
+                route=route,
+                system_msg=_SYSTEM_PROMPT,
+                user_msg=user_msg,
+            )
+        # Proxy delta wins when present (the billed truth on ProxyRoute, where
+        # the upstream Bedrock usage may also echo in the response body); fall
+        # back to the response-reported usage on Direct / Bedrock / LLMGW.
+        judge_usage = proxy_delta() or response_usage
 
         # Sanitize any raw model text we persist to CriterionResult.details. A misbehaving
         # model could echo the reference back in an unparseable response, so we scrub it.
@@ -140,10 +162,11 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
                 details=scrubbed[:500],
                 error=scrub_reference(parse_error, scrub_key),
                 transcript=_maybe_transcript(),
+                token_usage=judge_usage,
             )
         assert verdict is not None  # parser contract: verdict is set iff parse_error is None
 
-        details = format_details(verdict.score, verdict.rationale, context.missing_files, context.degraded_notes)
+        details = format_details(verdict.score, verdict.rationale, judge_ctx.missing_files, judge_ctx.degraded_notes)
         return JudgeCriterionResult(
             criterion_type=criterion.type,
             description=criterion.description,
@@ -151,23 +174,28 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
             details=scrub_reference(details, scrub_key),
             findings=[scrub_reference(f, scrub_key) for f in verdict.findings],
             transcript=_maybe_transcript(),
+            token_usage=judge_usage,
         )
 
 
 def _invoke_tool_channel(
     *,
     criterion: LLMJudgeCriterion,
-    route: ApiRoute | None,
+    route: "ApiRoute | None",
     system_msg: str,
     user_msg: str,
-) -> tuple[JudgeVerdict | None, str | None, str]:
+) -> tuple[JudgeVerdict | None, str | None, str, TokenUsage | None]:
     """Dispatch the tool-channel invocation by route.
 
-    Returns ``(verdict, parse_error, raw_verdict_text)``. ``raw_verdict_text`` is
-    the JSON-dumped verdict for the transcript when present, or a fallback
-    marker when the model failed to call the tool — preserves the
-    "judge transcript carries the structured payload" invariant.
+    Returns ``(verdict, parse_error, raw_verdict_text, response_usage)``.
+    ``raw_verdict_text`` is the JSON-dumped verdict for the transcript when
+    present, or a fallback marker when the model failed to call the tool —
+    preserves the "judge transcript carries the structured payload" invariant.
+    ``response_usage`` is the usage the model reported (``None`` when the
+    backend surfaced none); the caller prefers the proxy delta over it on
+    ProxyRoute.
     """
+    response_usage: TokenUsage | None
     match route:
         case BedrockRoute():
             response = invoke_bedrock_judge(
@@ -180,6 +208,7 @@ def _invoke_tool_channel(
                 tool_spec=SUBMIT_VERDICT_ANTHROPIC_TOOL,
             )
             verdict, err = extract_verdict_from_anthropic_response(response)
+            response_usage = token_usage_from_anthropic_dict(response)
         case DirectRoute(judge_transport="llmgw"):
             llm = get_llmgw_chat_model(
                 model=criterion.model,
@@ -193,6 +222,7 @@ def _invoke_tool_channel(
                 ]
             )
             verdict, err = extract_verdict_from_langchain_message(response)
+            response_usage = token_usage_from_langchain_message(response)
         case DirectRoute() | ProxyRoute():
             anthropic_response = invoke_anthropic_judge(
                 route=route,
@@ -204,6 +234,7 @@ def _invoke_tool_channel(
                 tool_spec=SUBMIT_VERDICT_ANTHROPIC_TOOL,
             )
             verdict, err = extract_verdict_from_anthropic_response(anthropic_response)
+            response_usage = token_usage_from_anthropic_dict(anthropic_response)
         case _:
             llm = get_llmgw_chat_model(
                 model=criterion.model,
@@ -217,10 +248,11 @@ def _invoke_tool_channel(
                 ]
             )
             verdict, err = extract_verdict_from_langchain_message(response)
+            response_usage = token_usage_from_langchain_message(response)
 
     if verdict is not None:
-        return verdict, None, verdict.model_dump_json()
-    return None, err, f"(no verdict — {err})"
+        return verdict, None, verdict.model_dump_json(), response_usage
+    return None, err, f"(no verdict — {err})", response_usage
 
 
 def _render_user_message(prompt: str, context: JudgeContext) -> str:

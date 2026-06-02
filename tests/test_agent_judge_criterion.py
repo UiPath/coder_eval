@@ -422,8 +422,8 @@ def test_agent_judge_with_no_route_raises(sandbox: Sandbox) -> None:
 
 
 def test_success_checker_threads_route_to_check(sandbox: Sandbox) -> None:
-    """The route passed to SuccessChecker reaches arbitrary checkers as the
-    ``route`` kwarg of ``BaseCriterion.check`` — not just agent_judge."""
+    """The route passed to SuccessChecker reaches arbitrary checkers inside the
+    ``context`` (a CheckContext) kwarg of ``_check_impl`` — not just agent_judge."""
     from coder_eval.criteria.file_exists import FileExistsChecker
     from coder_eval.models import FileExistsCriterion
 
@@ -434,7 +434,7 @@ def test_success_checker_threads_route_to_check(sandbox: Sandbox) -> None:
     with patch.object(FileExistsChecker, "_check_impl", wraps=FileExistsChecker()._check_impl) as spy:
         checker.check(criterion)
 
-    assert spy.call_args.kwargs["route"] == route
+    assert spy.call_args.kwargs["context"].route == route
 
 
 # --- prompt / context assembly ---

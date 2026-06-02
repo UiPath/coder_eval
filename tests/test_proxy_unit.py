@@ -22,6 +22,8 @@ from coder_eval.proxy.server import (
     _RETRY_CFG,
     LLMGatewayProxy,
     ProxyUsage,
+    measure_proxy,
+    usage_between,
 )
 
 
@@ -237,6 +239,149 @@ class TestBodyFieldStripping:
 # ---------------------------------------------------------------------------
 # Token usage tracking
 # ---------------------------------------------------------------------------
+
+
+class TestProxyUsageSnapshotAndDiff:
+    """Tests for ``ProxyUsage.snapshot()`` and the module-level
+    ``usage_between(before, after)`` helper.
+
+    These primitives are the foundation of per-consumer token attribution
+    on LLMGW: each consumer (main-agent turn, sub-agent judge, llm_judge
+    call) snapshots the proxy before its work and computes the delta after,
+    so it can attribute only its own slice instead of pooling everything
+    into the main agent's total.
+    """
+
+    def test_snapshot_is_independent_of_live_mutation(self):
+        u = ProxyUsage(input_tokens=10, output_tokens=20, total_cost=0.001)
+        snap = u.snapshot()
+        # Mutate the live instance after the snapshot.
+        u.input_tokens = 999
+        u.output_tokens = 888
+        u.total_cost = 9.99
+        u.cache_creation_input_tokens = 500
+        # Snapshot must remain frozen at its capture point.
+        assert snap.input_tokens == 10
+        assert snap.output_tokens == 20
+        assert snap.total_cost == 0.001
+        assert snap.cache_creation_input_tokens == 0
+
+    def test_snapshot_copies_models_used_dict(self):
+        u = ProxyUsage()
+        u.models_used["model-a"] = 1
+        snap = u.snapshot()
+        u.models_used["model-a"] = 99
+        u.models_used["model-b"] = 5
+        assert snap.models_used == {"model-a": 1}
+
+    def test_usage_between_returns_per_field_delta(self):
+        before = ProxyUsage(
+            input_tokens=100,
+            output_tokens=50,
+            cache_creation_input_tokens=200,
+            cache_read_input_tokens=1000,
+            total_cost=0.10,
+        )
+        after = ProxyUsage(
+            input_tokens=150,
+            output_tokens=80,
+            cache_creation_input_tokens=250,
+            cache_read_input_tokens=1500,
+            total_cost=0.18,
+        )
+        delta = usage_between(before, after)
+        assert delta.input_tokens == 50
+        assert delta.output_tokens == 30
+        assert delta.cache_creation_input_tokens == 50
+        assert delta.cache_read_input_tokens == 500
+        assert delta.total_cost_usd is not None
+        assert delta.total_cost_usd == pytest.approx(0.08)
+
+    def test_usage_between_zero_delta_returns_zero_tokens_and_none_cost(self):
+        u = ProxyUsage(input_tokens=10, total_cost=0.001)
+        snap = u.snapshot()
+        delta = usage_between(snap, u)
+        assert delta.input_tokens == 0
+        assert delta.output_tokens == 0
+        assert delta.cache_creation_input_tokens == 0
+        assert delta.cache_read_input_tokens == 0
+        # Cost diff is 0.0; usage_between surfaces None rather than 0.0 for
+        # cost so downstream "is None" gates don't fire on a no-op.
+        assert delta.total_cost_usd is None
+
+    def test_usage_between_typical_full_cycle(self):
+        """End-to-end snapshot/diff usage that matches the orchestrator's pattern."""
+        proxy = _make_proxy()
+        pre = proxy.usage.snapshot()
+        proxy._track_usage("model-a", {"input_tokens": 60_000, "output_tokens": 250})
+        delta = usage_between(pre, proxy.usage)
+        assert delta.input_tokens == 60_000
+        assert delta.output_tokens == 250
+
+
+class TestMeasureProxy:
+    """Tests for the ``measure_proxy`` context manager — the single home for
+    the snapshot/diff attribution pattern that all three call sites use.
+    """
+
+    def test_none_proxy_yields_getter_returning_none(self):
+        """Direct / Bedrock pass proxy=None; the getter must be a no-op."""
+        with measure_proxy(None) as proxy_delta:
+            assert proxy_delta() is None
+        # Still None after the block (no live usage to read).
+        assert proxy_delta() is None
+
+    def test_returns_field_wise_delta_for_mid_block_traffic(self):
+        proxy = _make_proxy()
+        proxy._track_usage("model-a", {"input_tokens": 1_000, "output_tokens": 10})
+        with measure_proxy(proxy) as proxy_delta:
+            proxy._track_usage(
+                "model-a",
+                {
+                    "input_tokens": 60_000,
+                    "output_tokens": 250,
+                    "cache_read_input_tokens": 5_000,
+                },
+            )
+            delta = proxy_delta()
+        assert delta is not None
+        assert delta.input_tokens == 60_000
+        assert delta.output_tokens == 250
+        assert delta.cache_read_input_tokens == 5_000
+
+    def test_returns_none_when_no_traffic_occurred(self):
+        """An empty window drops to None, not an all-zero TokenUsage."""
+        proxy = _make_proxy()
+        proxy._track_usage("model-a", {"input_tokens": 1_000, "output_tokens": 10})
+        with measure_proxy(proxy) as proxy_delta:
+            pass  # no traffic inside the window
+        assert proxy_delta() is None
+
+    def test_getter_returns_delta_when_block_raises(self):
+        """Exception inside the block must not lose the pre-failure delta —
+        the getter re-reads live usage, matching the prior ``finally`` site.
+
+        Uses bare ``try/except`` (rather than ``pytest.raises``) so the
+        post-block assertions are unambiguously reachable to CodeQL's
+        Python analyzer, which doesn't model ``pytest.raises`` as a
+        catch site and would otherwise flag the assertions as unreachable.
+        """
+        proxy = _make_proxy()
+        captured: list = []
+        raised = False
+        try:
+            with measure_proxy(proxy) as proxy_delta:
+                proxy._track_usage("model-a", {"input_tokens": 42, "output_tokens": 8})
+                captured.append(proxy_delta)
+                raise RuntimeError("boom")
+        except RuntimeError:
+            raised = True
+
+        assert raised, "expected RuntimeError to propagate out of the measure_proxy block"
+        delta = captured[0]()
+        assert delta is not None
+        assert delta.input_tokens == 42
+        assert delta.output_tokens == 8
 
 
 class TestUsageTracking:

@@ -1045,3 +1045,194 @@ def test_llm_judge_rejects_legacy_verdict_channel_field() -> None:
 
     with pytest.raises(ValidationError, match="verdict_channel field was removed"):
         LLMJudgeCriterion.model_validate({"description": "x", "prompt": "grade", "verdict_channel": "text"})
+
+
+# --- Phase 3: route-uniform judge token_usage capture ---
+
+
+class _UsageFakeProxy:
+    """Minimal LLMGatewayProxy stand-in exposing ``.usage`` for measure_proxy."""
+
+    def __init__(self) -> None:
+        from coder_eval.proxy.server import ProxyUsage
+
+        self.usage = ProxyUsage()
+
+    def bump(self, *, input_tokens: int, output_tokens: int) -> None:
+        self.usage.input_tokens += input_tokens
+        self.usage.output_tokens += output_tokens
+
+
+def _anthropic_response(*, score: float, usage: dict | None) -> dict:
+    resp: dict = {
+        "content": [
+            {"type": "tool_use", "name": "submit_verdict", "input": {"score": score, "rationale": "ok"}},
+        ]
+    }
+    if usage is not None:
+        resp["usage"] = usage
+    return resp
+
+
+def test_judge_usage_direct_anthropic_from_response(sandbox: Sandbox) -> None:
+    """DirectRoute (anthropic): token_usage comes from the response usage block."""
+    from coder_eval.models import JudgeCriterionResult
+    from coder_eval.models.routing import DirectRoute
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    resp = _anthropic_response(score=0.7, usage={"input_tokens": 1234, "output_tokens": 56})
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", return_value=resp):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute(judge_transport="anthropic")).check(
+            criterion
+        )
+    assert isinstance(result, JudgeCriterionResult)
+    assert result.token_usage is not None
+    assert result.token_usage.input_tokens == 1234
+    assert result.token_usage.output_tokens == 56
+
+
+def test_judge_usage_bedrock_from_response(sandbox: Sandbox) -> None:
+    """BedrockRoute: token_usage comes from the /invoke JSON usage block."""
+    from coder_eval.models import JudgeCriterionResult
+    from coder_eval.models.routing import BedrockRoute
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    resp = _anthropic_response(
+        score=0.6, usage={"input_tokens": 900, "output_tokens": 40, "cache_read_input_tokens": 100}
+    )
+    with patch("coder_eval.criteria.llm_judge.invoke_bedrock_judge", return_value=resp):
+        result = SuccessChecker(
+            sandbox, init_registry=False, route=BedrockRoute(bearer_token="t", region="us-east-1")
+        ).check(criterion)
+    assert isinstance(result, JudgeCriterionResult)
+    assert result.token_usage is not None
+    assert result.token_usage.input_tokens == 900
+    assert result.token_usage.cache_read_input_tokens == 100
+
+
+def test_judge_usage_langchain_from_usage_metadata(sandbox: Sandbox) -> None:
+    """LangChain/LLMGW transport: token_usage from AIMessage.usage_metadata."""
+    from coder_eval.models import JudgeCriterionResult
+    from coder_eval.models.routing import DirectRoute
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    mock_llm = _make_mock_llm('{"score": 0.5, "rationale": "ok"}')
+    mock_llm.invoke.return_value.usage_metadata = {"input_tokens": 321, "output_tokens": 12, "total_tokens": 333}
+    with patch("coder_eval.criteria.llm_judge.get_llmgw_chat_model", return_value=mock_llm):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute(judge_transport="llmgw")).check(
+            criterion
+        )
+    assert isinstance(result, JudgeCriterionResult)
+    assert result.token_usage is not None
+    assert result.token_usage.input_tokens == 321
+    assert result.token_usage.output_tokens == 12
+
+
+def test_judge_usage_proxy_delta_wins_over_response_usage(sandbox: Sandbox) -> None:
+    """ProxyRoute: when BOTH a proxy delta and a response usage are present,
+    the proxy delta (the billed truth) wins."""
+    from coder_eval.models import JudgeCriterionResult
+    from coder_eval.models.routing import ProxyRoute
+
+    proxy = _UsageFakeProxy()
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    # The response echoes a (different) usage; the proxy records the real bill.
+    resp = _anthropic_response(score=0.9, usage={"input_tokens": 1, "output_tokens": 1})
+
+    def _fake_invoke(*, route, model, system, user, temperature, max_tokens, tool_spec, timeout_seconds=120.0):
+        proxy.bump(input_tokens=50_000, output_tokens=400)
+        return resp
+
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=_fake_invoke):
+        result = SuccessChecker(sandbox, init_registry=False, route=ProxyRoute(port=123), proxy=proxy).check(criterion)
+    assert isinstance(result, JudgeCriterionResult)
+    assert result.token_usage is not None
+    # Proxy delta, NOT the response's 1/1 echo.
+    assert result.token_usage.input_tokens == 50_000
+    assert result.token_usage.output_tokens == 400
+
+
+def test_judge_usage_none_when_response_has_no_usage(sandbox: Sandbox) -> None:
+    """No usage in the response and no proxy → token_usage stays None (distinct
+    from a zero TokenUsage)."""
+    from coder_eval.models import JudgeCriterionResult
+    from coder_eval.models.routing import DirectRoute
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    resp = _anthropic_response(score=0.7, usage=None)
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", return_value=resp):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute(judge_transport="anthropic")).check(
+            criterion
+        )
+    assert isinstance(result, JudgeCriterionResult)
+    assert result.token_usage is None
+
+
+# --- Phase 3: usage extractor unit tests ---
+
+
+def test_token_usage_from_anthropic_dict() -> None:
+    from coder_eval.evaluation.judge_usage import token_usage_from_anthropic_dict
+
+    tu = token_usage_from_anthropic_dict(
+        {
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "cache_creation_input_tokens": 3,
+                "cache_read_input_tokens": 4,
+            }
+        }
+    )
+    assert tu is not None
+    assert (tu.input_tokens, tu.output_tokens, tu.cache_creation_input_tokens, tu.cache_read_input_tokens) == (
+        10,
+        2,
+        3,
+        4,
+    )
+    # Missing / empty usage → None (not a zero TokenUsage).
+    assert token_usage_from_anthropic_dict({}) is None
+    assert token_usage_from_anthropic_dict({"usage": {}}) is None
+    assert token_usage_from_anthropic_dict({"usage": {"input_tokens": 0, "output_tokens": 0}}) is None
+
+
+def test_token_usage_from_langchain_message() -> None:
+    from coder_eval.evaluation.judge_usage import token_usage_from_langchain_message
+
+    msg = MagicMock()
+    msg.usage_metadata = {"input_tokens": 7, "output_tokens": 3}
+    tu = token_usage_from_langchain_message(msg)
+    assert tu is not None
+    assert tu.input_tokens == 7
+    assert tu.output_tokens == 3
+    # Absent usage_metadata → None.
+    no_meta = MagicMock()
+    no_meta.usage_metadata = None
+    assert token_usage_from_langchain_message(no_meta) is None
+
+
+def test_usage_extractors_degrade_non_numeric_values_without_raising() -> None:
+    """A malformed (non-numeric) usage value must NOT raise — the extractor's
+    contract is to return usage or None, never to fail the judge criterion.
+    The bad field degrades to 0; valid sibling fields survive."""
+    from coder_eval.evaluation.judge_usage import (
+        token_usage_from_anthropic_dict,
+        token_usage_from_langchain_message,
+    )
+
+    # One bad field, one good: bad → 0, good survives → non-empty result.
+    tu = token_usage_from_anthropic_dict({"usage": {"input_tokens": "NaN", "output_tokens": 5}})
+    assert tu is not None
+    assert tu.input_tokens == 0
+    assert tu.output_tokens == 5
+
+    # A nested object is also non-coercible → degrades to 0 (here all-zero → None).
+    assert token_usage_from_anthropic_dict({"usage": {"input_tokens": {}, "output_tokens": "x"}}) is None
+
+    msg = MagicMock()
+    msg.usage_metadata = {"input_tokens": "oops", "output_tokens": 4}
+    tu2 = token_usage_from_langchain_message(msg)
+    assert tu2 is not None
+    assert tu2.input_tokens == 0
+    assert tu2.output_tokens == 4

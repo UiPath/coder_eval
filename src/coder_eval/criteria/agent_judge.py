@@ -15,7 +15,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from coder_eval.criteria.base import BaseCriterion, register_criterion
+from coder_eval.criteria.base import BaseCriterion, CheckContext, register_criterion
+from coder_eval.errors.agent import AgentCrashError
 from coder_eval.errors.timeout import TurnTimeoutError
 from coder_eval.evaluation.judge_context import (
     DIALOG_HEADER,
@@ -38,6 +39,7 @@ from coder_eval.models import (
     ClaudeCodeAgentConfig,
     CriterionResult,
     JudgeCriterionResult,
+    TokenUsage,
 )
 
 # Private helper + shared security-floor constant — not part of the public
@@ -49,10 +51,7 @@ from coder_eval.models.criteria import (  # noqa: CE001
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from coder_eval.models.results import TurnRecord
-    from coder_eval.models.routing import ApiRoute
     from coder_eval.sandbox import Sandbox
 
 
@@ -103,10 +102,15 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
         criterion: AgentJudgeCriterion,
         sandbox: Sandbox,
         reference_code: str | None = None,
+        *,
         turn_records: list[TurnRecord] | None = None,
-        route: ApiRoute | None = None,
-        reference_dir: Path | None = None,
+        context: CheckContext | None = None,
     ) -> CriterionResult:
+        ctx = context or CheckContext()
+        route = ctx.route
+        reference_dir = ctx.reference_dir
+        proxy = ctx.proxy
+
         # Master enablement gate. Skipped criteria don't spawn the sub-agent and
         # don't affect cost; weighted score includes them as 1.0 so they don't penalize.
         # The route precondition below is intentionally NOT checked when skipped —
@@ -134,7 +138,7 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
         # to the prompt envelope (fast verdict, narrow tool surface); when empty, the
         # judge inspects the sandbox copy via its tools. Both modes compose — the judge
         # can ``Read`` anything else even when files are pre-attached.
-        context = JudgeContextBuilder(
+        judge_ctx = JudgeContextBuilder(
             files=criterion.files,
             include_reference=criterion.include_reference,
             include_agent_output=criterion.include_agent_output,
@@ -150,7 +154,7 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
         ref_dir_for_runner = reference_dir if criterion.include_reference else None
         user_msg = _render_user_message(
             criterion.prompt,
-            context,
+            judge_ctx,
             reference_dir_mounted=ref_dir_for_runner is not None,
         )
         agent_config = _build_agent_config(criterion, system_prompt=_SYSTEM_PROMPT)
@@ -172,28 +176,67 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
             capture=capture,
         )
 
-        try:
-            turn = runner.run(
-                user_msg,
-                max_turns=criterion.max_turns,
-                turn_timeout=float(criterion.turn_timeout),
-            )
-        except TurnTimeoutError as e:
-            logger.warning("agent_judge: turn timeout after %ds", criterion.turn_timeout)
-            # No turn was produced, so there's no transcript to capture — but
-            # return a JudgeCriterionResult anyway so renderers / aggregators
-            # that switch on ``isinstance(cr, JudgeCriterionResult)`` see the
-            # uniform shape (findings=[], transcript=None) instead of having to
-            # special-case a base CriterionResult with criterion_type='agent_judge'.
-            return JudgeCriterionResult(
-                criterion_type=criterion.type,
-                description=criterion.description,
-                score=0.0,
-                details=f"Judge agent timed out after {criterion.turn_timeout}s",
-                error=f"{e.__class__.__name__}: {e}",
-                findings=[],
-                transcript=None,
-            )
+        # Measure the proxy delta around the sub-agent run so we can override
+        # the sub-agent's TurnRecord.token_usage when the bundled Claude Code
+        # CLI reports zeros on ProxyRoute (it can't parse Bedrock's
+        # event-stream usage). The proxy delta is the truthful value. On
+        # Direct / Bedrock-direct the proxy is None and ``measure_proxy``
+        # yields a getter returning None — the sub-agent's SDK-parsed usage
+        # flows through unchanged.
+        from coder_eval.proxy.server import measure_proxy  # local import: avoid cycles
+
+        with measure_proxy(proxy) as proxy_delta:
+            try:
+                turn = runner.run(
+                    user_msg,
+                    max_turns=criterion.max_turns,
+                    turn_timeout=float(criterion.turn_timeout),
+                )
+            except (TurnTimeoutError, AgentCrashError) as e:
+                # Two pre-output failure modes share one return path:
+                #   - TurnTimeoutError: sub-agent's per-turn watchdog fired.
+                #   - AgentCrashError: SDK/CLI emitted an is_error ResultMessage
+                #     (e.g. Bedrock's ``error_during_execution / end_turn`` flake
+                #     when the model returns an empty assistant turn). The
+                #     sub-agent typically sent some traffic before the failure;
+                #     surface that as the judge's token_usage so suite billing
+                #     still attributes those tokens away from the main agent
+                #     instead of dropping them on the floor.
+                is_timeout = isinstance(e, TurnTimeoutError)
+                if is_timeout:
+                    logger.warning("agent_judge: turn timeout after %ds", criterion.turn_timeout)
+                    details = f"Judge agent timed out after {criterion.turn_timeout}s"
+                else:
+                    logger.warning("agent_judge: sub-agent crashed: %s", str(e)[:200])
+                    details = f"Judge agent crashed before producing a verdict: {str(e)[:200]}"
+
+                # ``proxy_delta()`` already drops an empty delta to None.
+                pre_output_usage: TokenUsage | None = proxy_delta()
+                # No turn was produced, so there's no transcript to capture — but
+                # return a JudgeCriterionResult anyway so renderers / aggregators
+                # that switch on ``isinstance(cr, JudgeCriterionResult)`` see the
+                # uniform shape (findings=[], transcript=None) instead of having to
+                # special-case a base CriterionResult with criterion_type='agent_judge'.
+                return JudgeCriterionResult(
+                    criterion_type=criterion.type,
+                    description=criterion.description,
+                    score=0.0,
+                    details=details,
+                    error=f"{e.__class__.__name__}: {e}",
+                    findings=[],
+                    transcript=None,
+                    token_usage=pre_output_usage,
+                )
+
+        # Attribute the proxy delta to the sub-agent's TurnRecord when its
+        # own SDK-parsed usage is zero (LLMGW path — the CLI can't parse
+        # Bedrock's event-stream usage). On Direct / Bedrock-direct the
+        # delta is None and the SDK-parsed usage flows through unchanged.
+        delta = proxy_delta()
+        if delta is not None:
+            existing = turn.token_usage
+            if existing is None or existing.is_empty():
+                turn.token_usage = delta
 
         # Build the scrub set: reference_code (if any) plus every file's content
         # under reference_dir (if any). Either is honored only when the criterion
@@ -209,7 +252,7 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
         return _build_result(
             criterion,
             turn,
-            context,
+            judge_ctx,
             scrub_secrets=scrub_secrets,
             system_prompt=_SYSTEM_PROMPT,
             user_msg=user_msg,
@@ -310,6 +353,7 @@ def _build_result(
             details=f"UNTRUSTED_JUDGE_OUTPUT: {scrubbed_output[:500]}",
             error=scrub_reference(parse_err, scrub_key),
             transcript=transcript,
+            token_usage=turn.token_usage,
         )
     assert verdict is not None  # parser contract: verdict is set iff parse_err is None
 
@@ -330,6 +374,7 @@ def _build_result(
         details=scrub_reference(details, scrub_key),
         findings=[scrub_reference(f, scrub_key) for f in verdict.findings],
         transcript=transcript,
+        token_usage=turn.token_usage,
     )
 
 

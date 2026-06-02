@@ -1,12 +1,12 @@
 """Base criterion checker interface with error handling."""
 
-import inspect
 import logging
 import os
 import statistics
 import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import wraps
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -18,9 +18,29 @@ if TYPE_CHECKING:
 
     from coder_eval.models.results import TurnRecord
     from coder_eval.models.routing import ApiRoute
+    from coder_eval.proxy.server import LLMGatewayProxy
     from coder_eval.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class CheckContext:
+    """Live run context forwarded to every criterion checker's ``_check_impl``.
+
+    Bundles the three pieces of orchestrator state that judge-style criteria
+    (``llm_judge`` / ``agent_judge``) need to route their own LLM calls and
+    attribute their token usage. Carries live objects (a running ``proxy``, a
+    resolved ``route``), so it is NOT a ``coder_eval.models`` Pydantic model —
+    it never gets serialized into a result record.
+
+    Non-judge checkers receive it too (uniform ``_check_impl`` signature) and
+    ignore it.
+    """
+
+    route: "ApiRoute | None" = None
+    reference_dir: "Path | None" = None
+    proxy: "LLMGatewayProxy | None" = None
 
 
 def handle_criterion_errors(func: Callable[..., CriterionResult]) -> Callable[..., CriterionResult]:
@@ -39,8 +59,7 @@ def handle_criterion_errors(func: Callable[..., CriterionResult]) -> Callable[..
         sandbox: "Sandbox",
         reference_code: str | None = None,
         turn_records: list["TurnRecord"] | None = None,
-        route: "ApiRoute | None" = None,
-        reference_dir: "Path | None" = None,
+        context: "CheckContext | None" = None,
     ) -> CriterionResult:
         try:
             return func(
@@ -49,8 +68,7 @@ def handle_criterion_errors(func: Callable[..., CriterionResult]) -> Callable[..
                 sandbox,
                 reference_code,
                 turn_records=turn_records,
-                route=route,
-                reference_dir=reference_dir,
+                context=context,
             )
         except Exception as e:
             exc_info = f"{e.__class__.__name__}: {e}"
@@ -104,18 +122,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
     # Subclasses MUST define this as a class variable
     criterion_type: ClassVar[str]
 
-    # Per-subclass cache of which kwargs the subclass's ``_check_impl`` accepts.
-    # Lets the base ``check`` forward forward-compat kwargs (e.g. ``reference_dir``,
-    # added when directory references were introduced) without forcing every
-    # subclass to declare them. Filled lazily in ``check()``.
-    _impl_accepted_params: ClassVar[set[str] | None] = None
-    # Identity (id()) of the ``_check_impl`` callable that produced the cache.
-    # When the bound method is replaced — e.g. ``monkeypatch.setattr(Cls,
-    # "_check_impl", new_fn)`` in tests, or a hot reload that re-binds the
-    # method — the new callable has a different id and the cache refreshes on
-    # the next ``check()`` call.
-    _impl_signature_owner: ClassVar[int | None] = None
-
     @handle_criterion_errors
     def check(
         self,
@@ -123,8 +129,7 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         sandbox: "Sandbox",
         reference_code: str | None = None,
         turn_records: list["TurnRecord"] | None = None,
-        route: "ApiRoute | None" = None,
-        reference_dir: "Path | None" = None,
+        context: "CheckContext | None" = None,
     ) -> CriterionResult:
         """Execute the criterion check with centralized error handling.
 
@@ -136,35 +141,21 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             sandbox: Sandbox instance for file access and command execution
             reference_code: Optional reference code string for comparison
             turn_records: Optional list of turn records for command inspection
-            route: Optional resolved ApiRoute. Forwarded by SuccessChecker so
-                criteria that spawn sub-agents (e.g. agent_judge) can route
-                through the same backend (Direct/Proxy/Bedrock) as the main
-                agent. Most checkers ignore it.
-            reference_dir: Optional resolved path to a reference directory
-                (from ``task.reference.directory``). Only consumed by
-                ``agent_judge``; non-judge checkers ignore it.
+            context: Optional :class:`CheckContext` carrying the live run state
+                (``route`` / ``reference_dir`` / ``proxy``) that judge criteria
+                (``agent_judge``, ``llm_judge``) consume. Non-judge checkers
+                accept the uniform signature and ignore it.
 
         Returns:
             CriterionResult with score (0.0-1.0), details, and error info
         """
-        # Forward only the kwargs the subclass's _check_impl actually accepts.
-        # Older checkers haven't been updated to take ``reference_dir`` and would
-        # raise TypeError; the filter keeps them oblivious to the new field.
-        # Cache identity-keyed on the method's id() so monkeypatched _check_impl
-        # callables (tests, hot reload) refresh on the next call instead of
-        # silently reusing the previous signature.
-        cls = type(self)
-        impl = cls._check_impl
-        impl_id = id(impl)
-        if cls._impl_accepted_params is None or cls._impl_signature_owner != impl_id:
-            cls._impl_accepted_params = set(inspect.signature(impl).parameters)
-            cls._impl_signature_owner = impl_id
-        accepted = cls._impl_accepted_params
-
-        kwargs: dict[str, Any] = {"turn_records": turn_records, "route": route}
-        if "reference_dir" in accepted:
-            kwargs["reference_dir"] = reference_dir
-        return self._check_impl(criterion, sandbox, reference_code, **kwargs)
+        return self._check_impl(
+            criterion,
+            sandbox,
+            reference_code,
+            turn_records=turn_records,
+            context=context,
+        )
 
     @abstractmethod
     def _check_impl(
@@ -172,24 +163,23 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         criterion: C,
         sandbox: "Sandbox",
         reference_code: str | None = None,
+        *,
         turn_records: list["TurnRecord"] | None = None,
-        route: "ApiRoute | None" = None,
+        context: "CheckContext | None" = None,
     ) -> CriterionResult:
         """Implement the actual criterion checking logic.
 
-        Subclasses override this method, NOT check().
+        Subclasses override this method, NOT check(). Every checker shares this
+        uniform signature; non-judge checkers accept ``context`` and ignore it.
 
         Args:
             criterion: The specific criterion definition (Pydantic model)
             sandbox: Sandbox instance for file access and command execution
             reference_code: Optional reference code string for comparison
             turn_records: Optional list of turn records for command inspection
-            route: Optional resolved ApiRoute (see ``check()``).
-
-        Subclasses may also declare ``reference_dir: Path | None = None`` —
-        ``check()`` introspects each subclass's signature and forwards the
-        kwarg only when accepted, so older subclasses don't have to update.
-        Currently only ``agent_judge`` consumes ``reference_dir``.
+            context: Optional :class:`CheckContext` (route / reference_dir /
+                proxy). Consumed by ``llm_judge`` / ``agent_judge``; ignored by
+                the rest.
 
         Returns:
             CriterionResult with score (0.0-1.0), details, and error info
