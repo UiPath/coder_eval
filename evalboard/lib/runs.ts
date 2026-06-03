@@ -258,6 +258,12 @@ interface RawTaskResult {
     // null-fallback through the cell helpers in lib/turns.ts.
     total_turns?: number;
     expected_turns?: number | null;
+    // Documented visible-turn count (tool calls + final reply) — the canonical
+    // metric the "within expected turns" chart compares against expected_turns.
+    // Absent on runs predating this field; visibleTurnsFromRaw() then reconstructs
+    // it from actual_commands + has_final_reply (the identical formula) so the
+    // metric still populates for historical runs.
+    visible_turns?: number | null;
     // True iff the final iteration's ResultMessage.result was non-empty.
     // Absent on legacy runs predating the field — treated as false.
     has_final_reply?: boolean;
@@ -471,6 +477,7 @@ export interface RunOverviewTask {
     actualCommands: number | null;
     totalTurns: number | null;
     expectedTurns: number | null;
+    visibleTurns: number | null;
     hasFinalReply: boolean;
 }
 
@@ -482,6 +489,24 @@ export interface RunOverview {
     totalCostUsd: number | null;
     taskDurationSeconds: number | null;
     componentShas: ComponentSha[];
+}
+
+// Visible-turn count for a task row: the persisted `visible_turns` field when
+// present, else reconstructed as actual_commands + (1 if final reply). That
+// reconstruction is the documented turn rule (tool calls + final reply, see
+// docs/features/2026-05-22-visible-turns.md) and is provably identical to the
+// persisted field — so it backfills the "within expected turns" metric for runs
+// written before `visible_turns` existed. null when neither signal is present.
+export function visibleTurnsFromRaw(t: {
+    visible_turns?: number | null;
+    actual_commands?: number | null;
+    has_final_reply?: boolean;
+}): number | null {
+    if (t.visible_turns != null) return t.visible_turns;
+    if (t.actual_commands != null) {
+        return t.actual_commands + (t.has_final_reply ? 1 : 0);
+    }
+    return null;
 }
 
 export async function readRunOverview(
@@ -505,6 +530,7 @@ export async function readRunOverview(
                 actualCommands: t.actual_commands ?? null,
                 totalTurns: t.total_turns ?? null,
                 expectedTurns: t.expected_turns ?? null,
+                visibleTurns: visibleTurnsFromRaw(t),
                 hasFinalReply: t.has_final_reply ?? false,
             };
         });

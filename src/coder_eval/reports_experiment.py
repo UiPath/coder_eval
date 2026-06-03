@@ -58,7 +58,7 @@ def eval_result_to_task_dict(
             from the source folder structure instead of guessing from tags.
         duration_override: Optional duration value (defaults to result.duration_seconds).
     """
-    from coder_eval.reports_stats import expected_turns_overage
+    from coder_eval.reports_stats import expected_turns_overage, visible_turn_count
     from coder_eval.reports_stats import has_final_reply as _has_final_reply
 
     ref_similarity: float | None = None
@@ -125,6 +125,10 @@ def eval_result_to_task_dict(
         "max_turns_exhausted": result.max_turns_exhausted,
         "expected_turns_overage": list(overage) if overage is not None else None,
         "total_turns": total_turns,
+        # Documented "visible turns" (tool calls + final reply) — the canonical
+        # turn count the run-level "within expected turns" metric compares against
+        # expected_turns. Distinct from total_turns (SDK num_turns).
+        "visible_turns": visible_turn_count(result),
         "expected_turns": expected_turns_value,
         "has_final_reply": has_reply,
     }

@@ -93,7 +93,8 @@ coder-eval run tasks/*.yaml --exclude-tags example # Skip example tasks
 ```yaml
 # Run-time caps (turns, wall-clock, tokens, USD) live under run_limits
 run_limits:
-  max_turns: 20                       # Optional: cap on inner-loop turns per iteration
+  max_turns: 20                       # Optional: hard cap on inner-loop turns per iteration
+  expected_turns: 8                   # Optional: SOFT efficiency budget (visible turns) — not a cap
   turn_timeout: 300                   # Optional: per-communicate() timeout in seconds
   task_timeout: 600                   # Optional: wall-clock cap across all iterations
 
@@ -144,6 +145,24 @@ for the full reference.
 > the agent model's `extra="forbid"` raises a clear validation error.
 > They must live under `run_limits:`. (A deprecation shim hoisted them
 > automatically until it was removed on 2026-06-01.)
+
+### `expected_turns` (soft efficiency budget)
+
+`run_limits.expected_turns` is a **soft target**, not a cap: the run is never
+aborted for exceeding it (use `max_turns` for a hard limit). It's the budget the
+dashboard's **"Within Expected Turns"** metric divides by — a task counts as
+"within budget" when its turn count stays within **1.5×** `expected_turns`, and
+the run-level headline reports the share of (successful) tasks that did.
+
+The count compared against the budget is **visible turns** — one per tool call
+plus one for the agent's final reply — *not* the SDK's `total_turns` (which
+counts assistant messages and can bundle several tool calls into one). See
+[`docs/features/2026-05-22-visible-turns.md`](features/2026-05-22-visible-turns.md).
+
+Set it to the number of turns a competent agent should need for the task. Pick
+budgets consistently across a suite — the headline % is only comparable when
+tasks are measured against realistic, like-for-like targets. Omit it (the
+default) to exclude a task from the metric entirely.
 
 ## Sandbox Configuration
 

@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
+    TURN_BUDGET_TOLERANCE,
     fmtTurnsCount,
     getTurnRatioThresholds,
     tintForRatio,
     turnRatio,
+    withinTurnBudget,
 } from "../turns";
 
 describe("turnRatio", () => {
@@ -81,6 +83,41 @@ describe("getTurnRatioThresholds", () => {
         vi.stubEnv("EVALBOARD_TURNS_YELLOW_RATIO", "0");
         vi.stubEnv("EVALBOARD_TURNS_RED_RATIO", "-1");
         expect(getTurnRatioThresholds()).toEqual({ yellow: 1.25, red: 1.5 });
+    });
+});
+
+describe("withinTurnBudget (default tolerance 0.5 → 1.5× budget)", () => {
+    test("default tolerance is 0.5", () => {
+        expect(TURN_BUDGET_TOLERANCE).toBe(0.5);
+    });
+
+    test("passes at exactly 1.5× the budget", () => {
+        expect(withinTurnBudget(15, 10)).toBe(true);
+    });
+
+    test("fails just past 1.5× the budget", () => {
+        expect(withinTurnBudget(16, 10)).toBe(false);
+    });
+
+    test("passes well under budget", () => {
+        expect(withinTurnBudget(7, 10)).toBe(true);
+    });
+
+    test("null when no visible-turn count (ineligible)", () => {
+        expect(withinTurnBudget(null, 10)).toBeNull();
+    });
+
+    test("null when no budget (ineligible)", () => {
+        expect(withinTurnBudget(12, null)).toBeNull();
+    });
+
+    test("null when budget below 1 (defensive)", () => {
+        expect(withinTurnBudget(0, 0)).toBeNull();
+    });
+
+    test("honours a custom tolerance", () => {
+        expect(withinTurnBudget(10, 10, 0)).toBe(true);
+        expect(withinTurnBudget(11, 10, 0)).toBe(false);
     });
 });
 

@@ -9,6 +9,7 @@ import { fmtDuration, fmtRunTime } from "@/lib/format";
 import { WindowSelector } from "./_components/window-selector";
 import { WINDOWS, type Window } from "@/lib/reviews-types";
 import { DailySuccessChart } from "./_overview/daily-chart";
+import { TurnBudgetChart } from "./_overview/turn-budget-chart";
 import { ChipLegend, MergedTagRail } from "./_overview/tag-rail";
 
 export const dynamic = "force-dynamic";
@@ -190,6 +191,21 @@ export default async function Page({
                     windowStart={overview.windowStart}
                     windowEnd={overview.windowEnd}
                 />
+                <div className="pt-4 mt-2 border-t border-dashed border-gray-200 space-y-1">
+                    <h2 className="text-sm font-semibold text-gray-900">
+                        Within Expected Turns (%)
+                    </h2>
+                    <p className="text-xs text-gray-500">
+                        % of tasks with a turn budget that stayed within 1.5×
+                        their expected turns
+                        {activeTag || q ? " · scoped to the active filter" : ""}
+                    </p>
+                    <TurnBudgetChart
+                        data={overview.runs}
+                        windowStart={overview.windowStart}
+                        windowEnd={overview.windowEnd}
+                    />
+                </div>
                 <div className="pt-2 border-t border-gray-100 space-y-2">
                     <ChipLegend />
                     <MergedTagRail

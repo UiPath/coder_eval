@@ -12,6 +12,7 @@ import {
     type RunOverviewTask,
 } from "./runs";
 import { listRunIdsInWindow, readRunReviewIndex, parseRunIdDate } from "./reviews";
+import { withinTurnBudget } from "./turns";
 import { humanizeTaskId } from "./format";
 import { mapWithConcurrency } from "./concurrency";
 import type { Window } from "./reviews-types";
@@ -20,6 +21,28 @@ export interface RunPoint {
     runId: string;
     timestamp: number; // ms since epoch (UTC); used as the chart x-coordinate
     successRate: number | null;
+    // % of eligible tasks — SUCCESS tasks with an expected_turns budget —
+    // whose visible turns stayed within 1.5× that budget. null when no task in
+    // scope qualifies. Same tag/q scoping as successRate.
+    turnBudgetRate: number | null;
+}
+
+// Of the SUCCESS tasks carrying an expected_turns budget, the % whose visible
+// turns stayed within 1.5× that budget; null when none qualify. Non-SUCCESS
+// tasks are excluded so an agent that bails early (low visible turns) can't
+// inflate the efficiency headline. Callers pass the already tag/q-scoped task
+// list, so the rate inherits that scoping. Exported for unit testing.
+export function turnBudgetRateForTasks(tasks: RunOverviewTask[]): number | null {
+    let eligible = 0;
+    let withinBudget = 0;
+    for (const t of tasks) {
+        if (t.status !== "SUCCESS") continue;
+        const verdict = withinTurnBudget(t.visibleTurns, t.expectedTurns);
+        if (verdict === null) continue;
+        eligible += 1;
+        if (verdict) withinBudget += 1;
+    }
+    return eligible > 0 ? (withinBudget / eligible) * 100 : null;
 }
 
 export interface TagCount {
@@ -350,10 +373,12 @@ export async function getOverview(
             (t) => t.status === "SUCCESS",
         ).length;
         const rate = (succeeded / matching.length) * 100;
+
         runPoints.push({
             runId: id,
             timestamp: date.getTime(),
             successRate: rate,
+            turnBudgetRate: turnBudgetRateForTasks(matching),
         });
     }
     runPoints.sort((a, b) => a.timestamp - b.timestamp);

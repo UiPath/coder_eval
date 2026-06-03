@@ -16,6 +16,7 @@ import {
     isExcludedArtifact,
     sortArtifacts,
     toTaskRow,
+    visibleTurnsFromRaw,
     walkArtifacts,
 } from "../runs";
 
@@ -189,5 +190,40 @@ describe("clearRunCacheDir", () => {
     test("rejects ids with path separators", async () => {
         expect(await clearRunCacheDir(root, "a/b")).toBe(false);
         expect(await clearRunCacheDir(root, "../sibling")).toBe(false);
+    });
+});
+
+describe("visibleTurnsFromRaw (historical backfill)", () => {
+    test("prefers the persisted visible_turns field", () => {
+        expect(
+            visibleTurnsFromRaw({
+                visible_turns: 7,
+                actual_commands: 99, // ignored when the field is present
+                has_final_reply: true,
+            }),
+        ).toBe(7);
+    });
+
+    test("reconstructs from actual_commands + final reply on legacy runs", () => {
+        expect(
+            visibleTurnsFromRaw({ actual_commands: 4, has_final_reply: true }),
+        ).toBe(5);
+    });
+
+    test("omits the +1 when there is no final reply", () => {
+        expect(
+            visibleTurnsFromRaw({ actual_commands: 4, has_final_reply: false }),
+        ).toBe(4);
+    });
+
+    test("treats actual_commands=0 as a real count, not missing", () => {
+        expect(
+            visibleTurnsFromRaw({ actual_commands: 0, has_final_reply: true }),
+        ).toBe(1);
+    });
+
+    test("null when neither the field nor actual_commands is present", () => {
+        expect(visibleTurnsFromRaw({})).toBeNull();
+        expect(visibleTurnsFromRaw({ has_final_reply: true })).toBeNull();
     });
 });

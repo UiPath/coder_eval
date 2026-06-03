@@ -4,8 +4,10 @@ from datetime import datetime
 
 from coder_eval.models import (
     AgentKind,
+    CommandTelemetry,
     EvaluationResult,
     FinalStatus,
+    ResultSummary,
     TaskConfigRecord,
     TurnRecord,
 )
@@ -36,6 +38,37 @@ def _make_result(
 
 def _turn(n: int | None) -> TurnRecord:
     return TurnRecord(iteration=1, user_input="p", agent_output="a", num_turns=n)
+
+
+def _visible_turn(commands: int = 0, reply: str | None = None) -> TurnRecord:
+    """TurnRecord with `commands` tool calls and an optional final reply."""
+    return TurnRecord(
+        iteration=1,
+        user_input="p",
+        agent_output="a",
+        commands=[
+            CommandTelemetry(tool_name="Bash", tool_id=f"t{i}", timestamp=datetime.now()) for i in range(commands)
+        ],
+        result_summary=(ResultSummary(is_error=False, subtype="success", result=reply) if reply is not None else None),
+    )
+
+
+class TestVisibleTurns:
+    def test_counts_tool_calls_plus_final_reply(self):
+        # 5 tool calls + a final reply = 6 visible turns.
+        result = _make_result(turns=[_visible_turn(commands=5, reply="done")])
+        d = eval_result_to_task_dict(result)
+        assert d["visible_turns"] == 6
+
+    def test_no_reply_omits_plus_one(self):
+        result = _make_result(turns=[_visible_turn(commands=4), _visible_turn(commands=5)])
+        d = eval_result_to_task_dict(result)
+        assert d["visible_turns"] == 9
+
+    def test_empty_turns(self):
+        result = _make_result(turns=[])
+        d = eval_result_to_task_dict(result)
+        assert d["visible_turns"] == 0
 
 
 class TestTotalTurns:

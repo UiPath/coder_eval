@@ -2,6 +2,7 @@
 
 from datetime import datetime
 
+from coder_eval.analysis import calculate_command_statistics
 from coder_eval.models import (
     AgentKind,
     CommandTelemetry,
@@ -11,7 +12,7 @@ from coder_eval.models import (
     TaskConfigRecord,
     TurnRecord,
 )
-from coder_eval.reports_stats import expected_turns_overage
+from coder_eval.reports_stats import expected_turns_overage, has_final_reply, visible_turn_count
 
 
 def _make_result(
@@ -109,3 +110,29 @@ class TestExpectedTurnsOverage:
     def test_empty_turns(self):
         result = _make_result(resolved={"run_limits": {"expected_turns": 1}}, turns=[])
         assert expected_turns_overage(result) is None
+
+
+class TestTurnDefinitionMatchesDoc:
+    """Pin the turn definition from docs/features/2026-05-22-visible-turns.md:
+
+        visible_turn_count == command_stats.total_commands + (1 if final reply)
+
+    The evalboard "Turns" cell, ``displayedTurns``/``actual_commands``, and the
+    proposed historical reconstruction all read ``command_stats.total_commands``
+    (i.e. the tool-call part of the persisted ``visible_turns`` field). If
+    someone later changes ``calculate_command_statistics`` to filter commands,
+    that count would silently diverge from ``visible_turn_count`` and these
+    cells would drift. This test fails first if that ever happens.
+    """
+
+    def test_mixed_tools_with_final_reply(self):
+        # 2 + 3 tool calls across two iterations, plus a final reply.
+        result = _make_result(turns=[_turn(commands=2), _turn(commands=3, reply="done")])
+        stats = calculate_command_statistics(result.iterations)
+        assert visible_turn_count(result) == stats.total_commands + (1 if has_final_reply(result) else 0)
+
+    def test_tools_without_final_reply(self):
+        # Crashed before producing a reply: the +1 must be omitted on both sides.
+        result = _make_result(turns=[_turn(commands=4)])
+        stats = calculate_command_statistics(result.iterations)
+        assert visible_turn_count(result) == stats.total_commands + (1 if has_final_reply(result) else 0)

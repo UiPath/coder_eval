@@ -69,3 +69,21 @@ export function turnsCellClasses(tint: TurnTint): string {
 export function fmtTurnsCount(n: number | null): string {
     return n == null ? "—" : `${n}`;
 }
+
+// Fail a task's turn-budget check once its visible turns exceed the budget by
+// more than this fraction (> 1.5× expected_turns).
+export const TURN_BUDGET_TOLERANCE = 0.5;
+
+// Whether a task stayed within (1 + tolerance) × its expected-turns budget,
+// using the documented visible-turn count. Returns null when the task is not
+// eligible: no visible-turn count, or no positive expected_turns budget.
+export function withinTurnBudget(
+    visibleTurns: number | null,
+    expectedTurns: number | null,
+    tolerance: number = TURN_BUDGET_TOLERANCE,
+): boolean | null {
+    if (visibleTurns == null || expectedTurns == null || expectedTurns < 1) {
+        return null;
+    }
+    return visibleTurns <= expectedTurns * (1 + tolerance);
+}

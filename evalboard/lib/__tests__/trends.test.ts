@@ -14,6 +14,7 @@ function task(overrides: Partial<RunOverviewTask>): RunOverviewTask {
         actualCommands: null,
         totalTurns: null,
         expectedTurns: null,
+        visibleTurns: null,
         hasFinalReply: false,
         ...overrides,
     };
