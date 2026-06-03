@@ -56,6 +56,7 @@ const v1_to_v2_1 = require("v1-to-v2");
 const script_body_emitter_1 = require("./script-body-emitter");
 const expression_1 = require("./expression");
 const datetime_translator_1 = require("./datetime-translator");
+const migrate_to_13_1 = require("./migrate-to-13");
 const KNOWN_SCRIPT_KEYS = new Set(['script_id', 'description', 'label']);
 /**
  * Extract magic-comment metadata from a statement's leadingComments. Returns
@@ -248,6 +249,7 @@ class FilToFlowConverter {
             patchEdgePorts(flow);
         }
         normalizeTypeVersions(flow);
+        (0, migrate_to_13_1.migrateInMemoryFlowTo13)(flow);
         return flow;
     }
     convertFunctionToSubflow(fn) {

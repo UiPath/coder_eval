@@ -19,6 +19,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.expandManifest = expandManifest;
 const configuration_1 = require("./configuration");
+const definitions_1 = require("./definitions");
 function buildBindingLookup(bindings) {
     const byId = new Map();
     const entriesById = new Map();
@@ -129,6 +130,13 @@ function expandNode(nodeId, node, opts, bindingLookup, missing) {
             connectorName: lib.connector.name || '',
         },
     };
+    // `uip` >= 1.2.0 requires `inputs.detail.uiPathActivityTypeId` on every
+    // connector activity node (Studio Web crashes opening a flow without it).
+    // It's a stable per-(connector, action) id that v1→v2 drops as
+    // library-determined; recover it from the canonical v1def sidecar.
+    const activityTypeId = (0, definitions_1.loadActivityTypeId)(opts.libraryDir, type, version);
+    if (activityTypeId)
+        detail.uiPathActivityTypeId = activityTypeId;
     // Bindings — the manifest holds symbolic IDs (e.g. "bOutlook"). v1 wants
     // the real UUIDs in three slots: connectionId, connectionResourceId,
     // connectionFolderKey. Resolve through bindings.json.

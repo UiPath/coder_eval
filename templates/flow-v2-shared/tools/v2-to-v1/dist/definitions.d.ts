@@ -26,4 +26,19 @@ export interface BuildDefinitionsResult {
     missing: string[];
 }
 export declare function buildDefinitions(typeRefs: Set<string>, opts: BuildDefinitionsOptions, embedded?: Record<string, unknown>): BuildDefinitionsResult;
+/**
+ * The stable per-(connector, action) activity id lives in the connector's
+ * v1def sidecar form, at
+ *   form.sections[].fields[].componentProps.connectorDetail.uiPathActivityTypeId
+ *
+ * `uip` >= 1.2.0 (the 2026-05 validation tightening) rejects a connector
+ * activity node whose `inputs.detail.uiPathActivityTypeId` is missing —
+ * "Studio Web crashes when opening this flow". The v1→v2 distillation drops
+ * the field as library-determined (see v1-to-v2 `LIBRARY_DETERMINED_FIELDS`),
+ * so the v2→v1 rebuild has to re-populate it from the canonical sidecar.
+ *
+ * Returns undefined when the sidecar is absent or predates the field (older
+ * fixtures, custom nodes) — the missing-definition path already surfaces that.
+ */
+export declare function loadActivityTypeId(libraryDir: string | undefined, nodeType: string, version: string): string | undefined;
 //# sourceMappingURL=definitions.d.ts.map

@@ -1,6 +1,6 @@
 ---
 name: uipath-flow-v2
-description: "UiPath Flow v2 — author flows as FIL (a TypeScript subset) plus a small bindings file. Inverse of `.flow` JSON: program logic AND per-node config in FIL, connection IDs and resource bindings in bindings. Verify locally with `./verify.sh`; use `./convert.sh + uip maestro flow validate` only as a final compatibility check before deploy."
+description: "UiPath Flow v2 — author flows as FIL (a TypeScript subset) plus a small bindings file. Inverse of `.flow` JSON: program logic AND per-node config in FIL, connection IDs and resource bindings in bindings. Verify locally with `./verify.sh`; gate-check with `./convert.sh <Name>` (runs the v2-to-v1 conversion + `uip maestro flow validate` + `format` in one step)."
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
 
@@ -15,7 +15,7 @@ A v2 flow project is **two files**:
 
 **Primary verifier:** `./verify.sh` parses the FIL, validates connector bindings against your tenant (via `uip is connections list`), validates process/queue resource bindings from `bindings.json`, validates inline Agent, HITL quickform, Summarize, and Batch Transform `rawInputs` shape, and executes supported node decisions. Connector calls go through `uip is resources execute`; Agent, Queue, Summarize, and Batch Transform nodes are validated and dry-run only until live product dispatch is wired. It records every dispatch in `decisions.json` so you can see what was sent and what came back. Use it as the inner loop while authoring.
 
-**Final compatibility check (deploy gate):** `./convert.sh <Name>` produces `<Name>.flow` (the v1 form), then `uip maestro flow validate <Name>.flow` cross-checks against the v1 schema. Run this before declaring the flow shippable, but don't depend on it for iteration — `./verify.sh`'s errors are far more actionable than `convert + validate`'s output.
+**Final compatibility check (deploy gate):** `./convert.sh <Name>` produces `<Name>.flow` (the v1 form), then runs `uip maestro flow validate` + `uip maestro flow format` against it — three steps in one Bash call. Run this before declaring the flow shippable, but don't depend on it for iteration — `./verify.sh`'s errors are far more actionable than `convert + validate`'s output. **Do not chain `uip maestro flow validate && format` yourself in a separate Bash call** — the CLI's plugin-load cost can push the combined invocation past Claude Code's implicit Bash timeout and force the tool to auto-background, costing minutes of wall time. `convert.sh` handles the whole gate behind a single tool call.
 
 ## Authoring loop
 
@@ -41,9 +41,7 @@ A v2 flow project is **two files**:
    - `./verify.sh --live` — runs supported live nodes for real. Each connector call goes through `uip is resources execute`; HTTP nodes via `fetch()`. Do not use `--live` for Agent-, Queue-, Summarize-, or Batch Transform-bearing flows yet; those live dispatch paths fail explicitly. After completion, read `.flow-run/decisions.json` to see exact inputs and outputs per node.
    - Iterate. Compile errors → fix the FIL. Connector failures → adjust the `inputs` you pass via `executeNode(...)` or the action's `rawInputs` (the failure envelope is preserved in `decisions.json`).
 6. **Final compatibility check** (only when the flow is otherwise done):
-   - `./convert.sh <Name>` → writes `<Name>.flow`.
-   - `uip maestro flow validate <Name>.flow`.
-   - `uip maestro flow format <Name>.flow` → auto-layout so the v1 file is openable in the designer.
+   - `./convert.sh <Name>` → writes `<Name>.flow`, then runs `uip maestro flow validate` + `uip maestro flow format` against it. One Bash call, three steps. If validate or format fails, `convert.sh` exits non-zero and prints which step.
 
 ## FIL — the language
 
@@ -845,9 +843,7 @@ Not yet supported: the 21 connector activities whose `operation.name` is `Downlo
 After verify.sh is happy, run the v1 converter + validator + format to confirm the flow round-trips into the v1 schema cleanly and is openable in the designer:
 
 ```bash
-./convert.sh OrderNotify                       # writes OrderNotify.flow
-uip maestro flow validate OrderNotify.flow     # final compatibility check
-uip maestro flow format OrderNotify.flow         # auto-layout for the designer view
+./convert.sh OrderNotify                       # writes OrderNotify.flow + runs validate + format
 ```
 
 Conversion produces stdout like:
@@ -956,6 +952,45 @@ async function main(customerId: string): Promise<void> {
 ```
 
 `customerId` becomes a v1 flow `in` variable.
+
+### Resolving connector field values at authoring time (`uip is resources run`)
+
+Some connector inputs need values that live in another system — a Jira `accountId`, a Slack user ID, a Salesforce record ID. Two paths to fill them:
+
+1. **Hardcode** after a one-time lookup at authoring time.
+2. **Add a runtime lookup node** to the flow (e.g., a `find-user-by-email-or-display-name` action upstream of `create-issue`).
+
+Prefer **option 1** when the lookup target is stable across runs (the recipient email is hardcoded in the flow anyway, or the assignee is "the current user"). It removes a node from the flow, removes a binding/dependency, and avoids per-iteration overhead. Use option 2 only when the lookup target genuinely varies at runtime.
+
+The IS resource CLI lets you run any connector operation directly:
+
+```bash
+# Find what operations the connector exposes (use Name as the object-name below).
+uip is resources list <connector-key> --output-filter "[?contains(DisplayName, '<keyword>')].{Name:Name, DisplayName:DisplayName}"
+
+# Run one of those operations.
+uip is resources run <list|get|create|update|delete|replace> <connector-key> <object-name> \
+  --connection-id <id> \
+  --query "<key>=<value>&<key2>=<value2>"
+```
+
+Concrete example — find a Jira user's `accountId` to hardcode into a `create-issue` action's `assignee.accountId`:
+
+```bash
+# 1. Get the Jira connection ID
+uip is connections list --output-filter "[?starts_with(ConnectorKey, 'uipath-atlassian-jira')].{Id:Id, Name:Name}"
+
+# 2. Look up the user (Jira's user_search_query is a list op)
+uip is resources run list uipath-atlassian-jira user_search_query \
+  --connection-id <jira-conn-id> \
+  --query "query=dustin.metzgar" \
+  --output-filter "[?accountType=='atlassian'].{accountId:accountId, displayName:displayName, emailAddress:emailAddress}"
+
+# 3. Hardcode the resulting accountId into the FIL action's inputs:
+#    rawInputs: { fields: { assignee: { accountId: "<that-uuid>" } } }
+```
+
+This pattern works for any IS connector: Slack user lookups, Salesforce record IDs, Outlook calendar IDs, etc. Resolve once, paste in, move on.
 
 ## Pitfalls
 

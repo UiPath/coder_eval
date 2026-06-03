@@ -21,8 +21,7 @@ Do not create a `.manifest.flow` file for these tasks. The action declarations i
 2. Write `bindings.json` with process `name` and `folderPath` bindings.
 3. Run `./parse-fil.sh <Name>.fil`.
 4. Run `./verify.sh`. This uses `flow-run --dry-run`, validates process bindings, and returns each process node's `fixture`.
-5. Run `./convert.sh <Name>`.
-6. Run `uip maestro flow validate <Name>.flow` and `uip maestro flow format <Name>.flow`.
+5. Run `./convert.sh <Name>` — writes `<Name>.flow` and then runs `uip maestro flow validate` + `uip maestro flow format` against it. One Bash call. Do **not** chain `validate && format` yourself; the CLI's plugin-load cost can push the combined invocation past Claude Code's implicit Bash timeout and force the tool to auto-background.
 
 Do not run `./verify.sh --live` for API Workflow, RPA Workflow, or Agentic Process nodes. Live dispatch is blocked until the direct Orchestrator CLI/API path is confirmed.
 
@@ -206,4 +205,4 @@ For Agentic Process, use `bAgenticProcessName` / `bAgenticProcessFolder`, `resou
 
 `./verify.sh` runs `flow-run --dry-run`. It validates the FIL, process-resource action declarations, and `bindings.json`. API Workflow, RPA Workflow, and Agentic Process nodes return their `fixture` values in dry-run. Live dispatch fails intentionally with an explicit unsupported-dispatch error.
 
-`./convert.sh <Name>` calls the v2-to-v1 converter with `<Name>.fil` and writes `<Name>.flow`. The converted v1 flow should validate and format with the UiPath CLI.
+`./convert.sh <Name>` calls the v2-to-v1 converter with `<Name>.fil` and writes `<Name>.flow`, then immediately runs `uip maestro flow validate` and `uip maestro flow format` against the produced file. Bundled this way so the agent doesn't pay the multi-second `uip` plugin-load cost twice in a chained Bash call.

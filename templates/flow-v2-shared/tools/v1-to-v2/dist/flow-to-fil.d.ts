@@ -37,6 +37,12 @@ export declare function flowToFilWithOverrides(flow: FlowFile): {
     overrides: FlowOverrides;
 };
 /**
+ * Unwrap a v1.3 source object back to its v1.0-style expression string. Accepts
+ * either a bare string (v1.0 shape) or `{ type, expression, fieldType }` (v1.3
+ * shape); restores the `=js:` prefix when `type === 'jsExpression'`.
+ */
+export declare function unwrapSource(src: unknown): string;
+/**
  * Convert a Flow expression string to a FIL AST expression.
  * Flow expressions use $vars.nodeId.output syntax and =js: prefix.
  */

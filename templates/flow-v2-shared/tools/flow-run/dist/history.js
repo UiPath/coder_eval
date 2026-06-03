@@ -37,6 +37,8 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.historyEvent = void 0;
+exports.historyFile = historyFile;
 exports.loadHistory = loadHistory;
 exports.saveHistory = saveHistory;
 exports.newHistory = newHistory;
@@ -44,6 +46,38 @@ exports.appendEvent = appendEvent;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const GITIGNORE_TAG = '# added by flow-run';
+exports.historyEvent = {
+    node(name, output) {
+        return { kind: 'node', name, output: normalizeJson(output, `node "${name}" output`) };
+    },
+    triggerFired(name, payload) {
+        return { kind: 'trigger-fired', name, payload: normalizeJson(payload, `trigger "${name}" payload`) };
+    },
+    timer(deadline) {
+        return { kind: 'timer', deadline };
+    },
+    all(n) {
+        return { kind: 'all-marker', n };
+    },
+    race(n, winner) {
+        return { kind: 'race-marker', n, winner };
+    },
+    nodeCancelled() {
+        return { kind: 'node-cancelled' };
+    },
+    timerCancelled() {
+        return { kind: 'timer-cancelled' };
+    },
+};
+function historyFile(options = {}) {
+    return {
+        runId: options.runId ?? 'test-run',
+        flowId: options.flowId ?? 'test-flow',
+        flowName: options.flowName ?? 'Test Flow',
+        startedAt: options.startedAt ?? '2026-01-01T00:00:00.000Z',
+        events: (options.events ?? []).map(normalizeEvent),
+    };
+}
 function loadHistory(historyPath) {
     if (!fs.existsSync(historyPath))
         return null;
@@ -71,15 +105,7 @@ function newHistory(flowId, flowName) {
     };
 }
 function appendEvent(history, event) {
-    if (event.kind === 'node' && /[\r\n]/.test(event.output)) {
-        throw new Error(`node "${event.name}" output contains newlines, which would break the FIL replay parser. ` +
-            `Outputs must be single-line JSON.`);
-    }
-    if (event.kind === 'trigger-fired' && /[\r\n]/.test(event.payload)) {
-        throw new Error(`trigger "${event.name}" payload contains newlines, which would break the FIL replay parser. ` +
-            `Payloads must be single-line JSON.`);
-    }
-    history.events.push(event);
+    history.events.push(normalizeEvent(event));
 }
 // ─── Serialization ───────────────────────────────────────────────────────────
 function serializeHistory(h) {
@@ -89,7 +115,7 @@ function serializeHistory(h) {
         `flowName: ${h.flowName}\n` +
         `startedAt: ${h.startedAt}\n` +
         `# events follow (one wire-protocol line/block per event)\n`;
-    const body = h.events.map(e => {
+    const body = h.events.map(normalizeEvent).map(e => {
         switch (e.kind) {
             case 'node': return `node: ${e.name}\n  output: ${e.output}\n`;
             case 'trigger-fired': return `triggerEvent: ${e.name}\n  payload: ${e.payload}\n`;
@@ -170,6 +196,43 @@ function parseHistory(text) {
         // Unknown line: ignore (forward-compat).
     }
     return { runId, flowId, flowName, startedAt, events };
+}
+function normalizeEvent(event) {
+    switch (event.kind) {
+        case 'node':
+            return {
+                ...event,
+                output: normalizeJson(event.output, `node "${event.name}" output`),
+            };
+        case 'trigger-fired':
+            return {
+                ...event,
+                payload: normalizeJson(event.payload, `trigger "${event.name}" payload`),
+            };
+        default:
+            return event;
+    }
+}
+function normalizeJson(value, label) {
+    if (typeof value === 'string') {
+        try {
+            return JSON.stringify(JSON.parse(value));
+        }
+        catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            throw new Error(`${label} is not valid JSON: ${msg}`);
+        }
+    }
+    try {
+        const json = JSON.stringify(value);
+        if (json === undefined)
+            throw new Error(`${typeof value} is not representable in JSON`);
+        return json;
+    }
+    catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`${label} is not JSON-serializable: ${msg}`);
+    }
 }
 // ─── .gitignore management ───────────────────────────────────────────────────
 function ensureGitignored(historyPath) {

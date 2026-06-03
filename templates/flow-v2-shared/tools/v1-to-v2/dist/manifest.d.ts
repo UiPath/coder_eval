@@ -80,7 +80,7 @@ export interface ManifestNode {
     configurationExtras?: Record<string, unknown>;
     /** Per-instance output bindings (which flow variable receives which output). */
     outputs?: Record<string, {
-        source?: string;
+        source?: unknown;
         var?: string;
     }>;
     /** For non-integration nodes: the raw v1 inputs blob, since they have no library entry. */

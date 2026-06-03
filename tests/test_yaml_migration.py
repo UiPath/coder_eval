@@ -32,7 +32,10 @@ def _experiment_yamls() -> list[Path]:
 @pytest.mark.parametrize("path", _task_yamls(), ids=lambda p: p.relative_to(ROOT).as_posix())
 def test_task_yaml_has_no_stale_top_level_keys(path: Path) -> None:
     """No top-level max_turns / task_timeout / turn_timeout on any task YAML."""
-    data = yaml.safe_load(path.read_text())
+    # `encoding="utf-8"` matches CE008/CE011 (which guard the same in src/);
+    # task YAMLs frequently contain UTF-8 (← arrows, ≤, em-dashes, smart quotes)
+    # and the Windows-default cp1252 raises UnicodeDecodeError on those bytes.
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         return
     for key in ("max_turns", "task_timeout", "turn_timeout"):
@@ -42,7 +45,7 @@ def test_task_yaml_has_no_stale_top_level_keys(path: Path) -> None:
 @pytest.mark.parametrize("path", _experiment_yamls(), ids=lambda p: p.name)
 def test_experiment_yaml_has_no_stale_top_level_keys(path: Path) -> None:
     """No top-level max_turns / task_timeout / turn_timeout on experiment defaults / variants."""
-    data = yaml.safe_load(path.read_text())
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         return
     defaults = data.get("defaults") or {}

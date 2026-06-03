@@ -25,7 +25,7 @@ export interface NodeInstance {
     display: NodeDisplay;
     inputs?: Record<string, unknown>;
     outputs?: Record<string, {
-        source: string;
+        source: unknown;
     }>;
     model?: Record<string, unknown>;
     uipath?: Record<string, unknown>;
@@ -163,7 +163,7 @@ export interface NodeOverride {
     inputs?: Record<string, unknown>;
     /** Full outputs object from the original flow node */
     outputs?: Record<string, {
-        source: string;
+        source: unknown;
     }>;
 }
 export declare const NODE_TYPES: {

@@ -27,6 +27,13 @@ export interface ExpandOptions {
      * looking up each binding entry's `resourceKey`/`default`.
      */
     bindings?: BindingsFile;
+    /**
+     * Library root on disk. Needed to recover each connector node's
+     * `inputs.detail.uiPathActivityTypeId` from its `.v1def.json` sidecar
+     * (`uip` >= 1.2.0 requires the field). Optional: when absent the field is
+     * simply not re-emitted, matching pre-fix behavior.
+     */
+    libraryDir?: string;
 }
 export interface ExpandResult {
     overrides: Record<string, NodeOverride>;

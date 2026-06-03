@@ -12,6 +12,8 @@ run_limits:
   max_turns: 120
   turn_timeout: 1800
   task_timeout: 1800
+  max_turns: 120
+  turn_timeout: 1800
 
 agent:
   type: claude-code
@@ -62,6 +64,17 @@ initial_prompt: |
            - `uipath.connector.uipath-atlassian-jira.create-issue` —
              project `Maestro`, summary `"Security release: {repo} {tag_name}"`,
              description = release notes, assignee = the current user.
+             **Resolve the assignee accountId at authoring time** via the
+             IS resource CLI — do NOT add a `find-user-*` node to the
+             runtime flow. Run:
+             ```bash
+             $HOME/.bun/bin/uip is resources run list uipath-atlassian-jira user_search_query \
+               --connection-id <jira-conn-id> \
+               --query "query=dustin.metzgar"
+             ```
+             Pick the result whose `accountType` is `atlassian` and
+             whose `emailAddress` is `dustin.metzgar@uipath.com`; hard
+             code its `accountId` into the create-issue node's inputs.
            - `uipath.connector.uipath-salesforce-slack.send-message-to-user`
              — recipient `@Dustin Metzgar`, body = release notes URL.
            - `uipath.connector.uipath-microsoft-outlook365.send-email` — to
@@ -94,11 +107,24 @@ initial_prompt: |
   $HOME/.bun/bin/uip maestro flow registry get uipath.connector.uipath-atlassian-jira.create-issue --output json
   ```
 
-  ## Output
+  ## Output — project layout (MUST match exactly)
 
-  Save the flow as `ReleaseRollup/flow_files/ReleaseRollup.flow` with a
-  `ReleaseRollup/project.uiproj`. Include `bindings_v2.json` if your flow's
-  connector nodes reference symbolic bindings.
+  Create the project at the **sandbox root**, not nested inside another
+  directory of the same name. The layout the grader expects is:
+
+  ```
+  ./ReleaseRollup/                      ← project root, directly under cwd
+      project.uiproj
+      flow_files/
+          ReleaseRollup.flow            ← the only `.flow` the grader looks for
+      bindings_v2.json                  ← if any node uses symbolic bindings
+  ```
+
+  Common mistake to avoid: creating `ReleaseRollup/ReleaseRollup/...`
+  (double-nested) — `uip` project scaffolders sometimes default to this
+  when run from inside an already-named directory. The grader globs for
+  `**/flow_files/ReleaseRollup.flow`, so `flow_files/` must be the
+  immediate parent of the `.flow` file.
 
   ## Verifying your work
 

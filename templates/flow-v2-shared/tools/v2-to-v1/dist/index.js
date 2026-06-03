@@ -48,6 +48,7 @@ const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
 const parser_1 = require("fil-compiler/dist/parser");
 const fil_to_flow_1 = require("./fil-to-flow");
+const migrate_to_13_1 = require("./migrate-to-13");
 const v1_to_v2_1 = require("v1-to-v2");
 const manifest_1 = require("./manifest");
 const definitions_1 = require("./definitions");
@@ -97,7 +98,7 @@ function convertV2ToV1(filSource, manifest, bindings, opts = {}) {
     // 2. Expand manifest entries → NodeOverrides for filToFlow. The manifest
     //    references bindings by symbolic ID; we need bindings.json so we can
     //    write the real UUIDs into v1's inputs.detail.connectionId.
-    const expanded = (0, manifest_1.expandManifest)(manifest, { library, fieldsCache: cache, bindings });
+    const expanded = (0, manifest_1.expandManifest)(manifest, { library, fieldsCache: cache, bindings, libraryDir });
     // 3. Synthesize definitions[] from embedded fallbacks + canonical-library v1def sidecars.
     //    Include manifest-declared types, every key the user listed in
     //    embeddedDefinitions, AND every core type bundled by this package.
@@ -156,6 +157,11 @@ function convertV2ToV1(filSource, manifest, bindings, opts = {}) {
     //    those library-derived definitions still carry `version: "1.0.0"`).
     //    Studio Web's Flow editor flags `1.0.0` and wants `1.0`.
     (0, fil_to_flow_1.normalizeTypeVersions)(flow);
+    // 8. Re-apply the v1.3 migration. filToFlow already ran it, but step 5b
+    //    rebuilt `flow.definitions` and step 6 mutated input fields; both can
+    //    re-introduce shapes the v1.3 file format rejects (unwrapped sources,
+    //    `supportsErrorHandling` on library-fresh defs).
+    (0, migrate_to_13_1.migrateInMemoryFlowTo13)(flow);
     return {
         flow,
         missingLibraryEntries: expanded.missingLibraryEntries,
@@ -555,8 +561,12 @@ function buildProcessResourceDefinition(nodeType, version, node, spec) {
                 inputDefaults: spec.inputDefaultsFromRawInputs ? { ...node.rawInputs } : {},
             }
             : {}),
+        // Deep-clone node.outputs — migrate-to-13 mutates node.outputs[*].source
+        // in place after definitions are built, and aliasing here would propagate
+        // the wrapped form into the schema's outputDefinition (where it's not
+        // wanted).
         outputDefinition: node.outputs && Object.keys(node.outputs).length > 0
-            ? node.outputs
+            ? JSON.parse(JSON.stringify(node.outputs))
             : defaultProcessResourceOutputDefinition(spec),
     };
 }
@@ -757,7 +767,7 @@ function buildInlineAgentDefinition(version, node) {
                 : [{ id: 'content', type: 'string' }],
         },
         outputDefinition: node.outputs && Object.keys(node.outputs).length > 0
-            ? node.outputs
+            ? JSON.parse(JSON.stringify(node.outputs))
             : {
                 output: {
                     type: 'object',

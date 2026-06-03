@@ -49,6 +49,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.buildDefinitions = buildDefinitions;
+exports.loadActivityTypeId = loadActivityTypeId;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 function buildDefinitions(typeRefs, opts, embedded) {
@@ -119,5 +120,47 @@ function loadV1Definition(libraryDir, nodeType, version) {
     catch {
         return null;
     }
+}
+// Memoize per (libraryDir, typeRef) — a flow with N nodes of the same
+// connector would otherwise re-read the sidecar N times. `null` records a
+// looked-up-but-absent result so we don't retry on the next node.
+const activityTypeIdCache = new Map();
+/**
+ * The stable per-(connector, action) activity id lives in the connector's
+ * v1def sidecar form, at
+ *   form.sections[].fields[].componentProps.connectorDetail.uiPathActivityTypeId
+ *
+ * `uip` >= 1.2.0 (the 2026-05 validation tightening) rejects a connector
+ * activity node whose `inputs.detail.uiPathActivityTypeId` is missing —
+ * "Studio Web crashes when opening this flow". The v1→v2 distillation drops
+ * the field as library-determined (see v1-to-v2 `LIBRARY_DETERMINED_FIELDS`),
+ * so the v2→v1 rebuild has to re-populate it from the canonical sidecar.
+ *
+ * Returns undefined when the sidecar is absent or predates the field (older
+ * fixtures, custom nodes) — the missing-definition path already surfaces that.
+ */
+function loadActivityTypeId(libraryDir, nodeType, version) {
+    if (!libraryDir)
+        return undefined;
+    const cacheKey = `${libraryDir}\n${nodeType}@${version}`;
+    const cached = activityTypeIdCache.get(cacheKey);
+    if (cached !== undefined)
+        return cached ?? undefined;
+    const def = loadV1Definition(libraryDir, nodeType, version);
+    const id = def ? extractActivityTypeId(def) : undefined;
+    activityTypeIdCache.set(cacheKey, id ?? null);
+    return id;
+}
+function extractActivityTypeId(def) {
+    const form = def.form;
+    for (const section of form?.sections ?? []) {
+        for (const field of section.fields ?? []) {
+            const props = field.componentProps;
+            const id = props?.connectorDetail?.uiPathActivityTypeId;
+            if (typeof id === 'string' && id)
+                return id;
+        }
+    }
+    return undefined;
 }
 //# sourceMappingURL=definitions.js.map

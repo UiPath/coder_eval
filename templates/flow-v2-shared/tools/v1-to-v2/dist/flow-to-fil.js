@@ -13,6 +13,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.SCRIPT_FN_PREFIX = exports.INLINED_NODE_TYPES = void 0;
 exports.flowToFil = flowToFil;
 exports.flowToFilWithOverrides = flowToFilWithOverrides;
+exports.unwrapSource = unwrapSource;
 exports.convertFlowExpression = convertFlowExpression;
 const flow_types_1 = require("./flow-types");
 const flow_graph_1 = require("./flow-graph");
@@ -587,13 +588,13 @@ class FlowToFilConverter {
         const entries = Object.entries(node.outputs);
         if (entries.length === 1) {
             const [, val] = entries[0];
-            return [makeReturn(convertFlowExpression(val.source))];
+            return [makeReturn(convertFlowExpression(unwrapSource(val.source)))];
         }
         // Multiple outputs → return object
         const props = entries.map(([key, val]) => ({
             kind: 'ObjectProperty',
             key,
-            value: convertFlowExpression(val.source),
+            value: convertFlowExpression(unwrapSource(val.source)),
             shorthand: false,
         }));
         return [makeReturn({ kind: 'ObjectExpression', properties: props })];
@@ -782,6 +783,21 @@ class FlowToFilConverter {
     }
 }
 // ─── Expression conversion helpers ────────────────────────────────────────────
+/**
+ * Unwrap a v1.3 source object back to its v1.0-style expression string. Accepts
+ * either a bare string (v1.0 shape) or `{ type, expression, fieldType }` (v1.3
+ * shape); restores the `=js:` prefix when `type === 'jsExpression'`.
+ */
+function unwrapSource(src) {
+    if (typeof src === 'string')
+        return src;
+    if (src && typeof src === 'object' && 'expression' in src) {
+        const o = src;
+        const expr = typeof o.expression === 'string' ? o.expression : '';
+        return o.type === 'jsExpression' ? `=js:${expr}` : expr;
+    }
+    return '';
+}
 /**
  * Convert a Flow expression string to a FIL AST expression.
  * Flow expressions use $vars.nodeId.output syntax and =js: prefix.
@@ -1011,6 +1027,7 @@ function flowTypeToFil(flowType) {
         case 'boolean': return 'bool';
         case 'object': return 'json'; // legacy; v2-to-v1 now emits `any` for json
         case 'any': return 'json';
+        case 'file': return 'file';
         case 'array': return { kind: 'array', element: 'json' };
         default: return 'json';
     }
