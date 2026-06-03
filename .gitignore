@@ -87,3 +87,6 @@ templates/flow-v2-shared/tools/node_modules/
 # vendored flow-v2 tool dist trees — re-include them.
 !templates/flow-v2-shared/tools/*/dist/
 !templates/flow-v2-shared/tools/*/dist/**
+
+# Visual companion (brainstorming) scratch
+.superpowers/

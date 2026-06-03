@@ -39,6 +39,12 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                     </div>
                     <div className="flex items-center gap-4 text-sm shrink-0">
                         <a
+                            href="/watchlist"
+                            className="text-gray-700 hover:text-studio-blue"
+                        >
+                            Watchlist
+                        </a>
+                        <a
                             href="/trends"
                             className="text-gray-700 hover:text-studio-blue"
                         >
