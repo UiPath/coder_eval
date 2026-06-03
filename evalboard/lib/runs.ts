@@ -140,6 +140,12 @@ export interface MessageEvent {
     outputTokens: number | null;
     cacheWriteTokens: number | null;
     cacheReadTokens: number | null;
+    // Branch identity for the prompt-cache cascade tree: the Task tool_use_id
+    // that spawned this message's sub-agent, null for the main thread, or
+    // `undefined` when the run never recorded it (legacy). Calls grouped by this
+    // value form a branch whose context is re-read only within itself — a
+    // sub-agent's tokens don't cascade into the main thread or siblings.
+    parentToolUseId: string | null | undefined;
     // Anthropic's `reasoning_tokens`. ~Always 0 from the SDK, so it is NOT
     // used to attribute thinking output — see thinkingOutputTokens. Kept for
     // completeness. null when no raw in the group recorded it.
@@ -217,6 +223,21 @@ export interface TaskDetail extends TaskResultSummary {
     // Per-task token totals summed across iterations. All zeros for legacy
     // runs that don't record per-iteration token_usage.
     tokens: TokenTotals;
+    // Per-sub-agent token breakdown keyed by the spawning Agent tool_use_id
+    // (from iterations[].sub_agent_usage). Sourced from the Agent tool-result's
+    // tool_use_result.usage, so it is COMPLETE — total = input + output +
+    // cache-creation + cache-read. Used to attribute tokens to the Agent call
+    // that spawned a sub-agent. Empty for runs that predate this capture.
+    subAgentUsageByToolId: Record<string, SubAgentTotals>;
+}
+
+// Full per-sub-agent token breakdown (all components, cache-read included).
+export interface SubAgentTotals {
+    total: number;
+    input: number;
+    output: number;
+    cacheCreation: number;
+    cacheRead: number;
 }
 
 // ---------- run.json schema ----------
@@ -750,6 +771,12 @@ interface MessageEntry {
     // present, falling back to a wall-clock gap heuristic for older runs that
     // didn't record it.
     message_id?: string | null;
+    // The Task tool_use_id that spawned this message's sub-agent, or null for
+    // the main thread. KEY ABSENT (undefined) on runs that predate branch
+    // capture — distinct from an explicit null. Used to model the cache cascade
+    // as a tree; its absence disables the cost simulator (we can't tell whether
+    // sub-agents ran, so a flat cascade would be wrong).
+    parent_tool_use_id?: string | null;
     // Per-message token usage (recorded since coder_eval #336). Absent on
     // legacy runs. cache_* keys here are the message-record names, distinct
     // from the iteration token_usage's cache_*_input_tokens.
@@ -769,6 +796,19 @@ export interface TurnEntry {
         result?: string | null;
         stop_reason?: string | null;
     } | null;
+    sub_agent_usage?: SubAgentUsageEntry[] | null;
+}
+
+interface SubAgentUsageEntry {
+    tool_use_id?: string | null;
+    input_tokens?: number | null;
+    output_tokens?: number | null;
+    cache_creation_input_tokens?: number | null;
+    cache_read_input_tokens?: number | null;
+    total_tokens?: number | null;
+    tool_uses?: number | null;
+    duration_ms?: number | null;
+    status?: string | null;
 }
 
 interface TokenUsageEntry {
@@ -838,6 +878,11 @@ function pickArgText(params: Record<string, unknown>): string | null {
         "skill",
         "pattern",
         "query",
+        // Agent (sub-agent) tool: the operative input is the delegation prompt,
+        // not the short `description`. Without this the row showed only the
+        // one-line description, so a 1000+ char prompt looked like a tiny input
+        // next to a large output-token count.
+        "prompt",
     ];
     for (const k of keys) {
         const v = params[k];
@@ -923,6 +968,9 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             endMs: number | null;
             generationMs: number | null;
             messageId: string | null;
+            // null = main thread, string = sub-agent branch, undefined = run
+            // didn't record branch info (legacy).
+            parentToolUseId: string | null | undefined;
             blockTypes: ("thinking" | "tool_use" | "text")[];
             thinkingParts: string[];
             textParts: string[];
@@ -948,6 +996,14 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                         ? msg.generation_duration_ms
                         : null,
                 messageId: typeof msg.message_id === "string" ? msg.message_id : null,
+                // Preserve the absent/null distinction: undefined when the run
+                // never wrote the key (legacy), null when explicitly main thread.
+                parentToolUseId:
+                    msg.parent_tool_use_id === undefined
+                        ? undefined
+                        : typeof msg.parent_tool_use_id === "string"
+                          ? msg.parent_tool_use_id
+                          : null,
                 blockTypes: [],
                 thinkingParts: [],
                 textParts: [],
@@ -1179,6 +1235,9 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 outputTokens: haveOutputTok ? outputTokSum : null,
                 cacheWriteTokens: haveCacheWrite ? cacheWriteSum : null,
                 cacheReadTokens: haveCacheRead ? cacheReadSum : null,
+                // All raws in a group are one emission → one branch; head is
+                // representative.
+                parentToolUseId: head.parentToolUseId,
                 reasoningTokens: haveReasoning ? reasoningSum : null,
                 thinkingOutputTokens: haveThinkingOut ? thinkingOutSum : null,
                 textOutputTokens,
@@ -1318,11 +1377,43 @@ export async function readTaskDetail(
     const flowDebug = parseFlowDebug(criteria);
     const toolCalls = parseToolCalls(task?.iterations ?? []);
     const messages = parseMessages(task?.iterations ?? []);
-    // Prefer the authoritative iteration token_usage. Some runs (e.g. partial
-    // CLI captures) never recorded it; fall back to the collapsed per-message
-    // tokens so the cost simulator + token columns still have a baseline.
-    let tokens = sumTokenTotals(task?.iterations ?? []);
-    if (tokens.total === 0) tokens = sumMessageTokens(messages);
+    // The per-message stream is the authoritative cumulative bill and is
+    // preferred whenever it carries token data. Iteration token_usage comes
+    // from the SDK ResultMessage snapshot, which is NOT cumulative for
+    // cache/input tokens — on a multi-call run it under-reports
+    // cache_read_input_tokens by the re-read cascade (each later call re-reads
+    // the growing transcript and is billed for it), often 2-3x low. Anthropic
+    // bills cache reads per request, so the true total is the sum of each
+    // call's usage. parseMessages already collapses per message_id, so this sum
+    // doesn't double-count the CLI's repeated usage dicts. Fall back to the
+    // iteration aggregate only for runs that never recorded per-message tokens.
+    const tokens = selectTokenTotals(messages, task?.iterations ?? []);
+
+    // Per-sub-agent token breakdown keyed by the spawning Agent tool_use_id.
+    // Components summed in case one Agent call is reported across multiple
+    // entries; total falls back to the component sum when not recorded.
+    const subAgentUsageByToolId: Record<string, SubAgentTotals> = {};
+    for (const it of task?.iterations ?? []) {
+        for (const sa of it.sub_agent_usage ?? []) {
+            const id = sa.tool_use_id;
+            if (typeof id !== "string") continue;
+            const input = sa.input_tokens ?? 0;
+            const output = sa.output_tokens ?? 0;
+            const cacheCreation = sa.cache_creation_input_tokens ?? 0;
+            const cacheRead = sa.cache_read_input_tokens ?? 0;
+            const total =
+                sa.total_tokens ??
+                input + output + cacheCreation + cacheRead;
+            const prev = subAgentUsageByToolId[id];
+            subAgentUsageByToolId[id] = {
+                total: (prev?.total ?? 0) + total,
+                input: (prev?.input ?? 0) + input,
+                output: (prev?.output ?? 0) + output,
+                cacheCreation: (prev?.cacheCreation ?? 0) + cacheCreation,
+                cacheRead: (prev?.cacheRead ?? 0) + cacheRead,
+            };
+        }
+    }
 
     const taskDescription =
         task?.task_config?.resolved?.initial_prompt ??
@@ -1360,9 +1451,36 @@ export async function readTaskDetail(
         finalAssistantText,
         messages,
         tokens,
+        subAgentUsageByToolId,
     };
 }
 
+// Pick the run's authoritative cumulative token totals. The per-message stream
+// run-level token totals, picking the more complete of two sources:
+//   - iteration token_usage: on current runs this is built from the SDK
+//     ResultMessage `model_usage` (cumulative per-model billing, reconciles to
+//     total_cost_usd, and INCLUDES sub-agent cache-creation/input). On legacy
+//     runs it is the old ResultMessage `usage` snapshot, which under-reports the
+//     cache-read cascade ~2-3x.
+//   - per-message stream sum: deduped per message_id; captures the cache-read
+//     cascade but UNDER-reports sub-agent tokens (those emissions aren't fully
+//     bubbled into the stream).
+// Neither dominates across both run vintages, so pick the larger total — the
+// more complete figure. New runs → iteration (model_usage) wins; legacy runs →
+// per-message wins over the stale snapshot.
+export function selectTokenTotals(
+    messages: MessageEvent[],
+    turns: TurnEntry[],
+): TokenTotals {
+    const fromMessages = sumMessageTokens(messages);
+    const fromIterations = sumTokenTotals(turns);
+    return fromIterations.total >= fromMessages.total
+        ? fromIterations
+        : fromMessages;
+}
+
+// Token totals from the iteration token_usage aggregate (model_usage-derived on
+// current runs; the ResultMessage snapshot on legacy runs).
 function sumTokenTotals(turns: TurnEntry[]): TokenTotals {
     let input = 0;
     let output = 0;
@@ -1385,10 +1503,11 @@ function sumTokenTotals(turns: TurnEntry[]): TokenTotals {
     };
 }
 
-// Fallback token totals from the collapsed per-message stream, for runs whose
-// iteration token_usage was never recorded. MessageEvent tokens are already
-// summed per message_id group (see parseMessages), so they don't double-count
-// the CLI's repeated usage dicts the way summing raw MessageEntry rows would.
+// Token totals from the collapsed per-message stream. MessageEvent tokens are
+// already summed per message_id group (see parseMessages), so they don't
+// double-count the CLI's repeated usage dicts. Captures the per-request
+// cache-read cascade but under-reports sub-agent tokens (their emissions aren't
+// fully bubbled up) — one of the two inputs selectTokenTotals chooses between.
 function sumMessageTokens(messages: MessageEvent[]): TokenTotals {
     let input = 0;
     let output = 0;

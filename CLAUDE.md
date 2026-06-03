@@ -36,11 +36,11 @@ coder_eval/
 │   ├── experiment.py              # ExperimentDefinition, ExperimentVariant, ResolvedTask, result models
 │   ├── gateway.py                 # DEFAULT_GATEWAY_MODEL constant (cycle-free leaf)
 │   ├── mutations.py               # PromptMutation variants (prefix/suffix/replace/template/rephrase)
-│   ├── results.py                 # CriterionResult (+ ClassificationCriterionResult), TurnRecord, EvaluationResult, CriterionAggregate, ThresholdCheck, SuiteRollup
+│   ├── results.py                 # CriterionResult (+ ClassificationCriterionResult), TurnRecord (+ sub_agent_usage), EvaluationResult, CriterionAggregate, ThresholdCheck, SuiteRollup
 │   ├── routing.py                 # ApiRoute (DirectRoute/ProxyRoute/BedrockRoute)
 │   ├── sandbox.py                 # SandboxConfig, ResourceLimits
 │   ├── tasks.py                   # TaskDefinition, AgentConfig, Dataset (dataset fan-out + sample)
-│   ├── telemetry.py               # CommandTelemetry, CommandStatistics, TokenUsage
+│   ├── telemetry.py               # CommandTelemetry, CommandStatistics, TokenUsage, SubAgentUsage
 │   └── templates.py               # RepoSource, TemplateDirSource, StarterFilesSource
 │
 ├── criteria/                      # Criterion checker plugins (one file per type)
@@ -144,6 +144,8 @@ templates/                         # Sandbox template directories
 - **All core models importable from `coder_eval.models`** regardless of submodule
 - **Dataset fan-out**: `TaskDefinition.dataset` (inline rows or JSONL path) expands a single task into N row-tasks with `${row.<field>}` substitution in `initial_prompt` and `success_criteria` string fields. Expansion runs in `task_loader.expand_dataset` **before** variant resolution, so variants cannot override the dataset. Row cap: CLI `--sample N` > task-level `dataset.sample`.
 - **Per-criterion aggregation**: Each `BaseCriterion` subclass exposes `aggregate(criterion, per_row_results) -> CriterionAggregate | None`. Default emits `count / mean / median / std / min / max` so every criterion is suite-thresholdable for free. Classification-style criteria return `ClassificationCriterionResult` (subclass of `CriterionResult`) and layer accuracy / P/R/F1 / confusion via the shared `overlay_classification_metrics` utility. `BaseSuccessCriterion.suite_thresholds` gates the suite on those metrics; CLI exits non-zero on any gate failure.
+- **Sub-agent token accounting**: When the agent uses the `Agent` (sub-agent) tool, per-sub-agent token usage is captured from the SDK's `UserMessage.tool_use_result.usage` — the complete breakdown: `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`. This is the authoritative source (unlike `TaskNotificationMessage.usage` which drops cache-read). Stored as `TurnRecord.sub_agent_usage: list[SubAgentUsage]`. `CommandTelemetry.result_summary` is stored **untruncated** (no 200-char cap) so sub-agent returns are preserved whole. Set `CODER_EVAL_RAW_SDK_LOG=1` to dump every raw SDK event to the task log for inspection.
+- **sandbox isolation**: Tasks that don't need MCP servers should set `setting_sources: []` in their `agent:` block to isolate the sandbox from the host project's CLAUDE.md and settings. Without this, the host project's CLAUDE.md (often 20 KB+) is injected into every API call, inflating cache-creation tokens and cost significantly.
 - **Run-time caps (non-criterion enforcement)**: `TaskDefinition.run_limits` (`RunLimits` model) is the single namespace for all run-time caps — `max_turns` / `task_timeout` / `turn_timeout` (structural) and `max_input_tokens` / `max_output_tokens` / `max_total_tokens` / `max_usd` (cumulative budget). Token/USD breaches abort with `FinalStatus.TOKEN_BUDGET_EXCEEDED` or `COST_BUDGET_EXCEEDED` (both `category == "failed"`). Structural caps are set from the CLI via `-D run_limits.max_turns=…` / `-D run_limits.task_timeout=…` / `-D run_limits.turn_timeout=…` (field-merged into `run_limits`); budget caps via `-D run_limits.max_usd=…` etc. or YAML. Layered config uses field-merge — a variant block overrides individual keys without replacing the task's block. See `docs/features/2026-05-11-run-limits.md`.
 
 ## Success Criteria (17 types)

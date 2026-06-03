@@ -163,6 +163,7 @@ from coder_eval.models.telemetry import (
     CommandTelemetry,
     ContentBlock,
     SlowestCommandInfo,
+    SubAgentUsage,
     TokenUsage,
     UserMessage,
 )
@@ -245,6 +246,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "CommandStatistics",
     "ContentBlock",
     "SlowestCommandInfo",
+    "SubAgentUsage",
     "TokenUsage",
     "UserMessage",
     # Results

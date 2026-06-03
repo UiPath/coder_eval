@@ -1,0 +1,33 @@
+task_id: token-check
+description: "Exercises main agent + sub-agent Bash calls to verify per-message output tokens are not 0/1."
+tags: [smoke]
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: [Agent, Bash, Read, Write]
+  setting_sources: []
+
+initial_prompt: |
+  Use the Agent tool to spawn a sub-agent. The sub-agent's job is to:
+  1. Run `echo "hello from sub-agent"` with Bash.
+  2. Run `python3 -c "print(6*7)"` with Bash.
+  3. Return the two outputs.
+
+  After the sub-agent returns, write its outputs to result.txt.
+
+success_criteria:
+  - type: file_check
+    description: "result.txt exists and contains sub-agent output"
+    path: result.txt
+    includes:
+      - "hello from sub-agent"
+    weight: 1.0
+
+run_limits:
+  max_turns: 15
+  task_timeout: 120

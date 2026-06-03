@@ -1,0 +1,83 @@
+task_id: subagent-bash-long-input
+description: |
+  Probe task: make a SUB-AGENT (spawned via the Agent tool) emit one Bash tool
+  call whose argument is a long, verbatim text block. Confirms that a sub-agent
+  emission's output_tokens are NOT captured (~1) even when the generated command
+  is ~hundreds of tokens — contrast with the same long Bash call on the main
+  thread, which captures output correctly.
+
+tags:
+  - basic
+  - probe
+  - subagent
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools:
+    - Agent
+    - Bash
+    - Read
+
+initial_prompt: |
+  Do NOT write the file yourself. Use the Agent tool to spawn ONE sub-agent and
+  delegate the whole job to it. Pass the sub-agent these exact instructions:
+
+    "Using EXACTLY ONE Bash command (a single tool call — e.g. a
+    `cat <<'EOF' > message.txt` heredoc), write the text below VERBATIM to a
+    file named message.txt, preserving wording and punctuation. Do not split it
+    across multiple commands, and do not paraphrase or summarize it."
+
+  Then include this text for the sub-agent to write:
+
+  ===== BEGIN TEXT =====
+  SENTINEL-7F3A. The migration runbook for the orchestrator service proceeds in
+  strict order and must not be reordered under any circumstances. First, drain
+  the in-flight task queue and confirm zero active leases before touching the
+  primary. Second, snapshot the configuration store and verify the checksum
+  against the last known-good manifest recorded during the previous maintenance
+  window. Third, promote the warm standby to primary only after the replication
+  lag has read zero for ten consecutive health checks, each spaced thirty
+  seconds apart. Fourth, rotate the service credentials and invalidate every
+  cached token issued before the cutover timestamp, because stale tokens are the
+  single most common cause of post-migration authentication storms. Fifth,
+  re-enable the task queue at ten percent throughput, watch the error rate for
+  five minutes, and only then ramp to full throughput in twenty-percent steps.
+  If at any step a health check fails twice in a row, halt immediately, roll
+  back to the snapshot from step two, and page the on-call engineer with the
+  runbook step number and the exact error string. SENTINEL-END-9C2B.
+  ===== END TEXT =====
+
+success_criteria:
+  - type: file_contains
+    path: message.txt
+    description: "message.txt contains the verbatim text (sentinels + key phrases)."
+    includes:
+      - "SENTINEL-7F3A"
+      - "SENTINEL-END-9C2B"
+      - "post-migration authentication storms"
+      - "twenty-percent steps"
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "Work was delegated to a sub-agent via the Agent tool."
+    tool_name: "Agent"
+    min_count: 1
+    require_success: false
+    weight: 1.0
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "A Bash command targeting message.txt was run (inside the sub-agent)."
+    tool_name: "Bash"
+    command_pattern: "message\\.txt"
+    min_count: 1
+    require_success: false
+    weight: 1.0
+    pass_threshold: 1.0
+
+run_limits:
+  max_turns: 20
+  task_timeout: 600
+  turn_timeout: 180

@@ -48,6 +48,41 @@ class TokenUsage(BaseModel):
         )
 
 
+class SubAgentUsage(BaseModel):
+    """Per-sub-agent token usage from a Task/Agent-tool spawn.
+
+    Sourced from the SDK Agent tool-result ``UserMessage.tool_use_result.usage``
+    — the COMPLETE per-sub-agent breakdown, keyed by the spawning Agent
+    tool_use_id. Unlike the lossy ``TaskNotificationMessage.usage`` (which omits
+    cache-read), this carries every component: input / output / cache-creation /
+    cache-read. ``total_tokens`` is their sum and reconciles to the SDK's
+    ``totalTokens``. Captured because a sub-agent's own emissions are only
+    partially (sometimes never) surfaced in the message stream, so the tool
+    result is the authoritative per-sub-agent token figure. Downstream uses it
+    to attribute tokens to the Agent call that spawned the sub-agent; run-level
+    cost still comes from model_usage.
+    """
+
+    tool_use_id: str | None = Field(
+        default=None,
+        description="The Agent tool_use_id that spawned this sub-agent (matches a tool_use block).",
+    )
+    input_tokens: int = Field(default=0, description="Uncached input tokens the sub-agent consumed.")
+    output_tokens: int = Field(default=0, description="Output tokens the sub-agent generated.")
+    cache_creation_input_tokens: int = Field(default=0, description="Cache-creation (write) input tokens.")
+    cache_read_input_tokens: int = Field(
+        default=0,
+        description="Cache-read input tokens — the component TaskNotification.usage drops.",
+    )
+    total_tokens: int = Field(
+        default=0,
+        description="Sum of input + output + cache-creation + cache-read (reconciles to SDK totalTokens).",
+    )
+    tool_uses: int = Field(default=0, description="Number of tool calls the sub-agent made.")
+    duration_ms: int = Field(default=0, description="Sub-agent wall-clock duration in milliseconds.")
+    status: str | None = Field(default=None, description="Terminal status: completed | failed | stopped.")
+
+
 class ContentBlock(BaseModel):
     """One content block within a message, in emission order.
 
@@ -123,8 +158,13 @@ class AssistantMessage(BaseModel):
 
     Captures per-message generation timing, content blocks, and token usage so
     LLM time can be measured directly rather than inferred from gaps between
-    command timestamps. Per-message token usage is per-generation and may not
-    match the final aggregate from ResultMessage (which is the authoritative total).
+    command timestamps. Per-message token usage is per-generation. The run's
+    authoritative cumulative billing comes from the SDK ResultMessage
+    ``model_usage`` (cumulative per-model, reconciles to ``total_cost_usd``);
+    summing this stream is only a fallback when ``model_usage`` is absent (e.g.
+    LLMGW/proxy). The stream under-reports sub-agent cache-creation/input — those
+    emissions are only partially bubbled up — so do NOT treat it as the source of
+    truth for run-level cost.
     """
 
     role: Literal["assistant"] = "assistant"
@@ -150,7 +190,8 @@ class AssistantMessage(BaseModel):
             "Input prompt tokens for this LLM call. Zero on follow-up emissions that "
             "share a message_id with an earlier AssistantMessage (the CLI splits one "
             "API call into multiple emissions); billing is recorded on the first only. "
-            "Not authoritative for cost — use iteration.token_usage."
+            "Per-call only; the run's cumulative input is taken from ResultMessage "
+            "model_usage (summing this stream is a fallback — it misses sub-agent input)."
         ),
     )
     output_tokens: int = Field(
@@ -158,9 +199,9 @@ class AssistantMessage(BaseModel):
         description=(
             "Output tokens generated in this LLM call. Recovered from the "
             "message_delta stream event when include_partial_messages is on; falls "
-            "back to the (often partial) SDK assistant-event value otherwise. "
-            "Per-emission only — do NOT sum across emissions for billing; use "
-            "iteration.token_usage as the authoritative aggregate."
+            "back to the (often partial) SDK assistant-event value otherwise. Per-call "
+            "only; the run's cumulative output is taken from ResultMessage model_usage "
+            "(summing this stream is a fallback)."
         ),
     )
     cache_creation_tokens: int = Field(default=0, description="Tokens used to create prompt cache for this call.")
@@ -176,6 +217,19 @@ class AssistantMessage(BaseModel):
             "Anthropic API message_id. Multiple AssistantMessage records can share this id "
             "when the Claude Code CLI splits one API response into per-block-kind events. "
             "Downstream tooling can group by this id to recover one logical generation."
+        ),
+    )
+
+    parent_tool_use_id: str | None = Field(
+        default=None,
+        description=(
+            "The Task tool_use_id that spawned this message's sub-agent, or null for the "
+            "main agent thread. Sub-agent (Task tool) calls bubble up into the same message "
+            "stream, but each sub-agent has its OWN context that is not re-read by the main "
+            "thread or sibling sub-agents — so the conversation is a tree, not a flat list. "
+            "Grouping by this id recovers the branch a call belongs to, which is required to "
+            "model the prompt-cache re-read cascade correctly (content cascades only within "
+            "its own branch). Sourced from the SDK AssistantMessage.parent_tool_use_id."
         ),
     )
 
@@ -234,7 +288,12 @@ class CommandTelemetry(BaseModel):
         description="Whether the command succeeded or failed (None = pending result, set during two-phase processing)",
     )
     result_summary: str | None = Field(
-        default=None, description="Brief summary of result (e.g., 'File read: 245 bytes', 'Exit code: 0')"
+        default=None,
+        description=(
+            "Full tool-result content as text (untruncated). Despite the name, this is "
+            "the complete result body, not a preview — kept whole so sub-agent returns "
+            "and other large payloads are preserved."
+        ),
     )
     error_message: str | None = Field(default=None, description="Error message if command failed")
     result_data: dict[str, Any] | list[Any] | None = Field(

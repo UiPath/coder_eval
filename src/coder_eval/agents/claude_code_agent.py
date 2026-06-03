@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Sequence
 from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -20,6 +21,7 @@ from claude_agent_sdk import (
     ProcessError,
     ResultMessage,
     SystemMessage,
+    TaskNotificationMessage,
     UserMessage,
     query,
 )
@@ -52,6 +54,7 @@ from coder_eval.models import (
     DirectRoute,
     ProxyRoute,
     ResultSummary,
+    SubAgentUsage,
     TokenUsage,
     TurnRecord,
     to_bedrock_inference_profile,
@@ -136,12 +139,27 @@ def _is_tool_result_block(block: Any) -> bool:
     return hasattr(block, "tool_use_id") and hasattr(block, "is_error")
 
 
+def _is_task_notification(message: Any) -> bool:
+    """Check if message is a TaskNotificationMessage (sub-agent terminal event).
+
+    It is a SystemMessage carrying per-sub-agent ``usage`` (a TaskUsage), keyed
+    by the spawning ``tool_use_id``. It also has ``session_id`` + ``usage``, so
+    it would otherwise be misread as the final ResultMessage — hence the
+    explicit guard, checked before ``_is_sdk_result_message``. Identified by the
+    SDK type or ``subtype`` (both reliably present on the real message); we avoid
+    attribute-presence sniffing so it can't misfire on test mocks. The ``subtype``
+    fallback also lets duck-typed mocks (not real SDK instances) be recognized.
+    """
+    return isinstance(message, TaskNotificationMessage) or getattr(message, "subtype", None) == "task_notification"
+
+
 def _is_sdk_result_message(message: Any) -> bool:
     """Check if message is the SDK's final ResultMessage (with usage/cost data).
 
-    Distinct from ToolResultBlock which has tool_use_id.
+    Distinct from ToolResultBlock which has tool_use_id, and from
+    TaskNotificationMessage which also carries session_id + usage (excluded).
     """
-    return hasattr(message, "session_id") and hasattr(message, "usage")
+    return hasattr(message, "session_id") and hasattr(message, "usage") and not _is_task_notification(message)
 
 
 _SKIP = object()  # Sentinel for values that should be excluded from the dump
@@ -457,7 +475,15 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         # SDK ResultMessage token usage (captured from final message)
         sdk_result_usage: dict[str, Any] | None = None
+        # Cumulative per-model billing (authoritative for token_usage + cost —
+        # see _build_token_usage). Captured from the final ResultMessage.
+        sdk_result_model_usage: dict[str, Any] | None = None
         sdk_result_cost: float | None = None
+        # Per-sub-agent usage from TaskNotification messages, keyed by the
+        # spawning Agent tool_use_id. The sub-agent's own emissions are only
+        # partially surfaced in the stream, so this is the one per-sub-agent
+        # token figure the SDK exposes.
+        sub_agent_usages: list[SubAgentUsage] = []
         num_turns: int | None = None
         # Diagnostic summary of the final ResultMessage (status + error fields).
         # Populated on every ResultMessage (last one wins). Consumed by the
@@ -533,12 +559,14 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                     assistant_turn_count=assistant_turn_count,
                     messages_list=sdk_messages,
                     sdk_result_usage=sdk_result_usage,
+                    sdk_result_model_usage=sdk_result_model_usage,
                     sdk_result_cost=sdk_result_cost,
                     num_turns=num_turns,
                     sdk_model_used=sdk_model_used,
                     sdk_result_summary=sdk_result_summary,
                     turn_start_time=turn_start_time,
                     crash_reason=crash_reason,
+                    sub_agent_usages=sub_agent_usages,
                 )
             except Exception:
                 logger.exception("Failed to build partial turn record; continuing without partial")
@@ -647,6 +675,13 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
                     messages.append(message)
                     msg_type = type(message).__name__
+
+                    # Raw, untruncated dump of every SDK event exactly as it
+                    # arrives — opt-in via CODER_EVAL_RAW_SDK_LOG so normal runs
+                    # stay quiet. Use this to inspect what (if any) token usage
+                    # rides on each message type (e.g. Agent tool-result vs.
+                    # TaskNotification vs. ResultMessage).
+                    self._log_message_raw(message, msg_type)
 
                     # Stream debug logging for real-time visibility
                     self._log_message_debug(message, msg_type)
@@ -780,6 +815,12 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                         #    delta wasn't observed.
                         msg_usage = getattr(message, "usage", None) or {}
                         message_id = getattr(message, "message_id", None)
+                        # Branch identity: the Task tool_use_id that spawned this
+                        # message's sub-agent (None for the main thread). Sub-agent
+                        # calls bubble up into this same stream; this is the only
+                        # link back to which branch they belong to — needed to model
+                        # the cache cascade as a tree, not a flat list.
+                        parent_tool_use_id = getattr(message, "parent_tool_use_id", None)
                         is_duplicate_emission = isinstance(message_id, str) and message_id in seen_message_ids
                         if isinstance(message_id, str):
                             seen_message_ids.add(message_id)
@@ -825,6 +866,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                             ),
                             model=sdk_model_used,
                             message_id=message_id if isinstance(message_id, str) else None,
+                            parent_tool_use_id=(parent_tool_use_id if isinstance(parent_tool_use_id, str) else None),
                         )
                         sdk_messages.append(assistant_telemetry)
                         # Register every block-emission of this id (with its
@@ -841,10 +883,20 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                         last_event_monotonic = message_arrival_monotonic
                         last_event_wall = message_arrival_wall
 
+                    # TaskNotification fires when an Agent-tool spawn finishes,
+                    # but its ``usage`` is lossy (omits cache-read). We capture
+                    # per-sub-agent usage from the Agent tool-result instead (see
+                    # the _is_user_message branch). This guard stays solely to
+                    # stop _is_sdk_result_message from misreading it (session_id
+                    # + usage would otherwise match).
+                    elif _is_task_notification(message):
+                        pass
+
                     # Capture SDK ResultMessage with token usage (check BEFORE tool results
                     # to avoid misclassification if SDK message also has tool_use_id/is_error)
                     elif _is_sdk_result_message(message):
                         sdk_result_usage = getattr(message, "usage", None)
+                        sdk_result_model_usage = getattr(message, "model_usage", None)
                         sdk_result_cost = getattr(message, "total_cost_usd", None)
                         num_turns = getattr(message, "num_turns", None)
                         sdk_result_summary = self._summarize_result(message)
@@ -939,6 +991,14 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                         # assistant turn starts here.
                         last_event_monotonic = time.monotonic()
                         last_event_wall = datetime.now()
+
+                        # The Agent tool-result rides on this message's
+                        # ``tool_use_result`` and carries the COMPLETE
+                        # per-sub-agent usage (input/output/cache-create/
+                        # cache-read). Harvest it keyed by the Agent tool_use_id.
+                        sub_usage = self._extract_sub_agent_usage(message)
+                        if sub_usage is not None:
+                            sub_agent_usages.append(sub_usage)
 
                         content = getattr(message, "content", None)
                         if content and isinstance(content, list):
@@ -1038,7 +1098,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         # PHASE 3: Finalize commands and build turn record
         commands = self._finalize_commands(pending_commands, messages)
-        token_usage = self._build_token_usage(sdk_result_usage, sdk_result_cost)
+        token_usage = self._build_token_usage(sdk_messages, sdk_result_usage, sdk_result_cost, sdk_result_model_usage)
         agent_output = self._format_messages(messages)
         self._update_state_from_messages(messages)
 
@@ -1084,6 +1144,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             num_turns=num_turns,
             max_turns_exhausted=max_turns_exhausted,
             result_summary=sdk_result_summary,
+            sub_agent_usage=sub_agent_usages,
         )
 
     async def stop(self) -> None:
@@ -1182,12 +1243,14 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         assistant_turn_count: int,
         messages_list: list[UserMessageTelemetry | AssistantMessageTelemetry],
         sdk_result_usage: dict[str, Any] | None,
+        sdk_result_model_usage: dict[str, Any] | None,
         sdk_result_cost: float | None,
         num_turns: int | None,
         sdk_model_used: str | None,
         sdk_result_summary: ResultSummary | None,
         turn_start_time: float,
         crash_reason: str | None = None,
+        sub_agent_usages: list[SubAgentUsage] | None = None,
     ) -> TurnRecord:
         """Build a crashed=True TurnRecord from pre-crash telemetry.
 
@@ -1195,7 +1258,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         propagate to the caller.
         """
         commands = self._finalize_commands(pending_commands, messages)
-        token_usage = self._build_token_usage(sdk_result_usage, sdk_result_cost)
+        token_usage = self._build_token_usage(messages_list, sdk_result_usage, sdk_result_cost, sdk_result_model_usage)
         duration = time.monotonic() - turn_start_time
 
         # Broad handler: secondary failure here would defeat partial preservation.
@@ -1224,6 +1287,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             result_summary=sdk_result_summary,
             crashed=True,
             crash_reason=crash_reason,
+            sub_agent_usage=sub_agent_usages or [],
         )
 
     def _finalize_commands(
@@ -1261,8 +1325,94 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         return commands
 
     @staticmethod
-    def _build_token_usage(sdk_result_usage: dict[str, Any] | None, sdk_result_cost: float | None) -> TokenUsage | None:
-        """Build a TokenUsage from SDK ResultMessage data, or None if unavailable."""
+    def _aggregate_model_usage(model_usage: dict[str, Any] | None) -> TokenUsage | None:
+        """Sum the SDK ResultMessage ``model_usage`` into a cumulative TokenUsage.
+
+        ``model_usage`` maps each model id to its cumulative billing for the
+        session — ``{model: {inputTokens, outputTokens, cacheReadInputTokens,
+        cacheCreationInputTokens, costUSD, ...}}`` (camelCase, unlike ``usage``).
+        This is the SDK's authoritative cost breakdown: summed and priced it
+        reconciles to ``total_cost_usd`` exactly, and it INCLUDES sub-agent
+        consumption (notably cache-creation/input) that the assistant-message
+        stream and the ``usage`` snapshot under-report. Returns None when absent
+        or empty so the caller can fall back.
+        """
+        if not isinstance(model_usage, dict) or not model_usage:
+            return None
+        inp = out = cache_creation = cache_read = 0
+        cost = 0.0
+        any_cost = False
+        for entry in model_usage.values():
+            if not isinstance(entry, dict):
+                continue
+            inp += int(entry.get("inputTokens", 0) or 0)
+            out += int(entry.get("outputTokens", 0) or 0)
+            cache_creation += int(entry.get("cacheCreationInputTokens", 0) or 0)
+            cache_read += int(entry.get("cacheReadInputTokens", 0) or 0)
+            c = entry.get("costUSD")
+            if c is not None:
+                cost += float(c)
+                any_cost = True
+        return TokenUsage(
+            input_tokens=inp,
+            output_tokens=out,
+            cache_creation_input_tokens=cache_creation,
+            cache_read_input_tokens=cache_read,
+            total_cost_usd=cost if any_cost else None,
+        )
+
+    @staticmethod
+    def _build_token_usage(
+        messages: Sequence[UserMessageTelemetry | AssistantMessageTelemetry],
+        sdk_result_usage: dict[str, Any] | None,
+        sdk_result_cost: float | None,
+        sdk_result_model_usage: dict[str, Any] | None = None,
+    ) -> TokenUsage | None:
+        """Build the run's cumulative TokenUsage, or None if unavailable.
+
+        Source-of-truth order:
+
+        1. ``ResultMessage.model_usage`` — the SDK's cumulative per-model billing.
+           Summed + priced at list rates it equals ``total_cost_usd`` exactly,
+           and it captures sub-agent token consumption (especially cache-creation
+           and input) that the assistant-message stream and the ``usage`` snapshot
+           do NOT — sub-agent emissions are only partially (sometimes never)
+           bubbled into the recorded stream. This is authoritative; prefer it.
+
+        2. Per-call telemetry stream (sum) — used when ``model_usage`` is absent
+           (e.g. LLMGW/proxy or legacy/mock SDKs). Recorded usage is deduped by
+           ``message_id``, so summing is exact when every token-bearing emission
+           carries an id; this still beats the ``usage`` snapshot, which
+           under-reports the cache-read cascade ~2-3x on multi-call runs.
+
+        3. ``ResultMessage.usage`` snapshot — last resort.
+
+        ``total_cost_usd`` comes from ``model_usage.costUSD`` when present, else
+        the ResultMessage ``total_cost_usd`` — the real billed total.
+        """
+        from_models = ClaudeCodeAgent._aggregate_model_usage(sdk_result_model_usage)
+        if from_models is not None:
+            if from_models.total_cost_usd is None:
+                from_models.total_cost_usd = sdk_result_cost
+            return from_models
+
+        assistant_msgs = [m for m in messages if isinstance(m, AssistantMessageTelemetry)]
+        token_bearing = [
+            m
+            for m in assistant_msgs
+            if m.input_tokens or m.output_tokens or m.cache_creation_tokens or m.cache_read_tokens
+        ]
+        # Summing is exact only when every token-bearing emission has an id (so
+        # the dedup in communicate() applied and no ResultMessage backfill was
+        # mixed in). Otherwise defer to the ResultMessage summary.
+        if token_bearing and all(m.message_id for m in token_bearing):
+            return TokenUsage(
+                input_tokens=sum(m.input_tokens for m in assistant_msgs),
+                output_tokens=sum(m.output_tokens for m in assistant_msgs),
+                cache_creation_input_tokens=sum(m.cache_creation_tokens for m in assistant_msgs),
+                cache_read_input_tokens=sum(m.cache_read_tokens for m in assistant_msgs),
+                total_cost_usd=sdk_result_cost,
+            )
         if not sdk_result_usage:
             return None
         return TokenUsage(
@@ -1322,6 +1472,54 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             processed.append(processed_plugin)
 
         return processed
+
+    def _log_message_raw(self, message: Any, msg_type: str) -> None:
+        """Dump an SDK event verbatim, the instant it arrives, when opted in.
+
+        Gated behind the ``CODER_EVAL_RAW_SDK_LOG`` env var (truthy = "1",
+        "true", "yes", "on") so normal runs stay quiet. Emits at INFO so it
+        shows up in task.log without flipping the whole logger to DEBUG.
+
+        For each event we log, in order:
+          * the message type name,
+          * the full ``repr(message)`` (untruncated), and
+          * a sorted ``key=value`` dump of every public attribute (so token
+            fields like ``usage`` / ``model_usage`` / ``total_cost_usd`` are
+            visible exactly as the SDK delivered them, even when ``repr`` is
+            terse).
+
+        Use this to confirm, first-hand, which message types actually carry
+        token usage — e.g. that an Agent tool-result message does *not*, while
+        the sibling TaskNotification does.
+        """
+        flag = os.environ.get("CODER_EVAL_RAW_SDK_LOG", "")
+        if flag.strip().lower() not in ("1", "true", "yes", "on"):
+            return
+
+        try:
+            raw_repr = repr(message)
+        except Exception as exc:  # pragma: no cover - defensive
+            raw_repr = f"<unreprable: {exc!r}>"
+
+        attrs: dict[str, Any] = {}
+        for name in dir(message):
+            if name.startswith("_"):
+                continue
+            try:
+                value = getattr(message, name)
+            except Exception as exc:  # pragma: no cover - defensive
+                value = f"<unreadable: {exc!r}>"
+            if callable(value):
+                continue
+            attrs[name] = value
+        attr_dump = "\n".join(f"    {k} = {v!r}" for k, v in sorted(attrs.items()))
+
+        self._log.info(
+            "RAW_SDK_EVENT type=%s\n  repr=%s\n  attrs:\n%s",
+            msg_type,
+            raw_repr,
+            attr_dump or "    (none)",
+        )
 
     def _log_message_debug(self, message: Any, msg_type: str) -> None:
         """Log agent message details at DEBUG level for real-time streaming visibility.
@@ -1428,6 +1626,62 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             return parsed
         return None
 
+    @staticmethod
+    def _extract_sub_agent_usage(message: Any) -> SubAgentUsage | None:
+        """Build a SubAgentUsage from an Agent tool-result UserMessage.
+
+        The Agent tool-result rides on ``message.tool_use_result`` — a dict
+        carrying the sub-agent's ``agentId``, ``totalToolUseCount``,
+        ``totalDurationMs`` and a full ``usage`` breakdown (input / output /
+        cache-creation / cache-read). This is the authoritative per-sub-agent
+        token source, complete with the cache-read that TaskNotification.usage
+        drops.
+
+        Returns None for non-sub-agent tool results (regular Bash/Write/etc.
+        results also carry ``tool_use_result`` but no ``agentId``/``usage``).
+        The Agent tool_use_id is read from the message's ToolResultBlock so the
+        usage can be attributed to the spawning Agent call.
+        """
+        tur = getattr(message, "tool_use_result", None)
+        if not isinstance(tur, dict) or "agentId" not in tur:
+            return None
+        usage = tur.get("usage")
+        if not isinstance(usage, dict):
+            return None
+
+        # The spawning Agent tool_use_id lives on the ToolResultBlock, not on
+        # tool_use_result itself.
+        tool_use_id: str | None = None
+        content = getattr(message, "content", None)
+        if isinstance(content, list):
+            for block in content:
+                if _is_tool_result_block(block):
+                    tool_use_id = getattr(block, "tool_use_id", None)
+                    break
+
+        def _int(value: Any) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        input_tokens = _int(usage.get("input_tokens"))
+        output_tokens = _int(usage.get("output_tokens"))
+        cache_creation = _int(usage.get("cache_creation_input_tokens"))
+        cache_read = _int(usage.get("cache_read_input_tokens"))
+
+        return SubAgentUsage(
+            tool_use_id=tool_use_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_creation_input_tokens=cache_creation,
+            cache_read_input_tokens=cache_read,
+            total_tokens=input_tokens + output_tokens + cache_creation + cache_read,
+            tool_uses=_int(tur.get("totalToolUseCount")),
+            duration_ms=_int(tur.get("totalDurationMs")),
+            status=tur.get("status") if isinstance(tur.get("status"), str) else None,
+        )
+
     def _resolve_pending_command(
         self,
         tool_use_id: str,
@@ -1460,7 +1714,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             # Update command with actual results
             cmd.result_status = "error" if is_error else "success"
             cmd.duration_ms = duration_ms
-            cmd.result_summary = content_str[:200] if content_str else None
+            cmd.result_summary = content_str if content_str else None
             cmd.result_data = ClaudeCodeAgent._try_parse_json_value(content)
 
             # Wall-clock execution bounds. `execution_completed_at` is now;

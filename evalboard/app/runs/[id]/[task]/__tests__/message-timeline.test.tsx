@@ -21,6 +21,7 @@ function makeMessage(overrides: Partial<MessageEvent> = {}): MessageEvent {
         outputTokens: 1200,
         cacheWriteTokens: 4_500,
         cacheReadTokens: 85_000,
+        parentToolUseId: null,
         reasoningTokens: null,
         thinkingOutputTokens: null,
         textOutputTokens: 1200,
@@ -233,5 +234,184 @@ describe("MessageTimelineSection — expanded sub-rows", () => {
         // "1.2s" is the formatted exec time for 1234ms in the sub-row's Exec
         // column — verifies that durationMs propagates onto the same grid.
         expect(screen.getAllByText("1.2s").length).toBeGreaterThanOrEqual(1);
+    });
+});
+
+describe("MessageTimelineSection — sub-agent grouping", () => {
+    function agentTool(toolUseId: string) {
+        return {
+            toolName: "Agent",
+            toolUseId,
+            summary: "spawn sub-agent",
+            argText: "sort left half",
+            description: null,
+            genMs: 100,
+            durationMs: 2000,
+            isError: false,
+            resultPreview: "[1, 2]",
+            outputTokens: 10,
+        };
+    }
+
+    test("a sub-agent's emissions render nested under the Agent call that spawned them", () => {
+        const parent = makeMessage({
+            index: 1,
+            text: "PARENT_THREAD",
+            blockTypes: ["tool_use"],
+            toolUses: [agentTool("T1")],
+        });
+        const child = makeMessage({
+            index: 2,
+            text: "CHILD_SUBAGENT",
+            parentToolUseId: "T1", // ran inside the sub-agent spawned by T1
+        });
+        const { container } = render(
+            <MessageTimelineSection messages={[parent, child]} />,
+        );
+        // The child is NOT a top-level row — it lives inside the spawning
+        // Agent call's expansion. Open all disclosures to reveal it.
+        const details = container.querySelectorAll("details");
+        details.forEach((d) => d.setAttribute("open", ""));
+        // The child's emission renders FLAT inside the Agent group (no
+        // per-message disclosure of its own).
+        expect(screen.getByText("CHILD_SUBAGENT")).toBeInTheDocument();
+        expect(screen.getByText("PARENT_THREAD")).toBeInTheDocument();
+        // The Agent call's result is rendered too (after the nested rows).
+        expect(screen.getByText(/\[1, 2\]/)).toBeInTheDocument();
+    });
+
+    test("legacy run without branch info renders every message at top level", () => {
+        // No parent_tool_use_id recorded → both messages are top-level rows, and
+        // a message with an Agent tool call has no children to nest.
+        const a = makeMessage({
+            index: 1,
+            text: "ROW_A",
+            blockTypes: ["tool_use"],
+            toolUses: [agentTool("T1")],
+            parentToolUseId: undefined,
+        });
+        const b = makeMessage({
+            index: 2,
+            text: "ROW_B",
+            parentToolUseId: undefined,
+        });
+        const { container } = render(
+            <MessageTimelineSection messages={[a, b]} />,
+        );
+        // Two top-level rows in the table body.
+        const topRows = container.querySelectorAll("ol > li");
+        expect(topRows).toHaveLength(2);
+        expect(screen.getByText("ROW_A")).toBeInTheDocument();
+        expect(screen.getByText("ROW_B")).toBeInTheDocument();
+    });
+
+    test("shows the per-sub-agent token breakdown on the Agent result row", () => {
+        const parent = makeMessage({
+            index: 1,
+            text: "MAIN",
+            blockTypes: ["tool_use"],
+            toolUses: [agentTool("T1")],
+        });
+        const { container } = render(
+            <MessageTimelineSection
+                messages={[parent]}
+                subAgentUsageByToolId={{
+                    T1: {
+                        total: 14751,
+                        input: 47,
+                        output: 121,
+                        cacheCreation: 234,
+                        cacheRead: 14349,
+                    },
+                }}
+            />,
+        );
+        container
+            .querySelectorAll("details")
+            .forEach((d) => d.setAttribute("open", ""));
+        // The breakdown now lives in the Cache R / Cache W / Out columns of the
+        // result row — not a free-text "sub-agent total:" line.
+        expect(screen.queryByText(/sub-agent total:/)).not.toBeInTheDocument();
+        // cacheRead 14349 → "14k", cacheCreation 234 → "234", output 121 → "121".
+        expect(screen.getByText("14k")).toBeInTheDocument();
+        expect(screen.getByText("234")).toBeInTheDocument();
+        expect(screen.getByText("121")).toBeInTheDocument();
+    });
+
+    test("a childless sub-agent tool row is flat (no extra disclosure)", () => {
+        // The main message spawns an Agent (T1); inside it the sub-agent runs a
+        // single Bash with no children. Bash must render flat — only the Agent
+        // call (which HAS children) is an expandable group.
+        const parent = makeMessage({
+            index: 1,
+            text: "MAIN",
+            blockTypes: ["tool_use"],
+            toolUses: [agentTool("T1")],
+        });
+        const child = makeMessage({
+            index: 2,
+            parentToolUseId: "T1",
+            blockTypes: ["tool_use"],
+            toolUses: [
+                {
+                    toolName: "Bash",
+                    toolUseId: "B1",
+                    summary: "echo",
+                    argText: "echo hi",
+                    description: null,
+                    genMs: 10,
+                    durationMs: 20,
+                    isError: false,
+                    resultPreview: "hi",
+                    outputTokens: 3,
+                },
+            ],
+        });
+        const { container } = render(
+            <MessageTimelineSection messages={[parent, child]} />,
+        );
+        // Exactly two <details>: the top-level message and the Agent group.
+        // The childless Bash adds none.
+        expect(container.querySelectorAll("details")).toHaveLength(2);
+        expect(container.querySelectorAll(".group-chevron")).toHaveLength(1);
+    });
+
+    test("reconciling line shows cache-read billed but not present in rows", () => {
+        // Header (model_usage) says 100k cache-read; the visible rows only show
+        // 40k → 60k is sub-agent re-reads the SDK didn't surface as rows.
+        const m = makeMessage({ index: 1, cacheReadTokens: 40_000 });
+        render(
+            <MessageTimelineSection
+                messages={[m]}
+                tokens={{
+                    input: 0,
+                    output: 0,
+                    cacheCreation: 0,
+                    cacheRead: 100_000,
+                    total: 100_000,
+                }}
+            />,
+        );
+        expect(screen.getByText(/cache-read not shown above/)).toBeInTheDocument();
+        expect(screen.getByText(/\+ 60k/)).toBeInTheDocument();
+    });
+
+    test("no reconciling line when rows already cover the cache-read total", () => {
+        const m = makeMessage({ index: 1, cacheReadTokens: 40_000 });
+        render(
+            <MessageTimelineSection
+                messages={[m]}
+                tokens={{
+                    input: 0,
+                    output: 0,
+                    cacheCreation: 0,
+                    cacheRead: 40_000,
+                    total: 40_000,
+                }}
+            />,
+        );
+        expect(
+            screen.queryByText(/cache-read not shown above/),
+        ).not.toBeInTheDocument();
     });
 });

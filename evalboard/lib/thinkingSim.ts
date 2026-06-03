@@ -36,10 +36,15 @@
 //                    (each block is written into the cache once, on the next call)
 //     ΔCacheRead   = (s-1) · Σ thinkTokens_j · reads_j
 //                    (then re-read on every call after that — the cascade)
-//   where, for a run of M calls, a block made at call j is present in the
-//   context of the M-1-j later calls: the first is the cache write, the rest
-//   are cache reads → writes_j = (M-1-j ≥ 1 ? 1 : 0),
-//   reads_j = max(0, M-1-j-1) = max(0, M-2-j).
+//   where a block made at call j is present in the context of its LATER
+//   SAME-BRANCH calls only — the cascade is a tree, not a flat list. Sub-agent
+//   (Task tool) calls bubble up into one stream but each runs in its own
+//   context that the main thread and siblings never re-read, so with
+//   L_j = (count of calls after j sharing j's parent_tool_use_id):
+//   the first of those L_j is the cache write, the rest are cache reads →
+//   writes_j = (L_j ≥ 1 ? 1 : 0), reads_j = max(0, L_j - 1).
+//   (On a run with no sub-agents, L_j = M-1-j and this is the flat cascade.)
+//   Requires per-call branch ids; runs lacking them disable the model entirely.
 //
 // Held fixed ("assuming everything else is fine", per the feature request): the
 // trajectory itself — number of calls, tool calls, tool-result sizes, and the
@@ -51,7 +56,7 @@
 // apportion thinking across calls. At s=1 the projection reproduces the
 // recorded token mix exactly.
 
-import type { MessageEvent, TokenTotals } from "@/lib/runs";
+import type { MessageEvent, SubAgentTotals, TokenTotals } from "@/lib/runs";
 // Rates and resolution live in lib/pricing.ts (the single source of truth,
 // ported from src/coder_eval/proxy/pricing.py). Import directly from there;
 // this module no longer re-exports them.
@@ -120,11 +125,27 @@ export function buildThinkingModel(
     messages: MessageEvent[],
     tokens: TokenTotals,
     recordedCostUsd: number | null,
+    // Per-sub-agent token footprints (from tool_use_result.usage). A sub-agent
+    // invocation is, from the caller's view, a tool whose "output size" is the
+    // whole sub-agent's work — its cache-creation + cache-read mass. We fold
+    // that into the tool-output lever so scaling tool output also scales the
+    // sub-agent footprint (otherwise that mass sits in the baseline, immovable).
+    subAgentTotals: SubAgentTotals[] = [],
 ): ThinkingModel | null {
     const calls = messages.length;
     if (calls === 0) return null;
 
-    // Per-message output present iff the summed per-message output is non-zero.
+    // The prompt-cache cascade is a TREE, not a flat list. Sub-agent (Task tool)
+    // calls bubble up into the same message stream, but each sub-agent has its
+    // own context that is re-read only within its own branch — never by the main
+    // thread or sibling sub-agents (you can see it as the per-call cache_read
+    // collapsing back to a small base each time a sub-agent spawns). Modeling the
+    // cascade therefore requires each call's branch id (parent_tool_use_id).
+    // Runs that predate branch capture don't carry it; rather than fall back to a
+    // flat-list cascade that overstates re-read cost on any run with sub-agents,
+    // we decline to build the model — callers then hide the simulator.
+    const branchKnown = messages.every((m) => m.parentToolUseId !== undefined);
+    if (!branchKnown) return null;
     const perMessageOutputSum = messages.reduce(
         (s, m) => s + (m.outputTokens ?? 0),
         0,
@@ -200,27 +221,78 @@ export function buildThinkingModel(
     const toolPerCall: number[] = messages.map((m, j) => {
         const next = messages[j + 1];
         if (!next || next.cacheWriteTokens == null) return 0;
-        const nonThinkingOut = Math.max(
-            0,
-            (m.outputTokens ?? 0) - (m.thinkingOutputTokens ?? 0),
-        );
-        const realOutput = thinkPerCall[j] + nonThinkingOut;
-        return Math.max(0, next.cacheWriteTokens - realOutput);
+        // The successor's cache write only represents a tool result returned to
+        // THIS call when both are in the same branch. At a branch boundary
+        // (sub-agent spawn or return) the next call's cache write is its own
+        // fresh context, not a tool result here — don't attribute it.
+        if (next.parentToolUseId !== m.parentToolUseId) return 0;
+        // Only emit at turn boundaries: when the successor actually writes to
+        // cache (cacheWriteTokens > 0). Intermediate messages in a parallel group
+        // (e.g. two Agent calls in the same turn, or streaming thinking blocks)
+        // have cacheWriteTokens=0 on their successor — they don't produce
+        // independent tool results, so returning 0 prevents the boundary message
+        // from double-counting their outputs when we sum the group below.
+        if (next.cacheWriteTokens === 0) return 0;
+        // Sum real output of the ENTIRE parallel group: all same-branch messages
+        // since the last turn boundary (last message with cacheWriteTokens > 0).
+        // For sequential calls the group is just [j]; for parallel calls it spans
+        // multiple messages. Subtracting only j's output (old behaviour) over-
+        // stated the tool-result size and caused CR on parallel calls to be
+        // incorrectly amplified by the earlier call's output.
+        // Sum real output of the ENTIRE parallel group — all same-branch messages
+        // back to and including the last turn-start (message with cacheWriteTokens
+        // > 0). A turn-start marks the beginning of a group; stopping there avoids
+        // including outputs from a prior group. For sequential calls the group is
+        // just [j] (j has cacheWriteTokens > 0, so the loop stops immediately).
+        let groupRealOutput = 0;
+        for (let k = j; k >= 0; k--) {
+            if (messages[k].parentToolUseId !== m.parentToolUseId) break;
+            const nonThinkingOut = Math.max(
+                0,
+                (messages[k].outputTokens ?? 0) -
+                    (messages[k].thinkingOutputTokens ?? 0),
+            );
+            groupRealOutput += thinkPerCall[k] + nonThinkingOut;
+            // This message started a new turn — it's the beginning of the group.
+            if ((messages[k].cacheWriteTokens ?? 0) > 0) break;
+        }
+        return Math.max(0, next.cacheWriteTokens - groupRealOutput);
     });
 
-    // Cascade coefficients. Content present at call j is in the context of the
-    // M-1-j later calls: first is a cache write, the rest cache reads.
-    //   • Thinking made AT call j cascades over calls j+1 .. M-1.
-    //   • A tool result returned after call j first appears at call j+1, so it
-    //     cascades over calls j+1 .. M-1 too (toolPerCall already shifts the
-    //     measurement to the successor; positionally it lands the same way).
+    // How many LATER calls re-read content produced at call j. The cascade is
+    // tree-structured: content lives in its own branch's context and is re-read
+    // only by that branch's later calls — not by the main thread or siblings.
+    // So `later` counts calls after j that share j's branch (parent_tool_use_id),
+    // NOT all M-1-j subsequent calls. On a run with no sub-agents every call is
+    // in the one (main) branch and this reduces to the flat M-1-j.
+    const branchTotal = new Map<string | null | undefined, number>();
+    for (const m of messages) {
+        branchTotal.set(
+            m.parentToolUseId,
+            (branchTotal.get(m.parentToolUseId) ?? 0) + 1,
+        );
+    }
+    const branchSeen = new Map<string | null | undefined, number>();
+    const laterInBranch = messages.map((m) => {
+        const seen = branchSeen.get(m.parentToolUseId) ?? 0;
+        branchSeen.set(m.parentToolUseId, seen + 1);
+        return (branchTotal.get(m.parentToolUseId) ?? 0) - seen - 1;
+    });
+
+    // Cascade coefficients. Content present at call j is in the context of its
+    // `laterInBranch[j]` same-branch successors: the first is a cache write, the
+    // rest cache reads.
+    //   • Thinking made AT call j cascades over j's later same-branch calls.
+    //   • A tool result returned after call j first appears at call j+1 (same
+    //     branch, guaranteed by toolPerCall's branch check), then cascades over
+    //     the remaining same-branch calls.
     let coeffOutput = 0;
     let coeffCacheWrite = 0;
     let coeffCacheRead = 0;
     let coeffToolWrite = 0;
     let coeffToolRead = 0;
     for (let j = 0; j < calls; j++) {
-        const later = calls - 1 - j;
+        const later = laterInBranch[j];
         const t = thinkPerCall[j];
         if (t > 0) {
             coeffOutput += t;
@@ -235,6 +307,21 @@ export function buildThinkingModel(
             coeffToolWrite += tr;
             coeffToolRead += tr * Math.max(0, later - 1);
         }
+    }
+
+    // Sub-agent footprint as tool output. Each Agent invocation is, to its
+    // caller, a tool; its "output size" is the whole sub-agent's token mass.
+    // That mass lives in the sub-agent's OWN branch — written once, re-read only
+    // within that branch (the re-reads are already inside its cache_read total).
+    // So it contributes flat (no extra main-thread cascade): cache-creation at
+    // the write rate, cache-read at the read rate. Folding it here makes the
+    // tool-output lever move both the sub-tool outputs (inside cache-creation)
+    // and the agent invocation itself. The main-thread cascade above sees only
+    // top-level calls (toolPerCall returns 0 across branch boundaries), so this
+    // does not double-count.
+    for (const sa of subAgentTotals) {
+        coeffToolWrite += sa.cacheCreation;
+        coeffToolRead += sa.cacheRead;
     }
 
     return {

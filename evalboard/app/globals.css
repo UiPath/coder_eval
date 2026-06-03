@@ -23,3 +23,20 @@ body {
 .analysis-prose code:not(pre code)::after {
     content: none;
 }
+
+/* Message-timeline disclosure chevron. Rotate it only when the row's OWN
+   <details> is open — keyed to the immediate details so nested sub-agent rows
+   don't inherit an open ancestor's state (an unnamed Tailwind `group-open`
+   would match any open ancestor .group, since MessageRow nests recursively). */
+details[open] > summary > .msg-chevron {
+    transform: rotate(90deg);
+}
+
+/* Grouped tool-call disclosure chevron. Any tool call with bubbled children
+   (parent_tool_use_id) becomes an expandable group; its chevron lives inside the
+   SubRow grid that is itself the <summary>, so it's a descendant (not direct
+   child) of summary — but still keyed to `> summary` so a nested open group's
+   <details> doesn't rotate an ancestor's chevron. */
+details[open] > summary .group-chevron {
+    transform: rotate(90deg);
+}

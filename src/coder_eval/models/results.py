@@ -15,6 +15,7 @@ from coder_eval.models.telemetry import (
     AssistantMessage,
     CommandStatistics,
     CommandTelemetry,
+    SubAgentUsage,
     TokenUsage,
     UserMessage,
 )
@@ -344,6 +345,15 @@ class TurnRecord(BaseModel):
     crash_reason: str | None = Field(
         default=None,
         description="Short human-readable cause when crashed=True; None otherwise.",
+    )
+    sub_agent_usage: list[SubAgentUsage] = Field(
+        default_factory=list,
+        description=(
+            "Per-sub-agent token usage from Agent-tool (Task) spawns in this turn, from the SDK "
+            "TaskNotification messages, keyed by the spawning tool_use_id. Lets analysis attribute "
+            "tokens to the Agent call that spawned a sub-agent — the sub-agent's own emissions are "
+            "only partially surfaced in `messages`. See SubAgentUsage for the total_tokens caveat."
+        ),
     )
 
 

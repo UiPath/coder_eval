@@ -5,16 +5,44 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _is_sdk_result_message
+from coder_eval.agents.claude_code_agent import (
+    ClaudeCodeAgent,
+    _is_sdk_result_message,
+    _is_task_notification,
+)
 from coder_eval.models import (
     AgentKind,
+    AssistantMessage,
     EvaluationResult,
     RunSummary,
     TokenUsage,
     TurnRecord,
+    UserMessage,
     parse_agent_config,
 )
 from coder_eval.reports import ReportGenerator
+
+
+def _assistant(
+    *,
+    message_id: str | None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+    cache_read_tokens: int = 0,
+) -> AssistantMessage:
+    """Build an AssistantMessage telemetry record with the given per-call tokens."""
+    now = datetime.now()
+    return AssistantMessage(
+        started_at=now,
+        completed_at=now,
+        generation_duration_ms=1.0,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+        cache_read_tokens=cache_read_tokens,
+        message_id=message_id,
+    )
 
 
 # --- TokenUsage model tests ---
@@ -161,7 +189,9 @@ class TestSdkResultMessageGuard:
     """Tests for _is_sdk_result_message type guard."""
 
     def test_true_for_sdk_result_message(self):
-        msg = MagicMock()
+        # spec so the mock doesn't auto-vivify task_id/status/tool_use_id, which
+        # would make it look like a TaskNotification (a real ResultMessage has none).
+        msg = MagicMock(spec=["session_id", "usage", "num_turns", "total_cost_usd"])
         msg.session_id = "sess-123"
         msg.usage = {"input_tokens": 100, "output_tokens": 50}
         assert _is_sdk_result_message(msg) is True
@@ -176,6 +206,179 @@ class TestSdkResultMessageGuard:
     def test_false_for_assistant_message(self):
         msg = MagicMock(spec=["content", "role"])
         assert _is_sdk_result_message(msg) is False
+
+    def test_task_notification_not_misread_as_result(self):
+        """A TaskNotification has session_id + usage (so it looks like a
+        ResultMessage) but must be excluded — else its TaskUsage would clobber
+        the real ResultMessage usage/model_usage."""
+        tn = MagicMock(spec=["session_id", "usage", "subtype", "task_id", "status", "tool_use_id"])
+        tn.subtype = "task_notification"
+        assert _is_task_notification(tn) is True
+        assert _is_sdk_result_message(tn) is False
+
+    def test_real_result_is_not_a_task_notification(self):
+        result = MagicMock(spec=["session_id", "usage", "num_turns", "total_cost_usd", "model_usage"])
+        assert _is_task_notification(result) is False
+        assert _is_sdk_result_message(result) is True
+
+
+# --- _build_token_usage source-of-truth tests ---
+
+
+class TestBuildTokenUsage:
+    """Tests for ClaudeCodeAgent._build_token_usage.
+
+    The per-call telemetry stream (deduped by message_id) is the authoritative
+    cumulative source. ResultMessage.usage is a non-cumulative snapshot that
+    under-reports cache/input on multi-call runs, so it is only a fallback.
+    """
+
+    def test_sums_per_call_stream_over_resultmessage(self):
+        """Cumulative cache reads come from summing the per-call stream, not the
+        ResultMessage snapshot — the regression the bug surfaced."""
+        messages = [
+            _assistant(message_id="m1", input_tokens=10, output_tokens=100, cache_read_tokens=20_000),
+            _assistant(message_id="m2", input_tokens=5, output_tokens=80, cache_read_tokens=40_000),
+            _assistant(message_id="m3", input_tokens=3, output_tokens=60, cache_read_tokens=60_000),
+        ]
+        # ResultMessage snapshot drastically understates cache_read (e.g. only
+        # the final call's 60k) — must NOT win.
+        sdk_usage = {
+            "input_tokens": 3,
+            "output_tokens": 240,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 60_000,
+        }
+        usage = ClaudeCodeAgent._build_token_usage(messages, sdk_usage, 1.23)
+        assert usage is not None
+        assert usage.cache_read_input_tokens == 120_000  # 20k + 40k + 60k, not 60k
+        assert usage.input_tokens == 18
+        assert usage.output_tokens == 240
+        # total_cost_usd is always the real billed total from the ResultMessage.
+        assert usage.total_cost_usd == 1.23
+
+    def test_deduped_followups_do_not_double_count(self):
+        """Follow-up emissions sharing a message_id are recorded as zeros by the
+        recorder, so summing the stream stays exact."""
+        messages = [
+            _assistant(message_id="m1", input_tokens=10, output_tokens=50, cache_read_tokens=30_000),
+            # Same API call, second content block — recorder zeroed its usage.
+            _assistant(message_id="m1", input_tokens=0, output_tokens=25, cache_read_tokens=0),
+            _assistant(message_id="m2", input_tokens=4, output_tokens=40, cache_read_tokens=45_000),
+        ]
+        usage = ClaudeCodeAgent._build_token_usage(messages, None, 0.5)
+        assert usage is not None
+        assert usage.input_tokens == 14
+        assert usage.output_tokens == 115  # 50 + 25 + 40
+        assert usage.cache_read_input_tokens == 75_000
+
+    def test_falls_back_to_resultmessage_when_no_per_message_tokens(self):
+        """Streams that surface no per-call tokens (ResultMessage only) keep the
+        legacy behavior."""
+        usage = ClaudeCodeAgent._build_token_usage(
+            [],
+            {
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "cache_creation_input_tokens": 200,
+                "cache_read_input_tokens": 100,
+            },
+            0.02,
+        )
+        assert usage is not None
+        assert usage.input_tokens == 1000
+        assert usage.cache_read_input_tokens == 100
+        assert usage.total_cost_usd == 0.02
+
+    def test_falls_back_when_token_bearing_message_lacks_id(self):
+        """Legacy/mock streams whose token-bearing emissions have no message_id
+        defer to ResultMessage (summing them would double-count the backfill)."""
+        messages = [
+            _assistant(message_id=None, input_tokens=999, output_tokens=999, cache_read_tokens=999_999),
+        ]
+        sdk_usage = {
+            "input_tokens": 1000,
+            "output_tokens": 500,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 100,
+        }
+        usage = ClaudeCodeAgent._build_token_usage(messages, sdk_usage, None)
+        assert usage is not None
+        # ResultMessage values, NOT the id-less per-message values.
+        assert usage.input_tokens == 1000
+        assert usage.cache_read_input_tokens == 100
+
+    def test_ignores_user_messages_when_summing(self):
+        """Only assistant emissions carry billing; user telemetry is skipped."""
+        now = datetime.now()
+        messages = [
+            UserMessage(text="hi", started_at=now, completed_at=now),
+            _assistant(message_id="m1", input_tokens=10, output_tokens=20, cache_read_tokens=5_000),
+        ]
+        usage = ClaudeCodeAgent._build_token_usage(messages, None, None)
+        assert usage is not None
+        assert usage.input_tokens == 10
+        assert usage.cache_read_input_tokens == 5_000
+
+    def test_returns_none_when_nothing_available(self):
+        assert ClaudeCodeAgent._build_token_usage([], None, None) is None
+
+    def test_model_usage_is_authoritative_over_stream_and_snapshot(self):
+        """ResultMessage.model_usage (cumulative per-model) wins — it captures
+        sub-agent cache-creation/input the stream and snapshot under-report."""
+        # Stream + snapshot both say cache_creation ~21873; model_usage knows the
+        # true cumulative 51339 (the merge-sort probe's real numbers).
+        messages = [_assistant(message_id="m1", input_tokens=110, output_tokens=1800, cache_creation_tokens=21873)]
+        snapshot = {
+            "input_tokens": 110,
+            "output_tokens": 1800,
+            "cache_creation_input_tokens": 21873,
+            "cache_read_input_tokens": 41844,
+        }
+        model_usage = {
+            "us.anthropic.claude-sonnet-4-6": {
+                "inputTokens": 834,
+                "outputTokens": 1834,
+                "cacheReadInputTokens": 41844,
+                "cacheCreationInputTokens": 51339,
+                "costUSD": 0.23508645,
+            }
+        }
+        usage = ClaudeCodeAgent._build_token_usage(messages, snapshot, 0.23508645, model_usage)
+        assert usage is not None
+        assert usage.input_tokens == 834
+        assert usage.output_tokens == 1834
+        assert usage.cache_creation_input_tokens == 51339  # not 21873
+        assert usage.cache_read_input_tokens == 41844
+        # cost comes from summed costUSD, and reconciles with total_cost_usd.
+        assert usage.total_cost_usd == pytest.approx(0.23508645)
+
+    def test_model_usage_sums_across_multiple_models(self):
+        model_usage = {
+            "model-a": {"inputTokens": 100, "outputTokens": 200, "costUSD": 0.01},
+            "model-b": {"inputTokens": 5, "outputTokens": 7, "cacheCreationInputTokens": 9, "costUSD": 0.02},
+        }
+        usage = ClaudeCodeAgent._build_token_usage([], None, None, model_usage)
+        assert usage is not None
+        assert usage.input_tokens == 105
+        assert usage.output_tokens == 207
+        assert usage.cache_creation_input_tokens == 9
+        assert usage.total_cost_usd == pytest.approx(0.03)
+
+    def test_model_usage_without_cost_falls_back_to_result_cost(self):
+        model_usage = {"m": {"inputTokens": 10, "outputTokens": 20}}  # no costUSD
+        usage = ClaudeCodeAgent._build_token_usage([], None, 0.5, model_usage)
+        assert usage is not None
+        assert usage.input_tokens == 10
+        assert usage.total_cost_usd == 0.5
+
+    def test_empty_model_usage_falls_through_to_stream(self):
+        # Empty/absent model_usage must not shadow the stream-sum path.
+        messages = [_assistant(message_id="m1", input_tokens=7, cache_read_tokens=300)]
+        usage = ClaudeCodeAgent._build_token_usage(messages, None, None, {})
+        assert usage is not None
+        assert usage.input_tokens == 7
+        assert usage.cache_read_input_tokens == 300
 
 
 # --- Agent token capture tests ---
@@ -527,3 +730,159 @@ class TestReportTokenUsageSection:
 
         report_md = ReportGenerator.generate_markdown(summary)
         assert "## Token Usage" not in report_md
+
+
+# --- _extract_sub_agent_usage tests ---
+
+
+class TestExtractSubAgentUsage:
+    """Tests for ClaudeCodeAgent._extract_sub_agent_usage."""
+
+    def _make_msg(self, tool_use_result: dict | None, tool_use_id: str = "toolu_123") -> MagicMock:
+        msg = MagicMock()
+        msg.tool_use_result = tool_use_result
+        block = MagicMock()
+        block.tool_use_id = tool_use_id
+        block.is_error = False
+        msg.content = [block]
+        return msg
+
+    def test_extracts_full_breakdown(self):
+        msg = self._make_msg(
+            {
+                "agentId": "agent-abc",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 50,
+                    "cache_creation_input_tokens": 200,
+                    "cache_read_input_tokens": 1500,
+                },
+                "totalToolUseCount": 3,
+                "totalDurationMs": 4200,
+                "status": "completed",
+            }
+        )
+        result = ClaudeCodeAgent._extract_sub_agent_usage(msg)
+        assert result is not None
+        assert result.tool_use_id == "toolu_123"
+        assert result.input_tokens == 10
+        assert result.output_tokens == 50
+        assert result.cache_creation_input_tokens == 200
+        assert result.cache_read_input_tokens == 1500
+        assert result.total_tokens == 10 + 50 + 200 + 1500
+        assert result.tool_uses == 3
+        assert result.duration_ms == 4200
+        assert result.status == "completed"
+
+    def test_returns_none_for_non_agent_tool(self):
+        # Bash/Read/Write results have no agentId
+        msg = self._make_msg({"status": "completed", "output": "hello"})
+        assert ClaudeCodeAgent._extract_sub_agent_usage(msg) is None
+
+    def test_returns_none_when_tool_use_result_missing(self):
+        msg = MagicMock()
+        msg.tool_use_result = None
+        assert ClaudeCodeAgent._extract_sub_agent_usage(msg) is None
+
+    def test_returns_none_when_usage_missing(self):
+        msg = self._make_msg({"agentId": "agent-abc"})  # no usage key
+        assert ClaudeCodeAgent._extract_sub_agent_usage(msg) is None
+
+    def test_coerces_missing_token_fields_to_zero(self):
+        msg = self._make_msg(
+            {
+                "agentId": "agent-abc",
+                "usage": {},  # all fields absent
+                "totalToolUseCount": 1,
+                "totalDurationMs": 100,
+                "status": "completed",
+            }
+        )
+        result = ClaudeCodeAgent._extract_sub_agent_usage(msg)
+        assert result is not None
+        assert result.input_tokens == 0
+        assert result.output_tokens == 0
+        assert result.cache_creation_input_tokens == 0
+        assert result.cache_read_input_tokens == 0
+        assert result.total_tokens == 0
+
+    def test_coerces_none_token_fields_to_zero(self):
+        msg = self._make_msg(
+            {
+                "agentId": "agent-abc",
+                "usage": {
+                    "input_tokens": None,
+                    "output_tokens": None,
+                    "cache_creation_input_tokens": None,
+                    "cache_read_input_tokens": None,
+                },
+                "totalToolUseCount": 0,
+                "totalDurationMs": 0,
+                "status": "completed",
+            }
+        )
+        result = ClaudeCodeAgent._extract_sub_agent_usage(msg)
+        assert result is not None
+        assert result.total_tokens == 0
+
+    def test_tool_use_id_from_content_block(self):
+        msg = self._make_msg(
+            {"agentId": "agent-xyz", "usage": {"output_tokens": 5}, "status": "completed"},
+            tool_use_id="toolu_SPECIFIC",
+        )
+        result = ClaudeCodeAgent._extract_sub_agent_usage(msg)
+        assert result is not None
+        assert result.tool_use_id == "toolu_SPECIFIC"
+
+    def test_tool_use_id_none_when_no_content(self):
+        msg = MagicMock()
+        msg.tool_use_result = {"agentId": "agent-abc", "usage": {"output_tokens": 5}, "status": "completed"}
+        msg.content = []
+        result = ClaudeCodeAgent._extract_sub_agent_usage(msg)
+        assert result is not None
+        assert result.tool_use_id is None
+
+
+# --- _log_message_raw env-gate tests ---
+
+
+def _make_agent() -> ClaudeCodeAgent:
+    return ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
+
+
+class TestLogMessageRaw:
+    def test_disabled_by_default(self, caplog):
+        import os
+
+        os.environ.pop("CODER_EVAL_RAW_SDK_LOG", None)
+        msg = MagicMock(spec=[])
+        agent = _make_agent()
+        with caplog.at_level("INFO", logger="coder_eval.agents.claude_code_agent"):
+            agent._log_message_raw(msg, "FakeMessage")
+        assert "RAW_SDK_EVENT" not in caplog.text
+
+    def test_enabled_by_env_var(self, caplog, monkeypatch):
+        monkeypatch.setenv("CODER_EVAL_RAW_SDK_LOG", "1")
+        msg = MagicMock(spec=["some_attr"])
+        msg.some_attr = "hello"
+        agent = _make_agent()
+        with caplog.at_level("INFO", logger="coder_eval.agents.claude_code_agent"):
+            agent._log_message_raw(msg, "FakeMessage")
+        assert "RAW_SDK_EVENT" in caplog.text
+        assert "FakeMessage" in caplog.text
+
+
+# --- _is_task_notification subtype fallback ---
+
+
+def test_task_notification_subtype_string_fallback():
+    """The subtype=="task_notification" path lets duck-typed mocks be recognized."""
+    msg = MagicMock(spec=["subtype"])
+    msg.subtype = "task_notification"
+    assert _is_task_notification(msg) is True
+
+
+def test_task_notification_wrong_subtype_not_matched():
+    msg = MagicMock(spec=["subtype"])
+    msg.subtype = "something_else"
+    assert _is_task_notification(msg) is False

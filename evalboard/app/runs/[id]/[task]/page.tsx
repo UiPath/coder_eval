@@ -189,13 +189,18 @@ export default async function TaskPage({
             {flowDebug && <FlowDebugSection flowDebug={flowDebug} />}
             <CriteriaSection criteria={task.criteria} />
             {task.messages.length > 0 && (
-                <MessageTimelineSection messages={task.messages} />
+                <MessageTimelineSection
+                    messages={task.messages}
+                    tokens={task.tokens}
+                    subAgentUsageByToolId={task.subAgentUsageByToolId}
+                />
             )}
             {task.messages.length > 0 && task.tokens.total > 0 && (
                 <ThinkingCostSection
                     messages={task.messages}
                     tokens={task.tokens}
                     recordedCostUsd={task.totalCostUsd}
+                    subAgentUsageByToolId={task.subAgentUsageByToolId}
                 />
             )}
             {(task.toolCalls.length > 0 || task.finalAssistantText) && (

@@ -98,7 +98,25 @@ def test_resolve_pending_command_populates_result_data_for_json_object() -> None
 
     cmd = pending[tool_id]["telemetry"]
     assert cmd.result_data == {"a": 1, "b": "x"}
-    assert cmd.result_summary == content[:200]
+    assert cmd.result_summary == content
+
+
+def test_resolve_pending_command_does_not_truncate_long_result_summary() -> None:
+    tool_id = "toolu_long"
+    pending = _make_pending(tool_id)
+    content = "x" * 5000  # well past the old 200-char cap
+
+    _agent()._resolve_pending_command(
+        tool_id,
+        False,
+        content,
+        pending,
+        set(),
+    )
+
+    cmd = pending[tool_id]["telemetry"]
+    assert cmd.result_summary == content
+    assert len(cmd.result_summary) == 5000
 
 
 def test_resolve_pending_command_populates_result_data_for_json_array() -> None:

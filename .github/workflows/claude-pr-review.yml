@@ -84,7 +84,7 @@ jobs:
         # path; this bearer-token path skips that infra and is the same one
         # the Claude CLI uses directly (exercised end-to-end by the
         # live-tests BedrockRoute step).
-        uses: anthropics/claude-code-action@1dc994ee7a008f0ecc866d9ac23ef036b7229f84  # v1.0.127
+        uses: anthropics/claude-code-action@09f876c77e9d2d627cdf3e2f83d4d7b75106807e  # v1.0.134
         env:
           AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
           AWS_REGION: ${{ secrets.AWS_REGION }}

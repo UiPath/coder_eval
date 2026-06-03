@@ -6,6 +6,7 @@ import type {
     CriterionResult,
     FlowDebugResult,
     MessageEvent,
+    SubAgentTotals,
     TokenTotals,
     ToolCall,
 } from "@/lib/runs";
@@ -280,11 +281,46 @@ function kindBadgeClass(kind: string): string {
     }
 }
 
-export function MessageTimelineSection({ messages }: { messages: MessageEvent[] }) {
+export function MessageTimelineSection({
+    messages,
+    tokens,
+    subAgentUsageByToolId = {},
+}: {
+    messages: MessageEvent[];
+    // Run-level token totals (from model_usage on current runs). Used to compute
+    // the cache-read that sub-agent calls incurred but that never surfaced as a
+    // row, so the timeline reconciles to the header.
+    tokens?: TokenTotals;
+    // Per-Agent-call sub-agent token breakdown (input/output/cache-create/
+    // cache-read), keyed by the spawning tool_use_id. Surfaced on each Agent
+    // call's result row.
+    subAgentUsageByToolId?: Record<string, SubAgentTotals>;
+}) {
     // Token columns can be shown as counts or as their estimated USD value.
     const [unit, setUnit] = useState<Unit>("tokens");
 
     if (messages.length === 0) return null;
+
+    // Group sub-agent emissions under the Agent tool call that spawned them.
+    // The conversation is a tree: sub-agent (Task tool) calls bubble up into the
+    // flat stream tagged with the spawning tool_use_id (parent_tool_use_id).
+    // We key children by that id and render only the main thread at top level;
+    // each sub-agent's invocations nest, expandable, under its Agent call.
+    // Legacy runs (parentToolUseId undefined) have no string parents → the map
+    // stays empty and every message renders flat, exactly as before.
+    const childrenByParent = new Map<string, MessageEvent[]>();
+    for (const m of messages) {
+        const p = m.parentToolUseId;
+        if (typeof p === "string") {
+            const arr = childrenByParent.get(p) ?? [];
+            arr.push(m);
+            childrenByParent.set(p, arr);
+        }
+    }
+    // == null matches both null (main thread) and undefined (legacy, no branch
+    // info) → both render at the top level. Sub-agent emissions render nested
+    // inside the message that spawned them (see MessageRow).
+    const topLevelMessages = messages.filter((m) => m.parentToolUseId == null);
 
     // Roll-up stats for the summary strip.
     const totalGenMs = messages.reduce((s, m) => s + (m.generationMs ?? 0), 0);
@@ -433,10 +469,55 @@ export function MessageTimelineSection({ messages }: { messages: MessageEvent[] 
                     </span>
                 </div>
                 <ol>
-                    {messages.map((m) => (
-                        <MessageRow key={m.index} m={m} unit={unit} />
+                    {topLevelMessages.map((m) => (
+                        <MessageRow
+                            key={m.index}
+                            m={m}
+                            unit={unit}
+                            childrenByParent={childrenByParent}
+                            subAgentUsageByToolId={subAgentUsageByToolId}
+                        />
                     ))}
                 </ol>
+                {(() => {
+                    // Reconciling line: cache-read the run was billed for
+                    // (header total, from model_usage) minus what's visible.
+                    // The three pieces are DISJOINT and additive:
+                    //   • top-level rows  → the main agent's own cache-read
+                    //   • subAgentCr      → the COMPLETE per-sub-agent cache-read
+                    //                       (from tool_use_result.usage), shown on
+                    //                       each sub-agent result row
+                    //   • remainder       → anything still unaccounted
+                    // We sum only TOP-LEVEL rows here: a sub-agent's nested rows
+                    // (when its emissions bubble) are a re-presentation of the
+                    // same tokens already counted in subAgentCr — summing all
+                    // rows would double-count them.
+                    const rowCr = messages.reduce(
+                        (s, m) =>
+                            s +
+                            (m.parentToolUseId == null
+                                ? (m.cacheReadTokens ?? 0)
+                                : 0),
+                        0,
+                    );
+                    const subAgentCr = Object.values(
+                        subAgentUsageByToolId,
+                    ).reduce((s, u) => s + u.cacheRead, 0);
+                    const remainder =
+                        (tokens?.cacheRead ?? 0) - rowCr - subAgentCr;
+                    if (remainder <= 0) return null;
+                    return (
+                        <div className="border-t border-gray-200 bg-amber-50/40 px-2 py-1.5 text-[11px] text-gray-600 font-sans">
+                            <span className="text-amber-700 font-medium">
+                                + {fmtTokens(remainder)}
+                            </span>{" "}
+                            cache-read not shown above — sub-agent context
+                            re-reads on calls the SDK doesn&apos;t surface as
+                            rows. Included in the run total; shown here so the
+                            rows reconcile.
+                        </div>
+                    );
+                })()}
             </div>
         </section>
     );
@@ -446,12 +527,25 @@ export function ThinkingCostSection({
     messages,
     tokens,
     recordedCostUsd,
+    subAgentUsageByToolId = {},
 }: {
     messages: MessageEvent[];
     tokens: TokenTotals;
     recordedCostUsd: number | null;
+    // Per-sub-agent footprints, folded into the tool-output lever so the slider
+    // moves the sub-agent token mass too (not just main-thread tool results).
+    subAgentUsageByToolId?: Record<string, SubAgentTotals>;
 }) {
-    const model = buildThinkingModel(messages, tokens, recordedCostUsd);
+    const model = buildThinkingModel(
+        messages,
+        tokens,
+        recordedCostUsd,
+        Object.values(subAgentUsageByToolId),
+    );
+    // No model → the run can't be projected (unpriced model, or it predates
+    // per-call branch capture so the cache cascade can't be modeled as a tree).
+    // Hide the simulator entirely rather than show a misleading flat projection.
+    if (!model) return null;
     return (
         <section className="space-y-2">
             <h2 className="text-sm font-semibold text-gray-900">
@@ -463,14 +557,7 @@ export function ThinkingCostSection({
                 cascade — trimming early content shrinks the transcript every
                 later call re-reads.
             </p>
-            {model ? (
-                <ThinkingSimulator model={model} />
-            ) : (
-                <div className="text-sm text-gray-500 border border-gray-200 rounded-lg p-3 bg-white">
-                    Can&apos;t project — no recognized model pricing for this
-                    run&apos;s messages.
-                </div>
-            )}
+            <ThinkingSimulator model={model} />
         </section>
     );
 }
@@ -496,6 +583,58 @@ function summaryPreview(m: MessageEvent): string {
     return "";
 }
 
+// The result of an Agent (sub-agent) tool call, rendered as a full MSG_GRID
+// row so its token columns line up with every other row. The sub-agent's
+// COMPLETE usage (from tool_use_result.usage) populates Cache R / Cache W / Out
+// — cache-read included, the component TaskNotification.usage drops. The result
+// preview sits under Content. Input tokens have no column (the table has none),
+// matching every other row.
+function SubAgentResultRow({
+    preview,
+    isError,
+    usage,
+    fmtTok,
+}: {
+    preview: string | null;
+    isError: boolean;
+    usage: SubAgentTotals;
+    fmtTok: (tokens: number | null, kind: TokenKind) => string;
+}) {
+    return (
+        <div className={MSG_GRID + " items-start py-1 bg-studio-blue/[0.03]"}>
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+            <div className="min-w-0">
+                <div
+                    className={
+                        "text-[11px] whitespace-pre-wrap break-words border rounded px-2 py-1 " +
+                        (isError
+                            ? "border-red-200 bg-red-50/40 text-red-800"
+                            : "border-gray-100 bg-white text-gray-600")
+                    }
+                >
+                    <span className="text-[10px] uppercase tracking-wide text-gray-400 mr-1">
+                        result
+                    </span>
+                    {preview}
+                </div>
+            </div>
+            <span className="tabular-nums text-right text-gray-600">
+                {fmtTok(usage.cacheRead, "cacheRead")}
+            </span>
+            <span className="tabular-nums text-right text-gray-600">
+                {fmtTok(usage.cacheCreation, "cacheWrite")}
+            </span>
+            <span className="tabular-nums text-right text-gray-600">
+                {fmtTok(usage.output, "output")}
+            </span>
+            <span aria-hidden="true" />
+        </div>
+    );
+}
+
 // One sub-block row inside an expanded MessageRow. Aligns to the same MSG_GRID
 // columns as the parent so Gen / Exec / Content / Out line up. The Out cell
 // carries the block's own recorded per-emission output_tokens; Cache R / Cache W
@@ -509,6 +648,7 @@ function SubRow({
     toolName,
     outputTokens,
     fmtOut,
+    expandable = false,
     children,
 }: {
     kind: "thinking" | "tool" | "text";
@@ -523,6 +663,10 @@ function SubRow({
     // Formats the Out cell — token count or estimated USD, matching the row's
     // unit toggle. Passed down so the sub-row aligns with the parent.
     fmtOut: (tokens: number | null) => string;
+    // When true, this row is the summary of a nested <details> — a tool call
+    // that wraps the child tool rows it spawned. Renders a chevron in the first
+    // column that rotates open via the .group-chevron CSS rule.
+    expandable?: boolean;
     children: React.ReactNode;
 }) {
     const slowExec = (execMs ?? 0) >= SLOW_TOOL_MS;
@@ -547,7 +691,13 @@ function SubRow({
         );
     return (
         <div className={MSG_GRID + " items-start"}>
-            <span aria-hidden="true" />
+            {expandable ? (
+                <span className="group-chevron inline-block w-3 text-studio-blue/70 transition-transform">
+                    ▶
+                </span>
+            ) : (
+                <span aria-hidden="true" />
+            )}
             <span aria-hidden="true" />
             <span className="tabular-nums text-right text-gray-500">
                 {fmtMs(genMs)}
@@ -574,14 +724,217 @@ function SubRow({
     );
 }
 
-function MessageRow({ m, unit }: { m: MessageEvent; unit: Unit }) {
+// The inner rows of a message — thinking, each tool call, and trailing text —
+// rendered without a message-level header or expand toggle. Used both inside an
+// expanded MessageRow and, FLATTENED, for a sub-agent's bubbled emissions: a
+// child message whose tools have no children of their own shows its tool rows
+// directly (no per-message disclosure), while a tool that DID spawn children
+// stays an expandable group. Recurses via itself, so only child-bearing tool
+// calls ever carry a chevron.
+function MessageBody({
+    m,
+    unit,
+    childrenByParent,
+    subAgentUsageByToolId = {},
+}: {
+    m: MessageEvent;
+    unit: Unit;
+    childrenByParent: Map<string, MessageEvent[]>;
+    subAgentUsageByToolId?: Record<string, SubAgentTotals>;
+}) {
+    const fmtTok = (tokens: number | null, kind: TokenKind) =>
+        unit === "usd"
+            ? fmtUsd(tokenBucketUsd(m.model, tokens, kind))
+            : fmtTokens(tokens);
+    const fmtOut = (tokens: number | null) => fmtTok(tokens, "output");
+    return (
+        <>
+            {m.thinkingText && (
+                <SubRow
+                    kind="thinking"
+                    genMs={m.thinkingMs}
+                    execMs={null}
+                    isError={false}
+                    outputTokens={m.thinkingOutputTokens}
+                    fmtOut={fmtOut}
+                >
+                    <div className="text-gray-600 whitespace-pre-wrap break-words">
+                        {m.thinkingText}
+                    </div>
+                </SubRow>
+            )}
+            {m.toolUses.map((t, i) => {
+                // Child tool calls this tool spawned (matched by
+                // parent_tool_use_id). Any tool with children becomes an
+                // expandable group; in practice it's the Agent (sub-agent)
+                // tool, but nothing here hardcodes that.
+                const kids = t.toolUseId
+                    ? childrenByParent.get(t.toolUseId)
+                    : undefined;
+                const hasKids = !!kids && kids.length > 0;
+                // Complete per-sub-agent token breakdown for this Agent call
+                // (input/output/cache-create/cache-read), from the
+                // tool-result's tool_use_result.usage. When present, this is a
+                // sub-agent (Agent-tool) call and its result renders as a grid
+                // row with the Cache R / Cache W / Out columns filled.
+                const subUsage = t.toolUseId
+                    ? subAgentUsageByToolId[t.toolUseId]
+                    : undefined;
+                // Inline result for ordinary tools (Bash/Write/…): a block
+                // inside the call's Content cell, no token columns of its own.
+                const inlineResultBlock = t.resultPreview ? (
+                    <div
+                        className={
+                            "mt-1 text-[11px] whitespace-pre-wrap break-words border rounded px-2 py-1 " +
+                            (t.isError
+                                ? "border-red-200 bg-red-50/40 text-red-800"
+                                : "border-gray-100 bg-white text-gray-600")
+                        }
+                    >
+                        <span className="text-[10px] uppercase tracking-wide text-gray-400 mr-1">
+                            result
+                        </span>
+                        {t.resultPreview}
+                    </div>
+                ) : null;
+                // Tool chip + args. Reused whether the row is a plain SubRow or
+                // the summary of an expandable group.
+                const callBody = (
+                    <>
+                        {t.description && (
+                            <div className="text-gray-500 italic mb-1">
+                                {t.description}
+                            </div>
+                        )}
+                        {t.argText && (
+                            <div className="text-gray-800 whitespace-pre-wrap break-all bg-white border border-gray-200 rounded px-2 py-1">
+                                {t.argText}
+                            </div>
+                        )}
+                    </>
+                );
+                // The call's result, rendered below it (and below any expanded
+                // child rows). Sub-agent → token-bearing grid row; ordinary tool
+                // with bubbled children → the inline block.
+                const resultBelow = subUsage ? (
+                    <SubAgentResultRow
+                        preview={t.resultPreview}
+                        isError={t.isError}
+                        usage={subUsage}
+                        fmtTok={fmtTok}
+                    />
+                ) : (
+                    hasKids &&
+                    inlineResultBlock && (
+                        <div className="border-l-2 border-studio-blue/40 pl-2 py-1">
+                            {inlineResultBlock}
+                        </div>
+                    )
+                );
+                return (
+                    <div
+                        key={`${m.index}-tool-${i}`}
+                        className="divide-y divide-gray-100"
+                    >
+                        {hasKids ? (
+                            // Tool call that spawned children: collapsed by
+                            // default. The call row is the <summary>; expanding
+                            // it reveals the child tool rows, rendered FLAT (no
+                            // per-message disclosure) so a childless sub-tool
+                            // never gets its own toggle.
+                            <details className="group/grouped">
+                                <summary className="list-none [&::-webkit-details-marker]:hidden cursor-pointer hover:bg-gray-50">
+                                    <SubRow
+                                        kind="tool"
+                                        genMs={t.genMs}
+                                        execMs={t.durationMs}
+                                        isError={t.isError}
+                                        toolName={t.toolName}
+                                        outputTokens={t.outputTokens}
+                                        fmtOut={fmtOut}
+                                        expandable
+                                    >
+                                        {callBody}
+                                    </SubRow>
+                                </summary>
+                                <ol className="border-l-2 border-studio-blue/40 bg-studio-blue/[0.03] divide-y divide-gray-100">
+                                    {kids.map((c) => (
+                                        <li key={c.index}>
+                                            <MessageBody
+                                                m={c}
+                                                unit={unit}
+                                                childrenByParent={
+                                                    childrenByParent
+                                                }
+                                                subAgentUsageByToolId={
+                                                    subAgentUsageByToolId
+                                                }
+                                            />
+                                        </li>
+                                    ))}
+                                </ol>
+                            </details>
+                        ) : (
+                            <SubRow
+                                kind="tool"
+                                genMs={t.genMs}
+                                execMs={t.durationMs}
+                                isError={t.isError}
+                                toolName={t.toolName}
+                                outputTokens={t.outputTokens}
+                                fmtOut={fmtOut}
+                            >
+                                {callBody}
+                                {/* Ordinary tool with no children: result is
+                                    inline in the Content cell. Sub-agent results
+                                    render as a grid row below instead. */}
+                                {!subUsage && inlineResultBlock}
+                            </SubRow>
+                        )}
+                        {resultBelow}
+                    </div>
+                );
+            })}
+            {m.text && (
+                <SubRow
+                    kind="text"
+                    genMs={m.textMs}
+                    execMs={null}
+                    isError={false}
+                    outputTokens={m.textOutputTokens}
+                    fmtOut={fmtOut}
+                >
+                    <div className="text-gray-700 whitespace-pre-wrap break-words">
+                        {m.text}
+                    </div>
+                </SubRow>
+            )}
+        </>
+    );
+}
+
+function MessageRow({
+    m,
+    unit,
+    childrenByParent,
+    subAgentUsageByToolId = {},
+}: {
+    m: MessageEvent;
+    unit: Unit;
+    // Maps a sub-agent-spawn tool_use_id → the emissions that ran inside that
+    // sub-agent. Lets a message render its sub-agents' rows nested between the
+    // spawning Agent call and that call's result. Empty for legacy runs.
+    childrenByParent: Map<string, MessageEvent[]>;
+    // Per-Agent-call sub-agent token breakdown (input/output/cache-create/
+    // cache-read), keyed by tool_use_id. Shown on the Agent call's result row.
+    subAgentUsageByToolId?: Record<string, SubAgentTotals>;
+}) {
     // Token columns render as counts or, in USD mode, the estimated dollar
     // value of that bucket priced from this message's model.
     const fmtTok = (tokens: number | null, kind: TokenKind) =>
         unit === "usd"
             ? fmtUsd(tokenBucketUsd(m.model, tokens, kind))
             : fmtTokens(tokens);
-    const fmtOut = (tokens: number | null) => fmtTok(tokens, "output");
     const kind = messageKind(m.blockTypes);
     const slowGen = (m.generationMs ?? 0) >= SLOW_GEN_MS;
     const slowTool = m.toolUses.some((t) => (t.durationMs ?? 0) >= SLOW_TOOL_MS);
@@ -609,7 +962,7 @@ function MessageRow({ m, unit }: { m: MessageEvent; unit: Unit }) {
                 >
                     <span
                         aria-hidden="true"
-                        className="inline-block w-3 text-gray-400 transition-transform group-open:rotate-90"
+                        className="msg-chevron inline-block w-3 text-gray-400 transition-transform"
                     >
                         ▶
                     </span>
@@ -674,72 +1027,12 @@ function MessageRow({ m, unit }: { m: MessageEvent; unit: Unit }) {
                 </summary>
                 {hasBody && (
                     <div className="border-t border-gray-100 bg-gray-50/40 divide-y divide-gray-100">
-                        {m.thinkingText && (
-                            <SubRow
-                                kind="thinking"
-                                genMs={m.thinkingMs}
-                                execMs={null}
-                                isError={false}
-                                outputTokens={m.thinkingOutputTokens}
-                                fmtOut={fmtOut}
-                            >
-                                <div className="text-gray-600 whitespace-pre-wrap break-words">
-                                    {m.thinkingText}
-                                </div>
-                            </SubRow>
-                        )}
-                        {m.toolUses.map((t, i) => (
-                            <SubRow
-                                key={`${m.index}-tool-${i}`}
-                                kind="tool"
-                                genMs={t.genMs}
-                                execMs={t.durationMs}
-                                isError={t.isError}
-                                toolName={t.toolName}
-                                outputTokens={t.outputTokens}
-                                fmtOut={fmtOut}
-                            >
-                                {t.description && (
-                                    <div className="text-gray-500 italic mb-1">
-                                        {t.description}
-                                    </div>
-                                )}
-                                {t.argText && (
-                                    <div className="text-gray-800 whitespace-pre-wrap break-all bg-white border border-gray-200 rounded px-2 py-1">
-                                        {t.argText}
-                                    </div>
-                                )}
-                                {t.resultPreview && (
-                                    <div
-                                        className={
-                                            "mt-1 text-[11px] whitespace-pre-wrap break-words border rounded px-2 py-1 " +
-                                            (t.isError
-                                                ? "border-red-200 bg-red-50/40 text-red-800"
-                                                : "border-gray-100 bg-white text-gray-600")
-                                        }
-                                    >
-                                        <span className="text-[10px] uppercase tracking-wide text-gray-400 mr-1">
-                                            result
-                                        </span>
-                                        {t.resultPreview}
-                                    </div>
-                                )}
-                            </SubRow>
-                        ))}
-                        {m.text && (
-                            <SubRow
-                                kind="text"
-                                genMs={m.textMs}
-                                execMs={null}
-                                isError={false}
-                                outputTokens={m.textOutputTokens}
-                                fmtOut={fmtOut}
-                            >
-                                <div className="text-gray-700 whitespace-pre-wrap break-words">
-                                    {m.text}
-                                </div>
-                            </SubRow>
-                        )}
+                        <MessageBody
+                            m={m}
+                            unit={unit}
+                            childrenByParent={childrenByParent}
+                            subAgentUsageByToolId={subAgentUsageByToolId}
+                        />
                     </div>
                 )}
             </details>

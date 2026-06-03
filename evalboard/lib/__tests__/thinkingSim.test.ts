@@ -19,6 +19,9 @@ function call(opts: {
     cacheWriteTokens?: number | null;
     thinkingOutputTokens?: number | null;
     model?: string;
+    // null = main thread (default), string = sub-agent branch, undefined =
+    // run didn't record branch info (legacy → simulator disabled).
+    parentToolUseId?: string | null;
 }): MessageEvent {
     return {
         index: 0,
@@ -38,6 +41,8 @@ function call(opts: {
         cacheWriteTokens:
             opts.cacheWriteTokens === undefined ? 0 : opts.cacheWriteTokens,
         cacheReadTokens: 0,
+        parentToolUseId:
+            "parentToolUseId" in opts ? opts.parentToolUseId : null,
         reasoningTokens: null,
         thinkingOutputTokens:
             opts.thinkingOutputTokens === undefined
@@ -242,6 +247,64 @@ describe("buildThinkingModel — tool-result estimation", () => {
         expect(m.coeffToolWrite).toBe(0);
         expect(m.coeffToolRead).toBe(0);
     });
+
+    test("folds the sub-agent footprint into the tool-output lever", () => {
+        // Same 3-call run as toolModel(): message-derived write 300 / read 200.
+        const messages = [
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 100, cacheWriteTokens: 0 }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 300 }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 150 }),
+        ];
+        // A sub-agent contributes cache-creation 1000 → tool write, cache-read
+        // 8975 → tool read (one-time, no extra main-thread cascade).
+        const subAgents = [
+            { total: 10000, input: 5, output: 20, cacheCreation: 1000, cacheRead: 8975 },
+        ];
+        const m = buildThinkingModel(messages, TOTALS, 0.5, subAgents);
+        if (!m) return;
+        expect(m.coeffToolWrite).toBeCloseTo(1300, 5); // 300 + 1000
+        expect(m.coeffToolRead).toBeCloseTo(9175, 5); // 200 + 8975
+        // Empty sub-agent list leaves the lever exactly as the message cascade.
+        const bare = buildThinkingModel(messages, TOTALS, 0.5, []);
+        if (!bare) return;
+        expect(bare.coeffToolWrite).toBeCloseTo(300, 5);
+        expect(bare.coeffToolRead).toBeCloseTo(200, 5);
+    });
+
+    test("parallel intermediates: group boundary subtracts combined group output, not just its own", () => {
+        // 4 messages, no thinking:
+        //   call0: cw=0,   out=100 — pre-boundary (no cw, first message)
+        //   call1: cw=300, out=50  — boundary B_0 (group = [call0])
+        //   call2: cw=0,   out=30  — intermediate parallel message
+        //   call3: cw=150, out=20  — boundary B_1 (group = [call1, call2])
+        //
+        // toolPerCall[j]:
+        //   j=0: next=call1 cw=300>0 → boundary
+        //        loop: k=0, cw=0, add 100, k=-1 → stop
+        //        groupRealOutput=100 → toolPerCall[0] = max(0, 300-100) = 200
+        //   j=1: next=call2 cw=0 → NOT a boundary → 0
+        //   j=2: next=call3 cw=150>0 → boundary
+        //        loop: k=2, cw=0, add 30, continue
+        //              k=1, cw=300>0, add 50, BREAK
+        //        groupRealOutput=80 → toolPerCall[2] = max(0, 150-80) = 70
+        //
+        // Old formula would give toolPerCall[2] = max(0,150-30) = 120 (wrong, ignores call1's 50)
+        //
+        // coeffToolWrite = 200 + 70 = 270
+        // laterInBranch[0]=3, later-1=2 → coeffToolRead += 200*2 = 400
+        // laterInBranch[2]=1, later-1=0 → coeffToolRead += 70*0 = 0
+        // coeffToolRead = 400
+        const messages = [
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 100, cacheWriteTokens: 0 }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 300 }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 30, cacheWriteTokens: 0 }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 20, cacheWriteTokens: 150 }),
+        ];
+        const m = buildThinkingModel(messages, TOTALS, null);
+        if (!m) return;
+        expect(m.coeffToolWrite).toBeCloseTo(270, 5);
+        expect(m.coeffToolRead).toBeCloseTo(400, 5);
+    });
 });
 
 describe("projectThinking — tool-output lever", () => {
@@ -335,5 +398,102 @@ describe("toolAmplification", () => {
         const m = earlyThinkingModel(); // thinking only, no tool results
         if (!m) return;
         expect(toolAmplification(m)).toBeNull();
+    });
+});
+
+describe("buildThinkingModel — tree-structured (sub-agent) cascade", () => {
+    // call 0 thinks 100 tokens inside sub-agent branch "T1" (calls 0,1,2),
+    // followed by 7 main-thread calls. Only call 0 has generation time, so
+    // thinkPerCall[0] = output_total · (10/10) = 100, the rest 0.
+    function branched(parentOfFirstThree: string | null) {
+        const sub = (extra: { thinkingMs?: number; generationMs?: number }) =>
+            call({
+                generationMs: extra.generationMs ?? 0,
+                thinkingMs: extra.thinkingMs ?? 0,
+                outputTokens: 0,
+                parentToolUseId: parentOfFirstThree,
+            });
+        const messages = [
+            call({
+                generationMs: 10,
+                thinkingMs: 10,
+                outputTokens: 100,
+                parentToolUseId: parentOfFirstThree,
+            }),
+            sub({}),
+            sub({}),
+            ...Array.from({ length: 7 }, () =>
+                call({ generationMs: 0, thinkingMs: 0, outputTokens: 0 }),
+            ),
+        ];
+        return buildThinkingModel(
+            messages,
+            { input: 0, output: 100, cacheCreation: 0, cacheRead: 0, total: 100 },
+            null,
+        );
+    }
+
+    test("sub-agent thinking cascades only within its branch, not the whole run", () => {
+        const tree = branched("T1"); // calls 0,1,2 are a sub-agent branch
+        expect(tree).not.toBeNull();
+        if (!tree) return;
+        expect(tree.thinkTokens).toBeCloseTo(100, 5);
+        // Branch T1 = calls [0,1,2]; call 0 has 2 later same-branch calls →
+        // 1 cache write + 1 cache read. The 7 trailing MAIN calls never re-read
+        // the sub-agent's thinking.
+        expect(tree.coeffCacheWrite).toBeCloseTo(100, 5);
+        expect(tree.coeffCacheRead).toBeCloseTo(100, 5);
+    });
+
+    test("the flat-list model would have massively overcounted the same run", () => {
+        // Identical calls, but all on the main thread (no branch) → call 0 sees
+        // all 9 later calls: 1 write + 8 reads. This is the bug the tree fixes:
+        // 800 phantom cache-read tokens vs the correct 100.
+        const flat = branched(null);
+        if (!flat) return;
+        expect(flat.coeffCacheRead).toBeCloseTo(800, 5);
+        const tree = branched("T1");
+        if (!tree) return;
+        expect(tree.coeffCacheRead).toBeLessThan(flat.coeffCacheRead);
+    });
+
+    test("a sub-agent spawn's fresh context write is not counted as a tool result", () => {
+        // call 1 (sub-agent T1) opens with a 13k context cache-write. The flat
+        // model misreads cacheWrite_{j+1} − output_j as a giant tool result of
+        // call 0; the branch check excludes a cross-branch successor.
+        const messages = [
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 0 }), // main
+            call({
+                generationMs: 10,
+                thinkingMs: 0,
+                outputTokens: 0,
+                cacheWriteTokens: 13000,
+                parentToolUseId: "T1", // sub-agent spawn (different branch)
+            }),
+        ];
+        const m = buildThinkingModel(
+            messages,
+            { input: 0, output: 0, cacheCreation: 13000, cacheRead: 0, total: 13000 },
+            null,
+        );
+        if (!m) return;
+        expect(m.toolResultTokens).toBe(0);
+        expect(m.coeffToolWrite).toBe(0);
+    });
+
+    test("legacy run without branch info → no model (simulator hidden)", () => {
+        const m = buildThinkingModel(
+            [
+                call({
+                    generationMs: 10,
+                    thinkingMs: 10,
+                    outputTokens: 100,
+                    parentToolUseId: undefined, // run never recorded the field
+                }),
+            ],
+            TOTALS,
+            0.5,
+        );
+        expect(m).toBeNull();
     });
 });
