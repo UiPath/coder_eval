@@ -1540,8 +1540,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                         self._log.debug(f">>> ASSISTANT: {text}")
                     else:
                         block_type = type(block).__name__
-                        if block_type not in ("ToolUseBlock",):
-                            self._log.debug(f">>> ASSISTANT BLOCK ({block_type}): {str(block)[:200]}")
+                        self._log.debug(f">>> ASSISTANT BLOCK ({block_type}): {str(block)[:200]}")
             elif content and isinstance(content, str):
                 self._log.debug(f">>> ASSISTANT: {content[:500]}")
 
@@ -1558,14 +1557,14 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 pass
 
         elif msg_type == "SystemMessage":
-            subtype = getattr(message, "subtype", None)
-            data = getattr(message, "data", None)
-            self._log.debug(f"--- SYSTEM ({subtype}): {str(data)[:200]}")
+            # Most system messages are init or thinking messages.
+            # These are noisy — skip the debug dump.
+            pass
 
         elif msg_type == "StreamEvent":
             # StreamEvents drive token-delta capture (see message_delta
             # handler) but are noisy in transcripts — skip the debug dump.
-            return
+            pass
 
         else:
             self._log.debug(f"--- {msg_type}: {str(message)[:200]}")
