@@ -56,6 +56,30 @@ describe("WatchlistView", () => {
         expect(screen.getAllByText("alpha").length).toBeGreaterThan(0);
     });
 
+    test("volatility panel: definition popup + variance sparkline of real pass rates", () => {
+        // "wobble" passes both tasks in the older run (100%) and one of two in
+        // the newer run (50%) -> a genuine run-to-run swing the sparkline must
+        // show via the per-run pass-rate trace (oldest → newest).
+        const data = buildWatchlist([
+            run("2026-01-02", [
+                task({ taskId: "w1", skill: "wobble", status: "SUCCESS" }),
+                task({ taskId: "w2", skill: "wobble", status: "FAILURE" }),
+            ]),
+            run("2026-01-01", [
+                task({ taskId: "w1", skill: "wobble", status: "SUCCESS" }),
+                task({ taskId: "w2", skill: "wobble", status: "SUCCESS" }),
+            ]),
+        ]);
+        render(<WatchlistView data={data} />);
+
+        // Definition is reachable as the ⓘ tooltip's accessible label.
+        expect(
+            screen.getByLabelText(/Standard deviation of the skill's per-run pass rate/),
+        ).toBeInTheDocument();
+        // Sparkline plots the actual per-run pass rates, not a binary bar.
+        expect(screen.getByRole("img", { name: "100% → 50%" })).toBeInTheDocument();
+    });
+
     test("expands a list with tied offenders beyond the cap", () => {
         // 12 skills all failing once in one run -> 12 leaderboard rows tied at
         // 0%. The cap is 10, so the 11th/12th must be reachable via the

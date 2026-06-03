@@ -81,20 +81,100 @@ function ExpandableList<T>({
 function Panel({
     title,
     sub,
+    info,
     children,
 }: {
     title: string;
     sub: string;
+    /** Optional precise definition, shown as a native hover tooltip on an ⓘ. */
+    info?: string;
     children: ReactNode;
 }) {
     return (
         <section className="bg-white border border-gray-200 rounded-lg p-4">
-            <h3 className="text-sm font-semibold text-gray-900">{title}</h3>
+            <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-1">
+                {title}
+                {info ? (
+                    <span
+                        className="cursor-help select-none text-[11px] font-normal text-gray-300 hover:text-gray-500"
+                        title={info}
+                        aria-label={info}
+                    >
+                        ⓘ
+                    </span>
+                ) : null}
+            </h3>
             <p className="text-[10px] uppercase tracking-wide text-gray-400 mt-0.5 mb-3">
                 {sub}
             </p>
             {children}
         </section>
+    );
+}
+
+// Inline SVG for the volatility panel: a line tracing each run's pass rate
+// (oldest → newest) over a faint band marking mean ± std-dev (the "swing").
+// Unlike the old binary bars — green-tall ≥50%, red-short <50% — the line's
+// height tracks the *actual* pass rate, so a skill that bounces 100%↔50% reads
+// as a jagged line over a tall band (flaky) instead of a row of identical
+// green bars. Pure SVG, no client JS.
+function VarianceSparkline({ values, std }: { values: number[]; std: number }) {
+    const W = 96;
+    const H = 20;
+    const pad = 2; // keep the trace and dots off the top & bottom edges
+    const n = values.length;
+    const y = (p: number) => pad + (1 - p) * (H - 2 * pad);
+    const x = (i: number) => (n <= 1 ? W / 2 : (i / (n - 1)) * W);
+    const m = values.reduce((a, b) => a + b, 0) / n;
+    const bandTop = y(Math.min(1, m + std));
+    const bandBot = y(Math.max(0, m - std));
+    const trace = values.map((p, i) => `${x(i)},${y(p)}`).join(" ");
+    return (
+        <svg
+            width={W}
+            height={H}
+            viewBox={`0 0 ${W} ${H}`}
+            preserveAspectRatio="none"
+            role="img"
+        >
+            <title>{values.map((p) => pct(p)).join(" → ")}</title>
+            {/* mean ± swing band — a taller band means a flakier skill */}
+            <rect
+                x={0}
+                y={bandTop}
+                width={W}
+                height={Math.max(1, bandBot - bandTop)}
+                className="fill-amber-200"
+                fillOpacity={0.55}
+            />
+            {/* mean line */}
+            <line
+                x1={0}
+                y1={y(m)}
+                x2={W}
+                y2={y(m)}
+                className="stroke-amber-300"
+                strokeWidth={0.5}
+            />
+            {/* pass-rate trace */}
+            <polyline
+                points={trace}
+                fill="none"
+                className="stroke-green-600"
+                strokeWidth={1.25}
+                strokeLinejoin="round"
+                strokeLinecap="round"
+            />
+            {values.map((p, i) => (
+                <circle
+                    key={i}
+                    cx={x(i)}
+                    cy={y(p)}
+                    r={1.4}
+                    className="fill-green-700"
+                />
+            ))}
+        </svg>
     );
 }
 
@@ -380,7 +460,8 @@ export function WatchlistView({ data }: { data: WatchlistData }) {
 
                 <Panel
                     title="🎢 Yee-Yaw — least stable"
-                    sub="Biggest run-to-run swing (flaky)"
+                    sub="How much a skill's pass rate swings run-to-run"
+                    info="Standard deviation of the skill's per-run pass rate across the window. Higher = less consistent run-to-run (flakier). A run's pass rate = passing tasks ÷ total tasks for that skill in that run."
                 >
                     {data.volatility.length === 0 ? (
                         <Empty>All stable</Empty>
@@ -403,15 +484,10 @@ export function WatchlistView({ data }: { data: WatchlistData }) {
                                     >
                                         {r.skill}
                                     </Link>
-                                    <span className="flex gap-0.5 items-end h-[18px]">
-                                        {[...r.sparkline].reverse().map((p, i) => (
-                                            <b
-                                                key={i}
-                                                className={`w-[5px] rounded-sm block ${p >= 0.5 ? "bg-green-600" : "bg-red-500"}`}
-                                                style={{ height: p >= 0.5 ? "16px" : "6px" }}
-                                            />
-                                        ))}
-                                    </span>
+                                    <VarianceSparkline
+                                        values={[...r.sparkline].reverse()}
+                                        std={r.volatility}
+                                    />
                                     <span className="ml-auto font-bold text-amber-700">
                                         ±{Math.round(r.volatility * 100)}%
                                     </span>
