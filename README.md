@@ -541,6 +541,8 @@ See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.
 - [ ] Web UI for results visualization
 - [x] Comparative analysis reports (experiment layer with multi-variant comparison)
 
+For the running, stack-ranked backlog of proposed improvements (and how to add your own), see **[docs/IDEAS.md](docs/IDEAS.md)**.
+
 ## License
 
 MIT
