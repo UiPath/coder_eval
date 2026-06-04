@@ -8,6 +8,7 @@ import {
     ensureRunSummary,
     ensureTaskDir,
     isValidId,
+    isValidTaskId,
     listRunIdsRemote,
 } from "./blob";
 import { DELIVERABLE_KINDS, DELIVERABLE_NAMES } from "./artifact-kinds";
@@ -1615,7 +1616,7 @@ export async function collectTaskFiles(
     runId: string,
     taskId: string,
 ): Promise<{ relPath: string; abs: string }[] | null> {
-    if (!isValidId(runId) || !isValidId(taskId)) return null;
+    if (!isValidId(runId) || !isValidTaskId(taskId)) return null;
     await ensureTaskDir(runId, taskId, RUNS_DIR);
     const taskDir = path.join(RUNS_DIR, runId, "default", taskId);
     const refs = await walkArtifacts(taskDir);

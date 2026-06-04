@@ -32,6 +32,7 @@ jobs:
       UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
       UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
       ANTHROPIC_API_KEY: "sk-ant-test-dummy-key-for-ci-tests-only"
 
     steps:
@@ -62,7 +63,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=openai-codex-cli-bin,openai-codex uv sync --frozen --extra dev --extra uipath --extra codex
+        run: uv sync --frozen --extra dev --extra uipath --extra codex
 
       # PHASE 1: Fast checks (fail early)
       - name: Check code formatting (ruff format)
@@ -228,6 +229,7 @@ jobs:
       UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
       UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
       # Job-level dummy key keeps the unit-test step deterministic and isolated
       # from real-API leakage. The e2e step below overrides to Bedrock at step scope.
       ANTHROPIC_API_KEY: "sk-ant-test-dummy-key-for-ci-tests-only"
@@ -270,7 +272,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=openai-codex-cli-bin,openai-codex uv sync --frozen --extra dev --extra uipath --extra codex
+        run: uv sync --frozen --extra dev --extra uipath --extra codex
 
       - name: Check code formatting (ruff format)
         run: .venv/Scripts/ruff format --check src/ tests/
@@ -352,6 +354,7 @@ jobs:
       UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
       UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
       # tasks_run for --tags smoke-pass. 5 task files (hello_date, dataset_example,
       # smoke_llm_judge, smoke_agent_judge, byod_smoke_test); dataset_example fans out
       # to 2 inline rows, so 6 sub-tasks. If you add/remove a smoke-pass task or change
@@ -408,7 +411,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev --extra uipath
+        run: uv sync --frozen --extra dev --extra uipath --extra codex
 
       - name: Build coder-eval-agent base Docker image
         run: make docker-image
@@ -497,6 +500,12 @@ jobs:
           .venv/bin/coder-eval evaluate tasks/hello_date.yaml "$WORK" \
             --run-dir runs/ci-smoke-eval-only
 
+      - name: Debug SSH session on failure
+        if: failure()
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+
       - name: Upload run artifacts on failure
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -529,6 +538,7 @@ jobs:
       UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
       UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
       LLMGW_URL: ${{ secrets.LLMGW_URL }}
       LLMGW_CLIENT_ID: ${{ secrets.LLMGW_CLIENT_ID }}
       LLMGW_CLIENT_SECRET: ${{ secrets.LLMGW_CLIENT_SECRET }}
@@ -590,7 +600,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev --extra uipath
+        run: uv sync --frozen --extra dev --extra uipath --extra codex
 
       - name: Verify required secrets are present
         run: |
@@ -742,6 +752,7 @@ jobs:
       UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
       UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
 
     steps:
       - name: Checkout code
@@ -758,7 +769,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (with codex extra)
-        run: SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=openai-codex-cli-bin,openai-codex uv sync --frozen --extra dev --extra uipath --extra codex
+        run: uv sync --frozen --extra dev --extra uipath --extra codex
 
       - name: Verify required secrets are present
         run: |
@@ -822,6 +833,7 @@ jobs:
       UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
       UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
 
     steps:
       - name: Checkout coder_eval
@@ -858,7 +870,7 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev --extra uipath
+        run: uv sync --frozen --extra dev --extra uipath --extra codex
 
       - name: Validate every skills task YAML loads under current TaskDefinition schema
         # Hard gate. Catches the class of bug where a coder_eval PR renames or

@@ -20,6 +20,10 @@ export const LOCAL_RUNS_DIR = process.env.EVALBOARD_LOCAL_RUNS_DIR || null;
 // Run / task IDs get reflected into filesystem paths and blob prefixes, so
 // reject anything outside a narrow whitelist before any side effect.
 const ID_RE = /^[\w.-]+$/;
+// Task IDs from dataset-expanded tasks look like "sentiment-classification/r3"
+// (suite/row). Each segment must still pass the narrow ID_RE — only the slash
+// separator between segments is additionally allowed.
+const TASK_ID_RE = /^[\w.-]+(\/[\w.-]+)*$/;
 
 export function isValidId(id: unknown): id is string {
     return (
@@ -30,8 +34,24 @@ export function isValidId(id: unknown): id is string {
     );
 }
 
+export function isValidTaskId(id: unknown): id is string {
+    return (
+        typeof id === "string" &&
+        id.length > 0 &&
+        id.length < 256 &&
+        TASK_ID_RE.test(id) &&
+        !id.split("/").some((s) => s === "." || s === "..")
+    );
+}
+
 function assertValidId(id: string, label: string): void {
     if (!isValidId(id)) {
+        throw new Error(`Invalid ${label}: ${JSON.stringify(id)}`);
+    }
+}
+
+function assertValidTaskId(id: string, label: string): void {
+    if (!isValidTaskId(id)) {
         throw new Error(`Invalid ${label}: ${JSON.stringify(id)}`);
     }
 }
@@ -224,7 +244,7 @@ export async function ensureTaskDir(
     destRoot: string,
 ): Promise<void> {
     assertValidId(runId, "runId");
-    assertValidId(taskId, "taskId");
+    assertValidTaskId(taskId, "taskId");
     if (LOCAL_RUNS_DIR) return;
     return dedupe(`task:${runId}/${taskId}`, async () => {
         await ensureRunSummary(runId, destRoot);

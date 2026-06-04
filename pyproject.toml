@@ -18,7 +18,7 @@ dependencies = [
     "pylint>=4.0.5",
     "radon>=6.0.1",
     "tqdm>=4.67.3",
-    "aiohttp>=3.13.3",
+    "aiohttp>=3.14.0",
     "jmespath>=1.1.0",
     "jsonschema>=4.26.0",
     "starlette==1.0.1",

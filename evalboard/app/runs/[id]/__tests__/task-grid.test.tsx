@@ -140,6 +140,25 @@ describe("TaskGrid — column help popover", () => {
     });
 });
 
+describe("TaskGrid — dataset-expanded task links", () => {
+    test("link href uses the full slash-separated task ID", () => {
+        render(
+            <TaskGrid
+                runId="2026-06-03_16-16-26"
+                tasks={[row("sentiment-classification/r3", 1, null)]}
+            />,
+        );
+        // humanizeTaskId replaces dashes with spaces: "Sentiment classification/r3"
+        const link = screen.getByRole("link", {
+            name: /sentiment classification/i,
+        });
+        expect(link).toHaveAttribute(
+            "href",
+            "/runs/2026-06-03_16-16-26/sentiment-classification/r3",
+        );
+    });
+});
+
 describe("TaskGrid — Tokens↔USD toggle", () => {
     const priced = row("x", 1, 1, {
         model: "claude-sonnet-4-6",

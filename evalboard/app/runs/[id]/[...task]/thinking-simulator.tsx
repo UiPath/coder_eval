@@ -4,6 +4,9 @@ import { useState } from "react";
 import { fmtCompact, fmtUsd } from "@/lib/format";
 import {
     type ThinkingModel,
+    type ToolStats,
+    type TurnProfile,
+    computeSkipDelta,
     projectThinking,
     thinkingAmplification,
     toolAmplification,
@@ -36,9 +39,21 @@ function pct(n: number): string {
 export function ThinkingSimulator({ model }: { model: ThinkingModel }) {
     const [scale, setScale] = useState(1);
     const [toolScale, setToolScale] = useState(1);
+    const [skippedTools, setSkippedTools] = useState<Set<string>>(new Set());
+
+    const toggleTool = (toolName: string) => {
+        setSkippedTools((prev) => {
+            const next = new Set(prev);
+            if (next.has(toolName)) next.delete(toolName);
+            else next.add(toolName);
+            return next;
+        });
+    };
+
+    const skip = computeSkipDelta(model.turnProfiles, skippedTools);
 
     const baseline = projectThinking(model, 1, 1);
-    const proj = projectThinking(model, scale, toolScale);
+    const proj = projectThinking(model, scale, toolScale, skip);
     const delta = proj.costUsd - baseline.costUsd;
     const deltaPct = baseline.costUsd > 0 ? (delta / baseline.costUsd) * 100 : 0;
     const cheaper = delta < -1e-9;
@@ -247,6 +262,20 @@ export function ThinkingSimulator({ model }: { model: ThinkingModel }) {
                 </div>
             )}
 
+            {/* Skip tools */}
+            {model.toolStats.length > 0 && (
+                <ToolSkipSection
+                    toolStats={model.toolStats}
+                    turnProfiles={model.turnProfiles}
+                    skippedTools={skippedTools}
+                    onToggle={toggleTool}
+                    model={model}
+                    baseline={baseline}
+                    scale={scale}
+                    toolScale={toolScale}
+                />
+            )}
+
             {/* Method caveat */}
             <p className="text-[10px] text-gray-400 leading-snug">
                 Priced as <span className="font-mono">{model.model}</span>.
@@ -257,6 +286,164 @@ export function ThinkingSimulator({ model }: { model: ThinkingModel }) {
                 recorded). The trajectory itself — number of calls and tool calls
                 — is held fixed: a what-if on volume, not a re-run.
             </p>
+        </div>
+    );
+}
+
+// Checklist of tools with call counts. Checked tools are treated as completely
+// removed, which has two effects on the projection:
+//
+//   1. Direct token savings — the output tokens the model spent generating the
+//      tool call (writing tool name + parameters) are subtracted from the output
+//      bill. Result-size savings come from each tool's estimated share of
+//      injected tool-result tokens, derived from result preview lengths.
+//
+//   2. Turn elimination — when EVERY tool in an API call belongs to the skipped
+//      set, that entire call would never have been made. The thinking generated
+//      in that call also disappears: both the output tokens charged at call time
+//      and the cascade cost of that thinking being re-read on every later call.
+//      Calls with mixed tools (some skipped, some kept) are left intact
+//      conservatively — we can't know how the agent would have restructured.
+//
+// The "eliminates N turns" badge on each tool row counts the calls where that
+// tool is the ONLY tool (solo turn-eliminating call), giving a quick read on
+// how much "wasted" API round-trips a tool is responsible for.
+function ToolSkipSection({
+    toolStats,
+    turnProfiles,
+    skippedTools,
+    onToggle,
+    model,
+    baseline,
+    scale,
+    toolScale,
+}: {
+    toolStats: ToolStats[];
+    turnProfiles: TurnProfile[];
+    skippedTools: Set<string>;
+    onToggle: (toolName: string) => void;
+    model: ThinkingModel;
+    baseline: ReturnType<typeof projectThinking>;
+    scale: number;
+    toolScale: number;
+}) {
+    const [open, setOpen] = useState(false);
+
+    // For each tool: how many turns does it SOLELY occupy (only tool in that call)?
+    // Those turns are guaranteed to be eliminated when the tool is skipped —
+    // regardless of what else is checked. Mixed-tool turns only become eliminated
+    // when ALL their tools are checked.
+    const soloTurnCount = new Map<string, number>();
+    for (const tp of turnProfiles) {
+        if (tp.toolNames.length === 1) {
+            soloTurnCount.set(tp.toolNames[0], (soloTurnCount.get(tp.toolNames[0]) ?? 0) + 1);
+        }
+    }
+
+    // Helper: project cost given a specific skipped-tool set (used to compute
+    // marginal savings for each row independently).
+    function projectForSet(skipped: Set<string>): number {
+        return projectThinking(model, scale, toolScale, computeSkipDelta(turnProfiles, skipped))
+            .costUsd;
+    }
+
+    // Marginal saving of toggling each tool (cost without it minus cost with it),
+    // holding all other current selections fixed.
+    const perToolSavings = toolStats.map((t) => {
+        const withSet = new Set(skippedTools);
+        const withoutSet = new Set(skippedTools);
+        if (skippedTools.has(t.toolName)) {
+            withSet.delete(t.toolName); // "with" = restore it
+        } else {
+            withoutSet.add(t.toolName); // "without" = add it
+        }
+        return {
+            toolName: t.toolName,
+            saving: projectForSet(withSet) - projectForSet(withoutSet),
+        };
+    });
+
+    const totalSkippedSaving = baseline.costUsd - projectForSet(skippedTools);
+
+    return (
+        <div className="border border-gray-200 rounded-lg overflow-hidden">
+            <button
+                type="button"
+                onClick={() => setOpen((v) => !v)}
+                className="w-full flex items-center justify-between px-3 py-2 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
+            >
+                <span className="text-xs font-medium text-gray-700">
+                    Skip tools
+                    {skippedTools.size > 0 && (
+                        <span className="ml-2 px-1.5 py-0.5 bg-orange-100 text-orange-700 rounded text-[10px] font-semibold">
+                            {skippedTools.size} skipped
+                        </span>
+                    )}
+                </span>
+                <div className="flex items-center gap-3">
+                    {skippedTools.size > 0 && totalSkippedSaving > 1e-6 && (
+                        <span className="text-[11px] font-medium text-emerald-700 tabular-nums">
+                            −{fmtUsd(totalSkippedSaving)}
+                        </span>
+                    )}
+                    <span className="text-gray-400 text-xs">{open ? "▲" : "▼"}</span>
+                </div>
+            </button>
+            {open && (
+                <div className="divide-y divide-gray-100">
+                    <div className="px-3 py-2 text-[10px] text-gray-500 bg-white leading-relaxed">
+                        Check tools to remove them entirely. Savings include: generation
+                        tokens (writing the call), result tokens (injected into context),
+                        and — when a call&apos;s only tools are all skipped — the thinking
+                        generated in that call plus its downstream cache-read cascade.
+                        Mixed calls (some skipped tools, some kept) are conservatively
+                        left intact.
+                    </div>
+                    {toolStats.map((t) => {
+                        const checked = skippedTools.has(t.toolName);
+                        const saving = perToolSavings.find((s) => s.toolName === t.toolName)?.saving ?? 0;
+                        const soloTurns = soloTurnCount.get(t.toolName) ?? 0;
+                        return (
+                            <label
+                                key={t.toolName}
+                                className={
+                                    "flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-50 transition-colors " +
+                                    (checked ? "bg-orange-50/60" : "bg-white")
+                                }
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() => onToggle(t.toolName)}
+                                    className="accent-uipath-orange"
+                                />
+                                <span className="flex-1 text-xs font-mono text-gray-800">
+                                    {t.toolName}
+                                </span>
+                                {soloTurns > 0 && (
+                                    <span
+                                        title={`${soloTurns} API call(s) exist solely to run this tool — skipping it eliminates those turns entirely, including their thinking`}
+                                        className="text-[10px] text-amber-600 bg-amber-50 border border-amber-200 rounded px-1 py-0.5 tabular-nums"
+                                    >
+                                        {soloTurns} turn{soloTurns !== 1 ? "s" : ""}
+                                    </span>
+                                )}
+                                <span className="text-[11px] text-gray-400 tabular-nums">
+                                    {t.callCount}×
+                                </span>
+                                <span
+                                    className={
+                                        "text-[11px] tabular-nums w-16 text-right " +
+                                        (saving > 1e-6 ? "text-emerald-700" : "text-gray-300")
+                                    }
+                                >
+                                    {saving > 1e-6 ? `−${fmtUsd(saving)}` : "—"}
+                                </span>
+                            </label>
+                        );
+                    })}
+                </div>
+            )}
         </div>
     );
 }

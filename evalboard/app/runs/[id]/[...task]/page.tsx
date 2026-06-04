@@ -22,9 +22,10 @@ export const dynamic = "force-dynamic";
 export default async function TaskPage({
     params,
 }: {
-    params: Promise<{ id: string; task: string }>;
+    params: Promise<{ id: string; task: string[] }>;
 }) {
-    const { id, task: taskId } = await params;
+    const { id, task: taskSegments } = await params;
+    const taskId = taskSegments.join("/");
     const task = await readTaskDetail(id, taskId);
     if (!task) notFound();
 

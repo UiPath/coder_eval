@@ -48,4 +48,3 @@ export function ExpectedTurnsStat({
         </div>
     );
 }
-

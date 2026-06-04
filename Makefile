@@ -75,8 +75,9 @@ test-smoke:  ## Run e2e smoke tests with real API (mirrors CI "E2E Smoke Tests" 
 docker-image:  ## Build the coder-eval-agent container image
 	@VERSION=$$(uv run python -c "from importlib.metadata import version; print(version('coder-eval'))"); \
 	echo "Building coder-eval-agent:$$VERSION"; \
-	DOCKER_BUILDKIT=1 docker build -t coder-eval-agent:$$VERSION -t coder-eval-agent:latest -f docker/Dockerfile \
+	docker buildx build -t coder-eval-agent:$$VERSION -t coder-eval-agent:latest -f docker/Dockerfile \
 		--build-arg CODER_EVAL_VERSION=$$VERSION \
+		--build-arg SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS \
 		--secret id=uv_index_username,env=UV_INDEX_UIPATH_USERNAME \
 		--secret id=uv_index_password,env=UV_INDEX_UIPATH_PASSWORD \
 		.

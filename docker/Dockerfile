@@ -47,14 +47,14 @@ COPY experiments/default.yaml ./experiments/default.yaml
 # secrets, NOT ARG/ENV -- the secret mount is only visible to the single RUN
 # below, and nothing about it is recoverable from `docker history` or
 # `docker save | tar`. See `make docker-image` for the host-side wiring.
+ARG SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=""
+
 RUN --mount=type=secret,id=uv_index_username \
     --mount=type=secret,id=uv_index_password \
-    UV_INDEX_UIPATH_USERNAME=$(cat /run/secrets/uv_index_username 2>/dev/null || true) \
-    UV_INDEX_UIPATH_PASSWORD=$(cat /run/secrets/uv_index_password 2>/dev/null || true) \
-    UV_INDEX_UIPATH_USERNAME="$UV_INDEX_UIPATH_USERNAME" \
-    UV_INDEX_UIPATH_PASSWORD="$UV_INDEX_UIPATH_PASSWORD" \
-    SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=openai-codex-cli-bin,openai-codex \
-    uv pip install --system ".[uipath,codex]"
+    export UV_INDEX_UIPATH_USERNAME=$(cat /run/secrets/uv_index_username 2>/dev/null || true) && \
+    export UV_INDEX_UIPATH_PASSWORD=$(cat /run/secrets/uv_index_password 2>/dev/null || true) && \
+    export UV_EXTRA_INDEX_URL="https://${UV_INDEX_UIPATH_USERNAME}:${UV_INDEX_UIPATH_PASSWORD}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/" && \
+    uv export --frozen --extra uipath --extra codex | uv pip install --system -r /dev/stdin
 
 # Sanity check: the in-container entrypoint subcommand must be wired up.
 RUN coder-eval _run-task-internal --help > /dev/null

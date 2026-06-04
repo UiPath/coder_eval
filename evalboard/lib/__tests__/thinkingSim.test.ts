@@ -1,12 +1,33 @@
 import { describe, expect, test } from "vitest";
-import type { MessageEvent, TokenTotals } from "../runs";
+import type { MessageEvent, MessageToolUse, TokenTotals } from "../runs";
 import {
     buildThinkingModel,
+    computeSkipDelta,
     projectThinking,
     thinkingAmplification,
     toolAmplification,
 } from "../thinkingSim";
 import { resolvePricing } from "../pricing";
+
+// Minimal MessageToolUse for skip-tool tests.
+function toolUse(
+    toolName: string,
+    outputTokens: number,
+    resultPreview: string | null = null,
+): MessageToolUse {
+    return {
+        toolName,
+        toolUseId: null,
+        summary: toolName,
+        argText: null,
+        description: null,
+        genMs: null,
+        durationMs: null,
+        isError: false,
+        resultPreview,
+        outputTokens,
+    };
+}
 
 // Minimal assistant emission. Only the fields the simulator reads matter;
 // thinkingMs/generationMs drive the thinking-token estimate, outputTokens
@@ -19,6 +40,7 @@ function call(opts: {
     cacheWriteTokens?: number | null;
     thinkingOutputTokens?: number | null;
     model?: string;
+    toolUses?: MessageToolUse[];
     // null = main thread (default), string = sub-agent branch, undefined =
     // run didn't record branch info (legacy → simulator disabled).
     parentToolUseId?: string | null;
@@ -35,7 +57,7 @@ function call(opts: {
         blockTypes: [],
         thinkingText: null,
         text: null,
-        toolUses: [],
+        toolUses: opts.toolUses ?? [],
         inputTokens: 0,
         outputTokens: opts.outputTokens,
         cacheWriteTokens:
@@ -495,5 +517,396 @@ describe("buildThinkingModel — tree-structured (sub-agent) cascade", () => {
             0.5,
         );
         expect(m).toBeNull();
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Skip-tool feature
+//
+// Setup: 3 calls, no thinking, with toolUses so we can test per-tool attribution.
+//
+//   call0: out=50, cw=0, tools=[Bash(gen=30, preview=10chars), Read(gen=15, preview=5chars)]
+//   call1: out=20, cw=200, tools=[TaskCreate(gen=5, preview=2chars)]
+//   call2: out=10, cw=100, tools=[]  (last call, no result measured)
+//
+// toolPerCall estimation (thinkPerCall=0 everywhere since no thinking):
+//   j=0: next=call1 cw=200>0, same branch
+//        k=0: cw=0→add(0+max(0,50-0)=50)→groupRealOutput=50; k=-1 stop
+//        toolPerCall[0] = max(0, 200-50) = 150
+//   j=1: next=call2 cw=100>0, same branch
+//        k=1: cw=200>0→add(0+max(0,20-0)=20)→groupRealOutput=20; break
+//        toolPerCall[1] = max(0, 100-20) = 80
+//   j=2: last call → toolPerCall[2] = 0
+//
+// laterInBranch: call0→2, call1→1, call2→0
+//
+// cascade:
+//   coeffToolWrite = 150 + 80 = 230
+//   coeffToolRead  = 150*(2-1) + 80*(1-1) = 150
+//
+// turnProfiles[0] (call0, tools=[Bash,Read]):
+//   toolResultCacheWrite = 150, toolResultCacheRead = 150*(2-1) = 150
+//   Bash  preview=10, Read preview=5 → fractions: Bash=10/15, Read=5/15
+//   Bash  genCacheWrite=30*(1)=30, genCacheRead=30*(2-1)=30
+//   Read  genCacheWrite=15*(1)=15, genCacheRead=15*(2-1)=15
+//
+// turnProfiles[1] (call1, tools=[TaskCreate]):
+//   toolResultCacheWrite = 80, toolResultCacheRead = 80*(1-1) = 0
+//   TaskCreate fraction=1.0
+//   TaskCreate genCacheWrite=5*1=5, genCacheRead=5*0=0
+//
+// turnProfiles[2] (call2, no tools):
+//   toolResultCacheWrite = 0, toolShares = []
+// ---------------------------------------------------------------------------
+
+function skipToolModel() {
+    const messages = [
+        call({
+            generationMs: 10,
+            thinkingMs: 0,
+            outputTokens: 50,
+            cacheWriteTokens: 0,
+            toolUses: [
+                toolUse("Bash", 30, "x".repeat(10)),
+                toolUse("Read", 15, "y".repeat(5)),
+            ],
+        }),
+        call({
+            generationMs: 10,
+            thinkingMs: 0,
+            outputTokens: 20,
+            cacheWriteTokens: 200,
+            toolUses: [toolUse("TaskCreate", 5, "z".repeat(2))],
+        }),
+        call({
+            generationMs: 10,
+            thinkingMs: 0,
+            outputTokens: 10,
+            cacheWriteTokens: 100,
+            toolUses: [],
+        }),
+    ];
+    return buildThinkingModel(messages, TOTALS, null);
+}
+
+describe("buildThinkingModel — toolStats", () => {
+    test("lists each unique tool with correct call count and output tokens", () => {
+        const m = skipToolModel();
+        expect(m).not.toBeNull();
+        if (!m) return;
+        const byName = Object.fromEntries(m.toolStats.map((t) => [t.toolName, t]));
+        expect(byName["Bash"].callCount).toBe(1);
+        expect(byName["Bash"].outputTokens).toBe(30);
+        expect(byName["Read"].callCount).toBe(1);
+        expect(byName["Read"].outputTokens).toBe(15);
+        expect(byName["TaskCreate"].callCount).toBe(1);
+        expect(byName["TaskCreate"].outputTokens).toBe(5);
+    });
+
+    test("sorted by callCount descending", () => {
+        // Three tools each with 1 call in this fixture; add a second Bash call
+        // to verify descending order.
+        const messages = [
+            call({
+                generationMs: 10,
+                thinkingMs: 0,
+                outputTokens: 50,
+                cacheWriteTokens: 0,
+                toolUses: [toolUse("Bash", 30)],
+            }),
+            call({
+                generationMs: 10,
+                thinkingMs: 0,
+                outputTokens: 20,
+                cacheWriteTokens: 100,
+                toolUses: [toolUse("Bash", 25), toolUse("Read", 10)],
+            }),
+        ];
+        const m = buildThinkingModel(messages, TOTALS, null);
+        if (!m) return;
+        expect(m.toolStats[0].toolName).toBe("Bash"); // 2 calls
+        expect(m.toolStats[0].callCount).toBe(2);
+        expect(m.toolStats[0].outputTokens).toBe(55); // 30 + 25
+        expect(m.toolStats[1].toolName).toBe("Read"); // 1 call
+    });
+});
+
+describe("buildThinkingModel — turnProfiles", () => {
+    test("toolNames matches tools called in each emission", () => {
+        const m = skipToolModel();
+        if (!m) return;
+        expect(m.turnProfiles[0].toolNames).toEqual(["Bash", "Read"]);
+        expect(m.turnProfiles[1].toolNames).toEqual(["TaskCreate"]);
+        expect(m.turnProfiles[2].toolNames).toEqual([]);
+    });
+
+    test("toolResultCacheWrite/Read computed from cache-growth estimation", () => {
+        const m = skipToolModel();
+        if (!m) return;
+        // call0: toolPerCall=150, later=2 → write=150, read=150*(2-1)=150
+        expect(m.turnProfiles[0].toolResultCacheWrite).toBeCloseTo(150, 5);
+        expect(m.turnProfiles[0].toolResultCacheRead).toBeCloseTo(150, 5);
+        // call1: toolPerCall=80, later=1 → write=80, read=80*(1-1)=0
+        expect(m.turnProfiles[1].toolResultCacheWrite).toBeCloseTo(80, 5);
+        expect(m.turnProfiles[1].toolResultCacheRead).toBeCloseTo(0, 5);
+        // call2: last call, no successor → 0
+        expect(m.turnProfiles[2].toolResultCacheWrite).toBeCloseTo(0, 5);
+    });
+
+    test("toolShares resultFraction weighted by result preview length", () => {
+        const m = skipToolModel();
+        if (!m) return;
+        // call0: Bash preview=10chars, Read preview=5chars → 10/15, 5/15
+        const [bash, read] = m.turnProfiles[0].toolShares;
+        expect(bash.toolName).toBe("Bash");
+        expect(bash.resultFraction).toBeCloseTo(10 / 15, 5);
+        expect(read.toolName).toBe("Read");
+        expect(read.resultFraction).toBeCloseTo(5 / 15, 5);
+        // call1: TaskCreate only → fraction=1.0
+        expect(m.turnProfiles[1].toolShares[0].resultFraction).toBeCloseTo(1.0, 5);
+    });
+
+    test("toolShares resultFraction splits equally when all previews are null", () => {
+        const messages = [
+            call({
+                generationMs: 10,
+                thinkingMs: 0,
+                outputTokens: 20,
+                cacheWriteTokens: 0,
+                toolUses: [toolUse("A", 10, null), toolUse("B", 10, null)],
+            }),
+            call({
+                generationMs: 10,
+                thinkingMs: 0,
+                outputTokens: 10,
+                cacheWriteTokens: 100,
+                toolUses: [],
+            }),
+        ];
+        const m = buildThinkingModel(messages, TOTALS, null);
+        if (!m) return;
+        const [a, b] = m.turnProfiles[0].toolShares;
+        expect(a.resultFraction).toBeCloseTo(0.5, 5);
+        expect(b.resultFraction).toBeCloseTo(0.5, 5);
+    });
+
+    test("toolShares genCacheWrite/Read use laterInBranch multiplier", () => {
+        const m = skipToolModel();
+        if (!m) return;
+        // call0 has later=2: genCacheWrite = genTokens*1, genCacheRead = genTokens*(2-1)
+        const bash = m.turnProfiles[0].toolShares[0];
+        expect(bash.genTokens).toBe(30);
+        expect(bash.genCacheWrite).toBeCloseTo(30, 5); // 30 * 1
+        expect(bash.genCacheRead).toBeCloseTo(30, 5);  // 30 * (2-1)
+        // call1 has later=1: genCacheRead = genTokens*(1-1) = 0
+        const tc = m.turnProfiles[1].toolShares[0];
+        expect(tc.genTokens).toBe(5);
+        expect(tc.genCacheWrite).toBeCloseTo(5, 5);  // 5 * 1
+        expect(tc.genCacheRead).toBeCloseTo(0, 5);   // 5 * 0
+    });
+});
+
+describe("computeSkipDelta", () => {
+    test("empty skip set → zero delta", () => {
+        const m = skipToolModel();
+        if (!m) return;
+        const d = computeSkipDelta(m.turnProfiles, new Set());
+        expect(d.outputTokens).toBe(0);
+        expect(d.cacheWrite).toBe(0);
+        expect(d.cacheRead).toBe(0);
+        expect(d.toolResultCacheWrite).toBe(0);
+        expect(d.toolResultCacheRead).toBe(0);
+    });
+
+    test("solo tool skip: full turn eliminated — gen + result cascade removed", () => {
+        // TaskCreate is the only tool in call1 → full elimination.
+        // output: 5 (genTokens, no thinking)
+        // cacheWrite: 5 (genCW) + 80 (toolResultCW) = 85
+        // cacheRead:  0 (genCR) + 0  (toolResultCR) = 0
+        const m = skipToolModel();
+        if (!m) return;
+        const d = computeSkipDelta(m.turnProfiles, new Set(["TaskCreate"]));
+        expect(d.outputTokens).toBeCloseTo(5, 5);
+        expect(d.cacheWrite).toBeCloseTo(85, 5);
+        expect(d.cacheRead).toBeCloseTo(0, 5);
+        expect(d.toolResultCacheWrite).toBeCloseTo(80, 5);
+        expect(d.toolResultCacheRead).toBeCloseTo(0, 5);
+    });
+
+    test("solo tool skip eliminates full turn including thinking", () => {
+        // call0 has 100 thinking tokens + one tool. Skipping the tool kills the
+        // whole call, so thinking tokens also disappear.
+        // thinkPerCall[0] = 300 * (10/30) = 100; later=2
+        // thinkCacheWrite = 100*1 = 100, thinkCacheRead = 100*(2-1) = 100
+        const messages = [
+            call({
+                generationMs: 10,
+                thinkingMs: 10,
+                outputTokens: 100,
+                cacheWriteTokens: 0,
+                toolUses: [toolUse("Bash", 20, "preview")],
+            }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 300 }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 150 }),
+        ];
+        const m = buildThinkingModel(messages, TOTALS, null);
+        if (!m) return;
+        const thinkEst = 300 * (10 / 30); // ≈ 100
+        const d = computeSkipDelta(m.turnProfiles, new Set(["Bash"]));
+        // output = thinking(100) + genTokens(20)
+        expect(d.outputTokens).toBeCloseTo(thinkEst + 20, 3);
+        // cacheWrite includes all three: thinking + gen + result cascades
+        expect(d.cacheWrite).toBeGreaterThan(0);
+        // thinkCacheWrite and genCacheWrite are non-zero (later=2)
+        expect(d.cacheWrite).toBeCloseTo(
+            m.turnProfiles[0].thinkCacheWrite +
+                m.turnProfiles[0].toolShares[0].genCacheWrite +
+                m.turnProfiles[0].toolResultCacheWrite,
+            3,
+        );
+    });
+
+    test("mixed turn partial skip: only skipped tool's gen + result share removed, thinking stays", () => {
+        // call0 has Bash + Read. Skipping only Bash.
+        // Bash resultFraction = 10/15, so result contribution = (10/15)*150
+        const m = skipToolModel();
+        if (!m) return;
+        const bashFrac = 10 / 15;
+        const d = computeSkipDelta(m.turnProfiles, new Set(["Bash"]));
+        // output: Bash genTokens only (thinking=0 since no thinking in skipToolModel)
+        expect(d.outputTokens).toBeCloseTo(30, 5);
+        // cacheWrite: Bash genCW(30) + Bash resultFraction * toolResultCW(150)
+        expect(d.cacheWrite).toBeCloseTo(30 + bashFrac * 150, 4);
+        // cacheRead: Bash genCR(30) + Bash resultFraction * toolResultCR(150)
+        expect(d.cacheRead).toBeCloseTo(30 + bashFrac * 150, 4);
+        // toolResultCacheWrite only the fraction
+        expect(d.toolResultCacheWrite).toBeCloseTo(bashFrac * 150, 4);
+    });
+
+    test("skipping all tools in a mixed turn triggers full elimination", () => {
+        // Skip both Bash and Read in call0.
+        const m = skipToolModel();
+        if (!m) return;
+        const d = computeSkipDelta(m.turnProfiles, new Set(["Bash", "Read"]));
+        // Full elimination: gen(30+15) + result(150) cascade
+        expect(d.outputTokens).toBeCloseTo(45, 5); // 30+15 gen, 0 thinking
+        expect(d.cacheWrite).toBeCloseTo(
+            30 + 15 + 150,   // genCW(Bash) + genCW(Read) + full toolResultCW
+            4,
+        );
+        expect(d.toolResultCacheWrite).toBeCloseTo(150, 5); // full, not fractional
+    });
+
+    test("calls with no tools are never eliminated", () => {
+        // call2 has no tools; skipping any set of tools must not touch it.
+        const messages = [
+            call({ generationMs: 10, thinkingMs: 10, outputTokens: 100, cacheWriteTokens: 0 }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 300 }),
+        ];
+        const m = buildThinkingModel(messages, TOTALS, null);
+        if (!m) return;
+        // call0 has no tools (toolUses=[]) → even with a non-empty skip set, delta = 0
+        const d = computeSkipDelta(m.turnProfiles, new Set(["Bash", "Read"]));
+        expect(d.outputTokens).toBe(0);
+        expect(d.cacheWrite).toBe(0);
+    });
+});
+
+describe("projectThinking — tool skip", () => {
+    test("scale=1, no skip reproduces the baseline exactly", () => {
+        const m = skipToolModel();
+        if (!m) return;
+        const base = projectThinking(m, 1, 1);
+        expect(base.outputTokens).toBe(TOTALS.output);
+        expect(base.cacheCreationTokens).toBe(TOTALS.cacheCreation);
+        expect(base.cacheReadTokens).toBe(TOTALS.cacheRead);
+    });
+
+    test("skip reduces cost relative to baseline", () => {
+        const m = skipToolModel();
+        if (!m) return;
+        const base = projectThinking(m, 1, 1);
+        const skip = computeSkipDelta(m.turnProfiles, new Set(["TaskCreate"]));
+        const proj = projectThinking(m, 1, 1, skip);
+        expect(proj.costUsd).toBeLessThan(base.costUsd);
+    });
+
+    test("tool-output slider is a no-op when all tools are skipped", () => {
+        // Skipping every tool means no remaining tool results to scale.
+        // Moving toolScale should not change the projection.
+        const m = skipToolModel();
+        if (!m) return;
+        const allTools = new Set(m.toolStats.map((t) => t.toolName));
+        const skip = computeSkipDelta(m.turnProfiles, allTools);
+        const atHalf = projectThinking(m, 1, 0.5, skip);
+        const atOne = projectThinking(m, 1, 1, skip);
+        const atDouble = projectThinking(m, 1, 2, skip);
+        expect(atHalf.cacheCreationTokens).toBeCloseTo(atOne.cacheCreationTokens, 3);
+        expect(atHalf.cacheReadTokens).toBeCloseTo(atOne.cacheReadTokens, 3);
+        expect(atDouble.cacheCreationTokens).toBeCloseTo(atOne.cacheCreationTokens, 3);
+        expect(atDouble.cacheReadTokens).toBeCloseTo(atOne.cacheReadTokens, 3);
+    });
+
+    test("tool-output slider still works on remaining tools after partial skip", () => {
+        // Skip only TaskCreate; Bash + Read tool results remain and the slider
+        // should still move cost up/down for those.
+        const m = skipToolModel();
+        if (!m) return;
+        const skip = computeSkipDelta(m.turnProfiles, new Set(["TaskCreate"]));
+        const atZero = projectThinking(m, 1, 0, skip);
+        const atOne = projectThinking(m, 1, 1, skip);
+        const atDouble = projectThinking(m, 1, 2, skip);
+        expect(atZero.cacheCreationTokens).toBeLessThan(atOne.cacheCreationTokens);
+        expect(atDouble.cacheCreationTokens).toBeGreaterThan(atOne.cacheCreationTokens);
+    });
+
+    test("skipping more tools saves more cost (monotone in skip set size)", () => {
+        const m = skipToolModel();
+        if (!m) return;
+        const base = projectThinking(m, 1, 1).costUsd;
+        const skipOne = projectThinking(
+            m, 1, 1, computeSkipDelta(m.turnProfiles, new Set(["TaskCreate"])),
+        ).costUsd;
+        const skipTwo = projectThinking(
+            m, 1, 1, computeSkipDelta(m.turnProfiles, new Set(["TaskCreate", "Read"])),
+        ).costUsd;
+        const skipAll = projectThinking(
+            m, 1, 1, computeSkipDelta(m.turnProfiles, new Set(m.toolStats.map((t) => t.toolName))),
+        ).costUsd;
+        expect(skipOne).toBeLessThan(base);
+        expect(skipTwo).toBeLessThan(skipOne);
+        expect(skipAll).toBeLessThan(skipTwo);
+    });
+
+    test("skip and thinking scale compose independently", () => {
+        // Skipping a tool + scaling thinking should give the same result as
+        // applying each delta separately and summing — they are additive on
+        // top of the baseline because they affect disjoint token populations.
+        const m = skipToolModel();
+        if (!m) return;
+        const skip = computeSkipDelta(m.turnProfiles, new Set(["TaskCreate"]));
+        const combined = projectThinking(m, 0.5, 1, skip);
+        const skipOnly = projectThinking(m, 1, 1, skip);
+        const thinkOnly = projectThinking(m, 0.5, 1);
+        const base = projectThinking(m, 1, 1);
+        // cost(combined) ≈ cost(skipOnly) + cost(thinkOnly) - cost(base) when
+        // the populations are disjoint (tool skip has no thinking in this fixture).
+        expect(combined.costUsd).toBeCloseTo(
+            skipOnly.costUsd + thinkOnly.costUsd - base.costUsd,
+            6,
+        );
+    });
+
+    test("token counts never go negative under extreme skip combinations", () => {
+        const m = skipToolModel();
+        if (!m) return;
+        const skip = computeSkipDelta(
+            m.turnProfiles,
+            new Set(m.toolStats.map((t) => t.toolName)),
+        );
+        const proj = projectThinking(m, 0, 0, skip);
+        expect(proj.outputTokens).toBeGreaterThanOrEqual(0);
+        expect(proj.cacheCreationTokens).toBeGreaterThanOrEqual(0);
+        expect(proj.cacheReadTokens).toBeGreaterThanOrEqual(0);
     });
 });
