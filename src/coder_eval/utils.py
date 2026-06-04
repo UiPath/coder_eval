@@ -1,7 +1,9 @@
 """Utility functions for version tracking and reproducibility."""
 
+import json
 import logging
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -58,6 +60,69 @@ def _uip_version() -> str:
     return "unknown"
 
 
+def _resolve_plugin_tools_dir() -> Path | None:
+    """Resolve the canonical ``node_modules/@uipath`` plugin-tools directory.
+
+    Mirrors ``Sandbox._refresh_plugin_tools_dir`` (MST-9795): an external
+    ``PLUGIN_TOOLS_DIR`` pin wins; otherwise resolve ``uip`` on PATH, follow
+    symlinks (Bun installs ``uip`` as a symlink into the package dist), and walk
+    up to the first ``@uipath`` directory whose parent is ``node_modules``.
+
+    Returns ``None`` when no usable ``uip`` is on PATH or it does not live inside
+    a recognizable ``node_modules/@uipath`` tree (e.g. development monorepo runs).
+    """
+    if pinned := os.environ.get("PLUGIN_TOOLS_DIR"):
+        pinned_path = Path(pinned)
+        return pinned_path if pinned_path.is_dir() else None
+
+    resolved = shutil.which("uip")
+    if not resolved:
+        return None
+    try:
+        real = Path(resolved).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    for ancestor in real.parents:
+        if ancestor.name == "@uipath" and ancestor.parent.name == "node_modules":
+            return ancestor
+    return None
+
+
+def _tool_plugin_versions() -> dict[str, str]:
+    """Return ``{plugin_name: version}`` for installed ``@uipath/*-tool`` plugins.
+
+    The UiPath CLI shell (``@uipath/cli``, reported as ``cli_version``) and its
+    tool plugins (e.g. ``@uipath/maestro-tool``) are versioned independently, so
+    the shell version alone can mislead regression timelines. Enumerates the
+    ``@uipath`` plugin-tools dir for packages whose ``package.json`` name ends in
+    ``-tool`` and records their ``version``.
+
+    Best-effort: a missing dir or unreadable/unparseable ``package.json`` is
+    skipped, never raised — capturing reproducibility metadata must not fail a run.
+    """
+    tools_dir = _resolve_plugin_tools_dir()
+    if tools_dir is None or not tools_dir.is_dir():
+        return {}
+
+    plugins: dict[str, str] = {}
+    # npm installs ``@uipath/<pkg>`` into ``@uipath/<pkg>/``, so a ``-tool`` plugin
+    # dir is always named ``<pkg>-tool``. Mirror the manifest-name contract
+    # (``name.endswith("-tool")`` below) in the glob to avoid statting unrelated dirs.
+    for pkg_json in sorted(tools_dir.glob("*-tool/package.json")):
+        try:
+            data = json.loads(pkg_json.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.debug("Failed to read or parse tool-plugin package.json at %s: %s", pkg_json, exc)
+            continue
+        name = data.get("name")
+        if not isinstance(name, str) or not name.endswith("-tool"):
+            continue
+        # Key on the short package name (drop the @uipath scope) for readability.
+        short_name = name.rsplit("/", 1)[-1]
+        plugins[short_name] = data.get("version", "unknown")
+    return plugins
+
+
 def get_version_info(sandbox_path: Path | None = None) -> dict[str, Any]:
     """Captures versions of key dependencies for reproducibility.
 
@@ -85,6 +150,11 @@ def get_version_info(sandbox_path: Path | None = None) -> dict[str, Any]:
     # uip CLI is installed via npm; capture `uip --version`. Read by
     # dashboard/scripts/ci/slack_summary.py.
     version_info["cli_version"] = _uip_version()
+
+    # The CLI shell (cli_version) and its `@uipath/*-tool` plugins (e.g.
+    # maestro-tool) version independently, so the shell version alone can
+    # mislead regression timelines. Record the installed plugin versions too.
+    version_info["tool_plugins"] = _tool_plugin_versions()
 
     # Get coder_eval version
     from importlib.metadata import PackageNotFoundError, version

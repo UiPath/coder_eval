@@ -287,7 +287,12 @@ interface RawRunJson {
     tasks_failed?: number;
     tasks_error?: number;
     task_results?: RawTaskResult[];
-    environment_info?: Record<string, string | number | null>;
+    // Values are scalars except `tool_plugins`, a {plugin: version} map of
+    // the installed @uipath/*-tool packages (recorded since coder_eval #366).
+    environment_info?: Record<
+        string,
+        string | number | null | Record<string, string>
+    >;
 }
 
 // Components captured in run env_info. Each entry may accept multiple keys —
@@ -323,8 +328,8 @@ const COMPONENTS: {
     },
 ];
 
-function extractComponentShas(
-    env: Record<string, string | number | null> | undefined,
+export function extractComponentShas(
+    env: RawRunJson["environment_info"],
 ): ComponentSha[] {
     if (!env) return [];
     const out: ComponentSha[] = [];
@@ -345,6 +350,23 @@ function extractComponentShas(
             url = comp.nonShaUrl;
         }
         out.push({ name: comp.display, sha: value, url });
+    }
+    // Tool plugins (e.g. maestro-tool) version independently of the cli
+    // shell, and the plugin's bundled schema — not the shell version — often
+    // decides behavior; surface each one as its own chip after `cli`.
+    // Published from the same GitHub Packages feed as @uipath/cli.
+    const plugins = env.tool_plugins;
+    if (plugins != null && typeof plugins === "object") {
+        for (const [name, version] of Object.entries(plugins).sort(([a], [b]) =>
+            a.localeCompare(b),
+        )) {
+            if (typeof version !== "string" || !version) continue;
+            out.push({
+                name,
+                sha: version,
+                url: `https://github.com/UiPath/cli/pkgs/npm/${encodeURIComponent(name)}/versions`,
+            });
+        }
     }
     return out;
 }

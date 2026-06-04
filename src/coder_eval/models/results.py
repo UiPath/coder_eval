@@ -747,7 +747,14 @@ class RunSummary(BaseModel):
 
     # Environment info
     framework_version: str = Field(description="Version of coder_eval framework")
-    environment_info: dict[str, str] = Field(default_factory=dict, description="Environment and dependency versions")
+    environment_info: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Environment and dependency versions. Values are usually strings but may be "
+            "nested (e.g. ``tool_plugins`` is a ``{plugin: version}`` dict), so the value "
+            "type is ``Any`` to match ``EvaluationResult.environment_info``."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_task_count_invariant(self) -> RunSummary:

@@ -13,6 +13,7 @@ import {
 import {
     type ArtifactRef,
     clearRunCacheDir,
+    extractComponentShas,
     isExcludedArtifact,
     sortArtifacts,
     toTaskRow,
@@ -225,5 +226,48 @@ describe("visibleTurnsFromRaw (historical backfill)", () => {
     test("null when neither the field nor actual_commands is present", () => {
         expect(visibleTurnsFromRaw({})).toBeNull();
         expect(visibleTurnsFromRaw({ has_final_reply: true })).toBeNull();
+    });
+});
+
+describe("extractComponentShas", () => {
+    const baseEnv = {
+        git_commit: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+        skills_git_commit: "b2c3d4e",
+        cli_version: "1.2.0-alpha.20260603.7393",
+    };
+
+    test("appends one chip per tool plugin after the core components", () => {
+        const out = extractComponentShas({
+            ...baseEnv,
+            tool_plugins: {
+                "orchestrator-tool": "1.2.0-alpha.20260603.7393",
+                "maestro-tool": "1.2.0-alpha.20260603.7393",
+            },
+        });
+        expect(out.map((c) => c.name)).toEqual([
+            "coder_eval",
+            "skills",
+            "cli",
+            "maestro-tool",
+            "orchestrator-tool",
+        ]);
+        const maestro = out.find((c) => c.name === "maestro-tool");
+        expect(maestro?.sha).toBe("1.2.0-alpha.20260603.7393");
+        expect(maestro?.url).toBe(
+            "https://github.com/UiPath/cli/pkgs/npm/maestro-tool/versions",
+        );
+    });
+
+    test("legacy runs without tool_plugins are unchanged", () => {
+        const out = extractComponentShas(baseEnv);
+        expect(out.map((c) => c.name)).toEqual(["coder_eval", "skills", "cli"]);
+    });
+
+    test("skips empty/non-string plugin versions", () => {
+        const out = extractComponentShas({
+            ...baseEnv,
+            tool_plugins: { "maestro-tool": "" },
+        });
+        expect(out.map((c) => c.name)).toEqual(["coder_eval", "skills", "cli"]);
     });
 });
