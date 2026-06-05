@@ -628,6 +628,28 @@ class Sandbox:
         """
         return self._plugin_tools_dir
 
+    @property
+    def uip_search_path(self) -> str:
+        """The PATH used to resolve ``uip`` — agent-aligned prefix + process PATH.
+
+        The same PATH ``run_command`` subprocesses and the agent SDK env see,
+        so a binary resolved against it is the one task commands actually
+        executed.
+        """
+        search_path = os.environ.get("PATH", "")
+        if self._command_base_path:
+            search_path = f"{self._command_base_path}{os.pathsep}{search_path}"
+        return search_path
+
+    def refresh_plugin_tools_dir(self) -> None:
+        """Re-derive :attr:`plugin_tools_dir` for the current PATH.
+
+        Public hook for callers that need post-task state: the UiPath CLI
+        auto-installs/upgrades its tool plugins on first use, so a pin derived
+        at setup time can be stale (or ``None``) by the time the task ends.
+        """
+        self._refresh_plugin_tools_dir()
+
     def _refresh_plugin_tools_dir(self) -> None:
         """Resolve the canonical ``node_modules/@uipath`` for the current PATH.
 
@@ -647,12 +669,9 @@ class Sandbox:
         and ``set_command_base_path`` (re-derive after PATH alignment).
         """
         self._plugin_tools_dir = None
-        # Build the same PATH the criterion subprocess and SDK env see, so the
-        # binary we resolve here is the same one they will execute.
-        search_path = os.environ.get("PATH", "")
-        if self._command_base_path:
-            search_path = f"{self._command_base_path}{os.pathsep}{search_path}"
-        resolved = shutil.which("uip", path=search_path)
+        # Resolve against the same PATH the criterion subprocess and SDK env
+        # see, so the binary we resolve here is the same one they execute.
+        resolved = shutil.which("uip", path=self.uip_search_path)
         if not resolved:
             return
         try:

@@ -64,7 +64,7 @@ from .sandbox import Sandbox
 from .simulation import DialogStopReason, UserSimulator, evaluate_stop
 from .streaming.callbacks import StreamCallback, TaskScopedCallback, safe_emit
 from .streaming.events import CriteriaCheckEvent, CriterionSummary, TurnStartEvent
-from .utils import get_version_info
+from .utils import get_version_info, runtime_uip_versions
 
 
 # Get module logger
@@ -462,6 +462,9 @@ class Orchestrator:
                 logger.error(f"Evaluation failed: {e}", exc_info=True)
 
             finally:
+                # BEFORE post-run/cleanup: needs the live sandbox to resolve
+                # the agent-aligned `uip`, and post-task tool state on disk.
+                self._refresh_runtime_tool_versions()
                 await self._run_post_run_commands()
                 await self._cleanup()
                 # Capture the sanitised log tail AFTER teardown so any errors
@@ -953,6 +956,42 @@ class Orchestrator:
             # Record which transport llm_judge will use under DirectRoute so the
             # choice is visible in run artifacts (and not just the startup log).
             self.result.environment_info["judge_transport"] = self.route.judge_transport or "none"
+
+    def _refresh_runtime_tool_versions(self) -> None:
+        """Re-capture uip shell + tool-plugin versions after the task ran.
+
+        ``get_version_info`` runs at setup time and therefore records the
+        *pre-task* state. The UiPath CLI auto-installs/upgrades its
+        ``@uipath/*-tool`` plugins on first use inside the task (under
+        ``--driver docker`` containers start with image-baked or missing
+        tools), so what the agent and criteria actually executed is only
+        knowable once the task is done (coder_eval#366 follow-up). Resolve
+        through the sandbox's agent-aligned PATH so we report the binary the
+        task commands ran, not whichever ``uip`` this process sees first.
+
+        The two keys update independently: a run can end with a post-task
+        ``cli_version`` but setup-time ``tool_plugins`` (e.g. the plugin dir
+        was lost to a PATH change while the shell still resolves) — each key
+        keeps its setup-time value only when its own post-task resolution
+        came back empty.
+
+        Best-effort: skipped when the sandbox is gone; never raises.
+        """
+        if self.result is None or self.sandbox is None:
+            return
+        try:
+            # Re-derive: auto-install may have (re)created the plugin dir mid-task.
+            self.sandbox.refresh_plugin_tools_dir()
+            versions = runtime_uip_versions(self.sandbox.plugin_tools_dir, self.sandbox.uip_search_path)
+            # Keep the setup-time values when post-task resolution comes back
+            # empty (e.g. `uip` gone from PATH) — they are the better estimate
+            # of what the task ran than "unknown"/{}.
+            if versions.get("cli_version") not in (None, "", "unknown"):
+                self.result.environment_info["cli_version"] = versions["cli_version"]
+            if versions.get("tool_plugins"):
+                self.result.environment_info["tool_plugins"] = versions["tool_plugins"]
+        except Exception as exc:
+            logger.debug("Failed to refresh runtime tool versions: %s", exc)
 
     async def _create_agent(self) -> Agent[Any]:
         """Create the appropriate agent based on task configuration.

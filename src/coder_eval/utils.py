@@ -49,10 +49,21 @@ def _git_short_sha(repo_path: Path) -> str:
     return "unknown"
 
 
-def _uip_version() -> str:
-    """Return `uip --version` output, or 'unknown' if the CLI isn't installed."""
+def _uip_version(search_path: str | None = None) -> str:
+    """Return `uip --version` output, or 'unknown' if the CLI isn't installed.
+
+    ``search_path`` overrides the PATH used to resolve ``uip``; pass the
+    agent-aligned PATH to report the binary the agent actually executed
+    instead of whichever ``uip`` this process happens to see first.
+    """
+    uip = "uip"
+    if search_path is not None:
+        resolved = shutil.which("uip", path=search_path)
+        if not resolved:
+            return "unknown"
+        uip = resolved
     try:
-        result = subprocess.run(["uip", "--version"], capture_output=True, text=True, encoding="utf-8", timeout=5)
+        result = subprocess.run([uip, "--version"], capture_output=True, text=True, encoding="utf-8", timeout=5)
         if result.returncode == 0:
             return result.stdout.strip() or "unknown"
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -88,7 +99,7 @@ def _resolve_plugin_tools_dir() -> Path | None:
     return None
 
 
-def _tool_plugin_versions() -> dict[str, str]:
+def _tool_plugin_versions(tools_dir: Path | None = None) -> dict[str, str]:
     """Return ``{plugin_name: version}`` for installed ``@uipath/*-tool`` plugins.
 
     The UiPath CLI shell (``@uipath/cli``, reported as ``cli_version``) and its
@@ -97,10 +108,15 @@ def _tool_plugin_versions() -> dict[str, str]:
     ``@uipath`` plugin-tools dir for packages whose ``package.json`` name ends in
     ``-tool`` and records their ``version``.
 
+    ``tools_dir`` overrides the directory to enumerate (e.g. the sandbox's
+    agent-aligned ``plugin_tools_dir``); when ``None``, resolve from this
+    process's own environment via :func:`_resolve_plugin_tools_dir`.
+
     Best-effort: a missing dir or unreadable/unparseable ``package.json`` is
     skipped, never raised — capturing reproducibility metadata must not fail a run.
     """
-    tools_dir = _resolve_plugin_tools_dir()
+    if tools_dir is None:
+        tools_dir = _resolve_plugin_tools_dir()
     if tools_dir is None or not tools_dir.is_dir():
         return {}
 
@@ -121,6 +137,34 @@ def _tool_plugin_versions() -> dict[str, str]:
         short_name = name.rsplit("/", 1)[-1]
         plugins[short_name] = data.get("version", "unknown")
     return plugins
+
+
+def runtime_uip_versions(plugin_tools_dir: str | Path | None, search_path: str | None = None) -> dict[str, Any]:
+    """Capture uip shell + tool-plugin versions as resolved at task runtime.
+
+    :func:`get_version_info` resolves ``uip`` from this process's own
+    environment, which describes the *pre-task* state: under ``--driver
+    docker`` the CLI auto-installs/upgrades its ``@uipath/*-tool`` plugins on
+    first use inside the task, so versions captured at setup time are the
+    image-baked ones, not what the agent and criteria actually executed
+    (coder_eval#366 follow-up). Call this AFTER the task with the sandbox's
+    agent-aligned ``plugin_tools_dir``/PATH to record the real runtime state.
+
+    Strict about its inputs, unlike :func:`get_version_info`: a ``None``
+    ``plugin_tools_dir`` yields ``tool_plugins == {}`` rather than falling
+    back to process-env discovery — on an in-process (non-docker) run that
+    fallback would reach into the host's installs, re-introducing exactly the
+    host-pollution this function exists to remove. Callers keep their
+    setup-time values on empty results instead.
+
+    Returns a partial env-info dict (``cli_version`` + ``tool_plugins``)
+    suitable for ``environment_info.update(...)``. Best-effort like the rest
+    of the version capture: never raises.
+    """
+    return {
+        "cli_version": _uip_version(search_path),
+        "tool_plugins": _tool_plugin_versions(Path(plugin_tools_dir)) if plugin_tools_dir else {},
+    }
 
 
 def get_version_info(sandbox_path: Path | None = None) -> dict[str, Any]:

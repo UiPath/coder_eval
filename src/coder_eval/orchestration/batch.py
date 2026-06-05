@@ -16,6 +16,7 @@ import logging
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from ..models import (
     AgentKind,
@@ -364,6 +365,55 @@ def fingerprint_diff(prior: dict[str, object], current: dict[str, object]) -> di
     return {k: (prior[k], current[k]) for k in current if k in prior and prior[k] != current[k]}
 
 
+def _override_uip_versions_from_tasks(version_info: dict[str, Any], task_results: list[TaskResult]) -> None:
+    """Replace host-captured uip versions with the per-task (container) truth.
+
+    ``cli_version`` and ``tool_plugins`` in ``version_info`` were resolved on
+    the machine running this process; the tasks ran inside containers that
+    auto-install the latest alpha tool plugins on first use, so only the
+    per-task ``environment_info`` (captured in-container, post-task) describes
+    what actually executed. Mutates ``version_info`` in place: each key is
+    overridden by the consensus across tasks; when tasks disagree (e.g. an
+    alpha published mid-run) the sorted distinct versions are joined with
+    ``" | "`` and a warning is logged. Host values are kept only when no task
+    reported one — for ``cli_version`` that means no value besides ``""`` /
+    ``"unknown"``, and for ``tool_plugins`` no non-empty plugin entry at all
+    (legacy results, or every task errored before env capture).
+    """
+    cli_versions = sorted(
+        {
+            v
+            for r in task_results
+            if (env := r.result.environment_info)
+            and isinstance(v := env.get("cli_version"), str)
+            and v not in ("", "unknown")
+        }
+    )
+    if cli_versions:
+        if len(cli_versions) > 1:
+            logger.warning("cli_version drifted across task containers: %s", cli_versions)
+        version_info["cli_version"] = " | ".join(cli_versions)
+
+    plugin_versions: dict[str, set[str]] = {}
+    for r in task_results:
+        plugins = (r.result.environment_info or {}).get("tool_plugins")
+        if not isinstance(plugins, dict):
+            continue
+        for name, plugin_version in plugins.items():
+            if isinstance(plugin_version, str) and plugin_version:
+                plugin_versions.setdefault(name, set()).add(plugin_version)
+    # Gate on collected entries, not on "some task had a tool_plugins dict":
+    # an all-empty consensus ({} from every task) must not stomp the host
+    # fallback — symmetric with the ""/"unknown" filter on cli_version above.
+    if plugin_versions:
+        drifted = {name: sorted(versions) for name, versions in plugin_versions.items() if len(versions) > 1}
+        if drifted:
+            logger.warning("tool_plugins drifted across task containers: %s", drifted)
+        version_info["tool_plugins"] = {
+            name: " | ".join(sorted(versions)) for name, versions in sorted(plugin_versions.items())
+        }
+
+
 def _generate_run_summary(
     run_dir: Path,
     task_results: list[TaskResult],
@@ -397,6 +447,13 @@ def _generate_run_summary(
     statuses = [r.result.final_status for r in task_results]
 
     version_info = get_version_info()
+    # The run-level cli/tool versions must describe what the tasks executed,
+    # not this process's host installs: under --driver docker each task runs
+    # in its own container, which auto-installs the latest alpha tool plugins
+    # at first use — the host's `uip` tree can differ arbitrarily (#366
+    # recorded host values by mistake). Aggregate the per-task (in-container)
+    # captures; host values survive only as a fallback when no task reported.
+    _override_uip_versions_from_tasks(version_info, task_results)
     host_coder_eval = version_info.get("coder_eval", "unknown")
     # Surface host↔container version drift: under --driver docker the agent
     # ran against the image's version, not the host's. Without this warning
