@@ -16,6 +16,7 @@ bias is heavily toward "stay silent unless we're confident".
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import re
@@ -30,6 +31,16 @@ DASHBOARD_BASE = "https://coder-evalboard.uipath-dev.com/runs"
 # anything significantly lower likely means broken task discovery, a partial
 # run, or an ad-hoc smoke test — none of which the channel needs to see.
 MIN_TASKS_FOR_PING = 100
+
+# Pass-rate cutoffs for the traffic-light dot. >= GREEN_PCT reads green;
+# < RED_PCT reads red; in between is yellow. "Not green" (< GREEN_PCT) is also
+# the cutoff at which we tag the skill's owner in the breakdown — keep the two
+# uses keyed off the same constant so they never drift apart.
+GREEN_PCT = 85.0
+RED_PCT = 50.0
+
+# Per-skill owner mapping, shipped alongside this script and read at runtime.
+OWNERS_CSV = Path(__file__).resolve().parent / "skill-test-owners.csv"
 
 
 def fmt_duration(seconds: float) -> str:
@@ -72,12 +83,34 @@ def derive_skill(task: dict) -> str | None:
 
 
 def _pct_dot(pct: float) -> str:
-    """Traffic-light dot. Anything >= 85% reads green, <50% red, else yellow."""
-    if pct < 50:
+    """Traffic-light dot. >= GREEN_PCT reads green, < RED_PCT red, else yellow."""
+    if pct < RED_PCT:
         return ":red_circle:"
-    if pct < 85:
+    if pct < GREEN_PCT:
         return ":large_yellow_circle:"
     return ":large_green_circle:"
+
+
+def load_skill_owners() -> dict[str, str]:
+    """Map skill name → owner real name from skill-test-owners.csv.
+
+    The CSV is two columns, ``SkillName,Owner`` — one point-of-contact per
+    skill. Returns an empty dict when the file is missing or unreadable so the
+    breakdown degrades to no tags rather than failing the ping (the file ships
+    with the repo but may lag a fresh checkout). Skills absent from the CSV
+    simply get no owner.
+    """
+    try:
+        text = OWNERS_CSV.read_text()
+    except OSError:
+        return {}
+    owners: dict[str, str] = {}
+    for row in csv.DictReader(text.splitlines()):
+        skill = (row.get("SkillName") or "").strip()
+        owner = (row.get("Owner") or "").strip()
+        if skill and owner:
+            owners[skill] = owner
+    return owners
 
 
 def skill_breakdown(run: dict, min_tasks: int = 4) -> str:
@@ -85,10 +118,13 @@ def skill_breakdown(run: dict, min_tasks: int = 4) -> str:
 
     Lists every skill with at least ``min_tasks`` tasks in this run, sorted
     worst → best so the channel's eye lands on regressions first. Each row is
-    prefixed with a traffic-light dot keyed off pass rate. Returns the empty
-    string when no skill qualifies, so daily.sh can append unconditionally
-    without producing a dangling header.
+    prefixed with a traffic-light dot keyed off pass rate. Non-green skills
+    (< GREEN_PCT) are tagged with their owner's real name in plaintext (no
+    Slack @mention — we surface the point-of-contact without paging a
+    300-person channel). Returns the empty string when no skill qualifies, so
+    daily.sh can append unconditionally without producing a dangling header.
     """
+    owners = load_skill_owners()
     by_skill: dict[str, list[dict]] = {}
     for task in run.get("task_results") or []:
         skill = derive_skill(task)
@@ -110,7 +146,9 @@ def skill_breakdown(run: dict, min_tasks: int = 4) -> str:
     rows.sort(key=lambda r: (r[3], -r[2], r[0]))
     lines = [f":dart: Skills (>={min_tasks} tasks, worst → best):"]
     for skill, passed, total, pct in rows:
-        lines.append(f"{_pct_dot(pct)} {skill}: {passed}/{total} ({pct:.0f}%)")
+        owner = owners.get(skill) if pct < GREEN_PCT else None
+        owner_tag = f" — {owner}" if owner else ""
+        lines.append(f"{_pct_dot(pct)} {skill}: {passed}/{total} ({pct:.0f}%){owner_tag}")
     return "\n".join(lines)
 
 

@@ -136,6 +136,16 @@ jobs:
             --cov-report=xml \
             --cov-fail-under=80
 
+      # PHASE 4b: Dashboard package test suite. The dashboard is a separate
+      # package (own pyproject + lockfile under dashboard/), so the root
+      # `pytest tests/` above never reaches it. Install it editable into the
+      # same venv (mirrors dashboard/scripts/ci/daily.sh) and run its hermetic
+      # suite from the package dir so its pythonpath=["src"] config applies.
+      - name: Run dashboard test suite
+        run: |
+          uv pip install --python .venv/bin/python -e ./dashboard
+          cd dashboard && "$GITHUB_WORKSPACE/.venv/bin/pytest" tests/ -v --no-header
+
       - name: Upload coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
