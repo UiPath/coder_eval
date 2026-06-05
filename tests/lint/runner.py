@@ -10,6 +10,7 @@ from pathlib import Path
 
 from tests.lint.rules.base import BaseRule
 from tests.lint.rules.ce014_merge_strategy_declared import MergeStrategyDeclared
+from tests.lint.rules.ce015_create_subprocess_limit import CreateSubprocessExplicitLimit
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -43,6 +44,7 @@ ALL_RULES: list[RuleClass] = [
     NoTypeNameStringDispatch,
     NoTranscriptRegexInEval,
     MergeStrategyDeclared,
+    CreateSubprocessExplicitLimit,
 ]
 
 _NOQA_ALL = re.compile(r"#\s*noqa\s*$")

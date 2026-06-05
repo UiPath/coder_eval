@@ -58,6 +58,17 @@ HEARTBEAT_FILENAME = ".coder_eval_host_heartbeat"
 HEARTBEAT_INTERVAL_SECONDS = 2.0
 HEARTBEAT_STALE_SECONDS = 20
 
+# asyncio's StreamReader caps a single line at 64 KiB by default. The
+# container streams stream events as one NDJSON line each (wire.py), and a
+# single event carrying a large tool input -- e.g. an agent Write of a whole
+# .flow/.json file -- serialises well past 64 KiB. The default-limit reader
+# then raises ValueError mid-stream, which tore the container down before it
+# wrote task.json: the entire task was lost and the host recorded a bare
+# ERROR with no per-task report. Give the line reader generous headroom (run()
+# also degrades gracefully past it). Mirrors Orchestrator._POST_RUN_STREAM_LIMIT,
+# the same guard on the orchestrator's post-run subprocesses.
+STDOUT_LINE_LIMIT_BYTES = 64 * 1024 * 1024  # 64 MiB
+
 
 async def _heartbeat_loop(heartbeat_path: Path) -> None:
     """Write a monotonic counter to ``heartbeat_path`` every interval until cancelled.
@@ -371,6 +382,7 @@ class DockerRunner:
                 *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                limit=STDOUT_LINE_LIMIT_BYTES,
             )
             assert proc.stdout is not None
             log_path = self.rt.run_dir / "docker.log"
@@ -381,7 +393,28 @@ class DockerRunner:
             # budget. Covers CancelledError, KeyboardInterrupt, and any
             # other exit-by-exception path uniformly.
             try:
-                async for raw_line in proc.stdout:
+                # Explicit readline loop (not `async for`) so a single
+                # over-limit line degrades to a dropped line instead of a
+                # ValueError that tears the whole task down -- see below.
+                while True:
+                    try:
+                        raw_line = await proc.stdout.readline()
+                    except ValueError:
+                        # A single line exceeded STDOUT_LINE_LIMIT_BYTES.
+                        # readline() drains the offending bytes and resyncs at
+                        # the next newline, so we keep streaming. The dropped
+                        # line is a STREAM_EVENT (host-side live render) or a
+                        # log line; task.json crosses via the bind mount, not
+                        # stdout, so the task result is unaffected. Degrade,
+                        # don't die.
+                        logger.warning(
+                            "Dropped a stdout line over %d bytes from task %r's container; continuing to stream.",
+                            STDOUT_LINE_LIMIT_BYTES,
+                            self.rt.task.task_id,
+                        )
+                        continue
+                    if not raw_line:
+                        break
                     line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
                     # Three-way split:
                     #   - Has the wire-format prefix AND parses cleanly -> emit
