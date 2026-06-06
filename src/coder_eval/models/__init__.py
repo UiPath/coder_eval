@@ -136,6 +136,7 @@ from coder_eval.models.routing import (
 
 # Sandbox
 from coder_eval.models.sandbox import (
+    DockerBuildConfig,
     DockerDriverConfig,
     NodeEnvConfig,
     PythonEnvConfig,
@@ -234,6 +235,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "StarterFile",
     "TemplateSource",
     # Sandbox
+    "DockerBuildConfig",
     "DockerDriverConfig",
     "NodeEnvConfig",
     "PythonEnvConfig",

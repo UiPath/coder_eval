@@ -87,7 +87,17 @@ class BaseSuccessCriterion(BaseModel, ABC):
 
     description: str = Field(description="Human-readable description of what this criterion checks")
 
-    weight: float = Field(default=1.0, gt=0.0, description="Relative importance of this criterion (default: 1.0)")
+    weight: float = Field(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "Relative importance of this criterion in the weighted score (default: 1.0). Set to 0 to "
+            "exclude it from the weighted SCORE -- useful for informational or side-effect checks "
+            "(e.g. a setup command). NOTE: weight=0 excludes from the score but NOT from the pass/fail "
+            "gate -- a criterion scoring below its pass_threshold still flips the task to FAILURE "
+            "regardless of weight. To make a criterion truly non-gating, also set pass_threshold=0."
+        ),
+    )
 
     pass_threshold: float = Field(
         default=0.9, ge=0.0, le=1.0, description="Minimum score required to pass (default: 0.9 = 90%)"

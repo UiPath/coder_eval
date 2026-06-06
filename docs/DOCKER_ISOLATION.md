@@ -18,10 +18,15 @@ Aggregation (P/R/F1, suite thresholds, reports) always stays on the host. Each c
 ## One-time setup
 
 ```bash
-make docker-image
+make docker-image        # agnostic core (default; no extras, no credentials)
+# opt in to the UiPath + Codex extras (needs private-index credentials):
+make docker-image-full
 ```
 
-Builds `coder-eval-agent:<pkg-version>` and tags it `:latest`. Requires `UV_INDEX_UIPATH_USERNAME` / `..._PASSWORD` in the environment (auto-sourced from `.env`).
+Both build `coder-eval-agent:<pkg-version>` and tag it `:latest`.
+
+- **`make docker-image`** installs the agnostic core package only (no extras), mirroring `pip install coder-eval`. It needs **no credentials** and is enough for the common case — claude-code tasks scored with `run_command` / `file_contains` (incl. converted skillsbench tasks). It omits the LLM-Gateway judge (`llm_judge` via UiPath LLMGW) and the Codex agent.
+- **`make docker-image-full`** adds the `uipath` + `codex` extras. The `uipath` extra pulls `uipath-llmgw-client` from a private index, so it needs `UV_INDEX_UIPATH_USERNAME` / `..._PASSWORD` in the environment (auto-sourced from `.env`); without them the build fails with a `401 Unauthorized` on the UiPath feed. Use this only for tasks that need the LLMGW judge or the Codex agent.
 
 ## Running a task in Docker
 
@@ -39,6 +44,100 @@ sandbox:
     network: bridge         # or "none" for sealed runs
     image: my-custom:tag    # override the default image
 ```
+
+## Building the image from a task Dockerfile
+
+Instead of pointing at a pre-built `image`, a task can ship its own `Dockerfile`
+and have coder-eval build it before the run:
+
+```yaml
+sandbox:
+  driver: docker
+  docker:
+    dockerfile_path: ./environment/Dockerfile   # relative to the task YAML
+```
+
+> **⚠️ Contract: a task Dockerfile MUST start `FROM coder-eval-agent:<version>`.**
+> The container runs the coder-eval orchestrator (`coder-eval _run-task-internal`)
+> via the framework image's `ENTRYPOINT`. A task Dockerfile extends that image and
+> adds only task-specific layers — extra `apt` packages, `COPY`-ed inputs, etc. A
+> bare base like `FROM ubuntu:24.04` has **no entrypoint**, so `docker run` treats
+> the run flags as the command and fails with
+> `exec: "--output": executable file not found in $PATH`. coder-eval now detects
+> this after the build and aborts with an actionable error instead.
+>
+> Build the framework base first — `make docker-image` (tags both
+> `coder-eval-agent:<version>` and `coder-eval-agent:latest`).
+
+```dockerfile
+# environment/Dockerfile
+FROM coder-eval-agent:latest          # inherit runtime + entrypoint
+RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils
+RUN pip install --no-cache-dir PyMuPDF==1.24.10
+COPY input/ /root/input/
+```
+
+Behavior:
+
+- **Path resolution** — `dockerfile_path` is resolved relative to the task YAML's
+  directory at load time (with `$VAR` / `${VAR}` expansion). A missing file fails
+  fast at load, not mid-run.
+- **Entrypoint check** — after building, coder-eval inspects the image's
+  `ENTRYPOINT` and aborts with a `FROM coder-eval-agent` hint if the runtime
+  wasn't inherited.
+- **Overrides `image`** — when `dockerfile_path` is set, it takes precedence over
+  any `image` value.
+- **Build context** — the build context is the **Dockerfile's parent directory**,
+  so relative `COPY ./input/... ` instructions resolve naturally. In the layout
+  above, `environment/` is the context.
+- **Caching** — the image is tagged deterministically as
+  `coder-eval-task-<task_id>:built`, so repeat runs of the same task reuse
+  Docker's layer cache. Edit the Dockerfile and the next run rebuilds the
+  changed layers only.
+- **Version-label check skipped** — the `org.coder-eval.version` preflight only
+  applies to the framework image; task-built images don't carry it and won't
+  warn.
+
+A build failure aborts the task with a `DockerRunError` carrying `docker build`'s
+stderr.
+
+### Customizing the build (`docker.build`)
+
+The `docker build` invocation is configurable via `sandbox.docker.build`:
+
+```yaml
+sandbox:
+  driver: docker
+  docker:
+    dockerfile_path: ./environment/Dockerfile
+    build:
+      args:                          # -> --build-arg KEY=VALUE
+        PKG_VERSION: "1.2.3"
+        TOKEN: "${HOST_TOKEN}"       # values are $VAR / ${VAR} expanded from the host env
+      secrets:                       # -> --secret <spec> (requires BuildKit)
+        - id=mytoken,env=MY_TOKEN    # forward a host env var as a build secret
+        - id=npmrc,src=~/.npmrc      # or a file
+      extra_args: ["--target", "runtime"]   # escape hatch for any other docker build flag
+      buildkit: true                 # optional: force DOCKER_BUILDKIT (see below)
+```
+
+- **`args`** → `--build-arg KEY=VALUE`. Values are environment-expanded against
+  the host. Prefer `secrets` for credentials — build-args are recorded in the
+  image history.
+- **`secrets`** → `--secret <spec>`. Use `id=NAME,env=VAR` to forward a host env
+  var or `id=NAME,src=PATH` for a file; reference it in the Dockerfile via
+  `RUN --mount=type=secret,id=NAME ...`. Secrets are exposed only to the mounting
+  RUN step and never baked into layers. **Secrets require BuildKit.**
+- **`extra_args`** → raw flags inserted before the build context (e.g.
+  `--target`, `--network`, `--platform`). Escape hatch for options without a
+  dedicated field.
+- **`buildkit`** → controls the `DOCKER_BUILDKIT` env var. Omitted (default),
+  coder-eval **inherits the invoker's environment** — set `DOCKER_BUILDKIT=1`
+  before running coder-eval to enable it globally. Set `buildkit: true` / `false`
+  to force it per task. If `secrets` are configured but BuildKit isn't enabled,
+  coder-eval logs a warning (the build would otherwise fail).
+
+The build context is always appended last, so `extra_args` can't displace it.
 
 ## Authentication
 

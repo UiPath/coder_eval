@@ -90,3 +90,6 @@ templates/flow-v2-shared/tools/node_modules/
 
 # Visual companion (brainstorming) scratch
 .superpowers/
+
+# SkillsBench tasks for testing
+/resources/

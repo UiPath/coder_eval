@@ -58,6 +58,7 @@ def load_task(task_file: Path) -> tuple[TaskDefinition, str]:
         task = resolve_template_paths(task, task_file.parent)
         task = resolve_initial_prompt_file(task, task_file.parent)
         task = resolve_system_prompt_files(task, task_file.parent)
+        task = resolve_dockerfile_path(task, task_file.parent)
         return task, raw_yaml
     except Exception as e:
         raise ValueError(f"Invalid task definition: {e}") from e
@@ -131,6 +132,42 @@ def resolve_template_paths(task: TaskDefinition, base_dir: Path) -> TaskDefiniti
     if task.sandbox.template_sources:
         resolve_template_source_paths(task.sandbox.template_sources, base_dir)
 
+    return task
+
+
+def resolve_dockerfile_path(task: TaskDefinition, base_dir: Path) -> TaskDefinition:
+    """Resolve ``sandbox.docker.dockerfile_path`` to an absolute path, in place.
+
+    When set, ``dockerfile_path`` is interpreted relative to the task YAML's
+    directory (``base_dir``), with ``$VAR`` / ``${VAR}`` environment variables
+    expanded first (mirroring :func:`resolve_template_source_paths`). The
+    resolved file must exist -- a missing Dockerfile is a configuration error
+    surfaced at load time rather than as an opaque ``docker build`` failure.
+
+    No-op when ``dockerfile_path`` is unset. Resolution runs regardless of the
+    configured ``driver`` so the absolute path stays stable even if a later
+    layer flips the driver to ``docker``.
+
+    Args:
+        task: Task definition possibly carrying a relative ``dockerfile_path``.
+        base_dir: Directory containing the task YAML file.
+
+    Returns:
+        The same task with an absolute ``dockerfile_path`` (modified in place).
+
+    Raises:
+        FileNotFoundError: If the resolved Dockerfile does not exist.
+    """
+    docker_cfg = task.sandbox.docker
+    raw = docker_cfg.dockerfile_path
+    if raw is None:
+        return task
+    dockerfile = Path(os.path.expandvars(raw))
+    if not dockerfile.is_absolute():
+        dockerfile = (base_dir / dockerfile).resolve()
+    if not dockerfile.is_file():
+        raise FileNotFoundError(f"Dockerfile not found: {dockerfile}")
+    docker_cfg.dockerfile_path = str(dockerfile)
     return task
 
 

@@ -99,6 +99,60 @@ def validate_template_sources_list(sources: list[TemplateSource]) -> None:
         )
 
 
+class DockerBuildConfig(BaseModel):
+    """``docker build`` customization for a ``dockerfile_path`` task image.
+
+    Only consulted when ``DockerDriverConfig.dockerfile_path`` is set. BuildKit
+    (required for ``secrets``) is inherited from the invoking environment by
+    default; set ``buildkit`` to force it on or off.
+
+    SECURITY: these fields are task-author-controlled and flow straight into the
+    ``docker build`` argv. Task YAMLs are trusted infra; treat ``extra_args``
+    like any other shell-adjacent config.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    buildkit: bool | None = Field(
+        default=None,
+        description=(
+            "Controls the DOCKER_BUILDKIT env var for `docker build`. None (default) inherits the "
+            "invoker's environment -- export DOCKER_BUILDKIT before running coder-eval to control it. "
+            "true forces it on; false forces it off. BuildKit is REQUIRED for `secrets`: set this true "
+            "(or export DOCKER_BUILDKIT=1) when using build secrets, else the build fails."
+        ),
+    )
+
+    args: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Build-time variables -> `--build-arg KEY=VALUE`. Values are environment-expanded "
+            "($VAR / ${VAR}) against the host env, so you can forward host values "
+            "(e.g. {VERSION: '${BUILD_VERSION}'}). For credentials, prefer `secrets` -- build-args "
+            "are recorded in the image history."
+        ),
+    )
+    secrets: list[str] = MergeField(
+        strategy="replace",
+        default_factory=list,
+        description=(
+            "BuildKit secret specs -> `--secret <spec>`, e.g. 'id=mytoken,env=MY_TOKEN' (forward a "
+            "host env var) or 'id=mytoken,src=/path/to/file'. Exposed only to RUN steps that mount "
+            "them, never baked into image layers. Reference in the Dockerfile via "
+            "`RUN --mount=type=secret,id=mytoken ...`."
+        ),
+    )
+    extra_args: list[str] = MergeField(
+        strategy="replace",
+        default_factory=list,
+        description=(
+            "Additional raw `docker build` flags inserted before the build context, e.g. "
+            "['--target', 'runtime'] or ['--network', 'host']. Escape hatch for options without a "
+            "dedicated field."
+        ),
+    )
+
+
 class DockerDriverConfig(BaseModel):
     """Per-task overrides for ``driver: docker``.
 
@@ -118,6 +172,22 @@ class DockerDriverConfig(BaseModel):
         description=(
             "Container image (default: coder-eval-agent:<pkg-version>). Override to use a custom image "
             "(e.g., for BYOD: Bring Your Own Docker)."
+        ),
+    )
+    dockerfile_path: str | None = Field(
+        default=None,
+        description=(
+            "Optional path to a Dockerfile to build a custom image for this task, relative to the "
+            "task YAML directory (resolved to an absolute path at load time). When set it overrides "
+            "`image`: the image is built with the Dockerfile's parent directory as the build context, "
+            "so relative COPY paths resolve. Example: `./environment/Dockerfile`."
+        ),
+    )
+    build: DockerBuildConfig = Field(
+        default_factory=DockerBuildConfig,
+        description=(
+            "`docker build` customization (build args / BuildKit secrets / extra flags) applied when "
+            "`dockerfile_path` is set. Ignored when building is not in play."
         ),
     )
     network: Literal["bridge", "none"] = Field(

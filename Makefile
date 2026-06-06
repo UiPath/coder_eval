@@ -1,4 +1,4 @@
-.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra clean run lint docker-image
+.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra clean run lint docker-image docker-image-full
 
 help:  ## Show this help message
 	@echo "Available commands:"
@@ -72,11 +72,19 @@ test-smoke:  ## Run e2e smoke tests with real API (mirrors CI "E2E Smoke Tests" 
 	@echo "--- now running smoke-fail bucket (expected to exit non-zero) ---"
 	! uv run coder-eval run tasks/*.yaml --tags smoke-fail --model claude-haiku-4-5-20251001
 
-docker-image:  ## Build the coder-eval-agent container image
+docker-image:  ## Build the coder-eval-agent image (agnostic core; no extras, no creds needed)
 	@VERSION=$$(uv run python -c "from importlib.metadata import version; print(version('coder-eval'))"); \
-	echo "Building coder-eval-agent:$$VERSION"; \
+	echo "Building coder-eval-agent:$$VERSION (agnostic core)"; \
+	DOCKER_BUILDKIT=1 docker build -t coder-eval-agent:$$VERSION -t coder-eval-agent:latest -f docker/Dockerfile \
+		--build-arg CODER_EVAL_VERSION=$$VERSION \
+		.
+
+docker-image-full:  ## Build with UiPath + Codex extras (opt-in; needs private-index creds)
+	@VERSION=$$(uv run python -c "from importlib.metadata import version; print(version('coder-eval'))"); \
+	echo "Building coder-eval-agent:$$VERSION (full: uipath + codex extras)"; \
 	docker buildx build -t coder-eval-agent:$$VERSION -t coder-eval-agent:latest -f docker/Dockerfile \
 		--build-arg CODER_EVAL_VERSION=$$VERSION \
+		--build-arg CODER_EVAL_UV_EXTRAS="--extra uipath --extra codex" \
 		--build-arg SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS \
 		--secret id=uv_index_username,env=UV_INDEX_UIPATH_USERNAME \
 		--secret id=uv_index_password,env=UV_INDEX_UIPATH_PASSWORD \

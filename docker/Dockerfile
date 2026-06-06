@@ -43,18 +43,33 @@ COPY src/ ./src/
 # experiments/default.yaml is force-included by hatchling per pyproject.toml.
 COPY experiments/default.yaml ./experiments/default.yaml
 
-# UiPath private index credentials are passed at build time via BuildKit
-# secrets, NOT ARG/ENV -- the secret mount is only visible to the single RUN
-# below, and nothing about it is recoverable from `docker history` or
-# `docker save | tar`. See `make docker-image` for the host-side wiring.
+# Optional extras to install, expressed as `uv export` flags. Defaults to the
+# agnostic core (no extras) -- mirroring `pip install coder-eval` -- so the image
+# builds without private-index credentials. The UiPath + Codex extras are
+# opt-in: `make docker-image-full` passes
+# CODER_EVAL_UV_EXTRAS="--extra uipath --extra codex", which pulls
+# uipath-llmgw-client from a private index (needs the secrets below). The index
+# is only wired up when the uipath extra is requested.
+ARG CODER_EVAL_UV_EXTRAS=""
+
+# safe-chain min-age exclusions for the codex cli-bin pin (see pyproject [tool.uv]).
 ARG SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS=""
 
+# UiPath private index credentials are passed at build time via BuildKit secrets,
+# NOT ARG/ENV -- the secret mount is only visible to this RUN, and nothing about
+# it is recoverable from `docker history` or `docker save | tar`. The index is
+# only wired up when the uipath extra is requested, so the lite build never
+# queries (or needs credentials for) the private feed. See `make docker-image`.
 RUN --mount=type=secret,id=uv_index_username \
     --mount=type=secret,id=uv_index_password \
-    export UV_INDEX_UIPATH_USERNAME=$(cat /run/secrets/uv_index_username 2>/dev/null || true) && \
-    export UV_INDEX_UIPATH_PASSWORD=$(cat /run/secrets/uv_index_password 2>/dev/null || true) && \
-    export UV_EXTRA_INDEX_URL="https://${UV_INDEX_UIPATH_USERNAME}:${UV_INDEX_UIPATH_PASSWORD}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/" && \
-    uv export --frozen --extra uipath --extra codex | uv pip install --system -r /dev/stdin
+    export SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="${SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS}" && \
+    case "${CODER_EVAL_UV_EXTRAS}" in \
+      *uipath*) \
+        export UV_INDEX_UIPATH_USERNAME=$(cat /run/secrets/uv_index_username 2>/dev/null || true) && \
+        export UV_INDEX_UIPATH_PASSWORD=$(cat /run/secrets/uv_index_password 2>/dev/null || true) && \
+        export UV_EXTRA_INDEX_URL="https://${UV_INDEX_UIPATH_USERNAME}:${UV_INDEX_UIPATH_PASSWORD}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/" ;; \
+    esac && \
+    uv export --frozen ${CODER_EVAL_UV_EXTRAS} | uv pip install --system -r /dev/stdin
 
 # Sanity check: the in-container entrypoint subcommand must be wired up.
 RUN coder-eval _run-task-internal --help > /dev/null

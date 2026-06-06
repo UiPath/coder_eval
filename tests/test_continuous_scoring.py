@@ -46,15 +46,14 @@ def create_test_evaluation_result(**kwargs):
 class TestModelValidation:
     """Test Pydantic validation for continuous scoring fields."""
 
-    def test_weight_must_be_positive(self):
-        """Test that weight must be greater than 0."""
-        with pytest.raises(ValidationError) as exc_info:
-            FileExistsCriterion(
-                path="test.txt",
-                description="Test",
-                weight=0.0,  # Invalid: must be > 0
-            )
-        assert "greater than 0" in str(exc_info.value).lower()
+    def test_weight_zero_is_allowed(self):
+        """weight=0 is valid: 'run but don't score' (criterion runs, excluded from weighted avg)."""
+        criterion = FileExistsCriterion(
+            path="test.txt",
+            description="Test",
+            weight=0.0,
+        )
+        assert criterion.weight == 0.0
 
     def test_weight_cannot_be_negative(self):
         """Test that weight cannot be negative."""
@@ -62,9 +61,9 @@ class TestModelValidation:
             FileExistsCriterion(
                 path="test.txt",
                 description="Test",
-                weight=-1.0,  # Invalid: must be > 0
+                weight=-1.0,  # Invalid: must be >= 0
             )
-        assert "greater than 0" in str(exc_info.value).lower()
+        assert "greater than or equal to 0" in str(exc_info.value).lower()
 
     def test_weight_default_is_one(self):
         """Test that weight defaults to 1.0."""
@@ -170,6 +169,40 @@ class TestWeightedScoreCalculation:
         result.calculate_weighted_score(criteria)
         # (1.0*1.0 + 0.5*1.0 + 0.0*1.0) / (1.0 + 1.0 + 1.0) = 1.5 / 3.0 = 0.5
         assert result.weighted_score == 0.5
+
+    def test_weight_zero_criterion_excluded_from_score(self):
+        """A weight=0 criterion runs but does not affect the weighted score ('run but don't score')."""
+        result = create_test_evaluation_result(
+            task_id="test",
+            final_status="SUCCESS",
+            success_criteria_results=[
+                CriterionResult(criterion_type="run_command", description="setup", score=0.0),
+                CriterionResult(criterion_type="file_exists", description="real", score=1.0),
+            ],
+            turns=[],
+        )
+        criteria = [
+            FileExistsCriterion(path="setup", description="setup", weight=0.0),  # run-but-don't-score
+            FileExistsCriterion(path="real.txt", description="real", weight=1.0),
+        ]
+        result.calculate_weighted_score(criteria)
+        # The weight-0 criterion (score 0.0) is excluded; only the weight-1 criterion counts.
+        # (0.0*0.0 + 1.0*1.0) / (0.0 + 1.0) = 1.0
+        assert result.weighted_score == 1.0
+
+    def test_all_zero_weights_scores_zero_without_dividing(self):
+        """All-zero weights must not divide by zero -- the guard yields 0.0."""
+        result = create_test_evaluation_result(
+            task_id="test",
+            final_status="SUCCESS",
+            success_criteria_results=[
+                CriterionResult(criterion_type="file_exists", description="A", score=1.0),
+            ],
+            turns=[],
+        )
+        criteria = [FileExistsCriterion(path="a.txt", description="A", weight=0.0)]
+        result.calculate_weighted_score(criteria)
+        assert result.weighted_score == 0.0
 
     def test_weighted_score_different_weights(self):
         """Test weighted score with different weights."""
