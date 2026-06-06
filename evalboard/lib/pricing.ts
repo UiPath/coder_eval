@@ -39,6 +39,8 @@ export const PRICING: Record<string, Pricing> = {
     "gpt-5-codex": p(1.25, 10, 1.25, 0.125),
     "gpt-5": p(1.25, 10, 1.25, 0.125),
     "gpt-5.3-codex": p(1.75, 14, 1.75, 0.175),
+    "gpt-5.4": p(2.5, 15, 2.5, 0.25),
+    "gpt-5.5": p(5, 30, 5, 0.5),
 };
 
 function p(

@@ -43,9 +43,10 @@ from coder_eval.errors import (
     format_timeout_reason,
     truncate_crash_message,
 )
-from coder_eval.formatting import format_payload, format_token_usage
+from coder_eval.formatting import format_payload
 from coder_eval.models import (
     AgentKind,
+    AgentUsage,
     ApiRoute,
     BedrockRoute,
     ClaudeCodeAgentConfig,
@@ -54,7 +55,6 @@ from coder_eval.models import (
     DirectRoute,
     ProxyRoute,
     ResultSummary,
-    SubAgentUsage,
     TokenUsage,
     TurnRecord,
     to_bedrock_inference_profile,
@@ -65,8 +65,20 @@ from coder_eval.models import (
 from coder_eval.models import (
     UserMessage as UserMessageTelemetry,
 )
-from coder_eval.streaming.callbacks import StreamCallback, safe_emit
-from coder_eval.streaming.events import TextChunkEvent, ToolCallEvent, ToolResultEvent, TurnCompleteEvent
+from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
+from coder_eval.streaming.collector import EventCollector
+from coder_eval.streaming.events import (
+    AgentEndEvent,
+    AgentEndStatus,
+    AgentStartEvent,
+    TextChunkEvent,
+    ToolEndEvent,
+    ToolEndStatus,
+    ToolStartEvent,
+    TurnEndEvent,
+    TurnEndStatus,
+    TurnStartEvent,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -483,7 +495,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # spawning Agent tool_use_id. The sub-agent's own emissions are only
         # partially surfaced in the stream, so this is the one per-sub-agent
         # token figure the SDK exposes.
-        sub_agent_usages: list[SubAgentUsage] = []
+        sub_agent_usages: list[AgentUsage] = []
         num_turns: int | None = None
         # Diagnostic summary of the final ResultMessage (status + error fields).
         # Populated on every ResultMessage (last one wins). Consumed by the
@@ -545,32 +557,124 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         def capture_stderr(line: str) -> None:
             stderr_lines.append(line)
 
-        # Build a partial TurnRecord and store it in the slot. Partial-build
-        # failure is downgraded to None so the typed exception's category is
-        # preserved; rollback of _iteration happens exclusively in
-        # discard_pending_turn(), which the orchestrator calls after every
-        # failed communicate().
-        def _set_pending(crash_reason: str) -> None:
-            try:
-                self.pending_turn = self._build_partial_turn_record(
-                    user_input=user_input,
-                    messages=messages,
-                    pending_commands=pending_commands,
-                    assistant_turn_count=assistant_turn_count,
-                    messages_list=sdk_messages,
-                    sdk_result_usage=sdk_result_usage,
-                    sdk_result_model_usage=sdk_result_model_usage,
-                    sdk_result_cost=sdk_result_cost,
-                    num_turns=num_turns,
-                    sdk_model_used=sdk_model_used,
-                    sdk_result_summary=sdk_result_summary,
-                    turn_start_time=turn_start_time,
-                    crash_reason=crash_reason,
-                    sub_agent_usages=sub_agent_usages,
+        # Event emission: the agent is the SOLE emitter. Events fan out to an
+        # internal EventCollector (which assembles the TurnRecord — the single,
+        # agent-agnostic capture path) and the caller's stream_callback.
+        task_id = self.config.type.value
+        collector = EventCollector()
+        emit = CompositeStreamCallback([c for c in (collector, stream_callback) if c is not None])
+
+        # Turn/tool bracketing state (self-describing event tree).
+        current_turn_id: str | None = None
+        tool_turn_ids: dict[str, str] = {}  # tool_id -> the turn_id that spawned it
+        emitted_tool_ends: set[str] = set()  # tool_ids already closed with a ToolEndEvent
+        finalized = False
+
+        def _turn_tokens(turn_id: str) -> TokenUsage | None:
+            """Best-effort per-turn tokens, summed over that call's block emissions."""
+            records = emissions_by_id.get(turn_id)
+            if not records:
+                return None
+            total = TokenUsage()
+            for rec in records:
+                total = total + TokenUsage(
+                    input_tokens=rec.input_tokens,
+                    output_tokens=rec.output_tokens,
+                    cache_creation_input_tokens=rec.cache_creation_tokens,
+                    cache_read_input_tokens=rec.cache_read_tokens,
                 )
-            except Exception:
-                logger.exception("Failed to build partial turn record; continuing without partial")
-                self.pending_turn = None
+            return total
+
+        # Single finalization path: close orphaned tool calls + the open turn,
+        # then emit the terminal AgentEndEvent carrying the cumulative usage and
+        # the per-message/token payload. The EventCollector reduces all of this
+        # into the TurnRecord. Idempotent (guarded by ``finalized``) so it fires
+        # exactly once whether the turn completed, crashed, or timed out.
+        def _finalize(status: AgentEndStatus, *, crashed: bool, crash_reason: str | None) -> None:
+            nonlocal finalized, current_turn_id
+            if finalized:
+                return
+            finalized = True
+
+            commands = self._finalize_commands(pending_commands, messages)
+            # Close any tool that never produced a result with an unresolved end.
+            for cmd in commands:
+                if cmd.tool_id in emitted_tool_ends:
+                    continue
+                emitted_tool_ends.add(cmd.tool_id)
+                emit.on_event(
+                    ToolEndEvent(
+                        task_id=task_id,
+                        turn_id=tool_turn_ids.get(cmd.tool_id, current_turn_id or ""),
+                        tool=cmd,
+                        status=ToolEndStatus.UNRESOLVED,
+                    )
+                )
+
+            # max_turns exhaustion (clean turns only): ResultMessage subtype OR num_turns > max_turns.
+            max_turns_exhausted = not crashed and (
+                self._is_max_turns_result(sdk_result_summary)
+                or (max_turns is not None and num_turns is not None and num_turns > max_turns)
+            )
+            if max_turns_exhausted and status == AgentEndStatus.COMPLETED:
+                status = AgentEndStatus.MAX_TURNS_EXHAUSTED
+                self._log.warning("Agent exhausted max_turns (%s); turn ended without completing", max_turns)
+
+            # Close the open inner turn. AgentEndStatus and TurnEndStatus share
+            # identical members; map by value (no duplicated dict / KeyError risk).
+            if current_turn_id is not None:
+                emit.on_event(
+                    TurnEndEvent(
+                        task_id=task_id,
+                        turn_id=current_turn_id,
+                        status=TurnEndStatus(status.value),
+                        tokens=_turn_tokens(current_turn_id),
+                    )
+                )
+                current_turn_id = None
+
+            token_usage = self._build_token_usage(
+                sdk_messages, sdk_result_usage, sdk_result_cost, sdk_result_model_usage
+            )
+            usage = AgentUsage(
+                tokens=token_usage or TokenUsage(),
+                tool_uses=len(commands),
+                per_model=self._per_model_usage(sdk_result_model_usage),
+            )
+
+            try:
+                agent_output = self._format_messages(messages)
+            except Exception as fmt_err:
+                logger.warning("Failed to format messages for AgentEndEvent; using placeholder", exc_info=True)
+                agent_output = f"<partial record: message formatting failed: {type(fmt_err).__name__}: {fmt_err}>"
+
+            emit.on_event(
+                AgentEndEvent(
+                    task_id=task_id,
+                    status=status,
+                    usage=usage,
+                    iteration=self._iteration,
+                    user_input=user_input,
+                    agent_output=agent_output,
+                    model_used=sdk_model_used,
+                    assistant_turn_count=assistant_turn_count,
+                    messages=list(sdk_messages),
+                    num_turns=num_turns,
+                    max_turns_exhausted=max_turns_exhausted,
+                    result_summary=sdk_result_summary,
+                    crashed=crashed,
+                    crash_reason=crash_reason,
+                    duration_seconds=time.monotonic() - turn_start_time,
+                    sub_agent_usage=list(sub_agent_usages),
+                )
+            )
+
+            if crashed:
+                try:
+                    self.pending_turn = collector.build_turn_record()
+                except Exception:
+                    logger.exception("Failed to build partial turn record; continuing without partial")
+                    self.pending_turn = None
 
         try:
             # Process plugins: copy from config and replace env vars in paths
@@ -584,6 +688,16 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 plugin_tools_dir=self._plugin_tools_dir,
             )
             effective_model = self._resolve_effective_model(self.config.model, env, route_model)
+
+            # Agent lifecycle opens here (the agent — not the orchestrator — owns it).
+            emit.on_event(
+                AgentStartEvent(
+                    task_id=task_id,
+                    prompt=user_input,
+                    iteration=self._iteration,
+                    model=effective_model,
+                )
+            )
 
             disallowed_tools = list(self.config.disallowed_tools or [])
             # Do not allow ToolSearch. This is required to keep Bedrock backend in sync with the other backends.
@@ -701,6 +815,24 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                         if isinstance(model_attr, str):
                             sdk_model_used = model_attr
 
+                        # Inner-turn boundary: one TurnStart per new message_id (one
+                        # API call). Split emissions that share an id stay on the
+                        # same turn. Falls back to a synthetic id when none is set.
+                        raw_mid = getattr(message, "message_id", None)
+                        turn_id = raw_mid if isinstance(raw_mid, str) else f"turn-{assistant_turn_count}"
+                        if turn_id != current_turn_id:
+                            if current_turn_id is not None:
+                                emit.on_event(
+                                    TurnEndEvent(
+                                        task_id=task_id,
+                                        turn_id=current_turn_id,
+                                        status=TurnEndStatus.COMPLETED,
+                                        tokens=_turn_tokens(current_turn_id),
+                                    )
+                                )
+                            current_turn_id = turn_id
+                            emit.on_event(TurnStartEvent(task_id=task_id, turn_id=turn_id, model=sdk_model_used))
+
                         content = getattr(message, "content", None)
                         turn_content_blocks: list[ContentBlock] = []
                         turn_tool_use_ids: list[str] = []
@@ -750,17 +882,13 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                                     )
                                     turn_tool_use_ids.append(block.id)
 
-                                    safe_emit(
-                                        stream_callback,
-                                        ToolCallEvent(
-                                            task_id=self.config.type.value,
-                                            tool_name=block.name,
-                                            tool_id=block.id,
-                                            parameters=block.input
-                                            if isinstance(block.input, dict)
-                                            else {"raw": block.input},
-                                            sequence_number=sequence_number - 1,
-                                        ),
+                                    tool_turn_ids[block.id] = current_turn_id or ""
+                                    emit.on_event(
+                                        ToolStartEvent(
+                                            task_id=task_id,
+                                            turn_id=current_turn_id or "",
+                                            tool=telemetry,
+                                        )
                                     )
                                 elif _is_thinking_block(block):
                                     thinking_text = getattr(block, "thinking", None)
@@ -784,12 +912,12 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                                             text=text_value,
                                         )
                                     )
-                                    safe_emit(
-                                        stream_callback,
+                                    emit.on_event(
                                         TextChunkEvent(
-                                            task_id=self.config.type.value,
+                                            task_id=task_id,
+                                            turn_id=current_turn_id or "",
                                             text=text_value,
-                                        ),
+                                        )
                                     )
 
                         # Per-message token usage with two corrections layered on
@@ -1016,15 +1144,23 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                                         processed_results,
                                     )
                                     is_error_flag = getattr(block, "is_error", False) or False
-                                    safe_emit(
-                                        stream_callback,
-                                        ToolResultEvent(
-                                            task_id=self.config.type.value,
-                                            tool_id=block.tool_use_id,
-                                            tool_name=tool_name,
-                                            success=not is_error_flag,
-                                            result_preview=format_payload(block.content),
-                                        ),
+                                    resolved = pending_commands.get(block.tool_use_id, {}).get("telemetry")
+                                    tool_for_event = resolved or CommandTelemetry(
+                                        tool_name=tool_name or "unknown",
+                                        tool_id=block.tool_use_id,
+                                        timestamp=datetime.now(),
+                                        result_status="error" if is_error_flag else "success",
+                                        result_summary=format_payload(block.content),
+                                    )
+                                    status = self._tool_end_status(is_error_flag, block.content)
+                                    emitted_tool_ends.add(block.tool_use_id)
+                                    emit.on_event(
+                                        ToolEndEvent(
+                                            task_id=task_id,
+                                            turn_id=tool_turn_ids.get(block.tool_use_id, current_turn_id or ""),
+                                            tool=tool_for_event,
+                                            status=status,
+                                        )
                                     )
 
             self._log.debug("Agent query stream ended")
@@ -1039,7 +1175,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             if self._timed_out(timeout_hit, deadline):
                 self._state = AgentState.ERROR
                 assert timeout is not None
-                _set_pending(format_timeout_reason(timeout))
+                _finalize(AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout))
                 raise TurnTimeoutError(timeout, iteration=self._iteration) from None
             raise
         except ProcessError as e:
@@ -1049,7 +1185,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             if self._timed_out(timeout_hit, deadline):
                 self._state = AgentState.ERROR
                 assert timeout is not None
-                _set_pending(format_timeout_reason(timeout))
+                _finalize(AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout))
                 raise TurnTimeoutError(timeout, iteration=self._iteration) from e
             if not self._max_turns_short_circuit(sdk_result_summary, f"ProcessError(exit={e.exit_code})"):
                 self._state = AgentState.ERROR
@@ -1057,7 +1193,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 error_info = self._format_error_summary(sdk_result_summary)
                 detail = error_info or stderr
                 message = f"CLI process failed (exit code {e.exit_code}): {detail}"
-                _set_pending(truncate_crash_message(message))
+                _finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason=truncate_crash_message(message))
                 raise AgentCrashError(message) from e
         except Exception as e:
             # Same race as above: the watchdog may have killed the subprocess
@@ -1067,7 +1203,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             if self._timed_out(timeout_hit, deadline):
                 self._state = AgentState.ERROR
                 assert timeout is not None
-                _set_pending(format_timeout_reason(timeout))
+                _finalize(AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout))
                 raise TurnTimeoutError(timeout, iteration=self._iteration) from e
             if not self._max_turns_short_circuit(sdk_result_summary, "Generic Exception"):
                 self._state = AgentState.ERROR
@@ -1082,70 +1218,40 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 elif stderr:
                     error_details += f"\nStderr output:\n{stderr}"
                 message = f"Communication with agent failed: {error_details}"
-                _set_pending(truncate_crash_message(message))
+                _finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason=truncate_crash_message(message))
                 raise AgentCrashError(message) from e
         finally:
+            # Auto-finalize any path the except blocks didn't (happy path,
+            # max_turns short-circuit, in-loop timeout break). Guarded by
+            # ``finalized`` so the crash/timeout branches that already finalized
+            # are a no-op here. The AgentEndEvent + the EventCollector-built
+            # TurnRecord are produced exactly once, on every exit path.
+            if not finalized:
+                if timeout_hit:
+                    assert timeout is not None
+                    _finalize(AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout))
+                else:
+                    _finalize(AgentEndStatus.COMPLETED, crashed=False, crash_reason=None)
             self._active_transport = None
 
         # Only trust `timeout_hit` in the happy path: if the loop completed
         # cleanly, a wall-clock drift during post-loop cleanup would falsely
         # classify a successful turn as a timeout. The watchdog and in-loop
-        # guard are the authoritative signals.
+        # guard are the authoritative signals. (pending_turn already set by the
+        # _finalize(TIMEOUT) call in the finally above.)
         if timeout_hit:
             assert timeout is not None
-            _set_pending(format_timeout_reason(timeout))
             raise TurnTimeoutError(timeout, iteration=self._iteration)
 
-        # PHASE 3: Finalize commands and build turn record
-        commands = self._finalize_commands(pending_commands, messages)
-        token_usage = self._build_token_usage(sdk_messages, sdk_result_usage, sdk_result_cost, sdk_result_model_usage)
-        agent_output = self._format_messages(messages)
         self._update_state_from_messages(messages)
-
-        # max_turns exhaustion: ResultMessage subtype OR num_turns > max_turns (strict; == is a normal completion).
-        max_turns_exhausted = self._is_max_turns_result(sdk_result_summary) or (
-            max_turns is not None and num_turns is not None and num_turns > max_turns
-        )
-        if max_turns_exhausted:
-            self._log.warning(
-                "Agent exhausted max_turns (%s/%s) — the SDK hit the turn limit before the agent completed.",
-                num_turns,
-                max_turns,
-            )
-
-        duration = time.monotonic() - turn_start_time
 
         # Clear the rollback flag — this turn completed successfully and the iteration
         # increment stands. (Discard is no-op on a successful turn anyway, but stay tidy.)
         self._iteration_was_incremented = False
 
-        safe_emit(
-            stream_callback,
-            TurnCompleteEvent(
-                task_id=self.config.type.value,
-                iteration=self._iteration,
-                duration_s=duration,
-                command_count=len(commands),
-                token_usage_str=format_token_usage(token_usage),
-            ),
-        )
-
-        return TurnRecord(
-            iteration=self._iteration,
-            user_input=user_input,
-            agent_output=agent_output,
-            commands=commands,
-            timestamp=datetime.now(),
-            duration_seconds=duration,
-            token_usage=token_usage,
-            model_used=sdk_model_used,
-            assistant_turn_count=assistant_turn_count,
-            messages=sdk_messages,
-            num_turns=num_turns,
-            max_turns_exhausted=max_turns_exhausted,
-            result_summary=sdk_result_summary,
-            sub_agent_usage=sub_agent_usages,
-        )
+        # The TurnRecord is the EventCollector's reduction of the events emitted
+        # above — single, agent-agnostic capture path (no parallel record build).
+        return collector.build_turn_record()
 
     async def stop(self) -> None:
         """Stop the agent and clean up resources."""
@@ -1233,62 +1339,6 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             Current agent state
         """
         return self._state
-
-    def _build_partial_turn_record(
-        self,
-        *,
-        user_input: str,
-        messages: list[Message],
-        pending_commands: dict[str, dict[str, Any]],
-        assistant_turn_count: int,
-        messages_list: list[UserMessageTelemetry | AssistantMessageTelemetry],
-        sdk_result_usage: dict[str, Any] | None,
-        sdk_result_model_usage: dict[str, Any] | None,
-        sdk_result_cost: float | None,
-        num_turns: int | None,
-        sdk_model_used: str | None,
-        sdk_result_summary: ResultSummary | None,
-        turn_start_time: float,
-        crash_reason: str | None = None,
-        sub_agent_usages: list[SubAgentUsage] | None = None,
-    ) -> TurnRecord:
-        """Build a crashed=True TurnRecord from pre-crash telemetry.
-
-        Message-formatting failure substitutes a placeholder. Other exceptions
-        propagate to the caller.
-        """
-        commands = self._finalize_commands(pending_commands, messages)
-        token_usage = self._build_token_usage(messages_list, sdk_result_usage, sdk_result_cost, sdk_result_model_usage)
-        duration = time.monotonic() - turn_start_time
-
-        # Broad handler: secondary failure here would defeat partial preservation.
-        try:
-            agent_output = self._format_messages(messages)
-        except Exception as fmt_err:
-            logger.warning(
-                "Failed to format messages for partial turn record; continuing with placeholder agent_output",
-                exc_info=True,
-            )
-            agent_output = f"<partial record: message formatting failed: {type(fmt_err).__name__}: {fmt_err}>"
-
-        return TurnRecord(
-            iteration=self._iteration,
-            user_input=user_input,
-            agent_output=agent_output,
-            commands=commands,
-            timestamp=datetime.now(),
-            duration_seconds=duration,
-            token_usage=token_usage,
-            model_used=sdk_model_used,
-            assistant_turn_count=assistant_turn_count,
-            messages=messages_list,
-            num_turns=num_turns,
-            max_turns_exhausted=False,
-            result_summary=sdk_result_summary,
-            crashed=True,
-            crash_reason=crash_reason,
-            sub_agent_usage=sub_agent_usages or [],
-        )
 
     def _finalize_commands(
         self, pending_commands: dict[str, dict[str, Any]], messages: list[Message]
@@ -1625,9 +1675,45 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             return parsed
         return None
 
+    _PERMISSION_PHRASES = ("permission", "not allowed", "requires approval", "denied", "blocked")
+
+    @classmethod
+    def _tool_end_status(cls, is_error: bool, content: Any) -> ToolEndStatus:
+        """Classify a tool result into a ToolEndStatus (promotes the old string-scan)."""
+        if not is_error:
+            return ToolEndStatus.OK
+        text = str(content).lower() if content is not None else ""
+        if any(phrase in text for phrase in cls._PERMISSION_PHRASES):
+            return ToolEndStatus.PERMISSION_DENIED
+        return ToolEndStatus.ERROR
+
     @staticmethod
-    def _extract_sub_agent_usage(message: Any) -> SubAgentUsage | None:
-        """Build a SubAgentUsage from an Agent tool-result UserMessage.
+    def _per_model_usage(model_usage: dict[str, Any] | None) -> dict[str, TokenUsage]:
+        """Break the SDK ResultMessage ``model_usage`` into per-model TokenUsage.
+
+        ``model_usage`` maps each model id to its cumulative billing (camelCase
+        keys). Returns one ``TokenUsage`` per model — the cost simulator's input.
+        Empty dict when ``model_usage`` is absent.
+        """
+        if not isinstance(model_usage, dict) or not model_usage:
+            return {}
+        per_model: dict[str, TokenUsage] = {}
+        for model_id, entry in model_usage.items():
+            if not isinstance(entry, dict):
+                continue
+            cost = entry.get("costUSD")
+            per_model[str(model_id)] = TokenUsage(
+                input_tokens=int(entry.get("inputTokens", 0) or 0),
+                output_tokens=int(entry.get("outputTokens", 0) or 0),
+                cache_creation_input_tokens=int(entry.get("cacheCreationInputTokens", 0) or 0),
+                cache_read_input_tokens=int(entry.get("cacheReadInputTokens", 0) or 0),
+                total_cost_usd=float(cost) if cost is not None else None,
+            )
+        return per_model
+
+    @staticmethod
+    def _extract_sub_agent_usage(message: Any) -> AgentUsage | None:
+        """Build an AgentUsage from an Agent tool-result UserMessage.
 
         The Agent tool-result rides on ``message.tool_use_result`` — a dict
         carrying the sub-agent's ``agentId``, ``totalToolUseCount``,
@@ -1669,16 +1755,17 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         cache_creation = _int(usage.get("cache_creation_input_tokens"))
         cache_read = _int(usage.get("cache_read_input_tokens"))
 
-        return SubAgentUsage(
-            tool_use_id=tool_use_id,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_creation_input_tokens=cache_creation,
-            cache_read_input_tokens=cache_read,
-            total_tokens=input_tokens + output_tokens + cache_creation + cache_read,
+        # tool_use_id is no longer stored on AgentUsage (attribution comes from the
+        # event tree's parent_thread_id); kept local only for potential logging.
+        _ = tool_use_id
+        return AgentUsage(
+            tokens=TokenUsage(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_creation_input_tokens=cache_creation,
+                cache_read_input_tokens=cache_read,
+            ),
             tool_uses=_int(tur.get("totalToolUseCount")),
-            duration_ms=_int(tur.get("totalDurationMs")),
-            status=tur.get("status") if isinstance(tur.get("status"), str) else None,
         )
 
     def _resolve_pending_command(

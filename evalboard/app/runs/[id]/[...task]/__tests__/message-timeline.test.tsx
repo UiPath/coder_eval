@@ -235,6 +235,36 @@ describe("MessageTimelineSection — expanded sub-rows", () => {
         // column — verifies that durationMs propagates onto the same grid.
         expect(screen.getAllByText("1.2s").length).toBeGreaterThanOrEqual(1);
     });
+
+    test("renders blocks in emission order: text before a later tool call", () => {
+        // blockTypes records true emission order. A generation that emits text
+        // ("I'm writing 5050 now") THEN a tool call must render the text ABOVE
+        // the tool row — not the old fixed thinking→tools→text layout.
+        const m = makeMessage({
+            blockTypes: ["text", "tool_use"],
+            text: "WRITE_PREAMBLE_TEXT",
+            toolUses: [
+                {
+                    toolName: "Bash",
+                    toolUseId: "tu_1",
+                    summary: "write",
+                    argText: "WROTE_ANSWER_FILE",
+                    description: null,
+                    genMs: 10,
+                    durationMs: 10,
+                    isError: false,
+                    resultPreview: null,
+                    outputTokens: 5,
+                },
+            ],
+        });
+        const { container } = render(<MessageTimelineSection messages={[m]} />);
+        const body = container.textContent ?? "";
+        // The collapsed summary repeats the tool arg, so compare against the
+        // tool's BODY occurrence (lastIndexOf): the text must precede it.
+        expect(body.indexOf("WRITE_PREAMBLE_TEXT")).toBeGreaterThanOrEqual(0);
+        expect(body.indexOf("WRITE_PREAMBLE_TEXT")).toBeLessThan(body.lastIndexOf("WROTE_ANSWER_FILE"));
+    });
 });
 
 describe("MessageTimelineSection — sub-agent grouping", () => {

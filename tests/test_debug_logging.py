@@ -18,7 +18,7 @@ def agent():
 
 
 # --- Issue #2: Empty-string tool result content shows "(empty)" ---
-# NOTE: Tool result logging is now handled by ToolResultEvent and LoggingStreamRenderer
+# NOTE: Tool result logging is now handled by ToolEndEvent and LoggingStreamRenderer
 # This test now verifies that _log_message_debug no longer directly logs UserMessages
 
 
@@ -47,7 +47,7 @@ def test_log_debug_tool_result_empty_string(agent, caplog):
     with caplog.at_level(logging.DEBUG, logger="coder_eval.agents.claude_code_agent"):
         agent._log_message_debug(msg, "UserMessage")
 
-    # No direct logging - handled by ToolResultEvent instead
+    # No direct logging - handled by ToolEndEvent instead
     assert len(caplog.records) == 0
 
 
@@ -59,12 +59,12 @@ def test_log_debug_tool_result_none_content(agent, caplog):
     with caplog.at_level(logging.DEBUG, logger="coder_eval.agents.claude_code_agent"):
         agent._log_message_debug(msg, "UserMessage")
 
-    # No direct logging - handled by ToolResultEvent instead
+    # No direct logging - handled by ToolEndEvent instead
     assert len(caplog.records) == 0
 
 
 # --- Issue #3: cost=$None in debug output ---
-# NOTE: Result message logging is now handled by TurnCompleteEvent and LoggingStreamRenderer
+# NOTE: Result message logging is now handled by AgentEndEvent and LoggingStreamRenderer
 # This test now verifies that _log_message_debug no longer directly logs ResultMessages
 
 
@@ -86,7 +86,7 @@ def test_log_debug_result_cost_none(agent, caplog):
     with caplog.at_level(logging.DEBUG, logger="coder_eval.agents.claude_code_agent"):
         agent._log_message_debug(msg, "ResultMessage")
 
-    # No direct logging - handled by TurnCompleteEvent instead
+    # No direct logging - handled by AgentEndEvent instead
     assert len(caplog.records) == 0
 
 
@@ -97,7 +97,7 @@ def test_log_debug_result_cost_present(agent, caplog):
     with caplog.at_level(logging.DEBUG, logger="coder_eval.agents.claude_code_agent"):
         agent._log_message_debug(msg, "ResultMessage")
 
-    # No direct logging - handled by TurnCompleteEvent instead
+    # No direct logging - handled by AgentEndEvent instead
     assert len(caplog.records) == 0
 
 

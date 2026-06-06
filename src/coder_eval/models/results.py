@@ -12,10 +12,10 @@ from coder_eval.models.agent_config import AgentConfig, BaseAgentConfig
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind, FinalStatus
 from coder_eval.models.telemetry import (
+    AgentUsage,
     AssistantMessage,
     CommandStatistics,
     CommandTelemetry,
-    SubAgentUsage,
     TokenUsage,
     UserMessage,
 )
@@ -346,13 +346,13 @@ class TurnRecord(BaseModel):
         default=None,
         description="Short human-readable cause when crashed=True; None otherwise.",
     )
-    sub_agent_usage: list[SubAgentUsage] = Field(
+    sub_agent_usage: list[AgentUsage] = Field(
         default_factory=list,
         description=(
-            "Per-sub-agent token usage from Agent-tool (Task) spawns in this turn, from the SDK "
-            "TaskNotification messages, keyed by the spawning tool_use_id. Lets analysis attribute "
-            "tokens to the Agent call that spawned a sub-agent — the sub-agent's own emissions are "
-            "only partially surfaced in `messages`. See SubAgentUsage for the total_tokens caveat."
+            "Per-sub-agent usage from Agent-tool (Task) spawns in this turn. Each entry is the "
+            "rolled-up token cost of one sub-agent invocation (from the SDK Agent tool-result "
+            "usage). Lets analysis attribute tokens to sub-agents — the sub-agent's own emissions "
+            "are only partially surfaced in `messages`. Run-level cost still comes from model_usage."
         ),
     )
 

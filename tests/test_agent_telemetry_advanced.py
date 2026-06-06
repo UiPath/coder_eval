@@ -231,8 +231,11 @@ async def test_orphaned_result_without_tool_use_logs_warning(tmp_path, caplog):
         with caplog.at_level(logging.WARNING):
             turn_record = await agent.communicate("test prompt")
 
-        # No commands should be created
-        assert len(turn_record.commands) == 0
+        # The orphaned result is handled gracefully: a single synthesized
+        # 'unknown' command captures it (rather than being silently dropped).
+        assert len(turn_record.commands) == 1
+        assert turn_record.commands[0].tool_name == "unknown"
+        assert turn_record.commands[0].tool_id == "nonexistent_tool"
 
         # Verify warning logged
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]

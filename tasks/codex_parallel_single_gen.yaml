@@ -1,0 +1,49 @@
+task_id: codex_parallel_single_gen
+description: |
+  Forces API-parallel tool calls: two independent, fast, read-only commands that
+  have no data dependency, so the model should emit BOTH tool calls in a single
+  generation (one assistant response). Verifies the event-derived transcript
+  groups two commandExecution items started within the SAME
+  thread/tokenUsage/updated window into ONE AssistantMessage carrying two
+  tool_use blocks — the genuine "parallel tool calls in one step" shape (distinct
+  from cross-generation background-process overlap).
+
+tags:
+  - codex
+  - streaming
+  - parallel-tools
+
+agent:
+  type: codex
+  model: gpt-5.5
+  permission_mode: acceptEdits
+  allowed_tools:
+    - Bash
+    - Read
+    - Write
+
+initial_prompt: |
+  Gather two completely independent pieces of system information at once. Issue
+  these as TWO separate tool calls in a SINGLE step (in parallel — they have no
+  dependency on each other, so do not wait for one before sending the other, and
+  do not combine them into one command):
+    - Tool call 1: `uname -a`
+    - Tool call 2: `python3 --version`
+  Then write the operating-system name (the first field of `uname`) to os.txt and
+  the python version string to py.txt, and stop.
+
+success_criteria:
+  - type: file_exists
+    path: os.txt
+    description: "os.txt must be written from the uname result."
+    weight: 0.5
+
+  - type: file_exists
+    path: py.txt
+    description: "py.txt must be written from the python version result."
+    weight: 0.5
+
+run_limits:
+  max_turns: 8
+  task_timeout: 180
+  turn_timeout: 90

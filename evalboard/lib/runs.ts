@@ -224,11 +224,14 @@ export interface TaskDetail extends TaskResultSummary {
     // Per-task token totals summed across iterations. All zeros for legacy
     // runs that don't record per-iteration token_usage.
     tokens: TokenTotals;
-    // Per-sub-agent token breakdown keyed by the spawning Agent tool_use_id
-    // (from iterations[].sub_agent_usage). Sourced from the Agent tool-result's
-    // tool_use_result.usage, so it is COMPLETE — total = input + output +
-    // cache-creation + cache-read. Used to attribute tokens to the Agent call
-    // that spawned a sub-agent. Empty for runs that predate this capture.
+    // Per-sub-agent token breakdown (from iterations[].sub_agent_usage). Sourced
+    // from each sub-agent invocation's AgentEnd usage, so it is COMPLETE — total
+    // = input + output + cache-creation + cache-read. Keyed by 1-based sub-agent
+    // index (`sub-agent #1`, `#2`, …): per-tool_use_id attribution is no longer
+    // present in the data, so the message-timeline lookup by tool_use_id simply
+    // misses (renders the Agent row without token columns) while the cost
+    // simulator still consumes the values via Object.values(). Empty for runs
+    // that predate this capture. The field name is retained for compatibility.
     subAgentUsageByToolId: Record<string, SubAgentTotals>;
 }
 
@@ -239,6 +242,39 @@ export interface SubAgentTotals {
     output: number;
     cacheCreation: number;
     cacheRead: number;
+}
+
+// Reduce iterations[].sub_agent_usage into a per-sub-agent token breakdown.
+//
+// The serialized entry (Python `AgentUsage`) nests token components under
+// `tokens` and no longer carries a `tool_use_id` (per-call attribution moved to
+// the event tree and isn't wired up yet). We therefore key by a stable 1-based
+// sub-agent index ("sub-agent #1", "#2", …) accumulated across all iterations,
+// so each invocation gets its own bucket and the values flow to the cost
+// simulator via Object.values(). Empty for runs without sub-agent usage.
+export function aggregateSubAgentUsage(
+    iterations: TurnEntry[],
+): Record<string, SubAgentTotals> {
+    const out: Record<string, SubAgentTotals> = {};
+    let index = 0;
+    for (const it of iterations) {
+        for (const sa of it.sub_agent_usage ?? []) {
+            const tok = sa.tokens ?? {};
+            const input = tok.input_tokens ?? 0;
+            const output = tok.output_tokens ?? 0;
+            const cacheCreation = tok.cache_creation_input_tokens ?? 0;
+            const cacheRead = tok.cache_read_input_tokens ?? 0;
+            index += 1;
+            out[`sub-agent #${index}`] = {
+                total: input + output + cacheCreation + cacheRead,
+                input,
+                output,
+                cacheCreation,
+                cacheRead,
+            };
+        }
+    }
+    return out;
 }
 
 // ---------- run.json schema ----------
@@ -848,16 +884,15 @@ export interface TurnEntry {
     sub_agent_usage?: SubAgentUsageEntry[] | null;
 }
 
+// Current serialized shape of one sub-agent entry (Python `AgentUsage`).
+// Token components are nested under `tokens` (a `TokenUsage`); per-tool-use_id
+// attribution is GONE — the spawning Agent tool_use_id is no longer recorded
+// here (its replacement, nested AgentStart/End joined via parent_thread_id, is
+// not implemented yet). Consumers therefore key the breakdown by array index.
 interface SubAgentUsageEntry {
-    tool_use_id?: string | null;
-    input_tokens?: number | null;
-    output_tokens?: number | null;
-    cache_creation_input_tokens?: number | null;
-    cache_read_input_tokens?: number | null;
-    total_tokens?: number | null;
+    tokens?: TokenUsageEntry | null;
     tool_uses?: number | null;
-    duration_ms?: number | null;
-    status?: string | null;
+    per_model?: Record<string, TokenUsageEntry> | null;
 }
 
 interface TokenUsageEntry {
@@ -1438,31 +1473,9 @@ export async function readTaskDetail(
     // iteration aggregate only for runs that never recorded per-message tokens.
     const tokens = selectTokenTotals(messages, task?.iterations ?? []);
 
-    // Per-sub-agent token breakdown keyed by the spawning Agent tool_use_id.
-    // Components summed in case one Agent call is reported across multiple
-    // entries; total falls back to the component sum when not recorded.
-    const subAgentUsageByToolId: Record<string, SubAgentTotals> = {};
-    for (const it of task?.iterations ?? []) {
-        for (const sa of it.sub_agent_usage ?? []) {
-            const id = sa.tool_use_id;
-            if (typeof id !== "string") continue;
-            const input = sa.input_tokens ?? 0;
-            const output = sa.output_tokens ?? 0;
-            const cacheCreation = sa.cache_creation_input_tokens ?? 0;
-            const cacheRead = sa.cache_read_input_tokens ?? 0;
-            const total =
-                sa.total_tokens ??
-                input + output + cacheCreation + cacheRead;
-            const prev = subAgentUsageByToolId[id];
-            subAgentUsageByToolId[id] = {
-                total: (prev?.total ?? 0) + total,
-                input: (prev?.input ?? 0) + input,
-                output: (prev?.output ?? 0) + output,
-                cacheCreation: (prev?.cacheCreation ?? 0) + cacheCreation,
-                cacheRead: (prev?.cacheRead ?? 0) + cacheRead,
-            };
-        }
-    }
+    const subAgentUsageByToolId = aggregateSubAgentUsage(
+        task?.iterations ?? [],
+    );
 
     const taskDescription =
         task?.task_config?.resolved?.initial_prompt ??

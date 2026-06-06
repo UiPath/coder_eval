@@ -54,7 +54,7 @@ uipath = [
 # Without this extra, the framework still installs and runs; Codex-dependent
 # code paths fail at dispatch with a clear hint pointing back here.
 codex = [
-    "openai-codex>=0.1.0b2",
+    "openai-codex>=0.1.0b3",
 ]
 
 [project.scripts]
@@ -81,12 +81,12 @@ packages = ["src/coder_eval"]
 allow-direct-references = true
 
 [tool.uv]
-# openai-codex 0.1.0b2 hardpins `openai-codex-cli-bin==0.132.0`, which only
-# ships musllinux/macOS/Windows wheels — no glibc Linux wheel — so the [codex]
-# extra is otherwise uninstallable on standard CI/Linux runners. Newer cli-bin
-# builds (0.134.0) publish manylinux wheels and speak the same JSON-RPC
-# protocol to the SDK, so override the transitive pin to that build.
-override-dependencies = ["openai-codex-cli-bin==0.134.0"]
+# openai-codex 0.1.0b3 hardpins `openai-codex-cli-bin==0.137.0a4`, a
+# PRE-RELEASE. Because that pin is transitive (not referenced directly by us),
+# uv won't select it without an explicit opt-in. Naming it here as an override
+# both enables the pre-release and documents the pinned cli-bin build; 0.137.0a4
+# publishes manylinux wheels (x86_64 + aarch64), so CI/Linux installs work.
+override-dependencies = ["openai-codex-cli-bin==0.137.0a4"]
 
 [[tool.uv.index]]
 name = "uipath"

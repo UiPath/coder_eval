@@ -471,9 +471,9 @@ class TestCommandTelemetryStatus:
 
     @pytest.mark.asyncio
     async def test_stream_event_non_dict_input_preserved(self, tmp_path):
-        """Verify non-dict tool input is also preserved in ToolCallEvent (not discarded).
+        """Verify non-dict tool input is also preserved in ToolStartEvent (not discarded).
 
-        Both CommandTelemetry and ToolCallEvent should wrap non-dict input consistently.
+        Both CommandTelemetry and ToolStartEvent should wrap non-dict input consistently.
         """
         tool_use_block_cls, assistant_message_cls, user_message_cls, _, _, result_message_cls = (
             create_mock_sdk_messages()
@@ -508,11 +508,11 @@ class TestCommandTelemetryStatus:
             await agent.start(str(tmp_path))
             await agent.communicate("Non-dict stream", stream_callback=CollectingCallback())
 
-            from coder_eval.streaming.events import ToolCallEvent
+            from coder_eval.streaming.events import ToolStartEvent
 
-            tool_call_events = [e for e in collected_events if isinstance(e, ToolCallEvent)]
-            assert len(tool_call_events) == 1
-            assert tool_call_events[0].parameters == {"raw": ["a", "list", "input"]}
+            tool_start_events = [e for e in collected_events if isinstance(e, ToolStartEvent)]
+            assert len(tool_start_events) == 1
+            assert tool_start_events[0].tool.parameters == {"raw": ["a", "list", "input"]}
         finally:
             agent_module.query = original_query
 

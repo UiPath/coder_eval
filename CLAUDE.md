@@ -111,11 +111,12 @@ coder_eval/
 │   ├── quality.py                 # Quality metrics (annotations, docstrings)
 │   └── similarity.py              # Unified similarity interface
 │
-├── streaming/                     # Real-time LLM event streaming
+├── streaming/                     # Real-time agent event streaming (agent is sole emitter)
 │   ├── __init__.py                # Unified exports
-│   ├── callbacks.py               # StreamCallback protocol, TaskScopedCallback, safe_emit
-│   ├── events.py                  # StreamEvent types (TurnStart, ToolCall, ToolResult, etc.)
-│   └── renderers.py               # RichStreamRenderer (full/minimal verbosity, batch mode)
+│   ├── callbacks.py               # StreamCallback protocol, TaskScopedCallback, CompositeStreamCallback, safe_emit
+│   ├── events.py                  # Event protocol: Agent/Turn/Tool Start+End + status enums (Pydantic)
+│   ├── collector.py               # EventCollector: reduces the event stream into a TurnRecord (task.json capture)
+│   └── renderers.py               # RichStreamRenderer + LoggingStreamRenderer (task.log; both event-driven)
 │
 ├── simulation/                    # Multi-turn user simulation (dialog-mode evaluation)
 │   ├── __init__.py                # Unified exports (UserSimulator, DialogStopReason, evaluate_stop)
@@ -239,9 +240,16 @@ When fixing a bug, ask: *could a custom lint rule have prevented this?* If the r
    any per-turn bookkeeping (e.g. iteration counter). Must be idempotent.
 6. Clear `self.pending_turn = None` at the top of `communicate()` (defensive
    reset) and in `stop()` (cleanup).
-7. When `stream_callback` is provided, emit exactly one `TurnCompleteEvent` at
-   the end of a successful turn (the orchestrator emits `TurnStartEvent` but not
-   the end boundary). The task-log handler and renderers depend on it.
+7. The agent is the SOLE emitter of the standardized event protocol
+   (`streaming/events.py`): emit one `AgentStartEvent` at the top of
+   `communicate()` and one matching `AgentEndEvent` on EVERY exit path (success,
+   crash, timeout — from `finally`), with `TurnStartEvent`/`TurnEndEvent` per
+   inner turn and `ToolStartEvent`/`ToolEndEvent` per tool call (close orphaned
+   tools with `status=unresolved`). Fan events through an internal
+   `EventCollector` (which builds the returned `TurnRecord` — the single,
+   agent-agnostic capture path, so do NOT assemble a `TurnRecord` by hand) plus
+   the caller's `stream_callback`. The orchestrator is a pure consumer; renderers
+   and the task-log handler consume the same stream.
 8. If the agent shells out / holds OS resources, implement real `stop()` /
    `kill()` / `kill_sync()` teardown — `kill_sync()` is called from the
    watchdog's non-asyncio thread, so it must not await.

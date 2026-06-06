@@ -11,15 +11,37 @@ from pydantic import BaseModel, Field
 class TokenUsage(BaseModel):
     """Token usage from a single agent turn or aggregated across turns."""
 
-    input_tokens: int = Field(default=0, description="Input prompt tokens")
+    input_tokens: int = Field(
+        default=0,
+        description=(
+            "Fresh (uncached) input prompt tokens. NOTE the per-provider convention: "
+            "Anthropic reports the uncached slice here; the Codex agent buckets the "
+            "fresh slice into cache_creation_input_tokens instead (OpenAI bills no "
+            "separate cache-write fee), so a Codex turn's input_tokens is 0 by design."
+        ),
+    )
     output_tokens: int = Field(default=0, description="Output completion tokens")
-    cache_creation_input_tokens: int = Field(default=0, description="Tokens used to create prompt cache")
+    cache_creation_input_tokens: int = Field(
+        default=0,
+        description=(
+            "Tokens written to the prompt cache this call. For OpenAI/Codex this also "
+            "carries the fresh prompt slice (input - cached), priced at the input rate."
+        ),
+    )
     cache_read_input_tokens: int = Field(default=0, description="Tokens read from prompt cache")
     total_cost_usd: float | None = Field(default=None, description="Total cost in USD (from SDK)")
 
     @property
     def total_tokens(self) -> int:
-        """Total tokens consumed (input + output)."""
+        """input + output ONLY — deliberately excludes cache buckets.
+
+        This is a billing-shaped figure, not a processed-volume one: it omits
+        cache_creation/cache_read. Because the Codex agent buckets the fresh
+        prompt into cache_creation (input_tokens == 0), a Codex turn's
+        total_tokens is effectively output-only — do NOT read it as "all tokens
+        the turn touched." For cross-agent processed-volume comparison, sum the
+        cache buckets explicitly.
+        """
         return self.input_tokens + self.output_tokens
 
     def is_empty(self) -> bool:
@@ -48,39 +70,34 @@ class TokenUsage(BaseModel):
         )
 
 
-class SubAgentUsage(BaseModel):
-    """Per-sub-agent token usage from a Task/Agent-tool spawn.
+class AgentUsage(BaseModel):
+    """Cumulative usage for one agent invocation (main agent or a sub-agent).
 
-    Sourced from the SDK Agent tool-result ``UserMessage.tool_use_result.usage``
-    — the COMPLETE per-sub-agent breakdown, keyed by the spawning Agent
-    tool_use_id. Unlike the lossy ``TaskNotificationMessage.usage`` (which omits
-    cache-read), this carries every component: input / output / cache-creation /
-    cache-read. ``total_tokens`` is their sum and reconciles to the SDK's
-    ``totalTokens``. Captured because a sub-agent's own emissions are only
-    partially (sometimes never) surfaced in the message stream, so the tool
-    result is the authoritative per-sub-agent token figure. Downstream uses it
-    to attribute tokens to the Agent call that spawned the sub-agent; run-level
-    cost still comes from model_usage.
+    Carried on ``AgentEndEvent.usage``. Each agent invocation — the main agent
+    and every sub-agent spawned via the Agent/Task tool — emits its own
+    ``AgentEndEvent``, so this is agent-agnostic: it is the rolled-up token cost
+    of that one invocation. Per-spawn attribution (which tool/thread spawned a
+    sub-agent) is intended to come from the event tree (``parent_thread_id`` on a
+    nested ``AgentStartEvent``) — but nested sub-agent events are NOT yet emitted
+    (deferred), so ``sub_agent_usage`` is currently a flat, unattributed list. Do
+    not rely on per-tool-id attribution here until nesting lands.
+
+    Composes ``TokenUsage`` (so token fields aren't duplicated) and exposes the
+    per-model breakdown the cost simulator needs. A parent agent's ``tokens``
+    (from the SDK's cumulative ``model_usage``) already INCLUDES its sub-agents'
+    consumption; the nested sub-agent ``AgentEndEvent``s give the per-child split,
+    so don't double-count by summing children on top of the parent total.
     """
 
-    tool_use_id: str | None = Field(
-        default=None,
-        description="The Agent tool_use_id that spawned this sub-agent (matches a tool_use block).",
+    tokens: TokenUsage = Field(
+        default_factory=TokenUsage,
+        description="Cumulative token usage for this agent invocation (cost included).",
     )
-    input_tokens: int = Field(default=0, description="Uncached input tokens the sub-agent consumed.")
-    output_tokens: int = Field(default=0, description="Output tokens the sub-agent generated.")
-    cache_creation_input_tokens: int = Field(default=0, description="Cache-creation (write) input tokens.")
-    cache_read_input_tokens: int = Field(
-        default=0,
-        description="Cache-read input tokens — the component TaskNotification.usage drops.",
+    tool_uses: int = Field(default=0, description="Number of tool calls this agent invocation made.")
+    per_model: dict[str, TokenUsage] = Field(
+        default_factory=dict,
+        description="Per-model cost breakdown, keyed by model id (the cost simulator's input).",
     )
-    total_tokens: int = Field(
-        default=0,
-        description="Sum of input + output + cache-creation + cache-read (reconciles to SDK totalTokens).",
-    )
-    tool_uses: int = Field(default=0, description="Number of tool calls the sub-agent made.")
-    duration_ms: int = Field(default=0, description="Sub-agent wall-clock duration in milliseconds.")
-    status: str | None = Field(default=None, description="Terminal status: completed | failed | stopped.")
 
 
 class ContentBlock(BaseModel):

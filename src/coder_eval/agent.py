@@ -95,12 +95,17 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         exclusively in ``discard_pending_turn``, which the caller invokes after
         every failed ``communicate()``.
 
-        Streaming contract: when ``stream_callback`` is provided, an
-        implementation MUST emit exactly one ``TurnCompleteEvent`` at the end of
-        a successful turn (the orchestrator emits ``TurnStartEvent`` before the
-        call, but owns no turn-end signal). Renderers and the task-log handler
-        rely on this boundary; omitting it silently drops the turn from the log
-        with no failing assertion.
+        Streaming contract: the agent is the SOLE emitter of the standardized
+        event protocol (the orchestrator is a pure consumer). An implementation
+        MUST emit exactly one ``AgentStartEvent`` at the top of ``communicate()``
+        and exactly one matching ``AgentEndEvent`` on every exit path (success,
+        crash, or timeout — emit it from ``finally``), with one ``TurnStartEvent``
+        / ``TurnEndEvent`` pair per inner turn and ``ToolStartEvent`` /
+        ``ToolEndEvent`` for each tool call (every ``ToolStart`` closed by a
+        ``ToolEnd``, including ``status=unresolved`` for tools orphaned by a crash).
+        Events fan out through an internal ``EventCollector`` (which builds the
+        returned ``TurnRecord``) and the caller's ``stream_callback``; renderers
+        and the task-log handler consume the same stream.
         """
         pass
 

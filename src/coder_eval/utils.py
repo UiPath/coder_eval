@@ -71,32 +71,53 @@ def _uip_version(search_path: str | None = None) -> str:
     return "unknown"
 
 
+def resolve_uipath_plugin_dir(search_path: str | None = None) -> Path | None:
+    """Resolve the canonical ``node_modules/@uipath`` plugin-tools directory.
+
+    Shared core of ``Sandbox._refresh_plugin_tools_dir`` and
+    :func:`_resolve_plugin_tools_dir` (MST-9795). Resolve ``uip`` on
+    ``search_path`` (``None`` → process PATH), follow symlinks (Bun installs
+    ``uip`` as a symlink into the package dist), and walk up to the first
+    ``@uipath`` directory whose parent is ``node_modules``.
+
+    ``search_path`` is forwarded to :func:`shutil.which`; pass the
+    agent-aligned PATH (``Sandbox.uip_search_path``) to resolve the binary the
+    agent actually executed, or ``None`` to use this process's PATH.
+
+    Returns ``None`` when no usable ``uip`` is on PATH or the resolved binary
+    does not live inside a recognizable ``node_modules/@uipath`` tree (e.g.
+    development monorepo runs). Logs at debug on every non-resolving branch.
+    """
+    resolved = shutil.which("uip", path=search_path)
+    if not resolved:
+        return None
+    try:
+        real = Path(resolved).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        logger.debug("Failed to resolve `uip` symlink %s: %s", resolved, exc)
+        return None
+    # Walk up looking for `.../node_modules/@uipath`. We accept the first
+    # @uipath dir whose parent is named `node_modules` — the cli is always
+    # inside one, e.g. `~/.bun/.../node_modules/@uipath/cli/dist/index.js`.
+    for ancestor in real.parents:
+        if ancestor.name == "@uipath" and ancestor.parent.name == "node_modules":
+            logger.debug("Resolved @uipath plugin-tools dir=%s from `uip` at %s", ancestor, real)
+            return ancestor
+    logger.debug("`uip` at %s is not inside a recognizable node_modules/@uipath tree", real)
+    return None
+
+
 def _resolve_plugin_tools_dir() -> Path | None:
     """Resolve the canonical ``node_modules/@uipath`` plugin-tools directory.
 
-    Mirrors ``Sandbox._refresh_plugin_tools_dir`` (MST-9795): an external
-    ``PLUGIN_TOOLS_DIR`` pin wins; otherwise resolve ``uip`` on PATH, follow
-    symlinks (Bun installs ``uip`` as a symlink into the package dist), and walk
-    up to the first ``@uipath`` directory whose parent is ``node_modules``.
-
-    Returns ``None`` when no usable ``uip`` is on PATH or it does not live inside
-    a recognizable ``node_modules/@uipath`` tree (e.g. development monorepo runs).
+    An external ``PLUGIN_TOOLS_DIR`` pin wins; otherwise delegates to
+    :func:`resolve_uipath_plugin_dir` against this process's PATH.
     """
     if pinned := os.environ.get("PLUGIN_TOOLS_DIR"):
         pinned_path = Path(pinned)
         return pinned_path if pinned_path.is_dir() else None
 
-    resolved = shutil.which("uip")
-    if not resolved:
-        return None
-    try:
-        real = Path(resolved).resolve(strict=True)
-    except (OSError, RuntimeError):
-        return None
-    for ancestor in real.parents:
-        if ancestor.name == "@uipath" and ancestor.parent.name == "node_modules":
-            return ancestor
-    return None
+    return resolve_uipath_plugin_dir()
 
 
 def _tool_plugin_versions(tools_dir: Path | None = None) -> dict[str, str]:
@@ -135,7 +156,8 @@ def _tool_plugin_versions(tools_dir: Path | None = None) -> dict[str, str]:
             continue
         # Key on the short package name (drop the @uipath scope) for readability.
         short_name = name.rsplit("/", 1)[-1]
-        plugins[short_name] = data.get("version", "unknown")
+        version = data.get("version")
+        plugins[short_name] = version if isinstance(version, str) else "unknown"
     return plugins
 
 

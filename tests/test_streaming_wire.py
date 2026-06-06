@@ -10,51 +10,106 @@ Covers:
 
 from datetime import datetime
 
+from coder_eval.models import AgentUsage, CommandTelemetry, TokenUsage
 from coder_eval.streaming.events import (
+    AgentEndEvent,
+    AgentEndStatus,
+    AgentStartEvent,
     CriteriaCheckEvent,
     CriterionSummary,
     TextChunkEvent,
-    ToolCallEvent,
-    ToolResultEvent,
-    TurnCompleteEvent,
+    ToolEndEvent,
+    ToolEndStatus,
+    ToolStartEvent,
+    TurnEndEvent,
+    TurnEndStatus,
     TurnStartEvent,
 )
 from coder_eval.streaming.wire import LINE_PREFIX, deserialize_event, has_prefix, serialize_event
 
 
+def _telemetry(tool_name: str = "Bash", tool_id: str = "x", **kwargs) -> CommandTelemetry:
+    return CommandTelemetry(tool_name=tool_name, tool_id=tool_id, timestamp=datetime(2025, 1, 1), **kwargs)
+
+
 class TestRoundTrip:
-    def test_turn_start_event(self):
-        ev = TurnStartEvent(task_id="t1", iteration=2, prompt_preview="hi")
+    def test_agent_start_event(self):
+        ev = AgentStartEvent(task_id="t1", iteration=2, prompt="hi", model="opus", thread_id="A")
         roundtripped = deserialize_event(serialize_event(ev))
-        assert isinstance(roundtripped, TurnStartEvent)
+        assert isinstance(roundtripped, AgentStartEvent)
         assert roundtripped.task_id == "t1"
         assert roundtripped.iteration == 2
-        assert roundtripped.prompt_preview == "hi"
+        assert roundtripped.prompt == "hi"
+        assert roundtripped.model == "opus"
 
-    def test_tool_call_event(self):
-        ev = ToolCallEvent(task_id="t", tool_name="Bash", tool_id="x", parameters={"cmd": "ls"}, sequence_number=3)
+    def test_turn_start_event(self):
+        ev = TurnStartEvent(task_id="t", turn_id="t1", thread_id="A", model="opus")
         rt = deserialize_event(serialize_event(ev))
-        assert isinstance(rt, ToolCallEvent)
-        assert rt.parameters == {"cmd": "ls"}
-        assert rt.sequence_number == 3
+        assert isinstance(rt, TurnStartEvent)
+        assert rt.turn_id == "t1"
+        assert rt.model == "opus"
 
-    def test_tool_result_event(self):
-        ev = ToolResultEvent(task_id="t", tool_id="x", tool_name="Bash", success=False, result_preview="boom")
+    def test_tool_start_event(self):
+        ev = ToolStartEvent(
+            task_id="t",
+            turn_id="t1",
+            tool=_telemetry(parameters={"cmd": "ls"}, sequence_number=3),
+        )
         rt = deserialize_event(serialize_event(ev))
-        assert isinstance(rt, ToolResultEvent)
-        assert rt.success is False
+        assert isinstance(rt, ToolStartEvent)
+        # Nested CommandTelemetry must rehydrate, not stay a raw dict.
+        assert isinstance(rt.tool, CommandTelemetry)
+        assert rt.tool.parameters == {"cmd": "ls"}
+        assert rt.tool.sequence_number == 3
+
+    def test_tool_end_event(self):
+        ev = ToolEndEvent(
+            task_id="t",
+            turn_id="t1",
+            tool=_telemetry(result_summary="boom"),
+            status=ToolEndStatus.ERROR,
+        )
+        rt = deserialize_event(serialize_event(ev))
+        assert isinstance(rt, ToolEndEvent)
+        assert isinstance(rt.tool, CommandTelemetry)
+        assert rt.status is ToolEndStatus.ERROR
+        assert rt.tool.result_summary == "boom"
 
     def test_text_chunk_event(self):
-        ev = TextChunkEvent(task_id="t", text="hello")
+        ev = TextChunkEvent(task_id="t", turn_id="t1", text="hello")
         rt = deserialize_event(serialize_event(ev))
         assert isinstance(rt, TextChunkEvent)
         assert rt.text == "hello"
 
-    def test_turn_complete_event(self):
-        ev = TurnCompleteEvent(task_id="t", iteration=4, duration_s=1.5, command_count=2)
+    def test_turn_end_event(self):
+        ev = TurnEndEvent(
+            task_id="t",
+            turn_id="t1",
+            status=TurnEndStatus.COMPLETED,
+            tokens=TokenUsage(input_tokens=10, output_tokens=5),
+        )
         rt = deserialize_event(serialize_event(ev))
-        assert isinstance(rt, TurnCompleteEvent)
-        assert rt.duration_s == 1.5
+        assert isinstance(rt, TurnEndEvent)
+        assert rt.status is TurnEndStatus.COMPLETED
+        assert isinstance(rt.tokens, TokenUsage)
+        assert rt.tokens.input_tokens == 10
+
+    def test_agent_end_event(self):
+        ev = AgentEndEvent(
+            task_id="t",
+            status=AgentEndStatus.COMPLETED,
+            usage=AgentUsage(tokens=TokenUsage(input_tokens=20, output_tokens=8)),
+            iteration=4,
+            duration_seconds=1.5,
+            agent_output="done",
+        )
+        rt = deserialize_event(serialize_event(ev))
+        assert isinstance(rt, AgentEndEvent)
+        assert rt.status is AgentEndStatus.COMPLETED
+        assert rt.duration_seconds == 1.5
+        assert rt.iteration == 4
+        assert isinstance(rt.usage, AgentUsage)
+        assert rt.usage.tokens.input_tokens == 20
 
     def test_criteria_check_event_with_nested_summary(self):
         ev = CriteriaCheckEvent(
@@ -72,13 +127,13 @@ class TestRoundTrip:
         rt = deserialize_event(serialize_event(ev))
         assert isinstance(rt, CriteriaCheckEvent)
         assert len(rt.criteria) == 2
-        # Nested dataclasses must rehydrate as CriterionSummary, not raw dict.
+        # Nested models must rehydrate as CriterionSummary, not raw dict.
         assert isinstance(rt.criteria[0], CriterionSummary)
         assert rt.criteria[1].failure_reason == "oops"
 
     def test_timestamp_roundtrip(self):
         ts = datetime(2025, 1, 2, 3, 4, 5)
-        ev = TurnStartEvent(task_id="t", timestamp=ts, iteration=0)
+        ev = AgentStartEvent(task_id="t", timestamp=ts, iteration=0)
         rt = deserialize_event(serialize_event(ev))
         assert rt is not None
         assert rt.timestamp == ts

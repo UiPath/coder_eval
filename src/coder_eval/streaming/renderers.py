@@ -6,16 +6,18 @@ import threading
 from rich.console import Console
 from rich.markup import escape
 
-from coder_eval.formatting import format_payload
+from coder_eval.formatting import format_payload, format_token_usage
 from coder_eval.streaming.events import (
+    AgentEndEvent,
+    AgentStartEvent,
     CriteriaCheckEvent,
     CriterionSummary,
     StreamEvent,
     TextChunkEvent,
-    ToolCallEvent,
-    ToolResultEvent,
-    TurnCompleteEvent,
-    TurnStartEvent,
+    ToolEndEvent,
+    ToolEndStatus,
+    ToolStartEvent,
+    TurnEndEvent,
 )
 
 
@@ -51,7 +53,7 @@ class RichStreamRenderer:
 
     def on_event(self, event: StreamEvent) -> None:
         """Render a streaming event to the console."""
-        if self._verbosity == "minimal" and isinstance(event, (ToolCallEvent, ToolResultEvent, TextChunkEvent)):
+        if self._verbosity == "minimal" and isinstance(event, (ToolStartEvent, ToolEndEvent, TextChunkEvent)):
             return
 
         line = self._format_event(event)
@@ -66,28 +68,31 @@ class RichStreamRenderer:
 
     def _format_event(self, event: StreamEvent) -> str | None:
         """Format a single event into a Rich markup string."""
-        if isinstance(event, TurnStartEvent):
+        if isinstance(event, AgentStartEvent):
             return f"[bold]--- Iteration {event.iteration} ---[/bold]"
 
-        if isinstance(event, ToolCallEvent):
-            params_str = escape(format_payload(event.parameters, max_chars=_MAX_PARAMS_LEN))
-            return f"[cyan]>>> TOOL: {escape(event.tool_name)}[/cyan] | {params_str}"
+        if isinstance(event, ToolStartEvent):
+            params_str = escape(format_payload(event.tool.parameters, max_chars=_MAX_PARAMS_LEN))
+            return f"[cyan]>>> TOOL: {escape(event.tool.tool_name)}[/cyan] | {params_str}"
 
-        if isinstance(event, ToolResultEvent):
-            # ``result_preview`` is already ``format_payload``-rendered and
-            # capped by the agent; re-truncating here would clip off the
-            # ``…(N more chars)`` marker.
-            preview = escape(event.result_preview)
-            tag = "[green]<<< OK[/green]" if event.success else "[red]<<< ERROR:[/red]"
-            return f"{tag} ({len(event.result_preview)} chars) {preview}"
+        if isinstance(event, ToolEndEvent):
+            preview = escape(event.tool.result_summary or "")
+            if event.status == ToolEndStatus.OK:
+                tag = "[green]<<< OK[/green]"
+            elif event.status == ToolEndStatus.UNRESOLVED:
+                tag = "[yellow]<<< UNRESOLVED:[/yellow]"
+            else:
+                tag = f"[red]<<< {escape(event.status.value.upper())}:[/red]"
+            return f"{tag} ({len(preview)} chars) {preview}"
 
         if isinstance(event, TextChunkEvent):
             return f"[dim]{escape(event.text)}[/dim]"
 
-        if isinstance(event, TurnCompleteEvent):
+        if isinstance(event, AgentEndEvent):
+            usage_str = escape(format_token_usage(event.usage.tokens))
             return (
-                f"[bold]--- Turn complete: {event.command_count} commands, "
-                f"{event.duration_s:.1f}s, {escape(event.token_usage_str)} ---[/bold]"
+                f"[bold]--- Turn complete: {len(event.messages)} msgs, "
+                f"{event.duration_seconds:.1f}s, {usage_str} ---[/bold]"
             )
 
         if isinstance(event, CriteriaCheckEvent):
@@ -130,8 +135,9 @@ class LoggingStreamRenderer:
     """Logs streaming events to the task logger (for task.log file capture).
 
     Converts stream events into DEBUG log lines, making them available for
-    task.log persistence. This replaces direct logging in agent code with
-    event-driven logging for consistency.
+    task.log persistence. This is the single, agent-agnostic place where the
+    event stream becomes task.log lines — agents emit events and get logging
+    for free, with no per-agent message-dumping.
     """
 
     def __init__(self) -> None:
@@ -149,30 +155,38 @@ class LoggingStreamRenderer:
     def _format_event(self, event: StreamEvent) -> str | None:
         """Format a single event into a log line (plain text, no Rich markup).
 
-        Only logs "important" events: tool calls/results, turn boundaries, criteria checks.
-        Ignores TextChunkEvent to avoid cluttering task.log with streaming text chunks.
+        Logs lifecycle + tool boundaries; skips TextChunkEvent to avoid
+        cluttering task.log with streaming text chunks.
         """
-        if isinstance(event, TurnStartEvent):
+        if isinstance(event, AgentStartEvent):
             return f"[{event.task_id}] --- Iteration {event.iteration} ---"
 
-        if isinstance(event, ToolCallEvent):
-            # Format like: ">>> TOOL CALL: Write | id=<id> | params={...}"
-            params_str = format_payload(event.parameters, max_chars=_MAX_PARAMS_LEN)
-            return f"[{event.task_id}] >>> TOOL CALL: {event.tool_name} | id={event.tool_id} | params={params_str}"
+        if isinstance(event, ToolStartEvent):
+            params_str = format_payload(event.tool.parameters, max_chars=_MAX_PARAMS_LEN)
+            return (
+                f"[{event.task_id}] >>> TOOL CALL: {event.tool.tool_name} "
+                f"| id={event.tool.tool_id} | params={params_str}"
+            )
 
-        if isinstance(event, ToolResultEvent):
-            # Format like: "<<< TOOL RESULT [OK/ERROR]: id=<id> | <preview>"
-            status = "OK" if event.success else "ERROR"
-            return f"[{event.task_id}] <<< TOOL RESULT [{status}]: id={event.tool_id} | {event.result_preview}"
+        if isinstance(event, ToolEndEvent):
+            return (
+                f"[{event.task_id}] <<< TOOL RESULT [{event.status.value.upper()}]: "
+                f"id={event.tool.tool_id} | {event.tool.result_summary or ''}"
+            )
 
         if isinstance(event, TextChunkEvent):
             # Skip text chunks to avoid cluttering logs with streaming text
             return None
 
-        if isinstance(event, TurnCompleteEvent):
+        if isinstance(event, TurnEndEvent):
+            tok = format_token_usage(event.tokens) if event.tokens is not None else "n/a"
+            return f"[{event.task_id}] --- Turn end [{event.status.value}]: {tok} ---"
+
+        if isinstance(event, AgentEndEvent):
+            usage_str = format_token_usage(event.usage.tokens)
             return (
-                f"[{event.task_id}] --- Turn complete: {event.command_count} commands, "
-                f"{event.duration_s:.1f}s, {event.token_usage_str} ---"
+                f"[{event.task_id}] --- Agent complete [{event.status.value}]: "
+                f"{len(event.messages)} msgs, {event.duration_seconds:.1f}s, {usage_str} ---"
             )
 
         if isinstance(event, CriteriaCheckEvent):

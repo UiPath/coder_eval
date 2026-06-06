@@ -735,8 +735,8 @@ class TestReportTokenUsageSection:
 # --- _extract_sub_agent_usage tests ---
 
 
-class TestExtractSubAgentUsage:
-    """Tests for ClaudeCodeAgent._extract_sub_agent_usage."""
+class TestExtractAgentUsage:
+    """Tests for ClaudeCodeAgent._extract_sub_agent_usage (returns AgentUsage)."""
 
     def _make_msg(self, tool_use_result: dict | None, tool_use_id: str = "toolu_123") -> MagicMock:
         msg = MagicMock()
@@ -764,15 +764,14 @@ class TestExtractSubAgentUsage:
         )
         result = ClaudeCodeAgent._extract_sub_agent_usage(msg)
         assert result is not None
-        assert result.tool_use_id == "toolu_123"
-        assert result.input_tokens == 10
-        assert result.output_tokens == 50
-        assert result.cache_creation_input_tokens == 200
-        assert result.cache_read_input_tokens == 1500
-        assert result.total_tokens == 10 + 50 + 200 + 1500
+        # The full token breakdown is extracted onto the composed TokenUsage.
+        assert result.tokens.input_tokens == 10
+        assert result.tokens.output_tokens == 50
+        assert result.tokens.cache_creation_input_tokens == 200
+        assert result.tokens.cache_read_input_tokens == 1500
+        # TokenUsage.total_tokens is input + output only (cache tokens excluded).
+        assert result.tokens.total_tokens == 10 + 50
         assert result.tool_uses == 3
-        assert result.duration_ms == 4200
-        assert result.status == "completed"
 
     def test_returns_none_for_non_agent_tool(self):
         # Bash/Read/Write results have no agentId
@@ -800,11 +799,11 @@ class TestExtractSubAgentUsage:
         )
         result = ClaudeCodeAgent._extract_sub_agent_usage(msg)
         assert result is not None
-        assert result.input_tokens == 0
-        assert result.output_tokens == 0
-        assert result.cache_creation_input_tokens == 0
-        assert result.cache_read_input_tokens == 0
-        assert result.total_tokens == 0
+        assert result.tokens.input_tokens == 0
+        assert result.tokens.output_tokens == 0
+        assert result.tokens.cache_creation_input_tokens == 0
+        assert result.tokens.cache_read_input_tokens == 0
+        assert result.tokens.total_tokens == 0
 
     def test_coerces_none_token_fields_to_zero(self):
         msg = self._make_msg(
@@ -823,24 +822,32 @@ class TestExtractSubAgentUsage:
         )
         result = ClaudeCodeAgent._extract_sub_agent_usage(msg)
         assert result is not None
-        assert result.total_tokens == 0
+        assert result.tokens.total_tokens == 0
 
-    def test_tool_use_id_from_content_block(self):
+    def test_extracts_usage_when_tool_result_block_present(self):
+        # The spawning Agent tool_use_id is read off the ToolResultBlock for
+        # potential logging, but no longer surfaces on AgentUsage (attribution
+        # now comes from the event tree's parent_thread_id). Presence of the
+        # block must not interfere with token extraction.
         msg = self._make_msg(
             {"agentId": "agent-xyz", "usage": {"output_tokens": 5}, "status": "completed"},
             tool_use_id="toolu_SPECIFIC",
         )
         result = ClaudeCodeAgent._extract_sub_agent_usage(msg)
         assert result is not None
-        assert result.tool_use_id == "toolu_SPECIFIC"
+        assert result.tokens.output_tokens == 5
+        # tool_use_id is intentionally not exposed on the returned AgentUsage.
+        assert not hasattr(result, "tool_use_id")
 
-    def test_tool_use_id_none_when_no_content(self):
+    def test_extracts_usage_when_no_content_block(self):
+        # With no ToolResultBlock to read a tool_use_id from, extraction still
+        # succeeds and returns a valid AgentUsage.
         msg = MagicMock()
         msg.tool_use_result = {"agentId": "agent-abc", "usage": {"output_tokens": 5}, "status": "completed"}
         msg.content = []
         result = ClaudeCodeAgent._extract_sub_agent_usage(msg)
         assert result is not None
-        assert result.tool_use_id is None
+        assert result.tokens.output_tokens == 5
 
 
 # --- _log_message_raw env-gate tests ---

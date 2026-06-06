@@ -52,6 +52,14 @@ _PRICING: dict[str, ModelPricing] = {
     "gpt-5": ModelPricing(1.25, 10.0, 1.25, 0.125),
     # gpt-5.3-codex (2026-02-24): $1.75/M input, $0.175/M cached, $14/M output.
     "gpt-5.3-codex": ModelPricing(1.75, 14.0, 1.75, 0.175),
+    # gpt-5.4 (2026-03-05): $2.50/M input, $0.25/M cached, $15/M output.
+    "gpt-5.4": ModelPricing(2.5, 15.0, 2.5, 0.25),
+    # gpt-5.5: $5/M input, $0.50/M cached, $30/M output.
+    # CAVEAT: this flat rate does NOT model gpt-5.5's long-context surcharge
+    # (2x input / 1.5x output once a session exceeds 272K input tokens), so cost
+    # for very-large-context runs reads low. Fine for typical eval tasks; revisit
+    # if benchmarking large-context Codex runs.
+    "gpt-5.5": ModelPricing(5.0, 30.0, 5.0, 0.50),
 }
 
 

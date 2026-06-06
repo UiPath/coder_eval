@@ -11,6 +11,7 @@ import {
     test,
 } from "vitest";
 import {
+    aggregateSubAgentUsage,
     type ArtifactRef,
     clearRunCacheDir,
     extractComponentShas,
@@ -41,6 +42,73 @@ describe("toTaskRow", () => {
     test("expected_turns explicitly null on raw yields null", () => {
         const row = toTaskRow({ task_id: "x", expected_turns: null });
         expect(row.expectedTurns).toBeNull();
+    });
+});
+
+describe("aggregateSubAgentUsage", () => {
+    // Regression guard for Blocker B1: the Python SubAgentUsage model was
+    // renamed to AgentUsage and reshaped so token components nest under
+    // `tokens`. The old consumer read flat top-level fields and a tool_use_id,
+    // so every current-shape entry was silently skipped and the breakdown
+    // rendered empty. Feed the CURRENT (nested) shape and assert it is honored.
+    test("reads the nested `tokens` shape and keys by sub-agent index", () => {
+        const iterations = [
+            {
+                sub_agent_usage: [
+                    {
+                        tokens: {
+                            input_tokens: 47,
+                            output_tokens: 121,
+                            cache_creation_input_tokens: 234,
+                            cache_read_input_tokens: 14349,
+                            total_cost_usd: 0.0123,
+                        },
+                        tool_uses: 3,
+                        per_model: {},
+                    },
+                ],
+            },
+            {
+                sub_agent_usage: [
+                    {
+                        tokens: {
+                            input_tokens: 10,
+                            output_tokens: 20,
+                            cache_creation_input_tokens: 0,
+                            cache_read_input_tokens: 100,
+                        },
+                        tool_uses: 1,
+                    },
+                ],
+            },
+        ];
+
+        const result = aggregateSubAgentUsage(iterations);
+
+        // NON-empty: the old code would have skipped both (no tool_use_id).
+        expect(Object.keys(result)).toEqual(["sub-agent #1", "sub-agent #2"]);
+
+        expect(result["sub-agent #1"]).toEqual({
+            input: 47,
+            output: 121,
+            cacheCreation: 234,
+            cacheRead: 14349,
+            // total = 47 + 121 + 234 + 14349
+            total: 14751,
+        });
+        expect(result["sub-agent #2"]).toEqual({
+            input: 10,
+            output: 20,
+            cacheCreation: 0,
+            cacheRead: 100,
+            total: 130,
+        });
+    });
+
+    test("no sub-agent usage yields an empty breakdown", () => {
+        expect(aggregateSubAgentUsage([])).toEqual({});
+        expect(aggregateSubAgentUsage([{ sub_agent_usage: [] }])).toEqual({});
+        expect(aggregateSubAgentUsage([{}])).toEqual({});
     });
 });
 

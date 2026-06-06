@@ -729,6 +729,46 @@ class TestPricingCalculation:
         )
         assert cost == pytest.approx(1.25 + 0.125)
 
+    def test_gpt5_4_cost(self):
+        # gpt-5.4: $2.50/MTok in, $15/MTok out, $0.25/MTok cached.
+        assert calculate_cost("gpt-5.4", input_tokens=1_000_000, output_tokens=0) == pytest.approx(2.5)
+        assert calculate_cost("gpt-5.4", input_tokens=0, output_tokens=1_000_000) == pytest.approx(15.0)
+        assert calculate_cost("gpt-5.4", input_tokens=0, output_tokens=0, cache_read_tokens=1_000_000) == pytest.approx(
+            0.25
+        )
+
+    def test_gpt5_5_cost(self):
+        # gpt-5.5: $5/MTok in, $30/MTok out, $0.50/MTok cached.
+        assert calculate_cost("gpt-5.5", input_tokens=1_000_000, output_tokens=0) == pytest.approx(5.0)
+        assert calculate_cost("gpt-5.5", input_tokens=0, output_tokens=1_000_000) == pytest.approx(30.0)
+        assert calculate_cost("gpt-5.5", input_tokens=0, output_tokens=0, cache_read_tokens=1_000_000) == pytest.approx(
+            0.5
+        )
+
+    def test_openai_cache_write_rate_equals_input_rate(self):
+        # OpenAI bills no separate cache-write fee, so the table sets
+        # cache_write == input rate for every gpt-* model. This is the invariant
+        # that makes CodexAgent's "fresh -> cache_creation" re-attribution
+        # cost-neutral. Guard it for all priced OpenAI models.
+        from coder_eval.proxy.pricing import _PRICING
+
+        openai_models = [m for m in _PRICING if m.startswith("gpt-")]
+        assert openai_models  # table actually has OpenAI entries
+        for model in openai_models:
+            pricing = _PRICING[model]
+            assert pricing.cache_write_per_mtok == pricing.input_per_mtok, model
+
+    def test_cache_write_reattribution_is_cost_neutral(self):
+        # CodexAgent moved the fresh slice from input_tokens into
+        # cache_creation_tokens. Because cache_write == input rate for OpenAI,
+        # pricing the fresh tokens either way yields the same cost.
+        fresh, cached, out = 14_080, 278, 458
+        as_input = calculate_cost("gpt-5.5", input_tokens=fresh, output_tokens=out, cache_read_tokens=cached)
+        as_cache_write = calculate_cost(
+            "gpt-5.5", input_tokens=0, output_tokens=out, cache_creation_tokens=fresh, cache_read_tokens=cached
+        )
+        assert as_input == pytest.approx(as_cache_write)
+
 
 # ---------------------------------------------------------------------------
 # get_total_cost

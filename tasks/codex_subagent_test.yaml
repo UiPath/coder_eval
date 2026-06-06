@@ -1,0 +1,41 @@
+task_id: codex_subagent_test
+description: |
+  Codex counterpart to claude_subagent_test: the agent delegates a subtask to a
+  spawned sub-agent (Codex's Agent tool), then records the result. Drives the
+  sub_agent_usage telemetry path for cross-agent comparison. (If the model
+  resolves the subtask directly instead of spawning, the task still completes —
+  the success criterion checks the artifact, not the delegation.)
+
+tags:
+  - codex
+  - streaming
+  - sub-agent
+
+agent:
+  type: codex
+  model: gpt-5.5
+  permission_mode: acceptEdits
+  allowed_tools:
+    - Bash
+    - Read
+    - Write
+
+initial_prompt: |
+  Delegate this to a SUB-AGENT (spawn one via the Agent tool). Instruct the
+  sub-agent to compute the sum of the integers from 1 to 100 inclusive by RUNNING
+  A SHELL COMMAND (for example `python3 -c "print(sum(range(1,101)))"` or
+  `seq 1 100 | paste -sd+ | bc`) — it must execute a command, not reason the
+  number out in its head. When the sub-agent returns the result, write just that
+  number to a file named answer.txt in the working directory, and stop. Prefer
+  delegating to a sub-agent (that runs a shell command) over computing it yourself.
+
+success_criteria:
+  - type: file_contains
+    path: answer.txt
+    includes: ["5050"]
+    description: "answer.txt must contain the sub-agent's computed sum (5050)."
+
+run_limits:
+  max_turns: 12
+  task_timeout: 240
+  turn_timeout: 120

@@ -1,0 +1,50 @@
+task_id: codex_parallel_commands
+description: |
+  Exercises parallel tool calls for the Codex agent. The agent is asked to run
+  two independent commands that each `sleep 10` in parallel. If they truly run as
+  parallel tool calls (both commandExecution items in one generation), wall-clock
+  is ~10s; if serialized, ~20s. This both verifies Codex's parallel execution and
+  exercises the event-derived transcript's grouping of multiple tool_use blocks
+  into a single AssistantMessage.
+
+tags:
+  - codex
+  - streaming
+  - parallel-tools
+
+agent:
+  type: codex
+  model: gpt-5.5
+  permission_mode: acceptEdits
+  allowed_tools:
+    - Bash
+    - Read
+    - Write
+
+initial_prompt: |
+  Run these two independent commands IN PARALLEL — issue them together as two
+  separate tool calls in a single step, so they execute concurrently:
+    - Tool call 1: `sleep 10; echo "first" > a.txt`
+    - Tool call 2: `sleep 10; echo "second" > b.txt`
+  Do NOT combine them into one command and do NOT run them one after another.
+  After both finish, stop.
+
+success_criteria:
+  - type: file_contains
+    path: a.txt
+    includes:
+      - "first"
+    description: "a.txt must be written by the first command."
+    weight: 0.5
+
+  - type: file_contains
+    path: b.txt
+    includes:
+      - "second"
+    description: "b.txt must be written by the second command."
+    weight: 0.5
+
+run_limits:
+  max_turns: 8
+  task_timeout: 300
+  turn_timeout: 120

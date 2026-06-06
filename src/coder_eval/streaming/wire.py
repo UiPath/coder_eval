@@ -1,31 +1,31 @@
 """Line-based wire format for streaming events across a process boundary.
 
 Used by the Docker isolation path: the in-container CLI installs a callback
-that writes ``STREAM_EVENT:<json>`` lines to stdout; ``DockerRunner`` on the
-host parses them and forwards to the original host callback. Plain log lines
-without the prefix pass through to docker.log unchanged.
+that writes prefixed lines to stdout; ``DockerRunner`` on the host parses them
+and forwards to the original host callback. Plain log lines without the prefix
+pass through to docker.log unchanged.
 
-Wire format is deliberately tiny: ``{"cls": <event class name>, "data":
-<dataclasses.asdict(event)>}``. Datetimes are encoded as ISO strings.
+Each line is ``LINE_PREFIX`` (the RS-framed sentinel ``"\x1ecoder-eval-stream\x1e:"``)
+followed by ``{"cls": <event class name>, "data": <event.model_dump(mode="json")>}``.
+The control-char sentinel (not a plain ``STREAM_EVENT:`` token) avoids collisions
+with ordinary log output. Datetimes are encoded as ISO strings by Pydantic.
 """
 
 from __future__ import annotations
 
 import contextlib
-import dataclasses
 import json
 import logging
-from datetime import datetime
-from typing import Any
 
 from coder_eval.streaming.events import (
+    AgentEndEvent,
+    AgentStartEvent,
     CriteriaCheckEvent,
-    CriterionSummary,
     StreamEvent,
     TextChunkEvent,
-    ToolCallEvent,
-    ToolResultEvent,
-    TurnCompleteEvent,
+    ToolEndEvent,
+    ToolStartEvent,
+    TurnEndEvent,
     TurnStartEvent,
 )
 
@@ -40,24 +40,22 @@ LINE_PREFIX = "\x1ecoder-eval-stream\x1e:"
 
 _EVENT_CLASSES: dict[str, type[StreamEvent]] = {
     cls.__name__: cls
-    for cls in [TurnStartEvent, ToolCallEvent, ToolResultEvent, TextChunkEvent, TurnCompleteEvent, CriteriaCheckEvent]
+    for cls in [
+        AgentStartEvent,
+        TurnStartEvent,
+        ToolStartEvent,
+        ToolEndEvent,
+        TextChunkEvent,
+        TurnEndEvent,
+        AgentEndEvent,
+        CriteriaCheckEvent,
+    ]
 }
-
-
-def _to_jsonable(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, list):
-        return [_to_jsonable(v) for v in value]
-    if isinstance(value, dict):
-        return {k: _to_jsonable(v) for k, v in value.items()}
-    return value
 
 
 def serialize_event(event: StreamEvent) -> str:
     """Render a single event as a one-line wire string (no trailing newline)."""
-    data = {k: _to_jsonable(v) for k, v in dataclasses.asdict(event).items()}
-    return LINE_PREFIX + json.dumps({"cls": type(event).__name__, "data": data})
+    return LINE_PREFIX + json.dumps({"cls": type(event).__name__, "data": event.model_dump(mode="json")})
 
 
 def has_prefix(line: str) -> bool:
@@ -88,13 +86,8 @@ def deserialize_event(line: str) -> StreamEvent | None:
         if cls is None:
             logger.warning("Unknown stream event class %r; dropping", cls_name)
             return None
-        # Datetime round-trip: ISO -> datetime
-        if isinstance(data.get("timestamp"), str):
-            data["timestamp"] = datetime.fromisoformat(data["timestamp"])
-        # CriteriaCheckEvent has nested CriterionSummary dataclasses; rebuild them.
-        if cls is CriteriaCheckEvent and isinstance(data.get("criteria"), list):
-            data["criteria"] = [CriterionSummary(**c) for c in data["criteria"]]
-        return cls(**data)
+        # Pydantic handles datetime + nested-model reconstruction from the dict.
+        return cls.model_validate(data)
     except Exception as exc:
         # Prefix matched but JSON / class / construction failed. Log loud --
         # this is a wire-format bug, not benign noise.

@@ -77,3 +77,13 @@ class RunLimits(BaseModel):
             "budgets. Default False — cached reads are typically free."
         ),
     )
+    count_cache_creation: bool = Field(
+        default=False,
+        description=(
+            "When True, cache_creation_input_tokens count toward input/total "
+            "budgets. Needed to budget Codex prompt input: the Codex agent buckets "
+            "the fresh (full-price) prompt slice into cache_creation, so with this "
+            "False a Codex token budget caps only output. Default False preserves "
+            "existing behavior (Claude reports real cache-creation writes here)."
+        ),
+    )

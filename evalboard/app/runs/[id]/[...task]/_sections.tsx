@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import type {
     ArtifactRef,
     CriterionResult,
     FlowDebugResult,
     MessageEvent,
+    MessageToolUse,
     SubAgentTotals,
     TokenTotals,
     ToolCall,
@@ -747,23 +748,37 @@ function MessageBody({
             ? fmtUsd(tokenBucketUsd(m.model, tokens, kind))
             : fmtTokens(tokens);
     const fmtOut = (tokens: number | null) => fmtTok(tokens, "output");
-    return (
-        <>
-            {m.thinkingText && (
-                <SubRow
-                    kind="thinking"
-                    genMs={m.thinkingMs}
-                    execMs={null}
-                    isError={false}
-                    outputTokens={m.thinkingOutputTokens}
-                    fmtOut={fmtOut}
-                >
-                    <div className="text-gray-600 whitespace-pre-wrap break-words">
-                        {m.thinkingText}
-                    </div>
-                </SubRow>
-            )}
-            {m.toolUses.map((t, i) => {
+    const thinkingRow = m.thinkingText ? (
+        <SubRow
+            key="thinking"
+            kind="thinking"
+            genMs={m.thinkingMs}
+            execMs={null}
+            isError={false}
+            outputTokens={m.thinkingOutputTokens}
+            fmtOut={fmtOut}
+        >
+            <div className="text-gray-600 whitespace-pre-wrap break-words">
+                {m.thinkingText}
+            </div>
+        </SubRow>
+    ) : null;
+    const textRow = m.text ? (
+        <SubRow
+            key="text"
+            kind="text"
+            genMs={m.textMs}
+            execMs={null}
+            isError={false}
+            outputTokens={m.textOutputTokens}
+            fmtOut={fmtOut}
+        >
+            <div className="text-gray-700 whitespace-pre-wrap break-words">
+                {m.text}
+            </div>
+        </SubRow>
+    ) : null;
+    const renderTool = (t: MessageToolUse, i: number) => {
                 // Child tool calls this tool spawned (matched by
                 // parent_tool_use_id). Any tool with children becomes an
                 // expandable group; in practice it's the Agent (sub-agent)
@@ -894,23 +909,41 @@ function MessageBody({
                         {resultBelow}
                     </div>
                 );
-            })}
-            {m.text && (
-                <SubRow
-                    kind="text"
-                    genMs={m.textMs}
-                    execMs={null}
-                    isError={false}
-                    outputTokens={m.textOutputTokens}
-                    fmtOut={fmtOut}
-                >
-                    <div className="text-gray-700 whitespace-pre-wrap break-words">
-                        {m.text}
-                    </div>
-                </SubRow>
-            )}
-        </>
-    );
+    };
+    // Render blocks in their actual emission order (content_blocks sequence),
+    // interleaving text and tool calls instead of forcing thinking→tools→text.
+    // `blockTypes` preserves order for both agents; thinking/text are aggregated
+    // per message, so each renders once at its first occurrence while tool_use
+    // blocks consume `toolUses` in order. Falls back to the legacy grouping when
+    // a (legacy) run recorded no blockTypes.
+    const ordered: ReactNode[] = [];
+    if (m.blockTypes.length === 0) {
+        if (thinkingRow) ordered.push(thinkingRow);
+        m.toolUses.forEach((t, i) => ordered.push(renderTool(t, i)));
+        if (textRow) ordered.push(textRow);
+    } else {
+        let toolIdx = 0;
+        let thinkingDone = false;
+        let textDone = false;
+        for (const bt of m.blockTypes) {
+            if (bt === "thinking") {
+                if (!thinkingDone && thinkingRow) ordered.push(thinkingRow);
+                thinkingDone = true;
+            } else if (bt === "text") {
+                if (!textDone && textRow) ordered.push(textRow);
+                textDone = true;
+            } else if (bt === "tool_use") {
+                const t = m.toolUses[toolIdx++];
+                if (t) ordered.push(renderTool(t, toolIdx - 1));
+            }
+        }
+        // Defensive: if blockTypes didn't list thinking/text but the aggregated
+        // field is present, still render it (thinking first, text last — the
+        // legacy positions) so content is never dropped.
+        if (!thinkingDone && thinkingRow) ordered.unshift(thinkingRow);
+        if (!textDone && textRow) ordered.push(textRow);
+    }
+    return <>{ordered}</>;
 }
 
 function MessageRow({

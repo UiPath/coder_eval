@@ -63,7 +63,7 @@ from .path_utils import format_task_log_id, task_log_path
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, UserSimulator, evaluate_stop
 from .streaming.callbacks import StreamCallback, TaskScopedCallback, safe_emit
-from .streaming.events import CriteriaCheckEvent, CriterionSummary, TurnStartEvent
+from .streaming.events import CriteriaCheckEvent, CriterionSummary
 from .utils import get_version_info, runtime_uip_versions
 
 
@@ -610,6 +610,8 @@ class Orchestrator:
             return
 
         input_tokens = sum(u.input_tokens for u in usages)
+        if limits.count_cache_creation:
+            input_tokens += sum(u.cache_creation_input_tokens for u in usages)
         if limits.count_cached_input:
             input_tokens += sum(u.cache_read_input_tokens for u in usages)
         output_tokens = sum(u.output_tokens for u in usages)
@@ -1291,15 +1293,8 @@ class Orchestrator:
         prompt_with_cwd = f"Your working directory is: {sandbox_dir.resolve()}\n\n{current_prompt}"
         logger.debug(f"Sending prompt: {current_prompt[:100]}...")
 
-        safe_emit(
-            self.stream_callback,
-            TurnStartEvent(
-                task_id=self._log_task_id,
-                iteration=iteration,
-                prompt_preview=current_prompt[:100],
-            ),
-        )
-
+        # The agent owns its lifecycle events now (AgentStartEvent fires inside
+        # communicate()); the orchestrator is a pure consumer of the stream.
         turn_record = await self._communicate_with_retry(
             prompt=prompt_with_cwd,
             iteration=iteration,
@@ -1378,10 +1373,10 @@ class Orchestrator:
           7. After the dialog ends, run a final criteria check unless one
              just happened, and return pass/fail.
 
-        Emits the same streaming events as the single-shot loop
-        (``TurnStartEvent`` from orchestrator, ``TurnCompleteEvent`` + ``CriteriaCheckEvent`` from agents/orchestrator)
-        so downstream UI renderers work unchanged. Simulator telemetry is
-        recorded on ``self.result.simulation``.
+        Emits the same streaming events as the single-shot loop (the agent emits
+        its ``AgentStart``/``Turn``/``Tool``/``AgentEnd`` lifecycle; the orchestrator
+        adds ``CriteriaCheckEvent``) so downstream UI renderers work unchanged.
+        Simulator telemetry is recorded on ``self.result.simulation``.
         """
         assert self.result is not None
         assert self.task.simulation is not None
@@ -1504,15 +1499,7 @@ class Orchestrator:
                 logger.info("Simulation turn %s/%s", turns_completed, sim_config.max_turns)
 
                 prompt_with_cwd = f"Your working directory is: {sandbox_dir.resolve()}\n\n{current_prompt}"
-                safe_emit(
-                    self.stream_callback,
-                    TurnStartEvent(
-                        task_id=self._log_task_id,
-                        iteration=turns_completed,
-                        prompt_preview=current_prompt[:100],
-                    ),
-                )
-
+                # Agent emits its own AgentStartEvent inside communicate().
                 agent_turn_attempted = True
                 turn_record = await self._communicate_with_retry(
                     prompt=prompt_with_cwd,

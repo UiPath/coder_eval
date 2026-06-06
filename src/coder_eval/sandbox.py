@@ -653,49 +653,18 @@ class Sandbox:
     def _refresh_plugin_tools_dir(self) -> None:
         """Resolve the canonical ``node_modules/@uipath`` for the current PATH.
 
-        Algorithm:
-
-        1. ``shutil.which("uip")`` against ``command_base_path + os.environ['PATH']``
-           — the same PATH ``run_command`` and the agent SDK will see.
-        2. ``Path.resolve()`` follows symlinks (Bun installs ``uip`` as a
-           symlink from ``~/.bun/bin/uip`` into the actual package dist).
-        3. Walk up looking for ``<dir>/node_modules/@uipath`` (any path
-           segment named ``@uipath`` whose parent is ``node_modules``).
-           Stops at the filesystem root.
-
-        Stores the result on ``self._plugin_tools_dir`` (or ``None`` if no
-        usable ``uip`` is on PATH). Idempotent across calls; safe to call
-        from both ``setup`` (initial value when no command_base_path yet)
-        and ``set_command_base_path`` (re-derive after PATH alignment).
+        Delegates to :func:`coder_eval.utils.resolve_uipath_plugin_dir` against
+        ``uip_search_path`` (``command_base_path + os.environ['PATH']`` — the
+        same PATH ``run_command`` and the agent SDK will see), then stores the
+        result as a string on ``self._plugin_tools_dir`` (or ``None`` if no
+        usable ``uip`` is on PATH). Idempotent across calls; safe to call from
+        both ``setup`` (initial value when no command_base_path yet) and
+        ``set_command_base_path`` (re-derive after PATH alignment).
         """
-        self._plugin_tools_dir = None
-        # Resolve against the same PATH the criterion subprocess and SDK env
-        # see, so the binary we resolve here is the same one they execute.
-        resolved = shutil.which("uip", path=self.uip_search_path)
-        if not resolved:
-            return
-        try:
-            real = Path(resolved).resolve(strict=True)
-        except (OSError, RuntimeError) as exc:
-            logger.debug("Failed to resolve `uip` symlink %s: %s", resolved, exc)
-            return
-        # Walk up looking for `.../node_modules/@uipath`. We accept the first
-        # @uipath dir whose parent is named `node_modules` — the cli is
-        # always inside one, e.g.
-        # `~/.bun/install/global/node_modules/@uipath/cli/dist/index.js`.
-        for ancestor in real.parents:
-            if ancestor.name == "@uipath" and ancestor.parent.name == "node_modules":
-                self._plugin_tools_dir = str(ancestor)
-                logger.debug(
-                    "Resolved PLUGIN_TOOLS_DIR=%s from `uip` at %s",
-                    self._plugin_tools_dir,
-                    real,
-                )
-                return
-        logger.debug(
-            "`uip` at %s is not inside a recognizable node_modules/@uipath tree; PLUGIN_TOOLS_DIR pin disabled",
-            real,
-        )
+        from .utils import resolve_uipath_plugin_dir
+
+        resolved = resolve_uipath_plugin_dir(self.uip_search_path)
+        self._plugin_tools_dir = str(resolved) if resolved is not None else None
 
     def _maybe_remediate_home_plugins_pollution(self) -> Path | None:
         """Optionally delete ``$HOME/node_modules/@uipath`` before the task runs.
