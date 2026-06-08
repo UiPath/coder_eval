@@ -20,6 +20,7 @@ import {
     TOKEN_COLUMN_HELP,
 } from "@/app/_components/col-help";
 import { type Unit, UnitToggle } from "@/app/_components/unit-toggle";
+import { TableScroll } from "@/app/_components/scroll-table";
 import { StatusPill } from "@/lib/pills";
 import { displayedTurns } from "@/lib/turns";
 import { Expandable, KindChip, ResultPill, ToolChip } from "./_chips";
@@ -47,7 +48,7 @@ export function FlowDebugSection({ flowDebug }: { flowDebug: FlowDebugResult }) 
                     no element executions
                 </div>
             ) : (
-                <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
+                <TableScroll>
                     <table className="w-full text-sm">
                         <thead>
                             <tr className="bg-gray-50 border-b border-gray-200 text-left text-gray-600">
@@ -91,7 +92,7 @@ export function FlowDebugSection({ flowDebug }: { flowDebug: FlowDebugResult }) 
                             ))}
                         </tbody>
                     </table>
-                </div>
+                </TableScroll>
             )}
         </section>
     );
@@ -435,7 +436,11 @@ export function MessageTimelineSection({
                     </div>
                 </div>
             </div>
-            <div className="border border-gray-200 rounded-lg overflow-hidden bg-white text-xs font-mono">
+            <TableScroll>
+                {/* min-width keeps the fixed grid from crushing on a phone — it
+                    scrolls horizontally as a unit instead, with the content
+                    column staying readable. */}
+                <div className="min-w-[46rem] text-xs font-mono">
                 <div
                     className={
                         MSG_GRID +
@@ -519,7 +524,8 @@ export function MessageTimelineSection({
                         </div>
                     );
                 })()}
-            </div>
+                </div>
+            </TableScroll>
         </section>
     );
 }

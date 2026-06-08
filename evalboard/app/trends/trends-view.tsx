@@ -17,12 +17,10 @@ import {
 } from "@/lib/turns";
 import { ChipLegend, MergedTagRail } from "@/app/_overview/tag-rail";
 import { ChipButton } from "@/app/runs/[id]/chips";
+import { TableScroll } from "@/app/_components/scroll-table";
+import { CollapsibleRail } from "@/app/_components/collapsible-rail";
+import { VersionChip } from "@/app/_components/version-list";
 import { fetchTaskHistoryAction } from "./actions";
-
-// Local copy of the SHA shape check from lib/runs.ts — that module imports
-// node:fs/node:path and can't be pulled into the client bundle. Used only
-// to decide whether the chip label should be truncated to a short SHA.
-const SHA_RE = /^[0-9a-f]{7,40}$/i;
 
 function fmtUsd(c: number | null): string {
     if (c == null) return "—";
@@ -173,38 +171,6 @@ function StatusBar({
     );
 }
 
-function ShaChip({
-    name,
-    sha,
-    url,
-}: {
-    name: string;
-    sha: string;
-    url: string | null;
-}) {
-    // Truncate SHA-shaped values for compactness; version labels stay full
-    // even when they link out (e.g. cli_version → GitHub Packages page).
-    const isSha = SHA_RE.test(sha);
-    const display = isSha && sha.length > 9 ? sha.slice(0, 9) : sha;
-    return (
-        <span className="inline-flex items-center gap-1 text-[10px] leading-none">
-            <span className="text-gray-400">{name}:</span>
-            {url ? (
-                <a
-                    href={url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="font-mono text-blue-600 hover:underline"
-                >
-                    {display}
-                </a>
-            ) : (
-                <span className="font-mono text-gray-500">{display}</span>
-            )}
-        </span>
-    );
-}
-
 function HistoryTable({
     taskId,
     entries,
@@ -298,15 +264,14 @@ function HistoryTable({
                             <td className="py-1 pr-3 text-right tabular-nums text-gray-700">
                                 {fmtScore(e.weightedScore)}
                             </td>
-                            <td className="py-1 pr-3">
-                                <span className="flex flex-wrap gap-x-2 gap-y-0.5">
-                                    {e.componentShas.map((c) => (
-                                        <ShaChip
-                                            key={c.name}
-                                            name={c.name}
-                                            sha={c.sha}
-                                            url={c.url}
-                                        />
+                            <td className="py-1 pr-3 align-top">
+                                {/* Recent runs stamp ~24 component versions
+                                    (3 core + ~21 tool plugins). Show only the 3
+                                    core versions per history row — the tool
+                                    plugins are noise in this view. */}
+                                <span className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-500 font-mono">
+                                    {e.componentShas.slice(0, 3).map((c) => (
+                                        <VersionChip key={c.name} {...c} />
                                     ))}
                                 </span>
                             </td>
@@ -350,9 +315,9 @@ function TaskRow({
         <>
             <tr
                 onClick={onToggle}
-                className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer"
+                className="group border-b border-gray-100 hover:bg-gray-50 cursor-pointer"
             >
-                <td className="py-2 px-4">
+                <td className="py-2 px-4 sticky left-0 z-10 bg-white group-hover:bg-gray-50">
                     <div className="font-medium text-gray-900">
                         {humanizeTaskId(t.taskId)}
                     </div>
@@ -449,6 +414,7 @@ function SortableHeader({
     onSort,
     align = "left",
     title,
+    sticky = false,
 }: {
     label: string;
     columnKey: SortKey;
@@ -457,12 +423,15 @@ function SortableHeader({
     onSort: (key: SortKey) => void;
     align?: "left" | "right";
     title?: string;
+    // Pin this header to the left edge so it stays visible while the metric
+    // columns scroll horizontally. Pairs with the sticky first body cell.
+    sticky?: boolean;
 }) {
     const isActive = columnKey === activeKey;
     const arrow = isActive ? (activeDir === "asc" ? "▲" : "▼") : "";
     return (
         <th
-            className={`py-2 px-3 font-medium cursor-pointer select-none hover:text-gray-900 ${align === "right" ? "text-right" : ""} ${isActive ? "text-gray-900" : ""}`}
+            className={`py-2 px-3 font-medium cursor-pointer select-none hover:text-gray-900 ${align === "right" ? "text-right" : ""} ${isActive ? "text-gray-900" : ""} ${sticky ? "sticky left-0 z-10 bg-gray-50" : ""}`}
             title={title}
             onClick={() => onSort(columnKey)}
             aria-sort={
@@ -553,15 +522,17 @@ export function TrendsView({
 
             <section className="border border-gray-200 rounded-lg bg-white p-4 space-y-2">
                 <ChipLegend />
-                <MergedTagRail
-                    skills={skills}
-                    taskTags={taskTags}
-                    reviewTags={reviewTags}
-                    activeTag={activeTag}
-                    basePath="/trends"
-                    q={q}
-                    limit={24}
-                />
+                <CollapsibleRail id="trends-tagrail">
+                    <MergedTagRail
+                        skills={skills}
+                        taskTags={taskTags}
+                        reviewTags={reviewTags}
+                        activeTag={activeTag}
+                        basePath="/trends"
+                        q={q}
+                        limit={24}
+                    />
+                </CollapsibleRail>
                 {q &&
                     skills.length === 0 &&
                     taskTags.length === 0 &&
@@ -582,7 +553,7 @@ export function TrendsView({
                     )}
                 </div>
             ) : (
-                <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
+                <TableScroll>
                     <table className="w-full text-sm">
                         <thead>
                             <tr className="bg-gray-50 border-b border-gray-200 text-left text-gray-600">
@@ -592,6 +563,7 @@ export function TrendsView({
                                     activeKey={sortKey}
                                     activeDir={sortDir}
                                     onSort={onSort}
+                                    sticky
                                 />
                                 <SortableHeader
                                     label="Runs"
@@ -657,7 +629,7 @@ export function TrendsView({
                             ))}
                         </tbody>
                     </table>
-                </div>
+                </TableScroll>
             )}
         </div>
     );

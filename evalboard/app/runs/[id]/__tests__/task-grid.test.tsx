@@ -29,8 +29,19 @@ function row(
     };
 }
 
+// Token columns (Cache R / Cache W / Out) are collapsed by default on every
+// screen now — click the toolbar toggle to reveal them before asserting on them.
+function revealTokens(): void {
+    fireEvent.click(screen.getByRole("button", { name: /show tokens/i }));
+}
+
 function turnsCellFor(taskId: string): HTMLElement {
-    const link = screen.getByRole("link", { name: new RegExp(taskId, "i") });
+    // Scope to the desktop <table>: below md the grid also renders each task as
+    // a card (same link/values), so an unscoped query would match twice.
+    const table = screen.getByRole("table");
+    const link = within(table).getByRole("link", {
+        name: new RegExp(taskId, "i"),
+    });
     const tr = link.closest("tr")!;
     const cells = within(tr).getAllByRole("cell");
     // Layout: Task, Status, Score, Duration, Cost, Turns, Out, Cache+, Cache↺
@@ -85,15 +96,30 @@ describe("TaskGrid — Turns column", () => {
         expect(cell.className).toContain("text-gray-900");
     });
 
-    test("table columns include perf + token stats", () => {
+    test("token columns are collapsed by default, revealed by the toggle", () => {
         render(<TaskGrid runId="r1" tasks={[row("x", 1, 1)]} />);
-        const headers = screen.getAllByRole("columnheader");
         // Read the sort toggle (first button) per header — token columns also
         // carry an ⓘ help button, so the bare th textContent isn't the label.
-        const labels = headers.map(
-            (h) => within(h).getAllByRole("button")[0].textContent?.trim() ?? "",
-        );
-        expect(labels).toEqual([
+        const labels = () =>
+            screen
+                .getAllByRole("columnheader")
+                .map(
+                    (h) =>
+                        within(h).getAllByRole("button")[0].textContent?.trim() ??
+                        "",
+                );
+        // Default: the six essentials only, no token group.
+        expect(labels()).toEqual([
+            "Task",
+            "Status",
+            "Score",
+            "Duration",
+            "Cost",
+            "Turns",
+        ]);
+        // Toggle reveals the perf + token columns.
+        revealTokens();
+        expect(labels()).toEqual([
             "Task",
             "Status",
             "Score",
@@ -110,6 +136,7 @@ describe("TaskGrid — Turns column", () => {
 describe("TaskGrid — column help popover", () => {
     test("ⓘ toggles a static help card; Escape closes it", () => {
         render(<TaskGrid runId="r1" tasks={[row("x", 1, 1)]} />);
+        revealTokens(); // ⓘ help buttons live on the token columns
         const trigger = screen.getByRole("button", {
             name: /What is Cache R/i,
         });
@@ -128,6 +155,7 @@ describe("TaskGrid — column help popover", () => {
 
     test("opening one column's help closes another's", () => {
         render(<TaskGrid runId="r1" tasks={[row("x", 1, 1)]} />);
+        revealTokens(); // ⓘ help buttons live on the token columns
         fireEvent.click(screen.getByRole("button", { name: /What is Out/i }));
         expect(screen.getByRole("tooltip")).toHaveTextContent("Output tokens");
 
@@ -149,7 +177,8 @@ describe("TaskGrid — dataset-expanded task links", () => {
             />,
         );
         // humanizeTaskId replaces dashes with spaces: "Sentiment classification/r3"
-        const link = screen.getByRole("link", {
+        // Scope to the table — the mobile card renders the same link.
+        const link = within(screen.getByRole("table")).getByRole("link", {
             name: /sentiment classification/i,
         });
         expect(link).toHaveAttribute(
@@ -167,19 +196,24 @@ describe("TaskGrid — Tokens↔USD toggle", () => {
         cacheReadTokens: 80_000,
     });
 
-    test("shows token counts by default, no 'estimated' badge", () => {
+    test("shows token counts once revealed, no 'estimated' badge", () => {
         render(<TaskGrid runId="r1" tasks={[priced]} />);
-        expect(screen.getByText("2k")).toBeInTheDocument();
+        revealTokens();
+        // Scope value lookups to the table — the mobile card duplicates them.
+        const table = screen.getByRole("table");
+        expect(within(table).getByText("2k")).toBeInTheDocument();
         expect(screen.queryByText(/estimated/i)).toBeNull();
     });
 
     test("USD mode prices each bucket and shows an 'estimated' badge", () => {
         render(<TaskGrid runId="r1" tasks={[priced]} />);
+        revealTokens();
         fireEvent.click(screen.getByRole("button", { name: "USD" }));
+        const table = screen.getByRole("table");
         // output: 2000 · 15 / 1e6 = 0.03 → "$0.0300"
-        expect(screen.getByText("$0.0300")).toBeInTheDocument();
+        expect(within(table).getByText("$0.0300")).toBeInTheDocument();
         // cache-read: 80000 · 0.3 / 1e6 = 0.024 → "$0.0240"
-        expect(screen.getByText("$0.0240")).toBeInTheDocument();
+        expect(within(table).getByText("$0.0240")).toBeInTheDocument();
         expect(screen.getByText(/estimated/i)).toBeInTheDocument();
         // token counts no longer shown
         expect(screen.queryByText("2k")).toBeNull();
@@ -193,6 +227,7 @@ describe("TaskGrid — Tokens↔USD toggle", () => {
             cacheReadTokens: 80_000,
         });
         render(<TaskGrid runId="r1" tasks={[unpriced]} />);
+        revealTokens();
         fireEvent.click(screen.getByRole("button", { name: "USD" }));
         // Estimated mode is active, but an unpriced model can't value the
         // buckets — they fall back to em-dash rather than the priced figure.

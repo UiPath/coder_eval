@@ -7,6 +7,7 @@ import type { ReviewIndexEntry } from "@/lib/reviews-types";
 import { fmtDuration, humanizeTaskId } from "@/lib/format";
 import { statusCategory } from "@/lib/status";
 import { ChipLegend } from "@/app/_overview/tag-rail";
+import { CollapsibleRail } from "@/app/_components/collapsible-rail";
 import { ChipButton } from "./chips";
 import { TaskGrid } from "./task-grid";
 
@@ -362,6 +363,7 @@ export function RunView({
                 (reviewTagCounts && reviewTagCounts.length > 0)) && (
                 <div className="space-y-1.5">
                     <ChipLegend />
+                    <CollapsibleRail id="run-tagrail">
                     <div className="flex flex-wrap items-center gap-1.5">
                         {visibleSkills.map(([tag, count]) => (
                             <ChipButton
@@ -415,6 +417,7 @@ export function RunView({
                             </button>
                         )}
                     </div>
+                    </CollapsibleRail>
                 </div>
             )}
 

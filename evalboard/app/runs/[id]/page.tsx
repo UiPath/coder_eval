@@ -11,6 +11,7 @@ import { fmtRunTime } from "@/lib/format";
 import { AnalysisPanel } from "./analysis-panel";
 import { RefreshButton } from "./refresh-button";
 import { RunView } from "./run-view";
+import { VersionList } from "@/app/_components/version-list";
 
 export const dynamic = "force-dynamic";
 
@@ -35,7 +36,7 @@ export default async function RunPage({
     return (
         <div className="space-y-5">
             <div className="space-y-1">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                     <h1 className="text-xl font-semibold text-gray-900">
                         {meta?.title ?? "Run"}
                     </h1>
@@ -64,29 +65,7 @@ export default async function RunPage({
                         {meta.description}
                     </p>
                 )}
-                {summary.componentShas.length > 0 && (
-                    <div className="text-xs text-gray-500 font-mono pt-1 flex flex-wrap gap-x-3 gap-y-1">
-                        {summary.componentShas.map((c) => (
-                            <span key={c.name}>
-                                <span className="text-gray-400">{c.name}:</span>{" "}
-                                {c.url ? (
-                                    <a
-                                        href={c.url}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="text-blue-600 hover:underline"
-                                    >
-                                        {c.sha}
-                                    </a>
-                                ) : (
-                                    <span className="text-gray-400">
-                                        {c.sha}
-                                    </span>
-                                )}
-                            </span>
-                        ))}
-                    </div>
-                )}
+                <VersionList versions={summary.componentShas} />
             </div>
 
             {analysis && <AnalysisPanel markdown={analysis} />}

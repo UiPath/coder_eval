@@ -11,6 +11,8 @@ import { WINDOWS, type Window } from "@/lib/reviews-types";
 import { DailySuccessChart } from "./_overview/daily-chart";
 import { TurnBudgetChart } from "./_overview/turn-budget-chart";
 import { ChipLegend, MergedTagRail } from "./_overview/tag-rail";
+import { TableScroll } from "./_components/scroll-table";
+import { CollapsibleRail } from "./_components/collapsible-rail";
 
 export const dynamic = "force-dynamic";
 
@@ -208,15 +210,17 @@ export default async function Page({
                 </div>
                 <div className="pt-2 border-t border-gray-100 space-y-2">
                     <ChipLegend />
-                    <MergedTagRail
-                        skills={skills}
-                        taskTags={taskTags}
-                        reviewTags={reviewTags}
-                        activeTag={activeTag}
-                        window={window}
-                        q={q}
-                        limit={24}
-                    />
+                    <CollapsibleRail id="home-tagrail">
+                        <MergedTagRail
+                            skills={skills}
+                            taskTags={taskTags}
+                            reviewTags={reviewTags}
+                            activeTag={activeTag}
+                            window={window}
+                            q={q}
+                            limit={24}
+                        />
+                    </CollapsibleRail>
                     {q &&
                         skills.length === 0 &&
                         taskTags.length === 0 &&
@@ -251,7 +255,34 @@ export default async function Page({
                 </div>
             </div>
 
-            <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
+            <TableScroll
+                footer={
+                    hasMore ? (
+                        <div className="flex items-center justify-center gap-3 px-4 py-3 border-t border-gray-100 bg-gray-50 text-xs">
+                            <Link
+                                href={showMoreHref}
+                                scroll={false}
+                                className="text-studio-blue hover:underline"
+                            >
+                                Show{" "}
+                                {Math.min(
+                                    DEFAULT_LIMIT,
+                                    tableTotalLabel - shownCount,
+                                )}{" "}
+                                more
+                            </Link>
+                            <span className="text-gray-300">·</span>
+                            <Link
+                                href={showAllHref}
+                                scroll={false}
+                                className="text-studio-blue hover:underline"
+                            >
+                                Show all ({tableTotalLabel})
+                            </Link>
+                        </div>
+                    ) : undefined
+                }
+            >
                 <table className="w-full text-sm">
                     <thead>
                         <tr className="bg-gray-50 border-b border-gray-200 text-left text-gray-600">
@@ -330,27 +361,7 @@ export default async function Page({
                         )}
                     </tbody>
                 </table>
-                {hasMore && (
-                    <div className="flex items-center justify-center gap-3 px-4 py-3 border-t border-gray-100 bg-gray-50 text-xs">
-                        <Link
-                            href={showMoreHref}
-                            scroll={false}
-                            className="text-studio-blue hover:underline"
-                        >
-                            Show {Math.min(DEFAULT_LIMIT, tableTotalLabel - shownCount)}{" "}
-                            more
-                        </Link>
-                        <span className="text-gray-300">·</span>
-                        <Link
-                            href={showAllHref}
-                            scroll={false}
-                            className="text-studio-blue hover:underline"
-                        >
-                            Show all ({tableTotalLabel})
-                        </Link>
-                    </div>
-                )}
-            </div>
+            </TableScroll>
 
             {adhocRows.length > 0 && (
                 <div className="space-y-2 pt-2">
@@ -363,7 +374,7 @@ export default async function Page({
                             list, and trends above
                         </span>
                     </div>
-                    <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
+                    <TableScroll>
                         <table className="w-full text-sm">
                             <thead>
                                 <tr className="bg-gray-50 border-b border-gray-200 text-left text-gray-600">
@@ -447,7 +458,7 @@ export default async function Page({
                                 })}
                             </tbody>
                         </table>
-                    </div>
+                    </TableScroll>
                 </div>
             )}
         </div>

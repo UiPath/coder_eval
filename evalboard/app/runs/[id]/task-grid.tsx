@@ -17,6 +17,7 @@ import {
     turnsCellClasses,
 } from "@/lib/turns";
 import { ChipButton } from "./chips";
+import { TableScroll } from "@/app/_components/scroll-table";
 import {
     type ColHelp,
     HelpPopover,
@@ -146,6 +147,99 @@ const COLUMNS: Array<{
     { key: "output", header: "Out", align: "right" },
 ];
 
+// The three token columns fold into one collapsible group. They're the densest
+// part of the grid and the first thing to overflow a narrow screen, so they're
+// hidden by default on small viewports (shown on desktop) and toggled on demand
+// — the data isn't removed, just tucked away until asked for.
+const TOKEN_KEYS = new Set<SortKey>(["cr", "cw", "output"]);
+
+// Skill / review / tag chips for a task. Shared by the table row and the mobile
+// card so the two stay in lock-step.
+function TaskTagChips({
+    t,
+    review,
+    selectedSet,
+    onToggleTag,
+    reviewSelectedSet,
+    onToggleReviewTag,
+}: {
+    t: TaskResultSummary;
+    review?: ReviewIndexEntry;
+    selectedSet?: Set<string>;
+    onToggleTag?: (tag: string) => void;
+    reviewSelectedSet?: Set<string>;
+    onToggleReviewTag?: (tag: string) => void;
+}) {
+    if (!(t.skill || t.tags.length > 0 || (review && review.tags.length > 0))) {
+        return null;
+    }
+    return (
+        <div className="flex flex-wrap gap-1 mt-0.5">
+            {t.skill && (
+                <ChipButton
+                    key={`s:${t.skill}`}
+                    tag={t.skill}
+                    variant="skill"
+                    size="sm"
+                    active={selectedSet?.has(t.skill) ?? false}
+                    onClick={
+                        onToggleTag ? () => onToggleTag(t.skill!) : undefined
+                    }
+                />
+            )}
+            {review?.tags.map((tag) => (
+                <ChipButton
+                    key={`r:${tag}`}
+                    tag={tag}
+                    variant="review"
+                    size="sm"
+                    active={reviewSelectedSet?.has(tag) ?? false}
+                    onClick={
+                        onToggleReviewTag
+                            ? () => onToggleReviewTag(tag)
+                            : undefined
+                    }
+                    title={review.summary_excerpt}
+                />
+            ))}
+            {t.tags
+                .filter((tag) => tag !== t.skill)
+                .map((tag) => (
+                    <ChipButton
+                        key={`t:${tag}`}
+                        tag={tag}
+                        variant="tag"
+                        size="sm"
+                        active={selectedSet?.has(tag) ?? false}
+                        onClick={
+                            onToggleTag ? () => onToggleTag(tag) : undefined
+                        }
+                    />
+                ))}
+        </div>
+    );
+}
+
+// One label/value pair in a mobile card's metric grid.
+function Stat({
+    label,
+    value,
+    valueClass = "text-gray-800",
+}: {
+    label: string;
+    value: string;
+    valueClass?: string;
+}) {
+    return (
+        <div className="min-w-0">
+            <div className="text-[10px] uppercase tracking-wide text-gray-400">
+                {label}
+            </div>
+            <div className={`tabular-nums ${valueClass}`}>{value}</div>
+        </div>
+    );
+}
+
 export function TaskGrid({
     runId,
     tasks,
@@ -172,6 +266,11 @@ export function TaskGrid({
 
     // Token columns can be shown as counts or as their estimated USD value.
     const [unit, setUnit] = useState<Unit>("tokens");
+
+    // Whether the Cache R / Cache W / Out group is expanded. Collapsed by
+    // default on every screen — the grid opens to the 6 essential columns and
+    // the token detail is one click away via the toolbar toggle.
+    const [showTokens, setShowTokens] = useState(false);
 
     // Which column's help popover is open (one at a time). Dismissed by a click
     // outside any popover/trigger or by Escape.
@@ -220,20 +319,44 @@ export function TaskGrid({
         );
     };
 
+    const visibleColumns = COLUMNS.filter(
+        (c) => showTokens || !TOKEN_KEYS.has(c.key),
+    );
+
     return (
         <div className="space-y-2">
-            <div className="flex justify-end">
-                <UnitToggle value={unit} onChange={setUnit} />
+            <div className="flex justify-end items-center gap-2">
+                {showTokens && <UnitToggle value={unit} onChange={setUnit} />}
+                <button
+                    type="button"
+                    onClick={() => setShowTokens((v) => !v)}
+                    aria-expanded={showTokens}
+                    className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-50 hover:text-gray-900 transition-colors"
+                >
+                    <span
+                        aria-hidden
+                        className={`inline-block transition-transform ${showTokens ? "rotate-90" : ""}`}
+                    >
+                        ▸
+                    </span>
+                    {showTokens ? "Hide tokens" : "Show tokens"}
+                </button>
             </div>
-            <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
+            <TableScroll className="hidden md:block">
             <table className="w-full text-sm">
                 <thead>
                     <tr className="bg-gray-50 border-b border-gray-200 text-left text-gray-600">
-                        {COLUMNS.map((col) => {
+                        {visibleColumns.map((col) => {
                             const alignCls =
                                 col.align === "right"
                                     ? "text-right"
                                     : "text-left";
+                            // Pin the Task column so the metric columns can scroll
+                            // under it on narrow screens without losing the name.
+                            const stickyCls =
+                                col.key === "task"
+                                    ? "sticky left-0 z-10 bg-gray-50"
+                                    : "";
                             const active = sort?.key === col.key;
                             const arrow = active
                                 ? sort.dir === "asc"
@@ -251,7 +374,7 @@ export function TaskGrid({
                                 <th
                                     key={col.key}
                                     aria-sort={ariaSort}
-                                    className={`py-3 px-4 font-medium ${alignCls}`}
+                                    className={`py-3 px-4 font-medium ${alignCls} ${stickyCls}`}
                                 >
                                     <span
                                         className={`inline-flex items-center gap-1 ${
@@ -331,9 +454,9 @@ export function TaskGrid({
                         return (
                         <tr
                             key={t.taskId}
-                            className="border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors"
+                            className="group border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors"
                         >
-                            <td className="py-3 px-4 text-gray-700">
+                            <td className="py-3 px-4 text-gray-700 sticky left-0 z-10 bg-white group-hover:bg-gray-50">
                                 <div className="flex flex-col min-w-0 gap-0.5">
                                     <Link
                                         href={`/runs/${runId}/${t.taskId}`}
@@ -341,82 +464,14 @@ export function TaskGrid({
                                     >
                                         {humanizeTaskId(t.taskId)}
                                     </Link>
-                                    {(t.skill ||
-                                        t.tags.length > 0 ||
-                                        (review && review.tags.length > 0)) && (
-                                        <div className="flex flex-wrap gap-1 mt-0.5">
-                                            {t.skill && (
-                                                <ChipButton
-                                                    key={`s:${t.skill}`}
-                                                    tag={t.skill}
-                                                    variant="skill"
-                                                    size="sm"
-                                                    active={
-                                                        selectedSet?.has(
-                                                            t.skill,
-                                                        ) ?? false
-                                                    }
-                                                    onClick={
-                                                        onToggleTag
-                                                            ? () =>
-                                                                  onToggleTag(
-                                                                      t.skill!,
-                                                                  )
-                                                            : undefined
-                                                    }
-                                                />
-                                            )}
-                                            {review?.tags.map((tag) => (
-                                                <ChipButton
-                                                    key={`r:${tag}`}
-                                                    tag={tag}
-                                                    variant="review"
-                                                    size="sm"
-                                                    active={
-                                                        reviewSelectedSet?.has(
-                                                            tag,
-                                                        ) ?? false
-                                                    }
-                                                    onClick={
-                                                        onToggleReviewTag
-                                                            ? () =>
-                                                                  onToggleReviewTag(
-                                                                      tag,
-                                                                  )
-                                                            : undefined
-                                                    }
-                                                    title={
-                                                        review.summary_excerpt
-                                                    }
-                                                />
-                                            ))}
-                                            {t.tags
-                                                .filter(
-                                                    (tag) => tag !== t.skill,
-                                                )
-                                                .map((tag) => (
-                                                    <ChipButton
-                                                        key={`t:${tag}`}
-                                                        tag={tag}
-                                                        variant="tag"
-                                                        size="sm"
-                                                        active={
-                                                            selectedSet?.has(
-                                                                tag,
-                                                            ) ?? false
-                                                        }
-                                                        onClick={
-                                                            onToggleTag
-                                                                ? () =>
-                                                                      onToggleTag(
-                                                                          tag,
-                                                                      )
-                                                                : undefined
-                                                        }
-                                                    />
-                                                ))}
-                                        </div>
-                                    )}
+                                    <TaskTagChips
+                                        t={t}
+                                        review={review}
+                                        selectedSet={selectedSet}
+                                        onToggleTag={onToggleTag}
+                                        reviewSelectedSet={reviewSelectedSet}
+                                        onToggleReviewTag={onToggleReviewTag}
+                                    />
                                 </div>
                             </td>
                             <td className="py-3 px-4">
@@ -448,46 +503,50 @@ export function TaskGrid({
                                     ),
                                 )}
                             </td>
-                            <td
-                                className="py-3 px-4 text-right tabular-nums text-gray-700"
-                                title="cache_read_input_tokens (cached tokens re-billed each turn — usually the dominant cost line)"
-                            >
-                                {tokenCell(
-                                    unit,
-                                    t.model,
-                                    t.cacheReadTokens,
-                                    "cacheRead",
-                                )}
-                            </td>
-                            <td
-                                className="py-3 px-4 text-right tabular-nums text-gray-700"
-                                title="cache_creation_input_tokens (tokens written to cache this task)"
-                            >
-                                {tokenCell(
-                                    unit,
-                                    t.model,
-                                    t.cacheCreationTokens,
-                                    "cacheWrite",
-                                )}
-                            </td>
-                            <td
-                                className="py-3 px-4 text-right tabular-nums text-gray-700"
-                                title="output_tokens"
-                            >
-                                {tokenCell(
-                                    unit,
-                                    t.model,
-                                    t.outputTokens,
-                                    "output",
-                                )}
-                            </td>
+                            {showTokens && (
+                                <>
+                                    <td
+                                        className="py-3 px-4 text-right tabular-nums text-gray-700"
+                                        title="cache_read_input_tokens (cached tokens re-billed each turn — usually the dominant cost line)"
+                                    >
+                                        {tokenCell(
+                                            unit,
+                                            t.model,
+                                            t.cacheReadTokens,
+                                            "cacheRead",
+                                        )}
+                                    </td>
+                                    <td
+                                        className="py-3 px-4 text-right tabular-nums text-gray-700"
+                                        title="cache_creation_input_tokens (tokens written to cache this task)"
+                                    >
+                                        {tokenCell(
+                                            unit,
+                                            t.model,
+                                            t.cacheCreationTokens,
+                                            "cacheWrite",
+                                        )}
+                                    </td>
+                                    <td
+                                        className="py-3 px-4 text-right tabular-nums text-gray-700"
+                                        title="output_tokens"
+                                    >
+                                        {tokenCell(
+                                            unit,
+                                            t.model,
+                                            t.outputTokens,
+                                            "output",
+                                        )}
+                                    </td>
+                                </>
+                            )}
                         </tr>
                         );
                     })}
                     {sorted.length === 0 && (
                         <tr>
                             <td
-                                colSpan={COLUMNS.length}
+                                colSpan={visibleColumns.length}
                                 className="py-6 px-4 text-center text-sm text-gray-500"
                             >
                                 {emptyHint}
@@ -496,6 +555,113 @@ export function TaskGrid({
                     )}
                 </tbody>
             </table>
+            </TableScroll>
+
+            {/* Mobile: the same rows as stacked cards. A wide metric table is
+                miserable on a phone (you can scroll it, but you see two columns
+                at a time), so below md each task becomes a card with its metrics
+                in a small grid — and the token group folds in exactly like the
+                table's columns do. */}
+            <div className="md:hidden space-y-2">
+                {sorted.map((t) => {
+                    const review = reviewsByTask?.get(t.taskId);
+                    const turnsTint = tintForRatio(
+                        turnRatio(
+                            displayedTurns(t.actualCommands, t.hasFinalReply),
+                            t.expectedTurns,
+                        ),
+                    );
+                    return (
+                        <div
+                            key={t.taskId}
+                            className="rounded-lg border border-gray-200 bg-white p-3 space-y-2"
+                        >
+                            <div className="flex items-start justify-between gap-2">
+                                <Link
+                                    href={`/runs/${runId}/${t.taskId}`}
+                                    className="min-w-0 break-words font-semibold text-gray-900 hover:text-studio-blue"
+                                >
+                                    {humanizeTaskId(t.taskId)}
+                                </Link>
+                                <span className="shrink-0">
+                                    <StatusPill status={t.status} relabel />
+                                </span>
+                            </div>
+                            <TaskTagChips
+                                t={t}
+                                review={review}
+                                selectedSet={selectedSet}
+                                onToggleTag={onToggleTag}
+                                reviewSelectedSet={reviewSelectedSet}
+                                onToggleReviewTag={onToggleReviewTag}
+                            />
+                            <dl className="grid grid-cols-4 gap-2 pt-1 text-xs">
+                                <Stat
+                                    label="Score"
+                                    value={
+                                        t.weightedScore != null
+                                            ? t.weightedScore.toFixed(2)
+                                            : "—"
+                                    }
+                                />
+                                <Stat
+                                    label="Duration"
+                                    value={fmtTableDuration(t.durationSeconds)}
+                                />
+                                <Stat
+                                    label="Cost"
+                                    value={fmtCost(t.totalCostUsd)}
+                                />
+                                <Stat
+                                    label="Turns"
+                                    value={fmtTurnsCount(
+                                        displayedTurns(
+                                            t.actualCommands,
+                                            t.hasFinalReply,
+                                        ),
+                                    )}
+                                    valueClass={`font-medium ${turnsCellClasses(turnsTint)}`}
+                                />
+                            </dl>
+                            {showTokens && (
+                                <dl className="grid grid-cols-3 gap-2 border-t border-gray-100 pt-2 text-xs">
+                                    <Stat
+                                        label="Cache R"
+                                        value={tokenCell(
+                                            unit,
+                                            t.model,
+                                            t.cacheReadTokens,
+                                            "cacheRead",
+                                        )}
+                                    />
+                                    <Stat
+                                        label="Cache W"
+                                        value={tokenCell(
+                                            unit,
+                                            t.model,
+                                            t.cacheCreationTokens,
+                                            "cacheWrite",
+                                        )}
+                                    />
+                                    <Stat
+                                        label="Out"
+                                        value={tokenCell(
+                                            unit,
+                                            t.model,
+                                            t.outputTokens,
+                                            "output",
+                                        )}
+                                    />
+                                </dl>
+                            )}
+                        </div>
+                    );
+                })}
+                {sorted.length === 0 && (
+                    <div className="rounded-lg border border-gray-200 bg-white py-6 px-4 text-center text-sm text-gray-500">
+                        {emptyHint}
+                    </div>
+                )}
             </div>
         </div>
     );
