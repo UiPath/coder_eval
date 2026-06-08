@@ -75,7 +75,10 @@ class Settings(BaseSettings):
 
     # Codex settings (CodexAgent). CODEX_MODEL is the fallback model/deployment
     # used when a task doesn't pin agent.model; CODEX_BASE_URL routes to a custom
-    # OpenAI-/responses-compatible endpoint.
+    # OpenAI-/responses-compatible endpoint (incl. Azure OpenAI). For Azure also
+    # set CODEX_API_VERSION (the required ``api-version`` query param) and use the
+    # deployment name as the model. CODEX_BASE_URL / CODEX_API_VERSION /
+    # CODEX_API_KEY are read directly via os.getenv in the agent, not mirrored here.
     codex_model: str | None = None
 
     # Logging

@@ -958,6 +958,10 @@ class Orchestrator:
             # Record which transport llm_judge will use under DirectRoute so the
             # choice is visible in run artifacts (and not just the startup log).
             self.result.environment_info["judge_transport"] = self.route.judge_transport or "none"
+        # Agent-specific routing (e.g. Codex custom-endpoint / Azure). No-op for
+        # the evaluate-only path (no agent) and for agents that add nothing.
+        if self.agent is not None:
+            self.result.environment_info.update(self.agent.get_environment_info())
 
     def _refresh_runtime_tool_versions(self) -> None:
         """Re-capture uip shell + tool-plugin versions after the task ran.

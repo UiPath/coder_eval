@@ -201,3 +201,17 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
             Dictionary of SDK option field names to values, or None if not available.
         """
         return None
+
+    def get_environment_info(self) -> dict[str, Any]:
+        """Agent-specific routing/environment details to persist into the run's
+        ``EvaluationResult.environment_info``.
+
+        Lets an agent surface non-default endpoint/model routing (e.g. a custom
+        base URL or wire protocol) so runs are auditable and comparable across
+        operators. The orchestrator merges this into ``environment_info`` after
+        the agent starts. Default: nothing to add.
+
+        Returns:
+            A flat dict of JSON-serializable keys to merge; empty by default.
+        """
+        return {}

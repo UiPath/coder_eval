@@ -201,6 +201,12 @@ def _fresh_input_tokens(raw_input: int, cached: int) -> int:
     return max(raw_input - cached, 0)
 
 
+# Wire protocol for the custom model provider. The pinned codex binary only
+# supports the Responses API (it rejects `wire_api = "chat"` as "no longer
+# supported"), so this is a fixed constant, not an operator knob.
+_CODEX_WIRE_API = "responses"
+
+
 def _get_item_root(notification: Any) -> Any:
     """Extract the typed item root from a Codex SDK notification.
 
@@ -557,6 +563,26 @@ class CodexAgent(Agent[CodexAgentConfig]):
         with contextlib.suppress(Exception):
             client.close()
 
+    def get_environment_info(self) -> dict[str, Any]:
+        """Record the resolved Codex routing so runs are auditable/comparable.
+
+        Only emits when a custom endpoint is configured (CODEX_BASE_URL). On a
+        custom endpoint the model is an operator-chosen alias (a deployment name
+        on Azure), so two operators' ``gpt-5-codex`` deployments are otherwise
+        indistinguishable in run artifacts. The host (not the full URL) is
+        recorded to avoid leaking any embedded credentials; the API key is never
+        recorded.
+        """
+        base_url = self._resolve_base_url()
+        if not base_url:
+            return {}
+        return {
+            "codex_base_url_host": urlparse(base_url).hostname or "",
+            "codex_wire_api": _CODEX_WIRE_API,
+            "codex_api_version": self._resolve_api_version() or "",
+            "codex_model_is_deployment": True,
+        }
+
     def _setup_skills(self, plugin_tools_dir: str | None) -> None:
         """Set up .agents/skills directory from plugins or plugin_tools_dir.
 
@@ -661,6 +687,16 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """Custom Codex endpoint base URL from CODEX_BASE_URL, or None."""
         return os.getenv("CODEX_BASE_URL") or None
 
+    @staticmethod
+    def _resolve_api_version() -> str | None:
+        """Azure OpenAI ``api-version`` from CODEX_API_VERSION, or None.
+
+        Azure's Responses endpoint requires an ``api-version`` query parameter on
+        every request; when set it is injected as the custom provider's
+        ``query_params``. Plain OpenAI / gateway endpoints leave this unset.
+        """
+        return os.getenv("CODEX_API_VERSION") or None
+
     def _effective_model(self) -> str | None:
         """Resolve the model: task/CLI ``agent.model`` wins, else CODEX_MODEL.
 
@@ -745,9 +781,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
             )
 
         # Route through a custom endpoint (e.g. an OpenAI-/responses-compatible
-        # gateway) when CODEX_BASE_URL is set. The codex binary has no base-URL
-        # env var — a model provider must be defined in config and selected, with
-        # env_key naming the env var that holds the key (CODEX_API_KEY).
+        # gateway, or Azure OpenAI) when CODEX_BASE_URL is set. The codex binary
+        # has no base-URL env var — a model provider must be defined in config and
+        # selected, with env_key naming the env var that holds the key
+        # (CODEX_API_KEY). For Azure, CODEX_API_VERSION adds the required
+        # ``api-version`` query param and CODEX_MODEL is the deployment name.
         base_url = self._resolve_base_url()
         if base_url:
             options["model_provider"] = _CUSTOM_PROVIDER_ID
@@ -756,15 +794,25 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     "CODEX_BASE_URL is set but no model resolved (agent.model / CODEX_MODEL) "
                     + "— the provider may reject the request."
                 )
-            tool_config["model_providers"] = {
-                _CUSTOM_PROVIDER_ID: {
-                    "name": "Custom",
-                    "base_url": base_url,
-                    "env_key": "CODEX_API_KEY",
-                    "wire_api": "responses",
-                }
+            provider: dict[str, Any] = {
+                "name": "Custom",
+                "base_url": base_url,
+                "env_key": "CODEX_API_KEY",
+                # The pinned codex binary only supports the Responses wire API
+                # (it rejects `wire_api = "chat"` as "no longer supported"), so
+                # this is fixed rather than configurable.
+                "wire_api": _CODEX_WIRE_API,
             }
-            self._log.debug(f"Codex routed via custom provider (host={urlparse(base_url).hostname or '(unknown)'})")
+            api_version = self._resolve_api_version()
+            if api_version:
+                # Azure requires ?api-version=… on every request; the codex binary
+                # appends these to the provider's request URL.
+                provider["query_params"] = {"api-version": api_version}
+            tool_config["model_providers"] = {_CUSTOM_PROVIDER_ID: provider}
+            self._log.debug(
+                f"Codex routed via custom provider (host={urlparse(base_url).hostname or '(unknown)'}, "
+                + f"api_version={'set' if api_version else 'unset'})"
+            )
 
         if tool_config:
             options["config"] = tool_config

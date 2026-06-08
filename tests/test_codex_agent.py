@@ -217,6 +217,76 @@ class TestCustomProviderRouting:
         # Explicit model wins over the fallback.
         assert CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="pinned"))._effective_model() == "pinned"
 
+    def test_base_url_without_api_version_omits_query_params(self, monkeypatch):
+        """Plain OpenAI / gateway endpoints get no api-version query param."""
+        monkeypatch.setenv("CODEX_BASE_URL", "https://gw.local/openai/v1")
+        monkeypatch.delenv("CODEX_API_VERSION", raising=False)
+        monkeypatch.delenv("CODEX_WIRE_API", raising=False)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5-codex"))
+        provider = agent._build_thread_options()["config"]["model_providers"]["custom"]
+        assert "query_params" not in provider
+        assert provider["wire_api"] == "responses"
+
+    def test_azure_provider_injects_api_version(self, monkeypatch):
+        """Azure: CODEX_API_VERSION adds the required api-version query param; the
+        deployment name rides in as the model."""
+        monkeypatch.setenv("CODEX_BASE_URL", "https://my-res.openai.azure.com/openai")
+        monkeypatch.setenv("CODEX_API_VERSION", "2025-04-01-preview")
+        monkeypatch.delenv("CODEX_WIRE_API", raising=False)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="my-gpt5-deployment"))
+        opts = agent._build_thread_options()
+        assert opts["model_provider"] == "custom"
+        assert opts["model"] == "my-gpt5-deployment"
+        provider = opts["config"]["model_providers"]["custom"]
+        assert provider["base_url"] == "https://my-res.openai.azure.com/openai"
+        assert provider["env_key"] == "CODEX_API_KEY"
+        assert provider["wire_api"] == "responses"
+        assert provider["query_params"] == {"api-version": "2025-04-01-preview"}
+
+    def test_wire_api_fixed_to_responses(self, monkeypatch):
+        """wire_api is always 'responses' — the pinned codex binary dropped 'chat'
+        support, so it's a fixed constant, not an operator knob."""
+        monkeypatch.setenv("CODEX_BASE_URL", "https://my-res.openai.azure.com/openai")
+        monkeypatch.setenv("CODEX_WIRE_API", "chat")  # ignored — no longer a knob
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
+        provider = agent._build_thread_options()["config"]["model_providers"]["custom"]
+        assert provider["wire_api"] == "responses"
+
+    def test_empty_api_version_falls_back(self, monkeypatch):
+        """Empty (not just unset) CODEX_API_VERSION is treated as unset: no
+        api-version query param."""
+        monkeypatch.setenv("CODEX_BASE_URL", "https://my-res.openai.azure.com/openai")
+        monkeypatch.setenv("CODEX_API_VERSION", "")
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
+        provider = agent._build_thread_options()["config"]["model_providers"]["custom"]
+        assert "query_params" not in provider
+        assert provider["wire_api"] == "responses"
+
+
+class TestCodexEnvironmentInfo:
+    """get_environment_info surfaces resolved custom-endpoint routing for run artifacts."""
+
+    def test_no_base_url_emits_nothing(self, monkeypatch):
+        monkeypatch.delenv("CODEX_BASE_URL", raising=False)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5-codex"))
+        assert agent.get_environment_info() == {}
+
+    def test_azure_routing_recorded(self, monkeypatch):
+        """Host (not full URL), wire_api, api-version, and the deployment-name marker
+        are recorded; the API key is never included."""
+        monkeypatch.setenv("CODEX_BASE_URL", "https://key@my-res.openai.azure.com/openai")
+        monkeypatch.setenv("CODEX_API_VERSION", "2025-04-01-preview")
+        monkeypatch.setenv("CODEX_API_KEY", "super-secret")
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="my-gpt5-deployment"))
+        info = agent.get_environment_info()
+        assert info == {
+            "codex_base_url_host": "my-res.openai.azure.com",
+            "codex_wire_api": "responses",
+            "codex_api_version": "2025-04-01-preview",
+            "codex_model_is_deployment": True,
+        }
+        assert "super-secret" not in str(info)
+
 
 class TestThreadOptions:
     """Test _build_thread_options method."""

@@ -33,7 +33,27 @@ await codex_client.login_chatgpt()
 await codex_client.login_chatgpt_device_code()
 ```
 
-`CodexAgent.start()` calls `login_api_key` automatically when `CODEX_API_KEY`, `OPENAI_API_KEY`, or `AZURE_OPENAI_API_KEY` is present in the environment. Without a key it falls back to any existing ChatGPT login.
+`CodexAgent.start()` calls `login_api_key` automatically when **`CODEX_API_KEY`** is present in the environment. Without a key it falls back to any existing ChatGPT login. (Only `CODEX_API_KEY` is read — not `OPENAI_API_KEY`/`AZURE_OPENAI_API_KEY`; point `CODEX_API_KEY` at whichever endpoint's key you use.)
+
+### Endpoint routing
+
+| Env var | Purpose |
+|---|---|
+| `CODEX_API_KEY` | Auth key/token for the selected endpoint (required for headless runs). |
+| `CODEX_BASE_URL` | Route to a custom endpoint. **Unset → standard OpenAI platform** (api.openai.com). Set → custom provider (gateway or Azure). |
+| `CODEX_MODEL` | Fallback model when `agent.model` is unset. On Azure this is the **deployment name**. |
+| `CODEX_API_VERSION` | Azure only: the required `api-version` query param. Leave unset for OpenAI/gateways. |
+
+**Standard OpenAI:** leave `CODEX_BASE_URL` unset, set `CODEX_API_KEY` to an OpenAI `sk-…` key and `CODEX_MODEL` to a Codex/Responses-capable model.
+
+**Azure OpenAI:**
+```bash
+CODEX_BASE_URL=https://<your-resource>.openai.azure.com/openai
+CODEX_API_VERSION=2025-04-01-preview   # required by Azure
+CODEX_MODEL=<your-deployment-name>     # deployment, not the base model id
+CODEX_API_KEY=<azure-openai-key>
+```
+This registers a custom Codex model provider (`base_url` + `env_key=CODEX_API_KEY` + `query_params={api-version}` + `wire_api=responses`). The Codex CLI only supports the Responses wire API (it rejects `wire_api=chat` as "no longer supported"), so the protocol is fixed. If your Azure deployment requires the key in an `api-key` header rather than `Authorization: Bearer`, that needs an additional provider `http_headers`/`env_http_headers` entry — open an issue if you hit that.
 
 ## Usage
 
@@ -195,7 +215,7 @@ The Codex SDK is synchronous. The agent uses `_run_async()` helper to detect and
 1. **Tool-name collapse** - Codex reports shell tools (`Read`/`Grep`/`Bash`) all as shell commands, surfaced as `Bash` telemetry; name-keyed criteria that distinguish these tools aren't meaningful across agents.
 2. **`skill_triggered` criterion** - Codex has no distinct `Skill` tool (it engages a skill by reading its files via shell), so the criterion detects Codex engagement from that file-read signal (a command referencing `skills/<name>/`) instead of a `Skill` tool call. The file-read signal is weaker than Claude's explicit invocation.
 3. **`disallowed_tools`** - passed to the SDK but not enforced; not a security boundary.
-4. **Authentication** - Requires `CODEX_API_KEY` or `OPENAI_API_KEY` (or Azure equivalents) in the environment; the agent calls `login_api_key` when a key is present.
+4. **Authentication** - Requires `CODEX_API_KEY` in the environment (point it at whichever endpoint's key you use — OpenAI, gateway, or Azure); the agent calls `login_api_key` when a key is present. `OPENAI_API_KEY`/`AZURE_OPENAI_API_KEY` are NOT read.
 5. **Model field** - `TurnRecord.model_used` reflects the pinned `agent.model`; the Codex `Turn` payload itself doesn't carry the resolved model.
 6. **Skills with Windows paths** - Symlink creation may fail on Windows; agent falls back to copying (slower).
 

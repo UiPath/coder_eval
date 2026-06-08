@@ -544,6 +544,9 @@ async def test_orchestrator_setup_preserve_sandbox_uses_ephemeral_runtime_dir(tm
         def get_sdk_options(self):
             return {"env": {"PATH": os.environ.get("PATH", "")}}
 
+        def get_environment_info(self):
+            return {}
+
     async def create_dummy_agent(_self):
         return DummyAgent()
 
