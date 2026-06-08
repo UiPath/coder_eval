@@ -15,6 +15,7 @@ distinguish them from task-level failures.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from pathlib import Path
@@ -109,6 +110,20 @@ def run_task_internal_command(
                     "Host heartbeat stale (>%ss); exiting to reap orphan container.",
                     HEARTBEAT_STALE_SECONDS,
                 )
+                # os._exit skips atexit and IO flushing, so the error line
+                # above would routinely be lost -- making a genuine
+                # stale-heartbeat suicide indistinguishable from an external
+                # SIGKILL in the archived logs. Flush best-effort first;
+                # never let a flush failure stop the exit.
+                import sys as _sys
+
+                for _handler in logging.getLogger().handlers:
+                    with contextlib.suppress(Exception):
+                        _handler.flush()
+                with contextlib.suppress(Exception):
+                    _sys.stdout.flush()
+                with contextlib.suppress(Exception):
+                    _sys.stderr.flush()
                 _os._exit(137)
             time.sleep(HEARTBEAT_STALE_SECONDS / 4)
 

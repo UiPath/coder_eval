@@ -53,3 +53,16 @@ class BatchRunConfig(BaseModel):
 
     # Logging
     verbose: bool = Field(default=False, description="Enable verbose (DEBUG level) logging for Docker output")
+
+    # TODO(container-death-diagnostics): consider a run-level default resource
+    # cap. Containers run uncapped today (sandbox.limits.{max_memory_mb,
+    # max_cpus,max_pids} default to None -> _build_argv emits no --memory/
+    # --cpus/--pids-limit), so at --max-parallel=20 a single runaway task can
+    # pressure the whole host. An opt-in default cap is already expressible
+    # via the EXISTING layered sandbox config -- defaults.sandbox.limits.
+    # max_memory_mb in the experiment YAML, or `-D sandbox.limits.
+    # max_memory_mb=N` on `coder-eval run` -- both flow through
+    # resolve_all_tasks and are overridden by per-task limits. If a dedicated
+    # CLI knob is ever wanted, add it as the FIRST (lowest-priority) layer in
+    # _build_sandbox_layers so per-task limits win, and do NOT default it to
+    # a non-None value (would change behavior for existing configs).

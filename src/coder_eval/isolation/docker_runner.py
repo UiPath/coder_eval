@@ -500,10 +500,19 @@ class DockerRunner:
 
             task_json = output_dir / "task.json"
             if not await asyncio.to_thread(task_json.exists):
-                raise DockerRunError(
+                # The container died before its orchestrator's `finally` could
+                # write task.json (e.g. it was torn down by the cleanup above
+                # after a host-side stream failure, or killed externally).
+                # Persist a synthetic ERROR task.json so the test stays
+                # visible on dashboards/timelines instead of silently
+                # vanishing -- the batch layer's in-memory skeleton never
+                # reaches the per-task dir.
+                error = DockerRunError(
                     f"Container exited with code {returncode} without producing task.json. "
                     + f"See {log_path} for container output."
                 )
+                await self._write_synthetic_task_json(task_json, error)
+                raise error
 
             # output_dir IS rt.run_dir -- no copy needed.
             task_json_text = await asyncio.to_thread(task_json.read_text, encoding="utf-8")
@@ -512,6 +521,38 @@ class DockerRunner:
             return result
         finally:
             await asyncio.to_thread(shutil.rmtree, staging, ignore_errors=True)
+
+    async def _write_synthetic_task_json(self, target: Path, error: DockerRunError) -> None:
+        """Persist a minimal ERROR task.json for a container that died pre-write.
+
+        A container killed mid-task (SIGKILL, or torn down by our own
+        cancellation cleanup) never reaches the in-container `finally` that
+        writes task.json, so without this the task is recorded only in the
+        batch layer's in-memory error skeleton and vanishes from every
+        per-task consumer (dashboard, timelines). Reuses
+        :func:`build_error_result` -- the documented mirror of
+        ``_create_error_task_result`` -- and the Orchestrator's own
+        ``model_dump_json(indent=2)`` serialization so downstream readers
+        parse it unchanged.
+
+        Atomic (tmp + os.replace), never overwrites an existing task.json
+        (if the container won the race after all, the real result wins), and
+        best-effort: a write failure logs a warning and never masks the
+        DockerRunError the caller is about to raise.
+        """
+        result = build_error_result(self.rt, error)
+
+        def _write() -> None:
+            if target.exists():
+                return
+            tmp = target.with_suffix(target.suffix + ".synthetic.tmp")
+            tmp.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+            os.replace(tmp, target)
+
+        try:
+            await asyncio.to_thread(_write)
+        except OSError as exc:
+            logger.warning("Failed to write synthetic task.json to %s: %s", target, exc)
 
     def _warn_on_version_mismatch(self, result: EvaluationResult) -> None:
         """Warn loudly if the in-container coder_eval version != the host's.
