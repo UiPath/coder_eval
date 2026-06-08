@@ -21,7 +21,7 @@ import shutil
 import subprocess
 from collections.abc import Collection
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 
 logger = logging.getLogger(__name__)
@@ -219,12 +219,35 @@ def _git_short_sha(repo_path: Path) -> str:
     return "unknown"
 
 
+# A semver-ish version token: major.minor.patch with an optional leading `v`
+# and any prerelease/build tail (e.g. `1.196.0-alpha.20260605.7426`). Anchored
+# at the start of a line so it rejects non-version `uip --version` output.
+_VERSION_TOKEN = re.compile(r"^v?\d+\.\d+\.\d+\S*$")
+
+
+def looks_like_version(value: object) -> TypeGuard[str]:
+    """True when ``value`` is a string that parses as a ``major.minor.patch`` version.
+
+    Guards every version-capture sink against non-version ``uip --version``
+    output: newer CLI builds can print a JSON envelope (e.g.
+    ``{"Result": "Success"}``) or an auto-update/sync line instead of a bare
+    version, and a raw ``stdout.strip()`` would otherwise record that verbatim.
+    """
+    return isinstance(value, str) and bool(_VERSION_TOKEN.match(value.strip()))
+
+
 def _uip_version(search_path: str | None = None) -> str:
-    """Return `uip --version` output, or 'unknown' if the CLI isn't installed.
+    """Return the ``uip --version`` version string, or 'unknown'.
 
     ``search_path`` overrides the PATH used to resolve ``uip``; pass the
     agent-aligned PATH to report the binary the agent actually executed
     instead of whichever ``uip`` this process happens to see first.
+
+    The output is validated against :func:`looks_like_version` and the first
+    version-shaped line is returned — so a CLI that prefixes the version with
+    an auto-update/sync envelope (newer builds do) still yields the version,
+    and one that prints only a non-version envelope yields ``"unknown"``
+    rather than polluting ``cli_version`` with ``{"Result": "Success"}``.
     """
     uip = "uip"
     if search_path is not None:
@@ -235,7 +258,10 @@ def _uip_version(search_path: str | None = None) -> str:
     try:
         result = subprocess.run([uip, "--version"], capture_output=True, text=True, encoding="utf-8", timeout=5)
         if result.returncode == 0:
-            return result.stdout.strip() or "unknown"
+            for line in result.stdout.splitlines():
+                stripped = line.strip()
+                if looks_like_version(stripped):
+                    return stripped
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return "unknown"
     return "unknown"
@@ -331,6 +357,41 @@ def _tool_plugin_versions(tools_dir: Path | None = None) -> dict[str, str]:
     return plugins
 
 
+def _cli_version_from_manifest(tools_dir: Path | None) -> str | None:
+    """Read ``@uipath/cli``'s version straight from its installed ``package.json``.
+
+    This is the same source of truth :func:`_tool_plugin_versions` reads for the
+    tool plugins — the published package's ``package.json`` carries the full
+    ``-alpha.<date>.<run>`` version (CI stamps it at publish time), and
+    ``uip --version`` merely prints that field. Reading the manifest avoids
+    parsing ``uip --version`` stdout, which newer CLI builds can pollute with a
+    JSON envelope / auto-update line. The CLI lives at ``<tools_dir>/cli`` (the
+    plugin-tools dir is derived by walking up from the resolved ``uip`` binary).
+
+    Returns ``None`` (so callers fall back to the validated stdout path) when the
+    dir/manifest is absent or the version isn't version-shaped — e.g. in-process
+    dev runs where ``uip`` isn't inside a ``node_modules/@uipath`` tree.
+    """
+    if tools_dir is None:
+        return None
+    try:
+        data = json.loads((tools_dir / "cli" / "package.json").read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.debug("Failed to read @uipath/cli package.json under %s: %s", tools_dir, exc)
+        return None
+    version = data.get("version")
+    return version if looks_like_version(version) else None
+
+
+def _resolve_cli_version(tools_dir: Path | None, search_path: str | None) -> str:
+    """The CLI shell version: prefer its ``package.json`` manifest, fall back to ``uip --version``.
+
+    Symmetric with ``tool_plugins`` (manifest-first); the validated stdout path
+    (:func:`_uip_version`) covers installs not under ``node_modules/@uipath``.
+    """
+    return _cli_version_from_manifest(tools_dir) or _uip_version(search_path)
+
+
 def runtime_uip_versions(plugin_tools_dir: str | Path | None, search_path: str | None = None) -> dict[str, Any]:
     """Capture uip shell + tool-plugin versions as resolved at task runtime.
 
@@ -353,9 +414,10 @@ def runtime_uip_versions(plugin_tools_dir: str | Path | None, search_path: str |
     suitable for ``environment_info.update(...)``. Best-effort like the rest
     of the version capture: never raises.
     """
+    tools_dir = Path(plugin_tools_dir) if plugin_tools_dir else None
     return {
-        "cli_version": _uip_version(search_path),
-        "tool_plugins": _tool_plugin_versions(Path(plugin_tools_dir)) if plugin_tools_dir else {},
+        "cli_version": _resolve_cli_version(tools_dir, search_path),
+        "tool_plugins": _tool_plugin_versions(tools_dir) if tools_dir else {},
     }
 
 
@@ -383,14 +445,16 @@ def get_version_info(sandbox_path: Path | None = None) -> dict[str, Any]:
     skills_path = Path(skills_override) if skills_override else sibling_root / "skills"
     version_info["skills_git_commit"] = _git_short_sha(skills_path)
 
-    # uip CLI is installed via npm; capture `uip --version`. Read by
-    # dashboard/scripts/ci/slack_summary.py.
-    version_info["cli_version"] = _uip_version()
+    # uip CLI is installed via npm; read its version from @uipath/cli's
+    # package.json (same source tool_plugins uses), falling back to a validated
+    # `uip --version`. Read by dashboard/scripts/ci/slack_summary.py.
+    tools_dir = resolve_uipath_plugin_dir()
+    version_info["cli_version"] = _resolve_cli_version(tools_dir, None)
 
     # The CLI shell (cli_version) and its `@uipath/*-tool` plugins (e.g.
     # maestro-tool) version independently, so the shell version alone can
     # mislead regression timelines. Record the installed plugin versions too.
-    version_info["tool_plugins"] = _tool_plugin_versions()
+    version_info["tool_plugins"] = _tool_plugin_versions(tools_dir)
 
     # Get coder_eval version
     from importlib.metadata import PackageNotFoundError, version

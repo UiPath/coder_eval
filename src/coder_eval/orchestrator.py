@@ -64,7 +64,7 @@ from .sandbox import Sandbox
 from .simulation import DialogStopReason, UserSimulator, evaluate_stop
 from .streaming.callbacks import StreamCallback, TaskScopedCallback, safe_emit
 from .streaming.events import CriteriaCheckEvent, CriterionSummary
-from .utils import get_version_info, runtime_uip_versions
+from .utils import get_version_info, looks_like_version, runtime_uip_versions
 
 
 # Get module logger
@@ -991,8 +991,10 @@ class Orchestrator:
             versions = runtime_uip_versions(self.sandbox.plugin_tools_dir, self.sandbox.uip_search_path)
             # Keep the setup-time values when post-task resolution comes back
             # empty (e.g. `uip` gone from PATH) — they are the better estimate
-            # of what the task ran than "unknown"/{}.
-            if versions.get("cli_version") not in (None, "", "unknown"):
+            # of what the task ran than "unknown"/{}. Gate on looks_like_version
+            # (not a "" / "unknown" denylist) so this sink shares the one
+            # version-shape contract with _uip_version and the run-level join.
+            if looks_like_version(versions.get("cli_version")):
                 self.result.environment_info["cli_version"] = versions["cli_version"]
             if versions.get("tool_plugins"):
                 self.result.environment_info["tool_plugins"] = versions["tool_plugins"]

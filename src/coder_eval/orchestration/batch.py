@@ -31,7 +31,7 @@ from ..models import (
 from ..path_utils import format_task_log_id
 from ..reports_experiment import eval_result_to_task_dict
 from ..streaming.callbacks import StreamCallback
-from ..utils import get_version_info
+from ..utils import get_version_info, looks_like_version
 from .config import BatchRunConfig
 
 
@@ -380,13 +380,15 @@ def _override_uip_versions_from_tasks(version_info: dict[str, Any], task_results
     ``"unknown"``, and for ``tool_plugins`` no non-empty plugin entry at all
     (legacy results, or every task errored before env capture).
     """
+    # Defence-in-depth alongside the chokepoint fix in _uip_version: filter to
+    # version-shaped strings so junk already on disk (older runs captured a
+    # CLI that printed a JSON envelope instead of a version) can't leak into
+    # the aggregated chip when those results are re-summarised on --resume.
     cli_versions = sorted(
         {
             v
             for r in task_results
-            if (env := r.result.environment_info)
-            and isinstance(v := env.get("cli_version"), str)
-            and v not in ("", "unknown")
+            if (env := r.result.environment_info) and looks_like_version(v := env.get("cli_version"))
         }
     )
     if cli_versions:

@@ -27,6 +27,24 @@ REPO = Path(os.environ.get("CODER_EVAL_REPO", "/home/azureuser/uipath/coder_eval
 RUNS = REPO / "runs"
 DASHBOARD_BASE = "https://coder-evalboard.uipath-dev.com/runs"
 
+# A version-shaped token (mirrors coder_eval.utils.looks_like_version, kept
+# local since this script is stdlib-only). The aggregator already drops junk,
+# but a stale / un-resummarised run.json could still hold a non-version
+# cli_version (e.g. an `{"Result": "Success"}` envelope from an older capture);
+# guard here so we never re-emit that to the channel. Drift is " | "-joined, so
+# accept that shape by validating each piece.
+_VERSION_TOKEN = re.compile(r"^v?\d+\.\d+\.\d+\S*$")
+
+
+def _clean_cli_version(value: object) -> str:
+    """Return a version-shaped ``cli_version`` (or its drift-joined pieces), else '?'."""
+    if not isinstance(value, str) or not value:
+        return "?"
+    pieces = [p.strip() for p in value.split("|")]
+    good = [p for p in pieces if _VERSION_TOKEN.match(p)]
+    return " | ".join(good) if good else "?"
+
+
 # Minimum tasks_run before we'll post to the channel. Production suite is ~300;
 # anything significantly lower likely means broken task discovery, a partial
 # run, or an ad-hoc smoke test — none of which the channel needs to see.
@@ -179,7 +197,7 @@ def build_metrics(cur: dict, suite: str, model: str, backend: str) -> str:
     env = cur.get("environment_info") or {}
     coder = (env.get("git_commit") or "?")[:7]
     skills_sha = (env.get("skills_git_commit") or "?")[:7]
-    cli = env.get("cli_version") or "?"
+    cli = _clean_cli_version(env.get("cli_version"))
 
     label = " / ".join(filter(None, [model, backend])) or "unknown config"
 

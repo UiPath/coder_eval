@@ -17,10 +17,17 @@ import stat
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from coder_eval.models import AgentKind, EvaluationResult, FinalStatus, TaskResult
 from coder_eval.orchestration.batch import _override_uip_versions_from_tasks
 from coder_eval.orchestrator import Orchestrator
-from coder_eval.utils import runtime_uip_versions
+from coder_eval.utils import (
+    _cli_version_from_manifest,
+    _uip_version,
+    looks_like_version,
+    runtime_uip_versions,
+)
 
 
 # ---------- helpers ----------
@@ -63,6 +70,23 @@ def _make_fake_uip(bin_dir: Path, version: str) -> None:
         return
     uip = bin_dir / "uip"
     uip.write_text(f"#!/bin/sh\necho '{version}'\n", encoding="utf-8")
+    uip.chmod(uip.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _make_fake_uip_lines(bin_dir: Path, lines: list[str]) -> None:
+    """Drop a ``uip`` stub whose ``--version`` prints ``lines`` verbatim, in order.
+
+    Models newer CLI builds that emit an auto-update/sync envelope (or any
+    non-version chatter) around the version line.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        body = "@echo off\n" + "".join(f"echo {ln}\n" for ln in lines)
+        (bin_dir / "uip.bat").write_text(body, encoding="utf-8")
+        return
+    uip = bin_dir / "uip"
+    body = "#!/bin/sh\n" + "".join(f"echo '{ln}'\n" for ln in lines)
+    uip.write_text(body, encoding="utf-8")
     uip.chmod(uip.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
@@ -186,29 +210,30 @@ def test_refresh_runtime_tool_versions_no_sandbox_is_noop():
 
 
 def test_override_uses_container_consensus_over_host():
-    version_info = {"cli_version": "host-1", "tool_plugins": {"maestro-tool": "host-1"}}
+    version_info = {"cli_version": "1.2.0-alpha.host", "tool_plugins": {"maestro-tool": "host-1"}}
     tasks = [
-        _make_result({"cli_version": "c-1", "tool_plugins": {"maestro-tool": "m-1"}}),
-        _make_result({"cli_version": "c-1", "tool_plugins": {"maestro-tool": "m-1"}}),
+        _make_result({"cli_version": "1.2.0-alpha.1", "tool_plugins": {"maestro-tool": "m-1"}}),
+        _make_result({"cli_version": "1.2.0-alpha.1", "tool_plugins": {"maestro-tool": "m-1"}}),
     ]
 
     _override_uip_versions_from_tasks(version_info, tasks)
 
-    assert version_info["cli_version"] == "c-1"
+    assert version_info["cli_version"] == "1.2.0-alpha.1"
     assert version_info["tool_plugins"] == {"maestro-tool": "m-1"}
 
 
 def test_override_records_drift_as_joined_versions():
     """A mid-run alpha publish shows up as a joined, sorted version set."""
-    version_info = {"cli_version": "host-1", "tool_plugins": {}}
+    version_info = {"cli_version": "1.2.0-alpha.host", "tool_plugins": {}}
     tasks = [
-        _make_result({"cli_version": "c-1", "tool_plugins": {"maestro-tool": "m-2"}}),
-        _make_result({"cli_version": "c-2", "tool_plugins": {"maestro-tool": "m-1"}}),
+        _make_result({"cli_version": "1.2.0-alpha.1", "tool_plugins": {"maestro-tool": "m-2"}}),
+        _make_result({"cli_version": "1.196.0-alpha.2", "tool_plugins": {"maestro-tool": "m-1"}}),
     ]
 
     _override_uip_versions_from_tasks(version_info, tasks)
 
-    assert version_info["cli_version"] == "c-1 | c-2"
+    # sorted() is lexicographic: "1.196..." sorts before "1.2..." (char '1' < '2').
+    assert version_info["cli_version"] == "1.196.0-alpha.2 | 1.2.0-alpha.1"
     assert version_info["tool_plugins"] == {"maestro-tool": "m-1 | m-2"}
 
 
@@ -248,12 +273,30 @@ def test_override_all_empty_plugin_dicts_keep_host_fallback():
 
 def test_override_filters_unknown_cli_among_valid():
     """'unknown' from one task neither blocks nor joins a valid consensus."""
-    version_info = {"cli_version": "host-1"}
-    tasks = [_make_result({"cli_version": "unknown"}), _make_result({"cli_version": "c-1"})]
+    version_info = {"cli_version": "1.2.0-alpha.host"}
+    tasks = [_make_result({"cli_version": "unknown"}), _make_result({"cli_version": "1.2.0-alpha.1"})]
 
     _override_uip_versions_from_tasks(version_info, tasks)
 
-    assert version_info["cli_version"] == "c-1"
+    assert version_info["cli_version"] == "1.2.0-alpha.1"
+
+
+def test_override_filters_nonversion_junk_cli():
+    """A non-version cli_version (newer CLI's JSON envelope) is filtered from the join.
+
+    Belt to the _uip_version chokepoint: even if junk is already on disk
+    (older runs, re-summarised on --resume), it must not reach the chip.
+    """
+    version_info = {"cli_version": "1.2.0-alpha.host"}
+    tasks = [
+        _make_result({"cli_version": '{"Result": "Success"}'}),
+        _make_result({"cli_version": "[]"}),
+        _make_result({"cli_version": "1.2.0-alpha.1"}),
+    ]
+
+    _override_uip_versions_from_tasks(version_info, tasks)
+
+    assert version_info["cli_version"] == "1.2.0-alpha.1"
 
 
 # ---------- Sandbox plumbing (real object, not the fake) ----------
@@ -272,3 +315,100 @@ def test_sandbox_refresh_plugin_tools_dir_real_plumbing(tmp_path: Path):
 
     assert sandbox.uip_search_path.startswith(f"{dist}{os.pathsep}")
     assert sandbox.plugin_tools_dir == str(tmp_path / "node_modules" / "@uipath")
+
+
+# ---------- version-string validation (junk-envelope guard) ----------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "1.196.0-alpha.20260605.7426",
+        "1.2.0-alpha.20260604.7394",
+        "1.1.0-alpha.20260519.7220",
+        "1.196.0",
+        "v1.2.0",
+        "  1.2.0  ",  # surrounding whitespace tolerated
+    ],
+)
+def test_looks_like_version_accepts_real_versions(value):
+    assert looks_like_version(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '{"Result": "Success"}',  # newer CLI's JSON envelope
+        "[]",
+        "unknown",
+        "",
+        "1.2",  # missing patch
+        "not a version",
+        None,
+        [],
+        {"Result": "Success"},
+    ],
+)
+def test_looks_like_version_rejects_junk(value):
+    assert not looks_like_version(value)
+
+
+def test_uip_version_returns_unknown_for_json_envelope(tmp_path: Path):
+    """A CLI that prints a JSON envelope instead of a version yields 'unknown', not the envelope."""
+    _make_fake_uip_lines(tmp_path / "bin", ['{"Result": "Success"}'])
+
+    assert _uip_version(str(tmp_path / "bin")) == "unknown"
+
+
+def test_uip_version_extracts_version_after_sync_envelope(tmp_path: Path):
+    """When the CLI prints sync chatter before the version, the version line still wins."""
+    _make_fake_uip_lines(
+        tmp_path / "bin",
+        ['{"Result": "Success", "Code": "VersionSync"}', "1.196.0-alpha.20260605.7426"],
+    )
+
+    assert _uip_version(str(tmp_path / "bin")) == "1.196.0-alpha.20260605.7426"
+
+
+# ---------- cli_version read from @uipath/cli/package.json (manifest-first) ----------
+
+
+def test_cli_version_from_manifest_reads_cli_package_json(tmp_path: Path):
+    """The shell version is read from @uipath/cli/package.json, like tool_plugins."""
+    tools_dir = tmp_path / "node_modules" / "@uipath"
+    _make_tool_plugin(tools_dir, "cli", name="@uipath/cli", version="1.2.0-alpha.20260604.7394")
+
+    assert _cli_version_from_manifest(tools_dir) == "1.2.0-alpha.20260604.7394"
+
+
+def test_cli_version_from_manifest_none_when_absent_or_junk(tmp_path: Path):
+    tools_dir = tmp_path / "node_modules" / "@uipath"
+    assert _cli_version_from_manifest(None) is None
+    assert _cli_version_from_manifest(tools_dir) is None  # dir has no cli/package.json
+    _make_tool_plugin(tools_dir, "cli", name="@uipath/cli", version="not-a-version")
+    assert _cli_version_from_manifest(tools_dir) is None  # non-version => fall back
+
+
+def test_runtime_uip_versions_prefers_manifest_over_stdout(tmp_path: Path):
+    """When the manifest is present, it wins over `uip --version` stdout."""
+    tools_dir = tmp_path / "node_modules" / "@uipath"
+    _make_tool_plugin(tools_dir, "cli", name="@uipath/cli", version="1.196.0-alpha.20260605.7426")
+    _make_tool_plugin(tools_dir, "maestro-tool", name="@uipath/maestro-tool", version="1.196.0-alpha.20260605.7426")
+    # A divergent stdout version proves the manifest path is taken, not stdout.
+    _make_fake_uip(tmp_path / "bin", "9.9.9-stale-stdout")
+
+    out = runtime_uip_versions(tools_dir, str(tmp_path / "bin"))
+
+    assert out["cli_version"] == "1.196.0-alpha.20260605.7426"
+    assert out["tool_plugins"] == {"maestro-tool": "1.196.0-alpha.20260605.7426"}
+
+
+def test_runtime_uip_versions_falls_back_to_stdout_without_manifest(tmp_path: Path):
+    """No @uipath/cli manifest under the dir => validated `uip --version` stdout is used."""
+    tools_dir = tmp_path / "node_modules" / "@uipath"
+    tools_dir.mkdir(parents=True)  # exists, but no cli/package.json
+    _make_fake_uip(tmp_path / "bin", "1.2.0-alpha.20260604.7394")
+
+    out = runtime_uip_versions(tools_dir, str(tmp_path / "bin"))
+
+    assert out["cli_version"] == "1.2.0-alpha.20260604.7394"
