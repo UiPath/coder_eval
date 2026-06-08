@@ -6,7 +6,7 @@ from pathlib import Path
 from dotenv import dotenv_values, load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from coder_eval.models import ApiBackend, PermissionMode
+from coder_eval.models import AgentKind, ApiBackend, PermissionMode
 
 
 # Load .env file with override so .env values always win over shell environment
@@ -142,6 +142,11 @@ class Settings(BaseSettings):
         Raises:
             ValueError: If required API key is missing
         """
+        # The no-op agent (agent: {type: none}) makes no model API call, so it
+        # needs no credentials — not even the backend (Bedrock/proxy) settings.
+        if agent_type == AgentKind.NONE.value:
+            return
+
         if self.api_backend == ApiBackend.BEDROCK:
             self._validate_bedrock_settings()
         elif self.api_backend == ApiBackend.PROXY:

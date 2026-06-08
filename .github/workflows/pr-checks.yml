@@ -362,12 +362,12 @@ jobs:
       UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
       UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
       SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
-      # tasks_run for --tags smoke-pass. 5 task files (hello_date, dataset_example,
-      # smoke_llm_judge, smoke_agent_judge, byod_smoke_test); dataset_example fans out
-      # to 2 inline rows, so 6 sub-tasks. If you add/remove a smoke-pass task or change
-      # the dataset row count, bump these.
-      EXPECTED_SMOKE_PASS_RUN: "6"
-      EXPECTED_SMOKE_PASS_SUCCEEDED: "6"
+      # tasks_run for --tags smoke-pass. 6 task files (hello_date, dataset_example,
+      # smoke_llm_judge, smoke_agent_judge, byod_smoke_test, agentless_smoke_test);
+      # dataset_example fans out to 2 inline rows, so 7 sub-tasks. If you add/remove a
+      # smoke-pass task or change the dataset row count, bump these.
+      EXPECTED_SMOKE_PASS_RUN: "7"
+      EXPECTED_SMOKE_PASS_SUCCEEDED: "7"
       # smoke-fail bucket: three tasks expected to fail.
       #   1. smoke_negative_path: file_contains criterion is unsatisfiable
       #      (sentinel-string regression detection for success-checker).

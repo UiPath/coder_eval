@@ -189,10 +189,11 @@ def resolve_initial_prompt_file(task: TaskDefinition, base_dir: Path) -> TaskDef
         task.initial_prompt = content
     if task.initial_prompt is None:
         in_simulation = task.simulation is not None and task.simulation.enabled
-        if not in_simulation:
+        if not in_simulation and not task.is_none_agent:
             raise ValueError(
                 "Either 'initial_prompt' or 'initial_prompt_file' must be set "
-                + "(unless 'simulation.enabled' is true, in which case the simulator generates the opener)"
+                + "(unless 'simulation.enabled' is true, in which case the simulator generates the opener, "
+                + "or 'agent.type' is 'none', in which case no agent runs)"
             )
     return task
 

@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from coder_eval.models.agent_config import AgentConfig, BaseAgentConfig
 from coder_eval.models.criteria import SuccessCriterion
+from coder_eval.models.enums import AgentKind
 from coder_eval.models.limits import RunLimits
 from coder_eval.models.merge_strategy import MergeField
 from coder_eval.models.sandbox import SandboxConfig
@@ -323,7 +324,17 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         ),
     )
     agent: AgentConfig | BaseAgentConfig | None = Field(
-        default=None, description="Agent configuration (resolved from experiment if omitted)"
+        default=None,
+        description=(
+            "Agent configuration (resolved from experiment if omitted). Set `agent: {type: none}` for a "
+            "no-op / system task: no coding agent runs and no model API call is made — coder-eval sets up "
+            "the sandbox, executes pre_run, and checks the success_criteria directly. Use for system / "
+            "canary checks (e.g. verifying Orchestrator or Integration Service connectivity) that reuse the "
+            "eval infrastructure without involving an agent. A `type: none` task must declare no "
+            "`initial_prompt` / `initial_prompt_file` and no `simulation` (no agent reads them), and every "
+            "criterion must be agent-independent (no `requires_agent` criteria such as command_executed / "
+            "skill_triggered / reference_comparison / commands_efficiency)."
+        ),
     )
     sandbox: SandboxConfig = Field(
         default_factory=SandboxConfig,
@@ -428,6 +439,16 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
             )
         return data
 
+    @property
+    def is_none_agent(self) -> bool:
+        """True when this task runs the no-op agent (``agent: {type: none}``).
+
+        The single signal for "no coding agent runs" — keyed off ``agent.type``,
+        not a separate flag. Note this is only meaningful after the agent block
+        is present; an unresolved task that omits ``agent`` entirely is False.
+        """
+        return self.agent is not None and self.agent.type == AgentKind.NONE
+
     @model_validator(mode="after")
     def check_prompt_fields(self) -> Self:
         """Validate initial_prompt / initial_prompt_file combination.
@@ -437,14 +458,57 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         - In simulation mode (``simulation.enabled=True``) both may be omitted;
           the simulator then generates the opening user utterance from its
           persona and goal.
+        - No-op (``agent: {type: none}``) tasks need no prompt — no agent reads
+          it. (``check_none_agent`` additionally rejects a prompt if one is set.)
         """
         if self.initial_prompt is not None and self.initial_prompt_file is not None:
             raise ValueError("Only one of 'initial_prompt' or 'initial_prompt_file' can be provided, not both")
         in_simulation = self.simulation is not None and self.simulation.enabled
-        if self.initial_prompt is None and self.initial_prompt_file is None and not in_simulation:
+        if (
+            self.initial_prompt is None
+            and self.initial_prompt_file is None
+            and not in_simulation
+            and not self.is_none_agent
+        ):
             raise ValueError(
                 "Either 'initial_prompt' or 'initial_prompt_file' must be provided "
-                + "(unless 'simulation.enabled' is true, in which case the simulator generates the opener)"
+                + "(unless 'simulation.enabled' is true, in which case the simulator generates the opener, "
+                + "or 'agent.type' is 'none', in which case no agent runs)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def check_none_agent(self) -> Self:
+        """Validate the no-op agent (``agent: {type: none}``) contract.
+
+        A ``type: none`` task runs no coding agent and makes no model API call, so:
+
+        - It must declare no ``initial_prompt`` / ``initial_prompt_file`` and no
+          enabled ``simulation`` — there is no agent to read a prompt or hold a
+          dialog, so setting them is a silent no-op; reject loudly instead.
+        - Every criterion must be agent-independent: criteria with
+          ``requires_agent=True`` (e.g. command_executed, skill_triggered,
+          reference_comparison, commands_efficiency) inspect the agent's
+          trajectory, which does not exist when no agent runs.
+        """
+        if not self.is_none_agent:
+            return self
+        if self.initial_prompt is not None or self.initial_prompt_file is not None:
+            raise ValueError(
+                "A 'type: none' task must not set 'initial_prompt' / 'initial_prompt_file' "
+                "(no agent runs to read it). Remove the prompt or pick a real agent type."
+            )
+        if self.simulation is not None and self.simulation.enabled:
+            raise ValueError(
+                "A 'type: none' task cannot enable 'simulation' (no agent for the simulator to talk to). "
+                "Remove the simulation block or pick a real agent type."
+            )
+        offending = sorted({c.type for c in self.success_criteria if c.requires_agent})
+        if offending:
+            raise ValueError(
+                f"A 'type: none' task cannot use criteria that require an agent trajectory: {offending}. "
+                "Use agent-independent criteria (run_command, file_exists, file_contains, json_check, "
+                "pytest, file_matches_regex, pylint_score, import_check, ...)."
             )
         return self
 

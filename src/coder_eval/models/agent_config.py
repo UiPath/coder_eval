@@ -222,11 +222,31 @@ class CodexAgentConfig(BaseAgentConfig):
     type: Literal[AgentKind.CODEX]  # type: ignore[assignment]
 
 
+class NoneAgentConfig(BaseAgentConfig):
+    """No-op ("agentless") agent configuration.
+
+    Selected with ``agent: {type: none}``. Binds to ``NoOpAgent`` (Null Object
+    pattern): coder-eval sets up the sandbox, runs ``pre_run``, and checks the
+    success_criteria directly — the agent's ``start``/``communicate``/``stop``
+    are no-ops and no model API call is made. Use for system / canary checks
+    (e.g. Orchestrator or Integration Service connectivity) that reuse the eval
+    infrastructure (sandbox, reports, evalboard, ADX) without involving an agent.
+
+    The task must declare no ``initial_prompt`` / ``initial_prompt_file`` and no
+    ``simulation`` (no agent reads them), and every criterion must be
+    agent-independent (no ``requires_agent`` criteria) — enforced by
+    ``TaskDefinition.check_none_agent``. The inherited ``model`` / prompt /
+    tool fields are accepted but ignored.
+    """
+
+    type: Literal[AgentKind.NONE]  # type: ignore[assignment]
+
+
 # Discriminated union type for type hints, validation, and YAML serialization
 # Only includes the concrete subclasses (not BaseAgentConfig) since the discriminator
 # must be a Literal type. BaseAgentConfig is returned by parse_agent_config when type=None.
 type AgentConfig = Annotated[
-    ClaudeCodeAgentConfig | CodexAgentConfig,
+    ClaudeCodeAgentConfig | CodexAgentConfig | NoneAgentConfig,
     Field(discriminator="type"),
 ]
 

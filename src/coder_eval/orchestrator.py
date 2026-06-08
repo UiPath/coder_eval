@@ -31,6 +31,7 @@ from .errors.retry import create_error_context
 from .evaluation.checker import SuccessChecker, _short_failure_reason
 from .models import (
     ROUTE_NAMES,
+    AgentKind,
     ApiBackend,
     ApiRoute,
     BedrockRoute,
@@ -304,6 +305,18 @@ class Orchestrator:
         # Canonical id shared with run_dir layout, tqdm label, and streaming events.
         self._log_task_id = format_task_log_id(variant_id, task.task_id, replicate_index)
 
+    @property
+    def _agent_name(self) -> str:
+        """Agent name for error-context telemetry.
+
+        ``agent.type.value`` for any resolved task (``"none"`` for no-op tasks);
+        falls back to ``"none"`` only on the evaluate-only path, where no agent
+        is attached.
+        """
+        if self.task.agent is not None and self.task.agent.type is not None:
+            return self.task.agent.type.value
+        return AgentKind.NONE.value
+
     async def run(self) -> EvaluationResult:
         """Run the complete evaluation.
 
@@ -315,7 +328,9 @@ class Orchestrator:
         """
         from .logging_config import task_log_handler
 
-        # Agent must be resolved before reaching the orchestrator
+        # Agent must be resolved before reaching the orchestrator. No-op (type: none)
+        # tasks are resolved to a NoneAgentConfig like any other agent, so there is
+        # no separate "no agent" branch here.
         assert self.task.agent is not None, (
             f"Task '{self.task.task_id}' has no agent config. Ensure experiment resolution ran before orchestration."
         )
@@ -323,6 +338,7 @@ class Orchestrator:
             f"Task '{self.task.task_id}' has no agent.type. Ensure experiment resolution + CLI overrides "
             "ran before orchestration."
         )
+        agent_type = self.task.agent.type
 
         start_time = time.time()
         started_at = datetime.now()
@@ -332,7 +348,7 @@ class Orchestrator:
             task_id=self.task.task_id,
             task_description=self.task.description,
             variant_id=self.variant_id,
-            agent_type=self.task.agent.type,
+            agent_type=agent_type,
             started_at=started_at,
             final_status=FinalStatus.FAILURE,  # Will be updated
             iteration_count=0,
@@ -417,7 +433,7 @@ class Orchestrator:
                     task_id=self.task.task_id,
                     attempt=max(self.result.iteration_count, 1),
                     component="orchestrator.task_timeout",
-                    agent_name=self.task.agent.type.value,
+                    agent_name=self._agent_name,
                 )
 
                 logger.error(f"Task timed out: {e}")
@@ -436,7 +452,7 @@ class Orchestrator:
                     task_id=self.task.task_id,
                     attempt=max(self.result.iteration_count, 1),
                     component=component,
-                    agent_name=self.task.agent.type.value,
+                    agent_name=self._agent_name,
                 )
                 logger.warning(f"Run limit exceeded: {e}")
             except Exception as e:
@@ -456,7 +472,7 @@ class Orchestrator:
                     task_id=self.task.task_id,
                     attempt=max(self.result.iteration_count, 1),  # Actual iteration attempt (1-indexed)
                     component=failed_component,
-                    agent_name=self.task.agent.type.value,
+                    agent_name=self._agent_name,
                 )
 
                 logger.error(f"Evaluation failed: {e}", exc_info=True)
@@ -489,6 +505,9 @@ class Orchestrator:
         if not self.result:
             return
 
+        # Every resolved task carries an agent config (no-op tasks resolve to a
+        # NoneAgentConfig); a missing one is a resolution bug. The evaluate-only
+        # path doesn't reach here with task.agent unset.
         if self.task.agent is None:
             logger.error("Cannot finalize result: task.agent is None")
             return
@@ -509,7 +528,7 @@ class Orchestrator:
                 if turn.model_used:
                     self.result.model_used = turn.model_used
                     break
-        if not self.result.model_used and self.task.agent.model:
+        if not self.result.model_used and self.task.agent is not None and self.task.agent.model:
             self.result.model_used = self.task.agent.model
 
         # Aggregate token usage
@@ -800,8 +819,10 @@ class Orchestrator:
             self._record_route_environment_info()
             return
 
-        # Validate API keys (agent guaranteed non-None after experiment resolution)
-        assert self.task.agent is not None
+        # Validate API keys (agent guaranteed non-None after experiment resolution).
+        # validate_api_keys exempts the no-op agent (type: none) internally — it
+        # makes no API call, so it needs no agent keys.
+        assert self.task.agent is not None and self.task.agent.type is not None
         settings.validate_api_keys(self.task.agent.type.value)
 
         # Create sandbox with retry logic
@@ -838,7 +859,11 @@ class Orchestrator:
         logger.info("API routing: %s", _format_routing(self.route))
         self.success_checker = SuccessChecker(self.sandbox, route=self.route, proxy=self.proxy)
 
-        # Create and start agent with retry logic
+        # Create and start the agent. For a no-op (type: none) task this dispatches
+        # to NoOpAgent, whose start/communicate/stop are no-ops — the orchestrator
+        # runs the normal lifecycle without any agentless branching, and the
+        # criteria are checked against the pre_run-prepared sandbox.
+        assert self.task.agent is not None
         self.agent = await self._create_agent()
 
         env_path_prepend = [str(p) for p in self.sandbox.resolved_mock_path_dirs]
@@ -855,7 +880,7 @@ class Orchestrator:
         await execute_with_retry(
             operation=_start_agent,
             operation_name="Agent start",
-            context={"task_id": self.task.task_id, "component": "agent", "agent_name": self.task.agent.type.value},
+            context={"task_id": self.task.task_id, "component": "agent", "agent_name": self._agent_name},
         )
 
         # Save agent config on result (copy to prevent mutation of shared reference)
@@ -1141,7 +1166,7 @@ class Orchestrator:
                     context={
                         "task_id": self.task.task_id,
                         "component": "agent",
-                        "agent_name": self.task.agent.type.value,
+                        "agent_name": self._agent_name,
                     },
                     on_attempt_error=_on_attempt_failure,
                 )
@@ -1241,16 +1266,22 @@ class Orchestrator:
         """
         assert self.success_checker is not None, "Success checker not initialized"
         assert self.result is not None, "Result not initialized"
+        # Every resolved task carries an agent config (no-op tasks resolve to a
+        # NoneAgentConfig and run via NoOpAgent).
         assert self.task.agent is not None
 
         if self.agent is None:
-            # evaluate-only mode: no agent, single check
+            # No agent attached: evaluate-only re-grade of a completed sandbox.
+            # (No-op tasks have a NoOpAgent here, so they take the normal path
+            # below.) Check the criteria directly against the sandbox.
             assert self.success_checker is not None
             assert self.result is not None
             unsupported = [c.type for c in self.task.success_criteria if c.requires_agent]
             if unsupported:
+                # Only reachable on the evaluate-only path (no agent attached):
+                # re-grading a completed agent run whose trajectory is gone.
                 logger.warning(
-                    "Criteria %s require agent execution; results may be incomplete in evaluate-only mode",
+                    "Criteria %s require agent execution; results may be incomplete with no agent",
                     unsupported,
                 )
             self.result.iteration_count = 1
@@ -1289,8 +1320,10 @@ class Orchestrator:
             # simulator produces the opening utterance itself.
             return await self._simulation_dialog_loop(self.task.initial_prompt, sandbox_dir)
 
-        assert self.task.initial_prompt is not None, "initial_prompt must be resolved before orchestration"
-        current_prompt = self.task.initial_prompt
+        # initial_prompt is guaranteed for real agents (check_prompt_fields); a
+        # no-op (type: none) task runs with no prompt — send empty, NoOpAgent
+        # ignores it and returns an empty turn.
+        current_prompt = self.task.initial_prompt or ""
 
         iteration = 1
         self.result.iteration_count = iteration

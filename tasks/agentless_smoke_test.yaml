@@ -1,0 +1,45 @@
+task_id: agentless_smoke_test
+description: |
+  Agentless smoke test — exercises the "coder-eval without a coder" path.
+
+  No coding agent is created and no model API call is made. coder-eval sets up
+  the sandbox, runs pre_run, then checks the success criteria directly against
+  it. The deterministic side effect (writing a file) happens in pre_run, so this
+  also proves pre_run still executes when no agent runs; the criteria read the
+  file back. The result is stable across runs and safe to gate CI on.
+
+  This is the canary / system-test pattern from issue #203: reuse the eval
+  infrastructure (sandbox, reports, evalboard, ADX) without involving an agent.
+
+tags: [smoke, smoke-pass, agentless]
+
+# `agent: {type: none}` selects the no-op agent: coder-eval sets up the sandbox
+# and runs pre_run, but creates no coding agent and makes no model API call. The
+# success criteria are checked directly against the sandbox.
+agent:
+  type: none
+
+sandbox:
+  driver: tempdir
+
+# pre_run runs inside the sandbox before evaluation. With the no-op agent there
+# is no coding agent, so pre_run is the only thing that touches the sandbox —
+# exactly the setup phase a canary/system task relies on. A non-zero exit here aborts with
+# FinalStatus.ERROR, so a green run proves pre_run executed.
+#
+# The payload is a single bare token (no quotes, no spaces) so the command runs
+# identically under POSIX sh and the Windows cmd.exe shell — cmd doesn't strip
+# quotes and splits on spaces, which would corrupt a quoted multi-word string.
+pre_run:
+  - command: "printf coder-eval-ran-without-a-coder > proof.txt"
+
+success_criteria:
+  - type: file_exists
+    path: proof.txt
+    description: "pre_run wrote its output file (proves pre_run ran with no agent)."
+
+  - type: file_contains
+    path: proof.txt
+    includes:
+      - "coder-eval-ran-without-a-coder"
+    description: "The file has the expected deterministic content."

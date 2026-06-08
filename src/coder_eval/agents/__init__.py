@@ -3,6 +3,7 @@
 # Import agents to trigger their @register decorators
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.agents.codex_agent import CodexAgent
+from coder_eval.agents.noop_agent import NoOpAgent
 from coder_eval.agents.registry import AgentRegistry, create_agent
 
 
@@ -10,5 +11,6 @@ __all__ = [
     "AgentRegistry",
     "ClaudeCodeAgent",
     "CodexAgent",
+    "NoOpAgent",
     "create_agent",
 ]

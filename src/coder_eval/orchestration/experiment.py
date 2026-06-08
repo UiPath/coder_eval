@@ -17,6 +17,8 @@ from typing import Any
 import yaml
 
 from ..models import (
+    AgentConfig,
+    BaseAgentConfig,
     ConfigLineageEntry,
     ExperimentDefinition,
     ExperimentResult,
@@ -372,6 +374,11 @@ def resolve_task_for_variant(
     lineage: dict[str, ConfigLineageEntry] = {}
 
     # --- agent: layers default -> exp-defaults -> task -> variant ---
+    # No-op (agent: {type: none}) tasks need no special-casing here: `type` is a
+    # replace-scalar, so a task-level `type: none` wins over a baseline coding
+    # agent injected by the default experiment, and the merged config validates
+    # as NoneAgentConfig. The orchestrator then dispatches to NoOpAgent.
+    resolved_agent: AgentConfig | BaseAgentConfig | None
     agent_layers: list[Layer] = []
     agent_specs: list[tuple[ConfigSource, dict[str, Any] | None]] = [
         ("default", default_agent),
@@ -457,8 +464,9 @@ def resolve_task_for_variant(
     effective_repeats = _resolve_repeats(default_experiment, experiment, variant, _config, lineage)
 
     # When no config was supplied (direct callers / tests), enforce the agent.type
-    # contract here — _apply_cli_overrides won't run to do it later.
-    if config is None and resolved_agent.type is None:
+    # contract here — _apply_cli_overrides won't run to do it later. A no-op task's
+    # `type: none` satisfies it (type is set), so only a truly type-less agent trips.
+    if config is None and resolved_agent is not None and resolved_agent.type is None:
         raise ValueError(
             f"Agent 'type' is required but was not set by any layer (default experiment, "
             f"experiment defaults, task, or variant) for task {task.task_id!r}. "
@@ -488,6 +496,11 @@ def _apply_cli_overrides(
     from ..config import settings as app_settings
     from .overrides import apply_overrides
 
+    # No-op (agent: {type: none}) tasks need no special-casing: the resolved agent
+    # is a NoneAgentConfig, so a suite-wide `--model` / `-D agent.*` lands on it
+    # harmlessly (NoOpAgent ignores them) and the `type: none` already satisfies the
+    # agent.type contract. An explicit `--type <x>` is highest precedence and, as for
+    # any task, replaces the type — turning the no-op task into that agent.
     assert task.agent is not None, f"Task '{task.task_id}' has no agent config"
 
     # `.env` defaults are the lowest-precedence layer-5 contributor. Only the

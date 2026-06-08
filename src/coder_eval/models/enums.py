@@ -66,6 +66,7 @@ class AgentKind(StrEnum):
     CLAUDE_CODE = "claude-code"
     CODEX = "codex"
     AIDER = "aider"
+    NONE = "none"  # Agentless / system task — no coding agent runs; success criteria do all the work.
     UNKNOWN = "unknown"  # Used when agent type cannot be determined (e.g., task loading failure)
 
 

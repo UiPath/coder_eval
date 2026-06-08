@@ -131,6 +131,40 @@ for the full reference, including the valid keys list.
 **Agent Types:**
 - `claude-code` (default) — Claude Code SDK agent. Supports `sdk_options`, `claude_settings`, and all permission modes.
 - `codex` — OpenAI Codex agent (requires `[codex]` extra; set `CODEX_API_KEY` and optional `CODEX_BASE_URL` environment variables).
+- `none` — No-op agent: no coding agent runs and no model API call is made. See [No-op / System Tasks](#no-op--system-tasks-type-none) below.
+
+### No-op / System Tasks (`type: none`)
+
+Set `agent: {type: none}` to run a task with **no coding agent** — "coder-eval
+without a coder". coder-eval sets up the sandbox, executes `pre_run`, and checks
+the `success_criteria` directly against it. No agent is created, no model API
+call is made, no agent loop runs, and the result records `agent_type = none`.
+
+Use it for **system / canary checks** (e.g. verifying Orchestrator or
+Integration Service connectivity) that want to reuse the eval infrastructure
+(sandbox, reports, evalboard, ADX) but don't need an agent to do anything. It
+replaces the no-op-prompt workaround (a dummy `initial_prompt: "Do nothing."`),
+which still spins up an agent and burns a real API call.
+
+```yaml
+agent:
+  type: none
+sandbox:
+  driver: tempdir
+pre_run:
+  - command: "uip orchestrator ping"   # the system check happens here (or in a criterion)
+success_criteria:
+  - type: run_command
+    command: "uip orchestrator ping"
+    description: Orchestrator is reachable.
+```
+
+Contract (enforced at load): a `type: none` task must declare no `initial_prompt`
+/ `initial_prompt_file` and no enabled `simulation` (no agent reads them), and
+every criterion must be agent-independent — criteria that inspect the agent
+trajectory (`command_executed`, `skill_triggered`, `reference_comparison`,
+`commands_efficiency`) are rejected. A worked example lives at
+[`tasks/agentless_smoke_test.yaml`](../tasks/agentless_smoke_test.yaml).
 
 ### `max_turns`, `task_timeout`, `turn_timeout` location
 
