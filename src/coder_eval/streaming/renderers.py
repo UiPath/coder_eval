@@ -7,6 +7,7 @@ from rich.console import Console
 from rich.markup import escape
 
 from coder_eval.formatting import format_payload, format_token_usage
+from coder_eval.models import ResultSummary
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentStartEvent,
@@ -18,6 +19,7 @@ from coder_eval.streaming.events import (
     ToolEndStatus,
     ToolStartEvent,
     TurnEndEvent,
+    TurnStartEvent,
 )
 
 
@@ -35,6 +37,27 @@ def _truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 3] + "..."
+
+
+def _format_result_error(summary: ResultSummary | None) -> str | None:
+    """Compact SDK error detail from a ResultSummary, or None when not an error.
+
+    Surfaces the diagnostic detail of an ``is_error`` ResultMessage even on
+    exits the agent treats as clean (a benign error-subtype result, or a
+    ``max_turns`` short-circuit) — paths where ``crash_reason`` is unset
+    because the turn never raised. Both renderers share this so the detail is
+    rendered identically on the console and in task.log.
+    """
+    if summary is None or not summary.is_error:
+        return None
+    parts: list[str] = []
+    if summary.subtype:
+        parts.append(f"subtype={summary.subtype}")
+    if summary.stop_reason:
+        parts.append(f"stop_reason={summary.stop_reason}")
+    if summary.result:
+        parts.append(f"result={_truncate(summary.result, _MAX_RESULT_LEN)}")
+    return ", ".join(parts) if parts else "(no detail)"
 
 
 class RichStreamRenderer:
@@ -69,7 +92,12 @@ class RichStreamRenderer:
     def _format_event(self, event: StreamEvent) -> str | None:
         """Format a single event into a Rich markup string."""
         if isinstance(event, AgentStartEvent):
-            return f"[bold]--- Iteration {event.iteration} ---[/bold]"
+            model = f" (model={escape(event.model)})" if event.model else ""
+            return f"[bold]--- Iteration {event.iteration}{model} ---[/bold]"
+
+        # TurnStartEvent is intentionally not rendered on the console: the Rich
+        # view is a terse live feed and Claude emits one per API call (noisy).
+        # The full turn tree lives in task.log via LoggingStreamRenderer.
 
         if isinstance(event, ToolStartEvent):
             params_str = escape(format_payload(event.tool.parameters, max_chars=_MAX_PARAMS_LEN))
@@ -90,10 +118,18 @@ class RichStreamRenderer:
 
         if isinstance(event, AgentEndEvent):
             usage_str = escape(format_token_usage(event.usage.tokens))
-            return (
+            line = (
                 f"[bold]--- Turn complete: {len(event.messages)} msgs, "
                 f"{event.duration_seconds:.1f}s, {usage_str} ---[/bold]"
             )
+            if event.max_turns_exhausted:
+                line += " [yellow](max_turns exhausted)[/yellow]"
+            if event.crashed and event.crash_reason:
+                line += f"\n[red]    reason: {escape(event.crash_reason)}[/red]"
+            error_detail = _format_result_error(event.result_summary)
+            if error_detail is not None:
+                line += f"\n[red]    detail: {escape(error_detail)}[/red]"
+            return line
 
         if isinstance(event, CriteriaCheckEvent):
             score_color = "green" if event.passed == event.total else "yellow"
@@ -159,7 +195,12 @@ class LoggingStreamRenderer:
         cluttering task.log with streaming text chunks.
         """
         if isinstance(event, AgentStartEvent):
-            return f"[{event.task_id}] --- Iteration {event.iteration} ---"
+            model = f" (model={event.model})" if event.model else ""
+            return f"[{event.task_id}] --- Iteration {event.iteration}{model} ---"
+
+        if isinstance(event, TurnStartEvent):
+            model = f" model={event.model}" if event.model else ""
+            return f"[{event.task_id}] >>> Turn start: id={event.turn_id}{model}"
 
         if isinstance(event, ToolStartEvent):
             params_str = format_payload(event.tool.parameters, max_chars=_MAX_PARAMS_LEN)
@@ -184,10 +225,18 @@ class LoggingStreamRenderer:
 
         if isinstance(event, AgentEndEvent):
             usage_str = format_token_usage(event.usage.tokens)
-            return (
+            line = (
                 f"[{event.task_id}] --- Agent complete [{event.status.value}]: "
                 f"{len(event.messages)} msgs, {event.duration_seconds:.1f}s, {usage_str} ---"
             )
+            if event.max_turns_exhausted:
+                line += " (max_turns exhausted)"
+            if event.crashed and event.crash_reason:
+                line += f"\n[{event.task_id}]     reason: {event.crash_reason}"
+            error_detail = _format_result_error(event.result_summary)
+            if error_detail is not None:
+                line += f"\n[{event.task_id}]     detail: {error_detail}"
+            return line
 
         if isinstance(event, CriteriaCheckEvent):
             details = " | ".join(event.details) if event.details else f"{event.passed}/{event.total}"

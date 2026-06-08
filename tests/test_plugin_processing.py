@@ -2,55 +2,49 @@
 
 from pathlib import Path
 
-from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
-from coder_eval.models import AgentKind, parse_agent_config
-
-
-def _agent() -> ClaudeCodeAgent:
-    """Build a minimal ClaudeCodeAgent instance just to reach _process_plugins."""
-    return ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
+from coder_eval.utils import process_plugins
 
 
 class TestProcessPlugins:
-    """Test suite for _process_plugins instance method."""
+    """Test suite for process_plugins."""
 
     def test_empty_plugins_list(self):
         """Empty plugins list should return empty list."""
-        result = _agent()._process_plugins([])
+        result = process_plugins([])
         assert result == []
 
     def test_plugin_without_path(self):
         """Plugin without 'path' key should pass through unchanged."""
         plugins = [{"type": "local"}]
-        result = _agent()._process_plugins(plugins)
+        result = process_plugins(plugins)
         assert result == plugins
         assert result[0].get("type") == "local"
 
     def test_simple_path_no_env_vars(self):
         """Path without env vars should pass through unchanged."""
         plugins = [{"type": "local", "path": "/absolute/path/to/plugin"}]
-        result = _agent()._process_plugins(plugins)
+        result = process_plugins(plugins)
         assert result[0]["path"] == str(Path("/absolute/path/to/plugin").resolve())
 
     def test_expandvars_single_dollar_syntax(self, monkeypatch):
         """Expand $VAR syntax in plugin paths."""
         monkeypatch.setenv("UIPATH_PLUGIN_MARKETPLACE_DIR", "/home/user/plugins")
         plugins = [{"type": "local", "path": "$UIPATH_PLUGIN_MARKETPLACE_DIR/mcp"}]
-        result = _agent()._process_plugins(plugins)
+        result = process_plugins(plugins)
         assert result[0]["path"] == str(Path("/home/user/plugins/mcp").resolve())
 
     def test_expandvars_braced_syntax(self, monkeypatch):
         """Expand ${VAR} syntax in plugin paths."""
         monkeypatch.setenv("UIPATH_PLUGIN_MARKETPLACE_DIR", "/home/user/plugins")
         plugins = [{"type": "local", "path": "${UIPATH_PLUGIN_MARKETPLACE_DIR}/mcp"}]
-        result = _agent()._process_plugins(plugins)
+        result = process_plugins(plugins)
         assert result[0]["path"] == str(Path("/home/user/plugins/mcp").resolve())
 
     def test_unset_env_var_unchanged(self, monkeypatch):
         """Path unchanged when env var is not set (logged as warning)."""
         monkeypatch.delenv("UNDEFINED_VAR", raising=False)
         plugins = [{"type": "local", "path": "$UNDEFINED_VAR/plugin"}]
-        result = _agent()._process_plugins(plugins)
+        result = process_plugins(plugins)
         # Path remains unchanged with the env var literal (os.path.expandvars behavior)
         assert "$UNDEFINED_VAR" in result[0]["path"]
 
@@ -62,7 +56,7 @@ class TestProcessPlugins:
             {"type": "local", "path": "$MARKETPLACE_DIR/plugin1"},
             {"type": "local", "path": "$PLUGIN_HOME/plugin2"},
         ]
-        result = _agent()._process_plugins(plugins)
+        result = process_plugins(plugins)
         assert result[0]["path"] == str(Path("/marketplace/plugin1").resolve())
         assert result[1]["path"] == str(Path("/plugins/plugin2").resolve())
 
@@ -71,7 +65,7 @@ class TestProcessPlugins:
         monkeypatch.setenv("PLUGIN_DIR", "/plugins")
         original_plugins = [{"type": "local", "path": "$PLUGIN_DIR/mcp"}]
         original_path = original_plugins[0]["path"]
-        _agent()._process_plugins(original_plugins)
+        process_plugins(original_plugins)
         # Original should be unchanged
         assert original_plugins[0]["path"] == original_path
 
@@ -80,7 +74,7 @@ class TestProcessPlugins:
         monkeypatch.setenv("BASE", "/base")
         monkeypatch.setenv("SUBDIR", "plugins")
         plugins = [{"type": "local", "path": "$BASE/$SUBDIR/mcp"}]
-        result = _agent()._process_plugins(plugins)
+        result = process_plugins(plugins)
         assert result[0]["path"] == str(Path("/base/plugins/mcp").resolve())
 
     def test_preserves_other_dict_fields(self, monkeypatch):
@@ -94,7 +88,7 @@ class TestProcessPlugins:
                 "custom_field": "value",
             }
         ]
-        result = _agent()._process_plugins(plugins)
+        result = process_plugins(plugins)
         assert result[0]["type"] == "local"
         assert result[0]["enabled"] is True
         assert result[0]["custom_field"] == "value"
@@ -104,6 +98,6 @@ class TestProcessPlugins:
         """Braced syntax ${VAR} also warns when not set."""
         monkeypatch.delenv("UNDEFINED_VAR", raising=False)
         plugins = [{"type": "local", "path": "${UNDEFINED_VAR}/plugin"}]
-        result = _agent()._process_plugins(plugins)
+        result = process_plugins(plugins)
         # Path unchanged (braced var not expanded when not set)
         assert "${UNDEFINED_VAR}" in result[0]["path"]

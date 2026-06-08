@@ -1036,7 +1036,7 @@ def test_dump_sdk_options_basic():
     """Test _dump_sdk_options with a real ClaudeAgentOptions instance."""
     from claude_agent_sdk import ClaudeAgentOptions
 
-    from coder_eval.agents.claude_code_agent import _dump_sdk_options
+    from coder_eval.utils import dump_dataclass
 
     options = ClaudeAgentOptions(
         cwd=_TEST_CWD,
@@ -1045,7 +1045,7 @@ def test_dump_sdk_options_basic():
         model="claude-sonnet-4-5-20250514",
     )
 
-    dump = _dump_sdk_options(options)
+    dump = dump_dataclass(options)
 
     assert isinstance(dump, dict)
     assert dump["cwd"] == _TEST_CWD
@@ -1058,7 +1058,7 @@ def test_dump_sdk_options_excludes_callables():
     """Test that _dump_sdk_options skips callable fields like stderr."""
     from claude_agent_sdk import ClaudeAgentOptions
 
-    from coder_eval.agents.claude_code_agent import _dump_sdk_options
+    from coder_eval.utils import dump_dataclass
 
     def my_stderr(line: str) -> None:
         pass
@@ -1068,7 +1068,7 @@ def test_dump_sdk_options_excludes_callables():
         stderr=my_stderr,
     )
 
-    dump = _dump_sdk_options(options)
+    dump = dump_dataclass(options)
 
     # stderr is a callable and should be excluded
     assert "stderr" not in dump
@@ -1078,11 +1078,11 @@ def test_dump_sdk_options_includes_defaults():
     """Test that _dump_sdk_options includes fields with default values."""
     from claude_agent_sdk import ClaudeAgentOptions
 
-    from coder_eval.agents.claude_code_agent import _dump_sdk_options
+    from coder_eval.utils import dump_dataclass
 
     options = ClaudeAgentOptions(cwd=_TEST_CWD)
 
-    dump = _dump_sdk_options(options)
+    dump = dump_dataclass(options)
 
     # Should include fields with default values
     assert "max_turns" in dump
@@ -1096,12 +1096,12 @@ def test_dump_sdk_options_converts_path():
     """Test that _dump_sdk_options converts Path objects to strings."""
     from claude_agent_sdk import ClaudeAgentOptions
 
-    from coder_eval.agents.claude_code_agent import _dump_sdk_options
+    from coder_eval.utils import dump_dataclass
 
     test_path = Path(_TEST_CWD)  # round-tripped through SDK options dump
     options = ClaudeAgentOptions(cwd=test_path)
 
-    dump = _dump_sdk_options(options)
+    dump = dump_dataclass(options)
 
     assert isinstance(dump["cwd"], str)
     assert dump["cwd"] == str(test_path)
@@ -1119,7 +1119,7 @@ def test_dump_sdk_options_handles_nested_dataclasses():
     from claude_agent_sdk import ClaudeAgentOptions
     from claude_agent_sdk.types import AgentDefinition, HookMatcher
 
-    from coder_eval.agents.claude_code_agent import _dump_sdk_options
+    from coder_eval.utils import dump_dataclass
 
     async def my_hook(input, output, ctx):
         return {"action": "allow"}
@@ -1130,7 +1130,7 @@ def test_dump_sdk_options_handles_nested_dataclasses():
         agents={"helper": AgentDefinition(description="test agent", prompt="do stuff")},
     )
 
-    dump = _dump_sdk_options(options)
+    dump = dump_dataclass(options)
 
     # Hooks should be recursively serialized, with callables stripped
     assert "hooks" in dump

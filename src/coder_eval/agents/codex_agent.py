@@ -5,7 +5,6 @@ import contextlib
 import json
 import logging
 import os
-import re
 import shutil
 import time
 from datetime import datetime
@@ -14,7 +13,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from coder_eval.agent import Agent, AgentState
-from coder_eval.agents._logging import PrefixedAdapter
+from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
 from coder_eval.config import settings
@@ -52,6 +51,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
+from coder_eval.utils import expand_env_vars
 
 
 logger = logging.getLogger(__name__)
@@ -238,11 +238,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self.codex_client: Any = None
         self.thread: Any = None
         self.working_directory: Path | None = None
-        self._state = AgentState.WORKING
-        self._iteration = 0
-        self._iteration_was_incremented = False
+        # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
+        # bookkeeping lives on the Agent base class (shared defaults + helpers).
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
-        self.pending_turn: TurnRecord | None = None
         # Live handle to the in-flight turn, set by _run_turn_with_streaming and
         # cleared in its finally. kill()/kill_sync() use it to interrupt a stuck
         # turn — the watchdog's task.cancel() alone can't preempt a blocking SDK
@@ -333,13 +331,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         assert self.config.type is not None, "CodexAgent requires AgentConfig.type to be set before communicate()"
 
-        self.pending_turn = None
+        # Reset the pending slot + bump the iteration counter (shared lifecycle).
+        self._begin_turn()
 
         turn_start_time = time.monotonic()
         timeout_hit = False
-
-        self._iteration += 1
-        self._iteration_was_incremented = True
 
         commands: list[CommandTelemetry] = []
         messages: list[UserMessage | AssistantMessage] = []
@@ -512,7 +508,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             raise AgentCrashError(message) from e
 
         self._state = AgentState.WORKING
-        self._iteration_was_incremented = False
+        self._end_turn_ok()
 
         # The TurnRecord is the EventCollector's reduction of the emitted events.
         _finalize(AgentEndStatus.COMPLETED, crashed=False, crash_reason=None)
@@ -528,8 +524,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._close_client()
         self.thread = None
         self._active_turn_handle = None
-        self.pending_turn = None
-        self._state = AgentState.FINISHED
+        self._mark_stopped()
 
     async def kill(self) -> None:
         """Force-terminate the agent: interrupt any in-flight turn, then tear down."""
@@ -562,24 +557,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
         with contextlib.suppress(Exception):
             client.close()
 
-    async def discard_pending_turn(self) -> None:
-        """Clear pending_turn and roll back the iteration counter.
-
-        Rolls back when either signal says a turn was attempted: the
-        ``_iteration_was_incremented`` flag (survives ``_set_pending`` swallowing
-        a partial-build exception, which leaves ``pending_turn=None``) or a
-        non-None ``pending_turn`` (for callers that set it directly). Idempotent.
-        """
-        should_rollback = self._iteration_was_incremented or self.pending_turn is not None
-        self.pending_turn = None
-        self._iteration_was_incremented = False
-        if should_rollback and self._iteration > 0:
-            self._iteration -= 1
-
-    def get_state(self) -> AgentState:
-        """Get the current state of the agent."""
-        return self._state
-
     def _setup_skills(self, plugin_tools_dir: str | None) -> None:
         """Set up .agents/skills directory from plugins or plugin_tools_dir.
 
@@ -605,7 +582,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     path_str = plugin.get("path")
                     if path_str:
                         # Expand environment variables in path
-                        expanded_path = self._expand_env_vars(path_str)
+                        expanded_path = expand_env_vars(path_str)
                         plugin_path = Path(expanded_path)
                         if plugin_path.exists() and plugin_path.is_dir():
                             skills_sources.append(plugin_path)
@@ -678,19 +655,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         except Exception as e:
             self._log.warning(f"Failed to set up skills: {e}")
-
-    def _expand_env_vars(self, path_str: str) -> str:
-        """Expand environment variables in a path string.
-
-        Supports $VAR and ${VAR} syntax.
-        """
-        var_pattern = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
-
-        def replace_var(match: re.Match[str]) -> str:
-            var_name = match.group(1) or match.group(2)
-            return os.environ.get(var_name, match.group(0))
-
-        return var_pattern.sub(replace_var, path_str)
 
     @staticmethod
     def _resolve_base_url() -> str | None:
@@ -821,53 +785,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 "[SECURITY] bypassPermissions grants unrestricted sandbox access (full-access). "
                 + "Only use in fully isolated environments with untrusted code execution disabled."
             )
-
-    def _log_notification_raw(self, notification: Any) -> None:
-        """Dump a Codex SDK stream notification verbatim, the instant it arrives.
-
-        Gated behind the ``CODER_EVAL_RAW_SDK_LOG`` env var (truthy = "1",
-        "true", "yes", "on") so normal runs stay quiet. Emits at INFO so it
-        shows up in task.log without flipping the whole logger to DEBUG.
-
-        For each notification we log the method plus a sorted ``key=value`` dump
-        of every public attribute of the payload's item root (when present),
-        falling back to the full ``repr`` of the notification. Use this to see
-        first-hand which item kinds Codex actually streams — e.g. whether a
-        sub-agent / Agent-tool item ever appears, or whether the model resolves
-        the subtask inline with no delegating item at all.
-        """
-        flag = os.environ.get("CODER_EVAL_RAW_SDK_LOG", "")
-        if flag.strip().lower() not in ("1", "true", "yes", "on"):
-            return
-
-        method = getattr(notification, "method", "<no-method>")
-        root = _get_item_root(notification)
-        try:
-            raw_repr = repr(notification)
-        except Exception as exc:  # pragma: no cover - defensive
-            raw_repr = f"<unreprable: {exc!r}>"
-
-        target = root if root is not None else notification
-        attrs: dict[str, Any] = {}
-        for name in dir(target):
-            if name.startswith("_"):
-                continue
-            try:
-                value = getattr(target, name)
-            except Exception as exc:  # pragma: no cover - defensive
-                value = f"<unreadable: {exc!r}>"
-            if callable(value):
-                continue
-            attrs[name] = value
-        attr_dump = "\n".join(f"    {k} = {v!r}" for k, v in sorted(attrs.items()))
-
-        self._log.info(
-            "RAW_SDK_EVENT method=%s root_type=%s\n  repr=%s\n  attrs:\n%s",
-            method,
-            getattr(root, "type", None),
-            raw_repr,
-            attr_dump or "    (none)",
-        )
 
     def _format_turn_result(self, turn_result: Any) -> str:
         """Format a Codex Turn to a readable string — fallback when no text streamed.
@@ -1103,8 +1020,15 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 if notification is _STREAM_DONE:
                     break
 
-                self._log_notification_raw(notification)
+                root = _get_item_root(notification)
                 method = notification.method
+                log_raw_sdk_event(
+                    self._log,
+                    repr_target=notification,
+                    attr_target=root,
+                    method=method,
+                    root_type=getattr(root, "type", None),
+                )
 
                 # --- item/started: Emit ToolStartEvent for every tool-like item ---
                 if method == "item/started":

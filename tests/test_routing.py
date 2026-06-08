@@ -5,11 +5,12 @@ import tempfile
 
 from claude_agent_sdk import ClaudeAgentOptions
 
-from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _dump_sdk_options
+from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.config import Settings
 from coder_eval.models import AgentKind, BedrockRoute, DirectRoute, ProxyRoute, parse_agent_config
 from coder_eval.models.enums import ApiBackend
 from coder_eval.models.routing import resolve_route, to_bedrock_inference_profile
+from coder_eval.utils import dump_dataclass
 
 
 class TestBuildSdkEnv:
@@ -379,7 +380,7 @@ class TestSdkOptionsDumpRedaction:
         route = BedrockRoute(bearer_token="SECRET_TOKEN_123", region="us-east-1")
         env, _ = ClaudeCodeAgent._build_sdk_env(route)
         opts = ClaudeAgentOptions(cwd=tempfile.gettempdir(), env=env)
-        dump = _dump_sdk_options(opts)
+        dump = dump_dataclass(opts)
         env_dump = dump.get("env", {})
         assert env_dump.get("AWS_BEARER_TOKEN_BEDROCK") != "SECRET_TOKEN_123"
 
@@ -387,6 +388,6 @@ class TestSdkOptionsDumpRedaction:
         """ANTHROPIC_API_KEY (even dummy) is redacted in sdk_options dump."""
         env, _ = ClaudeCodeAgent._build_sdk_env(ProxyRoute(port=8080))
         opts = ClaudeAgentOptions(cwd=tempfile.gettempdir(), env=env)
-        dump = _dump_sdk_options(opts)
+        dump = dump_dataclass(opts)
         env_dump = dump.get("env", {})
         assert env_dump.get("ANTHROPIC_API_KEY") != "llmgw-proxy"

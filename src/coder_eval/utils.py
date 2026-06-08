@@ -1,15 +1,185 @@
-"""Utility functions for version tracking and reproducibility."""
+"""General-purpose utilities.
 
+Groups several concerns that are deliberately agent-agnostic so any agent or
+subsystem can reuse them:
+
+* JSON-safe serialization of arbitrary values / dataclasses (``serialize_value``,
+  ``dump_dataclass``).
+* Environment handling: ``$VAR`` expansion (``expand_env_vars``) and secret
+  redaction (``redact_env``).
+* Plugin path processing (``process_plugins``).
+* Version / reproducibility capture (``get_version_info`` and the ``uip``
+  helpers).
+"""
+
+import dataclasses
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
 
 logger = logging.getLogger(__name__)
+
+# Matches $VAR or ${VAR} env-var references in a path string.
+_ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def expand_env_vars(text: str) -> str:
+    """Expand ``$VAR`` and ``${VAR}`` references in ``text`` from ``os.environ``.
+
+    Undefined references are left untouched (matching ``os.path.expandvars``
+    semantics), so callers can detect and warn about them afterwards.
+    """
+    return _ENV_VAR_PATTERN.sub(lambda m: os.environ.get(m.group(1) or m.group(2), m.group(0)), text)
+
+
+def process_plugins(
+    plugins: list[dict[str, Any]],
+    *,
+    log: logging.Logger | logging.LoggerAdapter[Any] = logger,
+) -> list[dict[str, Any]]:
+    """Process plugins by expanding environment variable placeholders in paths.
+
+    Expands any $VAR or ${VAR} patterns in plugin paths using environment variables.
+    Logs a warning if a path contains an env var reference that is not set.
+
+    Args:
+        plugins: List of plugin configuration dictionaries (with optional 'path' keys)
+        log: Logger (or adapter) for the undefined-env-var warning; defaults to
+            this module's logger.
+
+    Returns:
+        List of processed plugin configurations with env vars expanded
+    """
+    if not plugins:
+        return []
+
+    processed = []
+
+    for plugin in plugins:
+        # Create a copy to avoid modifying the original
+        processed_plugin = dict(plugin)
+
+        # Expand env vars in path if present
+        if "path" in processed_plugin:
+            path = processed_plugin["path"]
+            # Check for unset env vars before expansion (for better error messages)
+            for match in _ENV_VAR_PATTERN.finditer(path):
+                # group(1) is ${VAR}, group(2) is $VAR
+                var_name = match.group(1) or match.group(2)
+                if var_name not in os.environ:
+                    log.warning(f"Plugin path contains undefined environment variable ${var_name}: {path}")
+
+            # Expand all env vars in the path, then resolve relative paths
+            # against the process cwd (not the sandbox cwd) so plugins are found
+            expanded = expand_env_vars(path)
+            processed_plugin["path"] = str(Path(expanded).resolve())
+
+        processed.append(processed_plugin)
+
+    return processed
+
+
+SKIP = object()  # Sentinel marking values that serialize_value should drop from the result.
+
+
+def serialize_value(
+    value: Any,
+    *,
+    skip: Any = SKIP,
+    skip_if_has_attrs: Collection[str] = frozenset({"write", "read"}),
+) -> Any:
+    """Recursively serialize a value to JSON-safe types.
+
+    Traverses dataclasses, dicts, lists, and tuples, converting ``Path`` to
+    ``str`` and falling back to ``str(value)`` for unknown types.
+
+    Returns the ``skip`` sentinel for values that should be excluded from the
+    result: callables, and any object exposing *all* of ``skip_if_has_attrs``
+    (file-like objects — those with both ``write`` and ``read`` — by default).
+    Callers drop any field/item that comes back as ``skip``.
+
+    Args:
+        value: The value to serialize.
+        skip: Sentinel returned for non-serializable values; callers compare
+            results against this same object with ``is`` to filter them out.
+        skip_if_has_attrs: Attribute names that, when all present on a value,
+            mark it as non-serializable. Defaults to file-like detection
+            (``{"write", "read"}``); pass an empty collection to disable.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if callable(value):
+        return skip
+    if skip_if_has_attrs and all(hasattr(value, attr) for attr in skip_if_has_attrs):
+        return skip
+    if isinstance(value, Path):
+        return str(value)
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        serialized: dict[str, Any] = {}
+        for field in dataclasses.fields(value):
+            field_value = serialize_value(getattr(value, field.name), skip=skip, skip_if_has_attrs=skip_if_has_attrs)
+            if field_value is not skip:
+                serialized[field.name] = field_value
+        return serialized
+    if isinstance(value, dict):
+        serialized_dict: dict[str, Any] = {}
+        for k, v in value.items():
+            v_serialized = serialize_value(v, skip=skip, skip_if_has_attrs=skip_if_has_attrs)
+            if v_serialized is not skip:
+                serialized_dict[str(k)] = v_serialized
+        return serialized_dict
+    if isinstance(value, (list, tuple)):
+        serialized_list: list[Any] = []
+        for item in value:
+            item_serialized = serialize_value(item, skip=skip, skip_if_has_attrs=skip_if_has_attrs)
+            if item_serialized is not skip:
+                serialized_list.append(item_serialized)
+        return serialized_list
+    # Fallback: convert unknown types to string representation
+    return str(value)
+
+
+SENSITIVE_ENV_KEYWORDS = {"TOKEN", "KEY", "SECRET"}
+
+
+def redact_env(env: dict[str, str]) -> dict[str, str]:
+    """Redact sensitive values from an environment variable dict.
+
+    Keys containing TOKEN, KEY, or SECRET (case-insensitive) are replaced with ***REDACTED***.
+    """
+    return {k: "***REDACTED***" if any(kw in k.upper() for kw in SENSITIVE_ENV_KEYWORDS) else v for k, v in env.items()}
+
+
+def dump_dataclass(obj: Any, *, skip: Any = SKIP) -> dict[str, Any]:
+    """Dump a dataclass instance to a plain JSON-serializable dict.
+
+    Recursively serializes each field via :func:`serialize_value`, skipping
+    non-serializable values (callables, file-like objects). A field named
+    ``env`` holding a dict is passed through :func:`redact_env` so secrets
+    (tokens, keys) never reach the dump.
+
+    Args:
+        obj: A dataclass instance.
+        skip: Sentinel forwarded to :func:`serialize_value` to mark dropped values.
+
+    Returns:
+        Dictionary of field names to JSON-serializable values.
+    """
+    result: dict[str, Any] = {}
+    for field in dataclasses.fields(obj):
+        value = serialize_value(getattr(obj, field.name), skip=skip)
+        if value is not skip:
+            if field.name == "env" and isinstance(value, dict):
+                value = redact_env(value)
+            result[field.name] = value
+    return result
 
 
 def get_default_docker_image_tag() -> str:

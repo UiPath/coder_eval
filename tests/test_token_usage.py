@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from coder_eval.agents._logging import log_raw_sdk_event
 from coder_eval.agents.claude_code_agent import (
     ClaudeCodeAgent,
     _is_sdk_result_message,
@@ -850,14 +851,14 @@ class TestExtractAgentUsage:
         assert result.tokens.output_tokens == 5
 
 
-# --- _log_message_raw env-gate tests ---
+# --- log_raw_sdk_event env-gate tests (shared by both agents) ---
 
 
 def _make_agent() -> ClaudeCodeAgent:
     return ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
 
 
-class TestLogMessageRaw:
+class TestLogRawSdkEvent:
     def test_disabled_by_default(self, caplog):
         import os
 
@@ -865,7 +866,7 @@ class TestLogMessageRaw:
         msg = MagicMock(spec=[])
         agent = _make_agent()
         with caplog.at_level("INFO", logger="coder_eval.agents.claude_code_agent"):
-            agent._log_message_raw(msg, "FakeMessage")
+            log_raw_sdk_event(agent._log, repr_target=msg, type="FakeMessage")
         assert "RAW_SDK_EVENT" not in caplog.text
 
     def test_enabled_by_env_var(self, caplog, monkeypatch):
@@ -874,9 +875,32 @@ class TestLogMessageRaw:
         msg.some_attr = "hello"
         agent = _make_agent()
         with caplog.at_level("INFO", logger="coder_eval.agents.claude_code_agent"):
-            agent._log_message_raw(msg, "FakeMessage")
+            log_raw_sdk_event(agent._log, repr_target=msg, type="FakeMessage")
         assert "RAW_SDK_EVENT" in caplog.text
-        assert "FakeMessage" in caplog.text
+        assert "type=FakeMessage" in caplog.text
+        assert "some_attr = 'hello'" in caplog.text
+
+    def test_attr_target_overrides_dump_source(self, caplog, monkeypatch):
+        """Codex passes a separate attr_target (the item root); it's dumped, not repr_target."""
+        monkeypatch.setenv("CODER_EVAL_RAW_SDK_LOG", "1")
+        notification = MagicMock(spec=["method"])
+        notification.method = "item/started"
+        root = MagicMock(spec=["type", "id"])
+        root.type = "command_execution"
+        root.id = "abc"
+        agent = _make_agent()
+        with caplog.at_level("INFO", logger="coder_eval.agents.claude_code_agent"):
+            log_raw_sdk_event(
+                agent._log,
+                repr_target=notification,
+                attr_target=root,
+                method="item/started",
+                root_type=root.type,
+            )
+        assert "method=item/started" in caplog.text
+        assert "root_type=command_execution" in caplog.text
+        # The dumped attrs come from `root`, not the notification.
+        assert "id = 'abc'" in caplog.text
 
 
 # --- _is_task_notification subtype fallback ---

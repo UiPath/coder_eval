@@ -32,6 +32,41 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
     slot is always None.
     """
 
+    # Shared turn-lifecycle bookkeeping. Class-level defaults so subclasses get
+    # the behavior without re-declaring them in __init__ (they may still set
+    # `_state` in start()). `_iteration_was_incremented` is set True right after
+    # the counter bump at the top of `communicate()` and consumed by
+    # `discard_pending_turn()`, which rolls the counter back exactly once per
+    # failed turn — even when partial-record assembly leaves `pending_turn=None`.
+    _state: AgentState = AgentState.WORKING
+    _iteration: int = 0
+    _iteration_was_incremented: bool = False
+
+    def _begin_turn(self) -> None:
+        """Mark the start of a ``communicate()`` turn: reset the pending slot and
+        bump the iteration counter so a mid-turn failure can be rolled back.
+
+        Call once at the top of every ``communicate()`` implementation.
+        """
+        self.pending_turn = None
+        self._iteration += 1
+        self._iteration_was_incremented = True
+
+    def _end_turn_ok(self) -> None:
+        """Mark a turn as cleanly completed so its iteration bump stands.
+
+        Call on the success path of ``communicate()`` (before returning).
+        """
+        self._iteration_was_incremented = False
+
+    def _mark_stopped(self) -> None:
+        """Common ``stop()`` tail: clear the pending slot and enter FINISHED.
+
+        Subclasses call this after their own resource teardown.
+        """
+        self.pending_turn = None
+        self._state = AgentState.FINISHED
+
     @abstractmethod
     async def start(
         self,
@@ -124,12 +159,22 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         return None
 
     async def discard_pending_turn(self) -> None:
-        """Clear ``pending_turn`` and roll back per-turn bookkeeping.
+        """Clear ``pending_turn`` and roll back the iteration counter.
 
-        Idempotent: safe to call when ``pending_turn`` is already None.
-        Call only after a failed ``communicate()``; never after a success.
+        Rolls back when either signal says a turn was attempted: the
+        ``_iteration_was_incremented`` flag (survives partial-record assembly
+        swallowing an exception, which leaves ``pending_turn=None`` — so the
+        flag, not ``pending_turn``, is the reliable signal) or a non-None
+        ``pending_turn`` (for callers, e.g. tests, that set it directly).
+
+        Idempotent: after the first call both signals are cleared. Call only
+        after a failed ``communicate()``; never after a success.
         """
-        return None
+        should_rollback = self._iteration_was_incremented or self.pending_turn is not None
+        self.pending_turn = None
+        self._iteration_was_incremented = False
+        if should_rollback and self._iteration > 0:
+            self._iteration -= 1
 
     def kill_sync(self) -> None:
         """Synchronous variant of ``kill`` for callers on non-asyncio threads.
@@ -141,14 +186,13 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         """
         return None
 
-    @abstractmethod
     def get_state(self) -> AgentState:
         """Get the current state of the agent.
 
         Returns:
             Current agent state
         """
-        pass
+        return self._state
 
     def get_sdk_options(self) -> dict[str, Any] | None:
         """Get the raw SDK options used for the last agent query.

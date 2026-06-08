@@ -1,13 +1,15 @@
-"""Tests for the Rich stream renderer."""
+"""Tests for the Rich + logging stream renderers."""
 
 import io
+import logging
 from datetime import datetime
 
 from rich.console import Console
 
-from coder_eval.models import AgentUsage, CommandTelemetry, TokenUsage
+from coder_eval.models import AgentUsage, CommandTelemetry, ResultSummary, TokenUsage
 from coder_eval.streaming.events import (
     AgentEndEvent,
+    AgentEndStatus,
     AgentStartEvent,
     CriteriaCheckEvent,
     CriterionSummary,
@@ -15,8 +17,9 @@ from coder_eval.streaming.events import (
     ToolEndEvent,
     ToolEndStatus,
     ToolStartEvent,
+    TurnStartEvent,
 )
-from coder_eval.streaming.renderers import RichStreamRenderer
+from coder_eval.streaming.renderers import LoggingStreamRenderer, RichStreamRenderer
 
 
 def _make_renderer(verbosity: str = "full", batch_mode: bool = False) -> tuple[RichStreamRenderer, io.StringIO]:
@@ -236,3 +239,143 @@ def test_criteria_check_omits_reason_for_passing():
     output = buf.getvalue()
     assert "PASS" in output
     assert ">" not in output  # No failure reason indicator
+
+
+def test_rich_agent_start_includes_model():
+    """AgentStartEvent renders the model when present."""
+    renderer, buf = _make_renderer()
+    renderer.on_event(AgentStartEvent(task_id="t1", iteration=2, prompt="", model="claude-opus-4-8"))
+    assert "model=claude-opus-4-8" in buf.getvalue()
+
+
+def test_rich_agent_end_surfaces_crash_and_max_turns():
+    """AgentEndEvent on the console surfaces max_turns + crash reason + error detail."""
+    renderer, buf = _make_renderer()
+    renderer.on_event(
+        AgentEndEvent(
+            task_id="t1",
+            status=AgentEndStatus.CRASHED,
+            duration_seconds=1.0,
+            max_turns_exhausted=True,
+            crashed=True,
+            crash_reason="CLI process failed (exit code 1)",
+            result_summary=ResultSummary(is_error=True, subtype="error_during_execution", result="boom"),
+        )
+    )
+    output = buf.getvalue()
+    assert "max_turns exhausted" in output
+    assert "reason:" in output and "exit code 1" in output
+    assert "detail:" in output and "error_during_execution" in output
+
+
+# --- LoggingStreamRenderer (task.log path) ---------------------------------
+
+
+def _logged_lines(caplog) -> str:
+    """Join all records emitted by the logging renderer's module logger."""
+    return "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_logging_agent_start_includes_model(caplog):
+    """AgentStartEvent log line carries iteration and model."""
+    renderer = LoggingStreamRenderer()
+    with caplog.at_level(logging.DEBUG, logger="coder_eval.streaming.renderers"):
+        renderer.on_event(AgentStartEvent(task_id="t1", iteration=3, prompt="", model="claude-opus-4-8"))
+    out = _logged_lines(caplog)
+    assert "Iteration 3" in out
+    assert "model=claude-opus-4-8" in out
+
+
+def test_logging_turn_start_renders(caplog):
+    """TurnStartEvent produces a turn-start log line with id and model."""
+    renderer = LoggingStreamRenderer()
+    with caplog.at_level(logging.DEBUG, logger="coder_eval.streaming.renderers"):
+        renderer.on_event(TurnStartEvent(task_id="t1", turn_id="msg_123", model="claude-opus-4-8"))
+    out = _logged_lines(caplog)
+    assert "Turn start" in out
+    assert "id=msg_123" in out
+    assert "model=claude-opus-4-8" in out
+
+
+def test_logging_text_chunk_is_skipped(caplog):
+    """TextChunkEvent is intentionally not logged (avoids task.log clutter)."""
+    renderer = LoggingStreamRenderer()
+    with caplog.at_level(logging.DEBUG, logger="coder_eval.streaming.renderers"):
+        renderer.on_event(TextChunkEvent(task_id="t1", text="streaming text"))
+    assert len(caplog.records) == 0
+
+
+def test_logging_agent_end_notes_max_turns(caplog):
+    """A clean max_turns-exhausted exit is annotated without a crash reason."""
+    renderer = LoggingStreamRenderer()
+    with caplog.at_level(logging.DEBUG, logger="coder_eval.streaming.renderers"):
+        renderer.on_event(
+            AgentEndEvent(
+                task_id="t1",
+                status=AgentEndStatus.MAX_TURNS_EXHAUSTED,
+                duration_seconds=2.0,
+                max_turns_exhausted=True,
+                crashed=False,
+            )
+        )
+    out = _logged_lines(caplog)
+    assert "max_turns exhausted" in out
+    assert "reason:" not in out
+
+
+def test_logging_agent_end_renders_crash_reason(caplog):
+    """A crashed exit appends the crash reason on its own line."""
+    renderer = LoggingStreamRenderer()
+    with caplog.at_level(logging.DEBUG, logger="coder_eval.streaming.renderers"):
+        renderer.on_event(
+            AgentEndEvent(
+                task_id="t1",
+                status=AgentEndStatus.CRASHED,
+                duration_seconds=2.0,
+                crashed=True,
+                crash_reason="Communication with agent failed: boom",
+            )
+        )
+    out = _logged_lines(caplog)
+    assert "Agent complete [crashed]" in out
+    assert "reason: Communication with agent failed: boom" in out
+
+
+def test_logging_agent_end_surfaces_noncrash_error_detail(caplog):
+    """An is_error ResultSummary on a non-crash exit still surfaces detail."""
+    renderer = LoggingStreamRenderer()
+    with caplog.at_level(logging.DEBUG, logger="coder_eval.streaming.renderers"):
+        renderer.on_event(
+            AgentEndEvent(
+                task_id="t1",
+                status=AgentEndStatus.COMPLETED,
+                duration_seconds=2.0,
+                crashed=False,
+                result_summary=ResultSummary(
+                    is_error=True, subtype="error_max_turns", stop_reason="max_turns", result="hit the cap"
+                ),
+            )
+        )
+    out = _logged_lines(caplog)
+    assert "detail:" in out
+    assert "error_max_turns" in out
+    assert "hit the cap" in out
+    assert "reason:" not in out  # not crashed → no crash_reason line
+
+
+def test_logging_agent_end_no_detail_when_not_error(caplog):
+    """A clean COMPLETED exit with a non-error ResultSummary adds no detail line."""
+    renderer = LoggingStreamRenderer()
+    with caplog.at_level(logging.DEBUG, logger="coder_eval.streaming.renderers"):
+        renderer.on_event(
+            AgentEndEvent(
+                task_id="t1",
+                status=AgentEndStatus.COMPLETED,
+                duration_seconds=2.0,
+                crashed=False,
+                result_summary=ResultSummary(is_error=False, subtype="success"),
+            )
+        )
+    out = _logged_lines(caplog)
+    assert "detail:" not in out
+    assert "reason:" not in out

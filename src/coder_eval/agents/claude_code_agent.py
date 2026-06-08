@@ -1,7 +1,6 @@
 """Claude Code agent implementation using the Claude Agent SDK."""
 
 import asyncio
-import dataclasses
 import json
 import logging
 import os
@@ -14,15 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import (
-    AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
     Message,
     ProcessError,
-    ResultMessage,
-    SystemMessage,
     TaskNotificationMessage,
-    UserMessage,
     query,
 )
 
@@ -34,7 +29,7 @@ from claude_agent_sdk import (
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
 from coder_eval.agent import Agent, AgentState
-from coder_eval.agents._logging import PrefixedAdapter
+from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
 from coder_eval.errors import (
@@ -43,7 +38,7 @@ from coder_eval.errors import (
     format_timeout_reason,
     truncate_crash_message,
 )
-from coder_eval.formatting import format_payload
+from coder_eval.formatting import format_messages, format_payload
 from coder_eval.models import (
     AgentKind,
     AgentUsage,
@@ -79,6 +74,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
+from coder_eval.utils import dump_dataclass, process_plugins
 
 
 logger = logging.getLogger(__name__)
@@ -174,83 +170,7 @@ def _is_sdk_result_message(message: Any) -> bool:
     return hasattr(message, "session_id") and hasattr(message, "usage") and not _is_task_notification(message)
 
 
-_SKIP = object()  # Sentinel for values that should be excluded from the dump
-
-
-def _serialize_value(value: Any) -> Any:
-    """Recursively serialize a value to JSON-safe types.
-
-    Returns _SKIP sentinel for non-serializable values (callables, file-like objects).
-    """
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if callable(value):
-        return _SKIP
-    if hasattr(value, "write") and hasattr(value, "read"):
-        return _SKIP
-    if isinstance(value, Path):
-        return str(value)
-    if dataclasses.is_dataclass(value):
-        serialized: dict[str, Any] = {}
-        for field in dataclasses.fields(value):
-            field_value = _serialize_value(getattr(value, field.name))
-            if field_value is not _SKIP:
-                serialized[field.name] = field_value
-        return serialized
-    if isinstance(value, dict):
-        serialized_dict: dict[str, Any] = {}
-        for k, v in value.items():
-            v_serialized = _serialize_value(v)
-            if v_serialized is not _SKIP:
-                serialized_dict[str(k)] = v_serialized
-        return serialized_dict
-    if isinstance(value, (list, tuple)):
-        serialized_list: list[Any] = []
-        for item in value:
-            item_serialized = _serialize_value(item)
-            if item_serialized is not _SKIP:
-                serialized_list.append(item_serialized)
-        return serialized_list
-    # Fallback: convert unknown types to string representation
-    return str(value)
-
-
-_SENSITIVE_ENV_KEYWORDS = {"TOKEN", "KEY", "SECRET"}
-
 _JSON_START_SEARCH_LIMIT = 200
-
-
-def _redact_env(env: dict[str, str]) -> dict[str, str]:
-    """Redact sensitive values from an environment variable dict.
-
-    Keys containing TOKEN, KEY, or SECRET (case-insensitive) are replaced with ***REDACTED***.
-    """
-    return {
-        k: "***REDACTED***" if any(kw in k.upper() for kw in _SENSITIVE_ENV_KEYWORDS) else v for k, v in env.items()
-    }
-
-
-def _dump_sdk_options(opts: ClaudeAgentOptions) -> dict[str, Any]:
-    """Dump ClaudeAgentOptions to a plain dict, skipping non-serializable values.
-
-    Recursively traverses dataclass fields and nested structures (dicts, lists,
-    dataclasses). Skips callables and file-like objects. Converts Path to str.
-    Redacts sensitive environment variables (tokens, keys, secrets).
-
-    Args:
-        opts: ClaudeAgentOptions dataclass instance
-
-    Returns:
-        Dictionary of field names to JSON-serializable values
-    """
-    result: dict[str, Any] = {}
-    for field in dataclasses.fields(opts):
-        value = _serialize_value(getattr(opts, field.name))
-        if value is not _SKIP:
-            if field.name == "env" and isinstance(value, dict):
-                value = _redact_env(value)
-            result[field.name] = value
-    return result
 
 
 @AgentRegistry.register(AgentKind.CLAUDE_CODE, ClaudeCodeAgentConfig)
@@ -287,13 +207,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         self._extra_mcp_servers = extra_mcp_servers or {}
         self.client: ClaudeSDKClient | None = None
         self.working_directory: Path | None = None
-        self._state = AgentState.WORKING
-        self._iteration = 0
-        # Set True right after _iteration is incremented at the start of communicate();
-        # consumed (and cleared) by discard_pending_turn() to roll back the counter exactly
-        # once per failed turn, even when _set_pending swallows a partial-build exception
-        # and leaves pending_turn as None.
-        self._iteration_was_incremented = False
+        # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
+        # bookkeeping lives on the Agent base class (shared defaults + helpers).
         self._sdk_options_dump: dict[str, Any] | None = None
         self._session_id: str | None = None
         # Transport reference held only while a communicate() call is in flight,
@@ -307,7 +222,6 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # instance — _format_messages runs many times per task and these
         # types are stable for the lifetime of a session.
         self._warned_unknown_types: set[str] = set()
-        self.pending_turn: TurnRecord | None = None
 
     async def start(
         self,
@@ -452,8 +366,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # the invariant so streaming-event sites below can safely call `type.value`.
         assert self.config.type is not None, "ClaudeCodeAgent requires AgentConfig.type to be set before communicate()"
 
-        # Reset slot defensively in case the previous caller forgot to drain it.
-        self.pending_turn = None
+        # Reset the pending slot + bump the iteration counter (shared lifecycle).
+        self._begin_turn()
 
         turn_start_time = time.monotonic()
         deadline = turn_start_time + timeout if timeout is not None else None
@@ -461,9 +375,6 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # the asyncio thread via _timed_out(). Python bool assignment is
         # atomic under the GIL; no explicit lock needed here.
         timeout_hit = False
-
-        self._iteration += 1
-        self._iteration_was_incremented = True
 
         # Collect all messages from the turn
         messages = []
@@ -678,7 +589,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         try:
             # Process plugins: copy from config and replace env vars in paths
-            plugins = self._process_plugins(self.config.plugins or [])  # type: ignore[arg-type]
+            plugins = process_plugins(self.config.plugins or [], log=self._log)  # type: ignore[arg-type]
 
             # Build env overrides and resolve model for the configured API route.
             # Precedence: task/CLI agent.model > route default (e.g. BEDROCK_MODEL).
@@ -738,7 +649,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             )
 
             # Dump SDK options for later inspection (captures all 37+ fields including defaults)
-            self._sdk_options_dump = _dump_sdk_options(options)
+            self._sdk_options_dump = dump_dataclass(options)
 
             # When a timeout is set, pre-construct the transport ourselves and
             # hand it to query() so we retain a reference to the subprocess
@@ -795,10 +706,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                     # stay quiet. Use this to inspect what (if any) token usage
                     # rides on each message type (e.g. Agent tool-result vs.
                     # TaskNotification vs. ResultMessage).
-                    self._log_message_raw(message, msg_type)
-
-                    # Stream debug logging for real-time visibility
-                    self._log_message_debug(message, msg_type)
+                    log_raw_sdk_event(self._log, repr_target=message, type=msg_type)
 
                     # Two-phase command telemetry capture using type guards
 
@@ -1245,9 +1153,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         self._update_state_from_messages(messages)
 
-        # Clear the rollback flag — this turn completed successfully and the iteration
-        # increment stands. (Discard is no-op on a successful turn anyway, but stay tidy.)
-        self._iteration_was_incremented = False
+        # This turn completed successfully — the iteration increment stands.
+        self._end_turn_ok()
 
         # The TurnRecord is the EventCollector's reduction of the events emitted
         # above — single, agent-agnostic capture path (no parallel record build).
@@ -1256,8 +1163,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     async def stop(self) -> None:
         """Stop the agent and clean up resources."""
         self.client = None
-        self.pending_turn = None
-        self._state = AgentState.FINISHED
+        self._mark_stopped()
 
     async def kill(self) -> None:
         """Force-terminate the in-flight Claude CLI subprocess, if any.
@@ -1278,24 +1184,6 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         has already cleared it, this is a no-op.
         """
         self._kill_transport(self._active_transport)
-
-    async def discard_pending_turn(self) -> None:
-        """Clear pending_turn and roll back the iteration counter.
-
-        Decrement fires when either signal says a turn was attempted:
-          - _iteration_was_incremented: set by communicate() right after the
-            counter bump. Survives _set_pending swallowing a partial-build
-            exception (pending_turn=None) — pending_turn alone is not a
-            reliable signal.
-          - pending_turn is not None: preserves backward compatibility for
-            callers that set pending_turn directly (tests).
-        Idempotent: after the first call, both signals are cleared.
-        """
-        should_rollback = self._iteration_was_incremented or self.pending_turn is not None
-        self.pending_turn = None
-        self._iteration_was_incremented = False
-        if should_rollback and self._iteration > 0:
-            self._iteration -= 1
 
     @staticmethod
     def _timed_out(timeout_hit: bool, deadline: float | None) -> bool:
@@ -1331,14 +1219,6 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # ESRCH races; any other exception would be a real bug worth raising.
         with suppress(OSError):
             proc.kill()
-
-    def get_state(self) -> AgentState:
-        """Get the current state of the agent.
-
-        Returns:
-            Current agent state
-        """
-        return self._state
 
     def _finalize_commands(
         self, pending_commands: dict[str, dict[str, Any]], messages: list[Message]
@@ -1480,144 +1360,6 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             Dictionary of SDK option field names to values, or None if communicate() hasn't been called.
         """
         return self._sdk_options_dump
-
-    def _process_plugins(self, plugins: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Process plugins by expanding environment variable placeholders in paths.
-
-        Expands any $VAR or ${VAR} patterns in plugin paths using environment variables.
-        Logs a warning if a path contains an env var reference that is not set.
-
-        Args:
-            plugins: List of plugin configuration dictionaries (with optional 'path' keys)
-
-        Returns:
-            List of processed plugin configurations with env vars expanded
-        """
-        if not plugins:
-            return []
-
-        processed = []
-
-        for plugin in plugins:
-            # Create a copy to avoid modifying the original
-            processed_plugin = dict(plugin)
-
-            # Expand env vars in path if present
-            if "path" in processed_plugin:
-                path = processed_plugin["path"]
-                # Check for unset env vars before expansion (for better error messages)
-                # Matches $VAR or ${VAR}
-                var_pattern = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
-                for match in var_pattern.finditer(path):
-                    # group(1) is ${VAR}, group(2) is $VAR
-                    var_name = match.group(1) or match.group(2)
-                    if var_name not in os.environ:
-                        self._log.warning(f"Plugin path contains undefined environment variable ${var_name}: {path}")
-
-                # Expand all env vars in the path, then resolve relative paths
-                # against the process cwd (not the sandbox cwd) so plugins are found
-                expanded = os.path.expandvars(path)
-                processed_plugin["path"] = str(Path(expanded).resolve())
-
-            processed.append(processed_plugin)
-
-        return processed
-
-    def _log_message_raw(self, message: Any, msg_type: str) -> None:
-        """Dump an SDK event verbatim, the instant it arrives, when opted in.
-
-        Gated behind the ``CODER_EVAL_RAW_SDK_LOG`` env var (truthy = "1",
-        "true", "yes", "on") so normal runs stay quiet. Emits at INFO so it
-        shows up in task.log without flipping the whole logger to DEBUG.
-
-        For each event we log, in order:
-          * the message type name,
-          * the full ``repr(message)`` (untruncated), and
-          * a sorted ``key=value`` dump of every public attribute (so token
-            fields like ``usage`` / ``model_usage`` / ``total_cost_usd`` are
-            visible exactly as the SDK delivered them, even when ``repr`` is
-            terse).
-
-        Use this to confirm, first-hand, which message types actually carry
-        token usage — e.g. that an Agent tool-result message does *not*, while
-        the sibling TaskNotification does.
-        """
-        flag = os.environ.get("CODER_EVAL_RAW_SDK_LOG", "")
-        if flag.strip().lower() not in ("1", "true", "yes", "on"):
-            return
-
-        try:
-            raw_repr = repr(message)
-        except Exception as exc:  # pragma: no cover - defensive
-            raw_repr = f"<unreprable: {exc!r}>"
-
-        attrs: dict[str, Any] = {}
-        for name in dir(message):
-            if name.startswith("_"):
-                continue
-            try:
-                value = getattr(message, name)
-            except Exception as exc:  # pragma: no cover - defensive
-                value = f"<unreadable: {exc!r}>"
-            if callable(value):
-                continue
-            attrs[name] = value
-        attr_dump = "\n".join(f"    {k} = {v!r}" for k, v in sorted(attrs.items()))
-
-        self._log.info(
-            "RAW_SDK_EVENT type=%s\n  repr=%s\n  attrs:\n%s",
-            msg_type,
-            raw_repr,
-            attr_dump or "    (none)",
-        )
-
-    def _log_message_debug(self, message: Any, msg_type: str) -> None:
-        """Log agent message details at DEBUG level for real-time streaming visibility.
-
-        Args:
-            message: SDK message object
-            msg_type: Type name of the message
-        """
-        if not logger.isEnabledFor(logging.DEBUG):
-            return
-
-        if msg_type == "AssistantMessage":
-            content = getattr(message, "content", None)
-            if content and isinstance(content, list):
-                for block in content:
-                    if hasattr(block, "text"):
-                        text = str(block.text)[:500]
-                        self._log.debug(f">>> ASSISTANT: {text}")
-                    else:
-                        block_type = type(block).__name__
-                        self._log.debug(f">>> ASSISTANT BLOCK ({block_type}): {str(block)[:200]}")
-            elif content and isinstance(content, str):
-                self._log.debug(f">>> ASSISTANT: {content[:500]}")
-
-        elif msg_type == "UserMessage":
-            pass
-
-        elif msg_type == "ResultMessage":
-            summary = self._summarize_result(message)
-            if summary is not None and summary.is_error:
-                fields = {k: v for k, v in summary.model_dump().items() if v not in (None, False, "")}
-                rendered = ", ".join(f"{k}={str(v)[:200]}" for k, v in fields.items()) if fields else "(no detail)"
-                self._log.debug(f"<<< RESULT [ERROR]: {rendered}")
-            else:
-                pass
-
-        elif msg_type == "SystemMessage":
-            # Most system messages are init or thinking messages.
-            # These are noisy — skip the debug dump.
-            pass
-
-        elif msg_type == "StreamEvent":
-            # StreamEvents drive token-delta capture (see message_delta
-            # handler) but are noisy in transcripts — skip the debug dump.
-            pass
-
-        else:
-            self._log.debug(f"--- {msg_type}: {str(message)[:200]}")
 
     @staticmethod
     def _try_parse_json_value(content: Any) -> dict[str, Any] | list[Any] | None:
@@ -1953,59 +1695,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         return None
 
     def _format_messages(self, messages: list[Message]) -> str:
-        # isinstance, not type-name equality: SystemMessage subclasses must hit
-        # the SystemMessage arm per their drop-in contract. Unknown types emit
-        # the bare tag only — including a truncated ``__repr__`` can leak
-        # unmatched braces into the transcript persisted to ``task.json``.
-        formatted_parts = []
-
-        for msg in messages:
-            if isinstance(msg, SystemMessage):
-                continue
-
-            if isinstance(msg, UserMessage):
-                continue
-
-            if isinstance(msg, AssistantMessage):
-                content = getattr(msg, "content", "")
-                if isinstance(content, list):
-                    for block in content:
-                        text = getattr(block, "text", None)
-                        if text:
-                            formatted_parts.append(f"[ASSISTANT] {text}")
-                elif content:
-                    formatted_parts.append(f"[ASSISTANT] {content}")
-                continue
-
-            if isinstance(msg, ResultMessage):
-                result_text = getattr(msg, "result", "") or ""
-                is_error = getattr(msg, "is_error", False)
-                status = "ERROR" if is_error else "SUCCESS"
-                formatted_parts.append(f"[RESULT - {status}] {result_text}")
-                continue
-
-            # StreamEvent isn't exported by the SDK — duck-type on ``type``.
-            event_type = getattr(msg, "type", None)
-            if event_type == "tool_use":
-                tool_name = getattr(msg, "name", "unknown")
-                formatted_parts.append(f"[TOOL USE] {tool_name}")
-                continue
-
-            type_name = type(msg).__name__
-            # StreamEvent is a known SDK type used for token-delta capture
-            # elsewhere; don't surface it as an "unhandled" warning here.
-            if type_name == "StreamEvent":
-                continue
-            if type_name not in self._warned_unknown_types:
-                self._warned_unknown_types.add(type_name)
-                self._log.warning(
-                    "Unhandled SDK message type %s in _format_messages — "
-                    "extend the isinstance chain when the SDK adds new types.",
-                    type_name,
-                )
-            formatted_parts.append(f"[{type_name}]")
-
-        return "\n".join(formatted_parts) if formatted_parts else "[No output]"
+        return format_messages(messages, warned_unknown_types=self._warned_unknown_types, log=self._log)
 
     def _update_state_from_messages(self, messages: list[Message]) -> None:
         """Update agent state based on received messages.

@@ -1,6 +1,10 @@
-"""Tests for debug logging in agent._log_message_debug and _format_messages block handling."""
+"""Tests for _format_messages block handling.
 
-import logging
+Per-SDK-message debug logging (the old ``_log_message_debug``) has been removed:
+the agent now logs its trajectory solely through the standardized event stream
+(``ToolEndEvent`` / ``AgentEndEvent`` → ``LoggingStreamRenderer``), so there is
+no agent-specific debug-dump path left to test here.
+"""
 
 import pytest
 from claude_agent_sdk import AssistantMessage
@@ -17,91 +21,7 @@ def agent():
     return ClaudeCodeAgent(config)
 
 
-# --- Issue #2: Empty-string tool result content shows "(empty)" ---
-# NOTE: Tool result logging is now handled by ToolEndEvent and LoggingStreamRenderer
-# This test now verifies that _log_message_debug no longer directly logs UserMessages
-
-
-class _ToolResultBlock:
-    """Mock ToolResultBlock with tool_use_id and is_error attributes."""
-
-    def __init__(self, tool_use_id, content, is_error=False):
-        self.tool_use_id = tool_use_id
-        self.content = content
-        self.is_error = is_error
-
-
-class _UserMessage:
-    """Mock UserMessage with content list and tool_use_result attribute."""
-
-    def __init__(self, content):
-        self.content = content
-        self.tool_use_result = True  # marks as UserMessage for duck typing
-
-
-def test_log_debug_tool_result_empty_string(agent, caplog):
-    """Tool result logging is now handled by events, not direct logs."""
-    block = _ToolResultBlock(tool_use_id="t1", content="", is_error=False)
-    msg = _UserMessage(content=[block])
-
-    with caplog.at_level(logging.DEBUG, logger="coder_eval.agents.claude_code_agent"):
-        agent._log_message_debug(msg, "UserMessage")
-
-    # No direct logging - handled by ToolEndEvent instead
-    assert len(caplog.records) == 0
-
-
-def test_log_debug_tool_result_none_content(agent, caplog):
-    """Tool result logging is now handled by events, not direct logs."""
-    block = _ToolResultBlock(tool_use_id="t1", content=None, is_error=False)
-    msg = _UserMessage(content=[block])
-
-    with caplog.at_level(logging.DEBUG, logger="coder_eval.agents.claude_code_agent"):
-        agent._log_message_debug(msg, "UserMessage")
-
-    # No direct logging - handled by ToolEndEvent instead
-    assert len(caplog.records) == 0
-
-
-# --- Issue #3: cost=$None in debug output ---
-# NOTE: Result message logging is now handled by AgentEndEvent and LoggingStreamRenderer
-# This test now verifies that _log_message_debug no longer directly logs ResultMessages
-
-
-class _ResultMessage:
-    """Mock ResultMessage with session_id, usage, total_cost_usd."""
-
-    def __init__(self, usage=None, total_cost_usd=None, is_error=False, result=None):
-        self.session_id = "sess_1"
-        self.usage = usage
-        self.total_cost_usd = total_cost_usd
-        self.is_error = is_error
-        self.result = result
-
-
-def test_log_debug_result_cost_none(agent, caplog):
-    """Result message logging is now handled by events, not direct logs."""
-    msg = _ResultMessage(usage={"input_tokens": 100}, total_cost_usd=None)
-
-    with caplog.at_level(logging.DEBUG, logger="coder_eval.agents.claude_code_agent"):
-        agent._log_message_debug(msg, "ResultMessage")
-
-    # No direct logging - handled by AgentEndEvent instead
-    assert len(caplog.records) == 0
-
-
-def test_log_debug_result_cost_present(agent, caplog):
-    """Result message logging is now handled by events, not direct logs."""
-    msg = _ResultMessage(usage={"input_tokens": 100}, total_cost_usd=0.05)
-
-    with caplog.at_level(logging.DEBUG, logger="coder_eval.agents.claude_code_agent"):
-        agent._log_message_debug(msg, "ResultMessage")
-
-    # No direct logging - handled by AgentEndEvent instead
-    assert len(caplog.records) == 0
-
-
-# --- Issue #4: _format_messages renders block-based AssistantMessage as raw list ---
+# --- _format_messages renders block-based AssistantMessage as readable text ---
 #
 # Uses real claude_agent_sdk classes — _format_messages dispatches via
 # ``isinstance`` against the SDK's AssistantMessage, so locally-defined mock

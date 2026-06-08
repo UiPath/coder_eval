@@ -236,11 +236,13 @@ When fixing a bug, ask: *could a custom lint rule have prevented this?* If the r
    `AgentCrashError` or `TurnTimeoutError` (bare — no payload on the exception).
    The orchestrator's `_on_attempt_failure` callback drains the slot into
    `result.turns` and calls `discard_pending_turn()` to clear it.
-5. Override `discard_pending_turn()` to clear `self.pending_turn` and roll back
-   any per-turn bookkeeping (e.g. iteration counter). Must be idempotent.
-6. Clear `self.pending_turn = None` at the top of `communicate()` (defensive
-   reset) and in `stop()` (cleanup).
-7. The agent is the SOLE emitter of the standardized event protocol
+5. The turn lifecycle is shared on the `Agent` base class — do NOT reimplement
+   it: call `self._begin_turn()` at the top of `communicate()` (resets
+   `pending_turn` + bumps the iteration counter), `self._end_turn_ok()` on the
+   success path, and `self._mark_stopped()` in `stop()` (after your own resource
+   teardown). `discard_pending_turn()` and `get_state()` are concrete on the
+   base and need no override.
+6. The agent is the SOLE emitter of the standardized event protocol
    (`streaming/events.py`): emit one `AgentStartEvent` at the top of
    `communicate()` and one matching `AgentEndEvent` on EVERY exit path (success,
    crash, timeout — from `finally`), with `TurnStartEvent`/`TurnEndEvent` per
@@ -250,7 +252,7 @@ When fixing a bug, ask: *could a custom lint rule have prevented this?* If the r
    agent-agnostic capture path, so do NOT assemble a `TurnRecord` by hand) plus
    the caller's `stream_callback`. The orchestrator is a pure consumer; renderers
    and the task-log handler consume the same stream.
-8. If the agent shells out / holds OS resources, implement real `stop()` /
+7. If the agent shells out / holds OS resources, implement real `stop()` /
    `kill()` / `kill_sync()` teardown — `kill_sync()` is called from the
    watchdog's non-asyncio thread, so it must not await.
 

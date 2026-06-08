@@ -3,7 +3,97 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
+
+from claude_agent_sdk import (
+    AssistantMessage,
+    Message,
+    ResultMessage,
+    SystemMessage,
+    UserMessage,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+def format_messages(
+    messages: list[Message],
+    *,
+    warned_unknown_types: set[str],
+    log: logging.Logger | logging.LoggerAdapter[Any] = logger,
+) -> str:
+    """Render a list of SDK messages as a readable transcript string.
+
+    System and user messages are filtered out; assistant text, result status,
+    and ``tool_use`` stream events are tagged. Unknown message types emit only a
+    bare ``[TypeName]`` tag — never a truncated ``__repr__``, which could leak
+    unmatched braces into the transcript persisted to ``task.json``.
+
+    Uses ``isinstance`` (not type-name equality) so ``SystemMessage`` subclasses
+    (e.g. ``TaskStartedMessage``) hit the ``SystemMessage`` arm per their drop-in
+    contract.
+
+    Args:
+        messages: SDK message objects from a turn.
+        warned_unknown_types: Mutable set used to deduplicate the
+            "unhandled SDK message type" warning across calls; the caller owns
+            it (e.g. one per agent instance) so the warning fires once per type.
+        log: Logger (or adapter) for that warning; defaults to this module's logger.
+
+    Returns:
+        The formatted transcript, or ``"[No output]"`` when nothing was emitted.
+    """
+    formatted_parts = []
+
+    for msg in messages:
+        if isinstance(msg, SystemMessage):
+            continue
+
+        if isinstance(msg, UserMessage):
+            continue
+
+        if isinstance(msg, AssistantMessage):
+            content = getattr(msg, "content", "")
+            if isinstance(content, list):
+                for block in content:
+                    text = getattr(block, "text", None)
+                    if text:
+                        formatted_parts.append(f"[ASSISTANT] {text}")
+            elif content:
+                formatted_parts.append(f"[ASSISTANT] {content}")
+            continue
+
+        if isinstance(msg, ResultMessage):
+            result_text = getattr(msg, "result", "") or ""
+            is_error = getattr(msg, "is_error", False)
+            status = "ERROR" if is_error else "SUCCESS"
+            formatted_parts.append(f"[RESULT - {status}] {result_text}")
+            continue
+
+        # StreamEvent isn't exported by the SDK — duck-type on ``type``.
+        event_type = getattr(msg, "type", None)
+        if event_type == "tool_use":
+            tool_name = getattr(msg, "name", "unknown")
+            formatted_parts.append(f"[TOOL USE] {tool_name}")
+            continue
+
+        type_name = type(msg).__name__
+        # StreamEvent is a known SDK type used for token-delta capture
+        # elsewhere; don't surface it as an "unhandled" warning here.
+        if type_name == "StreamEvent":
+            continue
+        if type_name not in warned_unknown_types:
+            warned_unknown_types.add(type_name)
+            log.warning(
+                "Unhandled SDK message type %s in format_messages — "
+                "extend the isinstance chain when the SDK adds new types.",
+                type_name,
+            )
+        formatted_parts.append(f"[{type_name}]")
+
+    return "\n".join(formatted_parts) if formatted_parts else "[No output]"
 
 
 def format_payload(value: Any, *, max_chars: int = 800) -> str:
