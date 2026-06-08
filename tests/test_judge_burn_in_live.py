@@ -1,10 +1,10 @@
 """Live burn-in tests for the typed verdict tool channel.
 
 Exercises the ``submit_verdict`` channel against the three real backends:
-LLMGW (LangChain ``.bind_tools()``), Bedrock (httpx + Anthropic-native tools),
-and the Claude Code SDK (in-process MCP server). Each test ``pytest.skip``s
-when the required credentials are not present, so the file is safe to run
-in CI without a credential set.
+Anthropic-direct (Anthropic SDK + native ``tools``), Bedrock (httpx +
+Anthropic-native tools), and the Claude Code SDK (in-process MCP server).
+Each test ``pytest.skip``s when the required credentials are not present, so
+the file is safe to run in CI without a credential set.
 
 Run just these tests:
 
@@ -70,24 +70,25 @@ def _ensure_registry_initialized() -> None:
     init_criteria(validate=False)
 
 
-def test_llm_judge_llmgw_tool_channel(hello_sandbox: Sandbox) -> None:
-    """LLMGW route: ``.bind_tools(...)`` + forced ``tool_choice='submit_verdict'``."""
-    if not os.environ.get("LLMGW_URL"):
-        pytest.skip("LLMGW_URL not set")
+def test_llm_judge_anthropic_direct_tool_channel(hello_sandbox: Sandbox) -> None:
+    """Anthropic-direct route: Anthropic SDK ``tools`` + forced ``tool_choice='submit_verdict'``."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key or api_key.startswith("sk-ant-test-"):
+        pytest.skip("ANTHROPIC_API_KEY not set (or placeholder)")
 
     criterion = LLMJudgeCriterion(
-        description="burn-in / LLMGW",
+        description="burn-in / anthropic-direct",
         prompt=_JUDGE_PROMPT,
         files=["hello.txt"],
         model="anthropic.claude-sonnet-4-6",
         temperature=0.0,
         max_tokens=400,
     )
-    result = SuccessChecker(hello_sandbox, init_registry=False, route=DirectRoute(judge_transport="llmgw")).check(
+    result = SuccessChecker(hello_sandbox, init_registry=False, route=DirectRoute(judge_transport="anthropic")).check(
         criterion
     )
 
-    assert result.error is None, f"LLMGW judge failed: {result.error}\n{result.details}"
+    assert result.error is None, f"Anthropic-direct judge failed: {result.error}\n{result.details}"
     assert result.score >= 0.7, f"score below threshold: {result.score}"
 
 

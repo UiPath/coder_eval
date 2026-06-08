@@ -764,6 +764,12 @@ class DockerRunner:
         # Forward environment variables: explicit allowlist (optionally extended via env_passthrough_extra).
         # `--env VAR` (name-only) tells docker to copy the value from our current env at
         # run time, so secrets stay out of the rendered argv list that we log.
+        #
+        # The run's backend rides this same path: API_BACKEND is in the default allowlist,
+        # and `--backend` syncs it into os.environ at the CLI (run_command), so it forwards
+        # here exactly like every other allowlisted var. A flag that only mutated in-process
+        # Settings would be dropped at the container boundary and the in-container Settings
+        # would silently default to DIRECT — downgrading the judge (and agent) route.
         merged_allowlist = set(cfg.env_passthrough) | set(cfg.env_passthrough_extra)
         for env_var in merged_allowlist:
             if env_var in os.environ:

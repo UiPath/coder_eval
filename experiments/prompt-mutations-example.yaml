@@ -39,8 +39,3 @@ variants:
         content: "Follow best practices for production code."
       - type: suffix
         content: "Include error handling, type hints, and docstrings."
-
-  - variant_id: rephrased-formal
-    prompt_mutations:
-      - type: rephrase
-        instructions: "Rewrite this prompt in a formal, specification-like tone. Use precise technical language."

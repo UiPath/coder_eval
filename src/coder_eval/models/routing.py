@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -13,25 +12,17 @@ if TYPE_CHECKING:
     from coder_eval.config import Settings
     from coder_eval.proxy.config import ProxyConfig
 
-logger = logging.getLogger(__name__)
-
 
 # Resolved-at-startup transport for the `llm_judge` criterion under DirectRoute.
 # - "anthropic": call api.anthropic.com via the Anthropic SDK (needs ANTHROPIC_API_KEY).
-# - "llmgw": route through the LangChain LLM Gateway client (needs the LLMGW_* set).
-# - None: no judge credentials configured; any enabled `llm_judge` fails at dispatch.
-JudgeTransport = Literal["anthropic", "llmgw"]
+# - None: no ANTHROPIC_API_KEY; any enabled `llm_judge` under DirectRoute fails at
+#   dispatch. Bedrock/Proxy backends route the judge through the run's own backend
+#   and never reach this transport selection.
+JudgeTransport = Literal["anthropic"]
 
 
 # Bedrock cross-region inference profile prefixes.
 _BEDROCK_KNOWN_PREFIXES: tuple[str, ...] = ("eu.", "us.", "apac.", "global.")
-
-
-# One-shot guard for the "LLMGW creds set but package missing" warning.
-# ``resolve_route`` is called once per task in the orchestrator, so without
-# this guard a batch run would emit the same warning N times. Process-lifetime
-# state is fine here — the install state can't change mid-process.
-_llmgw_missing_warning_emitted = False
 
 
 def to_bedrock_inference_profile(model: str | None, region: str | None) -> str | None:
@@ -88,10 +79,7 @@ class DirectRoute:
     authenticate via ``ANTHROPIC_API_KEY``:
 
     - ``"anthropic"``: judge calls api.anthropic.com (requires ANTHROPIC_API_KEY).
-    - ``"llmgw"``: judge falls back to the LangChain LLM Gateway client
-      (requires the LLMGW_* settings). Activated when ANTHROPIC_API_KEY is
-      absent but full LLMGW creds are present.
-    - ``None``: neither credential set; ``llm_judge`` fails fast at dispatch
+    - ``None``: ANTHROPIC_API_KEY is absent; ``llm_judge`` fails fast at dispatch
       with a clear error. Non-judge runs are unaffected.
 
     Resolution happens once in ``resolve_route`` so the choice is deterministic
@@ -177,53 +165,16 @@ def resolve_route(settings: Settings) -> ApiRoute:
 
 
 def _resolve_direct_judge_transport(settings: Settings) -> JudgeTransport | None:
-    """Pick the judge transport for ``DirectRoute`` based on what's available.
+    """Pick the judge transport for ``DirectRoute``.
 
-    Precedence: ``ANTHROPIC_API_KEY`` first; then the LLMGW credential set
-    **and** the optional ``[uipath]`` extra (so ``uipath_llmgw_client`` is
-    importable). Returns ``None`` if neither path is usable — the run still
-    starts, but any enabled ``llm_judge`` criterion will fail at dispatch
-    with a clear error pointing at the install hint. The choice is made
-    once at startup so it is deterministic across criteria, audit-loggable,
-    and recordable in ``environment_info``.
+    ``"anthropic"`` when ``ANTHROPIC_API_KEY`` is set (the judge calls
+    api.anthropic.com); ``None`` otherwise — the run still starts, but any
+    enabled ``llm_judge`` criterion fails at dispatch with a clear error.
+    Bedrock and Proxy backends never reach this path: their judge routes
+    through the same backend as the run. The choice is made once at startup
+    so it is deterministic across criteria and recorded in ``environment_info``.
     """
-    # Local import keeps this leaf model module free of evaluation deps.
-    from coder_eval.evaluation.llmgw import is_llmgw_client_installed
-
-    if settings.anthropic_api_key:
-        return "anthropic"
-    has_creds = _has_llmgw_credentials(settings)
-    if has_creds and is_llmgw_client_installed():
-        return "llmgw"
-    if has_creds:
-        # Operator-visible signal: full LLMGW credentials are configured but the
-        # optional package is missing, so the judge transport is being demoted
-        # to None. Logged once per process — batch runs call resolve_route per
-        # task, and repeating the same warning N times just floods the log.
-        global _llmgw_missing_warning_emitted
-        if not _llmgw_missing_warning_emitted:
-            logger.warning(
-                "LLM Gateway credentials are configured, but `uipath_llmgw_client` is not "
-                "installed — llm_judge will fail at dispatch. Install with: "
-                "pip install 'coder-eval[uipath]' (or `uv sync --extra uipath`)."
-            )
-            _llmgw_missing_warning_emitted = True
-    return None
-
-
-def _has_llmgw_credentials(settings: Settings) -> bool:
-    """True iff the full LLMGW credential set required to build a chat model is present.
-
-    Mirrors the fields checked by ``Settings._validate_llmgw_settings``. Kept
-    in sync with that method — if one grows a field, so should the other.
-    """
-    return bool(
-        settings.llmgw_url
-        and settings.llmgw_client_id
-        and settings.llmgw_client_secret
-        and settings.llmgw_semantic_org_id
-        and settings.llmgw_semantic_tenant_id
-    )
+    return "anthropic" if settings.anthropic_api_key else None
 
 
 def proxy_config_from_settings(settings: Settings, *, task_id: str) -> ProxyConfig:

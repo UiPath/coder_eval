@@ -125,8 +125,8 @@ def _format_routing(route: ApiRoute) -> str:
     """Format the route name for the ``API routing:`` log line.
 
     For ``DirectRoute`` the resolved judge transport is appended so the choice
-    (anthropic / llmgw / none) is visible on every run, not only in the
-    persisted ``environment_info`` record.
+    (anthropic / none) is visible on every run, not only in the persisted
+    ``environment_info`` record.
     """
     name = ROUTE_NAMES[type(route)]
     if isinstance(route, DirectRoute):

@@ -8,7 +8,6 @@ import pytest
 
 from coder_eval.evaluation.verdict_tool import (
     SUBMIT_VERDICT_ANTHROPIC_TOOL,
-    SUBMIT_VERDICT_LC_TOOL,
     SUBMIT_VERDICT_MCP_TOOL_NAME,
     SUBMIT_VERDICT_TOOL_NAME,
     VerdictCapture,
@@ -16,16 +15,13 @@ from coder_eval.evaluation.verdict_tool import (
     build_submit_verdict_mcp_server,
     extract_verdict_from_anthropic_response,
     extract_verdict_from_capture,
-    extract_verdict_from_langchain_message,
 )
 from coder_eval.models import JudgeVerdict
 
 
-class _StubAIMessage:
-    """Minimal LangChain AIMessage stand-in — only ``.tool_calls`` is read."""
-
-    def __init__(self, tool_calls: list[dict[str, Any]]) -> None:
-        self.tool_calls = tool_calls
+def _anthropic_response(payload: Any) -> dict[str, Any]:
+    """Wrap a verdict-shaped ``input`` payload in an Anthropic tool_use response."""
+    return {"content": [{"type": "tool_use", "name": SUBMIT_VERDICT_TOOL_NAME, "input": payload}]}
 
 
 # --- VerdictCapture + SDK extractor ---
@@ -64,82 +60,10 @@ def test_extract_sdk_returns_did_not_call_when_capture_empty() -> None:
     assert err == "Judge did not call submit_verdict"
 
 
-# --- LangChain extractor ---
+# --- Anthropic / Bedrock extractor ---
 
 
-def test_extract_lc_picks_last_submit_verdict_call() -> None:
-    message = _StubAIMessage(
-        [
-            {"name": SUBMIT_VERDICT_TOOL_NAME, "args": {"score": 0.4, "rationale": "first"}},
-            {"name": SUBMIT_VERDICT_TOOL_NAME, "args": {"score": 0.8, "rationale": "second"}},
-        ]
-    )
-    verdict, err = extract_verdict_from_langchain_message(message)
-    assert err is None
-    assert verdict is not None
-    assert verdict.score == 0.8
-    assert verdict.rationale == "second"
-
-
-def test_extract_lc_ignores_other_tool_names() -> None:
-    message = _StubAIMessage(
-        [
-            {"name": "some_other_tool", "args": {"score": 0.99}},
-            {"name": SUBMIT_VERDICT_TOOL_NAME, "args": {"score": 0.5, "rationale": "real"}},
-        ]
-    )
-    verdict, err = extract_verdict_from_langchain_message(message)
-    assert err is None
-    assert verdict is not None
-    assert verdict.score == 0.5
-
-
-def test_extract_lc_returns_did_not_call_when_no_submit_verdict_call() -> None:
-    message = _StubAIMessage([{"name": "some_other_tool", "args": {}}])
-    verdict, err = extract_verdict_from_langchain_message(message)
-    assert verdict is None
-    assert err == "Judge did not call submit_verdict"
-
-
-def test_extract_lc_validates_args_against_judge_verdict_model() -> None:
-    message = _StubAIMessage([{"name": SUBMIT_VERDICT_TOOL_NAME, "args": {"score": "not a number", "rationale": "x"}}])
-    verdict, err = extract_verdict_from_langchain_message(message)
-    assert verdict is None
-    assert err == "score field is not a number: 'not a number'"
-
-
-def test_extract_lc_no_tool_calls_attribute() -> None:
-    """A model response that lacks a tool_calls attribute still produces the canonical diagnostic."""
-
-    class _Bare:
-        pass
-
-    verdict, err = extract_verdict_from_langchain_message(_Bare())  # type: ignore[arg-type]
-    assert verdict is None
-    assert err == "Judge did not call submit_verdict"
-
-
-def test_extract_lc_distinguishes_invalid_args_from_did_not_call() -> None:
-    """A submit_verdict call with non-dict args yields an "args must be an object"
-    diagnostic, not the "did not call" one — the judge DID fire the tool."""
-    message = _StubAIMessage([{"name": SUBMIT_VERDICT_TOOL_NAME, "args": "not a dict"}])
-    verdict, err = extract_verdict_from_langchain_message(message)
-    assert verdict is None
-    assert err == "submit_verdict args must be an object"
-
-
-def test_extract_lc_distinguishes_missing_args_from_did_not_call() -> None:
-    """args=None still counts as "tool fired with bad args", not "did not call"."""
-    message = _StubAIMessage([{"name": SUBMIT_VERDICT_TOOL_NAME, "args": None}])
-    verdict, err = extract_verdict_from_langchain_message(message)
-    assert verdict is None
-    assert err == "submit_verdict args must be an object"
-
-
-# --- Bedrock extractor ---
-
-
-def test_extract_bedrock_picks_last_tool_use_block() -> None:
+def test_extract_anthropic_picks_last_tool_use_block() -> None:
     response = {
         "content": [
             {"type": "text", "text": "thinking..."},
@@ -153,7 +77,7 @@ def test_extract_bedrock_picks_last_tool_use_block() -> None:
     assert verdict.score == 0.7
 
 
-def test_extract_bedrock_ignores_other_tool_names() -> None:
+def test_extract_anthropic_ignores_other_tool_names() -> None:
     response = {
         "content": [
             {"type": "tool_use", "name": "other_tool", "input": {"score": 0.99}},
@@ -166,14 +90,14 @@ def test_extract_bedrock_ignores_other_tool_names() -> None:
     assert verdict.score == 0.5
 
 
-def test_extract_bedrock_returns_did_not_call_when_no_tool_use_block() -> None:
+def test_extract_anthropic_returns_did_not_call_when_no_tool_use_block() -> None:
     response = {"content": [{"type": "text", "text": "no tool here"}]}
     verdict, err = extract_verdict_from_anthropic_response(response)
     assert verdict is None
     assert err == "Judge did not call submit_verdict"
 
 
-def test_extract_bedrock_validates_input_against_judge_verdict_model() -> None:
+def test_extract_anthropic_validates_input_against_judge_verdict_model() -> None:
     response = {
         "content": [
             {"type": "tool_use", "name": SUBMIT_VERDICT_TOOL_NAME, "input": {"score": float("nan"), "rationale": "x"}}
@@ -184,13 +108,13 @@ def test_extract_bedrock_validates_input_against_judge_verdict_model() -> None:
     assert err == "score field is not a finite number: nan"
 
 
-def test_extract_bedrock_empty_content() -> None:
+def test_extract_anthropic_empty_content() -> None:
     verdict, err = extract_verdict_from_anthropic_response({})
     assert verdict is None
     assert err == "Judge did not call submit_verdict"
 
 
-def test_extract_bedrock_distinguishes_invalid_input_from_did_not_call() -> None:
+def test_extract_anthropic_distinguishes_invalid_input_from_did_not_call() -> None:
     """A tool_use block with non-dict input must NOT collapse into the "did not call" diagnostic."""
     response = {"content": [{"type": "tool_use", "name": SUBMIT_VERDICT_TOOL_NAME, "input": "not a dict"}]}
     verdict, err = extract_verdict_from_anthropic_response(response)
@@ -202,9 +126,8 @@ def test_extract_bedrock_distinguishes_invalid_input_from_did_not_call() -> None
 
 
 def _err_for(payload: dict[str, Any]) -> str:
-    """Drive a verdict-shaped dict through the langchain extractor and read the error string."""
-    msg = _StubAIMessage([{"name": SUBMIT_VERDICT_TOOL_NAME, "args": payload}])
-    _, err = extract_verdict_from_langchain_message(msg)
+    """Drive a verdict-shaped dict through the anthropic extractor and read the error string."""
+    _, err = extract_verdict_from_anthropic_response(_anthropic_response(payload))
     assert err is not None
     return err
 
@@ -240,8 +163,7 @@ def test_format_validation_error_joins_multiple_field_failures() -> None:
 
 def test_score_clamps_to_unit_interval_through_tool() -> None:
     """An out-of-range score (1.5) clamps to 1.0 — JudgeVerdict's validator contract."""
-    msg = _StubAIMessage([{"name": SUBMIT_VERDICT_TOOL_NAME, "args": {"score": 1.5, "rationale": "x"}}])
-    verdict, err = extract_verdict_from_langchain_message(msg)
+    verdict, err = extract_verdict_from_anthropic_response(_anthropic_response({"score": 1.5, "rationale": "x"}))
     assert err is None
     assert verdict is not None
     assert verdict.score == 1.0
@@ -255,47 +177,6 @@ def test_submit_verdict_tool_schema_marks_findings_optional() -> None:
     assert schema.get("required") == ["score"], "only `score` should be required at the schema layer"
     assert "findings" in schema["properties"]
     assert "rationale" in schema["properties"]
-
-
-def test_lc_tool_spec_is_inner_only_shape() -> None:
-    """LangChain tool spec must be the inner-only function shape, NOT the OpenAI tools-API envelope.
-
-    ``uipath_llmgw_client.langchain.normalized.ChatNormalized.bind_tools`` runs each
-    tool through LangChain's ``convert_to_openai_function``, which rejects the
-    outer ``{"type": "function", "function": {...}}`` envelope with
-    ``ValueError: Unsupported function`` at ``.invoke()`` time.
-    """
-    assert SUBMIT_VERDICT_LC_TOOL["name"] == "submit_verdict"
-    assert "parameters" in SUBMIT_VERDICT_LC_TOOL
-    assert "description" in SUBMIT_VERDICT_LC_TOOL
-    # Negative pin: the broken outer envelope must NOT be present.
-    assert "type" not in SUBMIT_VERDICT_LC_TOOL
-    assert "function" not in SUBMIT_VERDICT_LC_TOOL
-
-
-def test_lc_tool_spec_survives_langchain_convert_to_openai_function() -> None:
-    """End-to-end regression: the spec must round-trip through LangChain's converter.
-
-    This is the exact call that ``ChatNormalized.bind_tools`` makes internally.
-    Pre-fix this raised ``ValueError: Unsupported function`` — covering it here
-    means any future shape change to ``SUBMIT_VERDICT_LC_TOOL`` that breaks the
-    LLMGW judge transport will fail at unit-test time rather than at the first
-    nightly cron run with ANTHROPIC_API_KEY unset.
-
-    This pins LangChain's converter directly, which is a *proxy* for the real
-    consumer (``ChatNormalized.bind_tools`` at llm_judge.py:188,212). If this
-    test passes but the LLMGW judge still errors at ``.invoke()``, check whether
-    ``ChatNormalized`` still routes through ``convert_to_openai_function`` rather
-    than ``convert_to_openai_tool`` or a custom validator.
-    """
-    # langchain_core ships with the [uipath] extra; skip (don't error) the test
-    # when running without it (e.g. the no-uipath-extra path or bare `pytest tests/`).
-    pytest.importorskip("langchain_core")
-    from langchain_core.utils.function_calling import convert_to_openai_function
-
-    converted = convert_to_openai_function(SUBMIT_VERDICT_LC_TOOL)
-    assert converted["name"] == "submit_verdict"
-    assert "parameters" in converted
 
 
 def test_anthropic_tool_spec_has_input_schema() -> None:

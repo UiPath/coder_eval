@@ -12,9 +12,8 @@ class JudgeVerdict(BaseModel):
     """Typed contract for a judge's verdict.
 
     Used both as the tool-input schema for the ``submit_verdict`` call (across
-    SDK MCP, LangChain ``.bind_tools()``, and Anthropic-native ``tools``) and
-    as the validation target for the three extractors in
-    ``coder_eval.evaluation.verdict_tool``.
+    SDK MCP and Anthropic-native ``tools``) and as the validation target for the
+    extractors in ``coder_eval.evaluation.verdict_tool``.
 
     Score is clamped to [0.0, 1.0] by a validator (not a Field constraint) so
     out-of-range values from the model become 0.0/1.0 rather than tool-input

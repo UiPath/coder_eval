@@ -6,9 +6,9 @@ help:  ## Show this help message
 
 install:  ## Install project with dev + uipath dependencies (hash-verified from uv.lock)
 	# Includes the optional [uipath] extra so the dev install has parity with CI
-	# (LLMGW judge transport, rephrase mutation, in-host uipath SDK). Requires
-	# UV_INDEX_UIPATH_USERNAME / UV_INDEX_UIPATH_PASSWORD for the private feed —
-	# see the install matrix in README.md if you want to skip the extra.
+	# (the in-host `uipath` SDK). Requires UV_INDEX_UIPATH_USERNAME /
+	# UV_INDEX_UIPATH_PASSWORD for the private feed — see the install matrix in
+	# README.md if you want to skip the extra.
 	uv sync --frozen --extra dev --extra uipath
 	uv run pre-commit install
 
@@ -56,7 +56,7 @@ verify-noextra:  ## Verify the framework works without the optional [uipath] ext
 	! .venv-noextra/bin/python -c "import uipath_llmgw_client" 2>/dev/null
 	! .venv-noextra/bin/python -c "import uipath" 2>/dev/null
 	@echo "--- running optional-dependency tests ---"
-	.venv-noextra/bin/pytest tests/test_optional_dependencies.py tests/test_llm_gateway_helper.py tests/test_rephrase.py -v --no-header
+	.venv-noextra/bin/pytest tests/test_optional_dependencies.py -v --no-header
 	rm -rf .venv-noextra
 
 clean:  ## Clean build artifacts and cache

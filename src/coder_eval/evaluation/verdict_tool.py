@@ -1,11 +1,10 @@
 """Typed verdict tool channel — replaces text-with-JSON parsing for judge criteria.
 
 Defines a single ``submit_verdict`` tool the judge calls as its terminal action,
-exposed in three native shapes (SDK MCP, LangChain, Anthropic) so each judge
-backend can use its own tool-calling protocol. The three extractors then collapse
-those native responses into a single ``tuple[JudgeVerdict | None, str | None]``
-contract shared with the legacy text path so the rest of the criterion code
-doesn't branch on backend.
+exposed in two native shapes (SDK MCP, Anthropic) so each judge backend can use
+its own tool-calling protocol. The extractors then collapse those native
+responses into a single ``tuple[JudgeVerdict | None, str | None]`` contract so
+the rest of the criterion code doesn't branch on backend.
 
 The shared anchor is ``JudgeVerdict.model_validate(args_dict)``: every backend
 ultimately delivers a ``dict``-shaped tool input, and that one call decides
@@ -16,17 +15,13 @@ existing tests / on-disk records keep matching.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server, tool
 from claude_agent_sdk.types import McpSdkServerConfig
 from pydantic import ValidationError
 
 from coder_eval.models import JudgeVerdict
-
-
-if TYPE_CHECKING:
-    from langchain_core.messages import BaseMessage
 
 
 SUBMIT_VERDICT_TOOL_NAME = "submit_verdict"
@@ -38,26 +33,6 @@ SUBMIT_VERDICT_MCP_TOOL_NAME = "mcp__coder_eval_judge__submit_verdict"
 _SUBMIT_VERDICT_DESCRIPTION = (
     "Submit your final score, rationale, and findings. Call exactly once as your terminal action."
 )
-
-
-SUBMIT_VERDICT_LC_TOOL: dict[str, Any] = {
-    "name": SUBMIT_VERDICT_TOOL_NAME,
-    "description": _SUBMIT_VERDICT_DESCRIPTION,
-    "parameters": JudgeVerdict.model_json_schema(),
-}
-"""LangChain tool spec for use with ``.bind_tools()``.
-
-Inner-only function shape (``name``/``description``/``parameters``) — NOT the
-OpenAI tools-API outer envelope (``{"type": "function", "function": {...}}``).
-LangChain's ``convert_to_openai_function`` (invoked by
-``uipath_llmgw_client.langchain.normalized.ChatNormalized.bind_tools``) does not
-accept the outer envelope and raises ``ValueError: Unsupported function`` at
-``.invoke()`` time. The shape is silently accepted at ``bind_tools`` time, so
-the bug only surfaces on the first judge call.
-
-Explicit ``name`` field — auto-deriving from a Pydantic class name would give
-``JudgeVerdict`` which would NOT match the SDK side's ``submit_verdict``.
-"""
 
 
 SUBMIT_VERDICT_ANTHROPIC_TOOL: dict[str, Any] = {
@@ -148,40 +123,6 @@ def extract_verdict_from_capture(
     return None, "Judge did not call submit_verdict"
 
 
-def extract_verdict_from_langchain_message(
-    message: BaseMessage,
-) -> tuple[JudgeVerdict | None, str | None]:
-    """Read the LAST ``submit_verdict`` tool call from a LangChain ``AIMessage``.
-
-    ``response.tool_calls`` is the typed accessor (a list of dicts with
-    ``name`` / ``args`` keys). ``args`` arrives as a parsed ``dict`` — no
-    ``json.loads`` needed.
-
-    LAST-call discipline + non-dict guard: a final ``submit_verdict`` call
-    whose ``args`` are missing or not a dict is treated as an invalid-args
-    failure, not "did not call" — otherwise a judge that fires the tool with
-    a malformed payload silently degrades into the same diagnostic as a
-    judge that ignored the tool entirely.
-    """
-    tool_calls = getattr(message, "tool_calls", None) or []
-    saw_submit_verdict = False
-    last_args: dict[str, Any] | None = None
-    for call in tool_calls:
-        if call.get("name") != SUBMIT_VERDICT_TOOL_NAME:
-            continue
-        saw_submit_verdict = True
-        args = call.get("args")
-        last_args = args if isinstance(args, dict) else None
-    if not saw_submit_verdict:
-        return None, "Judge did not call submit_verdict"
-    if last_args is None:
-        return None, "submit_verdict args must be an object"
-    try:
-        return JudgeVerdict.model_validate(last_args), None
-    except ValidationError as e:
-        return None, _format_validation_error(e)
-
-
 def extract_verdict_from_anthropic_response(
     response: dict[str, Any],
 ) -> tuple[JudgeVerdict | None, str | None]:
@@ -199,7 +140,7 @@ def extract_verdict_from_anthropic_response(
 
     LAST-call discipline + non-dict guard: a final ``submit_verdict`` block
     whose ``input`` is missing or not a dict is treated as an invalid-args
-    failure, not "did not call" — symmetric with the LangChain extractor.
+    failure, not "did not call".
     """
     blocks = response.get("content") or []
     saw_submit_verdict = False

@@ -1,7 +1,6 @@
 """Tests for prompt mutation models and apply_prompt_mutations()."""
 
 import re
-from unittest.mock import MagicMock
 
 import pytest
 from pydantic import TypeAdapter
@@ -9,7 +8,6 @@ from pydantic import TypeAdapter
 from coder_eval.models import (
     PromptMutation,
     PromptPrefix,
-    PromptRephrase,
     PromptReplace,
     PromptSuffix,
     PromptTemplate,
@@ -91,34 +89,6 @@ class TestPromptTemplate:
         assert result == "Use resolved and {unknown} variables"
 
 
-class TestPromptRephrase:
-    def test_calls_callback(self):
-        mutation = PromptRephrase(instructions="Make concise")
-        mock_fn = MagicMock(return_value="rephrased text")
-        result = apply_prompt_mutations("original prompt", [mutation], rephrase_fn=mock_fn)
-        assert result == "rephrased text"
-        mock_fn.assert_called_once_with("original prompt", mutation)
-
-    def test_without_callback_raises(self):
-        mutation = PromptRephrase(instructions="Make concise")
-        with pytest.raises(ValueError, match="rephrase mutation requires rephrase_fn callback"):
-            apply_prompt_mutations("text", [mutation])
-
-    def test_composes_with_other_mutations(self):
-        mock_fn = MagicMock(return_value="rephrased")
-        mutations: list[PromptMutation] = [
-            PromptPrefix(content="PREFIX"),
-            PromptRephrase(instructions="rephrase"),
-            PromptSuffix(content="SUFFIX"),
-        ]
-        result = apply_prompt_mutations("base", mutations, rephrase_fn=mock_fn)
-        # After prefix: "PREFIX\n\nbase"
-        # After rephrase: "rephrased" (mock returns this)
-        # After suffix: "rephrased\n\nSUFFIX"
-        assert result == "rephrased\n\nSUFFIX"
-        mock_fn.assert_called_once_with("PREFIX\n\nbase", mutations[1])
-
-
 class TestComposition:
     def test_mutations_compose_sequentially(self):
         mutations: list[PromptMutation] = [
@@ -145,14 +115,11 @@ class TestPydanticDiscriminator:
             PromptSuffix(content="suf"),
             PromptReplace(pattern="a", replacement="b"),
             PromptTemplate(variables={"x": "y"}),
-            PromptRephrase(instructions="rephrase it"),
         ]
         data = adapter.dump_python(mutations, mode="json")
         restored = adapter.validate_python(data)
-        assert len(restored) == 5
+        assert len(restored) == 4
         assert isinstance(restored[0], PromptPrefix)
         assert isinstance(restored[1], PromptSuffix)
         assert isinstance(restored[2], PromptReplace)
         assert isinstance(restored[3], PromptTemplate)
-        assert isinstance(restored[4], PromptRephrase)
-        assert restored[4].instructions == "rephrase it"

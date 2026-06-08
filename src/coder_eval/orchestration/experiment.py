@@ -22,7 +22,6 @@ from ..models import (
     ExperimentResult,
     ExperimentVariant,
     FinalStatus,
-    PromptRephrase,
     ResolvedTask,
     RunLimits,
     SimulationConfig,
@@ -250,15 +249,8 @@ def _apply_prompt_overrides(
     if task.initial_prompt is None:
         raise ValueError(f"initial_prompt must be resolved before applying mutations (task '{task.task_id}')")
 
-    # Lazily create rephrase_fn only if any rephrase mutation exists
-    rephrase_fn = None
-    if any(isinstance(m, PromptRephrase) for m in combined):
-        from .rephrase import create_rephrase_fn
-
-        rephrase_fn = create_rephrase_fn()
-
     try:
-        task.initial_prompt = apply_prompt_mutations(task.initial_prompt, combined, rephrase_fn=rephrase_fn)
+        task.initial_prompt = apply_prompt_mutations(task.initial_prompt, combined)
     except re.error as e:
         raise ValueError(
             f"Invalid regex in prompt_mutations for variant '{variant.variant_id}' on task '{task.task_id}': {e}"

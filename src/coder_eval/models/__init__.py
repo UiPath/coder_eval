@@ -87,11 +87,9 @@ from coder_eval.models.merge_strategy import (
 from coder_eval.models.mutations import (
     PromptMutation,
     PromptPrefix,
-    PromptRephrase,
     PromptReplace,
     PromptSuffix,
     PromptTemplate,
-    RephraseFn,
     apply_prompt_mutations,
 )
 
@@ -303,9 +301,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "PromptSuffix",
     "PromptReplace",
     "PromptTemplate",
-    "PromptRephrase",
     "PromptMutation",
-    "RephraseFn",
     "apply_prompt_mutations",
     # Experiment
     "ExperimentDefaults",

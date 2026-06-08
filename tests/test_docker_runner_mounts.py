@@ -226,3 +226,63 @@ class TestWindowsDriveLetterSource:
     def test_drive_letter_missing_destination_rejected(self, _patch_exists):
         with pytest.raises(ValueError, match="expected `src:dst"):
             _validate_extra_mount(r"C:\data")
+
+
+class TestApiBackendForwarding:
+    """The run's backend forwards into the container via the standard env allowlist.
+
+    ``API_BACKEND`` is in the default ``env_passthrough`` allowlist, so when it is
+    present in ``os.environ`` it forwards name-only (``--env API_BACKEND``) like
+    every other allowlisted var — docker copies the value at run time. ``--backend``
+    (CLI flag) syncs it into ``os.environ`` at ``run_command`` so the flag path and
+    the env-var path behave identically; nothing about the backend is wired through
+    a bespoke value-form ``--env K=V``.
+    """
+
+    def _make_runner(self) -> DockerRunner:
+        task = TaskDefinition(
+            task_id="test",
+            description="test task",
+            initial_prompt="test",
+            sandbox=SandboxConfig(),
+            success_criteria=[FileExistsCriterion(description="c", path="t.txt")],
+        )
+        rt = MagicMock()
+        rt.task = task
+        rt.run_dir = Path(tempfile.gettempdir()) / "test_run"
+        rt.task_file = None
+        return DockerRunner(rt)
+
+    def _forwarded_name_only(self, argv: list[str]) -> bool:
+        """True iff API_BACKEND forwards name-only (``--env API_BACKEND``)."""
+        return any(arg == "--env" and i + 1 < len(argv) and argv[i + 1] == "API_BACKEND" for i, arg in enumerate(argv))
+
+    def _forwarded_value_form(self, argv: list[str]) -> bool:
+        """True iff API_BACKEND forwards via the (removed) bespoke ``--env API_BACKEND=...``."""
+        return any(
+            arg == "--env" and i + 1 < len(argv) and argv[i + 1].startswith("API_BACKEND=")
+            for i, arg in enumerate(argv)
+        )
+
+    def _build(self, runner: DockerRunner) -> list[str]:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = Path(tmpdir) / "input"
+            output_dir = Path(tmpdir) / "output"
+            input_dir.mkdir()
+            output_dir.mkdir()
+            return runner._build_argv(input_dir, output_dir, container_name="c")
+
+    @pytest.mark.parametrize("backend", ["bedrock", "direct", "proxy"])
+    def test_backend_in_env_forwarded_name_only(self, monkeypatch, backend):
+        monkeypatch.setenv("API_BACKEND", backend)
+        argv = self._build(self._make_runner())
+        # Forwarded name-only via the standard allowlist — NOT the old bespoke value-form.
+        assert self._forwarded_name_only(argv)
+        assert not self._forwarded_value_form(argv)
+
+    def test_backend_absent_from_env_not_forwarded(self, monkeypatch):
+        """No API_BACKEND in os.environ → not forwarded, same as any allowlisted var."""
+        monkeypatch.delenv("API_BACKEND", raising=False)
+        argv = self._build(self._make_runner())
+        assert not self._forwarded_name_only(argv)
+        assert not self._forwarded_value_form(argv)

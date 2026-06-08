@@ -204,10 +204,7 @@ jobs:
           .venv/bin/python -c "
           import coder_eval
           import coder_eval.models
-          import coder_eval.evaluation.llmgw as llmgw
-          import coder_eval.orchestration.rephrase
           from coder_eval.criteria import init_criteria, CriterionRegistry
-          assert llmgw.is_llmgw_client_installed() is False
           init_criteria(validate=True)
           assert 'llm_judge' in CriterionRegistry.list_types()
           assert 'uipath_eval' in CriterionRegistry.list_types()
@@ -215,7 +212,7 @@ jobs:
           "
 
       - name: Run optional-dependency test suite
-        run: .venv/bin/pytest tests/test_optional_dependencies.py tests/test_llm_gateway_helper.py tests/test_rephrase.py -v --no-header
+        run: .venv/bin/pytest tests/test_optional_dependencies.py -v --no-header
 
   windows-smoke:
     name: Windows Smoke Test

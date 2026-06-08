@@ -37,10 +37,6 @@ def test_format_routing_direct_includes_judge_transport_anthropic():
     )
 
 
-def test_format_routing_direct_includes_judge_transport_llmgw():
-    assert _format_routing(DirectRoute(judge_transport="llmgw")) == "anthropic_direct (judge transport: llmgw)"
-
-
 def test_format_routing_direct_judge_transport_none_renders_as_none():
     """Unset transport prints 'none' so log readers don't see a confusing 'None' literal."""
     assert _format_routing(DirectRoute(judge_transport=None)) == "anthropic_direct (judge transport: none)"
@@ -78,11 +74,11 @@ def _make_orchestrator_with_route(tmp_path: Path, route) -> Orchestrator:
 
 
 def test_record_route_environment_info_direct_writes_judge_transport(tmp_path):
-    orchestrator = _make_orchestrator_with_route(tmp_path, DirectRoute(judge_transport="llmgw"))
+    orchestrator = _make_orchestrator_with_route(tmp_path, DirectRoute(judge_transport="anthropic"))
     orchestrator._record_route_environment_info()
     assert orchestrator.result is not None
     assert orchestrator.result.environment_info["api_routing"] == "anthropic_direct"
-    assert orchestrator.result.environment_info["judge_transport"] == "llmgw"
+    assert orchestrator.result.environment_info["judge_transport"] == "anthropic"
 
 
 def test_record_route_environment_info_direct_none_serialized_as_string(tmp_path):

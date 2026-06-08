@@ -39,15 +39,15 @@ dev = [
     "pre-commit>=4.5.1",
 ]
 # Optional extra that enables UiPath-specific features:
-#   - llm_judge via the LLMGW chat-model transport (uipath-llmgw-client)
-#   - prompt `rephrase` mutation (uipath-llmgw-client)
 #   - the `uipath` Python SDK on the host (handy for local sandbox parity with
 #     tasks that invoke `uv run uipath eval ...`)
 # Without this extra, the framework still installs and runs; UiPath-dependent
 # code paths fail at dispatch with a clear hint pointing back here.
+# NOTE: the LLM judge and the prompt `rephrase` mutation no longer use the
+# LLM Gateway client — they route through the run's backend (Bedrock /
+# Anthropic / proxy), so `uipath-llmgw-client` is no longer a dependency.
 uipath = [
     "uipath>=2.10.31",
-    "uipath-llmgw-client>=1.0.0",
 ]
 # Optional extra that enables Codex agent support:
 #   - CodexAgent implementation using official openai-codex SDK
@@ -106,9 +106,6 @@ constraint-dependencies = [
     "starlette>=1.0.1",
     "urllib3>=2.6.3",
 ]
-
-[tool.uv.sources]
-uipath-llmgw-client = { index = "uipath" }
 
 [tool.ruff]
 line-length = 120

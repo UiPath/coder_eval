@@ -16,15 +16,10 @@ from coder_eval.evaluation.judge_context import (
 )
 from coder_eval.evaluation.judge_usage import (
     token_usage_from_anthropic_dict,
-    token_usage_from_langchain_message,
 )
-from coder_eval.evaluation.llmgw import get_llmgw_chat_model
 from coder_eval.evaluation.verdict_tool import (
     SUBMIT_VERDICT_ANTHROPIC_TOOL,
-    SUBMIT_VERDICT_LC_TOOL,
-    SUBMIT_VERDICT_TOOL_NAME,
     extract_verdict_from_anthropic_response,
-    extract_verdict_from_langchain_message,
 )
 from coder_eval.models import (
     BedrockRoute,
@@ -101,18 +96,20 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
         user_msg = _render_user_message(criterion.prompt, judge_ctx)
 
         # Transport-unconfigured arm needs to short-circuit BEFORE backend dispatch.
-        if isinstance(route, DirectRoute) and route.judge_transport is None:
-            logger.error("llm_judge unreachable: no ANTHROPIC_API_KEY and no usable LLMGW transport")
+        # Hit when the run uses the Direct backend with no ANTHROPIC_API_KEY (or no
+        # route at all). Bedrock/Proxy backends always have a usable judge transport.
+        if route is None or (isinstance(route, DirectRoute) and route.judge_transport is None):
+            logger.error("llm_judge unreachable: no usable judge transport for the current backend")
             return JudgeCriterionResult(
                 criterion_type=criterion.type,
                 description=criterion.description,
                 score=0.0,
                 details="(judge transport unconfigured)",
                 error=(
-                    "llm_judge requires one of:\n"
-                    "  - ANTHROPIC_API_KEY in the environment, or\n"
-                    "  - the LLMGW_* credential set AND the `coder-eval[uipath]` extra "
-                    "installed (pip install 'coder-eval[uipath]').\n"
+                    "llm_judge needs the run to use a backend that can reach a judge model:\n"
+                    "  - Bedrock (--backend bedrock), or\n"
+                    "  - Anthropic direct with ANTHROPIC_API_KEY set, or\n"
+                    "  - the LLM Gateway proxy (--backend proxy).\n"
                     "Set one of the above, or remove/disable the llm_judge criterion."
                 ),
             )
@@ -136,7 +133,7 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
             )
         # Proxy delta wins when present (the billed truth on ProxyRoute, where
         # the upstream Bedrock usage may also echo in the response body); fall
-        # back to the response-reported usage on Direct / Bedrock / LLMGW.
+        # back to the response-reported usage on Direct / Bedrock / Proxy.
         judge_usage = proxy_delta() or response_usage
 
         # Sanitize any raw model text we persist to CriterionResult.details. A misbehaving
@@ -209,20 +206,6 @@ def _invoke_tool_channel(
             )
             verdict, err = extract_verdict_from_anthropic_response(response)
             response_usage = token_usage_from_anthropic_dict(response)
-        case DirectRoute(judge_transport="llmgw"):
-            llm = get_llmgw_chat_model(
-                model=criterion.model,
-                temperature=criterion.temperature,
-                max_tokens=criterion.max_tokens,
-            ).bind_tools([SUBMIT_VERDICT_LC_TOOL], tool_choice=SUBMIT_VERDICT_TOOL_NAME)
-            response = llm.invoke(
-                [
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": user_msg},
-                ]
-            )
-            verdict, err = extract_verdict_from_langchain_message(response)
-            response_usage = token_usage_from_langchain_message(response)
         case DirectRoute() | ProxyRoute():
             anthropic_response = invoke_anthropic_judge(
                 route=route,
@@ -236,19 +219,9 @@ def _invoke_tool_channel(
             verdict, err = extract_verdict_from_anthropic_response(anthropic_response)
             response_usage = token_usage_from_anthropic_dict(anthropic_response)
         case _:
-            llm = get_llmgw_chat_model(
-                model=criterion.model,
-                temperature=criterion.temperature,
-                max_tokens=criterion.max_tokens,
-            ).bind_tools([SUBMIT_VERDICT_LC_TOOL], tool_choice=SUBMIT_VERDICT_TOOL_NAME)
-            response = llm.invoke(
-                [
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": user_msg},
-                ]
-            )
-            verdict, err = extract_verdict_from_langchain_message(response)
-            response_usage = token_usage_from_langchain_message(response)
+            # route is None or an unexpected type — the unconfigured-arm guard in
+            # _check_impl handles None before dispatch, so this is defensive only.
+            return None, "llm_judge: no usable API route", "(no route)", None
 
     if verdict is not None:
         return verdict, None, verdict.model_dump_json(), response_usage

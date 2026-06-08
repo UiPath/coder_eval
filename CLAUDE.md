@@ -68,7 +68,6 @@ coder_eval/
 │   ├── checker.py                 # SuccessChecker (dispatches to criteria/)
 │   ├── judge_context.py           # JudgeContextBuilder + shared scrub/truncate/format_details for both judges
 │   ├── judge_verdict.py           # parse_judge_verdict + span walker (shared verdict parser)
-│   ├── llmgw.py                   # Shared UiPath LLM Gateway client factory
 │   ├── sub_agent.py               # SubAgentRunner: sandbox-copy + ClaudeCodeAgent lifecycle for judge-style sub-agents
 │   └── summaries.py               # summarize_commands (shared by orchestrator + llm_judge)
 │
@@ -168,7 +167,7 @@ templates/                         # Sandbox template directories
 | `uipath_eval` | Fractional | UiPath agent evaluation results |
 | `classification_match` | Binary | File-based label match (observed vs expected) with `(none)`/`(other)` sentinels; emits `ClassificationCriterionResult` for suite-level P/R/F1 |
 | `skill_triggered` | Binary | Did the agent engage the target skill? Agent-agnostic — Claude's `Skill` tool call, or (Codex) reading the skill's files off disk. Emits `ClassificationCriterionResult` for suite-level P/R/F1 |
-| `llm_judge` | Continuous | LLM grades artifacts + optional trajectory + optional reference via UiPath LLM Gateway |
+| `llm_judge` | Continuous | LLM grades artifacts + optional trajectory + optional reference; routes through the run's backend (Bedrock / Anthropic / proxy) |
 | `agent_judge` | Continuous | Spawns a Claude Code SDK agent in an isolated sandbox copy; judge uses tools (Bash/Read/Grep/…) to investigate and returns a JSON verdict. Expensive; runs with evaluator credentials — see SECURITY note in the criterion docstring. |
 
 All criteria support `weight` (default 1.0) and `pass_threshold` (default 0.9). On dataset-backed tasks, criteria may also set `suite_thresholds: {metric: min_value}` — the suite gate passes iff every listed metric (from the criterion's `aggregate()` output) meets its minimum.
@@ -270,7 +269,7 @@ Tasks are YAML files. See [docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_G
 
 **Runtime (always)**: pydantic, pydantic-settings, pyyaml, typer, rich, python-dotenv, anthropic, claude-agent-sdk, anyio, pylint, radon, tqdm, aiohttp, jmespath, jsonschema
 
-**Runtime (optional, `[uipath]` extra)**: uipath, uipath-llmgw-client — required only for the LLMGW judge transport, the `rephrase` prompt mutation, and (in-host) the `uipath` SDK. Base installs without this extra still run end-to-end; LLMGW-dependent paths fail at dispatch with a clear `pip install 'coder-eval[uipath]'` hint. See `docs/features/2026-05-19-optional-uipath-packages.md`.
+**Runtime (optional, `[uipath]` extra)**: uipath — the in-host `uipath` SDK (handy for local sandbox parity with tasks that invoke `uv run uipath eval ...`). Base installs without this extra still run end-to-end; UiPath-dependent paths fail at dispatch with a clear `pip install 'coder-eval[uipath]'` hint. The LLM judge and the `rephrase` mutation no longer use the LLM Gateway client — they route through the run's backend (Bedrock / Anthropic / proxy), so `uipath-llmgw-client` is no longer a dependency. See `docs/features/2026-05-19-optional-uipath-packages.md`.
 
 **Dev**: pytest, pytest-asyncio, pytest-mock, pytest-cov, ruff, pyright, pip-audit, bandit, pre-commit, mcp
 

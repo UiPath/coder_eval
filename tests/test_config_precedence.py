@@ -453,28 +453,23 @@ def _direct_settings(**overrides):
 
 
 def test_resolve_route_direct_judge_transport_anthropic_when_api_key_set():
-    """ANTHROPIC_API_KEY present → judge_transport='anthropic' (takes precedence over LLMGW)."""
+    """ANTHROPIC_API_KEY present → judge_transport='anthropic'."""
     from coder_eval.models import DirectRoute, resolve_route
 
-    s = _direct_settings(
-        anthropic_api_key="sk-test",
-        llmgw_url="https://gw.example.com/",
-        llmgw_client_id="cid",
-        llmgw_client_secret="secret",
-        llmgw_semantic_org_id="org",
-        llmgw_semantic_tenant_id="tenant",
-    )
+    s = _direct_settings(anthropic_api_key="sk-test")
     route = resolve_route(s)
     assert isinstance(route, DirectRoute)
     assert route.judge_transport == "anthropic"
 
 
-def test_resolve_route_direct_judge_transport_llmgw_when_only_llmgw_set(monkeypatch):
-    """No ANTHROPIC_API_KEY but full LLMGW creds + package present → judge_transport='llmgw'."""
-    from coder_eval.evaluation import llmgw as llmgw_helper
-    from coder_eval.models import DirectRoute, resolve_route
+def test_resolve_route_direct_judge_transport_none_when_only_llmgw_set():
+    """LLMGW creds no longer feed the judge: without ANTHROPIC_API_KEY → judge_transport=None.
 
-    monkeypatch.setattr(llmgw_helper, "is_llmgw_client_installed", lambda: True)
+    The LLM Gateway judge transport was removed — the judge now routes through the
+    run's backend (Bedrock/Proxy) or, under DirectRoute, api.anthropic.com. LLMGW
+    settings stay for the proxy but never select a judge transport.
+    """
+    from coder_eval.models import DirectRoute, resolve_route
 
     s = _direct_settings(
         llmgw_url="https://gw.example.com/",
@@ -484,86 +479,15 @@ def test_resolve_route_direct_judge_transport_llmgw_when_only_llmgw_set(monkeypa
         llmgw_semantic_tenant_id="tenant",
     )
     route = resolve_route(s)
-    assert isinstance(route, DirectRoute)
-    assert route.judge_transport == "llmgw"
-
-
-def test_resolve_route_direct_judge_transport_none_when_llmgw_creds_but_package_missing(monkeypatch, caplog):
-    """Full LLMGW creds but ``uipath_llmgw_client`` not installed → judge_transport=None
-    AND a warning log naming the missing extra (so operators can tell creds were
-    configured but ignored).
-    """
-    import logging
-
-    from coder_eval.evaluation import llmgw as llmgw_helper
-    from coder_eval.models import DirectRoute, resolve_route
-    from coder_eval.models import routing as routing_module
-
-    monkeypatch.setattr(llmgw_helper, "is_llmgw_client_installed", lambda: False)
-    # The warning is one-shot per process; reset the guard so this assertion is
-    # independent of test ordering.
-    monkeypatch.setattr(routing_module, "_llmgw_missing_warning_emitted", False)
-
-    s = _direct_settings(
-        llmgw_url="https://gw.example.com/",
-        llmgw_client_id="cid",
-        llmgw_client_secret="secret",
-        llmgw_semantic_org_id="org",
-        llmgw_semantic_tenant_id="tenant",
-    )
-    with caplog.at_level(logging.WARNING, logger="coder_eval.models.routing"):
-        route = resolve_route(s)
     assert isinstance(route, DirectRoute)
     assert route.judge_transport is None
-    # Operator-visible signal: warn (rather than silently demote) so users can
-    # tell creds were ignored vs. unset, and learn which extra to install.
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("coder-eval[uipath]" in r.getMessage() for r in warnings), (
-        f"expected a warning mentioning the [uipath] extra; got: {[r.getMessage() for r in warnings]}"
-    )
-
-
-def test_resolve_route_direct_judge_transport_anthropic_wins_even_without_llmgw_package(monkeypatch):
-    """ANTHROPIC_API_KEY wins regardless of LLMGW package availability."""
-    from coder_eval.evaluation import llmgw as llmgw_helper
-    from coder_eval.models import DirectRoute, resolve_route
-
-    monkeypatch.setattr(llmgw_helper, "is_llmgw_client_installed", lambda: False)
-
-    s = _direct_settings(
-        anthropic_api_key="sk-test",
-        llmgw_url="https://gw.example.com/",
-        llmgw_client_id="cid",
-        llmgw_client_secret="secret",
-        llmgw_semantic_org_id="org",
-        llmgw_semantic_tenant_id="tenant",
-    )
-    route = resolve_route(s)
-    assert isinstance(route, DirectRoute)
-    assert route.judge_transport == "anthropic"
 
 
 def test_resolve_route_direct_judge_transport_none_when_neither_set():
-    """No ANTHROPIC_API_KEY and no LLMGW creds → judge_transport=None (run starts; llm_judge fails at dispatch)."""
+    """No ANTHROPIC_API_KEY → judge_transport=None (run starts; llm_judge fails at dispatch)."""
     from coder_eval.models import DirectRoute, resolve_route
 
     route = resolve_route(_direct_settings())
-    assert isinstance(route, DirectRoute)
-    assert route.judge_transport is None
-
-
-def test_resolve_route_direct_judge_transport_none_when_partial_llmgw():
-    """Incomplete LLMGW credential set is not enough — must be all five fields."""
-    from coder_eval.models import DirectRoute, resolve_route
-
-    s = _direct_settings(
-        llmgw_url="https://gw.example.com/",
-        llmgw_client_id="cid",
-        llmgw_client_secret="secret",
-        llmgw_semantic_org_id="org",
-        # llmgw_semantic_tenant_id intentionally omitted
-    )
-    route = resolve_route(s)
     assert isinstance(route, DirectRoute)
     assert route.judge_transport is None
 

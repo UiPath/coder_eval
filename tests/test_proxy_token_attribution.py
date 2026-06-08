@@ -459,7 +459,7 @@ class TestLLMJudgeProxyAttribution:
                 sandbox,
                 reference_code=None,
                 turn_records=[],
-                context=CheckContext(route=DirectRoute(judge_transport="llmgw"), proxy=None),
+                context=CheckContext(route=DirectRoute(), proxy=None),
             )
 
         assert isinstance(result, JudgeCriterionResult)

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -329,11 +330,18 @@ def run_command(
         ],
     )
 
-    # Override API backend if --backend was passed
+    # Override API backend if --backend was passed. The flag is shorthand for the
+    # API_BACKEND env var, so mirror it into os.environ as well: the docker driver
+    # forwards the backend into the container via the standard env passthrough
+    # (name-only `--env API_BACKEND`, which reads os.environ). A flag that only
+    # mutated `settings` would be dropped at the container boundary and the
+    # in-container Settings would silently default to DIRECT.
     if backend is not None:
         from coder_eval.models import ApiBackend
 
-        settings.api_backend = ApiBackend(backend)
+        resolved_backend = ApiBackend(backend)
+        settings.api_backend = resolved_backend
+        os.environ["API_BACKEND"] = resolved_backend.value
 
     # Setup logging before running tasks
     log_level = settings.log_level
