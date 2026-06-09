@@ -1,9 +1,11 @@
 task_id: uipath-flow-csharp-calculator
 description: >
   C# port of the calculator task — multiply two numbers. Different flavor than
-  the v2 version: in C# the multiplication is just an arithmetic expression,
-  not a script-node body. Tests local-variable handling (becomes flow vars
-  after conversion) and that simple arithmetic round-trips through FIL.
+  the v2 version: bare C# arithmetic on locals (e.g. `int result = a * b;`) is
+  elided by v2-to-v1's dead-code pass, so the math must be dispatched as a
+  `core.action.script` node via the raw `IConnector.ExecuteNodeAsync(...)` API.
+  Tests local-variable handling (a, b become flow vars after conversion) and
+  that the converted v1 `.flow` contains an observable `core.action.script` node.
 tags: [flow-csharp, csharp, generate, variables]
 
 run_limits:
@@ -28,24 +30,36 @@ initial_prompt: |
 
   ## Scenario
 
-  Multiply two numeric inputs `a` and `b` and produce the result.
+  Multiply two numeric inputs `a` and `b` and produce the result. The
+  converted v1 `.flow` MUST contain an observable `core.action.script`
+  node that does the math — bare C# locals like `int result = a * b;`
+  get dropped by v2-to-v1's dead-code pass because nothing reads them.
 
-  In C# space, write the arithmetic directly in `Execute()`:
+  The pattern: dispatch a `core.action.script` node via the raw
+  `IConnector.ExecuteNodeAsync(...)` API. The script body is a v1 `=js:`
+  expression; capture the raw return string into `result`:
 
   ```csharp
   public async Task Execute()
   {
       int a = 7;
       int b = 6;
-      int result = a * b;
-      // … emit `result` somehow (e.g. via a connector or just leave it as a local;
-      //   the converter still records `a`, `b`, `result` as flow variables).
+      string scriptInput =
+          "{\"script\":\"return " + a + " * " + b + ";\"}";
+      string result = await connector.ExecuteNodeAsync(
+          "core.action.script", "multiply", "", scriptInput);
   }
   ```
 
-  Local declarations at the top of `Execute()` become v1 flow variables after
-  conversion. The variable mutability detector picks `let` vs `const` based
-  on whether the local is reassigned.
+  cs2fil promotes `a` and `b` to FIL `const` declarations (which become
+  v1 flow variables) and the `ExecuteNodeAsync` call to a v1
+  `core.action.script` node whose output is bound to `result`. The
+  `"return " + a + " * " + b + ";"` concatenation is recognized — the
+  converter inlines the variable values into the emitted script body.
+
+  `core.action.script` is a synthetic node type with no generated wrapper
+  class, so dispatch goes through the lower-level `IConnector.ExecuteNodeAsync`
+  rather than `Flow.ExecuteNode(connector, action(), ...)`.
 
   ## Phases
 
@@ -54,11 +68,16 @@ initial_prompt: |
   cd Calculator
   # replace Workflow.cs with the calculator logic — keep it simple
   dotnet build
-  dotnet run -- --test
   cd ..
+  ./verify.sh Calculator
   ./convert-to-v1.sh Calculator
   ./validate.sh    Calculator
   ```
+
+post_run:
+  - command: './snapshot-outputs.sh'
+    timeout: 30
+
 
 success_criteria:
   - type: file_exists
@@ -73,8 +92,8 @@ success_criteria:
     weight: 2.0
     pass_threshold: 1.0
   - type: run_command
-    description: "C# project runs in test mode"
-    command: "dotnet run --project Calculator -- --test"
+    description: "C# project verifies via csflowrun (cs2fil → flow-run --dry-run)"
+    command: "./verify.sh Calculator"
     timeout: 120
     expected_exit_code: 0
     weight: 2.0
@@ -100,6 +119,22 @@ success_criteria:
     description: "v1 .flow exists"
     path: "Calculator.flow"
     weight: 1.0
+  - type: run_command
+    description: "v1 .flow contains a core.action.script node that does the multiplication"
+    command: |
+      python3 -c "
+      import json
+      f = json.load(open('Calculator.flow'))
+      ns = f.get('nodes', [])
+      types = [n.get('type', '') for n in ns]
+      scripts = [n for n in ns if n.get('type') == 'core.action.script']
+      assert scripts, f'no core.action.script node in v1 .flow (types={types}). Plain C# arithmetic gets elided — dispatch a script node via IConnector.ExecuteNodeAsync.'
+      print(f'{len(scripts)} script node(s) found')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
   - type: run_command
     description: "v1 .flow validates"
     command: "uip maestro flow validate Calculator.flow"

@@ -1,0 +1,209 @@
+task_id: uipath-flow-csharp-inventory-alert
+description: >
+  Mid-complexity C# Flow workflow: fetch an inventory list via HTTP, fan
+  out per-item (DM Slack on low stock, increment counter), end with a
+  digest email. Smaller than release_rollup but exercises the same hard
+  patterns: HTTP envelope deserialisation, foreach + conditional, nested
+  record construction, counter accumulation, multi-connector dispatch.
+  Designed to surface whether the `csflowrun <Workflow.cs>` source-mode
+  inner loop (~1-2 s per iteration) lets the agent finish faster than
+  the full `dotnet build` + `csflowrun <Name>.dll` path (~10-15 s).
+tags: [flow-csharp, csharp, generate, http, loop, decision, multi-connector, source-mode]
+
+run_limits:
+  max_turns: 80
+  turn_timeout: 1500
+  task_timeout: 1500
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Skill", "Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+sandbox:
+  driver: tempdir
+  python: {}
+  template_sources:
+    - type: template_dir
+      path: "../../../templates/flow-csharp"
+
+initial_prompt: |
+  Author a UiPath C# Flow workflow named **InventoryAlert** in the current
+  directory. Read `SKILL.md` first — pay particular attention to the
+  **Test loop** section, which documents two modes: the fast `csflowrun
+  Workflow.cs --dry-run` inner loop (~1-2 s; analyzers fire but no
+  Assert tests) and the full `dotnet build` + `./verify.sh` deploy gate.
+  Use the fast loop while iterating; only do the full build/convert
+  cycle once your workflow is stable.
+
+  ## Scenario
+
+  Daily low-stock alert for warehouse inventory.
+
+  1. Fetch the inventory list from a mock API via `core.action.http`:
+     `https://api.example.com/inventory` (GET). Treat it as if it
+     returns an array of `{ sku: string, name: string, stock: int }`
+     objects in the response body.
+  2. For each item, decide:
+     - **Stock ≥ 10**: nothing to do — increment a `ok` counter.
+     - **Stock < 10**: increment a `low` counter, then send a Slack DM
+       to `@warehouse-ops` with `"Low stock: {name} ({sku}) — {stock}
+       left"`.
+  3. After the loop, send a digest email to
+     `warehouse-ops@example.com` with subject `"Daily inventory check"`
+     and body `"low={low}, ok={ok}"`.
+
+  ## Connectors
+
+  - **Outlook** (`MicrosoftOutlook365.SendEmail`) for the digest email.
+  - **Slack** (`SalesforceSlack.SendMessageToUser`) for low-stock DMs.
+
+  The HTTP fetch goes through the raw `connector.ExecuteNodeAsync(
+  "core.action.http", "fetchInventory", "", "{...}")` route since
+  `core.action.http` is a synthetic node type with no generated wrapper
+  class. The Slack and Outlook calls go through the `[FlowAction]` +
+  `Flow.ExecuteNode` route.
+
+  ## Suggested iteration pattern
+
+  This task is designed so the source-mode inner loop shines:
+
+  1. `dotnet new csflow --name InventoryAlert` — scaffold once.
+  2. Write a stub `Workflow.cs` with the structure (records, FlowActions,
+     foreach skeleton). Don't fill the body details yet.
+  3. `csflowrun InventoryAlert/Workflow.cs --dry-run` — catches every
+     CS2FIL violation in ~2 s. Fix and repeat.
+  4. Once green, flesh out the body, repeat step 3.
+  5. Once the workflow's logic feels complete:
+     `cd InventoryAlert && dotnet build && cd .. && ./verify.sh InventoryAlert`
+     for the full `[WorkflowTest]` cycle. This is your deploy gate.
+  6. `./convert-to-v1.sh InventoryAlert` + `./validate.sh InventoryAlert`.
+
+  Time the iterations — the source-mode loop should be dramatically
+  faster than going through `dotnet build` on every edit.
+
+post_run:
+  - command: './snapshot-outputs.sh'
+    timeout: 30
+
+
+success_criteria:
+  - type: file_exists
+    description: "C# project Workflow.cs exists"
+    path: "InventoryAlert/Workflow.cs"
+    weight: 1.0
+  - type: run_command
+    description: "C# project builds (analyzers pass)"
+    command: "dotnet build InventoryAlert/InventoryAlert.csproj"
+    timeout: 120
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "C# project verifies via csflowrun (cs2fil → flow-run --dry-run)"
+    command: "./verify.sh InventoryAlert"
+    timeout: 120
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: file_exists
+    description: "Bindings file exists at project root"
+    path: "bindings.json"
+    weight: 1.0
+  - type: file_exists
+    description: "v1 .flow exists"
+    path: "InventoryAlert.flow"
+    weight: 1.0
+  - type: run_command
+    description: "v1 .flow validates"
+    command: "uip maestro flow validate InventoryAlert.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 3.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "tidy succeeds"
+    command: "uip maestro flow format InventoryAlert.flow"
+    timeout: 30
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "v1 .flow uses HTTP + Outlook + Slack (no Jira / GitHub / others)"
+    command: |
+      python3 -c "
+      import json
+      f = json.load(open('InventoryAlert.flow'))
+      all_nodes = list(f.get('nodes', []))
+      for s in f.get('subflows', {}).values():
+          all_nodes.extend(s.get('nodes', []))
+      types = [n.get('type', '') for n in all_nodes]
+      assert any(t.startswith('core.action.http') for t in types), f'no HTTP node: {types}'
+      assert any('uipath-microsoft-outlook365' in t for t in types), f'no Outlook node: {types}'
+      assert any('uipath-salesforce-slack' in t for t in types), f'no Slack node: {types}'
+      print(f'connectors present: {sorted({t for t in types if t.startswith(\"uipath.connector.\") or t.startswith(\"core.action.\")})}')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "v1 .flow iterates (loop / subflow / repetition) and has at least one decision"
+    command: |
+      python3 -c "
+      import json
+      f = json.load(open('InventoryAlert.flow'))
+      all_nodes = list(f.get('nodes', []))
+      for s in f.get('subflows', {}).values():
+          all_nodes.extend(s.get('nodes', []))
+      types = [n.get('type', '') for n in all_nodes]
+      iterates = (
+          sum(1 for t in types if t == 'core.logic.loop') > 0
+          or sum(1 for t in types if t == 'core.subflow') >= 2
+          or sum(1 for t in types if t.startswith('core.action.http')) >= 2
+      )
+      assert iterates, f'no iteration evidence: types={types}'
+      decisions = sum(1 for t in types if t == 'core.logic.decision')
+      assert decisions >= 1, f'expected ≥1 decision (low-stock check), got {decisions}'
+      print(f'iter ok; {decisions} decision(s)')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 2.0
+    pass_threshold: 1.0
+  - type: run_command
+    description: "appsettings.json includes bindings for outlook + slack + a folder-key entry"
+    command: |
+      python3 -c "
+      import json
+      a = json.load(open('InventoryAlert/appsettings.json'))
+      bindings = a.get('Bindings', [])
+      assert len(bindings) >= 3, f'expected ≥3 binding entries (folder key + 2 connections), got {len(bindings)}'
+      folder_keys = [b for b in bindings if b.get('propertyAttribute') == 'FolderKey']
+      assert folder_keys, f'no FolderKey binding (none with propertyAttribute==\"FolderKey\"); have: {[b.get(\"id\") for b in bindings]}'
+      print(f'binding ids: {sorted(b.get(\"id\", \"\") for b in bindings)}; folder-key entries: {len(folder_keys)}')
+      "
+    timeout: 10
+    expected_exit_code: 0
+    weight: 1.0
+    pass_threshold: 1.0
+  - type: llm_judge
+    description: "Workflow implements the low-stock alert logic end-to-end"
+    prompt: |
+      Did the agent author a C# workflow that:
+      (a) fetches an inventory list via `core.action.http` against a URL
+          containing `inventory`;
+      (b) iterates over the parsed items with `foreach`;
+      (c) decides per-item whether stock is low (< 10) and dispatches a
+          Slack DM only on the low-stock branch;
+      (d) maintains two counters (`low` / `ok`) updated across iterations
+          on the appropriate branches;
+      (e) sends a final Outlook digest email summarising the counters.
+
+      Score 1.0 if all five pieces are present and structurally correct.
+      Subtract 0.2 per missing piece; floor at 0.
+    files:
+      - "InventoryAlert/Workflow.cs"
+      - "InventoryAlert.flow"
+    weight: 3.0
+    pass_threshold: 0.7

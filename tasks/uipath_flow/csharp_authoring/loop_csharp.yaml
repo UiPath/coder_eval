@@ -48,11 +48,17 @@ initial_prompt: |
   ```bash
   dotnet new csflow --name BatchProcessor
   cd BatchProcessor
-  dotnet build && dotnet run -- --test
+  dotnet build
   cd ..
+  ./verify.sh BatchProcessor
   ./convert-to-v1.sh BatchProcessor
   ./validate.sh    BatchProcessor
   ```
+
+post_run:
+  - command: './snapshot-outputs.sh'
+    timeout: 30
+
 
 success_criteria:
   - type: file_exists
@@ -67,8 +73,8 @@ success_criteria:
     weight: 2.0
     pass_threshold: 1.0
   - type: run_command
-    description: "C# project runs in test mode"
-    command: "dotnet run --project BatchProcessor -- --test"
+    description: "C# project verifies via csflowrun (cs2fil → flow-run --dry-run)"
+    command: "./verify.sh BatchProcessor"
     timeout: 120
     expected_exit_code: 0
     weight: 2.0

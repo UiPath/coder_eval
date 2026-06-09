@@ -42,6 +42,11 @@ initial_prompt: |
   Write your findings to `connector-discovery-report.md` covering all four
   questions.
 
+post_run:
+  - command: './snapshot-outputs.sh'
+    timeout: 30
+
+
 success_criteria:
   - type: file_exists
     description: "Discovery report file exists"

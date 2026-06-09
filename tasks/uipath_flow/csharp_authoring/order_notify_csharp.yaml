@@ -52,11 +52,16 @@ initial_prompt: |
   dotnet new csflow --name OrderNotify
   cd OrderNotify
   dotnet build
-  dotnet run -- --test
   cd ..
+  ./verify.sh OrderNotify
   ./convert-to-v1.sh OrderNotify
   ./validate.sh    OrderNotify
   ```
+
+post_run:
+  - command: './snapshot-outputs.sh'
+    timeout: 30
+
 
 success_criteria:
   - type: file_exists
@@ -71,8 +76,8 @@ success_criteria:
     weight: 2.0
     pass_threshold: 1.0
   - type: run_command
-    description: "C# project runs in test mode"
-    command: "dotnet run --project OrderNotify -- --test"
+    description: "C# project verifies via csflowrun (cs2fil → flow-run --dry-run)"
+    command: "./verify.sh OrderNotify"
     timeout: 120
     expected_exit_code: 0
     weight: 2.0

@@ -59,8 +59,8 @@ initial_prompt: |
   cd CalendarReminder
   # phase 2: edit Workflow.cs to call the create-event action
   dotnet build                                      # analyzers gate FIL-incompat
-  dotnet run -- --test                              # exercises against TestConnector
   cd ..
+  ./verify.sh CalendarReminder                      # csflowrun: cs2fil → flow-run --dry-run
 
   ./convert-to-v1.sh CalendarReminder               # phase 3: → CalendarReminder.flow + bindings.json
   ./validate.sh    CalendarReminder                 # phase 4: validate + tidy
@@ -73,6 +73,11 @@ initial_prompt: |
   - `CalendarReminder.flow`                   # v1 flow JSON
   - `bindings.json`                           # v1 bindings
   - `CalendarReminder.flow` is what `uip maestro flow validate` runs against
+
+post_run:
+  - command: './snapshot-outputs.sh'
+    timeout: 30
+
 
 success_criteria:
   - type: file_exists
@@ -87,8 +92,8 @@ success_criteria:
     weight: 2.0
     pass_threshold: 1.0
   - type: run_command
-    description: "C# project runs in test mode"
-    command: "dotnet run --project CalendarReminder -- --test"
+    description: "C# project verifies via csflowrun (cs2fil → flow-run --dry-run)"
+    command: "./verify.sh CalendarReminder"
     timeout: 120
     expected_exit_code: 0
     weight: 2.0
