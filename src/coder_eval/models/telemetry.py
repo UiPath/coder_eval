@@ -63,7 +63,15 @@ class TokenUsage(BaseModel):
         description="Tokens written to the prompt cache this call (Anthropic only; 0 for Codex).",
     )
     cache_read_input_tokens: int = Field(default=0, description="Tokens read from prompt cache")
-    total_cost_usd: float | None = Field(default=None, description="Total cost in USD (from SDK)")
+    total_cost_usd: float | None = Field(
+        default=None,
+        description=(
+            "Total cost in USD. Normally the agent SDK's billed total; on a "
+            "timed-out/killed turn (no terminal result message) it is backfilled "
+            "from the rate card via proxy.pricing.calculate_cost, so a multi-turn "
+            "or run total may blend SDK-billed and rate-card-estimated figures."
+        ),
+    )
 
     @computed_field  # type: ignore[prop-decorator]
     @property

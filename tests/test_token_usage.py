@@ -1,6 +1,7 @@
 """Tests for token usage tracking feature."""
 
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,6 +12,7 @@ from coder_eval.agents.claude_code_agent import (
     _is_sdk_result_message,
     _is_task_notification,
 )
+from coder_eval.errors import AgentCrashError
 from coder_eval.models import (
     AgentKind,
     AssistantMessage,
@@ -22,6 +24,7 @@ from coder_eval.models import (
     UserMessage,
     parse_agent_config,
 )
+from coder_eval.proxy.pricing import calculate_cost
 from coder_eval.reports import ReportGenerator
 
 
@@ -418,6 +421,65 @@ class TestBuildTokenUsage:
         assert usage.uncached_input_tokens == 7
         assert usage.cache_read_input_tokens == 300
 
+    def test_timeout_turn_backfills_cost_from_buckets(self):
+        """A killed/timed-out turn has no ResultMessage (no SDK cost), but its
+        tokens are captured. The cost is backfilled from the rate card so it
+        records a number instead of None (issue #386)."""
+        messages = [
+            _assistant(
+                message_id="m1",
+                input_tokens=1_000_000,
+                output_tokens=500_000,
+                cache_creation_tokens=200_000,
+                cache_read_tokens=4_000_000,
+            ),
+        ]
+        usage = ClaudeCodeAgent._build_token_usage(messages, None, None, None, "claude-opus-4-8")
+        assert usage is not None
+        # opus-4-8: 15/M in, 75/M out, 18.75/M cache-write, 1.50/M cache-read.
+        expected = (1_000_000 * 15.0 + 500_000 * 75.0 + 200_000 * 18.75 + 4_000_000 * 1.50) / 1_000_000
+        assert usage.total_cost_usd == pytest.approx(expected)
+
+    def test_backfill_via_resultmessage_snapshot_path(self):
+        """The snapshot-only fallback path (no per-message tokens) is also priced
+        when the SDK cost is absent. Expected cost comes from ``calculate_cost``
+        itself (not re-pinned literals) — this asserts the buckets are wired to
+        pricing correctly without duplicating the rate card."""
+        usage = ClaudeCodeAgent._build_token_usage(
+            [],
+            {"input_tokens": 1000, "output_tokens": 500, "cache_read_input_tokens": 100},
+            None,
+            None,
+            "claude-opus-4-8",
+        )
+        assert usage is not None
+        expected = calculate_cost(
+            "claude-opus-4-8", uncached_input_tokens=1000, output_tokens=500, cache_read_tokens=100
+        )
+        assert usage.total_cost_usd == pytest.approx(expected)
+
+    def test_sdk_cost_not_overwritten_by_backfill(self):
+        """When the SDK supplied a cost, the backfill is a no-op (real billed
+        total wins over the rate-card estimate)."""
+        messages = [_assistant(message_id="m1", input_tokens=10, output_tokens=20)]
+        usage = ClaudeCodeAgent._build_token_usage(messages, None, 1.23, None, "claude-opus-4-8")
+        assert usage is not None
+        assert usage.total_cost_usd == 1.23
+
+    def test_backfill_noop_for_unknown_model(self):
+        """An unpriced/unknown model leaves cost None — no crash, no fabrication."""
+        messages = [_assistant(message_id="m1", input_tokens=10, output_tokens=20)]
+        usage = ClaudeCodeAgent._build_token_usage(messages, None, None, None, "totally-unknown-model")
+        assert usage is not None
+        assert usage.total_cost_usd is None
+
+    def test_backfill_noop_when_no_model_provided(self):
+        """Without a model id the cost stays None (back-compat with old callers)."""
+        messages = [_assistant(message_id="m1", input_tokens=10, output_tokens=20)]
+        usage = ClaudeCodeAgent._build_token_usage(messages, None, None)
+        assert usage is not None
+        assert usage.total_cost_usd is None
+
 
 # --- Agent token capture tests ---
 
@@ -500,6 +562,63 @@ class TestAgentTokenCapture:
             record = await agent.communicate("test prompt")
 
         assert record.token_usage is None
+
+    @pytest.mark.asyncio
+    async def test_crashed_turn_backfills_cost_end_to_end(self):
+        """End-to-end wiring (issue #386): on a crash there is no ResultMessage,
+        so the SDK supplies no cost. The agent must thread its resolved
+        ``effective_model`` through ``communicate() → _finalize →
+        _build_token_usage`` so the partial ``pending_turn`` records a
+        rate-card cost instead of None. The unit tests for ``_build_token_usage``
+        pass an explicit model; this proves the closure is actually wired."""
+        config = parse_agent_config(
+            type=AgentKind.CLAUDE_CODE,
+            permission_mode="acceptEdits",
+            allowed_tools=["Read"],
+            model="claude-opus-4-8",
+        )
+        agent = ClaudeCodeAgent(config)
+        agent.working_directory = MagicMock()
+        agent.working_directory.rglob.return_value = []
+
+        # A token-bearing assistant emission, then a generic crash before any
+        # terminal ResultMessage (so sdk_result_cost stays None).
+        assistant_msg = SimpleNamespace(
+            content=[SimpleNamespace(text="working on it")],
+            model="claude-opus-4-8",
+            message_id="m1",
+            usage={
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "cache_creation_input_tokens": 200,
+                "cache_read_input_tokens": 100,
+            },
+        )
+
+        async def mock_query(*args, **kwargs):
+            yield assistant_msg
+            raise RuntimeError("subprocess died mid-turn")
+
+        with (
+            patch("coder_eval.agents.claude_code_agent.SubprocessCLITransport", return_value=MagicMock()),
+            patch("coder_eval.agents.claude_code_agent.query", side_effect=mock_query),
+            pytest.raises(AgentCrashError),
+        ):
+            await agent.communicate("test prompt")
+
+        # The crashed partial turn is parked on pending_turn with cost backfilled.
+        assert agent.pending_turn is not None
+        assert agent.pending_turn.crashed is True
+        usage = agent.pending_turn.token_usage
+        assert usage is not None
+        expected = calculate_cost(
+            "claude-opus-4-8",
+            uncached_input_tokens=1000,
+            output_tokens=500,
+            cache_creation_tokens=200,
+            cache_read_tokens=100,
+        )
+        assert usage.total_cost_usd == pytest.approx(expected)
 
     @pytest.mark.asyncio
     async def test_communicate_handles_none_cache_tokens(self):

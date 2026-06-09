@@ -684,6 +684,38 @@ class TestPricingCalculation:
     def test_unknown_model_returns_none(self):
         assert calculate_cost("unknown-model", uncached_input_tokens=1000, output_tokens=500) is None
 
+    def test_bedrock_qualified_model_prices_same_as_bare(self):
+        # A Bedrock route qualifies the alias into a region/vendor inference
+        # profile id (e.g. eu.anthropic.claude-opus-4-8). It must price the same
+        # as the bare alias so timeout-turn cost backfill works on Bedrock too
+        # (issue #386 follow-up). Covers each region prefix + the bare anthropic.
+        bare = calculate_cost("claude-opus-4-8", uncached_input_tokens=1_000_000, output_tokens=500_000)
+        assert bare is not None
+        for qualified in (
+            "eu.anthropic.claude-opus-4-8",
+            "us.anthropic.claude-opus-4-8",
+            "apac.anthropic.claude-opus-4-8",
+            "global.anthropic.claude-opus-4-8",
+            "anthropic.claude-opus-4-8",
+        ):
+            assert calculate_cost(qualified, uncached_input_tokens=1_000_000, output_tokens=500_000) == bare, qualified
+
+    def test_normalization_does_not_misprice_bare_models(self):
+        # Bare aliases (Claude + gpt-*) must pass through normalization unchanged.
+        assert calculate_cost("claude-sonnet-4-6", uncached_input_tokens=1_000_000, output_tokens=0) == pytest.approx(
+            3.0
+        )
+        assert calculate_cost("gpt-5-codex", uncached_input_tokens=1_000_000, output_tokens=0) == pytest.approx(1.25)
+
+    def test_pricing_region_prefixes_mirror_routing(self):
+        # _normalize_model mirrors routing._BEDROCK_KNOWN_PREFIXES; if routing
+        # adds a region prefix, pricing must strip it too or Bedrock backfill
+        # silently regresses. Lock the mirror so the two can't drift apart.
+        from coder_eval.models.routing import _BEDROCK_KNOWN_PREFIXES
+        from coder_eval.proxy.pricing import _BEDROCK_REGION_PREFIXES
+
+        assert set(_BEDROCK_REGION_PREFIXES) == set(_BEDROCK_KNOWN_PREFIXES)
+
     def test_zero_tokens_returns_zero(self):
         cost = calculate_cost("claude-sonnet-4-6", uncached_input_tokens=0, output_tokens=0)
         assert cost == 0.0

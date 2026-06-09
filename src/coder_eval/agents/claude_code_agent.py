@@ -57,6 +57,7 @@ from coder_eval.models import (
 from coder_eval.models import (
     AssistantMessage as AssistantMessageTelemetry,
 )
+from coder_eval.proxy.pricing import calculate_cost
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
@@ -481,6 +482,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         tool_turn_ids: dict[str, str] = {}  # tool_id -> the turn_id that spawned it
         emitted_tool_ends: set[str] = set()  # tool_ids already closed with a ToolEndEvent
         finalized = False
+        # Resolved model id, captured for cost backfill in _finalize. Set once the
+        # SDK env/model is resolved (below); stays None if we crash before then.
+        effective_model: str | None = None
 
         def _turn_tokens(turn_id: str) -> TokenUsage | None:
             """Best-effort per-turn tokens, summed over that call's block emissions."""
@@ -503,7 +507,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # into the TurnRecord. Idempotent (guarded by ``finalized``) so it fires
         # exactly once whether the turn completed, crashed, or timed out.
         def _finalize(status: AgentEndStatus, *, crashed: bool, crash_reason: str | None) -> None:
-            nonlocal finalized, current_turn_id
+            nonlocal finalized, current_turn_id, effective_model
             if finalized:
                 return
             finalized = True
@@ -546,7 +550,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 current_turn_id = None
 
             usage = (
-                self._build_token_usage(sdk_messages, sdk_result_usage, sdk_result_cost, sdk_result_model_usage)
+                self._build_token_usage(
+                    sdk_messages, sdk_result_usage, sdk_result_cost, sdk_result_model_usage, effective_model
+                )
                 or TokenUsage()
             )
 
@@ -1295,6 +1301,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         sdk_result_usage: dict[str, Any] | None,
         sdk_result_cost: float | None,
         sdk_result_model_usage: dict[str, Any] | None = None,
+        model: str | None = None,
     ) -> TokenUsage | None:
         """Build the run's cumulative TokenUsage, or None if unavailable.
 
@@ -1316,7 +1323,11 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         3. ``ResultMessage.usage`` snapshot — last resort.
 
         ``total_cost_usd`` comes from ``model_usage.costUSD`` when present, else
-        the ResultMessage ``total_cost_usd`` — the real billed total.
+        the ResultMessage ``total_cost_usd`` — the real billed total. When BOTH
+        are absent (timeout / kill — there is no terminal ``ResultMessage``), it
+        is backfilled from the priced token buckets via ``calculate_cost``,
+        mirroring the Codex self-pricing path so killed turns still record a cost
+        instead of ``—``. The tokens are already captured; this is pure pricing.
 
         WHY THIS FIELD IS NECESSARY — AND WHY YOU CANNOT DERIVE IT FROM ``messages``
         ---------------------------------------------------------------------------
@@ -1377,7 +1388,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         if from_models is not None:
             if from_models.total_cost_usd is None:
                 from_models.total_cost_usd = sdk_result_cost
-            return from_models
+            return ClaudeCodeAgent._backfill_cost(from_models, model)
 
         assistant_msgs = [m for m in messages if isinstance(m, AssistantMessageTelemetry)]
         token_bearing = [
@@ -1389,22 +1400,57 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # the dedup in communicate() applied and no ResultMessage backfill was
         # mixed in). Otherwise defer to the ResultMessage summary.
         if token_bearing and all(m.message_id for m in token_bearing):
-            return TokenUsage(
-                uncached_input_tokens=sum(m.input_tokens for m in assistant_msgs),
-                output_tokens=sum(m.output_tokens for m in assistant_msgs),
-                cache_creation_input_tokens=sum(m.cache_creation_tokens for m in assistant_msgs),
-                cache_read_input_tokens=sum(m.cache_read_tokens for m in assistant_msgs),
-                total_cost_usd=sdk_result_cost,
+            return ClaudeCodeAgent._backfill_cost(
+                TokenUsage(
+                    uncached_input_tokens=sum(m.input_tokens for m in assistant_msgs),
+                    output_tokens=sum(m.output_tokens for m in assistant_msgs),
+                    cache_creation_input_tokens=sum(m.cache_creation_tokens for m in assistant_msgs),
+                    cache_read_input_tokens=sum(m.cache_read_tokens for m in assistant_msgs),
+                    total_cost_usd=sdk_result_cost,
+                ),
+                model,
             )
         if not sdk_result_usage:
             return None
-        return TokenUsage(
-            uncached_input_tokens=sdk_result_usage.get("input_tokens", 0),
-            output_tokens=sdk_result_usage.get("output_tokens", 0),
-            cache_creation_input_tokens=sdk_result_usage.get("cache_creation_input_tokens", 0) or 0,
-            cache_read_input_tokens=sdk_result_usage.get("cache_read_input_tokens", 0) or 0,
-            total_cost_usd=sdk_result_cost,
+        return ClaudeCodeAgent._backfill_cost(
+            TokenUsage(
+                uncached_input_tokens=sdk_result_usage.get("input_tokens", 0),
+                output_tokens=sdk_result_usage.get("output_tokens", 0),
+                cache_creation_input_tokens=sdk_result_usage.get("cache_creation_input_tokens", 0) or 0,
+                cache_read_input_tokens=sdk_result_usage.get("cache_read_input_tokens", 0) or 0,
+                total_cost_usd=sdk_result_cost,
+            ),
+            model,
         )
+
+    @staticmethod
+    def _backfill_cost(usage: TokenUsage, model: str | None) -> TokenUsage:
+        """Price the token buckets when the SDK gave no cost (timeout / kill).
+
+        On a clean turn the SDK supplies ``costUSD`` / ``total_cost_usd``. When a
+        turn is timed out or killed there is no terminal ``ResultMessage``, so the
+        cost is absent even though the tokens are fully captured. Backfill it from
+        the rate card — the same self-pricing the Codex agent always does — so the
+        recorded top-line cost matches the evalboard simulator instead of ``—``.
+        A no-op when the cost is already set or the model is unknown/unpriced.
+        """
+        if usage.total_cost_usd is not None or not model:
+            return usage
+        cost = calculate_cost(
+            model,
+            uncached_input_tokens=usage.uncached_input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_creation_tokens=usage.cache_creation_input_tokens,
+            cache_read_tokens=usage.cache_read_input_tokens,
+        )
+        if cost is not None:
+            usage.total_cost_usd = cost
+        else:
+            # Model not in the rate card — the turn reverts to a null cost (the
+            # pre-#386 symptom). Surface it so a stale pricing table is visible
+            # rather than silently reproducing "Cost = —" for new models.
+            logger.warning("No pricing for model %r; timeout/kill turn cost left unset", model)
+        return usage
 
     def get_sdk_options(self) -> dict[str, Any] | None:
         """Get the raw SDK options used for the last agent query.

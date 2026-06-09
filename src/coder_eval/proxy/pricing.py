@@ -63,6 +63,30 @@ _PRICING: dict[str, ModelPricing] = {
 }
 
 
+# Bedrock cross-region inference-profile prefixes (mirrors
+# models.routing._BEDROCK_KNOWN_PREFIXES). A Bedrock route qualifies a bare
+# alias into e.g. ``eu.anthropic.claude-opus-4-8``; the pricing table is keyed
+# on the bare alias, so we strip these back off before the lookup.
+_BEDROCK_REGION_PREFIXES: tuple[str, ...] = ("eu.", "us.", "apac.", "global.")
+
+
+def _normalize_model(model: str) -> str:
+    """Strip Bedrock region + vendor qualifiers back to the bare pricing key.
+
+    ``eu.anthropic.claude-opus-4-8`` → ``claude-opus-4-8``. Idempotent on
+    already-bare aliases (``claude-opus-4-8`` / ``gpt-5-codex`` pass through),
+    so it is safe to apply unconditionally for every route.
+    """
+    model = model.strip()
+    for prefix in _BEDROCK_REGION_PREFIXES:
+        if model.startswith(prefix):
+            model = model[len(prefix) :]
+            break
+    if model.startswith("anthropic."):
+        model = model[len("anthropic.") :]
+    return model
+
+
 def calculate_cost(
     model: str,
     uncached_input_tokens: int,
@@ -76,9 +100,12 @@ def calculate_cost(
     ``TokenUsage.uncached_input_tokens``, NOT ``input_tokens`` (the derived total,
     which already includes the cache buckets and would double-count them).
 
-    Returns None if the model is not in the pricing table.
+    The model id is normalized (Bedrock region/vendor prefixes stripped) so a
+    qualified inference-profile id like ``eu.anthropic.claude-opus-4-8`` prices
+    the same as the bare ``claude-opus-4-8``. Returns None if the (normalized)
+    model is not in the pricing table.
     """
-    pricing = _PRICING.get(model)
+    pricing = _PRICING.get(_normalize_model(model))
     if pricing is None:
         return None
 
