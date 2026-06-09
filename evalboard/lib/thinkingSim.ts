@@ -56,7 +56,7 @@
 // apportion thinking across calls. At s=1 the projection reproduces the
 // recorded token mix exactly.
 
-import type { MessageEvent, SubAgentTotals, TokenTotals } from "@/lib/runs";
+import type { MessageEvent, TokenTotals } from "@/lib/runs";
 // Rates and resolution live in lib/pricing.ts (the single source of truth,
 // ported from src/coder_eval/proxy/pricing.py). Import directly from there;
 // this module no longer re-exports them.
@@ -105,8 +105,33 @@ export interface ToolStats {
 //      estimated by result-preview length within the turn (longer preview → more
 //      result tokens attributed to that tool)
 export interface TurnProfile {
+    // The MessageEvent.index of the assistant emission this profile describes,
+    // so the per-message impact view can join a projected delta back to its row.
+    messageIndex: number;
     // Names of every tool called in this API emission (empty = no tool calls).
     toolNames: string[];
+    // Where this call's content cascade is INCURRED downstream, by message index.
+    // Content produced here (thinking / tool-gen / tool-result) is cache-WRITTEN
+    // on the first same-branch successor and re-READ on every successor after it.
+    // The per-message impact view books each cache delta to the row that actually
+    // pays it, not to this source row. null/[] when this call has no successor.
+    cascadeWriteIndex: number | null;
+    cascadeReadIndices: number[];
+    // Same-branch successor message indices, in order (= [cascadeWriteIndex,
+    // ...cascadeReadIndices] with the null filtered out). Used by the elimination
+    // model to relocate this call's prompt cache-write to the first SURVIVING
+    // successor when the call itself is removed.
+    successorIndices: number[];
+    // This call's OWN recorded prompt footprint (what it READ to generate), as
+    // billed on its row. Distinct from the cascade fields above (which describe
+    // the content this call SOURCED into LATER rows). When the call is eliminated
+    // these are the row's own buckets that disappear: the prompt cache-read and
+    // uncached input vanish (one fewer reader of the prefix); the prompt
+    // cache-write relocates to the next surviving successor (the prefix content
+    // still has to enter the cache for downstream readers).
+    ownInput: number;
+    ownCacheRead: number;
+    ownCacheWrite: number;
     // A — thinking tokens generated in this call (output bill).
     thinkTokens: number;
     // A — thinking cascade: written to cache on the next same-branch call.
@@ -140,10 +165,18 @@ export interface SkipDelta {
     //   • Tool-gen tokens for ALL skipped tool calls (partial and eliminated turns)
     //   • Thinking tokens for ELIMINATED turns only
     outputTokens: number;
+    // Tokens to subtract from the uncached-input bill. Non-zero only for
+    // ELIMINATED turns, carrying the eliminated call's own uncached prompt input
+    // (the prefix it re-sent on a no-cache run; ~0 on a fully-cached run).
+    input: number;
     // Tokens to subtract from the cache-write bill (sum of all three populations'
-    // cache-write contributions for the skipped/eliminated content).
+    // cache-write contributions for the skipped/eliminated content). For an
+    // eliminated turn this is NET of relocation: the call's own prompt cache-write
+    // moves to the next surviving successor (net 0) unless it has none (then it
+    // vanishes and is counted here).
     cacheWrite: number;
-    // Same for the cache-read bill.
+    // Same for the cache-read bill. For an eliminated turn this also includes the
+    // call's OWN prompt cache-read, which vanishes outright (one fewer reader).
     cacheRead: number;
     // The portion of cacheWrite/cacheRead attributable purely to tool-result
     // tokens (population C). Kept separate so projectThinking can reduce the
@@ -164,6 +197,19 @@ export interface ThinkingModel {
     // apportioned from iteration totals by generation time (false). Surfaced
     // as a caveat in the UI.
     perMessageTokens: boolean;
+    // Per-bucket routing flags for the cascade — decided independently because
+    // providers bill caching differently:
+    //   • Anthropic: write-then-read — cache-WRITE present (1.25×) AND cache-READ.
+    //   • OpenAI/Codex: read-side discount only — NO cache-write event, but
+    //     cache-READ is present; first appearance is full-price uncached input.
+    //   • No caching: neither; the transcript is re-sent as uncached input.
+    // The cascade's write-portion lands in cache-write IFF the run bills it
+    // (hasCacheWrite), else in uncached input; the read-portion lands in
+    // cache-read IFF the run has it (hasCacheRead), else in uncached input. This
+    // is what stops the tool/thinking levers from "reducing from 0" on a bucket
+    // the run never used (e.g. Codex's cw=0).
+    hasCacheWrite: boolean;
+    hasCacheRead: boolean;
     // Authoritative baseline token totals (iteration token_usage).
     inputTokens: number;
     outputTokens: number;
@@ -173,9 +219,9 @@ export interface ThinkingModel {
     calls: number;
     // Estimated total thinking tokens generated across the run.
     thinkTokens: number;
-    // Estimated total tool-result tokens injected across the run (cache growth
-    // unexplained by model output — see header). 0 when per-message tokens are
-    // absent, which disables the tool-output lever.
+    // Total tool-result tokens injected across the run, MEASURED from the recorded
+    // result content (cache-independent — see header). 0 only when the run made no
+    // tool calls (or predates per-tool resultTokens), which disables the lever.
     toolResultTokens: number;
     // Recorded cost (sum of iteration total_cost_usd), for reference. May be
     // null on runs that didn't record it. The projection's own baseline is
@@ -224,13 +270,11 @@ export function buildThinkingModel(
     messages: MessageEvent[],
     tokens: TokenTotals,
     recordedCostUsd: number | null,
-    // Per-sub-agent token footprints (from tool_use_result.usage). A sub-agent
-    // invocation is, from the caller's view, a tool whose "output size" is the
-    // whole sub-agent's work — its cache-creation + cache-read mass. We fold
-    // that into the tool-output lever so scaling tool output also scales the
-    // sub-agent footprint (otherwise that mass sits in the baseline, immovable).
-    subAgentTotals: SubAgentTotals[] = [],
 ): ThinkingModel | null {
+    // The synthetic reconciliation entry is not an LLM call — exclude it from
+    // the cascade model (it has no generation, no branch position, and its
+    // tokens are already in the baseline TokenTotals passed in).
+    messages = messages.filter((m) => m.role !== "reconciliation");
     const calls = messages.length;
     if (calls === 0) return null;
 
@@ -275,88 +319,54 @@ export function buildThinkingModel(
 
     const OUT = tokens.output;
 
-    // Per-call thinking tokens, in order.
+    // Per-call thinking tokens, in order. Resolved in priority order:
     //
-    // Thinking tokens are billed inside output_tokens, but the SDK never breaks
-    // them out (reasoning_tokens is ~always 0) and the CLI's *per-message*
-    // output_tokens is unreliable for the thinking emission specifically — it
-    // routinely records a handful of tokens for multi-second thinking blocks
-    // (e.g. cd_ls_smoke: 8 tokens for 5.4 s of thinking). What *is* reliable is
-    // generation time. Token generation runs at a ~constant rate, so a call's
-    // thinking-time share of the run is a sound proxy for its share of the
-    // (authoritative, iteration-level) total output tokens:
+    //   1. reasoning_tokens — exact, when a future SDK actually populates it.
+    //   2. the recorded per-block thinking output_tokens — the agent now splits
+    //      each emission's output across its content blocks, so a thinking
+    //      block's own output_tokens IS its real token count. Prefer it whenever
+    //      it's present and non-trivial.
+    //   3. time-share fallback — for runs (or emissions) where the per-block
+    //      thinking output is missing or implausibly tiny (older runs recorded a
+    //      handful of tokens for multi-second thinking blocks, e.g. 8 tokens for
+    //      5.4 s). Generation time IS reliably recorded, so the thinking-time
+    //      share of the run approximates the thinking share of total output:
+    //          thinkTokens_j = OUT_total · (thinkingMs_j / Σ generationMs)
     //
-    //     thinkTokens_j = OUT_total · (thinkingMs_j / Σ generationMs)
-    //
-    // reasoning_tokens still wins when a future SDK actually populates it.
+    // Using the recorded count when we have it matters because token generation
+    // is NOT a constant rate: thinking routinely runs several times slower per
+    // token than text/tool output, so the time-share fallback OVERSTATES thinking
+    // whenever a real per-block count exists (e.g. 75 recorded tokens over 5.3 s
+    // would be back-computed as ~252 at the run-average rate). The fallback only
+    // applies when the recorded count is below the time-share estimate AND tiny
+    // enough to look like the legacy under-report — never to inflate a real count.
     const thinkPerCall: number[] = messages.map((m) => {
         if (m.reasoningTokens != null && m.reasoningTokens > 0) {
             return m.reasoningTokens;
         }
         const think = m.thinkingMs ?? 0;
         if (totalGen <= 0 || think <= 0) return 0;
-        return OUT * (think / totalGen);
+        const timeShare = OUT * (think / totalGen);
+        const recorded = m.thinkingOutputTokens ?? 0;
+        // Trust the recorded per-block count unless it's implausibly small for
+        // the thinking time spent — the legacy "handful of tokens for seconds of
+        // thinking" pathology, where time-share is the better estimate.
+        if (recorded > 0 && recorded >= timeShare * 0.25) {
+            return recorded;
+        }
+        return timeShare;
     });
 
-    // Per-call tool-result tokens, in order. Not recorded directly, so we infer
-    // them from cache growth call j's own output doesn't explain: the result
-    // returned after call j is the new content cache-written at call j+1, so
-    //   toolResult_j ≈ cacheWrite_{j+1} − realOutput_j   (clamped ≥ 0).
-    //
-    // realOutput_j is NOT the recorded per-message output: that figure badly
-    // under-counts thinking emissions (a multi-second thinking block routinely
-    // logs a handful of tokens — see above), so subtracting it would leave the
-    // missing thinking tokens in cacheWrite_{j+1} to be misread as tool results.
-    // Those tokens would then be scaled by BOTH levers — the thinking lever via
-    // its gen-time estimate AND the tool lever — double-counting them. So we
-    // subtract the SAME thinking estimate the thinking lever uses, plus the
-    // reliable non-thinking part of recorded output:
-    //   realOutput_j = thinkTokens_j + max(0, output_j − thinkingOutput_j)
-    // which keeps the two levers operating on disjoint token populations.
-    //
-    // Defined only for j ≤ calls-2 (the last call has no successor to write its
-    // results). Needs per-message cacheWrite; absent → all zero, which disables
-    // the tool lever.
-    const toolPerCall: number[] = messages.map((m, j) => {
-        const next = messages[j + 1];
-        if (!next || next.cacheWriteTokens == null) return 0;
-        // The successor's cache write only represents a tool result returned to
-        // THIS call when both are in the same branch. At a branch boundary
-        // (sub-agent spawn or return) the next call's cache write is its own
-        // fresh context, not a tool result here — don't attribute it.
-        if (next.parentToolUseId !== m.parentToolUseId) return 0;
-        // Only emit at turn boundaries: when the successor actually writes to
-        // cache (cacheWriteTokens > 0). Intermediate messages in a parallel group
-        // (e.g. two Agent calls in the same turn, or streaming thinking blocks)
-        // have cacheWriteTokens=0 on their successor — they don't produce
-        // independent tool results, so returning 0 prevents the boundary message
-        // from double-counting their outputs when we sum the group below.
-        if (next.cacheWriteTokens === 0) return 0;
-        // Sum real output of the ENTIRE parallel group: all same-branch messages
-        // since the last turn boundary (last message with cacheWriteTokens > 0).
-        // For sequential calls the group is just [j]; for parallel calls it spans
-        // multiple messages. Subtracting only j's output (old behaviour) over-
-        // stated the tool-result size and caused CR on parallel calls to be
-        // incorrectly amplified by the earlier call's output.
-        // Sum real output of the ENTIRE parallel group — all same-branch messages
-        // back to and including the last turn-start (message with cacheWriteTokens
-        // > 0). A turn-start marks the beginning of a group; stopping there avoids
-        // including outputs from a prior group. For sequential calls the group is
-        // just [j] (j has cacheWriteTokens > 0, so the loop stops immediately).
-        let groupRealOutput = 0;
-        for (let k = j; k >= 0; k--) {
-            if (messages[k].parentToolUseId !== m.parentToolUseId) break;
-            const nonThinkingOut = Math.max(
-                0,
-                (messages[k].outputTokens ?? 0) -
-                    (messages[k].thinkingOutputTokens ?? 0),
-            );
-            groupRealOutput += thinkPerCall[k] + nonThinkingOut;
-            // This message started a new turn — it's the beginning of the group.
-            if ((messages[k].cacheWriteTokens ?? 0) > 0) break;
-        }
-        return Math.max(0, next.cacheWriteTokens - groupRealOutput);
-    });
+    // Per-call tool-result tokens, in order. MEASURED directly from the recorded
+    // result content (`resultTokens` per tool_use — the backend's content-derived
+    // size), NOT inferred from cache growth. This is cache-independent: it is the
+    // same whether or not prompt caching was enabled, so the tool-output lever
+    // works in both modes (cache-growth inference broke with caching off, where
+    // cacheWrite is 0). toolPerCall[j] = Σ resultTokens of the tools called at j.
+    // 0 on legacy runs that predate the field (lever then has nothing to size).
+    const toolPerCall: number[] = messages.map((m) =>
+        m.toolUses.reduce((s, u) => s + (u.resultTokens ?? 0), 0),
+    );
 
     // How many LATER calls re-read content produced at call j. The cascade is
     // tree-structured: content lives in its own branch's context and is re-read
@@ -377,6 +387,23 @@ export function buildThinkingModel(
         branchSeen.set(m.parentToolUseId, seen + 1);
         return (branchTotal.get(m.parentToolUseId) ?? 0) - seen - 1;
     });
+
+    // Ordered list of call positions per branch, so each call can name its
+    // same-branch SUCCESSORS — the later calls that actually incur its content's
+    // cache write (first successor) and re-reads (the rest). Drives per-message
+    // incidence attribution: a cache delta is booked to the row that pays it.
+    const branchPositions = new Map<string | null | undefined, number[]>();
+    for (let j = 0; j < calls; j++) {
+        const key = messages[j].parentToolUseId;
+        const arr = branchPositions.get(key);
+        if (arr) arr.push(j);
+        else branchPositions.set(key, [j]);
+    }
+    const successorIndices = (j: number): number[] => {
+        const arr = branchPositions.get(messages[j].parentToolUseId) ?? [];
+        const at = arr.indexOf(j);
+        return arr.slice(at + 1).map((p) => messages[p].index);
+    };
 
     // Cascade coefficients. Content present at call j is in the context of its
     // `laterInBranch[j]` same-branch successors: the first is a cache write, the
@@ -405,22 +432,22 @@ export function buildThinkingModel(
             coeffCacheWrite += thinkCacheWrite;
             coeffCacheRead += thinkCacheRead;
         }
+        // A tool result returned at call j enters the context at call j+1 (one
+        // write) and is re-read on the remaining `later - 1` same-branch calls.
+        // With no later call (later=0) it never re-enters context → no cascade.
         const tr = toolPerCall[j];
-        if (tr > 0) {
-            // The result is written at call j+1 then re-read on calls j+2 .. M-1
-            // → write once (always, since toolPerCall[j]=0 when no successor),
-            // re-read on the remaining `later - 1` calls.
-            coeffToolWrite += tr;
-            coeffToolRead += tr * Math.max(0, later - 1);
-        }
+        const toolResultWrite = tr * (later >= 1 ? 1 : 0);
+        const toolResultRead = tr * Math.max(0, later - 1);
+        coeffToolWrite += toolResultWrite;
+        coeffToolRead += toolResultRead;
         // Per-tool shares for both B (generation cascade) and C (result fraction).
-        // resultFraction is weighted by result preview length within this turn —
-        // longer preview → more injected result tokens attributed to that tool.
-        // genCacheWrite/Read use the same `later` multiplier as the thinking
-        // cascade since position in the branch determines re-read depth.
+        // resultFraction splits the turn's result tokens by each tool's recorded
+        // resultTokens (a ceil(len/4) content-size estimate — approximate, but
+        // cache-independent), not a preview-length proxy. genCacheWrite/Read use
+        // the same `later` multiplier as the thinking cascade.
         const uses = messages[j].toolUses;
-        const previewWeights = uses.map((u) => u.resultPreview?.length ?? 0);
-        const totalPreview = previewWeights.reduce((a, b) => a + b, 0);
+        const resultWeights = uses.map((u) => u.resultTokens ?? 0);
+        const totalResult = resultWeights.reduce((a, b) => a + b, 0);
         const toolShares = uses.map((u, i) => {
             const genTokens = u.outputTokens ?? 0;
             return {
@@ -431,19 +458,27 @@ export function buildThinkingModel(
                 resultFraction:
                     uses.length === 0
                         ? 0
-                        : totalPreview > 0
-                          ? previewWeights[i] / totalPreview
+                        : totalResult > 0
+                          ? resultWeights[i] / totalResult
                           : 1 / uses.length,
             };
         });
 
+        const succ = successorIndices(j);
         turnProfiles.push({
+            messageIndex: messages[j].index,
             toolNames: uses.map((u) => u.toolName),
+            cascadeWriteIndex: succ.length > 0 ? succ[0] : null,
+            cascadeReadIndices: succ.slice(1),
+            successorIndices: succ,
+            ownInput: messages[j].inputTokens ?? 0,
+            ownCacheRead: messages[j].cacheReadTokens ?? 0,
+            ownCacheWrite: messages[j].cacheWriteTokens ?? 0,
             thinkTokens: t,
             thinkCacheWrite,
             thinkCacheRead,
-            toolResultCacheWrite: tr,
-            toolResultCacheRead: tr * Math.max(0, later - 1),
+            toolResultCacheWrite: toolResultWrite,
+            toolResultCacheRead: toolResultRead,
             toolShares,
         });
     }
@@ -470,25 +505,24 @@ export function buildThinkingModel(
         }))
         .sort((a, b) => b.callCount - a.callCount);
 
-    // Sub-agent footprint as tool output. Each Agent invocation is, to its
-    // caller, a tool; its "output size" is the whole sub-agent's token mass.
-    // That mass lives in the sub-agent's OWN branch — written once, re-read only
-    // within that branch (the re-reads are already inside its cache_read total).
-    // So it contributes flat (no extra main-thread cascade): cache-creation at
-    // the write rate, cache-read at the read rate. Folding it here makes the
-    // tool-output lever move both the sub-tool outputs (inside cache-creation)
-    // and the agent invocation itself. The main-thread cascade above sees only
-    // top-level calls (toolPerCall returns 0 across branch boundaries), so this
-    // does not double-count.
-    for (const sa of subAgentTotals) {
-        coeffToolWrite += sa.cacheCreation;
-        coeffToolRead += sa.cacheRead;
-    }
+    // NOTE: a sub-agent's footprint is deliberately NOT folded into the tool-
+    // output lever. A sub-agent's cache-creation is overwhelmingly its OWN
+    // system/delegation prompt (input), not anything it "returns into context":
+    // a typical Agent call shows in=0, cacheW≈20k, out≈95 — that 20k is prompt
+    // overhead, invariant to how much the tool "outputs." Folding it (the old
+    // behaviour) made "tool output → 0" drop ~23k cache-write that is really
+    // fixed prompt cost — a ~40× category error (see GH #378). The genuine tool-
+    // result tokens a sub-agent contributes (what its OWN tools returned inside
+    // its thread) aren't captured separately, so there is nothing faithful to
+    // fold; the sub-agent mass stays in the authoritative baseline (immovable),
+    // which is where prompt overhead belongs.
 
     return {
         model: primaryModel,
         pricing,
         perMessageTokens,
+        hasCacheWrite: tokens.cacheCreation > 0,
+        hasCacheRead: tokens.cacheRead > 0,
         inputTokens: tokens.input,
         outputTokens: tokens.output,
         cacheCreationTokens: tokens.cacheCreation,
@@ -510,10 +544,14 @@ export function buildThinkingModel(
 // Compute the SkipDelta for a given set of skipped tool names by walking each
 // turn in order and applying the elimination/partial rules:
 //
-//   Eliminated turn (ALL tools skipped, ≥1 tools present):
+//   Eliminated turn (ALL tools skipped, ≥1 tools present) — the whole API call
+//   disappears, so BOTH the content it sourced downstream AND its own prompt go:
 //     → output:     thinking tokens + all tool-gen tokens in the turn
-//     → cacheWrite: thinking cascade + all tool-gen cascade + all result cascade
-//     → cacheRead:  same
+//     → cacheWrite: thinking cascade + all tool-gen cascade + all result cascade;
+//                   the call's OWN prompt cache-write relocates to the first
+//                   surviving successor (net 0) and only counts here if none survives
+//     → cacheRead:  same cascades + the call's OWN prompt cache-read (vanishes)
+//     → input:      the call's OWN uncached prompt input (vanishes)
 //
 //   Partial turn (SOME tools skipped, turn still runs for the kept ones):
 //     → output:     skipped tools' gen tokens only (thinking stays)
@@ -526,15 +564,26 @@ export function computeSkipDelta(
     skippedTools: Set<string>,
 ): SkipDelta {
     let outputTokens = 0;
+    let input = 0;
     let cacheWrite = 0;
     let cacheRead = 0;
     let toolResultCacheWrite = 0;
     let toolResultCacheRead = 0;
+    // A call is eliminated iff it has tools and every one of them is skipped.
+    // Precomputed so cache-write relocation can find the first SURVIVING (non-
+    // eliminated) successor without re-deriving the predicate per lookup.
+    const eliminated = new Set<number>();
+    for (const tp of turnProfiles) {
+        if (tp.toolNames.length > 0 && tp.toolNames.every((n) => skippedTools.has(n))) {
+            eliminated.add(tp.messageIndex);
+        }
+    }
     for (const tp of turnProfiles) {
         if (tp.toolNames.length === 0) continue;
         const allSkipped = tp.toolNames.every((n) => skippedTools.has(n));
         if (allSkipped) {
-            // Entire call eliminated — subtract all three token populations.
+            // Entire call eliminated — subtract all three token populations of the
+            // content it SOURCED downstream...
             outputTokens += tp.thinkTokens;
             cacheWrite += tp.thinkCacheWrite + tp.toolResultCacheWrite;
             cacheRead += tp.thinkCacheRead + tp.toolResultCacheRead;
@@ -545,6 +594,16 @@ export function computeSkipDelta(
                 cacheWrite += sh.genCacheWrite;
                 cacheRead += sh.genCacheRead;
             }
+            // ...plus the call's OWN prompt footprint. The API call never happens,
+            // so its uncached input and its re-read of the cached prefix vanish
+            // outright (the cache-read here is usually the dominant line). The
+            // prompt cache-WRITE relocates to the first surviving successor — that
+            // prefix content still has to enter the cache for downstream readers —
+            // so it only vanishes (and is booked here) when no successor survives.
+            input += tp.ownInput;
+            cacheRead += tp.ownCacheRead;
+            const survivor = tp.successorIndices.find((i) => !eliminated.has(i));
+            if (survivor == null) cacheWrite += tp.ownCacheWrite;
         } else {
             // Partial — only the skipped tools' gen tokens + their result share.
             for (const sh of tp.toolShares) {
@@ -559,7 +618,7 @@ export function computeSkipDelta(
             }
         }
     }
-    return { outputTokens, cacheWrite, cacheRead, toolResultCacheWrite, toolResultCacheRead };
+    return { outputTokens, input, cacheWrite, cacheRead, toolResultCacheWrite, toolResultCacheRead };
 }
 
 // Project token mix + cost at a given thinking + tool-output scale (1 = as-run,
@@ -579,6 +638,7 @@ export function computeSkipDelta(
 // pure skip savings; (scale≠1, skip) combines both effects simultaneously.
 const ZERO_SKIP: SkipDelta = {
     outputTokens: 0,
+    input: 0,
     cacheWrite: 0,
     cacheRead: 0,
     toolResultCacheWrite: 0,
@@ -598,14 +658,49 @@ export function projectThinking(
     // even when all tools are already skipped (double-counting the removal).
     const remainingToolWrite = Math.max(0, m.coeffToolWrite - skip.toolResultCacheWrite);
     const remainingToolRead = Math.max(0, m.coeffToolRead - skip.toolResultCacheRead);
+
+    // Output is generated tokens — same in either cache mode.
     const outputTokens = clampNonNeg(m.outputTokens + d * m.coeffOutput - skip.outputTokens);
-    const cacheCreationTokens = clampNonNeg(
-        m.cacheCreationTokens + d * m.coeffCacheWrite + dt * remainingToolWrite - skip.cacheWrite,
-    );
-    const cacheReadTokens = clampNonNeg(
-        m.cacheReadTokens + d * m.coeffCacheRead + dt * remainingToolRead - skip.cacheRead,
-    );
-    const inputTokens = m.inputTokens;
+
+    // The thinking/tool cascades route PER BUCKET, because where the write- and
+    // read-portions land depends on how the provider bills caching:
+    //   • write-portion (content's first appearance) → cache-WRITE bucket IFF the
+    //     run bills cache-writes (Anthropic); otherwise uncached INPUT
+    //     (OpenAI/Codex bill the first appearance as full-price input; there is
+    //     no cache-write event, so cw stays 0 and the lever must not "reduce
+    //     from 0" there).
+    //   • read-portion (re-reads) → cache-READ bucket IFF the run has cache-reads;
+    //     otherwise uncached INPUT (no-cache runs re-send the transcript).
+    // Counts are identical across modes (write + read == total presence); only the
+    // bucket/rate differs. Each routed delta carries its share of skip savings.
+    const writeDelta = d * m.coeffCacheWrite + dt * remainingToolWrite - skip.cacheWrite;
+    const readDelta = d * m.coeffCacheRead + dt * remainingToolRead - skip.cacheRead;
+    // Eliminated calls' own uncached prompt input is removed straight off the
+    // input bucket (the cascade spill below adds to this).
+    let inputDelta = -skip.input;
+    let cacheCreationTokens = m.cacheCreationTokens;
+    let cacheReadTokens = m.cacheReadTokens;
+    // Drain the cache bucket the run actually uses; any over-reduction below 0
+    // SPILLS into uncached input rather than being lost to a clamp. On runs with
+    // no cache-write bucket (Codex/no-cache) the whole write-portion spills,
+    // since there's 0 to drain — so the lever can't "reduce from 0". Additions
+    // only land in a cache bucket the run genuinely bills (guarded by the flag)
+    // so we never fabricate a phantom bucket on a run that lacks it.
+    if (m.hasCacheWrite) {
+        const next = cacheCreationTokens + writeDelta;
+        cacheCreationTokens = Math.max(0, next);
+        if (next < 0) inputDelta += next; // leftover reduction → input
+    } else {
+        inputDelta += writeDelta;
+    }
+    if (m.hasCacheRead) {
+        const next = cacheReadTokens + readDelta;
+        cacheReadTokens = Math.max(0, next);
+        if (next < 0) inputDelta += next;
+    } else {
+        inputDelta += readDelta;
+    }
+    const inputTokens = clampNonNeg(m.inputTokens + inputDelta);
 
     const costInput = (inputTokens * m.pricing.inputPerMTok) / 1e6;
     const costOutput = (outputTokens * m.pricing.outputPerMTok) / 1e6;
@@ -627,6 +722,170 @@ export function projectThinking(
         costCacheRead,
         costUsd: costInput + costOutput + costCacheWrite + costCacheRead,
     };
+}
+
+// One message's projected token deltas under the current levers, booked PER
+// BUCKET to the row (and column) where that bucket is actually billed:
+//   • Δoutput — the SOURCE row that generates the tokens.
+//   • Δcache-write — the FIRST same-branch successor: a call's output isn't part
+//     of its own prompt, so it first enters the cache on the next call (the
+//     source row's own cache-write column is its PROMPT, invariant to scaling).
+//   • Δcache-read — split evenly across the later same-branch calls after that,
+//     which re-read the content.
+//   • Δinput — cache-OFF runs only: with no cache, the content is re-sent as
+//     uncached input on every later call, so its footprint lands in those calls'
+//     input column instead of cache write/read.
+// So removing a 75-token thinking block at 0% shows −75 output on its source row,
+// −75 cache write on the next same-branch call, and −75 cache read on the call
+// after — each in its proper column. Summed across rows + buckets, these
+// reproduce the aggregate projection's deltas exactly.
+//
+// ELIMINATION is the exception to "own prompt is invariant": when a call's every
+// tool is skipped the whole API call disappears, so its OWN prompt buckets are
+// removed too — input + cache-read vanish on its row, cache-write relocates to
+// the first surviving successor — driving the entire row to zero so the UI can
+// drop it.
+export interface PerMessageImpact {
+    messageIndex: number;
+    toolNames: string[];
+    eliminated: boolean; // the whole call would vanish (all its tools skipped)
+    dInput: number;
+    dOutput: number;
+    dCacheWrite: number;
+    dCacheRead: number;
+    // |Δ| magnitude across buckets — for sorting by impact.
+    magnitude: number;
+}
+
+export function projectPerMessage(
+    m: ThinkingModel,
+    scale: number,
+    toolScale = 1,
+    skippedTools: Set<string> = new Set(),
+): PerMessageImpact[] {
+    const ds = scale - 1;
+    const dt = toolScale - 1;
+
+    const byIndex = new Map<number, PerMessageImpact>();
+    const ensure = (index: number): PerMessageImpact => {
+        let imp = byIndex.get(index);
+        if (!imp) {
+            imp = {
+                messageIndex: index,
+                toolNames: [],
+                eliminated: false,
+                dInput: 0,
+                dOutput: 0,
+                dCacheWrite: 0,
+                dCacheRead: 0,
+                magnitude: 0,
+            };
+            byIndex.set(index, imp);
+        }
+        return imp;
+    };
+
+    const isEliminated = (tp: TurnProfile) =>
+        tp.toolNames.length > 0 && tp.toolNames.every((n) => skippedTools.has(n));
+    const eliminatedSet = new Set<number>();
+    for (const tp of m.turnProfiles) {
+        if (isEliminated(tp)) eliminatedSet.add(tp.messageIndex);
+    }
+
+    for (const tp of m.turnProfiles) {
+        const eliminated = isEliminated(tp);
+        const src = ensure(tp.messageIndex);
+        src.toolNames = tp.toolNames;
+        src.eliminated = eliminated;
+
+        // Δoutput accrues to the source row; the cache write/read TOTALS this
+        // call's content drives are redistributed onto the rows that incur them.
+        let dWrite = 0;
+        let dRead = 0;
+        if (eliminated) {
+            // The call never happens: remove thinking + every tool's gen + the
+            // whole tool-result cascade it sourced...
+            src.dOutput -= tp.thinkTokens;
+            dWrite -= tp.thinkCacheWrite + tp.toolResultCacheWrite;
+            dRead -= tp.thinkCacheRead + tp.toolResultCacheRead;
+            for (const sh of tp.toolShares) {
+                src.dOutput -= sh.genTokens;
+                dWrite -= sh.genCacheWrite;
+                dRead -= sh.genCacheRead;
+            }
+            // ...AND remove the call's own prompt footprint so the whole row goes
+            // to zero (the user-visible "this generation never happened"). The
+            // uncached input and the re-read of the cached prefix vanish; the
+            // prompt cache-write relocates to the first surviving successor (the
+            // prefix content still has to be cached for downstream readers), else
+            // it vanishes too. Booked directly on the rows here (not via the
+            // cascade indices below, which carry only the SOURCED content).
+            src.dInput -= tp.ownInput;
+            src.dCacheRead -= tp.ownCacheRead;
+            src.dCacheWrite -= tp.ownCacheWrite;
+            const survivor = tp.successorIndices.find(
+                (i) => !eliminatedSet.has(i),
+            );
+            if (survivor != null && tp.ownCacheWrite !== 0) {
+                const dst = ensure(survivor);
+                if (m.hasCacheWrite) dst.dCacheWrite += tp.ownCacheWrite;
+                else dst.dInput += tp.ownCacheWrite;
+            }
+        } else {
+            // Thinking lever scales this call's thinking + its cascade.
+            src.dOutput += ds * tp.thinkTokens;
+            dWrite += ds * tp.thinkCacheWrite;
+            dRead += ds * tp.thinkCacheRead;
+            // Skipped tools (in a surviving mixed call) drop their gen + result share;
+            // the rest of the tool-result cascade scales with the tool lever.
+            let keptResultWrite = tp.toolResultCacheWrite;
+            let keptResultRead = tp.toolResultCacheRead;
+            for (const sh of tp.toolShares) {
+                if (!skippedTools.has(sh.toolName)) continue;
+                src.dOutput -= sh.genTokens;
+                dWrite -= sh.genCacheWrite + sh.resultFraction * tp.toolResultCacheWrite;
+                dRead -= sh.genCacheRead + sh.resultFraction * tp.toolResultCacheRead;
+                keptResultWrite -= sh.resultFraction * tp.toolResultCacheWrite;
+                keptResultRead -= sh.resultFraction * tp.toolResultCacheRead;
+            }
+            dWrite += dt * Math.max(0, keptResultWrite);
+            dRead += dt * Math.max(0, keptResultRead);
+        }
+
+        // Book each portion where its bucket is actually billed:
+        //   • A call's OUTPUT (thinking/tool-gen) is generated AT the source row
+        //     → Δoutput already on `src` above.
+        //   • The WRITE-portion (content's first appearance) lands on the first
+        //     same-branch successor — in its cache-WRITE column when the run
+        //     bills cache-writes (Anthropic), else in uncached INPUT (Codex/no-
+        //     cache, where the first appearance is full-price input).
+        //   • The READ-portion (re-reads) is split across the later successors —
+        //     in cache-READ when the run has it, else in uncached INPUT.
+        if (Math.abs(dWrite) > 1e-9 && tp.cascadeWriteIndex != null) {
+            const w = ensure(tp.cascadeWriteIndex);
+            if (m.hasCacheWrite) w.dCacheWrite += dWrite;
+            else w.dInput += dWrite;
+        }
+        if (Math.abs(dRead) > 1e-9 && tp.cascadeReadIndices.length > 0) {
+            const per = dRead / tp.cascadeReadIndices.length;
+            for (const ri of tp.cascadeReadIndices) {
+                const r = ensure(ri);
+                if (m.hasCacheRead) r.dCacheRead += per;
+                else r.dInput += per;
+            }
+        }
+    }
+
+    const out: PerMessageImpact[] = [];
+    for (const imp of byIndex.values()) {
+        imp.magnitude =
+            Math.abs(imp.dInput) +
+            Math.abs(imp.dOutput) +
+            Math.abs(imp.dCacheWrite) +
+            Math.abs(imp.dCacheRead);
+        out.push(imp);
+    }
+    return out;
 }
 
 // True (cascade-aware) marginal cost of one thinking token across the whole

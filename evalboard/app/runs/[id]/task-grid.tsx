@@ -31,6 +31,7 @@ type SortKey =
     | "duration"
     | "cost"
     | "turns"
+    | "input"
     | "output"
     | "cw"
     | "cr";
@@ -80,6 +81,7 @@ const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
     duration: "desc",
     cost: "desc",
     turns: "desc",
+    input: "desc",
     output: "desc",
     cw: "desc",
     cr: "desc",
@@ -116,6 +118,8 @@ function compare(
                 (displayedTurns(b.actualCommands, b.hasFinalReply) ??
                     -Infinity)
             );
+        case "input":
+            return (a.inputTokens ?? -Infinity) - (b.inputTokens ?? -Infinity);
         case "output":
             return (a.outputTokens ?? -Infinity) - (b.outputTokens ?? -Infinity);
         case "cw":
@@ -142,16 +146,17 @@ const COLUMNS: Array<{
     { key: "duration", header: "Duration", align: "right" },
     { key: "cost", header: "Cost", align: "right" },
     { key: "turns", header: "Turns", align: "right" },
+    { key: "input", header: "In", align: "right" },
     { key: "cr", header: "Cache R", align: "right" },
     { key: "cw", header: "Cache W", align: "right" },
     { key: "output", header: "Out", align: "right" },
 ];
 
-// The three token columns fold into one collapsible group. They're the densest
+// The four token columns fold into one collapsible group. They're the densest
 // part of the grid and the first thing to overflow a narrow screen, so they're
 // hidden by default on small viewports (shown on desktop) and toggled on demand
 // — the data isn't removed, just tucked away until asked for.
-const TOKEN_KEYS = new Set<SortKey>(["cr", "cw", "output"]);
+const TOKEN_KEYS = new Set<SortKey>(["input", "cr", "cw", "output"]);
 
 // Skill / review / tag chips for a task. Shared by the table row and the mobile
 // card so the two stay in lock-step.
@@ -505,6 +510,17 @@ export function TaskGrid({
                             </td>
                             {showTokens && (
                                 <>
+                                    <td
+                                        className="py-3 px-4 text-right tabular-nums text-gray-700"
+                                        title="uncached_input_tokens (fresh prompt input billed at the full input rate)"
+                                    >
+                                        {tokenCell(
+                                            unit,
+                                            t.model,
+                                            t.inputTokens,
+                                            "input",
+                                        )}
+                                    </td>
                                     <td
                                         className="py-3 px-4 text-right tabular-nums text-gray-700"
                                         title="cache_read_input_tokens (cached tokens re-billed each turn — usually the dominant cost line)"

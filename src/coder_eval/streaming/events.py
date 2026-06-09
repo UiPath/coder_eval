@@ -18,25 +18,23 @@ are *not* a separate event type — a sub-agent is a nested ``AgentStart``/``Age
 pair linked by ``parent_thread_id``.
 
 Events are Pydantic ``BaseModel``s (keyword-only construction) and reuse the leaf
-telemetry models (``TokenUsage``, ``AgentUsage``, ``CommandTelemetry``) rather than
-re-declaring fields.
+telemetry models (``TokenUsage``, ``CommandTelemetry``) rather than re-declaring
+fields.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from coder_eval.models import (
-    AgentUsage,
-    AssistantMessage,
     CommandTelemetry,
     ResultSummary,
     TokenUsage,
-    UserMessage,
+    TranscriptMessage,
 )
 
 
@@ -74,9 +72,10 @@ class AgentEndStatus(StrEnum):
     MAX_TURNS_EXHAUSTED = "max_turns_exhausted"
 
 
-# Reuse the TurnRecord.messages annotation so AgentEndEvent carries per-message
-# telemetry losslessly (the deferred token path rides here, not on granular events).
-_MessageList = list[Annotated[UserMessage | AssistantMessage, Discriminator("role")]]
+# Reuse the canonical TranscriptMessage union (defined once in telemetry.py) so
+# AgentEndEvent carries per-message telemetry losslessly and stays in lock-step
+# with TurnRecord.messages (the deferred token path rides here, not on granular events).
+_MessageList = list[TranscriptMessage]
 
 
 class StreamEvent(BaseModel):
@@ -158,7 +157,7 @@ class AgentEndEvent(StreamEvent):
 
     kind: Literal["agent_end"] = "agent_end"
     status: AgentEndStatus = AgentEndStatus.COMPLETED
-    usage: AgentUsage = Field(default_factory=AgentUsage)
+    usage: TokenUsage = Field(default_factory=TokenUsage)
 
     # Finalization payload (the deferred token/messages path rides here).
     iteration: int = 0
@@ -173,10 +172,6 @@ class AgentEndEvent(StreamEvent):
     crashed: bool = False
     crash_reason: str | None = None
     duration_seconds: float = 0.0
-    sub_agent_usage: list[AgentUsage] = Field(
-        default_factory=list,
-        description="Per-sub-agent usage from Agent/Task-tool spawns in this turn (carried until nested events land).",
-    )
 
 
 # --- Post-evaluation events (orchestrator-owned, not part of the agent lifecycle) ---

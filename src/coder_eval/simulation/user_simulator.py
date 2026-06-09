@@ -282,7 +282,7 @@ class UserSimulator:
         turn = await self._agent.communicate(prompt, max_turns=1)
         raw = turn.agent_output or ""
         usage = turn.token_usage
-        input_tokens = usage.input_tokens if usage is not None else None
+        input_tokens = usage.uncached_input_tokens if usage is not None else None
         output_tokens = usage.output_tokens if usage is not None else None
 
         stop_requested = self.config.stop_token in raw

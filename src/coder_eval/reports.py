@@ -491,8 +491,8 @@ class ReportGenerator:
 
         lines.extend(
             [
-                "| Task ID | Input | Output | Cache Write | Cache Read | Total | Cost |",
-                "|---------|-------|--------|-------------|------------|-------|------|",
+                "| Task ID | Input (uncached) | Output | Cache Write | Cache Read | Total | Cost |",
+                "|---------|------------------|--------|-------------|------------|-------|------|",
             ]
         )
 

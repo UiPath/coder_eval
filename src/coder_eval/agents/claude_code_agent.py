@@ -41,7 +41,6 @@ from coder_eval.errors import (
 from coder_eval.formatting import format_messages, format_payload
 from coder_eval.models import (
     AgentKind,
-    AgentUsage,
     ApiRoute,
     BedrockRoute,
     ClaudeCodeAgentConfig,
@@ -51,14 +50,12 @@ from coder_eval.models import (
     ProxyRoute,
     ResultSummary,
     TokenUsage,
+    TranscriptMessage,
     TurnRecord,
     to_bedrock_inference_profile,
 )
 from coder_eval.models import (
     AssistantMessage as AssistantMessageTelemetry,
-)
-from coder_eval.models import (
-    UserMessage as UserMessageTelemetry,
 )
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
 from coder_eval.streaming.collector import EventCollector
@@ -145,6 +142,15 @@ def _is_user_message(message: Any) -> bool:
 def _is_tool_result_block(block: Any) -> bool:
     """Check if block is a ToolResultBlock using duck typing."""
     return hasattr(block, "tool_use_id") and hasattr(block, "is_error")
+
+
+def _tool_result_text(content: Any) -> str:
+    """Best-effort text of a ToolResultBlock's content (str, or list of text blocks)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(b["text"] for b in content if isinstance(b, dict) and isinstance(b.get("text"), str))
+    return ""
 
 
 def _is_task_notification(message: Any) -> bool:
@@ -388,7 +394,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         # Per-message telemetry (SDK messages). The list index is the
         # assistant_turn_index attached to commands emitted in that turn.
-        sdk_messages: list[UserMessageTelemetry | AssistantMessageTelemetry] = []
+        sdk_messages: list[TranscriptMessage] = []
         last_assistant_message_index: int | None = None  # Track last AssistantMessage to populate with final tokens
         # The SDK does not surface a "message started" event, so we approximate
         # generation_duration_ms as wall-clock between SDK events: previous tool
@@ -402,11 +408,6 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # see _build_token_usage). Captured from the final ResultMessage.
         sdk_result_model_usage: dict[str, Any] | None = None
         sdk_result_cost: float | None = None
-        # Per-sub-agent usage from TaskNotification messages, keyed by the
-        # spawning Agent tool_use_id. The sub-agent's own emissions are only
-        # partially surfaced in the stream, so this is the one per-sub-agent
-        # token figure the SDK exposes.
-        sub_agent_usages: list[AgentUsage] = []
         num_turns: int | None = None
         # Diagnostic summary of the final ResultMessage (status + error fields).
         # Populated on every ResultMessage (last one wins). Consumed by the
@@ -489,7 +490,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             total = TokenUsage()
             for rec in records:
                 total = total + TokenUsage(
-                    input_tokens=rec.input_tokens,
+                    uncached_input_tokens=rec.input_tokens,
                     output_tokens=rec.output_tokens,
                     cache_creation_input_tokens=rec.cache_creation_tokens,
                     cache_read_input_tokens=rec.cache_read_tokens,
@@ -544,13 +545,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 )
                 current_turn_id = None
 
-            token_usage = self._build_token_usage(
-                sdk_messages, sdk_result_usage, sdk_result_cost, sdk_result_model_usage
-            )
-            usage = AgentUsage(
-                tokens=token_usage or TokenUsage(),
-                tool_uses=len(commands),
-                per_model=self._per_model_usage(sdk_result_model_usage),
+            usage = (
+                self._build_token_usage(sdk_messages, sdk_result_usage, sdk_result_cost, sdk_result_model_usage)
+                or TokenUsage()
             )
 
             try:
@@ -576,7 +573,6 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                     crashed=crashed,
                     crash_reason=crash_reason,
                     duration_seconds=time.monotonic() - turn_start_time,
-                    sub_agent_usage=list(sub_agent_usages),
                 )
             )
 
@@ -1028,13 +1024,15 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                         last_event_monotonic = time.monotonic()
                         last_event_wall = datetime.now()
 
-                        # The Agent tool-result rides on this message's
-                        # ``tool_use_result`` and carries the COMPLETE
-                        # per-sub-agent usage (input/output/cache-create/
-                        # cache-read). Harvest it keyed by the Agent tool_use_id.
-                        sub_usage = self._extract_sub_agent_usage(message)
-                        if sub_usage is not None:
-                            sub_agent_usages.append(sub_usage)
+                        # A sub-agent's TERMINAL generation rides on this
+                        # message's ``tool_use_result`` (never as a streamed
+                        # assistant message). Materialize it as a
+                        # ``parent_tool_use_id``-tagged transcript message so the
+                        # sub-agent's full lifecycle is captured and per-sub-agent
+                        # usage stays derivable by grouping on that id.
+                        sub_msg = self._synthesize_subagent_terminal_message(message, sdk_model_used)
+                        if sub_msg is not None:
+                            sdk_messages.append(sub_msg)
 
                         content = getattr(message, "content", None)
                         if content and isinstance(content, list):
@@ -1284,7 +1282,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 cost += float(c)
                 any_cost = True
         return TokenUsage(
-            input_tokens=inp,
+            uncached_input_tokens=inp,
             output_tokens=out,
             cache_creation_input_tokens=cache_creation,
             cache_read_input_tokens=cache_read,
@@ -1293,7 +1291,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
     @staticmethod
     def _build_token_usage(
-        messages: Sequence[UserMessageTelemetry | AssistantMessageTelemetry],
+        messages: Sequence[TranscriptMessage],
         sdk_result_usage: dict[str, Any] | None,
         sdk_result_cost: float | None,
         sdk_result_model_usage: dict[str, Any] | None = None,
@@ -1319,6 +1317,61 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         ``total_cost_usd`` comes from ``model_usage.costUSD`` when present, else
         the ResultMessage ``total_cost_usd`` — the real billed total.
+
+        WHY THIS FIELD IS NECESSARY — AND WHY YOU CANNOT DERIVE IT FROM ``messages``
+        ---------------------------------------------------------------------------
+        There are two distinct token views, and they are NOT meant to reconcile:
+
+        * **Billing view** — ``model_usage`` (this method's output, carried as
+          ``AgentEndEvent.usage`` → ``TurnRecord.token_usage``). The complete,
+          cost-accurate per-model total for the turn. Cost/budget/reports read
+          this.
+        * **Attribution view** — the per-message ``messages`` transcript. Useful
+          for per-generation / per-sub-agent display (group by
+          ``parent_tool_use_id``), but NOT cost-complete.
+
+        Summing the per-generation ``AssistantMessage`` entries does NOT, on its
+        own, equal ``model_usage`` — for three independent reasons (all confirmed
+        empirically against live ``claude_subagent_test`` runs — see the dumps
+        under ``tmp/agentusage-*`` and ``CODER_EVAL_RAW_SDK_LOG=1``):
+
+        1. **Per-step input/output are lossy snapshots.** The streamed
+           ``message_start``/``message_delta`` ``usage`` under-reports
+           ``input_tokens`` (and ``output_tokens``) vs. the billed total; the
+           docs say to "prefer the result message." Only ``output`` gets a
+           ``message_delta`` correction — ``input`` never does.
+        2. **Sub-agent generations are not fully streamed.** A sub-agent's calls
+           never emit ``message_start``/``message_delta`` into the parent stream;
+           its terminal generation arrives only as the Agent tool result (we
+           synthesize it — see ``_synthesize_subagent_terminal_message``), and
+           its input is billed to ``model_usage`` without a corresponding parent
+           message.
+        3. **A fixed ~512-token input is billed but never streamed.** Across runs
+           ``model_usage.inputTokens`` exceeds the sum of ALL captured generations
+           by a constant ~512 — and this gap is IDENTICAL with prompt caching
+           disabled (``DISABLE_PROMPT_CACHING=1`` → cw=cr=0), so it is NOT a
+           cache-bucketing artifact. ``message_start`` count == captured
+           ``AssistantMessage`` count (we drop nothing); the 512 simply belongs to
+           no SDK-emitted message. It is an upstream billing-vs-stream property,
+           not a capture bug.
+
+        Cache (``cache_creation`` + ``cache_read``) reconciles from the generation
+        messages to the token; only ``input``/``output`` carry the residual above.
+        ``costUSD``/``total_cost_usd`` are themselves client-side estimates (the
+        SDK computes them locally) — the authoritative figure is Anthropic's
+        Usage/Cost API.
+
+        HOW THE STREAM RECONCILES (the residual is booked, not smeared). The full
+        ``TurnRecord.messages`` stream DOES sum to ``token_usage`` exactly —
+        because ``EventCollector`` appends one synthetic ``ReconciliationMessage``
+        (``role="reconciliation"``) carrying the per-bucket residual (this method's
+        ``model_usage`` total minus the sum of the real generations). The residual
+        is the three sources above. Do NOT instead smear by-difference tokens onto
+        the real ``AssistantMessage`` generations: that would fabricate
+        per-generation numbers matching no real call and break per-sub-agent
+        attribution. ``token_usage`` (billing) stays authoritative for
+        cost/budget/reports; ``messages`` (one reconciliation entry included) is
+        the attribution view that now sums to the same total.
         """
         from_models = ClaudeCodeAgent._aggregate_model_usage(sdk_result_model_usage)
         if from_models is not None:
@@ -1337,7 +1390,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # mixed in). Otherwise defer to the ResultMessage summary.
         if token_bearing and all(m.message_id for m in token_bearing):
             return TokenUsage(
-                input_tokens=sum(m.input_tokens for m in assistant_msgs),
+                uncached_input_tokens=sum(m.input_tokens for m in assistant_msgs),
                 output_tokens=sum(m.output_tokens for m in assistant_msgs),
                 cache_creation_input_tokens=sum(m.cache_creation_tokens for m in assistant_msgs),
                 cache_read_input_tokens=sum(m.cache_read_tokens for m in assistant_msgs),
@@ -1346,7 +1399,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         if not sdk_result_usage:
             return None
         return TokenUsage(
-            input_tokens=sdk_result_usage.get("input_tokens", 0),
+            uncached_input_tokens=sdk_result_usage.get("input_tokens", 0),
             output_tokens=sdk_result_usage.get("output_tokens", 0),
             cache_creation_input_tokens=sdk_result_usage.get("cache_creation_input_tokens", 0) or 0,
             cache_read_input_tokens=sdk_result_usage.get("cache_read_input_tokens", 0) or 0,
@@ -1430,44 +1483,27 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         return ToolEndStatus.ERROR
 
     @staticmethod
-    def _per_model_usage(model_usage: dict[str, Any] | None) -> dict[str, TokenUsage]:
-        """Break the SDK ResultMessage ``model_usage`` into per-model TokenUsage.
+    def _synthesize_subagent_terminal_message(message: Any, model: str | None) -> AssistantMessageTelemetry | None:
+        """Materialize a sub-agent's TERMINAL generation as an AssistantMessage.
 
-        ``model_usage`` maps each model id to its cumulative billing (camelCase
-        keys). Returns one ``TokenUsage`` per model — the cost simulator's input.
-        Empty dict when ``model_usage`` is absent.
-        """
-        if not isinstance(model_usage, dict) or not model_usage:
-            return {}
-        per_model: dict[str, TokenUsage] = {}
-        for model_id, entry in model_usage.items():
-            if not isinstance(entry, dict):
-                continue
-            cost = entry.get("costUSD")
-            per_model[str(model_id)] = TokenUsage(
-                input_tokens=int(entry.get("inputTokens", 0) or 0),
-                output_tokens=int(entry.get("outputTokens", 0) or 0),
-                cache_creation_input_tokens=int(entry.get("cacheCreationInputTokens", 0) or 0),
-                cache_read_input_tokens=int(entry.get("cacheReadInputTokens", 0) or 0),
-                total_cost_usd=float(cost) if cost is not None else None,
-            )
-        return per_model
+        A sub-agent that calls tools runs several generations. Its intermediate
+        ones bubble into the parent stream as ``parent_tool_use_id``-tagged
+        assistant messages, but its terminal generation is delivered as the Agent
+        tool RESULT (``UserMessage.tool_use_result``), never as a streamed
+        message. We synthesize it as one so the sub-agent's full lifecycle lives
+        in the transcript and per-sub-agent usage is recoverable by grouping
+        messages on ``parent_tool_use_id`` — no separate sidecar field needed.
 
-    @staticmethod
-    def _extract_sub_agent_usage(message: Any) -> AgentUsage | None:
-        """Build an AgentUsage from an Agent tool-result UserMessage.
+        ``tool_use_result.usage`` is the terminal call's usage breakdown (input /
+        output / cache-creation / cache-read — complete, incl. the cache-read that
+        ``TaskNotification.usage`` drops). It is terminal-only, not cumulative, so
+        it does NOT overlap the bubbled intermediate generations (its output is
+        the final reply's alone). Returns None for non-sub-agent tool results
+        (regular Bash/Write/etc. carry ``tool_use_result`` but no ``agentId``).
 
-        The Agent tool-result rides on ``message.tool_use_result`` — a dict
-        carrying the sub-agent's ``agentId``, ``totalToolUseCount``,
-        ``totalDurationMs`` and a full ``usage`` breakdown (input / output /
-        cache-creation / cache-read). This is the authoritative per-sub-agent
-        token source, complete with the cache-read that TaskNotification.usage
-        drops.
-
-        Returns None for non-sub-agent tool results (regular Bash/Write/etc.
-        results also carry ``tool_use_result`` but no ``agentId``/``usage``).
-        The Agent tool_use_id is read from the message's ToolResultBlock so the
-        usage can be attributed to the spawning Agent call.
+        The token total is unaffected: the normal path derives it from
+        ``ResultMessage.model_usage`` (which ignores this transcript), so the
+        synthetic message is purely additive for attribution/display.
         """
         tur = getattr(message, "tool_use_result", None)
         if not isinstance(tur, dict) or "agentId" not in tur:
@@ -1476,15 +1512,19 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         if not isinstance(usage, dict):
             return None
 
-        # The spawning Agent tool_use_id lives on the ToolResultBlock, not on
-        # tool_use_result itself.
+        # The spawning Agent tool_use_id (and the returned text) live on the
+        # ToolResultBlock, not on tool_use_result itself.
         tool_use_id: str | None = None
+        result_text = ""
         content = getattr(message, "content", None)
         if isinstance(content, list):
             for block in content:
                 if _is_tool_result_block(block):
                     tool_use_id = getattr(block, "tool_use_id", None)
+                    result_text = _tool_result_text(getattr(block, "content", None))
                     break
+        if not isinstance(tool_use_id, str) or not tool_use_id:
+            return None
 
         def _int(value: Any) -> int:
             try:
@@ -1492,22 +1532,21 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             except (TypeError, ValueError):
                 return 0
 
-        input_tokens = _int(usage.get("input_tokens"))
-        output_tokens = _int(usage.get("output_tokens"))
-        cache_creation = _int(usage.get("cache_creation_input_tokens"))
-        cache_read = _int(usage.get("cache_read_input_tokens"))
-
-        # tool_use_id is no longer stored on AgentUsage (attribution comes from the
-        # event tree's parent_thread_id); kept local only for potential logging.
-        _ = tool_use_id
-        return AgentUsage(
-            tokens=TokenUsage(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cache_creation_input_tokens=cache_creation,
-                cache_read_input_tokens=cache_read,
-            ),
-            tool_uses=_int(tur.get("totalToolUseCount")),
+        now = datetime.now()
+        return AssistantMessageTelemetry(
+            started_at=now,
+            completed_at=now,
+            generation_duration_ms=0.0,
+            content_blocks=([ContentBlock(block_type="text", sequence=0, text=result_text)] if result_text else []),
+            tool_use_ids=[],
+            input_tokens=_int(usage.get("input_tokens")),
+            output_tokens=_int(usage.get("output_tokens")),
+            cache_creation_tokens=_int(usage.get("cache_creation_input_tokens")),
+            cache_read_tokens=_int(usage.get("cache_read_input_tokens")),
+            reasoning_tokens=0,
+            model=model,
+            message_id=f"subagent-{tool_use_id}",
+            parent_tool_use_id=tool_use_id,
         )
 
     def _resolve_pending_command(

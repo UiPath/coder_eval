@@ -10,7 +10,7 @@ Covers:
 
 from datetime import datetime
 
-from coder_eval.models import AgentUsage, CommandTelemetry, TokenUsage
+from coder_eval.models import CommandTelemetry, TokenUsage
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
@@ -86,7 +86,7 @@ class TestRoundTrip:
             task_id="t",
             turn_id="t1",
             status=TurnEndStatus.COMPLETED,
-            tokens=TokenUsage(input_tokens=10, output_tokens=5),
+            tokens=TokenUsage(uncached_input_tokens=10, output_tokens=5),
         )
         rt = deserialize_event(serialize_event(ev))
         assert isinstance(rt, TurnEndEvent)
@@ -98,7 +98,7 @@ class TestRoundTrip:
         ev = AgentEndEvent(
             task_id="t",
             status=AgentEndStatus.COMPLETED,
-            usage=AgentUsage(tokens=TokenUsage(input_tokens=20, output_tokens=8)),
+            usage=TokenUsage(uncached_input_tokens=20, output_tokens=8),
             iteration=4,
             duration_seconds=1.5,
             agent_output="done",
@@ -108,8 +108,8 @@ class TestRoundTrip:
         assert rt.status is AgentEndStatus.COMPLETED
         assert rt.duration_seconds == 1.5
         assert rt.iteration == 4
-        assert isinstance(rt.usage, AgentUsage)
-        assert rt.usage.tokens.input_tokens == 20
+        assert isinstance(rt.usage, TokenUsage)
+        assert rt.usage.input_tokens == 20
 
     def test_criteria_check_event_with_nested_summary(self):
         ev = CriteriaCheckEvent(

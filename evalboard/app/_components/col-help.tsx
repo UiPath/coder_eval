@@ -17,6 +17,12 @@ export type ColHelp = {
 // "this task" / "this call") so it reads correctly on both the per-task grid
 // and the per-message timeline.
 export const TOKEN_COLUMN_HELP = {
+    input: {
+        title: "Input tokens (uncached)",
+        body: "Fresh prompt input billed at the full input rate — the slice that was neither written to nor read from the prompt cache (input_tokens minus cache-creation and cache-read).",
+        causes: "new content added to the prompt that wasn't cacheable yet — the latest user/tool message, anything past the cached prefix.",
+        fix: "this is usually small and unavoidable; the cache columns (cache-write / cache-read) are where prompt-input cost concentrates.",
+    },
     output: {
         title: "Output tokens",
         body: "Text, code, tool arguments and reasoning the model generated.",

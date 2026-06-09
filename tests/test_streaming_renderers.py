@@ -6,7 +6,7 @@ from datetime import datetime
 
 from rich.console import Console
 
-from coder_eval.models import AgentUsage, CommandTelemetry, ResultSummary, TokenUsage
+from coder_eval.models import CommandTelemetry, ResultSummary, TokenUsage
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
@@ -108,7 +108,7 @@ def test_agent_end_renders():
             task_id="t1",
             iteration=1,
             duration_seconds=12.5,
-            usage=AgentUsage(tokens=TokenUsage(input_tokens=1000, output_tokens=200)),
+            usage=TokenUsage(uncached_input_tokens=1000, output_tokens=200),
         )
     )
     output = buf.getvalue()

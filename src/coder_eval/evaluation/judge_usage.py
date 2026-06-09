@@ -43,7 +43,7 @@ def token_usage_from_anthropic_dict(resp: dict[str, Any]) -> TokenUsage | None:
     if not isinstance(u, dict):
         return None
     tu = TokenUsage(
-        input_tokens=_coerce_int(u.get("input_tokens")),
+        uncached_input_tokens=_coerce_int(u.get("input_tokens")),
         output_tokens=_coerce_int(u.get("output_tokens")),
         cache_creation_input_tokens=_coerce_int(u.get("cache_creation_input_tokens")),
         cache_read_input_tokens=_coerce_int(u.get("cache_read_input_tokens")),

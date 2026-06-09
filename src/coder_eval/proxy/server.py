@@ -107,7 +107,7 @@ def usage_between(before: ProxyUsage, after: ProxyUsage) -> TokenUsage:
     """
     cost_diff = after.total_cost - before.total_cost
     return TokenUsage(
-        input_tokens=after.input_tokens - before.input_tokens,
+        uncached_input_tokens=after.input_tokens - before.input_tokens,
         output_tokens=after.output_tokens - before.output_tokens,
         cache_creation_input_tokens=(after.cache_creation_input_tokens - before.cache_creation_input_tokens),
         cache_read_input_tokens=(after.cache_read_input_tokens - before.cache_read_input_tokens),
@@ -645,7 +645,7 @@ class LLMGatewayProxy:
         """
         u = self._usage
         return TokenUsage(
-            input_tokens=u.input_tokens,
+            uncached_input_tokens=u.input_tokens,
             output_tokens=u.output_tokens,
             cache_creation_input_tokens=u.cache_creation_input_tokens,
             cache_read_input_tokens=u.cache_read_input_tokens,

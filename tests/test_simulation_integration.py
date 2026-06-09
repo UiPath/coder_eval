@@ -98,7 +98,7 @@ class _TokenizedTextStub(TextStubAgent):
             iteration=turn.iteration,
             user_input=turn.user_input,
             agent_output=turn.agent_output,
-            token_usage=TokenUsage(input_tokens=in_tok, output_tokens=out_tok),
+            token_usage=TokenUsage(uncached_input_tokens=in_tok, output_tokens=out_tok),
         )
 
 

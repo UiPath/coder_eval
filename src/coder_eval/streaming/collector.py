@@ -22,7 +22,14 @@ reading the return value (and ``pending_turn`` on crash), now event-derived.
 
 from __future__ import annotations
 
-from coder_eval.models import CommandTelemetry, TokenUsage, TurnRecord
+from coder_eval.models import (
+    AssistantMessage,
+    CommandTelemetry,
+    ReconciliationMessage,
+    TokenUsage,
+    TranscriptMessage,
+    TurnRecord,
+)
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentStartEvent,
@@ -37,9 +44,9 @@ class EventCollector:
 
     Tolerant by construction: ``build_turn_record()`` can be called at any point
     (including mid-stream after a crash) and returns the best record derivable
-    from the events seen so far. Only ``main-agent`` events (``parent_thread_id``
-    is None) contribute to this record; nested sub-agent events are folded into
-    ``sub_agent_usage`` instead.
+    from the events seen so far. Sub-agent activity is captured as
+    ``parent_tool_use_id``-tagged messages in the transcript; per-sub-agent
+    attribution is derived by grouping those messages, not from a separate field.
     """
 
     def __init__(self) -> None:
@@ -78,6 +85,62 @@ class EventCollector:
     def _ordered_commands(self) -> list[CommandTelemetry]:
         return sorted(self._commands.values(), key=lambda c: c.sequence_number)
 
+    @staticmethod
+    def _reconciled_messages(messages: list[TranscriptMessage], usage: TokenUsage) -> list[TranscriptMessage]:
+        """Append a ``ReconciliationMessage`` so the transcript's token buckets
+        sum to ``usage`` (the authoritative turn total).
+
+        The per-``AssistantMessage`` stream consistently under-reports the bill —
+        a fixed prompt slice (~512 input tokens on Claude) is billed on no
+        SDK-emitted message, and sub-agent input/cache only partially bubbles up.
+        We book that residual once, explicitly, as a synthetic entry rather than
+        smearing fabricated tokens across real generations. After this, any
+        consumer that sums the four token buckets across the transcript reproduces
+        ``usage`` exactly — no separate aggregate needed. Only assistant
+        generations carry agent-billed tokens, so the residual is measured against
+        them (simulator ``UserMessage`` tokens are a separate bill). Emitted only
+        when some bucket actually diverges.
+        """
+        in_sum = out_sum = cw_sum = cr_sum = 0
+        for m in messages:
+            if isinstance(m, AssistantMessage):
+                in_sum += m.input_tokens
+                out_sum += m.output_tokens
+                cw_sum += m.cache_creation_tokens
+                cr_sum += m.cache_read_tokens
+        d_in = usage.uncached_input_tokens - in_sum
+        d_out = usage.output_tokens - out_sum
+        d_cw = usage.cache_creation_input_tokens - cw_sum
+        d_cr = usage.cache_read_input_tokens - cr_sum
+        if d_in == 0 and d_out == 0 and d_cw == 0 and d_cr == 0:
+            return messages
+        # The residual is almost always positive (tokens billed but not streamed).
+        # A negative residual means the captured generations OVER-report the turn
+        # total for some bucket; word the note for that case so a "-512" entry
+        # doesn't read as "billed but not surfaced".
+        positive = d_in >= 0 and d_out >= 0 and d_cw >= 0 and d_cr >= 0
+        note = (
+            "Tokens the agent billed but never surfaced as a generation "
+            "(fixed prompt overhead + sub-agent input/cache the stream doesn't bubble up). "
+            "Booked here so the transcript reconciles to the turn total."
+            if positive
+            else (
+                "Per-bucket residual reconciling the captured generations to the turn total "
+                "(negative where the stream over-reports a bucket). "
+                "Booked here so the transcript sums to the authoritative usage."
+            )
+        )
+        return [
+            *messages,
+            ReconciliationMessage(
+                input_tokens=d_in,
+                output_tokens=d_out,
+                cache_creation_tokens=d_cw,
+                cache_read_tokens=d_cr,
+                note=note,
+            ),
+        ]
+
     def build_turn_record(self) -> TurnRecord:
         """Assemble the ``TurnRecord`` from the events observed so far."""
         end = self._agent_end
@@ -98,10 +161,19 @@ class EventCollector:
 
         # Treat an all-zero, costless usage as "no usage reported" (None) so the
         # record matches agents that surfaced nothing; otherwise carry it through.
-        tokens = end.usage.tokens
+        tokens = end.usage
         token_usage: TokenUsage | None = (
             tokens if (not tokens.is_empty() or tokens.total_cost_usd is not None) else None
         )
+
+        # The authoritative turn total (token_usage) is the source of truth, but
+        # the per-message stream under-reports it. Book the residual as a single
+        # synthetic ReconciliationMessage so the transcript's token buckets sum
+        # to the total — making the stream self-reconciling for any downstream
+        # consumer (e.g. the evalboard) without a competing aggregate.
+        messages: list[TranscriptMessage] = list(end.messages)
+        if token_usage is not None:
+            messages = self._reconciled_messages(messages, token_usage)
 
         return TurnRecord(
             iteration=end.iteration or self._iteration,
@@ -112,11 +184,10 @@ class EventCollector:
             token_usage=token_usage,
             model_used=end.model_used or self._model,
             assistant_turn_count=end.assistant_turn_count,
-            messages=list(end.messages),
+            messages=messages,
             num_turns=end.num_turns,
             max_turns_exhausted=end.max_turns_exhausted,
             result_summary=end.result_summary,
             crashed=end.crashed,
             crash_reason=end.crash_reason,
-            sub_agent_usage=list(end.sub_agent_usage),
         )

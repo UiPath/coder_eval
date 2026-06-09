@@ -65,7 +65,7 @@ def _make_turn(
         agent_output="done",
         duration_seconds=1.0,
         token_usage=TokenUsage(
-            input_tokens=input_tokens,
+            uncached_input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_creation_input_tokens=0,
             cache_read_input_tokens=cache_read_input_tokens,

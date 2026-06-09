@@ -290,7 +290,7 @@ class TestProxyUsageSnapshotAndDiff:
             total_cost=0.18,
         )
         delta = usage_between(before, after)
-        assert delta.input_tokens == 50
+        assert delta.uncached_input_tokens == 50
         assert delta.output_tokens == 30
         assert delta.cache_creation_input_tokens == 50
         assert delta.cache_read_input_tokens == 500
@@ -345,7 +345,7 @@ class TestMeasureProxy:
             )
             delta = proxy_delta()
         assert delta is not None
-        assert delta.input_tokens == 60_000
+        assert delta.uncached_input_tokens == 60_000
         assert delta.output_tokens == 250
         assert delta.cache_read_input_tokens == 5_000
 
@@ -654,26 +654,26 @@ class TestPricingCalculation:
 
     def test_sonnet_cost(self):
         # Sonnet 4.6: $3/MTok in, $15/MTok out
-        cost = calculate_cost("claude-sonnet-4-6", input_tokens=1_000_000, output_tokens=0)
+        cost = calculate_cost("claude-sonnet-4-6", uncached_input_tokens=1_000_000, output_tokens=0)
         assert cost == pytest.approx(3.0)
 
-        cost = calculate_cost("claude-sonnet-4-6", input_tokens=0, output_tokens=1_000_000)
+        cost = calculate_cost("claude-sonnet-4-6", uncached_input_tokens=0, output_tokens=1_000_000)
         assert cost == pytest.approx(15.0)
 
     def test_opus_cost(self):
         # Opus 4.6: $15/MTok in, $75/MTok out
-        cost = calculate_cost("claude-opus-4-6", input_tokens=1_000_000, output_tokens=0)
+        cost = calculate_cost("claude-opus-4-6", uncached_input_tokens=1_000_000, output_tokens=0)
         assert cost == pytest.approx(15.0)
 
     def test_haiku_cost(self):
         # Haiku 4.5: $0.80/MTok in, $4.0/MTok out
-        cost = calculate_cost("claude-haiku-4-5-20251001", input_tokens=1_000_000, output_tokens=0)
+        cost = calculate_cost("claude-haiku-4-5-20251001", uncached_input_tokens=1_000_000, output_tokens=0)
         assert cost == pytest.approx(0.80)
 
     def test_cache_tokens_add_to_cost(self):
         cost = calculate_cost(
             "claude-sonnet-4-6",
-            input_tokens=0,
+            uncached_input_tokens=0,
             output_tokens=0,
             cache_creation_tokens=1_000_000,
             cache_read_tokens=1_000_000,
@@ -682,40 +682,40 @@ class TestPricingCalculation:
         assert cost == pytest.approx(3.75 + 0.30)
 
     def test_unknown_model_returns_none(self):
-        assert calculate_cost("unknown-model", input_tokens=1000, output_tokens=500) is None
+        assert calculate_cost("unknown-model", uncached_input_tokens=1000, output_tokens=500) is None
 
     def test_zero_tokens_returns_zero(self):
-        cost = calculate_cost("claude-sonnet-4-6", input_tokens=0, output_tokens=0)
+        cost = calculate_cost("claude-sonnet-4-6", uncached_input_tokens=0, output_tokens=0)
         assert cost == 0.0
 
     def test_realistic_request(self):
         # 50k input, 2k output on Sonnet
-        cost = calculate_cost("claude-sonnet-4-6", input_tokens=50_000, output_tokens=2_000)
+        cost = calculate_cost("claude-sonnet-4-6", uncached_input_tokens=50_000, output_tokens=2_000)
         expected = (50_000 * 3.0 + 2_000 * 15.0) / 1_000_000
         assert cost == pytest.approx(expected)
 
     def test_gpt5_codex_cost(self):
         # gpt-5-codex: $1.25/MTok in, $10/MTok out
-        cost = calculate_cost("gpt-5-codex", input_tokens=1_000_000, output_tokens=0)
+        cost = calculate_cost("gpt-5-codex", uncached_input_tokens=1_000_000, output_tokens=0)
         assert cost == pytest.approx(1.25)
 
-        cost = calculate_cost("gpt-5-codex", input_tokens=0, output_tokens=1_000_000)
+        cost = calculate_cost("gpt-5-codex", uncached_input_tokens=0, output_tokens=1_000_000)
         assert cost == pytest.approx(10.0)
 
     def test_gpt5_cost(self):
         # gpt-5: same rates as gpt-5-codex ($1.25/MTok in, $10/MTok out)
-        cost = calculate_cost("gpt-5", input_tokens=1_000_000, output_tokens=0)
+        cost = calculate_cost("gpt-5", uncached_input_tokens=1_000_000, output_tokens=0)
         assert cost == pytest.approx(1.25)
 
-        cost = calculate_cost("gpt-5", input_tokens=0, output_tokens=1_000_000)
+        cost = calculate_cost("gpt-5", uncached_input_tokens=0, output_tokens=1_000_000)
         assert cost == pytest.approx(10.0)
 
     def test_gpt5_3_codex_cost(self):
         # gpt-5.3-codex: $1.75/MTok in, $14/MTok out
-        cost = calculate_cost("gpt-5.3-codex", input_tokens=1_000_000, output_tokens=0)
+        cost = calculate_cost("gpt-5.3-codex", uncached_input_tokens=1_000_000, output_tokens=0)
         assert cost == pytest.approx(1.75)
 
-        cost = calculate_cost("gpt-5.3-codex", input_tokens=0, output_tokens=1_000_000)
+        cost = calculate_cost("gpt-5.3-codex", uncached_input_tokens=0, output_tokens=1_000_000)
         assert cost == pytest.approx(14.0)
 
     def test_gpt5_codex_cached_input(self):
@@ -723,7 +723,7 @@ class TestPricingCalculation:
         # the input rate, cached portion at the cache-read rate ($0.125/MTok).
         cost = calculate_cost(
             "gpt-5-codex",
-            input_tokens=1_000_000,
+            uncached_input_tokens=1_000_000,
             output_tokens=0,
             cache_read_tokens=1_000_000,
         )
@@ -731,19 +731,19 @@ class TestPricingCalculation:
 
     def test_gpt5_4_cost(self):
         # gpt-5.4: $2.50/MTok in, $15/MTok out, $0.25/MTok cached.
-        assert calculate_cost("gpt-5.4", input_tokens=1_000_000, output_tokens=0) == pytest.approx(2.5)
-        assert calculate_cost("gpt-5.4", input_tokens=0, output_tokens=1_000_000) == pytest.approx(15.0)
-        assert calculate_cost("gpt-5.4", input_tokens=0, output_tokens=0, cache_read_tokens=1_000_000) == pytest.approx(
-            0.25
-        )
+        assert calculate_cost("gpt-5.4", uncached_input_tokens=1_000_000, output_tokens=0) == pytest.approx(2.5)
+        assert calculate_cost("gpt-5.4", uncached_input_tokens=0, output_tokens=1_000_000) == pytest.approx(15.0)
+        assert calculate_cost(
+            "gpt-5.4", uncached_input_tokens=0, output_tokens=0, cache_read_tokens=1_000_000
+        ) == pytest.approx(0.25)
 
     def test_gpt5_5_cost(self):
         # gpt-5.5: $5/MTok in, $30/MTok out, $0.50/MTok cached.
-        assert calculate_cost("gpt-5.5", input_tokens=1_000_000, output_tokens=0) == pytest.approx(5.0)
-        assert calculate_cost("gpt-5.5", input_tokens=0, output_tokens=1_000_000) == pytest.approx(30.0)
-        assert calculate_cost("gpt-5.5", input_tokens=0, output_tokens=0, cache_read_tokens=1_000_000) == pytest.approx(
-            0.5
-        )
+        assert calculate_cost("gpt-5.5", uncached_input_tokens=1_000_000, output_tokens=0) == pytest.approx(5.0)
+        assert calculate_cost("gpt-5.5", uncached_input_tokens=0, output_tokens=1_000_000) == pytest.approx(30.0)
+        assert calculate_cost(
+            "gpt-5.5", uncached_input_tokens=0, output_tokens=0, cache_read_tokens=1_000_000
+        ) == pytest.approx(0.5)
 
     def test_openai_cache_write_rate_equals_input_rate(self):
         # OpenAI bills no separate cache-write fee, so the table sets
@@ -763,9 +763,9 @@ class TestPricingCalculation:
         # cache_creation_tokens. Because cache_write == input rate for OpenAI,
         # pricing the fresh tokens either way yields the same cost.
         fresh, cached, out = 14_080, 278, 458
-        as_input = calculate_cost("gpt-5.5", input_tokens=fresh, output_tokens=out, cache_read_tokens=cached)
+        as_input = calculate_cost("gpt-5.5", uncached_input_tokens=fresh, output_tokens=out, cache_read_tokens=cached)
         as_cache_write = calculate_cost(
-            "gpt-5.5", input_tokens=0, output_tokens=out, cache_creation_tokens=fresh, cache_read_tokens=cached
+            "gpt-5.5", uncached_input_tokens=0, output_tokens=out, cache_creation_tokens=fresh, cache_read_tokens=cached
         )
         assert as_input == pytest.approx(as_cache_write)
 

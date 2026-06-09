@@ -12,12 +12,10 @@ from coder_eval.models.agent_config import AgentConfig, BaseAgentConfig
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind, FinalStatus
 from coder_eval.models.telemetry import (
-    AgentUsage,
-    AssistantMessage,
     CommandStatistics,
     CommandTelemetry,
     TokenUsage,
-    UserMessage,
+    TranscriptMessage,
 )
 
 
@@ -309,12 +307,14 @@ class TurnRecord(BaseModel):
         default=0,
         description="Number of AssistantMessage objects received from the SDK in this turn.",
     )
-    messages: list[Annotated[UserMessage | AssistantMessage, Discriminator("role")]] = Field(
+    messages: list[TranscriptMessage] = Field(
         default_factory=list,
         description=(
             "Per-message telemetry in emission order, mirroring the LLM API messages array. "
-            "Includes UserMessage entries (simulator text or tool results) and AssistantMessage entries "
-            "(agent thinking/tool_use/text blocks). Preserves the full conversation trajectory for "
+            "Includes UserMessage entries (simulator text or tool results), AssistantMessage entries "
+            "(agent thinking/tool_use/text blocks), and an optional terminal ReconciliationMessage "
+            "carrying tokens the agent billed but never surfaced as a generation (so the transcript's "
+            "token buckets sum to token_usage). Preserves the full conversation trajectory for "
             "replay and analysis. May be empty for agents/modes that don't surface message detail."
         ),
     )
@@ -344,15 +344,6 @@ class TurnRecord(BaseModel):
     crash_reason: str | None = Field(
         default=None,
         description="Short human-readable cause when crashed=True; None otherwise.",
-    )
-    sub_agent_usage: list[AgentUsage] = Field(
-        default_factory=list,
-        description=(
-            "Per-sub-agent usage from Agent-tool (Task) spawns in this turn. Each entry is the "
-            "rolled-up token cost of one sub-agent invocation (from the SDK Agent tool-result "
-            "usage). Lets analysis attribute tokens to sub-agents — the sub-agent's own emissions "
-            "are only partially surfaced in `messages`. Run-level cost still comes from model_usage."
-        ),
     )
 
 

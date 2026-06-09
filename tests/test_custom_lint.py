@@ -32,3 +32,28 @@ def test_no_violations(rule_class: type) -> None:
         + "\n".join(f"  {v}" for v in violations)
         + f"\n\nFix the violation or add `# noqa: {rule_class.id}` to the offending line with a comment explaining why."
     )
+
+
+@pytest.mark.lint
+class TestCE016NoComputedTokenUsageKwargs:
+    """CE016 fires on TokenUsage(input_tokens=/total_tokens=) but not elsewhere."""
+
+    @staticmethod
+    def _run(src: str):
+        import ast
+
+        from tests.lint.rules.ce016_no_computed_tokenusage_kwargs import NoComputedTokenUsageKwargs
+
+        return NoComputedTokenUsageKwargs("<test>").check(ast.parse(src))
+
+    @pytest.mark.parametrize("kw", ["input_tokens", "total_tokens"])
+    def test_flags_computed_kwarg_on_tokenusage(self, kw: str):
+        assert self._run(f"TokenUsage({kw}=10, output_tokens=5)")
+
+    def test_allows_uncached_input_tokens(self):
+        assert not self._run("TokenUsage(uncached_input_tokens=10, output_tokens=5)")
+
+    def test_ignores_input_tokens_on_other_models(self):
+        # AssistantMessage / ReconciliationMessage DO have a settable input_tokens.
+        assert not self._run("AssistantMessage(input_tokens=10)")
+        assert not self._run("ReconciliationMessage(input_tokens=-5)")

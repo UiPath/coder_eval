@@ -9,9 +9,9 @@ from datetime import datetime
 from typing import ClassVar
 
 from coder_eval.models import (
-    AgentUsage,
     AssistantMessage,
     CommandTelemetry,
+    ReconciliationMessage,
     ResultSummary,
     TokenUsage,
     TurnRecord,
@@ -53,7 +53,7 @@ class TestUsageCoalescing:
                 AgentStartEvent(task_id=TASK_ID, prompt="go", iteration=1),
                 AgentEndEvent(
                     task_id=TASK_ID,
-                    usage=AgentUsage(tokens=TokenUsage()),  # all-zero, no cost
+                    usage=TokenUsage(),  # all-zero, no cost
                 ),
             ],
         )
@@ -69,7 +69,7 @@ class TestUsageCoalescing:
                 AgentStartEvent(task_id=TASK_ID, prompt="go", iteration=1),
                 AgentEndEvent(
                     task_id=TASK_ID,
-                    usage=AgentUsage(tokens=TokenUsage(output_tokens=5)),
+                    usage=TokenUsage(output_tokens=5),
                 ),
             ],
         )
@@ -88,7 +88,7 @@ class TestUsageCoalescing:
                 AgentStartEvent(task_id=TASK_ID, prompt="go", iteration=1),
                 AgentEndEvent(
                     task_id=TASK_ID,
-                    usage=AgentUsage(tokens=TokenUsage(total_cost_usd=0.0)),
+                    usage=TokenUsage(total_cost_usd=0.0),
                 ),
             ],
         )
@@ -126,7 +126,7 @@ class TestSubAgentEventFiltering:
                     iteration=2,
                     user_input="main prompt",
                     agent_output="main out",
-                    usage=AgentUsage(tokens=TokenUsage(output_tokens=10)),
+                    usage=TokenUsage(output_tokens=10),
                     parent_thread_id=None,
                 ),
             ],
@@ -155,7 +155,7 @@ class TestToolReduction:
                 AgentStartEvent(task_id=TASK_ID, prompt="go", iteration=1),
                 ToolEndEvent(task_id=TASK_ID, tool=first),
                 ToolEndEvent(task_id=TASK_ID, tool=second),
-                AgentEndEvent(task_id=TASK_ID, usage=AgentUsage(tokens=TokenUsage(output_tokens=1))),
+                AgentEndEvent(task_id=TASK_ID, usage=TokenUsage(output_tokens=1)),
             ],
         )
 
@@ -174,7 +174,7 @@ class TestToolReduction:
                 ToolEndEvent(task_id=TASK_ID, tool=_tool("c", 2)),
                 ToolEndEvent(task_id=TASK_ID, tool=_tool("a", 0)),
                 ToolEndEvent(task_id=TASK_ID, tool=_tool("b", 1)),
-                AgentEndEvent(task_id=TASK_ID, usage=AgentUsage(tokens=TokenUsage(output_tokens=1))),
+                AgentEndEvent(task_id=TASK_ID, usage=TokenUsage(output_tokens=1)),
             ],
         )
 
@@ -215,7 +215,7 @@ class TestFullFieldParity:
             user_input="the prompt",
             agent_output="the output",
             duration_seconds=9.5,
-            usage=AgentUsage(tokens=TokenUsage(output_tokens=7)),
+            usage=TokenUsage(output_tokens=7),
             model_used="model-z",
             assistant_turn_count=3,
             messages=[msg],
@@ -224,7 +224,6 @@ class TestFullFieldParity:
             result_summary=ResultSummary(is_error=False, subtype="success", result="all done"),
             crashed=True,
             crash_reason="boom",
-            sub_agent_usage=[AgentUsage(tokens=TokenUsage(output_tokens=2), tool_uses=1)],
         )
 
     def test_no_turn_record_field_is_unaccounted_for(self):
@@ -259,11 +258,180 @@ class TestFullFieldParity:
         for name in verbatim:
             event_value = getattr(end, name)
             record_value = getattr(record, name)
-            # messages / sub_agent_usage are copied into new lists; compare contents.
+            # messages are copied into a new list; compare contents.
             if isinstance(event_value, list):
                 assert record_value == list(event_value), f"{name} did not round-trip"
             else:
                 assert record_value == event_value, f"{name}: record={record_value!r} event={event_value!r}"
+
+
+def _assistant(
+    *,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    parent_tool_use_id: str | None = None,
+) -> AssistantMessage:
+    return AssistantMessage(
+        started_at=datetime.now(),
+        completed_at=datetime.now(),
+        generation_duration_ms=1.0,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+        cache_read_tokens=cache_read_tokens,
+        parent_tool_use_id=parent_tool_use_id,
+    )
+
+
+def _transcript_sum(record: TurnRecord) -> TokenUsage:
+    """Sum the four token buckets across the transcript (assistant + reconciliation).
+
+    Mirrors how a downstream consumer (the evalboard) sums the message stream:
+    only the per-message token buckets, no separate aggregate.
+    """
+    u = TokenUsage()
+    for m in record.messages:
+        # Assistant generations and the synthetic reconciliation entry both carry
+        # the four token buckets under identical field names; user/simulator
+        # messages are a separate bill and excluded.
+        if isinstance(m, AssistantMessage | ReconciliationMessage):
+            u = u + TokenUsage(
+                uncached_input_tokens=m.input_tokens,
+                output_tokens=m.output_tokens,
+                cache_creation_input_tokens=m.cache_creation_tokens,
+                cache_read_input_tokens=m.cache_read_tokens,
+            )
+    return u
+
+
+class TestReconciliation:
+    """The synthetic ReconciliationMessage makes the transcript's token buckets
+    sum EXACTLY to the authoritative turn total (collector.py ``_reconciled_messages``).
+
+    This is the invariant the evalboard relies on to drop its separate aggregate:
+    sum(message buckets) == token_usage, for any agent.
+    """
+
+    def _build(self, messages, usage: TokenUsage) -> TurnRecord:
+        collector = EventCollector()
+        _feed(
+            collector,
+            [
+                AgentStartEvent(task_id=TASK_ID, prompt="go", iteration=1),
+                AgentEndEvent(task_id=TASK_ID, usage=usage, messages=messages),
+            ],
+        )
+        return collector.build_turn_record()
+
+    def test_claude_shaped_gap_is_booked_so_transcript_reconciles(self):
+        # Claude: model_usage total exceeds the per-message sum (a fixed ~512 input
+        # slice + sub-agent input ride on no streamed message).
+        messages = [
+            _assistant(input_tokens=100, output_tokens=40, cache_read_tokens=2000),
+            _assistant(input_tokens=50, output_tokens=20, cache_read_tokens=3000),
+        ]
+        usage = TokenUsage(
+            uncached_input_tokens=662,  # 150 + 512 unattributed
+            output_tokens=60,
+            cache_creation_input_tokens=1000,  # all unattributed (sub-agent)
+            cache_read_input_tokens=5000,
+            total_cost_usd=0.12,
+        )
+        record = self._build(messages, usage)
+
+        recon = [m for m in record.messages if isinstance(m, ReconciliationMessage)]
+        assert len(recon) == 1
+        assert recon[0].input_tokens == 512
+        assert recon[0].cache_creation_tokens == 1000
+        assert recon[0].output_tokens == 0
+        assert recon[0].cache_read_tokens == 0
+        # The invariant: transcript buckets sum to the authoritative total.
+        s = _transcript_sum(record)
+        assert s.uncached_input_tokens == usage.uncached_input_tokens
+        assert s.output_tokens == usage.output_tokens
+        assert s.cache_creation_input_tokens == usage.cache_creation_input_tokens
+        assert s.cache_read_input_tokens == usage.cache_read_input_tokens
+
+    def test_codex_shaped_with_subagent_messages_reconciles(self):
+        # Codex: parent + recovered sub-agent (parent_tool_use_id) generations, with
+        # the folded total slightly above the streamed sum.
+        messages = [
+            _assistant(input_tokens=200, output_tokens=80, cache_read_tokens=1000),
+            _assistant(input_tokens=300, output_tokens=20, parent_tool_use_id="call_sub"),
+        ]
+        usage = TokenUsage(
+            uncached_input_tokens=520,  # 500 + 20 residual
+            output_tokens=100,
+            cache_read_input_tokens=1000,
+        )
+        record = self._build(messages, usage)
+        s = _transcript_sum(record)
+        assert s.uncached_input_tokens == 520
+        assert s.output_tokens == 100
+        assert s.cache_read_input_tokens == 1000
+
+    def test_no_reconciliation_when_already_exact(self):
+        messages = [_assistant(input_tokens=150, output_tokens=60, cache_read_tokens=5000)]
+        usage = TokenUsage(uncached_input_tokens=150, output_tokens=60, cache_read_input_tokens=5000)
+        record = self._build(messages, usage)
+        assert not any(isinstance(m, ReconciliationMessage) for m in record.messages)
+        assert len(record.messages) == 1
+
+    def test_no_reconciliation_when_usage_is_none(self):
+        # All-zero costless usage coalesces to None → no authoritative target → no entry.
+        record = self._build([_assistant(output_tokens=0)], TokenUsage())
+        assert record.token_usage is None
+        assert not any(isinstance(m, ReconciliationMessage) for m in record.messages)
+
+    def test_simulator_user_tokens_do_not_count_toward_the_sum(self):
+        # UserMessage simulator tokens are a separate bill; only assistant
+        # generations are measured against the agent total, so a UserMessage's
+        # tokens must not shrink the booked residual.
+        from coder_eval.models import UserMessage
+
+        messages = [
+            UserMessage(text="hi", input_tokens=999, output_tokens=999),
+            _assistant(input_tokens=100, output_tokens=40),
+        ]
+        usage = TokenUsage(uncached_input_tokens=150, output_tokens=40)
+        record = self._build(messages, usage)
+        recon = [m for m in record.messages if isinstance(m, ReconciliationMessage)]
+        assert len(recon) == 1
+        assert recon[0].input_tokens == 50  # 150 - 100 (assistant only), NOT minus the 999
+        assert recon[0].output_tokens == 0
+
+    def test_negative_residual_when_stream_over_reports(self):
+        # If the captured generations sum to MORE than the authoritative total for
+        # some bucket, the residual is negative. The invariant must still hold
+        # (transcript sums to the total), and the note must read for over-report
+        # rather than "billed but not surfaced".
+        messages = [_assistant(input_tokens=200, output_tokens=40, cache_read_tokens=5000)]
+        usage = TokenUsage(uncached_input_tokens=150, output_tokens=40, cache_read_input_tokens=5000)
+        record = self._build(messages, usage)
+        recon = [m for m in record.messages if isinstance(m, ReconciliationMessage)]
+        assert len(recon) == 1
+        assert recon[0].input_tokens == -50  # 150 - 200, booked (not clamped)
+        assert "over-report" in recon[0].note
+        # Invariant holds even with a negative residual.
+        assert _transcript_sum(record).uncached_input_tokens == 150
+
+    def test_reconciliation_message_round_trips_through_turnrecord_json(self):
+        # The Python serialization boundary: a TurnRecord carrying a
+        # ReconciliationMessage must deserialize the entry back to the right type
+        # via Discriminator("role") (the TS side is covered; this pins the Python side).
+        messages = [_assistant(input_tokens=100, output_tokens=40)]
+        usage = TokenUsage(uncached_input_tokens=612, output_tokens=40)
+        record = self._build(messages, usage)
+        restored = TurnRecord.model_validate(record.model_dump())
+        tail = restored.messages[-1]
+        assert isinstance(tail, ReconciliationMessage)
+        assert tail.role == "reconciliation"
+        assert tail.input_tokens == 512
+        # Round-trip via JSON string too (not just a dict).
+        restored_json = TurnRecord.model_validate_json(record.model_dump_json())
+        assert isinstance(restored_json.messages[-1], ReconciliationMessage)
 
 
 class TestNoTerminalEvent:

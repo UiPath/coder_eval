@@ -15,8 +15,19 @@ function msg(tokens: {
     cacheRead?: number;
 }): MessageEvent {
     return {
+        role: "assistant",
         inputTokens: tokens.input ?? 0,
         outputTokens: tokens.output ?? 0,
+        cacheWriteTokens: tokens.cacheWrite ?? 0,
+        cacheReadTokens: tokens.cacheRead ?? 0,
+    } as MessageEvent;
+}
+
+function recon(tokens: { input?: number; cacheWrite?: number; cacheRead?: number }): MessageEvent {
+    return {
+        role: "reconciliation",
+        inputTokens: tokens.input ?? 0,
+        outputTokens: 0,
         cacheWriteTokens: tokens.cacheWrite ?? 0,
         cacheReadTokens: tokens.cacheRead ?? 0,
     } as MessageEvent;
@@ -98,5 +109,31 @@ describe("selectTokenTotals", () => {
         const tokens = selectTokenTotals(messages, turns);
         expect(tokens.cacheCreation).toBe(51339); // iteration wins, not 21873
         expect(tokens.input).toBe(834);
+    });
+
+    test("when a reconciliation entry is present, the stream sum is authoritative (aggregate ignored)", () => {
+        // Current runs: the stream carries a reconciliation entry that already
+        // books the gap, so summing the stream IS the run total — the separate
+        // iteration aggregate ("agent tokens") is not consulted, even if present
+        // and different.
+        const messages = [
+            msg({ input: 110, output: 1800, cacheWrite: 21873, cacheRead: 41844 }),
+            recon({ input: 724, cacheWrite: 29466 }), // books the 834-110 / 51339-21873 gaps
+        ];
+        const turns: TurnEntry[] = [
+            {
+                token_usage: {
+                    input_tokens: 999999, // deliberately wrong/divergent — must be ignored
+                    output_tokens: 999999,
+                    cache_creation_input_tokens: 999999,
+                    cache_read_input_tokens: 999999,
+                },
+            },
+        ];
+        const tokens = selectTokenTotals(messages, turns);
+        expect(tokens.input).toBe(834); // 110 + 724
+        expect(tokens.output).toBe(1800);
+        expect(tokens.cacheCreation).toBe(51339); // 21873 + 29466
+        expect(tokens.cacheRead).toBe(41844);
     });
 });

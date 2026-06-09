@@ -117,7 +117,7 @@ class RichStreamRenderer:
             return f"[dim]{escape(event.text)}[/dim]"
 
         if isinstance(event, AgentEndEvent):
-            usage_str = escape(format_token_usage(event.usage.tokens))
+            usage_str = escape(format_token_usage(event.usage))
             line = (
                 f"[bold]--- Turn complete: {len(event.messages)} msgs, "
                 f"{event.duration_seconds:.1f}s, {usage_str} ---[/bold]"
@@ -224,7 +224,7 @@ class LoggingStreamRenderer:
             return f"[{event.task_id}] --- Turn end [{event.status.value}]: {tok} ---"
 
         if isinstance(event, AgentEndEvent):
-            usage_str = format_token_usage(event.usage.tokens)
+            usage_str = format_token_usage(event.usage)
             line = (
                 f"[{event.task_id}] --- Agent complete [{event.status.value}]: "
                 f"{len(event.messages)} msgs, {event.duration_seconds:.1f}s, {usage_str} ---"

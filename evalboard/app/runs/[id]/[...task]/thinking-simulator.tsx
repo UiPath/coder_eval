@@ -36,20 +36,26 @@ function pct(n: number): string {
     return `${r > 0 ? "+" : ""}${r}%`;
 }
 
-export function ThinkingSimulator({ model }: { model: ThinkingModel }) {
-    const [scale, setScale] = useState(1);
-    const [toolScale, setToolScale] = useState(1);
-    const [skippedTools, setSkippedTools] = useState<Set<string>>(new Set());
-
-    const toggleTool = (toolName: string) => {
-        setSkippedTools((prev) => {
-            const next = new Set(prev);
-            if (next.has(toolName)) next.delete(toolName);
-            else next.add(toolName);
-            return next;
-        });
-    };
-
+// Lever state lives in the parent (CostExplorerSection) so the Message timeline
+// can render each message's projected Δ inline from the SAME levers. This
+// component is fully controlled — it owns no projection state of its own.
+export function ThinkingSimulator({
+    model,
+    scale,
+    setScale,
+    toolScale,
+    setToolScale,
+    skippedTools,
+    toggleTool,
+}: {
+    model: ThinkingModel;
+    scale: number;
+    setScale: (scale: number) => void;
+    toolScale: number;
+    setToolScale: (scale: number) => void;
+    skippedTools: Set<string>;
+    toggleTool: (toolName: string) => void;
+}) {
     const skip = computeSkipDelta(model.turnProfiles, skippedTools);
 
     const baseline = projectThinking(model, 1, 1);
@@ -102,8 +108,9 @@ export function ThinkingSimulator({ model }: { model: ThinkingModel }) {
             )}
             {noTools && (
                 <div className="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded p-2">
-                    Tool-result sizes can&apos;t be estimated for this run (no
-                    per-message token data), so the tool-output lever is disabled.
+                    This run recorded no tool-result tokens (no tool calls, or a
+                    run predating per-tool result sizing), so the tool-output
+                    lever has nothing to scale.
                 </div>
             )}
 

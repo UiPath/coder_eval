@@ -16,6 +16,7 @@ import {
     clearRunCacheDir,
     extractComponentShas,
     isExcludedArtifact,
+    type MessageEvent,
     sortArtifacts,
     toTaskRow,
     visibleTurnsFromRaw,
@@ -46,49 +47,40 @@ describe("toTaskRow", () => {
 });
 
 describe("aggregateSubAgentUsage", () => {
-    // Regression guard for Blocker B1: the Python SubAgentUsage model was
-    // renamed to AgentUsage and reshaped so token components nest under
-    // `tokens`. The old consumer read flat top-level fields and a tool_use_id,
-    // so every current-shape entry was silently skipped and the breakdown
-    // rendered empty. Feed the CURRENT (nested) shape and assert it is honored.
-    test("reads the nested `tokens` shape and keys by sub-agent index", () => {
-        const iterations = [
-            {
-                sub_agent_usage: [
-                    {
-                        tokens: {
-                            input_tokens: 47,
-                            output_tokens: 121,
-                            cache_creation_input_tokens: 234,
-                            cache_read_input_tokens: 14349,
-                            total_cost_usd: 0.0123,
-                        },
-                        tool_uses: 3,
-                        per_model: {},
-                    },
-                ],
-            },
-            {
-                sub_agent_usage: [
-                    {
-                        tokens: {
-                            input_tokens: 10,
-                            output_tokens: 20,
-                            cache_creation_input_tokens: 0,
-                            cache_read_input_tokens: 100,
-                        },
-                        tool_uses: 1,
-                    },
-                ],
-            },
+    // Per-sub-agent usage is derived by grouping the parsed messages on
+    // `parentToolUseId` (the spawning Agent call's tool_use_id). Main-thread
+    // messages (null/undefined) are skipped; a sub-agent's multiple generations
+    // sum into one bucket, keyed by that tool_use_id.
+    const msg = (over: Partial<MessageEvent>): MessageEvent =>
+        ({
+            parentToolUseId: null,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheWriteTokens: 0,
+            cacheReadTokens: 0,
+            ...over,
+        }) as MessageEvent;
+
+    test("groups by parentToolUseId and sums each sub-agent's generations", () => {
+        const messages = [
+            // Main-thread message — must be skipped.
+            msg({ parentToolUseId: null, inputTokens: 999, outputTokens: 999 }),
+            msg({
+                parentToolUseId: "call_a",
+                inputTokens: 47,
+                outputTokens: 121,
+                cacheWriteTokens: 234,
+                cacheReadTokens: 14349,
+            }),
+            // call_b has two generations that must sum into one bucket.
+            msg({ parentToolUseId: "call_b", inputTokens: 10, outputTokens: 20, cacheReadTokens: 100 }),
+            msg({ parentToolUseId: "call_b", inputTokens: 0, outputTokens: 6, cacheWriteTokens: 5 }),
         ];
 
-        const result = aggregateSubAgentUsage(iterations);
+        const result = aggregateSubAgentUsage(messages);
 
-        // NON-empty: the old code would have skipped both (no tool_use_id).
-        expect(Object.keys(result)).toEqual(["sub-agent #1", "sub-agent #2"]);
-
-        expect(result["sub-agent #1"]).toEqual({
+        expect(Object.keys(result).sort()).toEqual(["call_a", "call_b"]);
+        expect(result["call_a"]).toEqual({
             input: 47,
             output: 121,
             cacheCreation: 234,
@@ -96,19 +88,19 @@ describe("aggregateSubAgentUsage", () => {
             // total = 47 + 121 + 234 + 14349
             total: 14751,
         });
-        expect(result["sub-agent #2"]).toEqual({
+        expect(result["call_b"]).toEqual({
             input: 10,
-            output: 20,
-            cacheCreation: 0,
+            output: 26,
+            cacheCreation: 5,
             cacheRead: 100,
-            total: 130,
+            total: 141,
         });
     });
 
-    test("no sub-agent usage yields an empty breakdown", () => {
+    test("no sub-agent messages yields an empty breakdown", () => {
         expect(aggregateSubAgentUsage([])).toEqual({});
-        expect(aggregateSubAgentUsage([{ sub_agent_usage: [] }])).toEqual({});
-        expect(aggregateSubAgentUsage([{}])).toEqual({});
+        expect(aggregateSubAgentUsage([msg({ parentToolUseId: null })])).toEqual({});
+        expect(aggregateSubAgentUsage([msg({ parentToolUseId: undefined })])).toEqual({});
     });
 });
 

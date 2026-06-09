@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from coder_eval.models import AgentUsage, CommandTelemetry, TokenUsage
+from coder_eval.models import CommandTelemetry, TokenUsage
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
@@ -127,7 +127,7 @@ def test_turn_end_event_creation():
     (Migrated from TurnCompleteEvent: the old duration/command_count/token_str
     summary now lives on AgentEndEvent; per-turn token usage rides here.)
     """
-    tokens = TokenUsage(input_tokens=1000, output_tokens=200)
+    tokens = TokenUsage(uncached_input_tokens=1000, output_tokens=200)
     event = TurnEndEvent(
         task_id="test-task",
         turn_id="turn-1",
@@ -147,7 +147,7 @@ def test_agent_end_event_creation():
     (The other half of the old TurnCompleteEvent split: turn-level summary
     stats like iteration/duration_seconds now live on the agent-end boundary.)
     """
-    usage = AgentUsage(tokens=TokenUsage(input_tokens=1200, output_tokens=200), tool_uses=5)
+    usage = TokenUsage(uncached_input_tokens=1200, output_tokens=200)
     event = AgentEndEvent(
         task_id="test-task",
         status=AgentEndStatus.COMPLETED,
@@ -160,7 +160,7 @@ def test_agent_end_event_creation():
     assert event.status == AgentEndStatus.COMPLETED
     assert event.iteration == 1
     assert event.duration_seconds == 12.5
-    assert event.usage.tool_uses == 5
+    assert event.usage.output_tokens == 200
     assert event.agent_output == "done"
 
 

@@ -158,13 +158,14 @@ from coder_eval.models.tasks import (
 
 # Telemetry
 from coder_eval.models.telemetry import (
-    AgentUsage,
     AssistantMessage,
     CommandStatistics,
     CommandTelemetry,
     ContentBlock,
+    ReconciliationMessage,
     SlowestCommandInfo,
     TokenUsage,
+    TranscriptMessage,
     UserMessage,
 )
 
@@ -247,9 +248,10 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "CommandTelemetry",
     "CommandStatistics",
     "ContentBlock",
-    "AgentUsage",
+    "ReconciliationMessage",
     "SlowestCommandInfo",
     "TokenUsage",
+    "TranscriptMessage",
     "UserMessage",
     # Results
     "ClassificationCriterionResult",

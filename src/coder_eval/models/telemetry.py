@@ -3,45 +3,82 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Discriminator, Field, computed_field, model_validator
 
 
 class TokenUsage(BaseModel):
-    """Token usage from a single agent turn or aggregated across turns."""
+    """Token usage from a single agent turn or aggregated across turns.
 
-    input_tokens: int = Field(
+    The prompt is split into three mutually-exclusive buckets that SUM to the
+    full prompt: ``uncached_input_tokens`` (fresh, billed at the input rate),
+    ``cache_creation_input_tokens`` (written to cache), and
+    ``cache_read_input_tokens`` (served from cache). ``input_tokens`` is the
+    DERIVED total of the three (the whole prompt the model processed), exposed
+    as a computed field so it can never drift from its parts.
+
+    Provider mapping for ``uncached_input_tokens``:
+
+    * Anthropic / Claude: the API ``input_tokens`` (the uncached slice);
+      ``cache_creation``/``cache_read`` as reported.
+    * OpenAI / Codex: ``input - cached`` (the fresh slice). ``cache_creation`` is
+      0 — OpenAI bills no separate cache-write fee — and ``cache_read`` is the
+      cached prefix.
+
+    COST bills ``uncached_input_tokens`` at the input rate, NOT ``input_tokens``
+    (which already contains the cache buckets and would double-count them).
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _adopt_legacy_input_tokens(cls, data: Any) -> Any:
+        """Read pre-split ``task.json`` files without silently under-counting.
+
+        Before the uncached/derived split, the stored field was ``input_tokens``
+        and it carried the FULL prompt. It is now a computed field, so a naive
+        reload drops it and recomputes from the cache buckets only — turning a
+        stored ``input_tokens=1000`` into ``350``. When the new stored field
+        ``uncached_input_tokens`` is absent but a legacy ``input_tokens`` is
+        present, adopt the legacy value as ``uncached_input_tokens`` so the Python
+        read path agrees with the evalboard (which already falls back the same
+        way). Current-format payloads carry ``uncached_input_tokens`` and are
+        untouched.
+        """
+        if isinstance(data, dict) and "uncached_input_tokens" not in data and "input_tokens" in data:
+            data = {**data, "uncached_input_tokens": data["input_tokens"]}
+        return data
+
+    uncached_input_tokens: int = Field(
         default=0,
         description=(
-            "Fresh (uncached) input prompt tokens. NOTE the per-provider convention: "
-            "Anthropic reports the uncached slice here; the Codex agent buckets the "
-            "fresh slice into cache_creation_input_tokens instead (OpenAI bills no "
-            "separate cache-write fee), so a Codex turn's input_tokens is 0 by design."
+            "Fresh (uncached) input prompt tokens, billed at the input rate. Maps to "
+            "Anthropic's API input_tokens; for Codex == (input - cached). This is the "
+            "field cost is computed from, NOT input_tokens (the derived total)."
         ),
     )
     output_tokens: int = Field(default=0, description="Output completion tokens")
     cache_creation_input_tokens: int = Field(
         default=0,
-        description=(
-            "Tokens written to the prompt cache this call. For OpenAI/Codex this also "
-            "carries the fresh prompt slice (input - cached), priced at the input rate."
-        ),
+        description="Tokens written to the prompt cache this call (Anthropic only; 0 for Codex).",
     )
     cache_read_input_tokens: int = Field(default=0, description="Tokens read from prompt cache")
     total_cost_usd: float | None = Field(default=None, description="Total cost in USD (from SDK)")
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def input_tokens(self) -> int:
+        """Total prompt tokens = uncached + cache_creation + cache_read.
+
+        Derived (read-only) so it always equals the sum of its parts. This is the
+        whole prompt the model processed, NOT the billable-at-input-rate slice —
+        for cost use ``uncached_input_tokens``.
+        """
+        return self.uncached_input_tokens + self.cache_creation_input_tokens + self.cache_read_input_tokens
+
     @property
     def total_tokens(self) -> int:
-        """input + output ONLY — deliberately excludes cache buckets.
-
-        This is a billing-shaped figure, not a processed-volume one: it omits
-        cache_creation/cache_read. Because the Codex agent buckets the fresh
-        prompt into cache_creation (input_tokens == 0), a Codex turn's
-        total_tokens is effectively output-only — do NOT read it as "all tokens
-        the turn touched." For cross-agent processed-volume comparison, sum the
-        cache buckets explicitly.
-        """
+        """All tokens the turn processed: full prompt (input_tokens) + output."""
         return self.input_tokens + self.output_tokens
 
     def is_empty(self) -> bool:
@@ -51,7 +88,7 @@ class TokenUsage(BaseModel):
         real traffic before attributing it to a turn/judge.
         """
         return (
-            self.input_tokens == 0
+            self.uncached_input_tokens == 0
             and self.output_tokens == 0
             and self.cache_creation_input_tokens == 0
             and self.cache_read_input_tokens == 0
@@ -59,45 +96,16 @@ class TokenUsage(BaseModel):
 
     def __add__(self, other: TokenUsage) -> TokenUsage:
         """Field-wise sum. Cost is summed only over the non-None operands
-        (stays None when neither carries a cost)."""
+        (stays None when neither carries a cost). ``input_tokens`` is derived, so
+        summing the parts keeps the total consistent automatically."""
         costs = [c for c in (self.total_cost_usd, other.total_cost_usd) if c is not None]
         return TokenUsage(
-            input_tokens=self.input_tokens + other.input_tokens,
+            uncached_input_tokens=self.uncached_input_tokens + other.uncached_input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
             cache_creation_input_tokens=self.cache_creation_input_tokens + other.cache_creation_input_tokens,
             cache_read_input_tokens=self.cache_read_input_tokens + other.cache_read_input_tokens,
             total_cost_usd=sum(costs) if costs else None,
         )
-
-
-class AgentUsage(BaseModel):
-    """Cumulative usage for one agent invocation (main agent or a sub-agent).
-
-    Carried on ``AgentEndEvent.usage``. Each agent invocation — the main agent
-    and every sub-agent spawned via the Agent/Task tool — emits its own
-    ``AgentEndEvent``, so this is agent-agnostic: it is the rolled-up token cost
-    of that one invocation. Per-spawn attribution (which tool/thread spawned a
-    sub-agent) is intended to come from the event tree (``parent_thread_id`` on a
-    nested ``AgentStartEvent``) — but nested sub-agent events are NOT yet emitted
-    (deferred), so ``sub_agent_usage`` is currently a flat, unattributed list. Do
-    not rely on per-tool-id attribution here until nesting lands.
-
-    Composes ``TokenUsage`` (so token fields aren't duplicated) and exposes the
-    per-model breakdown the cost simulator needs. A parent agent's ``tokens``
-    (from the SDK's cumulative ``model_usage``) already INCLUDES its sub-agents'
-    consumption; the nested sub-agent ``AgentEndEvent``s give the per-child split,
-    so don't double-count by summing children on top of the parent total.
-    """
-
-    tokens: TokenUsage = Field(
-        default_factory=TokenUsage,
-        description="Cumulative token usage for this agent invocation (cost included).",
-    )
-    tool_uses: int = Field(default=0, description="Number of tool calls this agent invocation made.")
-    per_model: dict[str, TokenUsage] = Field(
-        default_factory=dict,
-        description="Per-model cost breakdown, keyed by model id (the cost simulator's input).",
-    )
 
 
 class ContentBlock(BaseModel):
@@ -251,6 +259,41 @@ class AssistantMessage(BaseModel):
     )
 
 
+class ReconciliationMessage(BaseModel):
+    """A synthetic transcript entry carrying tokens the agent billed but never
+    surfaced as a streamed generation.
+
+    The authoritative turn total (Claude's ``ResultMessage.model_usage``, Codex's
+    thread total + folded sub-agent tokens) is consistently LARGER than the sum
+    of the per-``AssistantMessage`` token buckets, for reasons that are
+    architectural, not bugs: a fixed prompt slice (~512 input tokens on Claude)
+    is billed but rides on no SDK-emitted message, and sub-agent input/cache is
+    only partially bubbled into the parent stream. Rather than fabricate
+    per-generation numbers (which would match no real call), the residual is
+    booked once, explicitly, as this entry — so that summing the transcript's
+    token buckets EXACTLY reproduces the authoritative ``token_usage`` for the
+    turn. Consumers that sum the stream (the evalboard) therefore reconcile to
+    the bill without a separate aggregate; this entry is the visible "missing
+    tokens" line. Carries no cost (cost stays on the authoritative aggregate) and
+    is never an LLM generation — it is excluded from generation/turn counts.
+    """
+
+    role: Literal["reconciliation"] = "reconciliation"
+
+    input_tokens: int = Field(
+        default=0,
+        description="Residual uncached input tokens (authoritative turn total minus the per-message sum).",
+    )
+    output_tokens: int = Field(default=0, description="Residual output tokens.")
+    cache_creation_tokens: int = Field(default=0, description="Residual cache-creation tokens.")
+    cache_read_tokens: int = Field(default=0, description="Residual cache-read tokens.")
+
+    note: str = Field(
+        default="",
+        description="Human-readable explanation of why these tokens are unattributed (shown in the UI).",
+    )
+
+
 class CommandTelemetry(BaseModel):
     """Telemetry for a single command execution.
 
@@ -328,6 +371,31 @@ class CommandTelemetry(BaseModel):
 
     # Metadata
     sequence_number: int = Field(default=0, description="Order within the turn (0-indexed)")
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def result_tokens(self) -> int:
+        """Approximate token size of the tool result the model received.
+
+        Derived from the untruncated ``result_summary`` content (≈4 chars/token,
+        matching the evalboard heuristic), so it is a DIRECT, cache-independent
+        measure of "tool output size" — available identically whether prompt
+        caching was on or off. The cost simulator uses this instead of inferring
+        result size from prompt-cache growth (which is unavailable when caching is
+        disabled). Approximate, not the API's exact tokenizer count, but
+        deterministic and always present. 0 when the tool returned no content.
+        """
+        if not self.result_summary:
+            return 0
+        return -(-len(self.result_summary) // 4)  # ceil(len / 4)
+
+
+#: One entry in a turn's per-message transcript, discriminated on ``role``.
+#: ``ReconciliationMessage`` is the synthetic "missing tokens" line that makes the
+#: transcript's token buckets sum to the authoritative turn total. Defined once
+#: here and reused by ``TurnRecord.messages`` and ``AgentEndEvent.messages`` so the
+#: list element type is identical everywhere (avoids list-invariance friction).
+TranscriptMessage = Annotated[UserMessage | AssistantMessage | ReconciliationMessage, Discriminator("role")]
 
 
 class SlowestCommandInfo(BaseModel):

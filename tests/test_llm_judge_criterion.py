@@ -1047,7 +1047,7 @@ def test_judge_usage_bedrock_from_response(sandbox: Sandbox) -> None:
         ).check(criterion)
     assert isinstance(result, JudgeCriterionResult)
     assert result.token_usage is not None
-    assert result.token_usage.input_tokens == 900
+    assert result.token_usage.uncached_input_tokens == 900
     assert result.token_usage.cache_read_input_tokens == 100
 
 
@@ -1108,7 +1108,7 @@ def test_token_usage_from_anthropic_dict() -> None:
         }
     )
     assert tu is not None
-    assert (tu.input_tokens, tu.output_tokens, tu.cache_creation_input_tokens, tu.cache_read_input_tokens) == (
+    assert (tu.uncached_input_tokens, tu.output_tokens, tu.cache_creation_input_tokens, tu.cache_read_input_tokens) == (
         10,
         2,
         3,

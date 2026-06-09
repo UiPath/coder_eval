@@ -729,3 +729,44 @@ describe("parseMessages — per-message token summing", () => {
         expect(e.model).toBeNull();
     });
 });
+
+describe("parseMessages — reconciliation entry", () => {
+    test("surfaces a role=reconciliation entry as its own event after the turn's messages", () => {
+        const turns: TurnEntry[] = [
+            {
+                messages: [
+                    {
+                        role: "assistant",
+                        started_at: "2026-01-01T00:00:00.000Z",
+                        completed_at: "2026-01-01T00:00:01.000Z",
+                        generation_duration_ms: 1000,
+                        content_blocks: [{ block_type: "text", text: "hi" }],
+                        input_tokens: 100,
+                        output_tokens: 40,
+                        cache_read_tokens: 2000,
+                    },
+                    {
+                        role: "reconciliation",
+                        input_tokens: 512,
+                        output_tokens: 0,
+                        cache_creation_tokens: 1000,
+                        cache_read_tokens: 0,
+                        note: "billed but not streamed",
+                    },
+                ],
+            },
+        ];
+        const events = parseMessages(turns);
+        expect(events).toHaveLength(2);
+        const recon = events[1];
+        expect(recon.role).toBe("reconciliation");
+        expect(recon.inputTokens).toBe(512);
+        expect(recon.cacheWriteTokens).toBe(1000);
+        expect(recon.cacheReadTokens).toBe(0);
+        expect(recon.note).toBe("billed but not streamed");
+        // It carries no generation/branch identity.
+        expect(recon.generationMs).toBeNull();
+        expect(recon.parentToolUseId).toBeNull();
+        expect(recon.toolUses).toEqual([]);
+    });
+});

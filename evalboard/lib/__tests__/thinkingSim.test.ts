@@ -3,17 +3,21 @@ import type { MessageEvent, MessageToolUse, TokenTotals } from "../runs";
 import {
     buildThinkingModel,
     computeSkipDelta,
+    projectPerMessage,
     projectThinking,
     thinkingAmplification,
     toolAmplification,
 } from "../thinkingSim";
 import { resolvePricing } from "../pricing";
 
-// Minimal MessageToolUse for skip-tool tests.
+// Minimal MessageToolUse for skip-tool tests. `resultTokens` is the measured
+// (content-derived) size of this tool's result — what now drives the tool-output
+// lever (the old cache-growth inference is gone).
 function toolUse(
     toolName: string,
     outputTokens: number,
     resultPreview: string | null = null,
+    resultTokens = 0,
 ): MessageToolUse {
     return {
         toolName,
@@ -26,6 +30,7 @@ function toolUse(
         isError: false,
         resultPreview,
         outputTokens,
+        resultTokens,
     };
 }
 
@@ -33,6 +38,10 @@ function toolUse(
 // thinkingMs/generationMs drive the thinking-token estimate, outputTokens
 // drives per-message mode + apportionment, and cacheWriteTokens (minus the
 // prior call's output) drives the tool-result estimate.
+// Unique, monotonically increasing message index — production assigns these via
+// parseMessages (1-based ++order), and projectPerMessage keys its per-row impact
+// map on them, so fixtures must not all collide on index 0.
+let __callIndex = 0;
 function call(opts: {
     generationMs: number;
     thinkingMs: number;
@@ -46,7 +55,7 @@ function call(opts: {
     parentToolUseId?: string | null;
 }): MessageEvent {
     return {
-        index: 0,
+        index: ++__callIndex,
         role: "assistant",
         startedAt: null,
         completedAt: null,
@@ -73,6 +82,7 @@ function call(opts: {
         textOutputTokens: null,
         model: opts.model ?? "claude-sonnet-4-6",
         costUsd: null,
+        note: null,
     };
 }
 
@@ -217,25 +227,23 @@ describe("thinkingAmplification", () => {
     });
 });
 
-// 3 calls, no thinking. Tool-result tokens are inferred from cache growth the
-// model's own output doesn't explain: toolResult_j = cacheWrite_{j+1} − out_j.
-//   call0: out=100                       (its own write is never used)
-//   call1: write=300, out=50 → result_0 = 300 − 100 = 200
-//   call2: write=150, out=50 → result_1 = 150 −  50 = 100
-//   (call2 is last → no result measured)
-// Σ result = 300 (= coeffToolWrite). Cascade reads: result_0 (later=2) re-read
-// once → 200; result_1 (later=1) re-read zero times → 0. coeffToolRead = 200.
+// 3 calls, no thinking. Tool-result size is MEASURED from each tool's recorded
+// result content (resultTokens) — cache-independent, no cache-growth inference:
+//   call0: tool result 200, later=2 → write 200, read 200·(2-1)=200
+//   call1: tool result 100, later=1 → write 100, read 100·0=0
+//   call2: last call, no tool
+// coeffToolWrite=300, coeffToolRead=200.
 function toolModel() {
     const messages = [
-        call({ generationMs: 10, thinkingMs: 0, outputTokens: 100, cacheWriteTokens: 0 }),
-        call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 300 }),
-        call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 150 }),
+        call({ generationMs: 10, thinkingMs: 0, outputTokens: 100, toolUses: [toolUse("Bash", 0, null, 200)] }),
+        call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, toolUses: [toolUse("Read", 0, null, 100)] }),
+        call({ generationMs: 10, thinkingMs: 0, outputTokens: 50 }),
     ];
     return buildThinkingModel(messages, TOTALS, 0.5);
 }
 
-describe("buildThinkingModel — tool-result estimation", () => {
-    test("infers tool-result volume from cache growth beyond output", () => {
+describe("buildThinkingModel — tool-result sizing (content-based)", () => {
+    test("measures tool-result volume from recorded result content", () => {
         const m = toolModel();
         expect(m).not.toBeNull();
         if (!m) return;
@@ -247,21 +255,11 @@ describe("buildThinkingModel — tool-result estimation", () => {
         expect(m.coeffOutput).toBeCloseTo(0, 5);
     });
 
-    test("clamps when output exceeds the next call's cache write", () => {
-        // call1 writes fewer tokens than call0 emitted → negative, clamp to 0.
+    test("no recorded tool-result tokens → lever has nothing to size", () => {
+        // Tools present but no result content recorded (resultTokens 0) → 0.
         const messages = [
-            call({ generationMs: 10, thinkingMs: 0, outputTokens: 500, cacheWriteTokens: 0 }),
-            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 100 }),
-        ];
-        const m = buildThinkingModel(messages, TOTALS, null);
-        if (!m) return;
-        expect(m.toolResultTokens).toBeCloseTo(0, 5);
-    });
-
-    test("no per-message cache write → tool lever disabled", () => {
-        const messages = [
-            call({ generationMs: 10, thinkingMs: 0, outputTokens: 100, cacheWriteTokens: null }),
-            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: null }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 100, toolUses: [toolUse("Bash", 5)] }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50 }),
         ];
         const m = buildThinkingModel(messages, TOTALS, null);
         if (!m) return;
@@ -270,67 +268,41 @@ describe("buildThinkingModel — tool-result estimation", () => {
         expect(m.coeffToolRead).toBe(0);
     });
 
-    test("folds the sub-agent footprint into the tool-output lever", () => {
-        // Same 3-call run as toolModel(): message-derived write 300 / read 200.
+    test("is independent of per-message cache write (works the same with caching off)", () => {
+        // Same measured result sizes, but per-message cacheWriteTokens left at 0
+        // (as on a no-cache run). The content-based sizing is unchanged — the old
+        // cache-growth inference would have produced 0 here.
         const messages = [
-            call({ generationMs: 10, thinkingMs: 0, outputTokens: 100, cacheWriteTokens: 0 }),
-            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 300 }),
-            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 150 }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 100, cacheWriteTokens: 0, toolUses: [toolUse("Bash", 0, null, 200)] }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 0, toolUses: [toolUse("Read", 0, null, 100)] }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50 }),
         ];
-        // A sub-agent contributes cache-creation 1000 → tool write, cache-read
-        // 8975 → tool read (one-time, no extra main-thread cascade).
-        const subAgents = [
-            { total: 10000, input: 5, output: 20, cacheCreation: 1000, cacheRead: 8975 },
-        ];
-        const m = buildThinkingModel(messages, TOTALS, 0.5, subAgents);
+        const m = buildThinkingModel(messages, TOTALS, 0.5);
         if (!m) return;
-        expect(m.coeffToolWrite).toBeCloseTo(1300, 5); // 300 + 1000
-        expect(m.coeffToolRead).toBeCloseTo(9175, 5); // 200 + 8975
-        // Empty sub-agent list leaves the lever exactly as the message cascade.
-        const bare = buildThinkingModel(messages, TOTALS, 0.5, []);
-        if (!bare) return;
-        expect(bare.coeffToolWrite).toBeCloseTo(300, 5);
-        expect(bare.coeffToolRead).toBeCloseTo(200, 5);
+        expect(m.coeffToolWrite).toBeCloseTo(300, 5);
+        expect(m.coeffToolRead).toBeCloseTo(200, 5);
     });
 
-    test("parallel intermediates: group boundary subtracts combined group output, not just its own", () => {
-        // 4 messages, no thinking:
-        //   call0: cw=0,   out=100 — pre-boundary (no cw, first message)
-        //   call1: cw=300, out=50  — boundary B_0 (group = [call0])
-        //   call2: cw=0,   out=30  — intermediate parallel message
-        //   call3: cw=150, out=20  — boundary B_1 (group = [call1, call2])
-        //
-        // toolPerCall[j]:
-        //   j=0: next=call1 cw=300>0 → boundary
-        //        loop: k=0, cw=0, add 100, k=-1 → stop
-        //        groupRealOutput=100 → toolPerCall[0] = max(0, 300-100) = 200
-        //   j=1: next=call2 cw=0 → NOT a boundary → 0
-        //   j=2: next=call3 cw=150>0 → boundary
-        //        loop: k=2, cw=0, add 30, continue
-        //              k=1, cw=300>0, add 50, BREAK
-        //        groupRealOutput=80 → toolPerCall[2] = max(0, 150-80) = 70
-        //
-        // Old formula would give toolPerCall[2] = max(0,150-30) = 120 (wrong, ignores call1's 50)
-        //
-        // coeffToolWrite = 200 + 70 = 270
-        // laterInBranch[0]=3, later-1=2 → coeffToolRead += 200*2 = 400
-        // laterInBranch[2]=1, later-1=0 → coeffToolRead += 70*0 = 0
-        // coeffToolRead = 400
+    test("parallel tools in one call sum their measured result tokens", () => {
         const messages = [
-            call({ generationMs: 10, thinkingMs: 0, outputTokens: 100, cacheWriteTokens: 0 }),
-            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 300 }),
-            call({ generationMs: 10, thinkingMs: 0, outputTokens: 30, cacheWriteTokens: 0 }),
-            call({ generationMs: 10, thinkingMs: 0, outputTokens: 20, cacheWriteTokens: 150 }),
+            call({
+                generationMs: 10,
+                thinkingMs: 0,
+                outputTokens: 50,
+                toolUses: [toolUse("Bash", 0, null, 100), toolUse("Read", 0, null, 50)],
+            }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 20 }),
         ];
         const m = buildThinkingModel(messages, TOTALS, null);
         if (!m) return;
-        expect(m.coeffToolWrite).toBeCloseTo(270, 5);
-        expect(m.coeffToolRead).toBeCloseTo(400, 5);
+        // call0 result total = 150, later=1 → write 150, read 150·0 = 0.
+        expect(m.coeffToolWrite).toBeCloseTo(150, 5);
+        expect(m.coeffToolRead).toBeCloseTo(0, 5);
     });
 });
 
 describe("projectThinking — tool-output lever", () => {
-    test("tool scale moves the cache cascade but never output", () => {
+    test("tool scale moves the cache cascade but never output (caching on)", () => {
         const m = toolModel();
         if (!m) return;
         const base = projectThinking(m, 1, 1);
@@ -340,7 +312,7 @@ describe("projectThinking — tool-output lever", () => {
         // generated) — this is the core thinking/tool distinction.
         expect(z.outputTokens).toBe(base.outputTokens);
         expect(d.outputTokens).toBe(base.outputTokens);
-        // Cache write/read scale with the tool lever.
+        // Cache write/read scale with the tool lever (cacheActive run).
         expect(z.cacheCreationTokens).toBeCloseTo(0, 5); // 300 − 300
         expect(z.cacheReadTokens).toBeCloseTo(800, 5); // 1000 − 200
         expect(d.cacheCreationTokens).toBeCloseTo(600, 5); // 300 + 300
@@ -349,20 +321,75 @@ describe("projectThinking — tool-output lever", () => {
         expect(d.costUsd).toBeGreaterThan(base.costUsd);
     });
 
+    test("with caching OFF the tool lever moves INPUT (cascade re-sent as input)", () => {
+        // Same measured results, but a no-cache run (cache buckets 0): the
+        // tool-result cascade is re-sent as uncached input each call, so the
+        // lever moves inputTokens, not cache — and cache stays 0.
+        const totalsNoCache: TokenTotals = { input: 5000, output: 200, cacheCreation: 0, cacheRead: 0, total: 5200 };
+        const messages = [
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 100, toolUses: [toolUse("Bash", 0, null, 200)] }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, toolUses: [toolUse("Read", 0, null, 100)] }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50 }),
+        ];
+        const m = buildThinkingModel(messages, totalsNoCache, null);
+        if (!m) return;
+        expect(m.hasCacheWrite).toBe(false);
+        expect(m.hasCacheRead).toBe(false);
+        const base = projectThinking(m, 1, 1);
+        const z = projectThinking(m, 1, 0);
+        const d = projectThinking(m, 1, 2);
+        // Tool result presence = write(300) + read(200) = 500 input tokens.
+        expect(z.inputTokens).toBeCloseTo(5000 - 500, 5);
+        expect(d.inputTokens).toBeCloseTo(5000 + 500, 5);
+        // Cache buckets stay 0 in all positions; output untouched.
+        expect(z.cacheCreationTokens).toBe(0);
+        expect(d.cacheReadTokens).toBe(0);
+        expect(z.outputTokens).toBe(base.outputTokens);
+        expect(z.costUsd).toBeLessThan(base.costUsd);
+        expect(d.costUsd).toBeGreaterThan(base.costUsd);
+    });
+
+    test("caching ON: over-reducing a tool result past the cache-write bucket spills into input", () => {
+        // The cache-write bucket the run actually billed (300) is SMALLER than the
+        // measured tool-result write portion (500). Skipping that result (toolScale=0)
+        // must drain cache-write to exactly 0 and SPILL the 200-token remainder into
+        // uncached input — not silently clamp it away (which would understate cost and
+        // break the "drain first, spill the leftover" semantics).
+        const totals: TokenTotals = { input: 1000, output: 150, cacheCreation: 300, cacheRead: 1000, total: 2450 };
+        const messages = [
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 100, toolUses: [toolUse("Bash", 0, null, 500)] }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50 }),
+        ];
+        const m = buildThinkingModel(messages, totals, null);
+        if (!m) return;
+        expect(m.hasCacheWrite).toBe(true);
+        expect(m.coeffToolWrite).toBeCloseTo(500, 5); // single result, one trailing call → all write, no read
+        expect(m.coeffToolRead).toBeCloseTo(0, 5);
+        // Base projection reproduces the recorded mix exactly.
+        const base = projectThinking(m, 1, 1);
+        expect(base.cacheCreationTokens).toBeCloseTo(300, 5);
+        expect(base.inputTokens).toBeCloseTo(1000, 5);
+        // Skip the tool result entirely: write-portion delta = −500 against a 300 bucket.
+        const z = projectThinking(m, 1, 0);
+        expect(z.cacheCreationTokens).toBeCloseTo(0, 5); // drained, not negative
+        expect(z.inputTokens).toBeCloseTo(800, 5); // 1000 + (300 − 500) spilled remainder
+        expect(z.cacheReadTokens).toBeCloseTo(1000, 5); // read portion is 0 → untouched
+        // The 200 spilled tokens are conserved (a naive clamp would have lost them).
+        expect(z.totalTokens).toBeCloseTo(800 + 150 + 0 + 1000, 5);
+        expect(z.costUsd).toBeLessThan(base.costUsd);
+    });
+
     test("thinking and tool levers compose independently (deltas add)", () => {
         const messages = [
-            call({ generationMs: 10, thinkingMs: 10, outputTokens: 100, cacheWriteTokens: 0 }),
-            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 300 }),
-            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 150 }),
+            call({ generationMs: 10, thinkingMs: 10, outputTokens: 100, toolUses: [toolUse("Bash", 0, null, 100)] }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, toolUses: [toolUse("Read", 0, null, 100)] }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50 }),
         ];
         const m = buildThinkingModel(messages, TOTALS, null);
         if (!m) return;
-        // call0 thinking est = 300·(10/30) = 100. The tool estimate subtracts
-        // that SAME 100 (not the recorded output) from call1's write, so the
-        // thinking tokens don't leak into the tool population:
-        //   result_0 = cw_1(300) − [think(100) + nonThink(100)] = 100
-        //   result_1 = cw_2(150) − [think(0)   + nonThink(50)]  = 100
-        // coeffToolWrite=200, coeffToolRead=100 (result_0 re-read once).
+        // call0 thinking est = 300·(10/30) = 100; later=2 → think write/read 100/100.
+        // tool results: call0=100 (later2 → w100 r100), call1=100 (later1 → w100 r0)
+        //   → coeffToolWrite=200, coeffToolRead=100.
         expect(m.coeffToolWrite).toBeCloseTo(200, 5);
         expect(m.coeffToolRead).toBeCloseTo(100, 5);
         const both = projectThinking(m, 2, 2);
@@ -371,39 +398,6 @@ describe("projectThinking — tool-output lever", () => {
         expect(both.outputTokens).toBeCloseTo(400, 5);
         expect(both.cacheCreationTokens).toBeCloseTo(600, 5);
         expect(both.cacheReadTokens).toBeCloseTo(1200, 5);
-    });
-
-    test("under-recorded thinking does not leak into the tool estimate", () => {
-        // A thinking-heavy call whose per-message output badly under-counts the
-        // thinking block (10 logged for a long think). The gen-time estimate
-        // says it generated ~all of OUT; the tool estimate must subtract THAT,
-        // not the recorded 10, or the missing thinking is misread as a tool
-        // result and double-counted by both levers.
-        const totals: TokenTotals = {
-            input: 0,
-            output: 1000,
-            cacheCreation: 1000,
-            cacheRead: 0,
-            total: 2000,
-        };
-        const messages = [
-            // gen 10ms is the only generation time → think est = 1000·(10/10).
-            call({
-                generationMs: 10,
-                thinkingMs: 10,
-                outputTokens: 10,
-                thinkingOutputTokens: 10,
-                cacheWriteTokens: 0,
-            }),
-            call({ generationMs: 0, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 1000 }),
-        ];
-        const m = buildThinkingModel(messages, totals, null);
-        if (!m) return;
-        expect(m.thinkTokens).toBeCloseTo(1000, 5);
-        // cw_1(1000) − [think(1000) + nonThink(0)] = 0 → no phantom tool result.
-        expect(m.toolResultTokens).toBeCloseTo(0, 5);
-        // The buggy form (cw_1 − recorded_out 10 = 990) would have attributed
-        // nearly the whole write to tool results.
     });
 });
 
@@ -567,8 +561,11 @@ function skipToolModel() {
             outputTokens: 50,
             cacheWriteTokens: 0,
             toolUses: [
-                toolUse("Bash", 30, "x".repeat(10)),
-                toolUse("Read", 15, "y".repeat(5)),
+                // resultTokens chosen so call0's results total 150 split 100/50
+                // (Bash 2/3, Read 1/3 — same fractions the old preview-length
+                // proxy produced), keeping the downstream skip expectations stable.
+                toolUse("Bash", 30, "x".repeat(10), 100),
+                toolUse("Read", 15, "y".repeat(5), 50),
             ],
         }),
         call({
@@ -576,7 +573,7 @@ function skipToolModel() {
             thinkingMs: 0,
             outputTokens: 20,
             cacheWriteTokens: 200,
-            toolUses: [toolUse("TaskCreate", 5, "z".repeat(2))],
+            toolUses: [toolUse("TaskCreate", 5, "z".repeat(2), 80)],
         }),
         call({
             generationMs: 10,
@@ -640,7 +637,7 @@ describe("buildThinkingModel — turnProfiles", () => {
         expect(m.turnProfiles[2].toolNames).toEqual([]);
     });
 
-    test("toolResultCacheWrite/Read computed from cache-growth estimation", () => {
+    test("toolResultCacheWrite/Read derived from measured result tokens", () => {
         const m = skipToolModel();
         if (!m) return;
         // call0: toolPerCall=150, later=2 → write=150, read=150*(2-1)=150
@@ -653,10 +650,10 @@ describe("buildThinkingModel — turnProfiles", () => {
         expect(m.turnProfiles[2].toolResultCacheWrite).toBeCloseTo(0, 5);
     });
 
-    test("toolShares resultFraction weighted by result preview length", () => {
+    test("toolShares resultFraction weighted by measured result tokens", () => {
         const m = skipToolModel();
         if (!m) return;
-        // call0: Bash preview=10chars, Read preview=5chars → 10/15, 5/15
+        // call0: Bash result=100, Read result=50 → 100/150, 50/150 (= 10/15, 5/15)
         const [bash, read] = m.turnProfiles[0].toolShares;
         expect(bash.toolName).toBe("Bash");
         expect(bash.resultFraction).toBeCloseTo(10 / 15, 5);
@@ -666,7 +663,7 @@ describe("buildThinkingModel — turnProfiles", () => {
         expect(m.turnProfiles[1].toolShares[0].resultFraction).toBeCloseTo(1.0, 5);
     });
 
-    test("toolShares resultFraction splits equally when all previews are null", () => {
+    test("toolShares resultFraction splits equally when no result tokens recorded", () => {
         const messages = [
             call({
                 generationMs: 10,
@@ -908,5 +905,233 @@ describe("projectThinking — tool skip", () => {
         expect(proj.outputTokens).toBeGreaterThanOrEqual(0);
         expect(proj.cacheCreationTokens).toBeGreaterThanOrEqual(0);
         expect(proj.cacheReadTokens).toBeGreaterThanOrEqual(0);
+    });
+});
+
+describe("projectPerMessage", () => {
+    test("per-message deltas sum to the aggregate projection delta (thinking lever)", () => {
+        const m = earlyThinkingModel();
+        if (!m) return;
+        const impacts = projectPerMessage(m, 2); // double thinking
+        const sumOut = impacts.reduce((s, i) => s + i.dOutput, 0);
+        const sumCw = impacts.reduce((s, i) => s + i.dCacheWrite, 0);
+        const sumCr = impacts.reduce((s, i) => s + i.dCacheRead, 0);
+        const agg = projectThinking(m, 2);
+        const base = projectThinking(m, 1);
+        expect(sumOut).toBeCloseTo(agg.outputTokens - base.outputTokens, 4);
+        expect(sumCw).toBeCloseTo(agg.cacheCreationTokens - base.cacheCreationTokens, 4);
+        expect(sumCr).toBeCloseTo(agg.cacheReadTokens - base.cacheReadTokens, 4);
+    });
+
+    test("attributes the thinking OUTPUT delta to the message that did the thinking", () => {
+        // earlyThinkingModel: only call 0 thinks (100 tokens), index assigned in order.
+        const m = earlyThinkingModel();
+        if (!m) return;
+        const impacts = projectPerMessage(m, 0); // remove thinking
+        // OUTPUT is generated AT the thinking call, so exactly one row carries an
+        // output delta — call 0 — of −100. (Its cache-write/read cascade lands on
+        // the LATER calls that incur them; see the incidence test below.)
+        const withOutput = impacts.filter((i) => Math.abs(i.dOutput) >= 1);
+        expect(withOutput).toHaveLength(1);
+        expect(withOutput[0].dOutput).toBeCloseTo(-100, 5);
+        // Total output delta across all rows equals the single source's.
+        const sumOut = impacts.reduce((s, i) => s + i.dOutput, 0);
+        expect(sumOut).toBeCloseTo(-100, 5);
+    });
+
+    test("flags an eliminated turn when all its tools are skipped", () => {
+        const m = skipToolModel();
+        if (!m) return;
+        // TaskCreate is the only tool in call1 → skipping it eliminates that turn.
+        const impacts = projectPerMessage(m, 1, 1, new Set(["TaskCreate"]));
+        const elim = impacts.filter((i) => i.eliminated);
+        expect(elim).toHaveLength(1);
+        expect(elim[0].toolNames).toEqual(["TaskCreate"]);
+    });
+
+    test("identity levers + no skip → no message moves", () => {
+        const m = toolModel();
+        if (!m) return;
+        const impacts = projectPerMessage(m, 1, 1, new Set());
+        expect(impacts.every((i) => i.magnitude < 1e-9)).toBe(true);
+    });
+});
+
+// Mirrors the real claude_subagent_test shape: a standalone Write call whose
+// own prompt re-reads ~20k cached tokens. Skipping Write must make that whole
+// row disappear — not just zero its output. The cache-READ + input vanish (one
+// fewer reader); the prompt cache-WRITE relocates to the next surviving call.
+function writeRowModel() {
+    const messages = [
+        // call0: opening thinking that establishes the cached context.
+        call({ generationMs: 10, thinkingMs: 10, outputTokens: 65, cacheWriteTokens: 20000 }),
+        // call1: the standalone Write call — re-reads the 20k prefix.
+        {
+            ...call({ generationMs: 10, thinkingMs: 0, outputTokens: 126, cacheWriteTokens: 200, toolUses: [toolUse("Write", 126, "wrote results.txt", 204)] }),
+            inputTokens: 1,
+            cacheReadTokens: 20000,
+        },
+        // call2: final text reply.
+        {
+            ...call({ generationMs: 10, thinkingMs: 0, outputTokens: 29, cacheWriteTokens: 130 }),
+            inputTokens: 1,
+            cacheReadTokens: 20300,
+        },
+    ];
+    const totals: TokenTotals = { input: 3, output: 220, cacheCreation: 20330, cacheRead: 40300, total: 60853 };
+    return { m: buildThinkingModel(messages, totals, null), messages };
+}
+
+describe("projectPerMessage — turn elimination removes the whole row", () => {
+    test("skipping the sole tool zeroes the row's full footprint (input + cache-read + cache-write + output)", () => {
+        const { m, messages } = writeRowModel();
+        if (!m) return;
+        const writeIdx = messages[1].index;
+        const impacts = projectPerMessage(m, 1, 1, new Set(["Write"]));
+        const row = impacts.find((i) => i.messageIndex === writeIdx)!;
+        expect(row.eliminated).toBe(true);
+        // Each delta exactly cancels the row's recorded bucket → the row vanishes.
+        expect(row.dOutput).toBeCloseTo(-126, 5); // its generation
+        expect(row.dInput).toBeCloseTo(-1, 5); // own uncached prompt
+        expect(row.dCacheRead).toBeCloseTo(-20000, 5); // own prefix re-read — the dominant saving
+        expect(row.dCacheWrite).toBeCloseTo(-200, 5); // own prompt cache-write (relocated away)
+    });
+
+    test("the eliminated call's prompt cache-write relocates to the next surviving call", () => {
+        const { m, messages } = writeRowModel();
+        if (!m) return;
+        const nextIdx = messages[2].index;
+        const impacts = projectPerMessage(m, 1, 1, new Set(["Write"]));
+        const next = impacts.find((i) => i.messageIndex === nextIdx)!;
+        // call2 receives Write's relocated 200-token prompt cache-write on top of
+        // losing Write's sourced cascade (genCW 126 + resultCW 204 = 330):
+        //   −330 (sourced removed) + 200 (relocated) = −130.
+        expect(next.dCacheWrite).toBeCloseTo(-130, 5);
+    });
+
+    test("per-row deltas still sum to the aggregate projection delta (incl. input + dominant cache-read)", () => {
+        const { m } = writeRowModel();
+        if (!m) return;
+        const skip = computeSkipDelta(m.turnProfiles, new Set(["Write"]));
+        const agg = projectThinking(m, 1, 1, skip);
+        const base = projectThinking(m, 1, 1);
+        const impacts = projectPerMessage(m, 1, 1, new Set(["Write"]));
+        const sum = (sel: (i: (typeof impacts)[number]) => number) =>
+            impacts.reduce((s, i) => s + sel(i), 0);
+        expect(sum((i) => i.dInput)).toBeCloseTo(agg.inputTokens - base.inputTokens, 4);
+        expect(sum((i) => i.dOutput)).toBeCloseTo(agg.outputTokens - base.outputTokens, 4);
+        expect(sum((i) => i.dCacheWrite)).toBeCloseTo(agg.cacheCreationTokens - base.cacheCreationTokens, 4);
+        expect(sum((i) => i.dCacheRead)).toBeCloseTo(agg.cacheReadTokens - base.cacheReadTokens, 4);
+        // The dominant saving is the ~20k prompt cache-read, not the 126 output.
+        expect(base.cacheReadTokens - agg.cacheReadTokens).toBeCloseTo(20000, 4);
+    });
+
+    test("computeSkipDelta books the eliminated call's own prompt read + input", () => {
+        const { m } = writeRowModel();
+        if (!m) return;
+        const d = computeSkipDelta(m.turnProfiles, new Set(["Write"]));
+        expect(d.cacheRead).toBeCloseTo(20000, 5); // own prefix re-read (0 sourced read here)
+        expect(d.input).toBeCloseTo(1, 5);
+        // cacheWrite is sourced-only (330); the 200 own-write relocated (net 0).
+        expect(d.cacheWrite).toBeCloseTo(330, 5);
+    });
+});
+
+describe("projectThinking — robust across ALL lever combinations", () => {
+    // A reconciliation entry is part of the real stream now; buildThinkingModel
+    // must ignore it and the projection must stay finite + non-negative for
+    // every (thinkScale, toolScale, skip-subset) combination, including on a run
+    // with caching disabled (cacheCreation == cacheRead == 0).
+    function buildWith(totals: TokenTotals) {
+        const messages = [
+            call({
+                generationMs: 10,
+                thinkingMs: 5,
+                outputTokens: 100,
+                cacheWriteTokens: 0,
+                toolUses: [toolUse("Bash", 30, "x".repeat(10), 400)],
+            }),
+            call({
+                generationMs: 10,
+                thinkingMs: 0,
+                outputTokens: 50,
+                cacheWriteTokens: totals.cacheCreation > 0 ? 300 : 0,
+                toolUses: [toolUse("Read", 15, "y".repeat(5), 200)],
+            }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 0 }),
+        ];
+        return buildThinkingModel(messages, totals, 0.5);
+    }
+
+    const SCALES = [0, 0.5, 1, 1.5, 2];
+
+    function assertSane(p: ReturnType<typeof projectThinking>) {
+        for (const v of [
+            p.outputTokens,
+            p.cacheCreationTokens,
+            p.cacheReadTokens,
+            p.inputTokens,
+            p.totalTokens,
+            p.costUsd,
+        ]) {
+            expect(Number.isFinite(v)).toBe(true);
+            expect(v).toBeGreaterThanOrEqual(0);
+        }
+    }
+
+    test("cached run: every (think, tool, skip) combo is finite and non-negative", () => {
+        const m = buildWith({ input: 10, output: 200, cacheCreation: 300, cacheRead: 1000, total: 1510 });
+        if (!m) throw new Error("model should build");
+        const toolSubsets = [new Set<string>(), new Set(["Bash"]), new Set(["Bash", "Read"])];
+        for (const s of SCALES) {
+            for (const t of SCALES) {
+                for (const skipped of toolSubsets) {
+                    assertSane(projectThinking(m, s, t, computeSkipDelta(m.turnProfiles, skipped)));
+                }
+            }
+        }
+    });
+
+    test("cache-disabled run: tool lever WORKS (content-based) and every combo stays sane", () => {
+        // No prompt caching: cacheCreation == cacheRead == 0. Tool-result size is
+        // still measured from content, so the lever is active (routes to input);
+        // every (think, tool, skip) combo must stay finite + non-negative.
+        const m = buildWith({ input: 5000, output: 200, cacheCreation: 0, cacheRead: 0, total: 5200 });
+        if (!m) throw new Error("model should build even with caching disabled");
+        expect(m.hasCacheWrite).toBe(false);
+        expect(m.hasCacheRead).toBe(false);
+        expect(m.toolResultTokens).toBeGreaterThan(0); // measured from content, not cache
+        // Moving the tool lever changes cost even with caching off.
+        const lo = projectThinking(m, 1, 0, computeSkipDelta(m.turnProfiles, new Set()));
+        const hi = projectThinking(m, 1, 2, computeSkipDelta(m.turnProfiles, new Set()));
+        expect(hi.costUsd).toBeGreaterThan(lo.costUsd);
+        const toolSubsets = [new Set<string>(), new Set(["Bash"]), new Set(["Bash", "Read"])];
+        for (const s of SCALES) {
+            for (const t of SCALES) {
+                for (const skipped of toolSubsets) {
+                    assertSane(projectThinking(m, s, t, computeSkipDelta(m.turnProfiles, skipped)));
+                }
+            }
+        }
+    });
+
+    test("a reconciliation message in the stream is excluded from the model", () => {
+        const base = [
+            call({ generationMs: 10, thinkingMs: 5, outputTokens: 100, cacheWriteTokens: 0 }),
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 50, cacheWriteTokens: 300 }),
+        ];
+        const withRecon = [
+            ...base,
+            // role=reconciliation rows carry only token buckets + a note.
+            { ...base[0], role: "reconciliation" as const, generationMs: null, thinkingMs: null },
+        ];
+        const a = buildThinkingModel(base, TOTALS, 0.5);
+        const b = buildThinkingModel(withRecon, TOTALS, 0.5);
+        expect(a).not.toBeNull();
+        expect(b).not.toBeNull();
+        if (!a || !b) return;
+        // Same number of real calls — the reconciliation row didn't inflate it.
+        expect(b.calls).toBe(a.calls);
+        expect(b.coeffOutput).toBeCloseTo(a.coeffOutput, 5);
     });
 });

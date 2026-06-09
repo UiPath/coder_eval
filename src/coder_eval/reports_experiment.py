@@ -106,7 +106,7 @@ def eval_result_to_task_dict(
         ],
         "model_used": result.model_used,
         "reference_similarity": ref_similarity,
-        "input_tokens": (result.total_token_usage.input_tokens if result.total_token_usage else None),
+        "input_tokens": (result.total_token_usage.uncached_input_tokens if result.total_token_usage else None),
         "output_tokens": (result.total_token_usage.output_tokens if result.total_token_usage else None),
         "cache_creation_input_tokens": (
             result.total_token_usage.cache_creation_input_tokens if result.total_token_usage else None

@@ -1785,13 +1785,13 @@ def test_aggregate_token_usage_includes_crashed_partials(tmp_path):
             user_input="p",
             agent_output="<partial>",
             crashed=True,
-            token_usage=TokenUsage(input_tokens=100, output_tokens=20, total_cost_usd=0.01),
+            token_usage=TokenUsage(uncached_input_tokens=100, output_tokens=20, total_cost_usd=0.01),
         ),
         TurnRecord(
             iteration=1,
             user_input="p",
             agent_output="ok",
-            token_usage=TokenUsage(input_tokens=300, output_tokens=50, total_cost_usd=0.05),
+            token_usage=TokenUsage(uncached_input_tokens=300, output_tokens=50, total_cost_usd=0.05),
         ),
     ]
 

@@ -542,12 +542,13 @@ class TestCommunicateHappyPath:
         assert sorted(c.sequence_number for c in record.commands) == [0, 1]
         assert record.token_usage is not None
         # Cache-bucket convention: the SDK reports a full prompt count of 100 with
-        # 8 cached, so the fresh slice (100 - 8 = 92) is the cache-write and is
-        # recorded as cache_creation; input_tokens stays 0 and the cached portion
-        # is held in cache_read (see CodexAgent._token_usage_from_sdk).
-        assert record.token_usage.input_tokens == 0
-        assert record.token_usage.cache_creation_input_tokens == 92
+        # 8 cached, so the fresh slice (100 - 8 = 92) is plain uncached input;
+        # Codex has no cache-write (cache_creation == 0); 8 is cache_read. The
+        # derived input_tokens total = 92 + 8 = 100 (see _token_usage_from_sdk).
+        assert record.token_usage.uncached_input_tokens == 92
+        assert record.token_usage.cache_creation_input_tokens == 0
         assert record.token_usage.cache_read_input_tokens == 8
+        assert record.token_usage.input_tokens == 100
         assert agent.get_state() == AgentState.WORKING
         assert agent.pending_turn is None
         assert agent._active_turn_handle is None
@@ -569,50 +570,52 @@ def _sdk_usage(inp: int, out: int, cached: int) -> SimpleNamespace:
 
 
 class TestCodexCacheWriteBucketing:
-    """CodexAgent buckets the fresh prompt slice (input - cached) as cache-write.
+    """CodexAgent buckets the fresh prompt slice (input - cached) as uncached input.
 
     OpenAI reports ``input_tokens`` inclusive of the cached prefix and bills no
-    separate cache-write fee, so the fresh slice == the tokens written to cache
-    this call. CodexAgent emits it as ``cache_creation_input_tokens`` with
-    ``input_tokens == 0`` (mirroring Anthropic's cached-prompt accounting), and
-    the cost is unchanged because cache_write rate == input rate for OpenAI.
+    separate cache-write fee, so the fresh slice is plain ``uncached_input_tokens``
+    with ``cache_creation_input_tokens == 0``. ``input_tokens`` (the derived total)
+    equals the full prompt = uncached + cache_read.
     """
 
     def _agent(self, model: str = "gpt-5.5"):
         return CodexAgent(parse_agent_config(type=AgentKind.CODEX, model=model))
 
-    def test_first_call_all_fresh_is_cache_write(self):
-        # cached=0 (cold cache): the whole prompt is freshly processed AND written.
+    def test_first_call_all_fresh_is_uncached_input(self):
+        # cached=0 (cold cache): the whole prompt is freshly processed, no cache.
         usage = self._agent()._token_usage_from_sdk(_sdk_usage(1000, 40, 0))
         assert usage is not None
-        assert usage.input_tokens == 0
-        assert usage.cache_creation_input_tokens == 1000
+        assert usage.uncached_input_tokens == 1000
+        assert usage.cache_creation_input_tokens == 0
         assert usage.cache_read_input_tokens == 0
+        assert usage.input_tokens == 1000  # derived total
 
-    def test_fully_cached_prompt_has_no_cache_write(self):
-        # cached == input: nothing fresh, so no cache-write, all cache-read.
+    def test_fully_cached_prompt_has_no_uncached_input(self):
+        # cached == input: nothing fresh, all cache-read.
         usage = self._agent()._token_usage_from_sdk(_sdk_usage(1000, 40, 1000))
         assert usage is not None
-        assert usage.input_tokens == 0
+        assert usage.uncached_input_tokens == 0
         assert usage.cache_creation_input_tokens == 0
         assert usage.cache_read_input_tokens == 1000
+        assert usage.input_tokens == 1000  # derived total = cache_read
 
-    def test_partial_cache_fresh_slice_is_cache_write(self):
+    def test_partial_cache_fresh_slice_is_uncached_input(self):
         usage = self._agent()._token_usage_from_sdk(_sdk_usage(1000, 40, 800))
         assert usage is not None
-        assert usage.input_tokens == 0
-        assert usage.cache_creation_input_tokens == 200  # 1000 - 800
+        assert usage.uncached_input_tokens == 200  # 1000 - 800
+        assert usage.cache_creation_input_tokens == 0
         assert usage.cache_read_input_tokens == 800
+        assert usage.input_tokens == 1000  # derived total
 
     def test_cached_exceeding_input_clamps_to_zero(self):
         # Defensive: a malformed delta where cached > input must not go negative.
         usage = self._agent()._token_usage_from_sdk(_sdk_usage(100, 5, 150))
         assert usage is not None
-        assert usage.cache_creation_input_tokens == 0
+        assert usage.uncached_input_tokens == 0
         assert usage.cache_read_input_tokens == 150
 
-    def test_cost_prices_cache_write_at_input_rate(self):
-        # gpt-5.5: input $5/MTok, cached $0.50/MTok. Fresh 1M as cache-write -> $5.
+    def test_cost_prices_uncached_input_at_input_rate(self):
+        # gpt-5.5: input $5/MTok, cached $0.50/MTok. Fresh 1M as uncached input -> $5.
         usage = self._agent("gpt-5.5")._token_usage_from_sdk(_sdk_usage(1_000_000, 0, 0))
         assert usage is not None
         assert usage.total_cost_usd == pytest.approx(5.0)
@@ -621,10 +624,10 @@ class TestCodexCacheWriteBucketing:
         assert self._agent()._token_usage_from_sdk(None) is None
         assert self._agent()._token_usage_from_sdk(SimpleNamespace(total=None)) is None
 
-    async def test_per_message_cache_write_on_first_submessage_only(self):
+    async def test_per_message_uncached_input_on_first_submessage_only(self):
         # One generation (one tokenUsage) with two tool items + text. The fresh
         # slice is recorded once, on the first sub-message; follow-ups carry 0 so
-        # per-message_id sums don't double-count. input_tokens is 0 throughout.
+        # per-message_id sums don't double-count. cache_creation is 0 throughout.
         cmd_root = SimpleNamespace(
             type="commandExecution", id="c1", command="echo hi", exit_code=0, aggregated_output="hi\n", duration_ms=5
         )
@@ -653,22 +656,21 @@ class TestCodexCacheWriteBucketing:
 
         assistant_msgs = [m for m in record.messages if hasattr(m, "cache_creation_tokens")]
         assert assistant_msgs, "expected at least one AssistantMessage"
-        # No message carries raw input; the fresh slice lives in cache_creation.
-        assert all(m.input_tokens == 0 for m in assistant_msgs)
+        # Codex has no cache-write: the fresh slice lives in input_tokens, cache_creation is 0.
+        assert all(m.cache_creation_tokens == 0 for m in assistant_msgs)
         # Per-generation fresh (100 - 8 = 92) recorded exactly once across the gen.
-        assert sum(m.cache_creation_tokens for m in assistant_msgs) == 92
-        assert sum(1 for m in assistant_msgs if m.cache_creation_tokens > 0) == 1
+        assert sum(m.input_tokens for m in assistant_msgs) == 92
+        assert sum(1 for m in assistant_msgs if m.input_tokens > 0) == 1
         assert sum(m.cache_read_tokens for m in assistant_msgs) == 8
         # Turn-level aggregate matches the per-message sum (single cold gen).
         assert record.token_usage is not None
-        assert record.token_usage.cache_creation_input_tokens == 92
+        assert record.token_usage.uncached_input_tokens == 92
+        assert record.token_usage.cache_creation_input_tokens == 0
 
-    async def test_cache_miss_reread_is_input_not_cache_write(self):
-        # Two generations. Gen 2's prompt barely grew (1000 -> 1100) yet only 100
-        # tokens hit cache (a miss / eviction, like after a spawn-wait pause), so
-        # its fresh slice is 1000. Only the 100-token growth is a genuine cache
-        # WRITE; the other 900 are a re-send of previously-cached content and must
-        # be plain input — NOT an inflated 1000-token cache-write on the tool call.
+    async def test_fresh_slice_is_uncached_input_across_generations(self):
+        # Two generations. The fresh (uncached) slice each call = input - cached,
+        # billed as plain uncached input with NO cache-write bucket (Codex has no
+        # separate cache-write fee). Gen 2: fresh = 1100 - 100 = 1000.
         def _gen(item_id: str, text: str, inp: int, out: int, cached: int, tot_in: int, tot_out: int, tot_cached: int):
             msg = SimpleNamespace(type="agentMessage", id=item_id, text=text)
             last = SimpleNamespace(
@@ -690,16 +692,17 @@ class TestCodexCacheWriteBucketing:
         record = await agent.communicate("go")
 
         msgs = [m for m in record.messages if hasattr(m, "cache_creation_tokens")]
-        # Gen 1 (cold): all 1000 fresh is a genuine write, no input.
+        # Gen 1 (cold): all 1000 fresh is uncached input, no cache.
         g1 = next(m for m in msgs if m.message_id and m.message_id.endswith("-msg-0"))
-        assert (g1.cache_creation_tokens, g1.input_tokens) == (1000, 0)
-        # Gen 2 (cache miss): only the 100-token growth is a write; 900 is input.
+        assert (g1.cache_creation_tokens, g1.input_tokens) == (0, 1000)
+        # Gen 2: fresh 1000 is uncached input, 100 cache-read; no cache-write.
         g2 = next(m for m in msgs if m.message_id and m.message_id.endswith("-msg-1"))
-        assert (g2.cache_creation_tokens, g2.input_tokens, g2.cache_read_tokens) == (100, 900, 100)
-        # The turn total's split matches the per-message split (magnitudes unchanged).
+        assert (g2.cache_creation_tokens, g2.input_tokens, g2.cache_read_tokens) == (0, 1000, 100)
+        # Turn total: uncached 2000, no cache-write, cache-read 100; derived input == 2100.
         tu = record.token_usage
         assert tu is not None
-        assert (tu.cache_creation_input_tokens, tu.input_tokens, tu.cache_read_input_tokens) == (1100, 900, 100)
+        assert (tu.cache_creation_input_tokens, tu.uncached_input_tokens, tu.cache_read_input_tokens) == (0, 2000, 100)
+        assert tu.input_tokens == 2100
         assert tu.output_tokens == 15
 
 
@@ -809,10 +812,11 @@ class TestCommunicateCrashTokenFallback:
         assert agent.pending_turn.crashed is True
         tu = agent.pending_turn.token_usage
         assert tu is not None
-        # Fresh slice 100 - 8 = 92 -> cache_creation; cached 8 -> cache_read; out 40.
-        assert tu.input_tokens == 0
-        assert tu.cache_creation_input_tokens == 92
+        # Fresh slice 100 - 8 = 92 -> uncached_input; cached 8 -> cache_read; out 40; no cache-write.
+        assert tu.uncached_input_tokens == 92
+        assert tu.cache_creation_input_tokens == 0
         assert tu.cache_read_input_tokens == 8
+        assert tu.input_tokens == 100  # derived total
         assert tu.output_tokens == 40
 
 
@@ -844,10 +848,12 @@ class TestTokenUsageFromMessages:
 
         usage = agent._token_usage_from_messages(messages)
         assert usage is not None
-        assert usage.input_tokens == 0
-        assert usage.cache_creation_input_tokens == 102
+        # Fresh slices (input + any cache_creation) fold into uncached; Codex has no cache-write.
+        assert usage.uncached_input_tokens == 102
+        assert usage.cache_creation_input_tokens == 0
         assert usage.cache_read_input_tokens == 12
         assert usage.output_tokens == 46
+        assert usage.input_tokens == 114  # derived total = 102 + 12
 
     def test_empty_list_returns_none(self):
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
@@ -911,15 +917,16 @@ class TestFlushMessageReasoningSplit:
 
         # Per-message_id sums reconcile to the turn total.
         assert sum(m.output_tokens for m in assistant) == 50
-        # Cache write recorded once (first sub-message only): 100 - 8 = 92.
-        assert sum(m.cache_creation_tokens for m in assistant) == 92
-        assert sum(1 for m in assistant if m.cache_creation_tokens > 0) == 1
+        # Uncached input recorded once (first sub-message only): 100 - 8 = 92; no cache-write.
+        assert sum(m.input_tokens for m in assistant) == 92
+        assert sum(1 for m in assistant if m.input_tokens > 0) == 1
+        assert all(m.cache_creation_tokens == 0 for m in assistant)
         assert sum(m.cache_read_tokens for m in assistant) == 8
-        assert all(m.input_tokens == 0 for m in assistant)
 
         assert record.token_usage is not None
         assert record.token_usage.output_tokens == 50
-        assert record.token_usage.cache_creation_input_tokens == 92
+        assert record.token_usage.uncached_input_tokens == 92
+        assert record.token_usage.cache_creation_input_tokens == 0
         assert record.token_usage.cache_read_input_tokens == 8
 
 
@@ -955,11 +962,11 @@ def _collab_call(
 
 class TestCodexCollabSubAgent:
     """Codex spawns sub-agents via collabAgentToolCall (tool='spawnAgent'), not
-    Claude's Task tool. The agent must surface these as tool calls AND record one
-    (tokenless) sub_agent_usage entry per spawn — the wait/messaging follow-ups
-    reuse the same thread and are not new sub-agents."""
+    Claude's Task tool. The agent must surface these as tool calls AND nest the
+    sub-agent's generations under the spawn (``parent_tool_use_id``) — the
+    wait/messaging follow-ups reuse the same thread and are not new sub-agents."""
 
-    async def test_spawn_records_subagent_usage_and_tool_calls(self, monkeypatch, tmp_path):
+    async def test_spawn_nests_subagent_message_and_records_tool_calls(self, monkeypatch, tmp_path):
         # Isolate CODEX_HOME to a dir with no sessions/ so inner-tool-call recovery
         # short-circuits (no rollout to read) instead of polling the real ~/.codex.
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
@@ -980,20 +987,16 @@ class TestCodexCollabSubAgent:
         # Both collab calls surface as Agent tool calls in the transcript.
         agent_calls = [c for c in record.commands if c.tool_name == "Agent"]
         assert len(agent_calls) == 2
-        # Exactly ONE sub-agent recorded (the spawn, not the wait), tokenless,
-        # carrying the spawned model.
-        assert len(record.sub_agent_usage) == 1
-        sa = record.sub_agent_usage[0]
-        assert sa.tokens.output_tokens == 0
-        assert sa.tokens.total_cost_usd is None
-        assert "gpt-5.5" in sa.per_model
 
         # The sub-agent's returned result ("5050") nests under the spawn call
-        # (parent_tool_use_id == the spawn's tool_use_id) — this is what makes the
-        # Agent row expandable in the evalboard.
+        # (parent_tool_use_id == the spawn's tool_use_id, carrying the spawned
+        # model) — this is what makes the Agent row expandable in the evalboard
+        # and what per-sub-agent attribution is derived from. Only the spawn
+        # nests; the wait reuses the same thread and is not a new sub-agent.
         nested = [m for m in record.messages if getattr(m, "parent_tool_use_id", None) == "call_spawn"]
         assert len(nested) == 1
         assert nested[0].content_blocks[0].text == "5050"
+        assert nested[0].model == "gpt-5.5"
 
     async def test_wait_only_records_no_subagent(self, monkeypatch, tmp_path):
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
@@ -1008,7 +1011,8 @@ class TestCodexCollabSubAgent:
 
         record = await agent.communicate("wait")
 
-        assert record.sub_agent_usage == []
+        # No spawn → no nested sub-agent generations.
+        assert not any(getattr(m, "parent_tool_use_id", None) for m in record.messages)
         assert any(c.tool_name == "Agent" for c in record.commands)
 
     async def test_orphan_tool_started_without_completed_is_closed_unresolved(self, monkeypatch, tmp_path):
@@ -1200,11 +1204,10 @@ class TestCodexSubAgentToolRecovery:
         assert g2.content_blocks[0].block_type == "text"
         assert g2.content_blocks[0].text == "5050"
         assert g2.output_tokens == 6
-        # The aggregate sub_agent_usage tokens come from the child's cumulative total.
-        sa = record.sub_agent_usage[0]
-        assert sa.tokens.output_tokens == 96
-        assert sa.tokens.cache_read_input_tokens == 15104
-        assert sa.tool_uses == 1
+        # Per-sub-agent aggregate is now derived by summing the nested generations:
+        # output 90 + 6 == 96, cache-read 3456 + 11648 == 15104.
+        assert sum(m.output_tokens for m in nested) == 96
+        assert sum(m.cache_read_tokens for m in nested) == 15104
         # The inner python3 command is recovered as a Bash tool row + folded into total.
         bash = [c for c in record.commands if c.tool_name == "Bash"]
         assert len(bash) == 1 and "range(1,101)" in bash[0].parameters.get("command", "")
@@ -1249,11 +1252,13 @@ class TestCodexSubAgentToolRecovery:
 
         tu = record.token_usage
         assert tu is not None
-        # parent (cw 2000, cr 0, out 20) + child (cw 8755, cr 15104, out 96).
-        assert tu.cache_creation_input_tokens == 2000 + 8755
+        # parent (uncached 2000, cr 0, out 20) + child (uncached 8755, cr 15104, out 96).
+        # Codex has no cache-write, so cache_creation stays 0; fresh slices fold into uncached.
+        assert tu.cache_creation_input_tokens == 0
+        assert tu.uncached_input_tokens == 2000 + 8755
         assert tu.cache_read_input_tokens == 0 + 15104
         assert tu.output_tokens == 20 + 96
-        assert tu.input_tokens == 0
+        assert tu.input_tokens == (2000 + 8755) + (0 + 15104)  # derived total
 
 
 class TestCodexGenericToolCapture:

@@ -165,11 +165,20 @@ def format_token_usage(usage: Any) -> str:
 
     Returns empty string if usage is None or has no token counts.
     Includes cache_read_input_tokens if non-zero.
+
+    ``in=`` shows ``uncached_input_tokens`` (the fresh, billed-at-input-rate
+    slice), NOT the derived ``input_tokens`` total — the total already folds in
+    ``cache_read``, so using it here while also appending ``cached=`` would
+    double-count the cached prefix. Falls back to ``input_tokens`` only for
+    objects that predate the split / don't expose the uncached field.
     """
     if usage is None:
         return ""
     try:
-        input_tokens = getattr(usage, "input_tokens", 0) or 0
+        input_tokens = getattr(usage, "uncached_input_tokens", None)
+        if input_tokens is None:
+            input_tokens = getattr(usage, "input_tokens", 0)
+        input_tokens = input_tokens or 0
         output_tokens = getattr(usage, "output_tokens", 0) or 0
         if not input_tokens and not output_tokens:
             return ""

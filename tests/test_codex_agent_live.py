@@ -117,10 +117,11 @@ async def test_codex_live_token_usage_populated(tmp_path):
 
     assert record.token_usage is not None
     tu = record.token_usage
-    # Cache-write bucket convention (see CodexAgent._token_usage_from_sdk): the
-    # SDK's full prompt count is split into cache_read (the cached prefix) and
-    # cache_creation (the fresh slice == cache write), so input_tokens is always
-    # 0. Assert on what's actually populated rather than the now-always-0 input.
-    assert tu.input_tokens == 0
+    # Bucket convention (see CodexAgent._token_usage_from_sdk): the SDK's full
+    # prompt count is split into uncached_input_tokens (the fresh slice) and
+    # cache_read_input_tokens (the cached prefix); Codex bills no separate
+    # cache-write fee, so cache_creation is always 0. input_tokens is the derived
+    # TOTAL of the three buckets, so assert on the buckets, not the total.
+    assert tu.cache_creation_input_tokens == 0
     assert tu.output_tokens > 0
-    assert (tu.cache_creation_input_tokens + tu.cache_read_input_tokens) > 0
+    assert (tu.uncached_input_tokens + tu.cache_read_input_tokens) > 0

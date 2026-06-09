@@ -71,7 +71,11 @@ export interface TaskResultSummary {
     // Turns cells inflate by +1 on legacy runs that lack total_turns.
     hasFinalReply: boolean;
     // Per-task token totals from run.json. Null on legacy runs that
-    // don't record per-task token counts.
+    // don't record per-task token counts. `inputTokens` is the disjoint
+    // uncached slice (run.json `input_tokens` is serialized from
+    // TokenUsage.uncached_input_tokens — see reports_experiment.py), so it
+    // sits alongside the cache columns without overlap.
+    inputTokens: number | null;
     outputTokens: number | null;
     cacheCreationTokens: number | null;
     cacheReadTokens: number | null;
@@ -122,7 +126,12 @@ export interface ToolCall {
 //   - content: a flattened list of typed blocks (thinking / tool_use / text).
 export interface MessageEvent {
     index: number;                // 1-based order across the whole task
-    role: "assistant";            // user/system live in iteration metadata, not here
+    // "assistant" = a real LLM generation. "reconciliation" = the synthetic
+    // terminal entry (one per turn) carrying tokens the agent billed but never
+    // surfaced as a generation — so summing the four token buckets across the
+    // stream reproduces the authoritative turn total. user/system live in
+    // iteration metadata, not here.
+    role: "assistant" | "reconciliation";
     startedAt: string | null;
     completedAt: string | null;
     generationMs: number | null;  // LLM generation time for this message
@@ -169,6 +178,10 @@ export interface MessageEvent {
     // rate-accurate per-message attribution. null when the model is unpriced or
     // no token figure was recorded (older runs).
     costUsd: number | null;
+    // Only set on a `reconciliation` row: the human-readable explanation of why
+    // these tokens are unattributed (e.g. fixed prompt overhead + sub-agent
+    // input the stream doesn't bubble up). null on assistant rows.
+    note: string | null;
 }
 
 export interface MessageToolUse {
@@ -194,6 +207,11 @@ export interface MessageToolUse {
     // single emission carries multiple parallel tool_uses is it split among
     // them (by arg-size proxy). null when no output_tokens was recorded.
     outputTokens: number | null;
+    // Approx token size of THIS tool's result content (measured from the
+    // untruncated result, cache-independent). Drives the cost simulator's
+    // tool-output lever — works whether or not prompt caching was enabled. null
+    // on runs predating the field.
+    resultTokens: number | null;
 }
 
 export interface ArtifactRef {
@@ -224,14 +242,14 @@ export interface TaskDetail extends TaskResultSummary {
     // Per-task token totals summed across iterations. All zeros for legacy
     // runs that don't record per-iteration token_usage.
     tokens: TokenTotals;
-    // Per-sub-agent token breakdown (from iterations[].sub_agent_usage). Sourced
-    // from each sub-agent invocation's AgentEnd usage, so it is COMPLETE — total
-    // = input + output + cache-creation + cache-read. Keyed by 1-based sub-agent
-    // index (`sub-agent #1`, `#2`, …): per-tool_use_id attribution is no longer
-    // present in the data, so the message-timeline lookup by tool_use_id simply
-    // misses (renders the Agent row without token columns) while the cost
-    // simulator still consumes the values via Object.values(). Empty for runs
-    // that predate this capture. The field name is retained for compatibility.
+    // Per-sub-agent token breakdown, derived by grouping the parsed messages on
+    // `parentToolUseId` (the spawning Agent call's tool_use_id). Each sub-agent's
+    // generations are tagged with that id — Codex's child generations are
+    // reconstructed from its rollout, and Claude's terminal generation is
+    // synthesized as one too — so the breakdown is complete and keyed by the
+    // spawning tool_use_id (the message timeline can therefore join it back to
+    // the Agent row). The cost simulator consumes the values via Object.values().
+    // Empty for runs/turns with no spawned sub-agents.
     subAgentUsageByToolId: Record<string, SubAgentTotals>;
 }
 
@@ -244,35 +262,32 @@ export interface SubAgentTotals {
     cacheRead: number;
 }
 
-// Reduce iterations[].sub_agent_usage into a per-sub-agent token breakdown.
-//
-// The serialized entry (Python `AgentUsage`) nests token components under
-// `tokens` and no longer carries a `tool_use_id` (per-call attribution moved to
-// the event tree and isn't wired up yet). We therefore key by a stable 1-based
-// sub-agent index ("sub-agent #1", "#2", …) accumulated across all iterations,
-// so each invocation gets its own bucket and the values flow to the cost
-// simulator via Object.values(). Empty for runs without sub-agent usage.
+// Group the parsed assistant messages by `parentToolUseId` into a per-sub-agent
+// token breakdown. A sub-agent's generations all carry the spawning Agent call's
+// tool_use_id; main-thread messages (parentToolUseId null/undefined) are skipped.
+// Keyed by that tool_use_id so the timeline can join it to the Agent row, with
+// the values flowing to the cost simulator via Object.values(). Empty when no
+// message is parented to a sub-agent spawn.
 export function aggregateSubAgentUsage(
-    iterations: TurnEntry[],
+    messages: MessageEvent[],
 ): Record<string, SubAgentTotals> {
     const out: Record<string, SubAgentTotals> = {};
-    let index = 0;
-    for (const it of iterations) {
-        for (const sa of it.sub_agent_usage ?? []) {
-            const tok = sa.tokens ?? {};
-            const input = tok.input_tokens ?? 0;
-            const output = tok.output_tokens ?? 0;
-            const cacheCreation = tok.cache_creation_input_tokens ?? 0;
-            const cacheRead = tok.cache_read_input_tokens ?? 0;
-            index += 1;
-            out[`sub-agent #${index}`] = {
-                total: input + output + cacheCreation + cacheRead,
-                input,
-                output,
-                cacheCreation,
-                cacheRead,
-            };
-        }
+    for (const m of messages) {
+        if (m.role === "reconciliation") continue; // not a sub-agent generation
+        const toolId = m.parentToolUseId;
+        if (!toolId) continue;
+        const input = m.inputTokens ?? 0;
+        const output = m.outputTokens ?? 0;
+        const cacheCreation = m.cacheWriteTokens ?? 0;
+        const cacheRead = m.cacheReadTokens ?? 0;
+        const prev = out[toolId];
+        out[toolId] = {
+            input: (prev?.input ?? 0) + input,
+            output: (prev?.output ?? 0) + output,
+            cacheCreation: (prev?.cacheCreation ?? 0) + cacheCreation,
+            cacheRead: (prev?.cacheRead ?? 0) + cacheRead,
+            total: (prev?.total ?? 0) + input + output + cacheCreation + cacheRead,
+        };
     }
     return out;
 }
@@ -469,6 +484,7 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
         totalTurns: t.total_turns ?? null,
         expectedTurns: t.expected_turns ?? null,
         hasFinalReply: t.has_final_reply ?? false,
+        inputTokens: t.input_tokens ?? null,
         outputTokens: t.output_tokens ?? null,
         cacheCreationTokens: t.cache_creation_input_tokens ?? null,
         cacheReadTokens: t.cache_read_input_tokens ?? null,
@@ -835,6 +851,10 @@ interface CommandEntry {
     result_status?: string;
     result_summary?: unknown;
     error_message?: string | null;
+    // Approx token size of the tool result the model received, measured from the
+    // untruncated result content (computed field on CommandTelemetry). A direct,
+    // cache-independent "tool output size" — present whether caching was on/off.
+    result_tokens?: number | null;
 }
 
 interface ContentBlockEntry {
@@ -871,6 +891,8 @@ interface MessageEntry {
     cache_read_tokens?: number | null;
     reasoning_tokens?: number | null;
     model?: string | null;
+    // Only on a role="reconciliation" entry: why these tokens are unattributed.
+    note?: string | null;
 }
 
 export interface TurnEntry {
@@ -881,22 +903,16 @@ export interface TurnEntry {
         result?: string | null;
         stop_reason?: string | null;
     } | null;
-    sub_agent_usage?: SubAgentUsageEntry[] | null;
-}
-
-// Current serialized shape of one sub-agent entry (Python `AgentUsage`).
-// Token components are nested under `tokens` (a `TokenUsage`); per-tool-use_id
-// attribution is GONE — the spawning Agent tool_use_id is no longer recorded
-// here (its replacement, nested AgentStart/End joined via parent_thread_id, is
-// not implemented yet). Consumers therefore key the breakdown by array index.
-interface SubAgentUsageEntry {
-    tokens?: TokenUsageEntry | null;
-    tool_uses?: number | null;
-    per_model?: Record<string, TokenUsageEntry> | null;
 }
 
 interface TokenUsageEntry {
+    // On current runs `input_tokens` is the TOTAL prompt input (uncached +
+    // cache-creation + cache-read); `uncached_input_tokens` is the disjoint
+    // fresh slice we actually want to display next to the cache columns. Legacy
+    // runs predate the split and carry only `input_tokens`, which back then
+    // meant the disjoint uncached slice — so it's the correct fallback.
     input_tokens?: number | null;
+    uncached_input_tokens?: number | null;
     output_tokens?: number | null;
     cache_creation_input_tokens?: number | null;
     cache_read_input_tokens?: number | null;
@@ -1154,6 +1170,10 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                             RESULT_PREVIEW_CAP,
                         ),
                         outputTokens: null,
+                        resultTokens:
+                            typeof cmd?.result_tokens === "number"
+                                ? cmd.result_tokens
+                                : null,
                     });
                 }
             }
@@ -1333,6 +1353,7 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                     cacheWriteTokens: haveCacheWrite ? cacheWriteSum : null,
                     cacheReadTokens: haveCacheRead ? cacheReadSum : null,
                 }),
+                note: null,
             });
             group = [];
         };
@@ -1364,6 +1385,42 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             }
         }
         flush();
+
+        // After this turn's assistant emissions, surface the backend's synthetic
+        // reconciliation entry (tokens billed but never streamed as a generation)
+        // as its own row. Booked per-turn by the EventCollector so the four token
+        // buckets across the whole stream sum EXACTLY to the run total — that's
+        // what lets the dashboard sum the stream instead of reading a separate
+        // aggregate.
+        for (const msg of turn.messages ?? []) {
+            if (msg.role !== "reconciliation") continue;
+            out.push({
+                index: ++order,
+                role: "reconciliation",
+                startedAt: null,
+                completedAt: null,
+                generationMs: null,
+                thinkingMs: null,
+                textMs: null,
+                toolGenMs: null,
+                blockTypes: [],
+                thinkingText: null,
+                text: null,
+                toolUses: [],
+                inputTokens: typeof msg.input_tokens === "number" ? msg.input_tokens : null,
+                outputTokens: typeof msg.output_tokens === "number" ? msg.output_tokens : null,
+                cacheWriteTokens:
+                    typeof msg.cache_creation_tokens === "number" ? msg.cache_creation_tokens : null,
+                cacheReadTokens: typeof msg.cache_read_tokens === "number" ? msg.cache_read_tokens : null,
+                parentToolUseId: null,
+                reasoningTokens: null,
+                thinkingOutputTokens: null,
+                textOutputTokens: null,
+                model: null,
+                costUsd: null,
+                note: typeof msg.note === "string" ? msg.note : null,
+            });
+        }
     }
     return out;
 }
@@ -1473,9 +1530,7 @@ export async function readTaskDetail(
     // iteration aggregate only for runs that never recorded per-message tokens.
     const tokens = selectTokenTotals(messages, task?.iterations ?? []);
 
-    const subAgentUsageByToolId = aggregateSubAgentUsage(
-        task?.iterations ?? [],
-    );
+    const subAgentUsageByToolId = aggregateSubAgentUsage(messages);
 
     const taskDescription =
         task?.task_config?.resolved?.initial_prompt ??
@@ -1535,10 +1590,18 @@ export function selectTokenTotals(
     turns: TurnEntry[],
 ): TokenTotals {
     const fromMessages = sumMessageTokens(messages);
+    // Current runs carry a synthetic reconciliation entry per turn, so the
+    // message stream sums EXACTLY to the authoritative total — the stream is
+    // self-reconciling and authoritative; no separate aggregate is consulted.
+    // ("agent tokens" — the competing iteration aggregate — is retired here.)
+    if (messages.some((m) => m.role === "reconciliation")) {
+        return fromMessages;
+    }
+    // Legacy / pre-reconciliation runs: the stream may under-report (sub-agent
+    // tokens, fixed prompt overhead). Fall back to the more-complete of the two
+    // sources, as before.
     const fromIterations = sumTokenTotals(turns);
-    return fromIterations.total >= fromMessages.total
-        ? fromIterations
-        : fromMessages;
+    return fromIterations.total >= fromMessages.total ? fromIterations : fromMessages;
 }
 
 // Token totals from the iteration token_usage aggregate (model_usage-derived on
@@ -1551,7 +1614,9 @@ function sumTokenTotals(turns: TurnEntry[]): TokenTotals {
     for (const t of turns) {
         const tu = t.token_usage;
         if (!tu) continue;
-        input += tu.input_tokens ?? 0;
+        // Disjoint uncached slice: prefer the explicit field on current runs,
+        // fall back to legacy `input_tokens` (which meant uncached back then).
+        input += tu.uncached_input_tokens ?? tu.input_tokens ?? 0;
         output += tu.output_tokens ?? 0;
         cacheCreation += tu.cache_creation_input_tokens ?? 0;
         cacheRead += tu.cache_read_input_tokens ?? 0;

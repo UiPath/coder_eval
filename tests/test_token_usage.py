@@ -14,6 +14,7 @@ from coder_eval.agents.claude_code_agent import (
 from coder_eval.models import (
     AgentKind,
     AssistantMessage,
+    CommandTelemetry,
     EvaluationResult,
     RunSummary,
     TokenUsage,
@@ -54,13 +55,13 @@ class TestTokenUsageModel:
 
     def test_construction_with_all_fields(self):
         usage = TokenUsage(
-            input_tokens=1000,
+            uncached_input_tokens=1000,
             output_tokens=500,
             cache_creation_input_tokens=200,
             cache_read_input_tokens=100,
             total_cost_usd=0.0123,
         )
-        assert usage.input_tokens == 1000
+        assert usage.uncached_input_tokens == 1000
         assert usage.output_tokens == 500
         assert usage.cache_creation_input_tokens == 200
         assert usage.cache_read_input_tokens == 100
@@ -68,14 +69,14 @@ class TestTokenUsageModel:
 
     def test_defaults_all_zeros(self):
         usage = TokenUsage()
-        assert usage.input_tokens == 0
+        assert usage.uncached_input_tokens == 0
         assert usage.output_tokens == 0
         assert usage.cache_creation_input_tokens == 0
         assert usage.cache_read_input_tokens == 0
         assert usage.total_cost_usd is None
 
     def test_total_tokens_property(self):
-        usage = TokenUsage(input_tokens=1000, output_tokens=500)
+        usage = TokenUsage(uncached_input_tokens=1000, output_tokens=500)
         assert usage.total_tokens == 1500
 
     def test_total_tokens_zero(self):
@@ -84,7 +85,7 @@ class TestTokenUsageModel:
 
     def test_serialization_roundtrip(self):
         original = TokenUsage(
-            input_tokens=1000,
+            uncached_input_tokens=1000,
             output_tokens=500,
             cache_creation_input_tokens=200,
             cache_read_input_tokens=100,
@@ -93,17 +94,53 @@ class TestTokenUsageModel:
         json_str = original.model_dump_json()
         restored = TokenUsage.model_validate_json(json_str)
 
-        assert restored.input_tokens == original.input_tokens
+        assert restored.uncached_input_tokens == original.uncached_input_tokens
         assert restored.output_tokens == original.output_tokens
         assert restored.cache_creation_input_tokens == original.cache_creation_input_tokens
         assert restored.cache_read_input_tokens == original.cache_read_input_tokens
         assert restored.total_cost_usd == original.total_cost_usd
 
     def test_serialization_excludes_computed_property(self):
-        usage = TokenUsage(input_tokens=100, output_tokens=50)
+        usage = TokenUsage(uncached_input_tokens=100, output_tokens=50)
         dumped = usage.model_dump()
         # total_tokens is a @property, not a field, so it shouldn't be in dump
         assert "total_tokens" not in dumped
+
+
+# --- CommandTelemetry.result_tokens tests ---
+
+
+class TestCommandTelemetryResultTokens:
+    """The content-based, cache-independent tool-output size (ceil(len/4))."""
+
+    @staticmethod
+    def _telemetry(result_summary: str | None) -> CommandTelemetry:
+        return CommandTelemetry(
+            tool_name="Bash",
+            tool_id="t1",
+            timestamp=datetime.now(),
+            result_summary=result_summary,
+        )
+
+    @pytest.mark.parametrize(
+        ("summary", "expected"),
+        [
+            (None, 0),  # no result content
+            ("", 0),  # empty summary
+            ("a", 1),  # 1 char -> ceil(1/4) = 1
+            ("abcd", 1),  # exact multiple -> ceil(4/4) = 1
+            ("abcde", 2),  # 5 chars -> ceil(5/4) = 2
+            ("a" * 8, 2),  # exact multiple -> ceil(8/4) = 2
+            ("a" * 9, 3),  # 9 chars -> ceil(9/4) = 3
+        ],
+    )
+    def test_result_tokens_ceil(self, summary: str | None, expected: int):
+        assert self._telemetry(summary).result_tokens == expected
+
+    def test_result_tokens_is_computed_not_a_stored_field(self):
+        # It is a @computed_field: present in the dump but not settable as input.
+        tel = self._telemetry("abcde")
+        assert tel.model_dump()["result_tokens"] == 2
 
 
 # --- TurnRecord token_usage field tests ---
@@ -121,7 +158,7 @@ class TestTurnRecordTokenUsage:
         assert record.token_usage is None
 
     def test_turn_record_with_token_usage(self):
-        usage = TokenUsage(input_tokens=500, output_tokens=200, total_cost_usd=0.01)
+        usage = TokenUsage(uncached_input_tokens=500, output_tokens=200, total_cost_usd=0.01)
         record = TurnRecord(
             iteration=1,
             user_input="test",
@@ -132,7 +169,7 @@ class TestTurnRecordTokenUsage:
         assert record.token_usage.total_tokens == 700
 
     def test_turn_record_serialization_with_token_usage(self):
-        usage = TokenUsage(input_tokens=500, output_tokens=200)
+        usage = TokenUsage(uncached_input_tokens=500, output_tokens=200)
         record = TurnRecord(
             iteration=1,
             user_input="test",
@@ -142,7 +179,7 @@ class TestTurnRecordTokenUsage:
         json_str = record.model_dump_json()
         restored = TurnRecord.model_validate_json(json_str)
         assert restored.token_usage is not None
-        assert restored.token_usage.input_tokens == 500
+        assert restored.token_usage.uncached_input_tokens == 500
 
 
 # --- EvaluationResult total_token_usage field tests ---
@@ -165,7 +202,7 @@ class TestEvaluationResultTokenUsage:
 
     def test_evaluation_result_with_total_token_usage(self):
         usage = TokenUsage(
-            input_tokens=3000,
+            uncached_input_tokens=3000,
             output_tokens=1500,
             total_cost_usd=0.05,
         )
@@ -253,7 +290,7 @@ class TestBuildTokenUsage:
         usage = ClaudeCodeAgent._build_token_usage(messages, sdk_usage, 1.23)
         assert usage is not None
         assert usage.cache_read_input_tokens == 120_000  # 20k + 40k + 60k, not 60k
-        assert usage.input_tokens == 18
+        assert usage.uncached_input_tokens == 18
         assert usage.output_tokens == 240
         # total_cost_usd is always the real billed total from the ResultMessage.
         assert usage.total_cost_usd == 1.23
@@ -269,7 +306,7 @@ class TestBuildTokenUsage:
         ]
         usage = ClaudeCodeAgent._build_token_usage(messages, None, 0.5)
         assert usage is not None
-        assert usage.input_tokens == 14
+        assert usage.uncached_input_tokens == 14
         assert usage.output_tokens == 115  # 50 + 25 + 40
         assert usage.cache_read_input_tokens == 75_000
 
@@ -287,7 +324,7 @@ class TestBuildTokenUsage:
             0.02,
         )
         assert usage is not None
-        assert usage.input_tokens == 1000
+        assert usage.uncached_input_tokens == 1000
         assert usage.cache_read_input_tokens == 100
         assert usage.total_cost_usd == 0.02
 
@@ -306,7 +343,7 @@ class TestBuildTokenUsage:
         usage = ClaudeCodeAgent._build_token_usage(messages, sdk_usage, None)
         assert usage is not None
         # ResultMessage values, NOT the id-less per-message values.
-        assert usage.input_tokens == 1000
+        assert usage.uncached_input_tokens == 1000
         assert usage.cache_read_input_tokens == 100
 
     def test_ignores_user_messages_when_summing(self):
@@ -318,7 +355,7 @@ class TestBuildTokenUsage:
         ]
         usage = ClaudeCodeAgent._build_token_usage(messages, None, None)
         assert usage is not None
-        assert usage.input_tokens == 10
+        assert usage.uncached_input_tokens == 10
         assert usage.cache_read_input_tokens == 5_000
 
     def test_returns_none_when_nothing_available(self):
@@ -347,7 +384,7 @@ class TestBuildTokenUsage:
         }
         usage = ClaudeCodeAgent._build_token_usage(messages, snapshot, 0.23508645, model_usage)
         assert usage is not None
-        assert usage.input_tokens == 834
+        assert usage.uncached_input_tokens == 834
         assert usage.output_tokens == 1834
         assert usage.cache_creation_input_tokens == 51339  # not 21873
         assert usage.cache_read_input_tokens == 41844
@@ -361,7 +398,7 @@ class TestBuildTokenUsage:
         }
         usage = ClaudeCodeAgent._build_token_usage([], None, None, model_usage)
         assert usage is not None
-        assert usage.input_tokens == 105
+        assert usage.uncached_input_tokens == 105
         assert usage.output_tokens == 207
         assert usage.cache_creation_input_tokens == 9
         assert usage.total_cost_usd == pytest.approx(0.03)
@@ -370,7 +407,7 @@ class TestBuildTokenUsage:
         model_usage = {"m": {"inputTokens": 10, "outputTokens": 20}}  # no costUSD
         usage = ClaudeCodeAgent._build_token_usage([], None, 0.5, model_usage)
         assert usage is not None
-        assert usage.input_tokens == 10
+        assert usage.uncached_input_tokens == 10
         assert usage.total_cost_usd == 0.5
 
     def test_empty_model_usage_falls_through_to_stream(self):
@@ -378,7 +415,7 @@ class TestBuildTokenUsage:
         messages = [_assistant(message_id="m1", input_tokens=7, cache_read_tokens=300)]
         usage = ClaudeCodeAgent._build_token_usage(messages, None, None, {})
         assert usage is not None
-        assert usage.input_tokens == 7
+        assert usage.uncached_input_tokens == 7
         assert usage.cache_read_input_tokens == 300
 
 
@@ -427,12 +464,14 @@ class TestAgentTokenCapture:
             record = await agent.communicate("test prompt")
 
         assert record.token_usage is not None
-        assert record.token_usage.input_tokens == 1000
+        assert record.token_usage.uncached_input_tokens == 1000
         assert record.token_usage.output_tokens == 500
         assert record.token_usage.cache_creation_input_tokens == 200
         assert record.token_usage.cache_read_input_tokens == 100
         assert record.token_usage.total_cost_usd == 0.0234
-        assert record.token_usage.total_tokens == 1500
+        # total_tokens = full prompt (uncached 1000 + cc 200 + cr 100 = 1300) + output 500
+        assert record.token_usage.input_tokens == 1300
+        assert record.token_usage.total_tokens == 1800
 
     @pytest.mark.asyncio
     async def test_communicate_no_usage_when_not_present(self):
@@ -502,6 +541,81 @@ class TestAgentTokenCapture:
         assert record.token_usage.cache_read_input_tokens == 0
         assert record.token_usage.total_cost_usd is None
 
+    @pytest.mark.asyncio
+    async def test_subagent_terminal_synthesized_and_total_stays_model_usage(self):
+        """End-to-end through communicate(): a sub-agent Agent-tool result is
+        synthesized into a ``parent_tool_use_id`` message, AND the turn total
+        stays exactly ``model_usage`` — i.e. the synthetic message does NOT
+        inflate ``token_usage`` (no double-count)."""
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits", allowed_tools=["Read"])
+        agent = ClaudeCodeAgent(config)
+        agent.working_directory = MagicMock()
+        agent.working_directory.rglob.return_value = []
+
+        # Sub-agent Agent-tool result (its terminal generation) → triggers synthesis.
+        block = MagicMock()
+        block.tool_use_id = "tool_sub"
+        block.is_error = False
+        block.content = "5050"
+        user_msg = MagicMock()
+        user_msg.content = [block]
+        user_msg.tool_use_result = {
+            "agentId": "a1",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 5,
+                "cache_creation_input_tokens": 112,
+                "cache_read_input_tokens": 14536,
+            },
+        }
+        del user_msg.model  # keep out of the assistant branch
+        del user_msg.session_id  # keep out of the result-message branch
+
+        # ResultMessage carrying the authoritative cumulative total (model_usage).
+        result = MagicMock(spec=["session_id", "usage", "num_turns", "total_cost_usd", "model_usage"])
+        result.session_id = "s1"
+        result.usage = {
+            "input_tokens": 521,
+            "output_tokens": 481,
+            "cache_creation_input_tokens": 35329,
+            "cache_read_input_tokens": 55242,
+        }
+        result.model_usage = {
+            "claude-x": {
+                "inputTokens": 521,
+                "outputTokens": 481,
+                "cacheCreationInputTokens": 35329,
+                "cacheReadInputTokens": 55242,
+                "costUSD": 0.15,
+            }
+        }
+        result.num_turns = 1
+        result.total_cost_usd = 0.15
+
+        async def mock_query(*args, **kwargs):
+            yield user_msg
+            yield result
+
+        with patch("coder_eval.agents.claude_code_agent.query", side_effect=mock_query):
+            record = await agent.communicate("delegate it")
+
+        # Turn total is the model_usage figure — UNCHANGED by the synthetic message.
+        assert record.token_usage is not None
+        assert record.token_usage.uncached_input_tokens == 521
+        assert record.token_usage.output_tokens == 481
+        assert record.token_usage.cache_creation_input_tokens == 35329
+        assert record.token_usage.cache_read_input_tokens == 55242
+        assert record.token_usage.total_cost_usd == 0.15
+
+        # The sub-agent's terminal generation was synthesized as a nested message,
+        # carrying its own tokens — so grouping by parent_tool_use_id recovers it.
+        sub = [m for m in record.messages if getattr(m, "parent_tool_use_id", None) == "tool_sub"]
+        assert len(sub) == 1
+        assert sub[0].output_tokens == 5
+        assert sub[0].cache_read_tokens == 14536
+        assert sub[0].cache_creation_tokens == 112
+        assert sub[0].content_blocks[0].text == "5050"
+
 
 # --- Orchestrator aggregation tests ---
 
@@ -516,27 +630,27 @@ class TestOrchestratorTokenAggregation:
                 iteration=1,
                 user_input="p1",
                 agent_output="r1",
-                token_usage=TokenUsage(input_tokens=1000, output_tokens=500, total_cost_usd=0.01),
+                token_usage=TokenUsage(uncached_input_tokens=1000, output_tokens=500, total_cost_usd=0.01),
             ),
             TurnRecord(
                 iteration=2,
                 user_input="p2",
                 agent_output="r2",
-                token_usage=TokenUsage(input_tokens=2000, output_tokens=800, total_cost_usd=0.02),
+                token_usage=TokenUsage(uncached_input_tokens=2000, output_tokens=800, total_cost_usd=0.02),
             ),
         ]
 
         turns_with_usage = [t for t in turns if t.token_usage]
         costs = [t.token_usage.total_cost_usd for t in turns_with_usage if t.token_usage.total_cost_usd is not None]
         aggregated = TokenUsage(
-            input_tokens=sum(t.token_usage.input_tokens for t in turns_with_usage),
+            uncached_input_tokens=sum(t.token_usage.uncached_input_tokens for t in turns_with_usage),
             output_tokens=sum(t.token_usage.output_tokens for t in turns_with_usage),
             cache_creation_input_tokens=sum(t.token_usage.cache_creation_input_tokens for t in turns_with_usage),
             cache_read_input_tokens=sum(t.token_usage.cache_read_input_tokens for t in turns_with_usage),
             total_cost_usd=sum(costs) if costs else None,
         )
 
-        assert aggregated.input_tokens == 3000
+        assert aggregated.uncached_input_tokens == 3000
         assert aggregated.output_tokens == 1300
         assert aggregated.total_tokens == 4300
         assert aggregated.total_cost_usd == pytest.approx(0.03)
@@ -548,7 +662,7 @@ class TestOrchestratorTokenAggregation:
                 iteration=1,
                 user_input="p1",
                 agent_output="r1",
-                token_usage=TokenUsage(input_tokens=1000, output_tokens=500, total_cost_usd=0.01),
+                token_usage=TokenUsage(uncached_input_tokens=1000, output_tokens=500, total_cost_usd=0.01),
             ),
             TurnRecord(
                 iteration=2,
@@ -560,7 +674,7 @@ class TestOrchestratorTokenAggregation:
                 iteration=3,
                 user_input="p3",
                 agent_output="r3",
-                token_usage=TokenUsage(input_tokens=800, output_tokens=400),
+                token_usage=TokenUsage(uncached_input_tokens=800, output_tokens=400),
             ),
         ]
 
@@ -569,12 +683,12 @@ class TestOrchestratorTokenAggregation:
 
         costs = [t.token_usage.total_cost_usd for t in turns_with_usage if t.token_usage.total_cost_usd is not None]
         aggregated = TokenUsage(
-            input_tokens=sum(t.token_usage.input_tokens for t in turns_with_usage),
+            uncached_input_tokens=sum(t.token_usage.uncached_input_tokens for t in turns_with_usage),
             output_tokens=sum(t.token_usage.output_tokens for t in turns_with_usage),
             total_cost_usd=sum(costs) if costs else None,
         )
 
-        assert aggregated.input_tokens == 1800
+        assert aggregated.uncached_input_tokens == 1800
         assert aggregated.output_tokens == 900
         assert aggregated.total_cost_usd == pytest.approx(0.01)
 
@@ -733,22 +847,30 @@ class TestReportTokenUsageSection:
         assert "## Token Usage" not in report_md
 
 
-# --- _extract_sub_agent_usage tests ---
+# --- _synthesize_subagent_terminal_message tests ---
 
 
-class TestExtractAgentUsage:
-    """Tests for ClaudeCodeAgent._extract_sub_agent_usage (returns AgentUsage)."""
+class TestSynthesizeSubagentTerminalMessage:
+    """Tests for ClaudeCodeAgent._synthesize_subagent_terminal_message.
 
-    def _make_msg(self, tool_use_result: dict | None, tool_use_id: str = "toolu_123") -> MagicMock:
+    Materializes a sub-agent's terminal generation (delivered as the Agent tool
+    result, never streamed) as a ``parent_tool_use_id``-tagged AssistantMessage,
+    so per-sub-agent usage is recoverable by grouping messages on that id.
+    """
+
+    def _make_msg(
+        self, tool_use_result: dict | None, tool_use_id: str = "toolu_123", result_content: object = None
+    ) -> MagicMock:
         msg = MagicMock()
         msg.tool_use_result = tool_use_result
         block = MagicMock()
         block.tool_use_id = tool_use_id
         block.is_error = False
+        block.content = result_content
         msg.content = [block]
         return msg
 
-    def test_extracts_full_breakdown(self):
+    def test_builds_message_with_full_breakdown(self):
         msg = self._make_msg(
             {
                 "agentId": "agent-abc",
@@ -758,53 +880,49 @@ class TestExtractAgentUsage:
                     "cache_creation_input_tokens": 200,
                     "cache_read_input_tokens": 1500,
                 },
-                "totalToolUseCount": 3,
-                "totalDurationMs": 4200,
                 "status": "completed",
-            }
+            },
+            result_content="answer: 5050",
         )
-        result = ClaudeCodeAgent._extract_sub_agent_usage(msg)
+        result = ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, "claude-x")
         assert result is not None
-        # The full token breakdown is extracted onto the composed TokenUsage.
-        assert result.tokens.input_tokens == 10
-        assert result.tokens.output_tokens == 50
-        assert result.tokens.cache_creation_input_tokens == 200
-        assert result.tokens.cache_read_input_tokens == 1500
-        # TokenUsage.total_tokens is input + output only (cache tokens excluded).
-        assert result.tokens.total_tokens == 10 + 50
-        assert result.tool_uses == 3
+        assert result.input_tokens == 10
+        assert result.output_tokens == 50
+        assert result.cache_creation_tokens == 200
+        assert result.cache_read_tokens == 1500
+        # Parented to the spawning Agent call so message-grouping attributes it.
+        assert result.parent_tool_use_id == "toolu_123"
+        assert result.model == "claude-x"
+        # The sub-agent's returned text becomes a text content block.
+        assert result.content_blocks and result.content_blocks[0].text == "answer: 5050"
 
     def test_returns_none_for_non_agent_tool(self):
         # Bash/Read/Write results have no agentId
         msg = self._make_msg({"status": "completed", "output": "hello"})
-        assert ClaudeCodeAgent._extract_sub_agent_usage(msg) is None
+        assert ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, None) is None
 
     def test_returns_none_when_tool_use_result_missing(self):
         msg = MagicMock()
         msg.tool_use_result = None
-        assert ClaudeCodeAgent._extract_sub_agent_usage(msg) is None
+        assert ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, None) is None
 
     def test_returns_none_when_usage_missing(self):
         msg = self._make_msg({"agentId": "agent-abc"})  # no usage key
-        assert ClaudeCodeAgent._extract_sub_agent_usage(msg) is None
+        assert ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, None) is None
+
+    def test_returns_none_without_tool_use_id(self):
+        # No ToolResultBlock → no Agent tool_use_id to parent under → cannot attribute.
+        msg = MagicMock()
+        msg.tool_use_result = {"agentId": "agent-abc", "usage": {"output_tokens": 5}}
+        msg.content = []
+        assert ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, None) is None
 
     def test_coerces_missing_token_fields_to_zero(self):
-        msg = self._make_msg(
-            {
-                "agentId": "agent-abc",
-                "usage": {},  # all fields absent
-                "totalToolUseCount": 1,
-                "totalDurationMs": 100,
-                "status": "completed",
-            }
-        )
-        result = ClaudeCodeAgent._extract_sub_agent_usage(msg)
+        msg = self._make_msg({"agentId": "agent-abc", "usage": {}, "status": "completed"})
+        result = ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, None)
         assert result is not None
-        assert result.tokens.input_tokens == 0
-        assert result.tokens.output_tokens == 0
-        assert result.tokens.cache_creation_input_tokens == 0
-        assert result.tokens.cache_read_input_tokens == 0
-        assert result.tokens.total_tokens == 0
+        assert (result.input_tokens, result.output_tokens) == (0, 0)
+        assert (result.cache_creation_tokens, result.cache_read_tokens) == (0, 0)
 
     def test_coerces_none_token_fields_to_zero(self):
         msg = self._make_msg(
@@ -816,39 +934,19 @@ class TestExtractAgentUsage:
                     "cache_creation_input_tokens": None,
                     "cache_read_input_tokens": None,
                 },
-                "totalToolUseCount": 0,
-                "totalDurationMs": 0,
-                "status": "completed",
             }
         )
-        result = ClaudeCodeAgent._extract_sub_agent_usage(msg)
+        result = ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, None)
         assert result is not None
-        assert result.tokens.total_tokens == 0
+        assert result.input_tokens == 0 and result.output_tokens == 0
 
-    def test_extracts_usage_when_tool_result_block_present(self):
-        # The spawning Agent tool_use_id is read off the ToolResultBlock for
-        # potential logging, but no longer surfaces on AgentUsage (attribution
-        # now comes from the event tree's parent_thread_id). Presence of the
-        # block must not interfere with token extraction.
-        msg = self._make_msg(
-            {"agentId": "agent-xyz", "usage": {"output_tokens": 5}, "status": "completed"},
-            tool_use_id="toolu_SPECIFIC",
-        )
-        result = ClaudeCodeAgent._extract_sub_agent_usage(msg)
+    def test_no_text_block_when_result_empty(self):
+        # Tokens are still captured; an empty returned text yields no content block.
+        msg = self._make_msg({"agentId": "agent-abc", "usage": {"output_tokens": 5}})
+        result = ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, None)
         assert result is not None
-        assert result.tokens.output_tokens == 5
-        # tool_use_id is intentionally not exposed on the returned AgentUsage.
-        assert not hasattr(result, "tool_use_id")
-
-    def test_extracts_usage_when_no_content_block(self):
-        # With no ToolResultBlock to read a tool_use_id from, extraction still
-        # succeeds and returns a valid AgentUsage.
-        msg = MagicMock()
-        msg.tool_use_result = {"agentId": "agent-abc", "usage": {"output_tokens": 5}, "status": "completed"}
-        msg.content = []
-        result = ClaudeCodeAgent._extract_sub_agent_usage(msg)
-        assert result is not None
-        assert result.tokens.output_tokens == 5
+        assert result.output_tokens == 5
+        assert result.content_blocks == []
 
 
 # --- log_raw_sdk_event env-gate tests (shared by both agents) ---

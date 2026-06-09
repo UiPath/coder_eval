@@ -89,7 +89,7 @@ class _FakeProxy:
         """Mirror ``LLMGatewayProxy.usage_total`` — the cumulative counter."""
         u = self.usage
         return TokenUsage(
-            input_tokens=u.input_tokens,
+            uncached_input_tokens=u.input_tokens,
             output_tokens=u.output_tokens,
             cache_creation_input_tokens=u.cache_creation_input_tokens,
             cache_read_input_tokens=u.cache_read_input_tokens,
@@ -116,7 +116,7 @@ def _zero_token_usage() -> TokenUsage:
     rather than ``None``.
     """
     return TokenUsage(
-        input_tokens=0,
+        uncached_input_tokens=0,
         output_tokens=0,
         cache_creation_input_tokens=0,
         cache_read_input_tokens=0,
@@ -137,7 +137,7 @@ class TestAttributeProxyDeltaToIteration:
 
     def _delta(self, input_tokens: int = 100, output_tokens: int = 50) -> TokenUsage:
         return TokenUsage(
-            input_tokens=input_tokens,
+            uncached_input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_creation_input_tokens=0,
             cache_read_input_tokens=0,
@@ -185,7 +185,7 @@ class TestAttributeProxyDeltaToIteration:
         on ``self.proxy is not None`` before calling. Even so, defend in
         depth: if a non-zero value is already there, keep it.
         """
-        existing = TokenUsage(input_tokens=500, output_tokens=120)
+        existing = TokenUsage(uncached_input_tokens=500, output_tokens=120)
         returned = _make_turn(token_usage=existing)
         Orchestrator._attribute_proxy_delta_to_iteration(
             returned_turn=returned,
@@ -327,7 +327,7 @@ class TestAgentJudgeProxyAttribution:
         assert isinstance(result, JudgeCriterionResult)
         # Sub-agent's tokens land here, not on the main agent's bill.
         assert result.token_usage is not None
-        assert result.token_usage.input_tokens == 120_000
+        assert result.token_usage.uncached_input_tokens == 120_000
         assert result.token_usage.output_tokens == 2_000
         assert result.token_usage.cache_read_input_tokens == 300_000
         # The main-agent baseline is undisturbed in the proxy's running
@@ -341,7 +341,7 @@ class TestAgentJudgeProxyAttribution:
         """
         criterion = _minimal_agent_judge_criterion()
 
-        real_usage = TokenUsage(input_tokens=98_000, output_tokens=1_800)
+        real_usage = TokenUsage(uncached_input_tokens=98_000, output_tokens=1_800)
 
         class _DirectRouteStub(_StubRunner):
             def run(self, user_msg: str, *, max_turns: int, turn_timeout: float) -> TurnRecord:
@@ -432,7 +432,7 @@ class TestLLMJudgeProxyAttribution:
 
         assert isinstance(result, JudgeCriterionResult)
         assert result.token_usage is not None
-        assert result.token_usage.input_tokens == 80_000
+        assert result.token_usage.uncached_input_tokens == 80_000
         assert result.token_usage.output_tokens == 800
         assert result.token_usage.cache_read_input_tokens == 200_000
         # Suite-wide proxy total advanced by exactly the judge's slice.
@@ -516,8 +516,8 @@ class TestMainAgentTotalExcludesJudgeContributions:
         # Two main-agent turns with real per-turn usage (attribution already
         # done by ``_communicate_with_retry``'s snapshot/diff or by the SDK
         # parsing on OAUTH).
-        t1 = _make_turn(token_usage=TokenUsage(input_tokens=10_000, output_tokens=300))
-        t2 = _make_turn(token_usage=TokenUsage(input_tokens=15_000, output_tokens=450))
+        t1 = _make_turn(token_usage=TokenUsage(uncached_input_tokens=10_000, output_tokens=300))
+        t2 = _make_turn(token_usage=TokenUsage(uncached_input_tokens=15_000, output_tokens=450))
 
         # A judge result that — on the pre-fix code path — would have been
         # included in the main agent's total via the proxy fallback.
@@ -525,7 +525,7 @@ class TestMainAgentTotalExcludesJudgeContributions:
             criterion_type="agent_judge",
             description="dummy",
             score=0.9,
-            token_usage=TokenUsage(input_tokens=120_000, output_tokens=2_000),
+            token_usage=TokenUsage(uncached_input_tokens=120_000, output_tokens=2_000),
         )
 
         result = EvaluationResult(
@@ -568,32 +568,33 @@ class TestTokenUsageHelpers:
         assert TokenUsage(total_cost_usd=0.01).is_empty()
 
     def test_is_empty_false_when_any_counter_set(self) -> None:
-        assert not TokenUsage(input_tokens=1).is_empty()
+        assert not TokenUsage(uncached_input_tokens=1).is_empty()
         assert not TokenUsage(output_tokens=1).is_empty()
         assert not TokenUsage(cache_creation_input_tokens=1).is_empty()
         assert not TokenUsage(cache_read_input_tokens=1).is_empty()
 
     def test_add_sums_token_fields(self) -> None:
         a = TokenUsage(
-            input_tokens=10,
+            uncached_input_tokens=10,
             output_tokens=2,
             cache_creation_input_tokens=3,
             cache_read_input_tokens=4,
         )
         b = TokenUsage(
-            input_tokens=100,
+            uncached_input_tokens=100,
             output_tokens=20,
             cache_creation_input_tokens=30,
             cache_read_input_tokens=40,
         )
         total = a + b
-        assert total.input_tokens == 110
+        assert total.uncached_input_tokens == 110
+        assert total.input_tokens == 187  # derived total = 110 + 33 + 44
         assert total.output_tokens == 22
         assert total.cache_creation_input_tokens == 33
         assert total.cache_read_input_tokens == 44
 
     def test_add_cost_is_none_when_neither_has_cost(self) -> None:
-        assert (TokenUsage(input_tokens=1) + TokenUsage(input_tokens=1)).total_cost_usd is None
+        assert (TokenUsage(uncached_input_tokens=1) + TokenUsage(uncached_input_tokens=1)).total_cost_usd is None
 
     def test_add_cost_sums_only_present_operands(self) -> None:
         assert (TokenUsage(total_cost_usd=0.5) + TokenUsage()).total_cost_usd == 0.5
@@ -622,7 +623,7 @@ class TestAccumulateJudgeUsage:
 
     def test_single_check_passes_through(self) -> None:
         accum: dict[tuple[int, str], TokenUsage] = {}
-        results = [_judge(TokenUsage(input_tokens=100, output_tokens=10))]
+        results = [_judge(TokenUsage(uncached_input_tokens=100, output_tokens=10))]
         Orchestrator._accumulate_judge_usage(results, accum)
         assert results[0].token_usage is not None
         assert results[0].token_usage.input_tokens == 100
@@ -630,11 +631,11 @@ class TestAccumulateJudgeUsage:
     def test_accumulates_across_turns(self) -> None:
         accum: dict[tuple[int, str], TokenUsage] = {}
         # Turn 1: judge billed 100/10.
-        turn1 = [_judge(TokenUsage(input_tokens=100, output_tokens=10))]
+        turn1 = [_judge(TokenUsage(uncached_input_tokens=100, output_tokens=10))]
         Orchestrator._accumulate_judge_usage(turn1, accum)
         # Turn 2: a FRESH results list (as check_all returns) with that turn's
         # per-turn slice only.
-        turn2 = [_judge(TokenUsage(input_tokens=250, output_tokens=25))]
+        turn2 = [_judge(TokenUsage(uncached_input_tokens=250, output_tokens=25))]
         Orchestrator._accumulate_judge_usage(turn2, accum)
         # The latest results list now carries the cumulative dialog total.
         assert turn2[0].token_usage is not None
@@ -643,7 +644,7 @@ class TestAccumulateJudgeUsage:
 
     def test_carries_total_forward_when_later_turn_has_no_judge_tokens(self) -> None:
         accum: dict[tuple[int, str], TokenUsage] = {}
-        Orchestrator._accumulate_judge_usage([_judge(TokenUsage(input_tokens=100))], accum)
+        Orchestrator._accumulate_judge_usage([_judge(TokenUsage(uncached_input_tokens=100))], accum)
         # A later check where the judge produced an empty/None slice (e.g.
         # skipped, or a zero proxy delta dropped to None) must not lose the
         # running total.
@@ -655,7 +656,7 @@ class TestAccumulateJudgeUsage:
     def test_ignores_non_judge_results(self) -> None:
         accum: dict[tuple[int, str], TokenUsage] = {}
         plain = CriterionResult(criterion_type="file_exists", description="x", score=1.0)
-        results: list[CriterionResult] = [plain, _judge(TokenUsage(input_tokens=42))]
+        results: list[CriterionResult] = [plain, _judge(TokenUsage(uncached_input_tokens=42))]
         Orchestrator._accumulate_judge_usage(results, accum)
         # Non-judge result untouched; only the judge slot accumulated.
         assert accum == {(1, "llm_judge"): results[1].token_usage}
@@ -665,9 +666,9 @@ class TestAccumulateJudgeUsage:
     def test_per_criterion_isolation(self) -> None:
         """Two judges at different positions accumulate independently."""
         accum: dict[tuple[int, str], TokenUsage] = {}
-        turn1 = [_judge(TokenUsage(input_tokens=100)), _judge(TokenUsage(input_tokens=5))]
+        turn1 = [_judge(TokenUsage(uncached_input_tokens=100)), _judge(TokenUsage(uncached_input_tokens=5))]
         Orchestrator._accumulate_judge_usage(turn1, accum)
-        turn2 = [_judge(TokenUsage(input_tokens=100)), _judge(TokenUsage(input_tokens=5))]
+        turn2 = [_judge(TokenUsage(uncached_input_tokens=100)), _judge(TokenUsage(uncached_input_tokens=5))]
         Orchestrator._accumulate_judge_usage(turn2, accum)
         assert turn2[0].token_usage is not None
         assert turn2[1].token_usage is not None
@@ -682,7 +683,7 @@ class TestAccumulateJudgeUsage:
         accum: dict[tuple[int, str], TokenUsage] = {}
         per_turn = [(10, 1), (20, 2), (30, 3)]  # (judge-0 input, judge-1 input) per turn
         for j0_in, j1_in in per_turn:
-            results = [_judge(TokenUsage(input_tokens=j0_in)), _judge(TokenUsage(input_tokens=j1_in))]
+            results = [_judge(TokenUsage(uncached_input_tokens=j0_in)), _judge(TokenUsage(uncached_input_tokens=j1_in))]
             Orchestrator._accumulate_judge_usage(results, accum)
             latest = results
         # Distinct ledger entries, one per position.
@@ -698,7 +699,7 @@ class TestAccumulateJudgeUsage:
         path would produce if it ever called this) yields per-criterion totals
         equal to that one turn's slice — no carry-forward."""
         accum: dict[tuple[int, str], TokenUsage] = {}
-        results = [_judge(TokenUsage(input_tokens=42, output_tokens=7))]
+        results = [_judge(TokenUsage(uncached_input_tokens=42, output_tokens=7))]
         Orchestrator._accumulate_judge_usage(results, accum)
         assert results[0].token_usage is not None
         assert results[0].token_usage.input_tokens == 42
@@ -770,8 +771,8 @@ class TestReconcileProxyUsage:
 
     def test_gap_zero_logs_info(self, caplog) -> None:
         proxy = _FakeProxy()
-        main = TokenUsage(input_tokens=25_000, output_tokens=750)
-        judge_usage = TokenUsage(input_tokens=120_000, output_tokens=2_000)
+        main = TokenUsage(uncached_input_tokens=25_000, output_tokens=750)
+        judge_usage = TokenUsage(uncached_input_tokens=120_000, output_tokens=2_000)
         # Proxy ground-truth counter == main + judge (zero gap by construction).
         proxy.add(
             input_tokens=main.input_tokens + judge_usage.input_tokens,
@@ -791,7 +792,7 @@ class TestReconcileProxyUsage:
 
     def test_nonzero_gap_logs_warning_and_does_not_raise(self, caplog) -> None:
         proxy = _FakeProxy()
-        main = TokenUsage(input_tokens=10_000, output_tokens=300)
+        main = TokenUsage(uncached_input_tokens=10_000, output_tokens=300)
         # A dropped older partial: proxy counted more than we attributed.
         dropped = 5_000
         proxy.add(input_tokens=main.input_tokens + dropped, output_tokens=main.output_tokens)
@@ -806,7 +807,7 @@ class TestReconcileProxyUsage:
         assert any("gap" in m and str(dropped) in m for m in warn_msgs)
 
     def test_proxy_none_is_noop(self, caplog) -> None:
-        result = _eval_result_with(total_token_usage=TokenUsage(input_tokens=10_000), judges=[])
+        result = _eval_result_with(total_token_usage=TokenUsage(uncached_input_tokens=10_000), judges=[])
         orch = _orch_for_reconcile(None, result)
 
         with caplog.at_level(logging.INFO, logger="coder_eval.orchestrator"):
@@ -820,7 +821,7 @@ class TestReconcileProxyUsage:
         attributed sum, so its tokens show up as part of the gap. Acceptable
         and observable — must still WARNING, never raise."""
         proxy = _FakeProxy()
-        main = TokenUsage(input_tokens=10_000, output_tokens=300)
+        main = TokenUsage(uncached_input_tokens=10_000, output_tokens=300)
         unknown_judge_tokens = 8_000
         proxy.add(input_tokens=main.input_tokens + unknown_judge_tokens, output_tokens=main.output_tokens)
         result = _eval_result_with(total_token_usage=main, judges=[_judge(None)])
@@ -840,7 +841,7 @@ class TestReconcileProxyUsage:
             def usage_total(self) -> TokenUsage:
                 raise RuntimeError("boom")
 
-        result = _eval_result_with(total_token_usage=TokenUsage(input_tokens=1), judges=[])
+        result = _eval_result_with(total_token_usage=TokenUsage(uncached_input_tokens=1), judges=[])
         orch = _orch_for_reconcile(_BrokenProxy(), result)
 
         with caplog.at_level(logging.WARNING, logger="coder_eval.orchestrator"):

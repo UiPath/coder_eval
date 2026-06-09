@@ -65,12 +65,16 @@ _PRICING: dict[str, ModelPricing] = {
 
 def calculate_cost(
     model: str,
-    input_tokens: int,
+    uncached_input_tokens: int,
     output_tokens: int,
     cache_creation_tokens: int = 0,
     cache_read_tokens: int = 0,
 ) -> float | None:
     """Calculate cost in USD for the given token usage.
+
+    ``uncached_input_tokens`` is the fresh slice billed at the input rate — pass
+    ``TokenUsage.uncached_input_tokens``, NOT ``input_tokens`` (the derived total,
+    which already includes the cache buckets and would double-count them).
 
     Returns None if the model is not in the pricing table.
     """
@@ -79,7 +83,7 @@ def calculate_cost(
         return None
 
     return (
-        input_tokens * pricing.input_per_mtok
+        uncached_input_tokens * pricing.input_per_mtok
         + output_tokens * pricing.output_per_mtok
         + cache_creation_tokens * pricing.cache_write_per_mtok
         + cache_read_tokens * pricing.cache_read_per_mtok

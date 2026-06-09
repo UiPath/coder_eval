@@ -9,11 +9,10 @@ import { displayedTurns } from "@/lib/turns";
 import { ExpectedTurnsStat, TurnsStat } from "./turns-stat";
 import {
     ArtifactsSection,
+    CostExplorerSection,
     CriteriaSection,
     FlowDebugSection,
     LogTailSection,
-    MessageTimelineSection,
-    ThinkingCostSection,
     ToolTimelineSection,
 } from "./_sections";
 
@@ -190,18 +189,11 @@ export default async function TaskPage({
             {flowDebug && <FlowDebugSection flowDebug={flowDebug} />}
             <CriteriaSection criteria={task.criteria} />
             {task.messages.length > 0 && (
-                <MessageTimelineSection
+                <CostExplorerSection
                     messages={task.messages}
-                    tokens={task.tokens}
                     subAgentUsageByToolId={task.subAgentUsageByToolId}
-                />
-            )}
-            {task.messages.length > 0 && task.tokens.total > 0 && (
-                <ThinkingCostSection
-                    messages={task.messages}
                     tokens={task.tokens}
                     recordedCostUsd={task.totalCostUsd}
-                    subAgentUsageByToolId={task.subAgentUsageByToolId}
                 />
             )}
             {(task.toolCalls.length > 0 || task.finalAssistantText) && (

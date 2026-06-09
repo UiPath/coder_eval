@@ -25,7 +25,6 @@ from coder_eval.errors import (
 )
 from coder_eval.models import (
     AgentKind,
-    AgentUsage,
     ApiRoute,
     AssistantMessage,
     CodexAgentConfig,
@@ -33,8 +32,8 @@ from coder_eval.models import (
     ContentBlock,
     DirectRoute,
     TokenUsage,
+    TranscriptMessage,
     TurnRecord,
-    UserMessage,
 )
 from coder_eval.proxy.pricing import calculate_cost
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
@@ -146,9 +145,9 @@ _TOOL_ITEM_NAMES: dict[str, str] = {
 }
 
 # collabAgentToolCall.tool value that spawns a NEW sub-agent (vs "wait"/messaging
-# operations that act on an already-spawned agent). Only spawns count as a
-# sub-agent invocation for sub_agent_usage. Lowercased to match _status_value,
-# which normalizes the SDK's "spawnAgent" enum value to lowercase.
+# operations that act on an already-spawned agent). Only spawns register a new
+# child thread to recover. Lowercased to match _status_value, which normalizes
+# the SDK's "spawnAgent" enum value to lowercase.
 _COLLAB_SPAWN_TOOL = "spawnagent"
 
 # Friendly tool-name labels for the raw ResponseItem function-call names found in
@@ -199,6 +198,16 @@ def _fresh_input_tokens(raw_input: int, cached: int) -> int:
     they can't drift if the billing model ever changes.
     """
     return max(raw_input - cached, 0)
+
+
+def _message_uncached_input(m: AssistantMessage) -> int:
+    """A captured generation's fresh (uncached) input.
+
+    Single definition of the per-message convention, shared by the cost and the
+    fold-up paths. Codex children carry 0 ``cache_creation`` (no cache-write fee),
+    but fold both defensively so nothing is dropped if that ever changes.
+    """
+    return m.input_tokens + m.cache_creation_tokens
 
 
 # Wire protocol for the custom model provider. The pinned codex binary only
@@ -344,15 +353,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         timeout_hit = False
 
         commands: list[CommandTelemetry] = []
-        messages: list[UserMessage | AssistantMessage] = []
-        # One entry per sub-agent Codex spawned via its native collab-agent tool
-        # (collabAgentToolCall / spawnAgent). Mutated in place by the streaming
-        # loop, like ``commands``/``messages``, so a mid-turn crash keeps whatever
-        # sub-agents were already spawned. Tokens are empty: Codex does NOT emit a
-        # per-sub-agent token breakdown (the parent thread's cumulative usage
-        # already absorbs the child's cost), so these carry model + tool-call
-        # provenance only. See _record_collab_subagent.
-        sub_agent_usages: list[AgentUsage] = []
+        messages: list[TranscriptMessage] = []
         streamed_text = ""
         sdk_token_usage: Any = None
         turn_result: Any = None
@@ -379,14 +380,12 @@ class CodexAgent(Agent[CodexAgentConfig]):
             # the per-generation tokens already captured on the messages — otherwise
             # a crashed turn under-reports tokens/cost it actually spent.
             token_usage = self._token_usage_from_sdk(sdk_token_usage) or self._token_usage_from_messages(messages)
-            # Align the total's cache-write/input split with the per-message split
-            # (the SDK cumulative can't tell a write from a cache-miss re-read).
-            token_usage = self._resplit_total_cache(token_usage, messages)
             # Codex bills sub-agents on separate threads, so the parent total
-            # excludes them. Fold the recovered per-child usage into the turn
-            # total — matching Claude, whose total already includes its bubbled-up
-            # sub-agent messages (sub_agent_usage stays the attributed breakdown).
-            token_usage = self._fold_subagent_tokens(token_usage, sub_agent_usages)
+            # excludes them. Fold the recovered child generations (the
+            # ``parent_tool_use_id`` messages, carrying their real per-generation
+            # tokens) into the turn total — matching Claude, whose total already
+            # includes its bubbled-up sub-agent messages.
+            token_usage = self._fold_subagent_tokens(token_usage, messages)
 
             # AgentEndStatus and TurnEndStatus share identical members; map by value
             # (no duplicated dict, no KeyError if a member is ever added).
@@ -400,8 +399,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             )
 
             model_used = getattr(turn_result, "model", None) or self.config.model
-            per_model = {model_used: token_usage} if (token_usage is not None and model_used) else {}
-            usage = AgentUsage(tokens=token_usage or TokenUsage(), tool_uses=len(commands), per_model=per_model)
+            usage = token_usage or TokenUsage()
             # Real assistant text arrives as agentMessage deltas; fall back to the
             # raw Turn dump only when nothing streamed.
             agent_output = streamed_text or (self._format_turn_result(turn_result) if turn_result is not None else "")
@@ -421,7 +419,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     crashed=crashed,
                     crash_reason=crash_reason,
                     duration_seconds=time.monotonic() - turn_start_time,
-                    sub_agent_usage=list(sub_agent_usages),
                 )
             )
 
@@ -464,7 +461,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
                 try:
                     turn_result, sdk_token_usage, streamed_text = await self._run_turn_with_streaming(
-                        user_input, emit, task_id, turn_id, commands, messages, sub_agent_usages
+                        user_input, emit, task_id, turn_id, commands, messages
                     )
                 except asyncio.CancelledError:
                     if timeout_hit:
@@ -855,8 +852,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         task_id: str,
         turn_id: str,
         commands: list[CommandTelemetry],
-        messages: list[UserMessage | AssistantMessage],
-        sub_agent_usages: list[AgentUsage],
+        messages: list[TranscriptMessage],
     ) -> tuple[Any, Any, str]:
         """Run a turn with streaming support, emitting the standard event protocol.
 
@@ -906,12 +902,12 @@ class CodexAgent(Agent[CodexAgentConfig]):
         # Agent row expandable in the evalboard.
         collab_spawn_by_thread: dict[str, str] = {}
         # Every spawned sub-agent: (child_thread_id, spawning Agent tool_use_id,
-        # its AgentUsage entry). Unlike collab_spawn_by_thread (popped once the
-        # result nests), this is the durable record used AFTER the turn to recover
-        # each child's inner tool calls AND token usage from its on-disk rollout
-        # (the parent stream carries neither). The AgentUsage ref is mutated in
-        # place by recovery to fill the tokens Codex never streamed per-child.
-        spawned_children: list[tuple[str, str, AgentUsage]] = []
+        # spawned model). Unlike collab_spawn_by_thread (popped once the result
+        # nests), this is the durable record used AFTER the turn to recover each
+        # child's inner tool calls AND per-generation token usage from its on-disk
+        # rollout (the parent stream carries neither), reconstructed as nested
+        # ``parent_tool_use_id`` messages.
+        spawned_children: list[tuple[str, str, str | None]] = []
         # child thread id -> the message it returned to the parent (from the wait
         # collab call). Only used as a FALLBACK when the child's rollout can't be
         # found: then we nest just this returned text. When the rollout IS found,
@@ -986,15 +982,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
             cached = (getattr(last, "cached_input_tokens", 0) or 0) if last else 0
             raw_input = (getattr(last, "input_tokens", 0) or 0) if last else 0
             total_output = (getattr(last, "output_tokens", 0) or 0) if last else 0
-            # Split the fresh (uncached) slice into a genuine cache WRITE vs a cache
-            # MISS re-read. The write is at most how much the prompt grew since the
-            # last generation (new prefix actually cached); anything beyond that is
-            # previously-cached content the cache didn't return this call (a miss),
-            # which is plain input. Cold start (prev=0) → all fresh is a write.
-            fresh = _fresh_input_tokens(raw_input, cached)
-            prompt_growth = max(0, raw_input - prev_prompt_tokens)
-            gen_cache_write = min(fresh, prompt_growth)
-            gen_input = fresh - gen_cache_write
+            # The fresh (uncached) prompt slice is plain input — OpenAI bills no
+            # separate cache-write fee, so Codex carries 0 cache_creation. (Cost is
+            # unchanged; the cache-write rate == input rate for OpenAI.)
+            gen_input = _fresh_input_tokens(raw_input, cached)
+            gen_cache_write = 0
             prev_prompt_tokens = max(prev_prompt_tokens, raw_input)
             reasoning_tok = (getattr(last, "reasoning_output_tokens", 0) or 0) if last else 0
             # Resolve text-less reasoning blocks: OpenAI hides the raw CoT, so show
@@ -1168,7 +1160,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
                                 self._handle_collab_completion(
                                     root,
                                     tool_id,
-                                    sub_agent_usages,
                                     collab_spawn_by_thread,
                                     spawned_children,
                                     collab_results,
@@ -1445,47 +1436,40 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self,
         root: Any,
         tool_id: str,
-        sub_agent_usages: list[AgentUsage],
         spawn_by_thread: dict[str, str],
-        spawned_children: list[tuple[str, str, AgentUsage]],
+        spawned_children: list[tuple[str, str, str | None]],
         collab_results: dict[str, str],
     ) -> None:
         """Process a completed Codex collab-agent call (spawn / wait / message).
 
         Two responsibilities:
 
-        1. SPAWN (``tool == 'spawnAgent'``): record one (tokenless) ``AgentUsage``
-           sub-agent entry and remember which Agent call owns each spawned child
-           thread (so the child's result can nest under it). Follow-up ``wait``/
-           messaging calls reuse the same thread and are NOT new sub-agents.
+        1. SPAWN (``tool == 'spawnAgent'``): remember which Agent call owns each
+           spawned child thread (so the child's result can nest under it) and the
+           spawned model. Follow-up ``wait``/messaging calls reuse the same thread
+           and are NOT new sub-agents.
 
-           Codex emits NO per-sub-agent token breakdown — every
-           ``thread/tokenUsage/updated`` reports only the PARENT thread's
-           cumulative usage, which already absorbs the child's cost (the same
-           non-double-count rule as Claude's parent total). So the entry carries
-           the spawned model with empty tokens; ``tool_uses`` is 0 because the
-           sub-agent's own internal tool count is not reported. A Codex SDK
-           limitation, not something we can recover here.
+           Codex emits NO per-sub-agent token breakdown in the parent stream —
+           every ``thread/tokenUsage/updated`` reports only the PARENT thread's
+           cumulative usage. The child's real per-generation tokens are recovered
+           AFTER the turn from its on-disk rollout and reconstructed as nested
+           ``parent_tool_use_id`` messages (see ``_recover_subagent_tool_calls``);
+           ``_finalize`` then folds those messages into the turn total.
 
         2. RESULT: any collab completion may carry the child's returned message in
            ``agents_states[thread].message``. We stash it in ``collab_results`` as
            a FALLBACK — used only if the child's rollout can't be found later. When
            the rollout IS found, ``_recover_subagent_tool_calls`` rebuilds the
            sub-agent's full generation sequence (tool calls + final text) with real
-           per-generation tokens and nests it under the spawning Agent call, so the
-           returned message is just the last of those generations.
+           per-generation tokens, so the returned message is just the last of those.
         """
         tool = _status_value(getattr(root, "tool", ""))
         receivers = getattr(root, "receiver_thread_ids", None) or []
         if tool == _COLLAB_SPAWN_TOOL:
-            model = getattr(root, "model", None) or self._effective_model() or ""
-            per_model = {model: TokenUsage()} if model else {}
-            usage = AgentUsage(tokens=TokenUsage(), tool_uses=0, per_model=per_model)
-            sub_agent_usages.append(usage)
+            model = getattr(root, "model", None) or self._effective_model() or None
             for thread_id in receivers:
                 spawn_by_thread[thread_id] = tool_id
-                # Same AgentUsage ref → recovery fills its tokens in place.
-                spawned_children.append((str(thread_id), tool_id, usage))
+                spawned_children.append((str(thread_id), tool_id, model))
 
         states = getattr(root, "agents_states", None) or {}
         for thread_id, state in states.items():
@@ -1495,9 +1479,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
     async def _recover_subagent_tool_calls(
         self,
-        spawned_children: list[tuple[str, str, AgentUsage]],
+        spawned_children: list[tuple[str, str, str | None]],
         collab_results: dict[str, str],
-        messages: list[UserMessage | AssistantMessage],
+        messages: list[TranscriptMessage],
         commands: list[CommandTelemetry],
         emit: StreamCallback,
         task_id: str,
@@ -1510,7 +1494,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         rollout policy — which drops ``commandExecution`` events. So neither the
         live stream nor ``thread.read`` surfaces the sub-agent's shell commands,
         and ``thread/tokenUsage/updated`` only ever reports the PARENT thread, so
-        the per-child ``AgentUsage`` is created tokenless.
+        per-child tokens never appear in the live stream.
 
         But the child rollout ALWAYS persists the raw ``function_call`` /
         ``local_shell_call`` / ``custom_tool_call`` (+ ``*_output``) ResponseItems
@@ -1520,17 +1504,17 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         - per inner call, emit one ``CommandTelemetry`` (so the tool row resolves)
           plus one nested ``AssistantMessage`` parented to the spawning Agent call
-          (so the evalboard renders it as an expandable child); and
-        - fill the spawn's ``AgentUsage`` tokens (+ ``tool_uses``) from the child's
-          ``token_count`` — the attributed breakdown. ``_finalize`` then folds
-          these into the turn total so the run cost includes the sub-agent, exactly
-          as Claude's total already includes its bubbled-up sub-agent messages.
+          (so the evalboard renders it as an expandable child), carrying that
+          generation's real per-generation tokens. ``_finalize`` folds these
+          ``parent_tool_use_id`` messages into the turn total so the run cost
+          includes the sub-agent, exactly as Claude's total already includes its
+          bubbled-up sub-agent messages.
 
         Best-effort: any failure (missing file, parse error) is swallowed so a
         recovery hiccup never fails the turn.
         """
         home = self._codex_home()
-        for thread_id, parent_tool_id, usage in spawned_children:
+        for thread_id, parent_tool_id, model in spawned_children:
             try:
                 path = await self._await_rollout_file(home, thread_id)
                 if path is None:
@@ -1539,24 +1523,15 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     self._log.debug("CodexAgent: no rollout found for sub-agent thread %s", thread_id)
                     result = collab_results.get(thread_id)
                     if result:
-                        fallback_model = next(iter(usage.per_model), None)
                         messages.append(
-                            self._subagent_text_message(result, parent_tool_id, fallback_model, turn_id, len(messages))
+                            self._subagent_text_message(result, parent_tool_id, model, turn_id, len(messages))
                         )
                     continue
-                model = next(iter(usage.per_model), None)
                 gens = self._parse_rollout_generations(path)
-                # Fill the AgentUsage breakdown from the child's own token_count
-                # (the attributed total; _finalize folds it into the turn total).
-                child_tokens = self._subagent_tokens_from_rollout(path, model)
-                if child_tokens is not None:
-                    usage.tokens = child_tokens
-                    usage.per_model = {m: child_tokens for m in usage.per_model} or usage.per_model
-                usage.tool_uses = sum(len(g["tools"]) for g in gens)
                 # Rebuild the sub-agent's generations in order — each a nested
                 # message parented to the spawn, carrying its real per-generation
-                # tokens (cache-miss split, like the parent) and its blocks.
-                prev_input = 0
+                # tokens (fresh slice is plain input, cache_creation=0 — Codex has
+                # no separate cache-write fee) and its blocks.
                 for gi, gen in enumerate(gens):
                     blocks, tools = self._subagent_generation_blocks(gen, thread_id)
                     if not blocks:
@@ -1572,10 +1547,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                                 status=ToolEndStatus.ERROR if tel.result_status == "error" else ToolEndStatus.OK,
                             )
                         )
-                    msg, prev_input = self._subagent_generation_message(
-                        blocks, gen, parent_tool_id, model, turn_id, gi, prev_input
-                    )
-                    messages.append(msg)
+                    messages.append(self._subagent_generation_message(blocks, gen, parent_tool_id, model, turn_id, gi))
             except Exception as exc:
                 # Best-effort: a recovery hiccup must never fail the turn.
                 self._log.debug("CodexAgent: sub-agent recovery failed for %s: %s", thread_id, exc)
@@ -1709,51 +1681,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
         parts = [c.get("text", "") for c in content if isinstance(c, dict) and isinstance(c.get("text"), str)]
         return "".join(parts)
 
-    def _subagent_tokens_from_rollout(self, path: Path, model: str | None) -> TokenUsage | None:
-        """The child thread's cumulative token usage, from its rollout.
-
-        Reads the LAST ``token_count`` event's ``total_token_usage`` (the child's
-        lifetime cumulative) and buckets it with the same cache convention as
-        ``_token_usage_from_sdk``: ``input_tokens`` is the full prompt count, so
-        the fresh slice (input - cached) is the cache-write and ``input_tokens``
-        zeroes out. Cost is priced on the sub-agent's model. None if the rollout
-        carries no token_count (e.g. a child that never made a model call)."""
-        total: dict[str, Any] | None = None
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                obj = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            if obj.get("type") == "event_msg":
-                payload = obj.get("payload") or {}
-                if payload.get("type") == "token_count":
-                    tu = (payload.get("info") or {}).get("total_token_usage")
-                    if isinstance(tu, dict):
-                        total = tu  # keep the last one (cumulative)
-        if total is None:
-            return None
-        input_tokens = int(total.get("input_tokens", 0) or 0)
-        output_tokens = int(total.get("output_tokens", 0) or 0)
-        cached_input = int(total.get("cached_input_tokens", 0) or 0)
-        cache_write = _fresh_input_tokens(input_tokens, cached_input)
-        cost = calculate_cost(
-            model or "",
-            input_tokens=0,
-            output_tokens=output_tokens,
-            cache_creation_tokens=cache_write,
-            cache_read_tokens=cached_input,
-        )
-        return TokenUsage(
-            input_tokens=0,
-            output_tokens=output_tokens,
-            cache_creation_input_tokens=cache_write,
-            cache_read_input_tokens=cached_input,
-            total_cost_usd=cost,
-        )
-
     @staticmethod
     def _subagent_tool_name(payload: dict[str, Any]) -> str:
         """Friendly tool name for a rollout tool-call ResponseItem."""
@@ -1847,36 +1774,32 @@ class CodexAgent(Agent[CodexAgentConfig]):
         model: str | None,
         turn_id: str,
         index: int,
-        prev_input: int,
-    ) -> tuple[AssistantMessage, int]:
+    ) -> AssistantMessage:
         """A nested sub-agent generation as an AssistantMessage with real tokens.
 
         Parented to the spawning Agent call so it nests in the transcript. Tokens
-        come from the child's per-generation ``token_count`` and use the same
-        cache-write-vs-cache-miss split as the parent (see ``_flush_message``):
-        only the prompt growth is a genuine write, the rest of the fresh slice is
-        plain input. Returns the message and the updated prev-prompt high-water.
+        come from the child's per-generation ``token_count``: the fresh slice
+        (input - cached) is plain ``input`` and ``cache_creation`` is 0 — Codex
+        has no separate cache-write fee.
         """
         raw_input, cached, output, reasoning = gen["tokens"] or (0, 0, 0, 0)
         fresh = _fresh_input_tokens(raw_input, cached)
-        write = min(fresh, max(0, raw_input - prev_input))
         now = datetime.now()
-        msg = AssistantMessage(
+        return AssistantMessage(
             started_at=now,
             completed_at=now,
             generation_duration_ms=0.0,
             content_blocks=blocks,
             tool_use_ids=[b.tool_use_id for b in blocks if b.block_type == "tool_use" and b.tool_use_id],
-            input_tokens=fresh - write,
+            input_tokens=fresh,
             output_tokens=output,
-            cache_creation_tokens=write,
+            cache_creation_tokens=0,
             cache_read_tokens=cached,
             reasoning_tokens=reasoning,
             model=model or self._effective_model(),
             message_id=f"{turn_id}-subagent-{index}",
             parent_tool_use_id=parent_tool_use_id,
         )
-        return msg, max(prev_input, raw_input)
 
     def _subagent_text_message(
         self, text: str, parent_tool_use_id: str, model: str | None, turn_id: str, index: int
@@ -1997,19 +1920,17 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         Cache-bucket convention (Codex/OpenAI): the SDK's ``input_tokens`` is the
         FULL prompt count, *inclusive* of the cached prefix. The fresh slice
-        (``input_tokens - cached``) is, by OpenAI's caching model, exactly the
-        tokens written to the cache on this call — and OpenAI bills no separate
-        cache-write fee, so those fresh tokens are the cache-write tokens. We
-        therefore bucket them the way Anthropic reports a cached prompt:
+        (``input_tokens - cached``) is the uncached input (OpenAI bills no separate
+        cache-write fee), so:
 
-            input_tokens                = 0            (nothing is brand-new-uncached)
-            cache_creation_input_tokens = input - cached  (fresh == cache write)
+            uncached_input_tokens       = input - cached
+            cache_creation_input_tokens = 0            (no separate cache-write bucket)
             cache_read_input_tokens     = cached
+            input_tokens (derived)      = uncached + cache_read == the full prompt
 
-        Cost is unchanged versus billing the fresh slice as input, because the
-        pricing table sets the OpenAI cache-write rate == input rate. Pricing the
-        fresh tokens here as ``cache_creation`` keeps that equivalence explicit and
-        lets the evalboard surface the cache-write tokens.
+        Cost bills the uncached slice at the input rate — identical to the old
+        "fresh as cache-write" pricing since OpenAI's cache-write rate == input
+        rate, just labeled honestly.
         """
         if not sdk_token_usage:
             return None
@@ -2019,116 +1940,99 @@ class CodexAgent(Agent[CodexAgentConfig]):
         input_tokens = getattr(total, "input_tokens", 0) or 0
         output_tokens = getattr(total, "output_tokens", 0) or 0
         cached_input = getattr(total, "cached_input_tokens", 0) or 0
-        # Fresh (uncached) prompt slice == tokens written to cache this call.
-        cache_write = _fresh_input_tokens(input_tokens, cached_input)
-        # Bill cache-write at the OpenAI cache-write rate (== input rate) and the
-        # cached portion at the cache-read rate.
+        # Fresh (uncached) prompt slice = full prompt minus the cached prefix.
+        uncached = _fresh_input_tokens(input_tokens, cached_input)
         cost = calculate_cost(
             self._effective_model() or "",
-            input_tokens=0,
+            uncached_input_tokens=uncached,
             output_tokens=output_tokens,
-            cache_creation_tokens=cache_write,
             cache_read_tokens=cached_input,
         )
         return TokenUsage(
-            input_tokens=0,
+            uncached_input_tokens=uncached,
             output_tokens=output_tokens,
-            cache_creation_input_tokens=cache_write,
             cache_read_input_tokens=cached_input,
             total_cost_usd=cost,
         )
 
-    def _resplit_total_cache(
-        self, total: TokenUsage | None, messages: list[UserMessage | AssistantMessage]
-    ) -> TokenUsage | None:
-        """Re-split the turn total's fresh slice into cache-write vs cache-miss input.
-
-        ``_token_usage_from_sdk`` derives the total from the SDK's cumulative
-        figure, which can't tell a genuine cache write apart from a cache-miss
-        re-read — so it lumps the whole fresh slice into ``cache_creation``. The
-        per-message path (``_flush_message``) already made that distinction, so
-        align the total with the sum of the per-message cache-write tokens: the
-        rest of the fresh pool becomes plain ``input``. Magnitudes (and cost, since
-        write rate == input rate) are unchanged — only the write/input label moves.
-        """
-        if total is None:
-            return total
-        # PARENT-thread messages only: nested sub-agent messages have their own
-        # (separate-thread) tokens and would corrupt the parent's fresh pool.
-        assistant = [m for m in messages if isinstance(m, AssistantMessage) and m.parent_tool_use_id is None]
-        msg_write = sum(m.cache_creation_tokens for m in assistant)
-        msg_fresh = msg_write + sum(m.input_tokens for m in assistant)
-        fresh_pool = total.cache_creation_input_tokens + total.input_tokens
-        # Only realign when the per-message fresh slices fully account for the
-        # total's fresh pool. If they don't (e.g. per-generation usage wasn't
-        # captured), the per-message split isn't authoritative — leave the total.
-        if msg_fresh != fresh_pool:
-            return total
-        return total.model_copy(
-            update={"cache_creation_input_tokens": msg_write, "input_tokens": fresh_pool - msg_write}
-        )
-
-    @staticmethod
-    def _fold_subagent_tokens(parent: TokenUsage | None, sub_agent_usages: list[AgentUsage]) -> TokenUsage | None:
+    def _fold_subagent_tokens(self, parent: TokenUsage | None, messages: list[TranscriptMessage]) -> TokenUsage | None:
         """Add recovered sub-agent (child-thread) tokens to the parent turn total.
 
         Codex bills children on separate threads, so the parent's streamed total
-        omits them. Summing each ``AgentUsage.tokens`` (and cost) here makes the
+        (``_token_usage_from_sdk`` / parent-only ``_token_usage_from_messages``)
+        omits them. The child generations were reconstructed as
+        ``parent_tool_use_id``-tagged ``AssistantMessage``s carrying their real
+        per-generation tokens (fresh slice in ``input_tokens``, ``cache_read`` for
+        the cached prefix, no ``cache_creation`` — Codex has no cache-write fee).
+        Sum those here as ``uncached_input``, priced per child model, to make the
         turn total all-inclusive — the same end state Claude reaches naturally,
         where sub-agent messages bubble into the parent stream. A no-op when no
-        sub-agent carried tokens (e.g. recovery found no child rollout)."""
-        child_totals = [u.tokens for u in sub_agent_usages if u.tokens and u.tokens.output_tokens]
-        if not child_totals:
+        child generations were recovered.
+        """
+        children = [
+            m
+            for m in messages
+            if isinstance(m, AssistantMessage)
+            and m.parent_tool_use_id is not None
+            and (m.input_tokens or m.output_tokens or m.cache_creation_tokens or m.cache_read_tokens)
+        ]
+        if not children:
             return parent
         base = parent or TokenUsage()
 
-        def _cost(*values: float | None) -> float | None:
-            present = [v for v in values if v is not None]
-            return sum(present) if present else None
+        # Price each child generation on its own model (sub-agents may run a
+        # different model than the parent), then sum.
+        child_cost = 0.0
+        for m in children:
+            child_cost += (
+                calculate_cost(
+                    m.model or self._effective_model() or "",
+                    uncached_input_tokens=_message_uncached_input(m),
+                    output_tokens=m.output_tokens,
+                    cache_read_tokens=m.cache_read_tokens,
+                )
+                or 0.0
+            )
 
+        base_cost = base.total_cost_usd
         return TokenUsage(
-            input_tokens=base.input_tokens + sum(t.input_tokens for t in child_totals),
-            output_tokens=base.output_tokens + sum(t.output_tokens for t in child_totals),
-            cache_creation_input_tokens=(
-                base.cache_creation_input_tokens + sum(t.cache_creation_input_tokens for t in child_totals)
-            ),
-            cache_read_input_tokens=base.cache_read_input_tokens + sum(t.cache_read_input_tokens for t in child_totals),
-            total_cost_usd=_cost(base.total_cost_usd, *(t.total_cost_usd for t in child_totals)),
+            uncached_input_tokens=base.uncached_input_tokens + sum(_message_uncached_input(m) for m in children),
+            output_tokens=base.output_tokens + sum(m.output_tokens for m in children),
+            cache_creation_input_tokens=base.cache_creation_input_tokens,
+            cache_read_input_tokens=base.cache_read_input_tokens + sum(m.cache_read_tokens for m in children),
+            total_cost_usd=(base_cost or 0.0) + child_cost if (base_cost is not None or child_cost) else None,
         )
 
-    def _token_usage_from_messages(self, messages: list[UserMessage | AssistantMessage]) -> TokenUsage | None:
+    def _token_usage_from_messages(self, messages: list[TranscriptMessage]) -> TokenUsage | None:
         """Sum per-generation tokens off the captured assistant messages.
 
         Crash/timeout fallback for ``_finalize``: when the stream raises before it
         returns the SDK ``total`` (so ``_token_usage_from_sdk`` has nothing), the
         per-generation tokens were already recorded on the flushed
-        ``AssistantMessage``s (split into a genuine cache-write slice and a
-        cache-miss ``input`` slice — see ``_flush_message``). Summing them recovers
-        the tokens/cost a crashed turn actually spent. Returns None when nothing was
-        captured, matching ``_token_usage_from_sdk``'s empty contract.
+        ``AssistantMessage``s (fresh slice in ``input_tokens``, cached prefix in
+        ``cache_read``). Summing them recovers the tokens/cost a crashed turn
+        actually spent. Returns None when nothing was captured, matching
+        ``_token_usage_from_sdk``'s empty contract.
         """
         # PARENT-thread messages only — sub-agent (separate-thread) tokens are
         # added via _fold_subagent_tokens, not summed here (would double-count).
         assistant = [m for m in messages if isinstance(m, AssistantMessage) and m.parent_tool_use_id is None]
         if not assistant:
             return None
-        input_tokens = sum(m.input_tokens for m in assistant)
+        uncached = sum(_message_uncached_input(m) for m in assistant)
         output = sum(m.output_tokens for m in assistant)
-        cache_write = sum(m.cache_creation_tokens for m in assistant)
         cache_read = sum(m.cache_read_tokens for m in assistant)
-        if not (input_tokens or output or cache_write or cache_read):
+        if not (uncached or output or cache_read):
             return None
         cost = calculate_cost(
             self._effective_model() or "",
-            input_tokens=input_tokens,
+            uncached_input_tokens=uncached,
             output_tokens=output,
-            cache_creation_tokens=cache_write,
             cache_read_tokens=cache_read,
         )
         return TokenUsage(
-            input_tokens=input_tokens,
+            uncached_input_tokens=uncached,
             output_tokens=output,
-            cache_creation_input_tokens=cache_write,
             cache_read_input_tokens=cache_read,
             total_cost_usd=cost,
         )

@@ -700,7 +700,7 @@ def _render_turn(
         tu = turn.token_usage
         tokens_label = (
             f'<span class="badge neutral">'
-            f"in {tu.input_tokens} · out {tu.output_tokens}"
+            f"in {tu.uncached_input_tokens} · out {tu.output_tokens}"
             f" · cache {tu.cache_read_input_tokens}"
             f"</span>"
         )
@@ -856,13 +856,14 @@ def _render_token_usage(result: EvaluationResult) -> str:
         return ""
     total = tu.total_tokens
     cost_str = f"${tu.total_cost_usd:.4f}" if tu.total_cost_usd is not None else "N/A"
+    uncached_fmt = f"{tu.uncached_input_tokens:,}"
     cache_write_fmt = f"{tu.cache_creation_input_tokens:,}"
     cache_read_fmt = f"{tu.cache_read_input_tokens:,}"
     return f"""
 <h2>Token Usage</h2>
 <div class="card">
   <div class="grid">
-    <div class="stat"><div class="label">Input</div><div class="value">{tu.input_tokens:,}</div></div>
+    <div class="stat"><div class="label">Input (uncached)</div><div class="value">{uncached_fmt}</div></div>
     <div class="stat"><div class="label">Output</div><div class="value">{tu.output_tokens:,}</div></div>
     <div class="stat"><div class="label">Cache Write</div><div class="value">{cache_write_fmt}</div></div>
     <div class="stat"><div class="label">Cache Read</div><div class="value">{cache_read_fmt}</div></div>
@@ -1150,7 +1151,7 @@ def _render_variant_token_usage(eval_results: list[EvaluationResult]) -> str:
     usages = [r.total_token_usage for r in eval_results if r.total_token_usage is not None]
     if not usages:
         return ""
-    input_tok = sum(u.input_tokens for u in usages)
+    input_tok = sum(u.uncached_input_tokens for u in usages)
     output_tok = sum(u.output_tokens for u in usages)
     cache_write = sum(u.cache_creation_input_tokens for u in usages)
     cache_read = sum(u.cache_read_input_tokens for u in usages)

@@ -628,7 +628,7 @@ class Orchestrator:
         if not usages:
             return
 
-        input_tokens = sum(u.input_tokens for u in usages)
+        input_tokens = sum(u.uncached_input_tokens for u in usages)
         if limits.count_cache_creation:
             input_tokens += sum(u.cache_creation_input_tokens for u in usages)
         if limits.count_cached_input:
@@ -738,7 +738,7 @@ class Orchestrator:
             if usages:
                 costs = [u.total_cost_usd for u in usages if u.total_cost_usd is not None]
                 self.result.total_token_usage = TokenUsage(
-                    input_tokens=sum(u.input_tokens for u in usages),
+                    uncached_input_tokens=sum(u.uncached_input_tokens for u in usages),
                     output_tokens=sum(u.output_tokens for u in usages),
                     cache_creation_input_tokens=sum(u.cache_creation_input_tokens for u in usages),
                     cache_read_input_tokens=sum(u.cache_read_input_tokens for u in usages),
@@ -1556,8 +1556,8 @@ class Orchestrator:
                     agent_meta_parts.append(f"{turn_record.duration_seconds:.1f}s")
                 if turn_record.token_usage is not None:
                     usage_parts = []
-                    if turn_record.token_usage.input_tokens:
-                        usage_parts.append(f"in={turn_record.token_usage.input_tokens}")
+                    if turn_record.token_usage.uncached_input_tokens:
+                        usage_parts.append(f"in={turn_record.token_usage.uncached_input_tokens}")
                     if turn_record.token_usage.output_tokens:
                         usage_parts.append(f"out={turn_record.token_usage.output_tokens}")
                     if usage_parts:
@@ -1573,7 +1573,7 @@ class Orchestrator:
 
                 if turn_record.token_usage is not None:
                     usage = turn_record.token_usage
-                    total_tokens_used += (usage.input_tokens or 0) + (usage.output_tokens or 0)
+                    total_tokens_used += (usage.uncached_input_tokens or 0) + (usage.output_tokens or 0)
 
                 criteria_checked_this_turn = False
                 if check_every_turn:

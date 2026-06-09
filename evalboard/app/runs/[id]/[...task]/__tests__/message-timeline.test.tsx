@@ -27,6 +27,7 @@ function makeMessage(overrides: Partial<MessageEvent> = {}): MessageEvent {
         textOutputTokens: 1200,
         model: null,
         costUsd: null,
+        note: null,
         ...overrides,
     };
 }
@@ -37,13 +38,14 @@ describe("MessageTimelineSection — table layout", () => {
         expect(container.firstChild).toBeNull();
     });
 
-    test("renders a single header row with the eight columns", () => {
+    test("renders a single header row with the nine columns", () => {
         render(<MessageTimelineSection messages={[makeMessage()]} />);
         // Column labels are case-sensitive matches against the rendered header.
         expect(screen.getByText("#")).toBeInTheDocument();
         expect(screen.getByText("Gen")).toBeInTheDocument();
         expect(screen.getByText("Exec")).toBeInTheDocument();
         expect(screen.getByText("Content")).toBeInTheDocument();
+        expect(screen.getByText("In")).toBeInTheDocument();
         expect(screen.getByText("Out")).toBeInTheDocument();
         expect(screen.getByText("Cache W")).toBeInTheDocument();
         expect(screen.getByText("Cache R")).toBeInTheDocument();
@@ -223,6 +225,7 @@ describe("MessageTimelineSection — expanded sub-rows", () => {
                     isError: false,
                     resultPreview: null,
                     outputTokens: 80,
+                    resultTokens: null,
                 },
             ],
             outputTokens: 80,
@@ -255,6 +258,7 @@ describe("MessageTimelineSection — expanded sub-rows", () => {
                     isError: false,
                     resultPreview: null,
                     outputTokens: 5,
+                    resultTokens: null,
                 },
             ],
         });
@@ -280,6 +284,7 @@ describe("MessageTimelineSection — sub-agent grouping", () => {
             isError: false,
             resultPreview: "[1, 2]",
             outputTokens: 10,
+            resultTokens: null,
         };
     }
 
@@ -335,16 +340,43 @@ describe("MessageTimelineSection — sub-agent grouping", () => {
         expect(screen.getByText("ROW_B")).toBeInTheDocument();
     });
 
-    test("shows the per-sub-agent token breakdown on the Agent result row", () => {
+    test("shows each sub-agent call's token buckets on its per-call CallTokensRow", () => {
         const parent = makeMessage({
             index: 1,
             text: "MAIN",
             blockTypes: ["tool_use"],
             toolUses: [agentTool("T1")],
         });
+        // The sub-agent's own (bubbled) call — its input-side buckets surface on
+        // the per-call "call tokens" row inside the expanded Agent invocation,
+        // NOT on the aggregate result row (which now only previews the return).
+        const child = makeMessage({
+            index: 2,
+            parentToolUseId: "T1",
+            blockTypes: ["tool_use"],
+            inputTokens: 47,
+            cacheReadTokens: 14349,
+            cacheWriteTokens: 234,
+            outputTokens: 121,
+            toolUses: [
+                {
+                    toolName: "Bash",
+                    toolUseId: "B1",
+                    summary: "echo",
+                    argText: "echo hi",
+                    description: null,
+                    genMs: 10,
+                    durationMs: 20,
+                    isError: false,
+                    resultPreview: "hi",
+                    outputTokens: 121,
+                    resultTokens: null,
+                },
+            ],
+        });
         const { container } = render(
             <MessageTimelineSection
-                messages={[parent]}
+                messages={[parent, child]}
                 subAgentUsageByToolId={{
                     T1: {
                         total: 14751,
@@ -359,13 +391,12 @@ describe("MessageTimelineSection — sub-agent grouping", () => {
         container
             .querySelectorAll("details")
             .forEach((d) => d.setAttribute("open", ""));
-        // The breakdown now lives in the Cache R / Cache W / Out columns of the
-        // result row — not a free-text "sub-agent total:" line.
         expect(screen.queryByText(/sub-agent total:/)).not.toBeInTheDocument();
-        // cacheRead 14349 → "14k", cacheCreation 234 → "234", output 121 → "121".
+        // The "call tokens" row carries the call's input-side buckets:
+        // cacheRead 14349 → "14k", cacheCreation 234 → "234".
+        expect(screen.getAllByText("call tokens").length).toBeGreaterThan(0);
         expect(screen.getByText("14k")).toBeInTheDocument();
         expect(screen.getByText("234")).toBeInTheDocument();
-        expect(screen.getByText("121")).toBeInTheDocument();
     });
 
     test("a childless sub-agent tool row is flat (no extra disclosure)", () => {
@@ -394,6 +425,7 @@ describe("MessageTimelineSection — sub-agent grouping", () => {
                     isError: false,
                     resultPreview: "hi",
                     outputTokens: 3,
+                    resultTokens: null,
                 },
             ],
         });
@@ -406,42 +438,42 @@ describe("MessageTimelineSection — sub-agent grouping", () => {
         expect(container.querySelectorAll(".group-chevron")).toHaveLength(1);
     });
 
-    test("reconciling line shows cache-read billed but not present in rows", () => {
-        // Header (model_usage) says 100k cache-read; the visible rows only show
-        // 40k → 60k is sub-agent re-reads the SDK didn't surface as rows.
+    test("renders a reconciliation row carrying the backend's unattributed tokens", () => {
+        // The backend books tokens it billed but never streamed as a synthetic
+        // role="reconciliation" entry; it renders as its own amber row whose
+        // token cells add to the visible rows to reconcile with the run total.
         const m = makeMessage({ index: 1, cacheReadTokens: 40_000 });
-        render(
-            <MessageTimelineSection
-                messages={[m]}
-                tokens={{
-                    input: 0,
-                    output: 0,
-                    cacheCreation: 0,
-                    cacheRead: 100_000,
-                    total: 100_000,
-                }}
-            />,
-        );
-        expect(screen.getByText(/cache-read not shown above/)).toBeInTheDocument();
-        expect(screen.getByText(/\+ 60k/)).toBeInTheDocument();
+        const recon = makeMessage({
+            index: 2,
+            role: "reconciliation",
+            blockTypes: [],
+            text: null,
+            inputTokens: 512,
+            outputTokens: 0,
+            cacheWriteTokens: 0,
+            cacheReadTokens: 60_000,
+            note: "Tokens billed but not surfaced as a generation.",
+        });
+        render(<MessageTimelineSection messages={[m, recon]} />);
+        expect(screen.getByText("RECONCILE")).toBeInTheDocument();
+        expect(
+            screen.getByText(/Tokens billed but not surfaced/),
+        ).toBeInTheDocument();
+        // The residual cache-read shows on the row (60k).
+        expect(screen.getByText("60k")).toBeInTheDocument();
     });
 
-    test("no reconciling line when rows already cover the cache-read total", () => {
-        const m = makeMessage({ index: 1, cacheReadTokens: 40_000 });
-        render(
-            <MessageTimelineSection
-                messages={[m]}
-                tokens={{
-                    input: 0,
-                    output: 0,
-                    cacheCreation: 0,
-                    cacheRead: 40_000,
-                    total: 40_000,
-                }}
-            />,
-        );
-        expect(
-            screen.queryByText(/cache-read not shown above/),
-        ).not.toBeInTheDocument();
+    test("the reconciliation row is not counted as a message in the header", () => {
+        const m = makeMessage({ index: 1 });
+        const recon = makeMessage({
+            index: 2,
+            role: "reconciliation",
+            blockTypes: [],
+            text: null,
+            note: "x",
+        });
+        render(<MessageTimelineSection messages={[m, recon]} />);
+        // One real generation → "Message timeline (1)", not (2).
+        expect(screen.getByText("Message timeline (1)")).toBeInTheDocument();
     });
 });

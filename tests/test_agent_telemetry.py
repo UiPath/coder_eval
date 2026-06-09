@@ -700,11 +700,13 @@ class TestAssistantMessageTelemetry:
             await agent.start(str(tmp_path))
             turn = await agent.communicate("Multiple turns")
 
-            # Verify both turns captured
-            assert len(turn.messages) == 2
+            # Verify both turns captured (a trailing ReconciliationMessage may
+            # follow when the authoritative total exceeds the per-message sum).
+            assistant_msgs = [m for m in turn.messages if isinstance(m, AssistantMessage)]
+            assert len(assistant_msgs) == 2
 
             # First turn
-            aturn1 = turn.messages[0]
+            aturn1 = assistant_msgs[0]
             assert isinstance(aturn1, AssistantMessage)
             assert aturn1.role == "assistant"
             assert aturn1.input_tokens == 50
@@ -712,7 +714,7 @@ class TestAssistantMessageTelemetry:
             assert len(aturn1.content_blocks) == 2
 
             # Second turn
-            aturn2 = turn.messages[1]
+            aturn2 = assistant_msgs[1]
             assert isinstance(aturn2, AssistantMessage)
             assert aturn2.role == "assistant"
             assert aturn2.input_tokens == 60
@@ -1253,8 +1255,11 @@ class TestPerMessageTokenCapture:
         try:
             await agent.start(str(tmp_path))
             turn = await agent.communicate("hi")
-            assert len(turn.messages) == 2
-            first, second = turn.messages
+            # A trailing ReconciliationMessage may follow the two assistant
+            # emissions (here the snapshot total differs from the per-message sum).
+            assistant_msgs = [m for m in turn.messages if isinstance(m, AssistantMessage)]
+            assert len(assistant_msgs) == 2
+            first, second = assistant_msgs
             assert isinstance(first, AssistantMessage)
             assert isinstance(second, AssistantMessage)
             # First emission keeps its captured values — NOT clobbered.

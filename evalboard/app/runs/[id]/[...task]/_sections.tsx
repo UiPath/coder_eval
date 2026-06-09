@@ -11,8 +11,12 @@ import type {
     TokenTotals,
     ToolCall,
 } from "@/lib/runs";
-import { buildThinkingModel } from "@/lib/thinkingSim";
-import { fmtUsd } from "@/lib/format";
+import {
+    type PerMessageImpact,
+    buildThinkingModel,
+    projectPerMessage,
+} from "@/lib/thinkingSim";
+import { fmtCompact, fmtUsd } from "@/lib/format";
 import { tokenBucketUsd, type TokenKind } from "@/lib/pricing";
 import {
     type ColHelp,
@@ -236,7 +240,7 @@ function fmtTokens(n: number | null): string {
 // these exact columns, and every message summary row aligns to them.
 const MSG_GRID =
     "grid items-center gap-2 px-2 py-1 " +
-    "grid-cols-[1.5rem_2.5rem_3.5rem_3.5rem_minmax(0,1fr)_3.5rem_3.5rem_3.5rem_4.5rem]";
+    "grid-cols-[1.5rem_2.5rem_3.5rem_3.5rem_minmax(0,1fr)_3.5rem_3.5rem_3.5rem_3.5rem_4.5rem]";
 
 // Per-message Cost help (grid-specific: this is a rate-derived per-call figure,
 // not the SDK's cumulative per-turn cost). Token-column help is shared via
@@ -285,18 +289,18 @@ function kindBadgeClass(kind: string): string {
 
 export function MessageTimelineSection({
     messages,
-    tokens,
     subAgentUsageByToolId = {},
+    impactByIndex,
 }: {
     messages: MessageEvent[];
-    // Run-level token totals (from model_usage on current runs). Used to compute
-    // the cache-read that sub-agent calls incurred but that never surfaced as a
-    // row, so the timeline reconciles to the header.
-    tokens?: TokenTotals;
     // Per-Agent-call sub-agent token breakdown (input/output/cache-create/
     // cache-read), keyed by the spawning tool_use_id. Surfaced on each Agent
     // call's result row.
     subAgentUsageByToolId?: Record<string, SubAgentTotals>;
+    // Projected per-message token delta from the cost simulator's levers, keyed
+    // by message index. Renders an inline Δ badge on each affected row. Empty
+    // (no badges) when levers sit at as-run, or undefined when no simulator.
+    impactByIndex?: Map<number, PerMessageImpact>;
 }) {
     // Token columns can be shown as counts or as their estimated USD value.
     const [unit, setUnit] = useState<Unit>("tokens");
@@ -323,6 +327,9 @@ export function MessageTimelineSection({
     // info) → both render at the top level. Sub-agent emissions render nested
     // inside the message that spawned them (see MessageRow).
     const topLevelMessages = messages.filter((m) => m.parentToolUseId == null);
+    // Count real generations only — the synthetic reconciliation row is a meta
+    // entry, not a message.
+    const messageCount = messages.filter((m) => m.role === "assistant").length;
 
     // Roll-up stats for the summary strip.
     const totalGenMs = messages.reduce((s, m) => s + (m.generationMs ?? 0), 0);
@@ -347,7 +354,7 @@ export function MessageTimelineSection({
         <section className="space-y-2">
             <div className="flex items-center justify-between gap-2">
                 <h2 className="text-sm font-semibold text-gray-900">
-                    Message timeline ({messages.length})
+                    Message timeline ({messageCount})
                 </h2>
                 <UnitToggle value={unit} onChange={setUnit} />
             </div>
@@ -359,7 +366,7 @@ export function MessageTimelineSection({
                     <div className="text-gray-500 uppercase tracking-wide text-[10px]">
                         Messages
                     </div>
-                    <div className="text-gray-900 font-medium">{messages.length}</div>
+                    <div className="text-gray-900 font-medium">{messageCount}</div>
                 </div>
                 <div>
                     <div className="text-gray-500 uppercase tracking-wide text-[10px]">
@@ -454,6 +461,12 @@ export function MessageTimelineSection({
                     <span>Content</span>
                     <span className="text-right">
                         <MsgHeadHelp
+                            label="In"
+                            help={TOKEN_COLUMN_HELP.input}
+                        />
+                    </span>
+                    <span className="text-right">
+                        <MsgHeadHelp
                             label="Cache R"
                             help={TOKEN_COLUMN_HELP.cr}
                         />
@@ -475,97 +488,116 @@ export function MessageTimelineSection({
                     </span>
                 </div>
                 <ol>
-                    {topLevelMessages.map((m) => (
-                        <MessageRow
-                            key={m.index}
-                            m={m}
-                            unit={unit}
-                            childrenByParent={childrenByParent}
-                            subAgentUsageByToolId={subAgentUsageByToolId}
-                        />
-                    ))}
+                    {topLevelMessages.map((m) =>
+                        m.role === "reconciliation" ? (
+                            <ReconciliationRow key={m.index} m={m} unit={unit} />
+                        ) : impactByIndex?.get(m.index)?.eliminated ? (
+                            // Every tool in this call is skipped → the whole API
+                            // call never happens. The simulator already removed its
+                            // full footprint (output + own prompt) from the totals,
+                            // so the row collapses to a slim "removed" placeholder
+                            // rather than a live token line — keeping the index
+                            // sequence legible without pretending the call ran.
+                            <RemovedRow
+                                key={m.index}
+                                m={m}
+                                impact={impactByIndex.get(m.index)!}
+                            />
+                        ) : (
+                            <MessageRow
+                                key={m.index}
+                                m={m}
+                                unit={unit}
+                                childrenByParent={childrenByParent}
+                                subAgentUsageByToolId={subAgentUsageByToolId}
+                                impactByIndex={impactByIndex}
+                            />
+                        ),
+                    )}
                 </ol>
-                {(() => {
-                    // Reconciling line: cache-read the run was billed for
-                    // (header total, from model_usage) minus what's visible.
-                    // The three pieces are DISJOINT and additive:
-                    //   • top-level rows  → the main agent's own cache-read
-                    //   • subAgentCr      → the COMPLETE per-sub-agent cache-read
-                    //                       (from tool_use_result.usage), shown on
-                    //                       each sub-agent result row
-                    //   • remainder       → anything still unaccounted
-                    // We sum only TOP-LEVEL rows here: a sub-agent's nested rows
-                    // (when its emissions bubble) are a re-presentation of the
-                    // same tokens already counted in subAgentCr — summing all
-                    // rows would double-count them.
-                    const rowCr = messages.reduce(
-                        (s, m) =>
-                            s +
-                            (m.parentToolUseId == null
-                                ? (m.cacheReadTokens ?? 0)
-                                : 0),
-                        0,
-                    );
-                    const subAgentCr = Object.values(
-                        subAgentUsageByToolId,
-                    ).reduce((s, u) => s + u.cacheRead, 0);
-                    const remainder =
-                        (tokens?.cacheRead ?? 0) - rowCr - subAgentCr;
-                    if (remainder <= 0) return null;
-                    return (
-                        <div className="border-t border-gray-200 bg-amber-50/40 px-2 py-1.5 text-[11px] text-gray-600 font-sans">
-                            <span className="text-amber-700 font-medium">
-                                + {fmtTokens(remainder)}
-                            </span>{" "}
-                            cache-read not shown above — sub-agent context
-                            re-reads on calls the SDK doesn&apos;t surface as
-                            rows. Included in the run total; shown here so the
-                            rows reconcile.
-                        </div>
-                    );
-                })()}
                 </div>
             </TableScroll>
         </section>
     );
 }
 
-export function ThinkingCostSection({
+// Owns the cost-simulator lever state and renders BOTH the message timeline and
+// the simulator beneath it. Lifting the levers here lets the timeline show each
+// message's projected token Δ inline (the "message view" of the diff) driven by
+// the very same levers the simulator exposes.
+export function CostExplorerSection({
     messages,
+    subAgentUsageByToolId = {},
     tokens,
     recordedCostUsd,
-    subAgentUsageByToolId = {},
 }: {
     messages: MessageEvent[];
+    subAgentUsageByToolId?: Record<string, SubAgentTotals>;
     tokens: TokenTotals;
     recordedCostUsd: number | null;
-    // Per-sub-agent footprints, folded into the tool-output lever so the slider
-    // moves the sub-agent token mass too (not just main-thread tool results).
-    subAgentUsageByToolId?: Record<string, SubAgentTotals>;
 }) {
-    const model = buildThinkingModel(
-        messages,
-        tokens,
-        recordedCostUsd,
-        Object.values(subAgentUsageByToolId),
-    );
+    const [scale, setScale] = useState(1);
+    const [toolScale, setToolScale] = useState(1);
+    const [skippedTools, setSkippedTools] = useState<Set<string>>(new Set());
+    const toggleTool = (toolName: string) => {
+        setSkippedTools((prev) => {
+            const next = new Set(prev);
+            if (next.has(toolName)) next.delete(toolName);
+            else next.add(toolName);
+            return next;
+        });
+    };
+
     // No model → the run can't be projected (unpriced model, or it predates
     // per-call branch capture so the cache cascade can't be modeled as a tree).
-    // Hide the simulator entirely rather than show a misleading flat projection.
-    if (!model) return null;
+    // The timeline still renders; the simulator + inline deltas are hidden.
+    const model = buildThinkingModel(messages, tokens, recordedCostUsd);
+    const leversActive =
+        model != null &&
+        tokens.total > 0 &&
+        (scale !== 1 || toolScale !== 1 || skippedTools.size > 0);
+
+    // Per-message projected token deltas, keyed by message index — drives the
+    // inline Δ badge on each timeline row. Empty (no badges) at as-run levers.
+    const impactByIndex = new Map<number, PerMessageImpact>();
+    if (model && leversActive) {
+        for (const imp of projectPerMessage(model, scale, toolScale, skippedTools)) {
+            impactByIndex.set(imp.messageIndex, imp);
+        }
+    }
+
     return (
-        <section className="space-y-2">
-            <h2 className="text-sm font-semibold text-gray-900">
-                Cost simulator
-            </h2>
-            <p className="text-[10px] text-gray-500">
-                Project this run&apos;s cost if it had thought more or less, or
-                if tools had returned more or less. Both account for the cache
-                cascade — trimming early content shrinks the transcript every
-                later call re-reads.
-            </p>
-            <ThinkingSimulator model={model} />
-        </section>
+        <>
+            <MessageTimelineSection
+                messages={messages}
+                subAgentUsageByToolId={subAgentUsageByToolId}
+                impactByIndex={impactByIndex}
+            />
+            {model && tokens.total > 0 && (
+                <section className="space-y-2">
+                    <h2 className="text-sm font-semibold text-gray-900">
+                        Cost simulator
+                    </h2>
+                    <p className="text-[10px] text-gray-500">
+                        Project this run&apos;s cost if it had thought more or
+                        less, or if tools had returned more or less. Both account
+                        for the cache cascade — trimming early content shrinks the
+                        transcript every later call re-reads. Drag a lever to see
+                        each message&apos;s projected Δ inline in the timeline
+                        above.
+                    </p>
+                    <ThinkingSimulator
+                        model={model}
+                        scale={scale}
+                        setScale={setScale}
+                        toolScale={toolScale}
+                        setToolScale={setToolScale}
+                        skippedTools={skippedTools}
+                        toggleTool={toggleTool}
+                    />
+                </section>
+            )}
+        </>
     );
 }
 
@@ -590,22 +622,17 @@ function summaryPreview(m: MessageEvent): string {
     return "";
 }
 
-// The result of an Agent (sub-agent) tool call, rendered as a full MSG_GRID
-// row so its token columns line up with every other row. The sub-agent's
-// COMPLETE usage (from tool_use_result.usage) populates Cache R / Cache W / Out
-// — cache-read included, the component TaskNotification.usage drops. The result
-// preview sits under Content. Input tokens have no column (the table has none),
-// matching every other row.
+// The RETURN VALUE preview of an Agent (sub-agent) tool call. The sub-agent's
+// token buckets are now shown per-call on each SubAgentCallTokensRow inside the
+// expansion (where the cost is actually incurred — notably the first call's
+// delegation-prompt cache-write), so this row carries only the return preview;
+// its token columns stay blank to avoid double-counting the per-call rows.
 function SubAgentResultRow({
     preview,
     isError,
-    usage,
-    fmtTok,
 }: {
     preview: string | null;
     isError: boolean;
-    usage: SubAgentTotals;
-    fmtTok: (tokens: number | null, kind: TokenKind) => string;
 }) {
     return (
         <div className={MSG_GRID + " items-start py-1 bg-studio-blue/[0.03]"}>
@@ -628,16 +655,75 @@ function SubAgentResultRow({
                     {preview}
                 </div>
             </div>
-            <span className="tabular-nums text-right text-gray-600">
-                {fmtTok(usage.cacheRead, "cacheRead")}
-            </span>
-            <span className="tabular-nums text-right text-gray-600">
-                {fmtTok(usage.cacheCreation, "cacheWrite")}
-            </span>
-            <span className="tabular-nums text-right text-gray-600">
-                {fmtTok(usage.output, "output")}
-            </span>
             <span aria-hidden="true" />
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+        </div>
+    );
+}
+
+// One API call's OWN token buckets + cost — the complete per-call token line,
+// rendered as the lead row inside that call's expansion for BOTH main-thread
+// messages and nested sub-agent calls, so every call reads the same way. This is
+// the single home for a call's In / Cache R / Cache W / Out / Cost (the
+// expandable summary row above no longer repeats the sum). The simulator's
+// projected Δ for each bucket shows here too. The block rows below still split
+// the call's Out across thinking/text/tool — a breakdown of the Out shown here.
+function CallTokensRow({
+    m,
+    unit,
+    impact,
+}: {
+    m: MessageEvent;
+    unit: Unit;
+    impact?: PerMessageImpact;
+}) {
+    const fmtTok = (tokens: number | null, kind: TokenKind) =>
+        unit === "usd"
+            ? fmtUsd(tokenBucketUsd(m.model, tokens, kind))
+            : fmtTokens(tokens);
+    return (
+        <div className={MSG_GRID + " items-start py-0.5 bg-studio-blue/[0.04]"}>
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+            <div className="min-w-0 text-[10px] uppercase tracking-wide text-studio-blue/70">
+                call tokens
+            </div>
+            <TokenDeltaCell
+                value={fmtTok(m.inputTokens, "input")}
+                delta={impact?.dInput}
+                kind="input"
+                unit={unit}
+                model={m.model}
+            />
+            <TokenDeltaCell
+                value={fmtTok(m.cacheReadTokens, "cacheRead")}
+                delta={impact?.dCacheRead}
+                kind="cacheRead"
+                unit={unit}
+                model={m.model}
+            />
+            <TokenDeltaCell
+                value={fmtTok(m.cacheWriteTokens, "cacheWrite")}
+                delta={impact?.dCacheWrite}
+                kind="cacheWrite"
+                unit={unit}
+                model={m.model}
+            />
+            <TokenDeltaCell
+                value={fmtTok(m.outputTokens, "output")}
+                delta={impact?.dOutput}
+                kind="output"
+                unit={unit}
+                model={m.model}
+            />
+            <span className="tabular-nums text-right text-gray-600">
+                {m.costUsd != null ? fmtUsd(m.costUsd) : "—"}
+            </span>
         </div>
     );
 }
@@ -723,6 +809,7 @@ function SubRow({
             </div>
             <span aria-hidden="true" />
             <span aria-hidden="true" />
+            <span aria-hidden="true" />
             <span className="tabular-nums text-right text-gray-500">
                 {fmtOut(outputTokens)}
             </span>
@@ -743,11 +830,15 @@ function MessageBody({
     unit,
     childrenByParent,
     subAgentUsageByToolId = {},
+    impactByIndex,
 }: {
     m: MessageEvent;
     unit: Unit;
     childrenByParent: Map<string, MessageEvent[]>;
     subAgentUsageByToolId?: Record<string, SubAgentTotals>;
+    // Projected per-message Δ keyed by message index — threaded down so each
+    // nested sub-agent call's CallTokensRow shows its own bucket deltas too.
+    impactByIndex?: Map<number, PerMessageImpact>;
 }) {
     const fmtTok = (tokens: number | null, kind: TokenKind) =>
         unit === "usd"
@@ -841,8 +932,6 @@ function MessageBody({
                     <SubAgentResultRow
                         preview={t.resultPreview}
                         isError={t.isError}
-                        usage={subUsage}
-                        fmtTok={fmtTok}
                     />
                 ) : (
                     hasKids &&
@@ -881,6 +970,13 @@ function MessageBody({
                                 <ol className="border-l-2 border-studio-blue/40 bg-studio-blue/[0.03] divide-y divide-gray-100">
                                     {kids.map((c) => (
                                         <li key={c.index}>
+                                            <CallTokensRow
+                                                m={c}
+                                                unit={unit}
+                                                impact={impactByIndex?.get(
+                                                    c.index,
+                                                )}
+                                            />
                                             <MessageBody
                                                 m={c}
                                                 unit={unit}
@@ -890,6 +986,7 @@ function MessageBody({
                                                 subAgentUsageByToolId={
                                                     subAgentUsageByToolId
                                                 }
+                                                impactByIndex={impactByIndex}
                                             />
                                         </li>
                                     ))}
@@ -952,11 +1049,133 @@ function MessageBody({
     return <>{ordered}</>;
 }
 
+// The synthetic reconciliation entry rendered as its own timeline row: tokens
+// the agent billed but never surfaced as a generation, booked so the stream's
+// token columns sum to the run total. Not expandable (no body), amber-tinted to
+// read as a meta row rather than a real LLM call.
+function ReconciliationRow({ m, unit }: { m: MessageEvent; unit: Unit }) {
+    const fmtTok = (tokens: number | null, kind: TokenKind) =>
+        unit === "usd" ? fmtUsd(tokenBucketUsd(m.model, tokens, kind)) : fmtTokens(tokens);
+    return (
+        <li className="border-b last:border-b-0 border-amber-200 bg-amber-50/40">
+            <div className={MSG_GRID + " py-1"}>
+                <span aria-hidden="true" />
+                <span className="text-amber-700 tabular-nums text-right">{m.index}</span>
+                <span className="text-right text-gray-400">—</span>
+                <span className="text-right text-gray-400">—</span>
+                <span className="flex items-center gap-2 min-w-0">
+                    <span className="inline-flex items-center rounded border border-amber-300 bg-amber-100 text-amber-800 px-1.5 py-0.5 text-[10px] font-medium shrink-0">
+                        RECONCILE
+                    </span>
+                    <span
+                        className="text-amber-800/90 truncate min-w-0 font-sans"
+                        title={m.note ?? undefined}
+                    >
+                        {m.note ?? "Tokens billed but not surfaced as a generation."}
+                    </span>
+                </span>
+                <span className="tabular-nums text-right text-amber-700">
+                    {fmtTok(m.inputTokens, "input")}
+                </span>
+                <span className="tabular-nums text-right text-amber-700">
+                    {fmtTok(m.cacheReadTokens, "cacheRead")}
+                </span>
+                <span className="tabular-nums text-right text-amber-700">
+                    {fmtTok(m.cacheWriteTokens, "cacheWrite")}
+                </span>
+                <span className="tabular-nums text-right text-amber-700">
+                    {fmtTok(m.outputTokens, "output")}
+                </span>
+                <span className="text-right text-gray-400">—</span>
+            </div>
+        </li>
+    );
+}
+
+// A turn the simulator eliminated (all its tools skipped): the generation never
+// happens, so its row collapses to a single struck-through line. The token
+// columns read "—" because the call's whole footprint (output + its own prompt
+// re-read) has been removed from the projected totals — this isn't a row with
+// zeroed numbers, it's a row that no longer exists.
+function RemovedRow({ m, impact }: { m: MessageEvent; impact: PerMessageImpact }) {
+    const tools = impact.toolNames.length > 0 ? impact.toolNames.join(", ") : "tool";
+    return (
+        <li className="border-b last:border-b-0 border-gray-100 bg-gray-50/60">
+            <div className={MSG_GRID + " py-1 text-gray-400"}>
+                <span aria-hidden="true" />
+                <span className="tabular-nums text-right line-through">
+                    {m.index}
+                </span>
+                <span className="text-right">—</span>
+                <span className="text-right">—</span>
+                <span className="flex items-center gap-2 min-w-0">
+                    <span className="inline-flex items-center rounded border border-gray-300 bg-gray-100 text-gray-500 px-1.5 py-0.5 text-[10px] font-medium shrink-0 font-sans">
+                        removed
+                    </span>
+                    <span className="truncate min-w-0 line-through font-sans">
+                        turn skipped ({tools})
+                    </span>
+                </span>
+                <span className="text-right">—</span>
+                <span className="text-right">—</span>
+                <span className="text-right">—</span>
+                <span className="text-right">—</span>
+                <span className="text-right">—</span>
+            </div>
+        </li>
+    );
+}
+
+// A token-column cell that renders the message's recorded value and, when the
+// cost simulator's levers are off as-run, the projected Δ for THAT bucket on a
+// second line below — in the same unit as the column (tokens or USD). Green =
+// cheaper, rose = dearer; hidden when the bucket doesn't move.
+function TokenDeltaCell({
+    value,
+    delta,
+    kind,
+    unit,
+    model,
+}: {
+    value: string;
+    delta: number | undefined; // projected Δ in tokens for this bucket
+    kind: TokenKind;
+    unit: Unit;
+    model: string | null;
+}) {
+    const d = delta ?? 0;
+    const show = Math.abs(d) >= 1;
+    const cheaper = d < 0;
+    const usd = unit === "usd" ? tokenBucketUsd(model, d, kind) : null;
+    const text = !show
+        ? null
+        : unit === "usd"
+          ? fmtUsd(Math.abs(usd ?? 0))
+          : fmtCompact(Math.round(Math.abs(d)));
+    return (
+        <span className="text-right text-gray-600 leading-tight">
+            <span className="tabular-nums block">{value}</span>
+            {show && (
+                <span
+                    className={
+                        "tabular-nums block text-[10px] font-medium " +
+                        (cheaper ? "text-emerald-600" : "text-rose-600")
+                    }
+                >
+                    {cheaper ? "−" : "+"}
+                    {text}
+                </span>
+            )}
+        </span>
+    );
+}
+
 function MessageRow({
     m,
     unit,
     childrenByParent,
     subAgentUsageByToolId = {},
+    impactByIndex,
 }: {
     m: MessageEvent;
     unit: Unit;
@@ -967,13 +1186,14 @@ function MessageRow({
     // Per-Agent-call sub-agent token breakdown (input/output/cache-create/
     // cache-read), keyed by tool_use_id. Shown on the Agent call's result row.
     subAgentUsageByToolId?: Record<string, SubAgentTotals>;
+    // Projected per-message Δ keyed by message index. This row's own Δ shows on
+    // its CallTokensRow; the map is threaded down so nested sub-agent calls show
+    // theirs too.
+    impactByIndex?: Map<number, PerMessageImpact>;
 }) {
+    const impact = impactByIndex?.get(m.index);
     // Token columns render as counts or, in USD mode, the estimated dollar
     // value of that bucket priced from this message's model.
-    const fmtTok = (tokens: number | null, kind: TokenKind) =>
-        unit === "usd"
-            ? fmtUsd(tokenBucketUsd(m.model, tokens, kind))
-            : fmtTokens(tokens);
     const kind = messageKind(m.blockTypes);
     const slowGen = (m.generationMs ?? 0) >= SLOW_GEN_MS;
     const slowTool = m.toolUses.some((t) => (t.durationMs ?? 0) >= SLOW_TOOL_MS);
@@ -1050,30 +1270,33 @@ function MessageRow({
                         <span className="text-gray-700 truncate min-w-0">
                             {preview}
                         </span>
+                        {impact?.eliminated && (
+                            <span className="shrink-0 inline-flex items-center rounded border border-orange-200 bg-orange-50 text-orange-700 px-1.5 py-0.5 text-[10px] font-medium font-sans">
+                                turn removed
+                            </span>
+                        )}
                     </span>
-                    <span className="tabular-nums text-right text-gray-600">
-                        {fmtTok(m.cacheReadTokens, "cacheRead")}
-                    </span>
-                    <span className="tabular-nums text-right text-gray-600">
-                        {fmtTok(m.cacheWriteTokens, "cacheWrite")}
-                    </span>
-                    <span className="tabular-nums text-right text-gray-600">
-                        {fmtTok(m.outputTokens, "output")}
-                    </span>
-                    <span className="tabular-nums text-right text-gray-600">
-                        {fmtUsd(m.costUsd)}
-                    </span>
+                    {/* Token sum + cost intentionally NOT on the expandable
+                        summary — they live on the CallTokensRow inside, so each
+                        call has one canonical token line. */}
+                    <span aria-hidden="true" />
+                    <span aria-hidden="true" />
+                    <span aria-hidden="true" />
+                    <span aria-hidden="true" />
+                    <span aria-hidden="true" />
                 </summary>
-                {hasBody && (
-                    <div className="border-t border-gray-100 bg-gray-50/40 divide-y divide-gray-100">
+                <div className="border-t border-gray-100 bg-gray-50/40 divide-y divide-gray-100">
+                    <CallTokensRow m={m} unit={unit} impact={impact} />
+                    {hasBody && (
                         <MessageBody
                             m={m}
                             unit={unit}
                             childrenByParent={childrenByParent}
                             subAgentUsageByToolId={subAgentUsageByToolId}
+                            impactByIndex={impactByIndex}
                         />
-                    </div>
-                )}
+                    )}
+                </div>
             </details>
         </li>
     );
