@@ -290,3 +290,25 @@ exclude_lines = [
 
 [tool.coverage.html]
 directory = "htmlcov"
+
+[tool.semantic_release]
+# Conventional Commits → automatic version bumps on push to main.
+#   feat:           → minor bump
+#   fix: / perf:    → patch bump
+#   BREAKING CHANGE → major bump (also `feat!:` / `fix!:`)
+# Both files below are kept in sync; pyproject is the canonical source.
+version_toml = ["pyproject.toml:project.version"]
+version_variables = ["src/coder_eval/__init__.py:__version__"]
+build_command = "uv build"
+commit_parser = "conventional"
+commit_message = "chore(release): {version} [skip ci]"
+tag_format = "v{version}"
+major_on_zero = false  # while 0.x, breaking changes still bump minor (typical pre-1.0 behavior)
+allow_zero_version = true
+
+[tool.semantic_release.branches.main]
+match = "main"
+prerelease = false
+
+[tool.semantic_release.changelog]
+default_templates = { changelog_file = "CHANGELOG.md" }

@@ -1,0 +1,85 @@
+name: Release
+
+# Auto-bump version from Conventional Commits and publish to the UiPath
+# `coder_eval` Azure Artifacts feed (ML Platform project).
+#
+#   feat:           → minor bump
+#   fix: / perf:    → patch bump
+#   BREAKING CHANGE → major bump (also `feat!:` / `fix!:`)
+#
+# Driven by python-semantic-release; config lives in pyproject.toml under
+# [tool.semantic_release]. Runs only on push to main.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # needed to commit the version bump and push the tag
+
+jobs:
+  release:
+    name: Bump version and publish
+    runs-on: uipath-ubuntu-latest
+    # Skip the release commit semantic-release pushes back, otherwise we loop.
+    if: "!contains(github.event.head_commit.message, 'chore(release):')"
+    timeout-minutes: 15
+    env:
+      # uipath-ubuntu-latest runners enforce a minimum package-age safe-chain
+      # check on uv installs; match the exclusions used by pr-checks.yml so
+      # parity is maintained if/when codex deps flow through the release path.
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: "openai-codex-cli-bin,openai-codex"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0  # semantic-release needs full history to parse commits
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install build + release tools
+        run: uv tool install python-semantic-release && uv tool install twine
+
+      - name: Run semantic-release (bump + tag + push)
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # `version` mutates files, commits, tags, and pushes back to main.
+          # Outputs nothing on a no-op (no releasable commits since last tag).
+          uv tool run --from python-semantic-release semantic-release version \
+            --no-vcs-release \
+            --changelog
+          # Capture the new version (empty string if no bump happened)
+          NEW_VERSION=$(uv tool run --from python-semantic-release semantic-release version --print)
+          echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel + sdist
+        if: steps.release.outputs.version != ''
+        run: uv build
+
+      - name: Publish to coder_eval feed
+        if: steps.release.outputs.version != ''
+        env:
+          # Azure Artifacts accepts any non-empty username when paired with a
+          # PAT, so we hardcode it. The PAT (Packaging Read & write scope)
+          # comes from UV_INDEX_UIPATH_PASSWORD, reused from pr-checks.yml.
+          TWINE_USERNAME: "azure-artifacts"
+          TWINE_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
+          TWINE_REPOSITORY_URL: https://pkgs.dev.azure.com/uipath/ML%20Platform/_packaging/coder_eval/pypi/upload/
+        run: uv tool run --from twine twine upload --non-interactive --verbose dist/*
