@@ -330,4 +330,17 @@ describe("extractComponentShas", () => {
         });
         expect(out.map((c) => c.name)).toEqual(["coder_eval", "skills", "cli"]);
     });
+
+    test("drops components whose value is 'unknown' (in-container git SHAs)", () => {
+        // Per-task env_info captured in the sandbox can't `git rev-parse` the
+        // coder_eval / skills checkouts, so those come back "unknown"; only the
+        // npm-resolved cli + tool plugins survive.
+        const out = extractComponentShas({
+            git_commit: "unknown",
+            skills_git_commit: "unknown",
+            cli_version: "1.2.0-alpha.20260604.7394",
+            tool_plugins: { "maestro-tool": "1.2.0-alpha.20260604.7394" },
+        });
+        expect(out.map((c) => c.name)).toEqual(["cli", "maestro-tool"]);
+    });
 });

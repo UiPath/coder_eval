@@ -224,6 +224,13 @@ export interface ArtifactRef {
 
 export interface TaskDetail extends TaskResultSummary {
     runId: string;
+    // Component/tool versions parsed from THIS task's own task.json
+    // environment_info (cli + @uipath/*-tool plugins) — the versions that
+    // actually ran for this task, which can diverge from the run-level
+    // aggregate when tool resolution drifts mid-run (a task that invokes
+    // `uip <tool>` can pull a different alpha than its siblings). Empty for
+    // legacy task.json files captured before environment_info existed.
+    componentShas: ComponentSha[];
     finalStatus: string | null;
     errorMessage: string | null;
     taskDescription: string | null;
@@ -388,7 +395,12 @@ export function extractComponentShas(
         let value: string | null = null;
         for (const k of comp.keys) {
             const v = env[k];
-            if (typeof v === "string" && v) {
+            // Skip "unknown": the git-SHA components (coder_eval / skills)
+            // resolve to that string when env_info is captured in-container
+            // (the task sandbox has no repo checkout to `git rev-parse`), and
+            // an unknown SHA is never worth a chip. npm-based versions
+            // (cli / *-tool) still resolve in-container, so those survive.
+            if (typeof v === "string" && v && v.toLowerCase() !== "unknown") {
                 value = v;
                 break;
             }
@@ -1489,6 +1501,7 @@ export async function readTaskDetail(
             error?: string | null;
         }>;
         iterations?: TurnEntry[];
+        environment_info?: RawRunJson["environment_info"];
     }>(path.join(contentDir, "task.json"));
 
     const criteria: CriterionResult[] = (
@@ -1514,6 +1527,8 @@ export async function readTaskDetail(
     const artifacts = sortArtifacts(
         await walkArtifacts(artifactRoot, artifactPrefix),
     );
+
+    const componentShas = extractComponentShas(task?.environment_info);
 
     const flowDebug = parseFlowDebug(criteria);
     const toolCalls = parseToolCalls(task?.iterations ?? []);
@@ -1558,6 +1573,7 @@ export async function readTaskDetail(
         // timeline header, and the reply row in lockstep.
         hasFinalReply: finalAssistantText != null,
         runId,
+        componentShas,
         finalStatus: task?.final_status ?? null,
         errorMessage: task?.error_message ?? null,
         taskDescription,

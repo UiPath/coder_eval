@@ -5,6 +5,7 @@ import { readTaskReview } from "@/lib/reviews";
 import { fmtCompact, fmtRunTime, humanizeTaskId } from "@/lib/format";
 import { StatusPill } from "@/lib/pills";
 import { ChipButton } from "../chips";
+import { VersionChip } from "@/app/_components/version-list";
 import { displayedTurns } from "@/lib/turns";
 import { ExpectedTurnsStat, TurnsStat } from "./turns-stat";
 import {
@@ -62,8 +63,29 @@ export default async function TaskPage({
                         ↓ Download folder (.zip)
                     </a>
                 </div>
-                <div className="text-xs text-gray-500 tabular-nums font-mono">
-                    {taskId} · run {id}
+                <div className="text-xs text-gray-500 tabular-nums font-mono flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
+                    <span>
+                        {taskId} · run {id}
+                    </span>
+                    {task.componentShas.length > 0 && (
+                        <details className="group inline-block">
+                            <summary className="flex items-center gap-1 cursor-pointer list-none [&::-webkit-details-marker]:hidden hover:text-gray-700">
+                                <span className="text-gray-300">·</span>
+                                <span>versions</span>
+                                <span
+                                    aria-hidden
+                                    className="inline-block transition-transform group-open:rotate-90"
+                                >
+                                    ▸
+                                </span>
+                            </summary>
+                            <div className="flex flex-wrap gap-x-3 gap-y-1 pt-1.5">
+                                {task.componentShas.map((c) => (
+                                    <VersionChip key={c.name} {...c} />
+                                ))}
+                            </div>
+                        </details>
+                    )}
                 </div>
                 <dl className="grid grid-cols-2 md:grid-cols-7 gap-4 text-sm bg-gray-50 border border-gray-200 rounded-lg p-4">
                     <div>

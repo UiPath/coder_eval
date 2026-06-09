@@ -94,6 +94,14 @@ docker ps -aq --filter "ancestor=coder-eval-agent" 2>/dev/null \
 # below for the Python side).
 uv cache clean 2>/dev/null || true
 rm -rf "$HOME/.npm/_cacache" 2>/dev/null || true
+# Same idea for the UiPath CLI's own config (~/.uipath/config.json): nightly.yaml
+# bind-mounts ~/.uipath rw into every task container, and a stale `core.version`
+# pin there (carried over from the 1.2 -> 1.196 package-family rename) makes the
+# in-container CLI resolve its @uipath/*-tool plugins to that old line on the
+# first `uip <tool>` call, downgrading them under the image-baked 1.196 set. Drop
+# it so tool resolution tracks the current line — the file holds only the
+# update-channel + version pin; creds (~/.uipath/.auth) are untouched.
+rm -f "$HOME/.uipath/config.json" 2>/dev/null || true
 # ---- end pre-flight ----
 
 cd "$REPO"
