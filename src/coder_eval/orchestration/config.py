@@ -20,6 +20,14 @@ class BatchRunConfig(BaseModel):
     preserve_sandbox: bool = Field(default=True, description="Preserve sandbox after execution")
     include_tags: set[str] | None = Field(default=None, description="Only run tasks matching any of these tags")
     exclude_tags: set[str] | None = Field(default=None, description="Skip tasks matching any of these tags")
+    include_skipped: bool = Field(
+        default=False,
+        description=(
+            "Run tasks marked `skip: true` in their YAML instead of quarantining them. "
+            "Off by default so the nightly/CI keep excluding skipped tasks; pass "
+            "--include-skipped for on-demand / local runs of quarantined or opt-in tasks."
+        ),
+    )
 
     # Agent type override stays a dedicated field: it requires re-parsing the
     # discriminated union (not a simple field-merge), so it is injected into the

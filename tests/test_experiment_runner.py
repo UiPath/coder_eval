@@ -250,6 +250,37 @@ class TestResolveAllTasks:
         assert skipped[0].reason.startswith("skip: true")
         assert "task-blocked" in skipped[0].reason
 
+    def test_include_skipped_runs_skip_true_tasks(self, tmp_path, run_dir, default_experiment):
+        """`config.include_skipped` (--include-skipped) overrides `skip: true`.
+
+        A quarantined / opt-in task stays excluded from the nightly/CI (default),
+        but an on-demand run passing --include-skipped resolves it like any other
+        task — no entry in `skipped`. This is the bypass that makes `skip: true`
+        usable for "run sometimes, not daily" instead of permanent quarantine.
+        """
+        blocked = _write_task_yaml(tmp_path, "task-blocked", agent={"type": "claude-code"})
+        data = yaml.safe_load(blocked.read_text())
+        data["skip"] = True
+        blocked.write_text(yaml.dump(data))
+
+        live = _write_task_yaml(tmp_path, "task-live", agent={"type": "claude-code"})
+
+        experiment = ExperimentDefinition(
+            experiment_id="test-exp",
+            variants=[ExperimentVariant(variant_id="v")],
+        )
+        config = _make_config(run_dir, include_skipped=True)
+        resolved, skipped = resolve_all_tasks(
+            task_files=[blocked, live],
+            experiment=experiment,
+            default_experiment=default_experiment,
+            config=config,
+        )
+
+        # Both tasks resolve; nothing is held back as skipped.
+        assert sorted(rt.task.task_id for rt in resolved) == ["task-blocked", "task-live"]
+        assert skipped == []
+
     def test_skip_true_bypasses_dataset_fanout(self, tmp_path, run_dir, default_experiment):
         """`skip: true` on a dataset-backed task records ONE skip — no per-row fan-out.
 

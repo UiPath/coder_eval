@@ -614,7 +614,10 @@ def resolve_all_tasks(
             # skip row fan-out, variant resolution, and any further I/O. The
             # task is reported in RunSummary.skipped_tasks so the suite shows
             # which YAMLs were intentionally excluded vs. failed to load.
-            if task.skip:
+            # Bypassed by --include-skipped (config.include_skipped) so on-demand /
+            # local runs can execute quarantined or opt-in tasks; the nightly/CI
+            # leave the flag off and keep excluding them.
+            if task.skip and not config.include_skipped:
                 reason = f"skip: true (task_id={task.task_id!r})"
                 logger.info("Skipping task %s — skip: true in YAML", task.task_id)
                 skipped.append(SkippedTask(path=str(task_file), reason=reason))

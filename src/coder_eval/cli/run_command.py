@@ -194,6 +194,15 @@ def run_command(
         "--exclude-tags",
         help="Skip tasks matching any of these tags (comma-separated, e.g., 'example,integration')",
     ),
+    include_skipped: bool = typer.Option(
+        False,
+        "--include-skipped",
+        help=(
+            "Also run tasks marked `skip: true` in their YAML. Off by default so the "
+            "nightly/CI keep excluding them; use for on-demand / local runs of "
+            "quarantined or opt-in tasks."
+        ),
+    ),
     agent_type: str | None = typer.Option(
         None,
         "--type",
@@ -371,6 +380,7 @@ def run_command(
                 repeats=repeats,
                 verbose=verbose,
                 resume=resume,
+                include_skipped=include_skipped,
             )
         )
     except KeyboardInterrupt:
@@ -393,6 +403,7 @@ async def _run_all_tasks(
     repeats: int | None = None,
     verbose: bool = False,
     resume: bool = False,
+    include_skipped: bool = False,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -434,6 +445,7 @@ async def _run_all_tasks(
         max_rows=max_rows,
         repeats=repeats,
         verbose=verbose,
+        include_skipped=include_skipped,
     )
 
     # Always run through experiment layer (defaults to experiments/default.yaml)
