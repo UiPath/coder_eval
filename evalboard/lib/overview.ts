@@ -184,13 +184,71 @@ async function loadRecentRunsInner(limit: number): Promise<PerRun[]> {
     // Trends is the daily-cadence view: only pipeline runs belong here. Prune
     // to date-shaped ids BEFORE slicing (cheap, no IO) so ad-hoc runs — whose
     // ids sort lexically above every `2026-…` daily id and would otherwise
-    // crowd out the real "recent N" — never occupy a slot. Then drop any
-    // date-named run explicitly flagged adhoc (rare edge case) post-load.
-    const ids = (await listRunIds())
-        .filter((id) => parseRunIdDate(id) != null)
-        .slice(0, limit);
-    const runs = await mapWithConcurrency(ids, FETCH_CONCURRENCY, cachedLoadPerRun);
-    return runs.filter((r) => !r.adhoc);
+    // crowd out the real "recent N" — never occupy a slot.
+    const ids = (await listRunIds()).filter((id) => parseRunIdDate(id) != null);
+    return collectPipelineRuns(ids, limit, cachedLoadPerRun);
+}
+
+// A loaded run occupies a window slot only when it's usable downstream:
+// pipeline (non-adhoc) AND has a readable overview with at least one task.
+// Ad-hoc uploads, transiently unreadable runs (loadPerRunForId downgrades
+// those to overview:null), and empty/aborted uploads are all skipped and
+// backfilled from older candidates — none of them can silently shrink the
+// window. Every consumer of loadRecentRuns already skips null overviews, so
+// dropping them here only deepens the window, never changes row semantics.
+function isUsablePipelineRun(r: PerRun): boolean {
+    return !r.adhoc && r.overview != null && r.overview.tasks.length > 0;
+}
+
+// Backfill bounds. The scan cap keeps a pathological stretch of unusable
+// runs (bulk ad-hoc uploads, or a blob outage that fails every load — and
+// failures are cached for 5 min) from walking the entire container; 3× the
+// window is generous for realistic density. The batch floor keeps the
+// deficit-sized rounds from degenerating into one-id-per-round serial loads
+// when a single slot stays unfilled.
+const RECENT_SCAN_FACTOR = 3;
+const MIN_PROBE_BATCH = 5;
+
+// Load runs newest-first until `limit` usable pipeline runs are in hand, the
+// scan cap is reached, or the candidates run out. Usability is only known
+// AFTER a run is loaded (the adhoc flag lives in meta.json; a broken run.json
+// surfaces as overview:null) — slicing exactly `limit` ids up front would let
+// every unusable run silently shrink the window by one slot (loaded →
+// dropped, slot wasted). The first batch is sized to the full deficit, so the
+// common all-usable case stays a single fetch round.
+// Preconditions: `ids` must be newest-first (the final slice keeps the head,
+// i.e. the newest runs), and `load` must resolve rather than reject —
+// mapWithConcurrency propagates a rejection, which would tank the whole page.
+// loadPerRunForId honors this by downgrading failures to overview:null.
+// Exported for unit testing.
+export async function collectPipelineRuns(
+    ids: string[],
+    limit: number,
+    load: (id: string) => Promise<PerRun>,
+): Promise<PerRun[]> {
+    const maxScan = Math.min(ids.length, limit * RECENT_SCAN_FACTOR);
+    const out: PerRun[] = [];
+    let cursor = 0;
+    while (out.length < limit && cursor < maxScan) {
+        // First round = the full deficit; only refill rounds get the floor.
+        const batchSize =
+            cursor === 0
+                ? limit
+                : Math.max(limit - out.length, MIN_PROBE_BATCH);
+        const batch = ids.slice(cursor, Math.min(cursor + batchSize, maxScan));
+        cursor += batch.length;
+        const loaded = await mapWithConcurrency(batch, FETCH_CONCURRENCY, load);
+        out.push(...loaded.filter(isUsablePipelineRun));
+    }
+    if (out.length < limit && cursor >= maxScan && cursor < ids.length) {
+        console.warn(
+            `[evalboard] collectPipelineRuns: stopped after probing ${cursor} ` +
+                `candidates with ${out.length}/${limit} usable runs`,
+        );
+    }
+    // The batch floor can overshoot the deficit on the final round; keep the
+    // newest `limit` (out is filled newest-first).
+    return out.slice(0, limit);
 }
 
 // Tag-count aggregation where each tag's count is the number of distinct

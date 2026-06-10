@@ -34,7 +34,7 @@ export default async function TrendsPage({
     const q = parseQ(params.q);
     const activeTag = parseTag(params.tag);
 
-    const [allTrends, perRun] = await Promise.all([
+    const [{ runIds, trends: allTrends }, perRun] = await Promise.all([
         aggregateTaskTrends(TRENDS_RECENT_RUN_COUNT),
         loadRecentRuns(TRENDS_RECENT_RUN_COUNT),
     ]);
@@ -43,14 +43,15 @@ export default async function TrendsPage({
     // Provenance: surface the actual run count + date span. Mixing runs across
     // model/agent regimes into a single pass rate is otherwise invisible —
     // showing the window at least makes the user aware of what's collapsed.
-    const runIds = perRun.map((r) => r.id).sort();
+    // Derived from the same cached aggregate as the table (runIds is
+    // newest-first), so the label and the strips can't skew apart.
     const provenance =
         runIds.length === 0
             ? null
             : {
                   count: runIds.length,
-                  oldest: fmtRunTime(runIds[0]),
-                  newest: fmtRunTime(runIds[runIds.length - 1]),
+                  oldest: fmtRunTime(runIds[runIds.length - 1]),
+                  newest: fmtRunTime(runIds[0]),
               };
 
     let tasks = allTrends;
@@ -75,6 +76,7 @@ export default async function TrendsPage({
     return (
         <TrendsView
             tasks={tasks}
+            runIds={runIds}
             q={q}
             activeTag={activeTag}
             skills={tagCounts.skills}

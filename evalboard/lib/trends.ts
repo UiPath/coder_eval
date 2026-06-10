@@ -22,7 +22,9 @@ export interface TaskTrend {
     avgCostUsd: number | null; // SUCCESS runs only
     avgActualCommands: number | null; // SUCCESS runs only
     avgTotalTurns: number | null; // SUCCESS runs only
-    // Status sequence newest-first, one entry per run in scope.
+    // Status sequence newest-first, one entry per run the task APPEARS in —
+    // a subset of TrendsData.runIds. The view aligns these to the full run
+    // axis and renders an explicit gap slot for runs without an entry.
     recentStatuses: { runId: string; status: string | null }[];
     // Failure-only review tags aggregated across the slice. Secondary signal —
     // surfaces dominant failure mode without crowding out the primary metrics.
@@ -50,9 +52,25 @@ function avg(nums: number[]): number | null {
     return nums.reduce((a, b) => a + b, 0) / nums.length;
 }
 
-export function aggregate(perRun: PerRun[]): TaskTrend[] {
+export interface TrendsData {
+    // Run ids in scope, newest first — the slot axis every task's status
+    // strip aligns to. Tasks added/renamed/retired mid-window appear in only
+    // a subset of these runs; the view renders an explicit gap for the rest.
+    // Runs whose run.json failed to load or contained no tasks are excluded:
+    // they contribute no statuses to any task, so keeping them would render
+    // an all-gap column for every row.
+    runIds: string[];
+    trends: TaskTrend[];
+}
+
+export function aggregate(perRun: PerRun[]): TrendsData {
     // Newest first so recentStatuses comes out chronological-descending.
     const sorted = [...perRun].sort((a, b) => b.id.localeCompare(a.id));
+    const runIds = sorted
+        // Mirrors overview.ts's isUsablePipelineRun minus the adhoc clause:
+        // loadRecentRuns already strips ad-hoc runs before they reach here.
+        .filter((r) => r.overview != null && r.overview.tasks.length > 0)
+        .map((r) => r.id);
 
     type Bucket = {
         skill: string | null;
@@ -139,22 +157,24 @@ export function aggregate(perRun: PerRun[]): TaskTrend[] {
             b.totalRuns - a.totalRuns ||
             a.taskId.localeCompare(b.taskId),
     );
-    return trends;
+    return { runIds, trends };
 }
 
-async function aggregateTaskTrendsInner(limit: number): Promise<TaskTrend[]> {
+async function aggregateTaskTrendsInner(limit: number): Promise<TrendsData> {
     return aggregate(await loadRecentRuns(limit));
 }
 
 const cachedAggregate = unstable_cache(
     aggregateTaskTrendsInner,
-    ["aggregate-task-trends"],
+    // v2: the cached shape changed from TaskTrend[] to TrendsData — the key
+    // bump keeps a stale pre-deploy array from being served into new code.
+    ["aggregate-task-trends-v2"],
     { revalidate: 300 },
 );
 
 export function aggregateTaskTrends(
     limit: number = TRENDS_RECENT_RUN_COUNT,
-): Promise<TaskTrend[]> {
+): Promise<TrendsData> {
     return cachedAggregate(limit);
 }
 

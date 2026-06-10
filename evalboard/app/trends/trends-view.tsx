@@ -148,25 +148,44 @@ function statusFill(status: string | null): string {
 }
 
 function StatusBar({
+    runIds,
     statuses,
 }: {
+    // Newest-first run axis shared by every row (TrendsData.runIds). Slots
+    // the per-task statuses onto the common timeline so runs the task is
+    // missing from show as explicit gaps instead of silently compressing —
+    // without this, a renamed/retired task's strip ends flush-right and is
+    // indistinguishable from one that ran in the newest run.
+    runIds: string[];
     statuses: { runId: string; status: string | null }[];
 }) {
     if (statuses.length === 0) {
+        // Unreachable via aggregate() — every emitted trend carries ≥1
+        // status. Kept as a deliberate defensive no-op for directly-built
+        // TaskTrends.
         return <span className="text-xs text-gray-400">—</span>;
     }
+    const byRun = new Map(statuses.map((s) => [s.runId, s.status]));
     // Oldest-to-newest left-to-right so the rightmost bar is the most
     // recent run — matches the timeline convention on the front page.
-    const ordered = [...statuses].reverse();
+    const ordered = [...runIds].reverse();
     return (
         <div className="flex items-end gap-[2px] h-4">
-            {ordered.map((s) => (
-                <span
-                    key={s.runId}
-                    title={`${s.runId} · ${s.status ?? "unknown"}`}
-                    className={`w-[6px] h-full rounded-sm ${statusFill(s.status)}`}
-                />
-            ))}
+            {ordered.map((runId) =>
+                byRun.has(runId) ? (
+                    <span
+                        key={runId}
+                        title={`${runId} · ${byRun.get(runId) ?? "unknown"}`}
+                        className={`w-[6px] h-full rounded-sm ${statusFill(byRun.get(runId) ?? null)}`}
+                    />
+                ) : (
+                    <span
+                        key={runId}
+                        title={`${runId} · not in run`}
+                        className="w-[6px] h-[5px] rounded-sm bg-gray-50 border border-gray-300"
+                    />
+                ),
+            )}
         </div>
     );
 }
@@ -299,12 +318,14 @@ function HistoryTable({
 
 function TaskRow({
     t,
+    runIds,
     expanded,
     history,
     pending,
     onToggle,
 }: {
     t: TaskTrend;
+    runIds: string[];
     expanded: boolean;
     history: TaskHistoryEntry[] | null;
     pending: boolean;
@@ -370,7 +391,7 @@ function TaskRow({
                     {fmtPct(t.passRate)}
                 </td>
                 <td className="py-2 px-3">
-                    <StatusBar statuses={t.recentStatuses} />
+                    <StatusBar runIds={runIds} statuses={t.recentStatuses} />
                 </td>
                 <td className="py-2 px-3 tabular-nums text-right text-gray-700">
                     {fmtDuration(t.avgDurationSeconds)}
@@ -454,6 +475,7 @@ function SortableHeader({
 
 export function TrendsView({
     tasks,
+    runIds,
     q,
     activeTag,
     skills,
@@ -462,6 +484,8 @@ export function TrendsView({
     provenance,
 }: {
     tasks: TaskTrend[];
+    // Newest-first run axis from TrendsData — see StatusBar.
+    runIds: string[];
     q: string | null;
     activeTag: string | null;
     skills: TagCount[];
@@ -572,6 +596,7 @@ export function TrendsView({
                                     activeDir={sortDir}
                                     onSort={onSort}
                                     align="right"
+                                    title="Runs that include this task — fewer than the usable-run window when a task was added, renamed, or retired mid-window"
                                 />
                                 <SortableHeader
                                     label="Pass rate"
@@ -581,7 +606,10 @@ export function TrendsView({
                                     onSort={onSort}
                                     align="right"
                                 />
-                                <th className="py-2 px-3 font-medium">
+                                <th
+                                    className="py-2 px-3 font-medium"
+                                    title="One slot per usable run in the window (unreadable/empty runs are excluded entirely), oldest → newest. Hollow stubs mark runs that don't include this task (added, renamed, or retired mid-window)."
+                                >
                                     Recent
                                 </th>
                                 <SortableHeader
@@ -619,6 +647,7 @@ export function TrendsView({
                                 <TaskRow
                                     key={t.taskId}
                                     t={t}
+                                    runIds={runIds}
                                     expanded={openTaskId === t.taskId}
                                     history={history[t.taskId] ?? null}
                                     pending={

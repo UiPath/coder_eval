@@ -1,5 +1,9 @@
-import { describe, expect, test } from "vitest";
-import { turnBudgetRateForTasks } from "../overview";
+import { describe, expect, test, vi } from "vitest";
+import {
+    collectPipelineRuns,
+    turnBudgetRateForTasks,
+    type PerRun,
+} from "../overview";
 import type { RunOverviewTask } from "../runs";
 
 function task(overrides: Partial<RunOverviewTask>): RunOverviewTask {
@@ -76,5 +80,110 @@ describe("turnBudgetRateForTasks", () => {
         expect(
             turnBudgetRateForTasks([task({ expectedTurns: 8, visibleTurns: 8 })]),
         ).toBe(100);
+    });
+});
+
+describe("collectPipelineRuns", () => {
+    // A usable run: pipeline-cadence with a non-empty overview.
+    function run(id: string, adhoc = false): PerRun {
+        return {
+            id,
+            overview: {
+                id,
+                tasks: [task({ taskId: "t" })],
+                totalCostUsd: null,
+                taskDurationSeconds: null,
+                componentShas: [],
+            },
+            reviewTagCounts: {},
+            reviewTagsByTask: {},
+            adhoc,
+            title: null,
+        };
+    }
+
+    // A run whose run.json couldn't be read — loadPerRunForId downgrades
+    // transient blob failures (and missing run.json) to this shape.
+    function brokenRun(id: string): PerRun {
+        return { ...run(id), overview: null };
+    }
+
+    test("single fetch round when everything is usable", async () => {
+        const load = vi.fn(async (id: string) => run(id));
+        const out = await collectPipelineRuns(["r5", "r4", "r3", "r2"], 3, load);
+        expect(out.map((r) => r.id)).toEqual(["r5", "r4", "r3"]);
+        expect(load).toHaveBeenCalledTimes(3);
+    });
+
+    test("adhoc runs don't consume window slots", async () => {
+        // r3 is adhoc: the window must extend to r1 instead of coming back
+        // one short (the pre-fix behavior sliced before filtering).
+        const adhoc = new Set(["r3"]);
+        const load = vi.fn(async (id: string) => run(id, adhoc.has(id)));
+        const out = await collectPipelineRuns(
+            ["r5", "r4", "r3", "r2", "r1"],
+            4,
+            load,
+        );
+        expect(out.map((r) => r.id)).toEqual(["r5", "r4", "r2", "r1"]);
+        expect(load).toHaveBeenCalledTimes(5);
+    });
+
+    test("unreadable runs don't consume window slots", async () => {
+        // r4's run.json failed to load (overview null): it must be backfilled
+        // just like an adhoc run, not silently shrink the window/axis.
+        const broken = new Set(["r4"]);
+        const load = vi.fn(async (id: string) =>
+            broken.has(id) ? brokenRun(id) : run(id),
+        );
+        const out = await collectPipelineRuns(
+            ["r5", "r4", "r3", "r2", "r1"],
+            4,
+            load,
+        );
+        expect(out.map((r) => r.id)).toEqual(["r5", "r3", "r2", "r1"]);
+    });
+
+    test("never returns more than limit even when the probe overshoots", async () => {
+        // One adhoc run leaves a deficit of 1; the MIN_PROBE_BATCH floor
+        // loads several candidates at once — the result must still be the
+        // newest `limit` usable runs.
+        const adhoc = new Set(["r8"]);
+        const ids = ["r9", "r8", "r7", "r6", "r5", "r4", "r3", "r2", "r1"];
+        const load = vi.fn(async (id: string) => run(id, adhoc.has(id)));
+        const out = await collectPipelineRuns(ids, 2, load);
+        expect(out.map((r) => r.id)).toEqual(["r9", "r7"]);
+    });
+
+    test("stops without warning when candidates are exhausted", async () => {
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const load = vi.fn(async (id: string) => run(id, true));
+        const out = await collectPipelineRuns(["r2", "r1"], 5, load);
+        expect(out).toEqual([]);
+        expect(load).toHaveBeenCalledTimes(2);
+        // Exhaustion is the legitimate "fewer runs exist" case — no warning.
+        expect(warn).not.toHaveBeenCalled();
+        warn.mockRestore();
+    });
+
+    test("scan cap bounds the probe on a pathological unusable stretch", async () => {
+        // 40 adhoc candidates, limit 2 → probe at most 2 × RECENT_SCAN_FACTOR
+        // ids instead of walking the whole list, and warn-log the truncation
+        // (candidates remained beyond the cap).
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const ids = Array.from({ length: 40 }, (_, i) => `r${99 - i}`);
+        const load = vi.fn(async (id: string) => run(id, true));
+        const out = await collectPipelineRuns(ids, 2, load);
+        expect(out).toEqual([]);
+        expect(load.mock.calls.length).toBeLessThanOrEqual(6);
+        expect(warn).toHaveBeenCalledTimes(1);
+        warn.mockRestore();
+    });
+
+    test("limit=0 and empty ids short-circuit without loading", async () => {
+        const load = vi.fn(async (id: string) => run(id));
+        expect(await collectPipelineRuns(["r1"], 0, load)).toEqual([]);
+        expect(await collectPipelineRuns([], 5, load)).toEqual([]);
+        expect(load).not.toHaveBeenCalled();
     });
 });
