@@ -198,8 +198,9 @@ export default async function Page({
                         Within Expected Turns (%)
                     </h2>
                     <p className="text-xs text-gray-500">
-                        % of tasks with a turn budget that stayed within 1.5×
-                        their expected turns
+                        % of budgeted tasks that stayed within 1.5× their
+                        expected turns (a budgeted task that failed counts as
+                        over budget)
                         {activeTag || q ? " · scoped to the active filter" : ""}
                     </p>
                     <TurnBudgetChart

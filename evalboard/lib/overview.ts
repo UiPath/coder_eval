@@ -21,27 +21,54 @@ export interface RunPoint {
     runId: string;
     timestamp: number; // ms since epoch (UTC); used as the chart x-coordinate
     successRate: number | null;
-    // % of eligible tasks — SUCCESS tasks with an expected_turns budget —
-    // whose visible turns stayed within 1.5× that budget. null when no task in
-    // scope qualifies. Same tag/q scoping as successRate.
+    // % of budgeted tasks whose visible turns stayed within 1.5× their
+    // expected_turns budget. Only tasks carrying a positive expected_turns
+    // budget are eligible — both SUCCESS and non-SUCCESS. A budgeted task that
+    // did not succeed counts as over budget (a failed run never "stayed within
+    // budget"); a budgeted SUCCESS task is over budget only if its visible
+    // turns exceed the tolerance. Tasks with no budget are excluded regardless
+    // of outcome, so the rate is stable under tag/q filtering. null when no
+    // task in scope carries a budget at all (the chart shows a gap rather than
+    // a failure-driven 0%). Same tag/q scoping as successRate.
     turnBudgetRate: number | null;
 }
 
-// Of the SUCCESS tasks carrying an expected_turns budget, the % whose visible
-// turns stayed within 1.5× that budget; null when none qualify. Non-SUCCESS
-// tasks are excluded so an agent that bails early (low visible turns) can't
-// inflate the efficiency headline. Callers pass the already tag/q-scoped task
-// list, so the rate inherits that scoping. Exported for unit testing.
+// The % of budgeted tasks whose visible turns stayed within 1.5× their
+// expected_turns budget; null when no task in scope carries a budget.
+//
+// Eligibility is symmetric: a task counts iff it carries a positive
+// expected_turns budget, whether or not it succeeded. A budgeted non-SUCCESS
+// task is treated as having exhausted its budget (infinite turns) and counts
+// against the rate — a failed run never "stayed within budget." A budgeted
+// SUCCESS task counts within budget only when its visible turns are within
+// tolerance (a budgeted SUCCESS with no visible-turn count can't be judged and
+// is excluded). Budget-less tasks are excluded regardless of outcome, so the
+// metric name stays literally true (every counted task had expected turns) and
+// the rate does not shift when filtering changes which co-scoped tasks happen
+// to be budgeted. Callers pass the already tag/q-scoped task list, so the rate
+// inherits that scoping. Exported for unit testing.
+//
+// NOTE: this headline aggregate folds failure into the metric (a budgeted
+// failure counts as over budget) and so diverges from the per-task "Turns"
+// cell tint (turns.ts::turnRatio), which is a pure efficiency signal blind to
+// pass/fail. See turnRatio's comment.
 export function turnBudgetRateForTasks(tasks: RunOverviewTask[]): number | null {
     let eligible = 0;
     let withinBudget = 0;
     for (const t of tasks) {
-        if (t.status !== "SUCCESS") continue;
+        const hasBudget = t.expectedTurns != null && t.expectedTurns >= 1;
+        if (!hasBudget) continue; // unbudgeted tasks never count, success or fail
+        if (t.status !== "SUCCESS") {
+            // A budgeted task that didn't succeed never stayed within budget.
+            eligible += 1;
+            continue;
+        }
         const verdict = withinTurnBudget(t.visibleTurns, t.expectedTurns);
-        if (verdict === null) continue;
+        if (verdict === null) continue; // budgeted SUCCESS but no turn data → can't judge
         eligible += 1;
         if (verdict) withinBudget += 1;
     }
+    // No budgeted task in scope → nothing to report (not a failure-driven 0%).
     return eligible > 0 ? (withinBudget / eligible) * 100 : null;
 }
 

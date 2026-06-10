@@ -45,7 +45,7 @@ function CustomTooltip({
             </div>
             <div className="text-gray-600 tabular-nums">
                 {point.turnBudgetRate != null
-                    ? `${point.turnBudgetRate.toFixed(1)}% within turn budget`
+                    ? `${point.turnBudgetRate.toFixed(1)}% within turn budget (budgeted failures count as over)`
                     : "no tasks with a turn budget"}
             </div>
         </div>

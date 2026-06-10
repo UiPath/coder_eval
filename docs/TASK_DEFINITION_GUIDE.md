@@ -185,8 +185,10 @@ for the full reference.
 `run_limits.expected_turns` is a **soft target**, not a cap: the run is never
 aborted for exceeding it (use `max_turns` for a hard limit). It's the budget the
 dashboard's **"Within Expected Turns"** metric divides by — a task counts as
-"within budget" when its turn count stays within **1.5×** `expected_turns`, and
-the run-level headline reports the share of (successful) tasks that did.
+"within budget" when it succeeds *and* its turn count stays within **1.5×**
+`expected_turns`. The run-level headline reports the share of **budgeted** tasks
+that did: a budgeted task that failed counts as over budget, while tasks with no
+`expected_turns` budget are excluded entirely (success or fail).
 
 The count compared against the budget is **visible turns** — one per tool call
 plus one for the agent's final reply — *not* the SDK's `total_turns` (which

@@ -17,6 +17,14 @@ export function getTurnRatioThresholds(): TurnRatioThresholds {
 
 export type TurnTint = "green" | "yellow" | "red" | null;
 
+// Pure turn-efficiency ratio (turns ÷ expected_turns), used to tint per-task
+// "Turns" cells. This is deliberately blind to pass/fail: the cell answers
+// "was this task's turn usage efficient?", which is meaningful regardless of
+// outcome — a task that crashed at 2 turns should NOT read as "over budget"
+// red in the Turns column. The aggregate headline metric is the opposite: see
+// withinTurnBudget below, which `overview.ts::turnBudgetRateForTasks` treats as
+// over budget for any *budgeted* non-SUCCESS task. The two intentionally
+// diverge (the cell ignores outcome; the headline folds it in).
 export function turnRatio(
     totalTurns: number | null,
     expectedTurns: number | null,
