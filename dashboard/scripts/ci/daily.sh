@@ -128,6 +128,10 @@ done
 # AWS_BEARER_TOKEN_BEDROCK in the env, not the host's OAuth token.
 export CODER_EVAL_NO_CLAUDE_MOUNT=1
 
+# Disable in-container uip version-sync: the shared ~/.uipath rw mount lets one
+# task's post-login re-pin downgrade later tasks. Forwarded via env_passthrough.
+export UIPATH_CLI_DISABLE_VERSION_SYNC=1
+
 # Resolve MODEL after sourcing .env so the default falls back to $BEDROCK_MODEL
 # (full Bedrock id). Caller-set MODEL still wins.
 MODEL="${MODEL:-${BEDROCK_MODEL:-}}"

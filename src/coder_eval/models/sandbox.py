@@ -217,6 +217,9 @@ class DockerDriverConfig(BaseModel):
             "UIPATH_URL",
             "UIPATH_TENANT_ID",
             "UIPATH_ORGANIZATION_ID",
+            # Disable uip CLI version-sync: the shared ~/.uipath mount lets one
+            # task's post-login re-pin downgrade later tasks' CLI/tools.
+            "UIPATH_CLI_DISABLE_VERSION_SYNC",
             "AWS_BEARER_TOKEN_BEDROCK",
             "AWS_REGION",
             "BEDROCK_MODEL",
