@@ -75,13 +75,15 @@ jobs:
         run: |
           # `version` mutates files, commits, and tags but does not push yet
           # (--no-push) so we can regenerate uv.lock and amend before sending.
-          # Outputs nothing on a no-op (no releasable commits since last tag).
-          uv tool run --from python-semantic-release semantic-release version \
-            --no-vcs-release \
-            --no-push \
-            --changelog
-          # Capture the new version (empty string if no bump happened)
-          NEW_VERSION=$(uv tool run --from python-semantic-release semantic-release version --print)
+          # --strict makes a no-op exit non-zero so the if/else gate works.
+          if uv tool run --from python-semantic-release semantic-release --strict version \
+              --no-vcs-release \
+              --no-push \
+              --changelog; then
+            NEW_VERSION=$(uv tool run --from python-semantic-release semantic-release version --print)
+          else
+            NEW_VERSION=""
+          fi
           echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Regenerate uv.lock and amend release commit
