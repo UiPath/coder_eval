@@ -68,19 +68,36 @@ jobs:
       - name: Install build + release tools
         run: uv tool install python-semantic-release && uv tool install twine
 
-      - name: Run semantic-release (bump + tag + push)
+      - name: Run semantic-release (bump + tag, no push yet)
         id: release
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          # `version` mutates files, commits, tags, and pushes back to main.
+          # `version` mutates files, commits, and tags but does not push yet
+          # (--no-push) so we can regenerate uv.lock and amend before sending.
           # Outputs nothing on a no-op (no releasable commits since last tag).
           uv tool run --from python-semantic-release semantic-release version \
             --no-vcs-release \
+            --no-push \
             --changelog
           # Capture the new version (empty string if no bump happened)
           NEW_VERSION=$(uv tool run --from python-semantic-release semantic-release version --print)
           echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Regenerate uv.lock and amend release commit
+        if: steps.release.outputs.version != ''
+        run: |
+          uv lock
+          if ! git diff --quiet uv.lock; then
+            git add uv.lock
+            git commit --amend --no-edit
+            # Amend replaced the commit the tag points at; re-point it before pushing.
+            git tag -f "v${{ steps.release.outputs.version }}"
+          fi
+
+      - name: Push release commit and tags
+        if: steps.release.outputs.version != ''
+        run: git push origin main "v${{ steps.release.outputs.version }}"
 
       - name: Build wheel + sdist
         if: steps.release.outputs.version != ''
