@@ -625,7 +625,12 @@ def resolve_all_tasks(
             # Dataset fan-out BEFORE variant resolution: one task per row, each
             # treated as an independent task for the 4-layer merge below. This
             # locks the invariant that variants cannot override the dataset.
-            expanded_tasks = expand_dataset(task, task_file.parent, max_rows=config.max_rows)
+            expanded_tasks = expand_dataset(
+                task,
+                task_file.parent,
+                max_rows=config.max_rows,
+                sample_per_stratum=config.sample_per_stratum,
+            )
         # Narrow set: real load failures only. We deliberately don't catch
         # AttributeError / TypeError / ImportError — those signal a regression
         # in load_task / expand_dataset and should crash loudly rather than

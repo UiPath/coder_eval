@@ -164,6 +164,24 @@ export async function ensureRunSummary(
     });
 }
 
+// The activation suite is a nested sub-run: its self-contained run.json (cases +
+// rollup) lives at <runId>/activation/run.json. The activation card and page read
+// it via this fetch; absent (404) on runs without an activation suite.
+export async function ensureActivationSummary(
+    runId: string,
+    destRoot: string,
+): Promise<void> {
+    assertValidId(runId, "runId");
+    if (LOCAL_RUNS_DIR) return;
+    return dedupe(`activation:${runId}`, async () => {
+        try {
+            await downloadBlob(`${runId}/activation/run.json`, destRoot);
+        } catch (err) {
+            if (!isNotFound(err)) throw err;
+        }
+    });
+}
+
 export async function ensureRunAnalysis(
     runId: string,
     destRoot: string,
@@ -247,7 +265,12 @@ export async function ensureTaskDir(
     assertValidTaskId(taskId, "taskId");
     if (LOCAL_RUNS_DIR) return;
     return dedupe(`task:${runId}/${taskId}`, async () => {
-        await ensureRunSummary(runId, destRoot);
+        // Activation cases live in the nested sub-run (<runId>/activation/...),
+        // so their row + per-case dir come from there; skills tasks from the
+        // top-level run. Fetch the matching run.json for the row lookup.
+        const activation = taskId.startsWith("skill-activation/");
+        if (activation) await ensureActivationSummary(runId, destRoot);
+        else await ensureRunSummary(runId, destRoot);
         const c = getContainer();
         const ops: Promise<void>[] = [];
         // `listBlobsFlat` recurses, so both the flat legacy layout
@@ -255,7 +278,9 @@ export async function ensureTaskDir(
         // (`default/<task>/00/task.json`) download unchanged — the prefix
         // scope is the task subtree either way. `resolveTaskContentDir` in
         // runs.ts then picks the right shape at render time.
-        const prefix = `${runId}/default/${taskId}/`;
+        const prefix = activation
+            ? `${runId}/activation/default/${taskId}/`
+            : `${runId}/default/${taskId}/`;
         for await (const blob of c.listBlobsFlat({ prefix })) {
             // Agent sandboxes that run Python leave a `.venv/` tree (hundreds
             // of files, tens of MB) under the task dir. No UI page reads it,

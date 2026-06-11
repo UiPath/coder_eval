@@ -247,7 +247,20 @@ def run_command(
     sample: int | None = typer.Option(
         None,
         "--sample",
-        help="For dataset-backed tasks, use only the first N rows. Lets you smoke-test datasets cheaply.",
+        help=(
+            "For dataset-backed tasks, use a random N-row sample "
+            "(fixed seed: reproducible, unbiased across paths). Cheap dataset smoke-test."
+        ),
+        min=1,
+    ),
+    sample_per_stratum: int | None = typer.Option(
+        None,
+        "--sample-per-stratum",
+        help=(
+            "For dataset-backed tasks, keep up to N rows per stratum (stratify_field, "
+            "default expected_skill) — a stratified sample that overrides the task's "
+            "dataset.sample_per_stratum without editing the YAML. Ignored when --sample is set."
+        ),
         min=1,
     ),
     repeats: int | None = typer.Option(
@@ -382,6 +395,7 @@ def run_command(
                 stream,
                 experiment_path=resolved_experiment,
                 max_rows=sample,
+                sample_per_stratum=sample_per_stratum,
                 repeats=repeats,
                 verbose=verbose,
                 resume=resume,
@@ -405,6 +419,7 @@ async def _run_all_tasks(
     stream_mode: str | None = None,
     experiment_path: Path | None = None,
     max_rows: int | None = None,
+    sample_per_stratum: int | None = None,
     repeats: int | None = None,
     verbose: bool = False,
     resume: bool = False,
@@ -448,6 +463,7 @@ async def _run_all_tasks(
         agent_type=agent_type,
         overrides=overrides or {},
         max_rows=max_rows,
+        sample_per_stratum=sample_per_stratum,
         repeats=repeats,
         verbose=verbose,
         include_skipped=include_skipped,

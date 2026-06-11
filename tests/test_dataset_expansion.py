@@ -110,36 +110,139 @@ class TestExpandDatasetInline:
         expanded = expand_dataset(task, tmp_path)
         assert [t.task_id for t in expanded] == ["suite/alpha", "suite/beta"]
 
-    def test_max_rows_caps_expansion(self, tmp_path: Path) -> None:
-        task = _make_task_with_dataset(rows=[{"id": f"r{i}", "prompt": "x", "expected": "y"} for i in range(5)])
-        expanded = expand_dataset(task, tmp_path, max_rows=2)
-        assert [t.task_id for t in expanded] == ["suite/r0", "suite/r1"]
+    def test_max_rows_random_caps_expansion(self, tmp_path: Path) -> None:
+        # CLI --sample: a fixed-seed random N-row subset (reproducible, count == N).
+        rows = [{"id": f"r{i}", "prompt": "x", "expected": "y"} for i in range(5)]
+        expanded = expand_dataset(_make_task_with_dataset(rows=rows), tmp_path, max_rows=2)
+        ids = [t.row_id for t in expanded]
+        assert len(ids) == 2
+        assert set(ids) <= {f"r{i}" for i in range(5)}
+        # Fixed seed => same subset on a second call.
+        again = [t.row_id for t in expand_dataset(_make_task_with_dataset(rows=rows), tmp_path, max_rows=2)]
+        assert ids == again
 
-    def test_dataset_sample_caps_expansion(self, tmp_path: Path) -> None:
-        # Task-level dataset.sample caps rows when no CLI max_rows is provided.
-        task = _make_task_with_dataset(
-            sample=3,
-            rows=[{"id": f"r{i}", "prompt": "x", "expected": "y"} for i in range(10)],
-        )
-        expanded = expand_dataset(task, tmp_path)
-        assert [t.task_id for t in expanded] == ["suite/r0", "suite/r1", "suite/r2"]
+    def test_max_rows_is_unbiased_across_paths(self, tmp_path: Path) -> None:
+        # Regression: a first-N slice would draw all rows from the first block.
+        # The random sample must be able to reach later blocks too.
+        front = [{"id": f"a{i}", "prompt": "x", "expected": "y"} for i in range(20)]
+        back = [{"id": f"z{i}", "prompt": "x", "expected": "y"} for i in range(20)]
+        expanded = expand_dataset(_make_task_with_dataset(rows=front + back), tmp_path, max_rows=10)
+        assert any((t.row_id or "").startswith("z") for t in expanded)
 
-    def test_cli_max_rows_overrides_dataset_sample(self, tmp_path: Path) -> None:
-        # CLI --sample wins over task-level dataset.sample, in both directions.
-        task = _make_task_with_dataset(
-            sample=3,
-            rows=[{"id": f"r{i}", "prompt": "x", "expected": "y"} for i in range(10)],
-        )
-        # CLI tighter than task default
-        tight = expand_dataset(task, tmp_path, max_rows=1)
-        assert [t.task_id for t in tight] == ["suite/r0"]
-        # CLI looser than task default
-        loose = expand_dataset(task, tmp_path, max_rows=5)
-        assert [t.task_id for t in loose] == [f"suite/r{i}" for i in range(5)]
+    def test_max_rows_at_or_above_size_runs_full(self, tmp_path: Path) -> None:
+        rows = [{"id": f"r{i}", "prompt": "x", "expected": "y"} for i in range(3)]
+        assert len(expand_dataset(_make_task_with_dataset(rows=rows), tmp_path, max_rows=3)) == 3
+        assert len(expand_dataset(_make_task_with_dataset(rows=rows), tmp_path, max_rows=99)) == 3
 
     def test_no_cap_runs_full_dataset(self, tmp_path: Path) -> None:
         task = _make_task_with_dataset(rows=[{"id": f"r{i}", "prompt": "x", "expected": "y"} for i in range(4)])
         expanded = expand_dataset(task, tmp_path)
+        assert len(expanded) == 4
+
+
+class TestExpandDatasetStratifiedSample:
+    """sample_per_stratum: random N-per-stratum (the activation-suite sampling mode)."""
+
+    @staticmethod
+    def _stratified_rows() -> list[dict[str, Any]]:
+        # Strata of uneven size, mirroring activation: big skills, a small skill,
+        # and the shared-negative stratum (expected_skill == "").
+        rows: list[dict[str, Any]] = []
+        rows += [{"id": f"a-{i}", "prompt": "p", "expected": "e", "expected_skill": "skill-a"} for i in range(8)]
+        rows += [{"id": f"b-{i}", "prompt": "p", "expected": "e", "expected_skill": "skill-b"} for i in range(5)]
+        rows += [{"id": f"c-{i}", "prompt": "p", "expected": "e", "expected_skill": "skill-c"} for i in range(2)]
+        rows += [{"id": f"n-{i}", "prompt": "p", "expected": "e", "expected_skill": ""} for i in range(6)]
+        return rows
+
+    @staticmethod
+    def _counts_by_stratum(expanded: list[TaskDefinition]) -> dict[str, int]:
+        # row_id prefix encodes the stratum: "a-*"/"b-*"/"c-*" skills, "n-*" negatives.
+        counts: dict[str, int] = {}
+        for t in expanded:
+            assert t.row_id is not None
+            counts[t.row_id.split("-")[0]] = counts.get(t.row_id.split("-")[0], 0) + 1
+        return counts
+
+    def test_caps_each_stratum_and_takes_small_whole(self, tmp_path: Path) -> None:
+        task = _make_task_with_dataset(rows=self._stratified_rows(), sample_per_stratum=3, sample_seed=42)
+        expanded = expand_dataset(task, tmp_path)
+        counts = self._counts_by_stratum(expanded)
+        # Big strata capped at 3; the 2-row stratum 'c' taken whole (<= N).
+        assert counts == {"a": 3, "b": 3, "c": 2, "n": 3}
+        assert len(expanded) == 11
+
+    def test_deterministic_under_seed(self, tmp_path: Path) -> None:
+        rows = self._stratified_rows()
+        ids1 = [
+            t.row_id
+            for t in expand_dataset(_make_task_with_dataset(rows=rows, sample_per_stratum=3, sample_seed=7), tmp_path)
+        ]
+        ids2 = [
+            t.row_id
+            for t in expand_dataset(_make_task_with_dataset(rows=rows, sample_per_stratum=3, sample_seed=7), tmp_path)
+        ]
+        assert ids1 == ids2
+
+    def test_different_seeds_draw_differently(self, tmp_path: Path) -> None:
+        rows = self._stratified_rows()
+        ids_a = {
+            t.row_id
+            for t in expand_dataset(_make_task_with_dataset(rows=rows, sample_per_stratum=3, sample_seed=1), tmp_path)
+        }
+        ids_b = {
+            t.row_id
+            for t in expand_dataset(_make_task_with_dataset(rows=rows, sample_per_stratum=3, sample_seed=2), tmp_path)
+        }
+        # Same per-stratum counts, but at least one drawn row differs.
+        assert ids_a != ids_b
+
+    def test_unseeded_redraws_each_run(self, tmp_path: Path) -> None:
+        # sample_seed=None (the default, and how the nightly activation suite is
+        # wired) must re-draw on every run — a fresh nondeterministic RNG, NOT a
+        # fixed seed. Guards against anyone defaulting the seed to a constant and
+        # silently freezing which rows the nightly samples. Draw several times and
+        # require >1 distinct result; the odds of all draws colliding by chance are
+        # ~(1/11200)^(n-1) for these strata, i.e. effectively zero.
+        rows = self._stratified_rows()
+        draws = {
+            frozenset(
+                t.row_id for t in expand_dataset(_make_task_with_dataset(rows=rows, sample_per_stratum=3), tmp_path)
+            )
+            for _ in range(6)
+        }
+        assert len(draws) > 1
+
+    def test_custom_stratify_field(self, tmp_path: Path) -> None:
+        rows = [{"id": f"r{i}", "prompt": "p", "expected": "e", "bucket": "x" if i % 2 else "y"} for i in range(10)]
+        task = _make_task_with_dataset(rows=rows, sample_per_stratum=2, stratify_field="bucket", sample_seed=0)
+        expanded = expand_dataset(task, tmp_path)
+        assert len(expanded) == 4  # 2 buckets x 2
+
+    def test_cli_max_rows_overrides_stratified(self, tmp_path: Path) -> None:
+        # CLI --sample (flat uniform-random N) wins over sample_per_stratum.
+        task = _make_task_with_dataset(rows=self._stratified_rows(), sample_per_stratum=3, sample_seed=42)
+        expanded = expand_dataset(task, tmp_path, max_rows=4)
+        assert len(expanded) == 4  # flat 4, NOT 3-per-stratum
+
+    def test_arg_applies_when_yaml_absent(self, tmp_path: Path) -> None:
+        # CLI --sample-per-stratum drives the cap when the task YAML has none.
+        # This is how the nightly activation suite is wired: the runner injects
+        # the per-skill cap without editing the skills-repo task.
+        task = _make_task_with_dataset(rows=self._stratified_rows())
+        assert task.dataset is not None and task.dataset.sample_per_stratum is None
+        expanded = expand_dataset(task, tmp_path, sample_per_stratum=3)
+        assert self._counts_by_stratum(expanded) == {"a": 3, "b": 3, "c": 2, "n": 3}
+
+    def test_arg_overrides_yaml_value(self, tmp_path: Path) -> None:
+        # When both are set, the expand_dataset arg (CLI --sample-per-stratum) wins.
+        task = _make_task_with_dataset(rows=self._stratified_rows(), sample_per_stratum=2)
+        expanded = expand_dataset(task, tmp_path, sample_per_stratum=4)
+        assert self._counts_by_stratum(expanded) == {"a": 4, "b": 4, "c": 2, "n": 4}
+
+    def test_max_rows_overrides_arg(self, tmp_path: Path) -> None:
+        # --sample (flat) beats --sample-per-stratum, same as it beats the YAML.
+        task = _make_task_with_dataset(rows=self._stratified_rows())
+        expanded = expand_dataset(task, tmp_path, max_rows=4, sample_per_stratum=3)
         assert len(expanded) == 4
 
 
@@ -370,7 +473,8 @@ class TestResolveAllTasksIntegration:
             config=config,
         )
         assert len(resolved) == 1
-        assert resolved[0].task.task_id == "suite/row-a"
+        # --sample is now a random subset (count == max_rows), not a first-N slice.
+        assert resolved[0].task.task_id in {"suite/row-a", "suite/row-b"}
 
     def test_non_dataset_task_unaffected(self, tmp_path: Path) -> None:
         task_file = self._write_task_yaml(tmp_path, "plain", with_dataset=False)

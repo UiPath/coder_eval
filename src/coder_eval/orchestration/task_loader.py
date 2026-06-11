@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,10 @@ from ..models import (
     TemplateSource,
 )
 
+
+# Fixed seed for the CLI --sample (max_rows) uniform draw: a smoke sample should
+# be reproducible run-to-run, just not first-path-biased like a raw slice.
+_SMOKE_SAMPLE_SEED = 0
 
 _ROW_VAR_PATTERN = re.compile(r"\$\{row\.([A-Za-z_][A-Za-z0-9_]*)\}")
 _ROW_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
@@ -281,6 +286,30 @@ def _load_dataset_rows(dataset: Dataset, task_file_dir: Path) -> list[dict[str, 
     return rows
 
 
+def _stratified_sample(
+    rows: list[dict[str, Any]],
+    field: str,
+    n: int,
+    seed: int | None,
+) -> list[dict[str, Any]]:
+    """Randomly keep up to ``n`` rows per stratum, keyed on ``str(row[field])``.
+
+    Strata with <= n rows are taken whole. Output preserves first-seen stratum
+    order; within a sampled stratum, rows are in their drawn (random) order.
+    Rows missing ``field`` fall into the "" stratum (this is where the activation
+    dataset's shared negatives — ``expected_skill: ""`` — collect). ``seed=None``
+    uses a fresh nondeterministic RNG, so the draw differs every run.
+    """
+    rng = random.Random(seed)
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(str(row.get(field, "")), []).append(row)
+    out: list[dict[str, Any]] = []
+    for grp in groups.values():
+        out.extend(grp if len(grp) <= n else rng.sample(grp, n))
+    return out
+
+
 def _substitute_row_in_str(s: str, row: dict[str, Any]) -> str:
     """Replace ${row.<field>} occurrences in s with scalar values from row."""
 
@@ -313,6 +342,7 @@ def expand_dataset(
     task: TaskDefinition,
     task_file_dir: Path,
     max_rows: int | None = None,
+    sample_per_stratum: int | None = None,
 ) -> list[TaskDefinition]:
     """Fan out a task with ``dataset:`` into one TaskDefinition per row.
 
@@ -330,8 +360,17 @@ def expand_dataset(
     Args:
         task: Task that may carry a dataset.
         task_file_dir: Directory of the source task YAML (for resolving dataset.paths).
-        max_rows: Optional CLI cap on rows used (for cheap smoke runs). First
-            N rows. When provided, overrides ``dataset.sample`` from the task YAML.
+        max_rows: Optional CLI cap on rows used (for cheap smoke runs). A
+            fixed-seed uniform-random N-row sample over the whole dataset
+            (reproducible, but unbiased across ``dataset.paths`` — unlike a raw
+            slice). When provided, overrides both ``sample_per_stratum`` args.
+            Absent it, ``sample_per_stratum`` (stratified random) applies.
+        sample_per_stratum: Optional CLI override (``--sample-per-stratum``) for
+            ``dataset.sample_per_stratum`` — keep up to N rows per stratum
+            (stratum = ``dataset.stratify_field``, default ``expected_skill``).
+            Lets a runner cap a stratified dataset without editing the task YAML
+            (the nightly activation suite uses this). Ignored when ``max_rows``
+            is set. When None, falls back to ``dataset.sample_per_stratum``.
 
     Returns:
         Expanded list of TaskDefinitions. Length is 1 when dataset is None.
@@ -348,10 +387,19 @@ def expand_dataset(
     if not rows:
         raise ValueError(f"Dataset for task '{task.task_id}' is empty")
 
-    # Precedence: CLI --sample (max_rows) wins over task-level dataset.sample.
-    effective_cap = max_rows if max_rows is not None else task.dataset.sample
-    if effective_cap is not None:
-        rows = rows[:effective_cap]
+    # Row selection precedence:
+    #   1. CLI --sample (max_rows): flat uniform-random N over the whole dataset.
+    #      Fixed seed => reproducible across runs, but (unlike a first-N slice)
+    #      unbiased across the concatenated dataset.paths.
+    #   2. sample_per_stratum: stratified random N-per-stratum. CLI
+    #      --sample-per-stratum (the arg) overrides dataset.sample_per_stratum
+    #      (the YAML), so a runner can cap a dataset without editing its task.
+    ds = task.dataset
+    n_per_stratum = sample_per_stratum if sample_per_stratum is not None else ds.sample_per_stratum
+    if max_rows is not None and max_rows < len(rows):
+        rows = random.Random(_SMOKE_SAMPLE_SEED).sample(rows, max_rows)
+    elif max_rows is None and n_per_stratum is not None:
+        rows = _stratified_sample(rows, ds.stratify_field, n_per_stratum, ds.sample_seed)
 
     id_field = task.dataset.id_field
     seen_ids: set[str] = set()

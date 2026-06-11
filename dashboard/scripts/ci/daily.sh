@@ -45,7 +45,10 @@ SKILLS_REPO=/home/azureuser/uipath/skills
 LOG_DIR=/home/azureuser/runs-ci
 LOCK=/var/lock/uip-daily.lock
 BACKEND="${BACKEND:-bedrock}"
-SUITE="${SUITE:-skills}"
+# Comma-separated: the nightly runs the skills grid AND the 20-per-skill
+# activation sample into ONE merged run (one run.json + one upload; activation
+# is a section, surfaced via its suite.json). Override with e.g. SUITE=skills.
+SUITE="${SUITE:-skills,activation}"
 BRANCH="${BRANCH:-main}"
 SKILLS_BRANCH="${SKILLS_BRANCH:-main}"
 # MODEL is resolved AFTER sourcing .env so it can fall back to $BEDROCK_MODEL

@@ -613,6 +613,14 @@ class CriterionAggregate(BaseModel):
     """
 
     criterion_type: str
+    description: str | None = Field(
+        default=None,
+        description=(
+            "The source criterion's description. Set when a task stacks multiple criteria of the "
+            "same type (e.g. activation's per-skill skill_triggered criteria) so each aggregate is "
+            "distinguishable in the rollup; None for single-criterion-per-type suites."
+        ),
+    )
     metrics: dict[str, float] = Field(default_factory=dict, description="Flat metric name -> value")
     threshold_checks: list[ThresholdCheck] = Field(default_factory=list)
     passed: bool = Field(description="True when all threshold_checks passed (trivially true when no thresholds).")

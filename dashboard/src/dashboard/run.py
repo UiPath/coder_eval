@@ -63,6 +63,8 @@ def run_tests(
     extra_env: dict[str, str] | None = None,
     verbose: bool = False,
     backend: str | None = None,
+    sample_per_stratum: int | None = None,
+    run_dir: Path | None = None,
 ) -> Path:
     """Run coder-eval and return the resolved path of the latest run."""
     if task_patterns is None:
@@ -94,6 +96,13 @@ def run_tests(
         cmd.extend(["--tags", tags])
     if concurrency is not None:
         cmd.extend(["-j", str(concurrency)])
+    if sample_per_stratum is not None:
+        cmd.extend(["--sample-per-stratum", str(sample_per_stratum)])
+    if run_dir is not None:
+        # Pin the run dir: main suites share the run dir; the activation suite
+        # passes a nested <run>/activation/ path so it gets its own self-contained
+        # run.json without touching the skills one. coder-eval mkdir's it.
+        cmd.extend(["--run-dir", str(run_dir)])
     if experiment:
         cmd.extend(["--experiment", experiment])
     if verbose:
@@ -109,6 +118,8 @@ def run_tests(
     if result.returncode != 0:
         print(f"WARNING: coder-eval exited with code {result.returncode} (some tasks may have failed)")
 
+    if run_dir is not None:
+        return run_dir.resolve()
     latest = (CODER_EVAL_DIR / "runs" / "latest").resolve()
     if not latest.exists():
         raise FileNotFoundError(f"Expected run symlink not found: {latest}")

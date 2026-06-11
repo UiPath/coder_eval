@@ -10,6 +10,7 @@ from coder_eval.models import (
     AgentKind,
     CriterionResult,
     EvaluationResult,
+    FileExistsCriterion,
     FinalStatus,
     SuiteRollup,
     TaskResult,
@@ -476,3 +477,52 @@ class TestReplicateIndexInSuiteRollup:
         ]
         rollup = _compute_suite_rollup("s", "v1", rows, tmp_path)
         assert rollup.failed_samples[0].task_json_relpath == "v1/s/r1/03/task.json"
+
+
+class TestStackedSameTypeAggregation:
+    """A task can stack multiple criteria of the SAME type (e.g. activation's
+    per-skill skill_triggered) and each gets its OWN across-row aggregate, sliced
+    by position and keyed by description — not one type-pooled number repeated per
+    instance (the pre-fix behavior). This is what makes per-skill recall real."""
+
+    @staticmethod
+    def _row(row_id: str, scores: tuple[float, float]) -> TaskResult:
+        # Two criteria of the same type at index 0/1, with distinct descriptions.
+        result = EvaluationResult(
+            task_id=f"s/{row_id}",
+            task_description="t",
+            agent_type=AgentKind.CLAUDE_CODE,
+            started_at=datetime.now(),
+            final_status=FinalStatus.SUCCESS,
+            weighted_score=sum(scores) / len(scores),
+            iteration_count=1,
+            success_criteria_results=[
+                CriterionResult(criterion_type="file_exists", description="crit-A", score=scores[0]),
+                CriterionResult(criterion_type="file_exists", description="crit-B", score=scores[1]),
+            ],
+        )
+        return TaskResult(
+            task_id=f"s/{row_id}",
+            variant_id="v1",
+            duration=1.0,
+            suite_id="s",
+            row_id=row_id,
+            replicate_index=0,
+            result=result,
+        )
+
+    def test_each_instance_aggregates_its_own_column(self, tmp_path: Path) -> None:
+        rows = [self._row("r1", (1.0, 0.0)), self._row("r2", (1.0, 0.0))]
+        criteria = [
+            FileExistsCriterion(description="crit-A", path="a.txt"),
+            FileExistsCriterion(description="crit-B", path="b.txt"),
+        ]
+        rollup = _compute_suite_rollup("s", "v1", rows, tmp_path, task_criteria=criteria)
+        aggs = rollup.criterion_aggregates
+        assert len(aggs) == 2
+        by_desc = {a.description: a for a in aggs}
+        assert set(by_desc) == {"crit-A", "crit-B"}
+        # crit-A saw column [1.0, 1.0] -> mean 1.0; crit-B saw [0.0, 0.0] -> mean 0.0.
+        # Pooling by type (the old bug) would feed BOTH the combined [1,1,0,0] -> 0.5.
+        assert by_desc["crit-A"].metrics["mean"] == 1.0
+        assert by_desc["crit-B"].metrics["mean"] == 0.0

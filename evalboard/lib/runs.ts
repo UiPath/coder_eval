@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import {
     LOCAL_RUNS_DIR,
+    ensureActivationSummary,
     ensureRunAnalysis,
     ensureRunDir,
     ensureRunMeta,
@@ -333,6 +334,14 @@ interface RawTaskResult {
     // Model the task ran on (e.g. "claude-sonnet-4-6"). Used to price token
     // buckets as USD. Absent on legacy runs.
     model_used?: string | null;
+    // Activation enrichment the dashboard folds onto each case row in the nested
+    // activation run.json (see cli.py _finalize_activation_run). Absent on skills
+    // rows. `prompt` = the case's prompt text; `expected_skill` = the skill the
+    // prompt targets ("" for a negative case); `triggered_skill` = the skill that
+    // actually fired ("" = none fired). A mismatch between the two is a mistake.
+    prompt?: string | null;
+    expected_skill?: string | null;
+    triggered_skill?: string | null;
 }
 
 interface RawRunJson {
@@ -351,6 +360,79 @@ interface RawRunJson {
         string,
         string | number | null | Record<string, string>
     >;
+    // Per-skill activation rollup. Present ONLY on the nested activation sub-run's
+    // run.json (run_id/activation/run.json), which the dashboard finalizes with
+    // compute_activation_rollup. The top-level skills run.json never carries it.
+    activation?: RawActivation;
+}
+
+interface RawActivation {
+    score?: number;
+    denominator?: number;
+    min_prompts?: number;
+    n_skills_sampled?: number;
+    n_cases?: number | null;
+    per_skill?: {
+        skill?: string;
+        recall_yes?: number | null;
+        n_prompts?: number;
+        sampled?: boolean;
+        contributes?: number;
+    }[];
+}
+
+export interface ActivationSkillScore {
+    skill: string;
+    recallYes: number | null;
+    nPrompts: number;
+    sampled: boolean; // ran a full sample (>= minPrompts positive prompts)
+    contributes: number; // recallYes when sampled, else 0
+}
+
+// Activation rollup from the nested activation run.json["activation"].
+// score = mean over the FULL skill catalog of recall.yes, where a skill counts 0
+// unless it ran >= minPrompts positive prompts — so coverage gaps drag it down.
+export interface ActivationScore {
+    score: number;
+    denominator: number;
+    minPrompts: number;
+    nSkillsSampled: number;
+    nCases: number | null;
+    perSkill: ActivationSkillScore[];
+}
+
+// One activation case for the /runs/<id>/activation cases table. Read from the
+// nested activation run.json's task_results, enriched dashboard-side.
+export interface ActivationCaseRow {
+    taskId: string;
+    // The prompt text the agent received; null on rows the enrichment couldn't
+    // resolve (e.g. re-merged old run with no per-case task.json).
+    prompt: string | null;
+    // The skill the prompt targets; null for a negative case (nothing should fire).
+    expectedSkill: string | null;
+    // The skill that actually fired; "" = none fired, null = unknown (no signal).
+    // A mismatch with expectedSkill is a mistake (miss / false positive / wrong skill).
+    triggeredSkill: string | null;
+}
+
+function mapActivation(
+    a: RawActivation | undefined | null,
+): ActivationScore | null {
+    if (!a || typeof a.score !== "number") return null;
+    return {
+        score: a.score,
+        denominator: a.denominator ?? 0,
+        minPrompts: a.min_prompts ?? 20,
+        nSkillsSampled: a.n_skills_sampled ?? 0,
+        nCases: a.n_cases ?? null,
+        perSkill: (a.per_skill ?? []).map((p) => ({
+            skill: p.skill ?? "",
+            recallYes: p.recall_yes ?? null,
+            nPrompts: p.n_prompts ?? 0,
+            sampled: p.sampled ?? false,
+            contributes: p.contributes ?? 0,
+        })),
+    };
 }
 
 // Components captured in run env_info. Each entry may accept multiple keys —
@@ -459,6 +541,34 @@ async function readRunJson(id: string): Promise<RawRunJson | null> {
     return readJson<RawRunJson>(path.join(RUNS_DIR, id, "run.json"));
 }
 
+// The activation suite is a nested sub-run: its self-contained run.json (enriched
+// cases + the per-skill rollup) lives at <id>/activation/run.json, separate from
+// the skills run.json so the latter stays exactly what coder-eval wrote. Null when
+// the run has no activation suite.
+async function readActivationRunJson(id: string): Promise<RawRunJson | null> {
+    await ensureActivationSummary(id, RUNS_DIR);
+    return readJson<RawRunJson>(
+        path.join(RUNS_DIR, id, "activation", "run.json"),
+    );
+}
+
+// Activation cases run in the nested sub-run, so their per-case dirs (and row
+// data) come from <id>/activation/... rather than the top-level run. coder-eval
+// names the activation task "skill-activation", so its case task_ids are
+// "skill-activation/<row>".
+function isActivationTaskId(taskId: string): boolean {
+    return taskId.startsWith("skill-activation/");
+}
+
+// Filesystem base for a task's content (before the optional `00` replicate dir):
+// activation cases under <id>/activation/default/<taskId>, skills tasks under
+// <id>/default/<taskId>.
+function taskContentBase(runId: string, taskId: string): string {
+    return isActivationTaskId(taskId)
+        ? path.join(RUNS_DIR, runId, "activation", "default", taskId)
+        : path.join(RUNS_DIR, runId, "default", taskId);
+}
+
 // Resolve the skill (primary grouping axis) for a task. Two-stage fallback:
 //   1. New runs: parse "tasks/<skill>/..." from task_path — the folder a task
 //      lives under in the skills repo is the authoritative skill name.
@@ -548,6 +658,38 @@ export async function readRunTasks(
     const data = await readRunJson(id);
     if (!data) return null;
     return (data.task_results ?? []).filter((t) => t.task_id).map(toTaskRow);
+}
+
+// Run-level activation rollup — read from the nested activation sub-run's
+// run.json. Null when the run has no activation suite. Feeds the run-page card
+// and the activation page's score header.
+export async function readActivationScore(
+    id: string,
+): Promise<ActivationScore | null> {
+    const data = await readActivationRunJson(id);
+    return mapActivation(data?.activation);
+}
+
+// Activation cases — the per-case list for the /runs/<id>/activation page. Read
+// from the nested activation run.json's task_results (separate from the skills
+// run entirely). Returns the enriched case shape (prompt / skill / triggered)
+// the dashboard bakes onto each row.
+export async function readActivationTasks(
+    id: string,
+): Promise<ActivationCaseRow[] | null> {
+    const data = await readActivationRunJson(id);
+    if (!data) return null;
+    return (data.task_results ?? [])
+        .filter((t) => t.task_id)
+        .map((t) => ({
+            taskId: t.task_id ?? "",
+            prompt: t.prompt ?? null,
+            // Preserve "" (negative case → "none" expected) vs null (unknown /
+            // un-enriched row → "—"). Same for triggeredSkill ("" = nothing fired).
+            expectedSkill:
+                typeof t.expected_skill === "string" ? t.expected_skill : null,
+            triggeredSkill: t.triggered_skill ?? null,
+        }));
 }
 
 // Minimal per-task / per-run projection used by the front-page overview
@@ -1476,12 +1618,17 @@ export async function readTaskDetail(
 ): Promise<TaskDetail | null> {
     await ensureTaskDir(runId, taskId, RUNS_DIR);
 
-    const data = await readRunJson(runId);
+    // Activation cases live in the nested activation sub-run; skills tasks in the
+    // top-level run. Read the row from whichever run.json owns this task so the
+    // trace (linked from the activation page) still resolves.
+    const data = isActivationTaskId(taskId)
+        ? await readActivationRunJson(runId)
+        : await readRunJson(runId);
     const rawTask = data?.task_results?.find((t) => t.task_id === taskId);
     if (!rawTask) return null;
     const row = toTaskRow(rawTask);
 
-    const taskDir = path.join(RUNS_DIR, runId, "default", taskId);
+    const taskDir = taskContentBase(runId, taskId);
     const contentDir = await resolveTaskContentDir(taskDir);
     const task = await readJson<{
         final_status?: string;
@@ -1714,7 +1861,7 @@ export async function readLogTail(
     maxBytes = 200_000,
 ): Promise<string> {
     await ensureTaskDir(runId, taskId, RUNS_DIR);
-    const taskDir = path.join(RUNS_DIR, runId, "default", taskId);
+    const taskDir = taskContentBase(runId, taskId);
     const contentDir = await resolveTaskContentDir(taskDir);
     const logPath = path.join(contentDir, "task.log");
     const raw = await fs.readFile(logPath, "utf-8").catch(() => "");
@@ -1734,7 +1881,7 @@ export async function collectTaskFiles(
 ): Promise<{ relPath: string; abs: string }[] | null> {
     if (!isValidId(runId) || !isValidTaskId(taskId)) return null;
     await ensureTaskDir(runId, taskId, RUNS_DIR);
-    const taskDir = path.join(RUNS_DIR, runId, "default", taskId);
+    const taskDir = taskContentBase(runId, taskId);
     const refs = await walkArtifacts(taskDir);
     if (refs.length === 0) return null;
     return refs.map((r) => ({ relPath: r.relPath, abs: path.join(taskDir, r.relPath) }));

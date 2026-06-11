@@ -4,6 +4,7 @@ out
 *.tsbuildinfo
 .env*.local
 runs-remote/
+runs-local/
 
 # Parent .gitignore has broad rules ("lib/" for Python venvs, "runs/" for
 # eval outputs) that collide with Next.js convention. Re-include here.

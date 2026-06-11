@@ -2,12 +2,13 @@
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useMemo, useState } from "react";
-import type { TaskResultSummary } from "@/lib/runs";
+import type { ActivationScore, TaskResultSummary } from "@/lib/runs";
 import type { ReviewIndexEntry } from "@/lib/reviews-types";
 import { fmtDuration, humanizeTaskId } from "@/lib/format";
 import { statusCategory } from "@/lib/status";
 import { ChipLegend } from "@/app/_overview/tag-rail";
 import { CollapsibleRail } from "@/app/_components/collapsible-rail";
+import { ActivationCard } from "./activation-card";
 import { ChipButton } from "./chips";
 import { TaskGrid } from "./task-grid";
 
@@ -66,11 +67,15 @@ function Metric({
 export function RunView({
     runId,
     tasks,
+    activation,
     reviewsByTask,
     reviewTagCounts,
 }: {
     runId: string;
     tasks: TaskResultSummary[];
+    // Run-level activation rollup; null on runs without an activation suite, in
+    // which case the metrics grid has one fewer card.
+    activation?: ActivationScore | null;
     reviewsByTask?: Map<string, ReviewIndexEntry>;
     reviewTagCounts?: { tag: string; count: number }[];
 }) {
@@ -294,7 +299,11 @@ export function RunView({
 
     return (
         <div className="space-y-5">
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <div
+                className={`grid grid-cols-2 ${
+                    activation ? "md:grid-cols-6" : "md:grid-cols-5"
+                } gap-3`}
+            >
                 <div className="col-span-2 bg-white border border-gray-200 rounded-lg p-4">
                     <div className="text-xs text-gray-500 uppercase tracking-wide">
                         Pass rate
@@ -333,6 +342,9 @@ export function RunView({
                             : "text-gray-900"
                     }
                 />
+                {activation && (
+                    <ActivationCard runId={runId} activation={activation} />
+                )}
                 <Metric
                     label="Total cost"
                     value={

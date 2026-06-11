@@ -77,6 +77,15 @@ class BatchRunConfig(BaseModel):
         ge=1,
         description="Cap rows per dataset-backed task to first N. Non-dataset tasks unaffected.",
     )
+    sample_per_stratum: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "CLI override (--sample-per-stratum) for dataset.sample_per_stratum: keep up to N "
+            "rows per stratum (stratify_field, default expected_skill). Lets a runner cap a "
+            "stratified dataset without editing the task YAML. Ignored when max_rows is set."
+        ),
+    )
 
     # Replicate count override
     repeats: int | None = Field(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -133,3 +134,55 @@ def test_breakdown_below_min_tasks_excluded(slack, owners_csv):
     # Fewer than min_tasks (default 4) → skill is dropped entirely.
     run = {"task_results": _tasks("skill-red", 0, 3)}
     assert slack.skill_breakdown(run) == ""
+
+
+# --- activation: dedicated line + excluded from the per-skill leaderboard ---
+
+
+def test_breakdown_excludes_activation_rows(slack, owners_csv):
+    # Activation rows (tagged 'activation') must not form a giant 'activation'
+    # bucket in the leaderboard — they're summarized by activation_summary instead.
+    run = {
+        "task_results": [
+            *_tasks("skill-green", 10, 10),
+            *[
+                {"task_path": "tasks/activation/activation.yaml", "tags": ["activation"], "status": "FAILED"}
+                for _ in range(20)
+            ],
+        ]
+    }
+    out = slack.skill_breakdown(run)
+    assert "activation" not in out
+    assert "skill-green" in out
+
+
+def test_activation_summary_line(slack, tmp_path):
+    # The rollup lives in the nested sub-run: <run_dir>/activation/run.json.
+    act_dir = tmp_path / "activation"
+    act_dir.mkdir()
+    (act_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "activation": {
+                    "score": 0.734,
+                    "denominator": 22,
+                    "min_prompts": 20,
+                    "n_skills_sampled": 17,
+                    "n_cases": 369,
+                }
+            }
+        )
+    )
+    out = slack.activation_summary(tmp_path)
+    assert out == "Activation: 73% avg recall across 22 skills"
+
+
+def test_activation_summary_absent_when_no_block(slack, tmp_path):
+    # No activation sub-run at all → empty (the common skills-only / non-nightly case).
+    assert slack.activation_summary(tmp_path) == ""
+    assert slack.activation_summary(None) == ""
+    # Sub-run present but score not computed → still empty.
+    act_dir = tmp_path / "activation"
+    act_dir.mkdir()
+    (act_dir / "run.json").write_text(json.dumps({"activation": {"score": None}}))
+    assert slack.activation_summary(tmp_path) == ""

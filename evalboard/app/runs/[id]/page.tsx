@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import {
+    readActivationScore,
     readRunAnalysis,
     readRunMeta,
     readRunSummary,
@@ -21,13 +22,17 @@ export default async function RunPage({
     params: Promise<{ id: string }>;
 }) {
     const { id } = await params;
-    const [summary, tasks, analysis, reviewIndex, meta] = await Promise.all([
-        readRunSummary(id),
-        readRunTasks(id),
-        readRunAnalysis(id),
-        readRunReviewIndex(id),
-        readRunMeta(id),
-    ]);
+    const [summary, tasks, activation, analysis, reviewIndex, meta] =
+        await Promise.all([
+            readRunSummary(id),
+            readRunTasks(id),
+            // Nested activation sub-run rollup (null when the run has no
+            // activation suite); drives the clickable activation metric card.
+            readActivationScore(id),
+            readRunAnalysis(id),
+            readRunReviewIndex(id),
+            readRunMeta(id),
+        ]);
     if (!summary || !tasks) notFound();
     const tagCounts = reviewIndex ? tagCountsForRun(reviewIndex) : [];
     const reviewsByTask = reviewIndex ? indexByTask(reviewIndex) : undefined;
@@ -74,6 +79,7 @@ export default async function RunPage({
                 <RunView
                     runId={id}
                     tasks={tasks}
+                    activation={activation}
                     reviewsByTask={reviewsByTask}
                     reviewTagCounts={tagCounts}
                 />

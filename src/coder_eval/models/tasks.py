@@ -220,12 +220,26 @@ class Dataset(BaseModel):
         default="id",
         description="Field in each row to use as the row identifier (default: 'id').",
     )
-    sample: int | None = Field(
+    sample_per_stratum: int | None = Field(
         default=None,
         ge=1,
         description=(
-            "Task-level default: use only the first N rows. Overridden by CLI '--sample' when provided. "
-            "Useful for committing a cheap-smoke default while still allowing full runs on demand."
+            "Stratified random sample: keep up to N rows per stratum, where the stratum is the "
+            "value of 'stratify_field' on each row. Strata with <= N rows are taken whole. "
+            "Designed for classification datasets (e.g. activation) where the metric is computed "
+            "per stratum, so a uniform sample would starve rare strata. CLI '--sample' (a flat "
+            "uniform-random N over the whole dataset) overrides this when set."
+        ),
+    )
+    stratify_field: str = Field(
+        default="expected_skill",
+        description="Row field whose value defines the stratum for 'sample_per_stratum' (default: 'expected_skill').",
+    )
+    sample_seed: int | None = Field(
+        default=None,
+        description=(
+            "Seed for the 'sample_per_stratum' draw. None => fresh nondeterministic RNG each run "
+            "(re-draws every night). Set an integer for a reproducible sample."
         ),
     )
 

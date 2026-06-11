@@ -632,7 +632,9 @@ def _evaluate_thresholds(
     return aggregate.model_copy(update={"threshold_checks": checks, "passed": all(c.passed for c in checks)})
 
 
-def _build_missing_aggregator(criterion_type: str, suite_thresholds: dict[str, float]) -> CriterionAggregate:
+def _build_missing_aggregator(
+    criterion_type: str, suite_thresholds: dict[str, float], description: str | None = None
+) -> CriterionAggregate:
     """A stub aggregate used when a criterion declares suite_thresholds but its
     checker doesn't implement ``aggregate()``. Marks every threshold as failed
     with no actual value and records an error."""
@@ -642,6 +644,7 @@ def _build_missing_aggregator(criterion_type: str, suite_thresholds: dict[str, f
     ]
     return CriterionAggregate(
         criterion_type=criterion_type,
+        description=description,
         metrics={},
         threshold_checks=checks,
         passed=False,
@@ -674,17 +677,14 @@ def _compute_suite_rollup(
     scored = [r.result.weighted_score for r in rows if r.result.weighted_score is not None]
     average_weighted_score = sum(scored) / len(scored) if scored else None
 
-    # Per-criterion-type tallies: scores, errors, and the per-row CriterionResults
-    # that each checker's aggregate() will consume.
+    # Per-criterion-type tallies (scores + errors) for the type-level summary.
     by_type: dict[str, list[float]] = defaultdict(list)
     errors_by_type: dict[str, int] = defaultdict(int)
-    results_by_type: dict[str, list[Any]] = defaultdict(list)
     for row in rows:
         for cr in row.result.success_criteria_results:
             by_type[cr.criterion_type].append(cr.score)
             if cr.error is not None:
                 errors_by_type[cr.criterion_type] += 1
-            results_by_type[cr.criterion_type].append(cr)
 
     criterion_stats = [
         CriterionStats(
@@ -696,14 +696,26 @@ def _compute_suite_rollup(
         for ctype, scores in sorted(by_type.items())
     ]
 
-    # Drive each criterion's aggregate() + evaluate suite_thresholds.
+    # Drive each criterion's aggregate() + evaluate suite_thresholds. Per-row
+    # results are sliced per criterion INSTANCE by position: SuccessChecker.
+    # check_all appends one CriterionResult per criterion in declared order
+    # (evaluation/checker.py), so row.success_criteria_results[i] belongs to
+    # task_criteria[i]. Aggregating per-instance (not pooled by type) is what
+    # lets a task stack many criteria of the SAME type — e.g. activation's
+    # per-skill skill_triggered criteria — and get a distinct aggregate
+    # (per-skill recall / F1) for each, instead of one type-pooled number
+    # repeated once per instance. The aggregate carries the criterion's
+    # description so the stacked instances stay distinguishable downstream.
     criterion_aggregates: list[CriterionAggregate] = []
     if task_criteria is not None:
         init_criteria(validate=False)
-        for criterion in task_criteria:
+        for i, criterion in enumerate(task_criteria):
             ctype = criterion.type
-            per_rows = results_by_type.get(ctype, [])
+            per_rows = [
+                row.result.success_criteria_results[i] for row in rows if i < len(row.result.success_criteria_results)
+            ]
             suite_thresholds = getattr(criterion, "suite_thresholds", None)
+            description = getattr(criterion, "description", None)
             try:
                 checker_cls = CriterionRegistry.get_checker(ctype)
             except KeyError:
@@ -714,8 +726,9 @@ def _compute_suite_rollup(
             if aggregate is None:
                 if suite_thresholds:
                     # Thresholds declared but nothing produced — fail loudly.
-                    criterion_aggregates.append(_build_missing_aggregator(ctype, suite_thresholds))
+                    criterion_aggregates.append(_build_missing_aggregator(ctype, suite_thresholds, description))
                 continue
+            aggregate = aggregate.model_copy(update={"description": description})
             criterion_aggregates.append(_evaluate_thresholds(aggregate, suite_thresholds))
 
     suite_passed = all(a.passed for a in criterion_aggregates)

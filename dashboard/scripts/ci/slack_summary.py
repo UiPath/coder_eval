@@ -131,6 +131,27 @@ def load_skill_owners() -> dict[str, str]:
     return owners
 
 
+def activation_summary(run_dir: Path | None) -> str:
+    """One-line activation score for Slack — average recall across the whole skill
+    catalog (a skill with fewer than ``min_prompts`` prompts, or none, counts 0).
+
+    The activation suite is a nested sub-run, so its ``activation`` rollup lives in
+    ``<run_dir>/activation/run.json`` (NOT the skills run.json). Returns the empty
+    string when activation didn't run, so the caller appends it conditionally.
+    """
+    if run_dir is None:
+        return ""
+    try:
+        data = json.loads((run_dir / "activation" / "run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    act = data.get("activation")
+    if not act or act.get("score") is None:
+        return ""
+    pct = act["score"] * 100
+    return f"Activation: {pct:.0f}% avg recall across {act.get('denominator')} skills"
+
+
 def skill_breakdown(run: dict, min_tasks: int = 4) -> str:
     """Format a per-skill leaderboard for Slack.
 
@@ -146,7 +167,10 @@ def skill_breakdown(run: dict, min_tasks: int = 4) -> str:
     by_skill: dict[str, list[dict]] = {}
     for task in run.get("task_results") or []:
         skill = derive_skill(task)
-        if skill is None:
+        # Activation rows are a classification benchmark, not skill build/operate
+        # tasks — they're summarized by the dedicated activation line, not lumped
+        # into the per-skill leaderboard as one giant "activation" bucket.
+        if skill is None or skill == "activation":
             continue
         by_skill.setdefault(skill, []).append(task)
 
@@ -181,7 +205,7 @@ def configured_parallelism(run: dict) -> int | None:
     return None
 
 
-def build_metrics(cur: dict, suite: str, model: str, backend: str) -> str:
+def build_metrics(cur: dict, suite: str, model: str, backend: str, run_dir: Path | None = None) -> str:
     run_id = cur["run_id"]
     n_run = cur.get("tasks_run", 0)
     n_pass = cur.get("tasks_succeeded", 0)
@@ -211,6 +235,9 @@ def build_metrics(cur: dict, suite: str, model: str, backend: str) -> str:
         f":package: coder_eval @ {coder} · skills @ {skills_sha} · uip @ {cli}",
         f":bar_chart: {DASHBOARD_BASE}/{run_id}",
     ]
+    activation_line = activation_summary(run_dir)
+    if activation_line:
+        lines.append(activation_line)
     skills_section = skill_breakdown(cur)
     if skills_section:
         lines.append(skills_section)
@@ -248,7 +275,7 @@ def main() -> int:
         # Likely a test run or broken task discovery — don't spam the channel.
         return 0
 
-    print(json.dumps({"text": build_metrics(cur, args.suite, args.model, args.backend)}))
+    print(json.dumps({"text": build_metrics(cur, args.suite, args.model, args.backend, run_dir=latest_dir)}))
     return 0
 
 
