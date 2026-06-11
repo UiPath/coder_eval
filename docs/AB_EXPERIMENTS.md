@@ -29,7 +29,7 @@ to the orchestrator are involved.
 coder-eval run -e experiments/model-comparison.yaml
 
 # Scope to specific tasks:
-coder-eval run -e experiments/agents-skill-impact.yaml tasks/agents/create/*.yaml
+coder-eval run -e experiments/plugin-comparison.yaml tasks/claude_*.yaml
 
 # Bare experiment name resolves to experiments/<name>.yaml:
 coder-eval run -e model-comparison tasks/hello_date.yaml
@@ -181,9 +181,9 @@ Notes:
   it. Pair the experiment with a [`skill_triggered`](TASK_DEFINITION_GUIDE.md#skill_triggered)
   criterion to measure _whether it fired_ alongside your real success criteria
   that measure _whether outcomes improved_.
-- Plugin paths are environment-dependent. The shipped examples expect a sibling
-  `../skills` clone or a `$SKILLS_PLUGIN_PATH` env var. See
-  `experiments/agents-skill-impact.yaml` and `experiments/skills-eval.yaml`.
+- Plugin paths are environment-dependent. The shipped example expects a
+  `$PLUGIN_PATH` env var pointing at your plugin directory. See
+  `experiments/plugin-comparison.yaml`.
 
 Run it:
 

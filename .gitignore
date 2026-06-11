@@ -52,11 +52,9 @@ bandit-report.json
 # UiPath specific
 .uipath/
 uipath.json
-!templates/uipath-starter/uipath.json
 
 # Project-specific
 .claude/settings.local.json
-.uipath/
 c/
 runs/
 reports/
@@ -67,26 +65,6 @@ refs/
 # Cross-repo checkouts created by claude-pr-review.yml / validate-skills-yamls jobs
 # (CI clones UiPath/skills into ./skills/; ignored locally to prevent accidental commits)
 skills/
-# added by flow-run
-.flow-run/
-
-# flow-v2 connector libraries are not checked in; they are built into
-# a shared cache (default $HOME/.cache/coder-eval/flow-v2) by
-# templates/flow-v2-shared/setup-library.sh. Any stray copies inside
-# the template trees (e.g. from local debugging) should not land in git.
-templates/flow-v2-library/library/
-templates/flow-v2-shared/.registry-cache/
-templates/flow-v2-shared/.is-cache/
-templates/flow-v2-shared/.is-connectors-cache/
-
-# Tool deps (wabt + workspace symlinks) are reproducible from the
-# committed package.json + package-lock via `npm ci` in tools/.
-templates/flow-v2-shared/tools/node_modules/
-
-# The repo-wide `dist/` rule above (Python builds) also matches the
-# vendored flow-v2 tool dist trees — re-include them.
-!templates/flow-v2-shared/tools/*/dist/
-!templates/flow-v2-shared/tools/*/dist/**
 
 # Visual companion (brainstorming) scratch
 .superpowers/
