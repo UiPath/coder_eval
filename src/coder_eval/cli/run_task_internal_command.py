@@ -31,7 +31,7 @@ from coder_eval.isolation.docker_runner import (
     HEARTBEAT_STALE_SECONDS,
 )
 from coder_eval.logging_config import setup_logging
-from coder_eval.models import ConfigLineageEntry
+from coder_eval.models import ConfigLineageEntry, PreservationMode
 from coder_eval.orchestration.task_loader import load_task
 
 
@@ -141,7 +141,11 @@ def run_task_internal_command(
     context = json.loads(context_json.read_text(encoding="utf-8"))
     variant_id: str = context["variant_id"]
     replicate_index: int = context.get("replicate_index", 0)
-    preserve_sandbox: bool = context.get("preserve_sandbox", False)
+    # The host resolves the driver-derived default before dispatch; the container
+    # obeys it verbatim. This command only ever runs inside the docker driver, so
+    # a missing key falls back to the docker default (DIRECT_WRITE) — a deliberate
+    # default, not version back-compat.
+    preservation_mode = PreservationMode(context.get("preservation_mode", PreservationMode.DIRECT_WRITE.value))
     config_lineage = {k: ConfigLineageEntry.model_validate(v) for k, v in (context.get("config_lineage") or {}).items()}
     # Prefer the host's raw source_yaml so task.json's audit trail matches
     # the in-process driver. Fall back to the staged (post-override) YAML
@@ -174,7 +178,7 @@ def run_task_internal_command(
     orchestrator = Orchestrator(
         task=task,
         run_dir=output_dir,
-        preserve_sandbox=preserve_sandbox,
+        preservation_mode=preservation_mode,
         task_file=runtime_task_file,
         variant_id=variant_id,
         source_yaml=source_yaml,

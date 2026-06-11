@@ -5,6 +5,26 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from coder_eval.models import PreservationMode
+
+
+def resolve_preservation_mode(explicit: PreservationMode | None, driver: str) -> PreservationMode:
+    """Resolve the effective preservation mode for a task.
+
+    An explicit ``--preservation-mode`` always wins. Otherwise the default is
+    driver-derived: ``docker`` → ``DIRECT_WRITE`` (isolated container; writing
+    straight to the bind-mounted artifacts dir avoids a cross-mount copy),
+    every other driver → ``MOVE_ON_WRITE`` (keeps the run off ``run_dir`` so
+    parent-dir ``node_modules`` can't contaminate Node tool resolution).
+
+    This must be called where the *original* driver is known (the dispatch seam
+    in ``batch.run_single``); the in-container orchestrator sees the driver
+    forced to ``tempdir`` and would otherwise mis-resolve docker → MOVE.
+    """
+    if explicit is not None:
+        return explicit
+    return PreservationMode.DIRECT_WRITE if driver == "docker" else PreservationMode.MOVE_ON_WRITE
+
 
 class BatchRunConfig(BaseModel):
     """Configuration for batch task execution.
@@ -17,7 +37,13 @@ class BatchRunConfig(BaseModel):
 
     run_dir: Path = Field(description="Directory for this batch run")
     max_parallel: int = Field(default=1, ge=1, description="Max concurrent tasks")
-    preserve_sandbox: bool = Field(default=True, description="Preserve sandbox after execution")
+    preservation_mode: PreservationMode | None = Field(
+        default=None,
+        description=(
+            "How to persist each task's sandbox. None = driver-derived default "
+            "(docker → DIRECT_WRITE, else MOVE_ON_WRITE), resolved per-task at dispatch."
+        ),
+    )
     include_tags: set[str] | None = Field(default=None, description="Only run tasks matching any of these tags")
     exclude_tags: set[str] | None = Field(default=None, description="Skip tasks matching any of these tags")
     include_skipped: bool = Field(

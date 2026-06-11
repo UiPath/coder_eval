@@ -126,7 +126,7 @@ coder-eval run tasks/hello_date.yaml --stream full
 | ---------------------------- | --------------------------------------------------------------------------------------------- |
 | **Execution**                |                                                                                               |
 | `--max-parallel, -j`         | Concurrent tasks (default: 1)                                                                 |
-| `--preserve / --no-preserve` | Preserve sandbox after execution (default: preserve)                                          |
+| `--preservation-mode`        | Sandbox persistence: `NONE` / `MOVE_ON_WRITE` / `DIRECT_WRITE`. Default is driver-derived (docker → `DIRECT_WRITE`, else `MOVE_ON_WRITE`); explicit value always wins. |
 | `--run-dir`                  | Custom run directory (default: timestamped in `runs/`)                                        |
 | **Config overrides**         |                                                                                               |
 | `-D path=value` / `--set`    | Override any resolved task-config field (`agent`/`run_limits`/`sandbox` roots), e.g. `-D run_limits.max_turns=30 -D agent.permission_mode=plan -D agent.sdk_options.effort=high`. Repeatable; schema-validated. This is the way to set permission mode, turn/timeout limits, tools, plugins, and SDK options. |
@@ -394,7 +394,7 @@ runs/
 │   │       └── 00/                    # Replicate index — one dir per replicate (set via `repeats:` or --repeats)
 │   │           ├── task.json          # Evaluation result
 │   │           ├── task.log           # Execution log
-│   │           └── artifacts/         # Preserved sandbox (if --preserve)
+│   │           └── artifacts/         # Preserved sandbox (unless --preservation-mode NONE)
 │   └── ...
 └── latest -> 2026-02-26_14-30-00/     # Symlink to most recent run
 ```

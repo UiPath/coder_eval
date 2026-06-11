@@ -12,6 +12,7 @@ from coder_eval.models import (
     ClaudeCodeAgentConfig,
     DirectRoute,
     FileExistsCriterion,
+    PreservationMode,
     ProxyRoute,
     SandboxConfig,
     TaskDefinition,
@@ -275,7 +276,9 @@ def test_orchestrator_initialization(tmp_path):
 
     run_dir = tmp_path / "test_run" / "hello_date"
 
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=False, variant_id="test-variant")
+    orchestrator = Orchestrator(
+        task=task, run_dir=run_dir, preservation_mode=PreservationMode.NONE, variant_id="test-variant"
+    )
 
     assert orchestrator.task == task
     assert orchestrator.run_dir == run_dir
@@ -519,7 +522,7 @@ def test_create_error_result(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_setup_preserve_sandbox_uses_ephemeral_runtime_dir(tmp_path, monkeypatch):
+async def test_orchestrator_setup_move_on_write_uses_ephemeral_runtime_dir(tmp_path, monkeypatch):
     """Preserved runs should execute in a tempdir, then copy artifacts at cleanup."""
     from datetime import datetime
 
@@ -551,7 +554,9 @@ async def test_orchestrator_setup_preserve_sandbox_uses_ephemeral_runtime_dir(tm
     task.sandbox.python = None
 
     run_dir = tmp_path / "test_run" / "hello_date"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=True, variant_id="test-variant")
+    orchestrator = Orchestrator(
+        task=task, run_dir=run_dir, preservation_mode=PreservationMode.MOVE_ON_WRITE, variant_id="test-variant"
+    )
     orchestrator.task_file = task_file
     orchestrator.result = EvaluationResult(
         task_id=task.task_id,
@@ -581,8 +586,76 @@ async def test_orchestrator_setup_preserve_sandbox_uses_ephemeral_runtime_dir(tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pre_populate", "expect_warning"),
+    [(True, True), (False, False)],
+    ids=["non_empty_target_warns", "absent_target_silent"],
+)
+async def test_direct_write_warns_on_non_empty_target(tmp_path, monkeypatch, caplog, pre_populate, expect_warning):
+    """DIRECT_WRITE _setup warns iff the target artifacts dir already exists non-empty."""
+    import logging
+    from datetime import datetime
+
+    from coder_eval import orchestrator as orchestrator_module
+    from coder_eval.models import ApiBackend, DirectRoute, EvaluationResult
+    from coder_eval.sandbox import Sandbox
+
+    class DummyAgent:
+        async def start(self, working_directory, *, env_path_prepend=None, plugin_tools_dir=None):
+            self.working_directory = working_directory
+
+        def get_sdk_options(self):
+            return {"env": {"PATH": os.environ.get("PATH", "")}}
+
+        def get_environment_info(self):
+            return {}
+
+    async def create_dummy_agent(_self):
+        return DummyAgent()
+
+    task_file = Path("tasks/hello_date.yaml")
+    task, _ = load_task(task_file)
+    task.sandbox.python = None
+
+    run_dir = tmp_path / "test_run" / "hello_date"
+    if pre_populate:
+        target = run_dir / "artifacts" / task.task_id
+        target.mkdir(parents=True)
+        (target / "stale.txt").write_text("from a prior run")
+
+    orchestrator = Orchestrator(
+        task=task, run_dir=run_dir, preservation_mode=PreservationMode.DIRECT_WRITE, variant_id="test-variant"
+    )
+    orchestrator.task_file = task_file
+    orchestrator.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        variant_id="test-variant",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+
+    monkeypatch.setattr(orchestrator_module.settings, "api_backend", ApiBackend.DIRECT)
+    monkeypatch.setattr(type(orchestrator_module.settings), "validate_api_keys", lambda _self, _agent_type: None)
+    monkeypatch.setattr(orchestrator_module, "resolve_route", lambda _settings: DirectRoute(judge_transport=None))
+    monkeypatch.setattr(Orchestrator, "_create_agent", create_dummy_agent)
+
+    with caplog.at_level(logging.WARNING, logger="coder_eval.orchestrator"):
+        await orchestrator._setup()
+
+    assert isinstance(orchestrator.sandbox, Sandbox)
+    warned = any("already exists and is non-empty" in r.message for r in caplog.records)
+    assert warned is expect_warning
+
+    await orchestrator._cleanup()
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_cleanup_persistent_sandbox(tmp_path):
-    """Test that _cleanup with preserve_sandbox=True and a persistent sandbox skips copy."""
+    """DIRECT_WRITE: sandbox already lives in artifacts; _cleanup keeps it in place (no move)."""
     from datetime import datetime
 
     from coder_eval.models import EvaluationResult
@@ -593,7 +666,9 @@ async def test_orchestrator_cleanup_persistent_sandbox(tmp_path):
     task.sandbox.python = None
 
     run_dir = tmp_path / "test_run" / "hello_date"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=True, variant_id="test-variant")
+    orchestrator = Orchestrator(
+        task=task, run_dir=run_dir, preservation_mode=PreservationMode.DIRECT_WRITE, variant_id="test-variant"
+    )
 
     # Initialize result (normally done in run())
     orchestrator.result = EvaluationResult(
@@ -629,7 +704,7 @@ async def test_orchestrator_cleanup_persistent_sandbox(tmp_path):
 
 @pytest.mark.asyncio
 async def test_orchestrator_cleanup_non_persistent_sandbox_with_preserve(tmp_path):
-    """Test that _cleanup with preserve_sandbox=True and a non-persistent sandbox copies to artifacts."""
+    """MOVE_ON_WRITE: tempdir sandbox is moved into artifacts on _cleanup."""
     from datetime import datetime
 
     from coder_eval.models import EvaluationResult
@@ -640,7 +715,9 @@ async def test_orchestrator_cleanup_non_persistent_sandbox_with_preserve(tmp_pat
     task.sandbox.python = None
 
     run_dir = tmp_path / "test_run" / "hello_date"
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, preserve_sandbox=True, variant_id="test-variant")
+    orchestrator = Orchestrator(
+        task=task, run_dir=run_dir, preservation_mode=PreservationMode.MOVE_ON_WRITE, variant_id="test-variant"
+    )
 
     # Initialize result
     orchestrator.result = EvaluationResult(
@@ -673,6 +750,45 @@ async def test_orchestrator_cleanup_non_persistent_sandbox_with_preserve(tmp_pat
 
     # Original temp dir should be cleaned up
     assert not sandbox_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_cleanup_none_mode_deletes_sandbox(tmp_path):
+    """NONE: tempdir sandbox is deleted on _cleanup and sandbox_path is cleared."""
+    from datetime import datetime
+
+    from coder_eval.models import EvaluationResult
+    from coder_eval.sandbox import Sandbox
+
+    task_file = Path("tasks/hello_date.yaml")
+    task, _ = load_task(task_file)
+    task.sandbox.python = None
+
+    run_dir = tmp_path / "test_run" / "hello_date"
+    orchestrator = Orchestrator(
+        task=task, run_dir=run_dir, preservation_mode=PreservationMode.NONE, variant_id="test-variant"
+    )
+    orchestrator.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        variant_id="test-variant",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+
+    orchestrator.sandbox = Sandbox(task.sandbox, task_id=task.task_id)
+    sandbox_dir = orchestrator.sandbox.setup()
+    (sandbox_dir / "output.txt").write_text("agent output")
+
+    await orchestrator._cleanup()
+
+    # Sandbox deleted; no artifacts dir created; sandbox_path nulled.
+    assert not sandbox_dir.exists()
+    assert not (run_dir / "artifacts").exists()
+    assert orchestrator.result.sandbox_path is None
 
 
 # ==================== get_version_info Tests ====================
@@ -1828,7 +1944,7 @@ def _bootstrap_finalize_orchestrator(tmp_path, *, final_status, duration=None, s
     run_dir = tmp_path / "summary_run"
     run_dir.mkdir(parents=True)
 
-    orchestrator = Orchestrator(task, run_dir, preserve_sandbox=False, variant_id="v1")
+    orchestrator = Orchestrator(task, run_dir, preservation_mode=PreservationMode.NONE, variant_id="v1")
     orchestrator.result = EvaluationResult(
         task_id=task.task_id,
         task_description=task.description,

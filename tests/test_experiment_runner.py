@@ -13,6 +13,7 @@ from coder_eval.models import (
     ExperimentResult,
     ExperimentVariant,
     FinalStatus,
+    PreservationMode,
     ResolvedTask,
     TaskResult,
 )
@@ -38,7 +39,7 @@ def _write_task_yaml(path: Path, task_id: str, agent: dict | None = None) -> Pat
 
 def _make_config(run_dir: Path, **overrides) -> BatchRunConfig:
     """Create a BatchRunConfig with sensible defaults for testing."""
-    defaults = {"run_dir": run_dir, "max_parallel": 1, "preserve_sandbox": False}
+    defaults = {"run_dir": run_dir, "max_parallel": 1, "preservation_mode": PreservationMode.NONE}
     defaults.update(overrides)
     return BatchRunConfig(**defaults)
 

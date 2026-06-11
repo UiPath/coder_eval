@@ -179,10 +179,14 @@ class Sandbox:
             # Cache canonical @uipath dir for PLUGIN_TOOLS_DIR pin; no-op if `uip` absent.
             self._refresh_plugin_tools_dir()
         except Exception:
-            # Clean up directory if setup fails partway through
-            shutil.rmtree(self.sandbox_dir, ignore_errors=True)
-            self.sandbox_dir = None
-            self._cleanup_on_exit = True  # Reset flag on failure
+            # Clean up on failure -- but ONLY a temp dir we created ourselves.
+            # For a caller-supplied target_dir (DIRECT_WRITE persistent mode) we
+            # must not rmtree it: it may be a pre-existing artifacts dir, and the
+            # mode's contract is to never clear it. A self-created tempdir always
+            # has _cleanup_on_exit=True at this point; target_dir flips it False.
+            if self._cleanup_on_exit:
+                shutil.rmtree(self.sandbox_dir, ignore_errors=True)
+                self.sandbox_dir = None
             raise
 
         return self.sandbox_dir
@@ -972,6 +976,19 @@ class Sandbox:
                 files.append(str(rel_path))
 
         return sorted(files)
+
+    def grant_read_access(self) -> None:
+        """Apply ``chmod a+rX`` across the sandbox tree (in place).
+
+        For DIRECT_WRITE preservation the sandbox already lives in the
+        artifacts dir, so ``preserve_to`` (which would otherwise grant this)
+        never runs. A root-owned docker container leaves the tree at 0700, so
+        the host user can't traverse it; granting group+other read/traverse
+        keeps the artifacts visible across the uid boundary. No-op-ish on the
+        host path, where the sandbox is already owner-readable.
+        """
+        if self.sandbox_dir is not None and self.sandbox_dir.exists():
+            _grant_read_traverse(self.sandbox_dir)
 
     def preserve_to(self, artifact_dir: Path) -> Path:
         """Preserve sandbox contents to an artifact directory.

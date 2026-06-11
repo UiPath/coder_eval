@@ -13,6 +13,7 @@ upstream by resolve_all_tasks() in experiment.py.
 import asyncio
 import json
 import logging
+import shutil
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from ..models import (
     AgentKind,
     EvaluationResult,
     FinalStatus,
+    PreservationMode,
     ResolvedTask,
     RunSummary,
     SkippedTask,
@@ -32,7 +34,7 @@ from ..path_utils import format_task_log_id
 from ..reports_experiment import eval_result_to_task_dict
 from ..streaming.callbacks import StreamCallback
 from ..utils import get_version_info, looks_like_version
-from .config import BatchRunConfig
+from .config import BatchRunConfig, resolve_preservation_mode
 
 
 logger = logging.getLogger(__name__)
@@ -55,7 +57,7 @@ async def run_batch(
 
     Args:
         resolved_tasks: List of fully-resolved tasks from resolve_all_tasks.
-        config: Batch configuration (max_parallel, preserve_sandbox, run_dir).
+        config: Batch configuration (max_parallel, preservation_mode, run_dir).
         on_task_complete: Optional callback invoked after each task finishes.
         on_batch_start: Optional callback invoked with the final task count.
         stream_callback_factory: Optional factory for streaming callbacks.
@@ -93,6 +95,20 @@ async def run_batch(
             try:
                 rt.run_dir.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
                 sandbox_cfg = rt.task.sandbox
+                # Resolve the driver-derived preservation default HERE, where the
+                # original driver is still visible (the in-container orchestrator
+                # sees it forced to tempdir). Explicit --preservation-mode wins.
+                driver = sandbox_cfg.driver if sandbox_cfg is not None else "tempdir"
+                preservation_mode = resolve_preservation_mode(config.preservation_mode, driver)
+                # Explicit DIRECT_WRITE on a non-docker host runs the sandbox under
+                # run_dir, re-opening the parent-dir node_modules contamination the
+                # host default (MOVE_ON_WRITE) exists to prevent (MST-9795).
+                if config.preservation_mode == PreservationMode.DIRECT_WRITE and driver != "docker":
+                    logger.warning(
+                        "DIRECT_WRITE on driver=%s runs the sandbox under run_dir; parent-dir "
+                        "node_modules can contaminate Node tool resolution (MST-9795).",
+                        driver,
+                    )
                 if sandbox_cfg is not None and sandbox_cfg.driver == "docker":
                     # Docker isolation: spawn one container per task, parse
                     # its task.json on completion. The in-container CLI
@@ -103,7 +119,7 @@ async def run_batch(
 
                     result = await DockerRunner(
                         rt,
-                        preserve_sandbox=config.preserve_sandbox,
+                        preservation_mode=preservation_mode,
                         stream_callback=task_callback,
                         verbose=config.verbose,
                     ).run()
@@ -111,7 +127,7 @@ async def run_batch(
                     orchestrator = Orchestrator(
                         task=rt.task,
                         run_dir=rt.run_dir,
-                        preserve_sandbox=config.preserve_sandbox,
+                        preservation_mode=preservation_mode,
                         task_file=rt.task_file,
                         stream_callback=task_callback,
                         variant_id=rt.variant_id,
@@ -275,6 +291,27 @@ def partition_for_resume(
             prior_results.append(tr)
             prior_resolved.append(rt)
     return to_run, prior_results, prior_resolved
+
+
+def clear_rerun_artifacts(to_run: list[ResolvedTask]) -> int:
+    """Remove stale ``artifacts/<task_id>`` dirs for tasks about to re-run under --resume.
+
+    A task in ``to_run`` is non-finalized (``partition_for_resume`` excluded every
+    finalized task), so it re-executes from scratch and any leftover artifacts are
+    unwanted. Only DIRECT_WRITE writes into ``artifacts/<task_id>`` live (a container
+    killed mid-run leaves partial files there); MOVE_ON_WRITE/NONE only create it at
+    finalize, which a non-finalized task never reached — so a pre-existing dir here is
+    always a stale DIRECT_WRITE partial. Clearing it prevents stale files from
+    satisfying file-based criteria and skewing the resumed task's score. Host-side, so
+    it covers both the docker bind-mount and the tempdir path. Returns the count cleared.
+    """
+    cleared = 0
+    for rt in to_run:
+        artifacts = rt.run_dir / "artifacts" / rt.task.task_id
+        if artifacts.exists():
+            shutil.rmtree(artifacts, ignore_errors=True)
+            cleared += 1
+    return cleared
 
 
 def _load_completed_result(rt: ResolvedTask) -> TaskResult | None:

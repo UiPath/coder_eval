@@ -60,6 +60,23 @@ class PermissionMode(StrEnum):
     BYPASS_PERMISSIONS = "bypassPermissions"
 
 
+class PreservationMode(StrEnum):
+    """How a task's sandbox is persisted (or not) after execution.
+
+    The run-level CLI default is *driver-derived* (resolved at the dispatch
+    seam in ``orchestration.batch``): ``docker`` → ``DIRECT_WRITE`` (the
+    container is isolated, and writing straight to the bind-mounted artifacts
+    dir avoids a cross-mount copy), every other driver → ``MOVE_ON_WRITE``
+    (running under ``run_dir/artifacts`` on a shared host would let parent-dir
+    ``node_modules`` contaminate Node tool resolution — see MST-9795/PR #257).
+    An explicit ``--preservation-mode`` always wins over that default.
+    """
+
+    NONE = "NONE"  # Run in a tempdir, delete it on cleanup (no artifacts kept).
+    MOVE_ON_WRITE = "MOVE_ON_WRITE"  # Run in a tempdir, shutil.move into run_dir/artifacts at the end.
+    DIRECT_WRITE = "DIRECT_WRITE"  # Run directly in run_dir/artifacts; nothing to move (left in place).
+
+
 class AgentKind(StrEnum):
     """Supported agent types."""
 

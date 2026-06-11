@@ -584,8 +584,13 @@ def test_sandbox_setup_target_dir_cleanup_on_exit_false(tmp_path):
     assert (target / "data.txt").exists()
 
 
-def test_sandbox_setup_target_dir_failure_cleans_up(tmp_path, monkeypatch):
-    """Test that a failed setup with target_dir still cleans up and resets state."""
+def test_sandbox_setup_target_dir_failure_preserves_target(tmp_path, monkeypatch):
+    """A caller-supplied target_dir is NOT deleted on setup failure.
+
+    DIRECT_WRITE points the sandbox straight at run_dir/artifacts/<task_id>, which
+    may be a pre-existing dir the mode must never clear. So a failed setup leaves
+    the persistent target in place (only self-created tempdirs are rmtree'd).
+    """
     config = SandboxConfig(driver="tempdir", python=None)
     sandbox = Sandbox(config, task_id="test_fail_cleanup")
 
@@ -597,10 +602,10 @@ def test_sandbox_setup_target_dir_failure_cleans_up(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="boom"):
         sandbox.setup(target_dir=target)
 
-    # Directory should be cleaned up and state reset
-    assert not target.exists()
-    assert sandbox.sandbox_dir is None
-    assert not sandbox.is_persistent
+    # Target is preserved; sandbox stays persistent so a later cleanup() is a no-op.
+    assert target.exists()
+    assert sandbox.sandbox_dir == target
+    assert sandbox.is_persistent
 
 
 def test_sandbox_preserve_to_self_referential_guard(tmp_path):

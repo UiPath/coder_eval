@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from ..config import settings
 from ..logging_config import setup_logging
-from ..models import AgentKind, ResolvedTask, RunSummary, TaskResult
+from ..models import AgentKind, PreservationMode, ResolvedTask, RunSummary, TaskResult
 from ..orchestration.config import BatchRunConfig
 from ..path_utils import create_latest_symlink, format_task_log_id
 from ..streaming.callbacks import CompositeStreamCallback
@@ -141,11 +141,15 @@ def run_command(
         None,
         help="Path(s) to task YAML file(s). Defaults to all tasks/ recursively.",
     ),
-    preserve: bool = typer.Option(
-        True,
-        "--preserve/--no-preserve",
-        "-p/-P",
-        help="Preserve sandbox after execution (default: preserve)",
+    preservation_mode: PreservationMode | None = typer.Option(  # noqa: B008
+        None,
+        "--preservation-mode",
+        help=(
+            "How to persist each task's sandbox: NONE (delete), MOVE_ON_WRITE "
+            "(run in a tempdir, move into run_dir/artifacts), or DIRECT_WRITE "
+            "(run directly in run_dir/artifacts). Default is driver-derived — "
+            "docker → DIRECT_WRITE, else MOVE_ON_WRITE. Explicit value always wins."
+        ),
     ),
     run_dir: Path | None = typer.Option(  # noqa: B008
         None,
@@ -297,7 +301,8 @@ def run_command(
 
     When no TASK_FILES are provided, all .yaml files under tasks/ are discovered recursively.
 
-    Sandboxes are preserved by default for debugging. Use --no-preserve to clean up.
+    Sandboxes are preserved by default for debugging (driver-derived mode).
+    Use --preservation-mode NONE to clean up.
 
     Examples:
 
@@ -305,7 +310,7 @@ def run_command(
 
         coder-eval run tasks/hello_date.yaml
 
-        coder-eval run tasks/*.yaml --no-preserve
+        coder-eval run tasks/*.yaml --preservation-mode NONE
 
         coder-eval run tasks/*.yaml --run-dir ./my-custom-run
 
@@ -367,7 +372,7 @@ def run_command(
         asyncio.run(
             _run_all_tasks(
                 resolved_task_files,
-                preserve,
+                preservation_mode,
                 run_dir,
                 max_parallel,
                 include_tags,
@@ -390,7 +395,7 @@ def run_command(
 
 async def _run_all_tasks(
     task_files: list[Path],
-    preserve: bool,
+    preservation_mode: PreservationMode | None,
     run_dir: Path | None,
     max_parallel: int,
     include_tags: set[str] | None = None,
@@ -412,7 +417,7 @@ async def _run_all_tasks(
 
     Args:
         task_files: List of task file paths or glob patterns
-        preserve: Whether to preserve sandbox
+        preservation_mode: Sandbox preservation mode, or None for the driver-derived default
         run_dir: Custom run directory (or None for auto-generated)
         max_parallel: Maximum number of concurrent tasks
         include_tags: Only run tasks matching any of these tags
@@ -437,7 +442,7 @@ async def _run_all_tasks(
     config = BatchRunConfig(
         run_dir=run_dir,
         max_parallel=max_parallel,
-        preserve_sandbox=preserve,
+        preservation_mode=preservation_mode,
         include_tags=include_tags,
         exclude_tags=exclude_tags,
         agent_type=agent_type,
@@ -541,6 +546,7 @@ async def _run_with_experiment(
         RunSummary with aggregated results.
     """
     from ..orchestration.batch import (
+        clear_rerun_artifacts,
         compute_run_fingerprint,
         fingerprint_diff,
         partition_for_resume,
@@ -623,8 +629,14 @@ async def _run_with_experiment(
     prior_resolved: list[ResolvedTask] = []
     if resume:
         to_run, prior_results, prior_resolved = partition_for_resume(resolved)
+        # A re-run task re-executes from scratch, so any leftover artifacts (only
+        # DIRECT_WRITE writes them live; a container killed mid-run leaves partials)
+        # are stale and could let a file-based criterion pass on the old output.
+        cleared = clear_rerun_artifacts(to_run)
         console.print(
-            f"[cyan]↻ Resume:[/] {len(prior_results)} task(s) already complete, " + f"running {len(to_run)} remaining"
+            f"[cyan]↻ Resume:[/] {len(prior_results)} task(s) already complete, "
+            + f"running {len(to_run)} remaining"
+            + (f" (cleared {cleared} stale artifact dir(s))" if cleared else "")
         )
 
     # Print execution mode

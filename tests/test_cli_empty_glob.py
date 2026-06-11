@@ -43,7 +43,7 @@ def test_cli_handles_empty_glob_results(tmp_path):
             asyncio.run(
                 _run_all_tasks(
                     task_files=[glob_pattern],
-                    preserve=True,
+                    preservation_mode=None,
                     run_dir=None,
                     max_parallel=1,
                 )
@@ -79,7 +79,7 @@ def test_cli_handles_invalid_glob_pattern(tmp_path):
             asyncio.run(
                 _run_all_tasks(
                     task_files=[pattern],
-                    preserve=True,
+                    preservation_mode=None,
                     run_dir=None,
                     max_parallel=1,
                 )
@@ -141,7 +141,7 @@ success_criteria:
         asyncio.run(
             _run_all_tasks(
                 task_files=[task_file],
-                preserve=True,
+                preservation_mode=None,
                 run_dir=tmp_path / "run",
                 max_parallel=1,
             )
@@ -205,7 +205,7 @@ success_criteria:
         asyncio.run(
             _run_all_tasks(
                 task_files=[glob_pattern],
-                preserve=True,
+                preservation_mode=None,
                 run_dir=tmp_path / "run",
                 max_parallel=1,
             )

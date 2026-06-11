@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from coder_eval.models import AgentState, ResolvedTask, TaskDefinition
+from coder_eval.models import AgentState, PreservationMode, ResolvedTask, TaskDefinition
 from coder_eval.orchestration.config import BatchRunConfig
 from coder_eval.orchestrator import Orchestrator
 
@@ -53,7 +53,7 @@ success_criteria:
     config = BatchRunConfig(
         run_dir=run_dir,
         max_parallel=1,  # Sequential
-        preserve_sandbox=False,
+        preservation_mode=PreservationMode.NONE,
     )
 
     resolved_task = ResolvedTask(

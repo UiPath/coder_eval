@@ -48,19 +48,18 @@ class TestProjectRootResolution:
 
 
 class TestPreserveSandboxDefault:
-    """Bug: BatchRunConfig.preserve_sandbox defaults to False but CLI defaults to True.
+    """BatchRunConfig.preservation_mode and the CLI must share the same default.
 
-    This creates inconsistent behavior between CLI and programmatic usage.
+    Both default to None (auto / driver-derived), so programmatic and CLI usage
+    resolve the mode identically at the batch dispatch seam.
     """
 
     def test_batch_run_config_default_matches_cli(self):
-        """BatchRunConfig.preserve_sandbox default should match CLI --preserve default."""
+        """BatchRunConfig.preservation_mode default should match CLI --preservation-mode default (both None)."""
         from coder_eval.orchestration.config import BatchRunConfig
 
         config = BatchRunConfig(run_dir=tmp_subdir("test"))
-        # CLI defaults to True (--preserve/--no-preserve with default True)
-        # BatchRunConfig should match
-        assert config.preserve_sandbox is True, (
-            f"BatchRunConfig.preserve_sandbox defaults to {config.preserve_sandbox}, "
-            f"but CLI --preserve defaults to True"
+        assert config.preservation_mode is None, (
+            f"BatchRunConfig.preservation_mode defaults to {config.preservation_mode}, "
+            f"but the CLI --preservation-mode default is None (auto)"
         )

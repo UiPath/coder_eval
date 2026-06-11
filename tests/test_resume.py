@@ -19,7 +19,7 @@ from typer.testing import CliRunner
 
 from coder_eval.cli import app
 from coder_eval.cli.run_command import _run_with_experiment
-from coder_eval.models import AgentKind, EvaluationResult, FinalStatus, ResolvedTask, TaskDefinition
+from coder_eval.models import AgentKind, EvaluationResult, FinalStatus, PreservationMode, ResolvedTask, TaskDefinition
 from coder_eval.orchestration.batch import (
     compute_run_fingerprint,
     fingerprint_diff,
@@ -107,7 +107,7 @@ def test_partition_no_run_dir_yields_all_pending(tmp_path):
 async def test_run_batch_folds_prior_into_run_json(tmp_path):
     """run_batch with no new tasks but prior_results writes a consistent run.json."""
     run_dir = tmp_path / "run"
-    config = BatchRunConfig(run_dir=run_dir, max_parallel=1, preserve_sandbox=False)
+    config = BatchRunConfig(run_dir=run_dir, max_parallel=1, preservation_mode=PreservationMode.NONE)
 
     p_success = _resolved(tmp_path, "prior_ok")
     p_fail = _resolved(tmp_path, "prior_bad")
@@ -226,6 +226,6 @@ async def test_resume_warns_on_config_drift_but_proceeds(tmp_path):
     run_dir.mkdir()
     write_run_fingerprint(run_dir, {"overrides": {"agent.model": "sonnet"}})
 
-    config = BatchRunConfig(run_dir=run_dir, overrides={"agent.model": "opus"}, preserve_sandbox=False)
+    config = BatchRunConfig(run_dir=run_dir, overrides={"agent.model": "opus"}, preservation_mode=PreservationMode.NONE)
     summary, _ = await _run_with_experiment([], config, None, None, 1, resume=True)
     assert summary.tasks_run == 0

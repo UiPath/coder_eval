@@ -29,6 +29,7 @@ from coder_eval.models import (
     DockerDriverConfig,
     EvaluationResult,
     FinalStatus,
+    PreservationMode,
     ResourceLimits,
 )
 from coder_eval.streaming.callbacks import safe_emit
@@ -289,12 +290,12 @@ class DockerRunner:
     def __init__(
         self,
         rt: ResolvedTask,
-        preserve_sandbox: bool = False,
+        preservation_mode: PreservationMode = PreservationMode.DIRECT_WRITE,
         stream_callback: StreamCallback | None = None,
         verbose: bool = False,
     ) -> None:
         self.rt = rt
-        self.preserve_sandbox = preserve_sandbox
+        self.preservation_mode = preservation_mode
         self.stream_callback = stream_callback
         self.verbose = verbose
 
@@ -360,7 +361,7 @@ class DockerRunner:
                     "variant_id": self.rt.variant_id,
                     "replicate_index": self.rt.replicate_index,
                     "config_lineage": {k: v.model_dump(mode="json") for k, v in self.rt.config_lineage.items()},
-                    "preserve_sandbox": self.preserve_sandbox,
+                    "preservation_mode": self.preservation_mode.value,
                     "source_yaml": self.rt.source_yaml,
                 }
             )

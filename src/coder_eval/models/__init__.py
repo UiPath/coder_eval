@@ -48,6 +48,7 @@ from coder_eval.models.enums import (
     ApiBackend,
     FinalStatus,
     PermissionMode,
+    PreservationMode,
 )
 
 # Experiment
@@ -196,6 +197,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "ApiBackend",
     "FinalStatus",
     "PermissionMode",
+    "PreservationMode",
     # Criteria
     "BaseSuccessCriterion",
     "ClassificationMatchCriterion",

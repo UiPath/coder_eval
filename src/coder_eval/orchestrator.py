@@ -44,6 +44,7 @@ from .models import (
     PostRunCommand,
     PostRunResult,
     PreRunCommand,
+    PreservationMode,
     ProxyRoute,
     ResolvedTask,
     RunSummary,
@@ -233,7 +234,7 @@ class Orchestrator:
         self,
         task: TaskDefinition,
         run_dir: Path,
-        preserve_sandbox: bool = False,
+        preservation_mode: PreservationMode = PreservationMode.MOVE_ON_WRITE,
         task_file: Path | None = None,
         stream_callback: StreamCallback | None = None,
         sandbox: Sandbox | None = None,
@@ -248,7 +249,9 @@ class Orchestrator:
         Args:
             task: Task definition to evaluate
             run_dir: Per-task directory within a run (e.g., runs/2025-10-09_15-30-45/default/hello_date/00/)
-            preserve_sandbox: Whether to preserve sandbox after completion
+            preservation_mode: How to persist the sandbox after completion
+                (NONE / MOVE_ON_WRITE / DIRECT_WRITE). The driver-derived
+                default is resolved upstream at the batch dispatch seam.
             task_file: Path to task YAML file (for resolving reference file paths)
             stream_callback: Optional callback for real-time event streaming
             sandbox: Pre-built Sandbox to use directly; if None, creates one from task config and runs the agent
@@ -260,7 +263,7 @@ class Orchestrator:
         """
         self.task = task
         self.run_dir = run_dir
-        self.preserve_sandbox = preserve_sandbox
+        self.preservation_mode = preservation_mode
         self.task_file = task_file
         self.stream_callback = stream_callback
         self.sandbox = sandbox
@@ -829,11 +832,28 @@ class Orchestrator:
         task_dir = self.task_file.parent.resolve() if self.task_file else None
         self.sandbox = Sandbox(self.task.sandbox, task_id=self.task.task_id, task_dir=task_dir)
 
-        # Preserve by copying after execution. Running directly under run_dir/artifacts
-        # lets parent-dir node_modules contaminate Node tool resolution on shared hosts.
+        # DIRECT_WRITE runs the sandbox straight in run_dir/artifacts/<task_id>
+        # (no end-of-run copy/move). MOVE_ON_WRITE / NONE run in a tempdir —
+        # this keeps the run off run_dir on shared hosts, where parent-dir
+        # node_modules can contaminate Node tool resolution (MST-9795).
+        direct_target = (
+            (self.run_dir / "artifacts" / self.task.task_id)
+            if self.preservation_mode == PreservationMode.DIRECT_WRITE
+            else None
+        )
+        # DIRECT_WRITE deliberately does NOT clear the target dir, so a reused
+        # --run-dir (or --resume) can leave a prior run's files alongside this
+        # run's outputs and silently perturb file-based criteria. Surface it.
+        if direct_target is not None and direct_target.exists() and any(direct_target.iterdir()):
+            logger.warning(
+                "DIRECT_WRITE target %s already exists and is non-empty; "
+                "stale files from a prior run are not cleared and may affect criteria.",
+                direct_target,
+            )
+
         async def _setup_sandbox() -> Any:
             assert self.sandbox is not None
-            return await asyncio.to_thread(self.sandbox.setup)
+            return await asyncio.to_thread(self.sandbox.setup, direct_target)
 
         sandbox_dir = await execute_with_retry(
             operation=_setup_sandbox,
@@ -1971,19 +1991,28 @@ class Orchestrator:
         # Cleanup sandbox
         if self.sandbox:
             try:
-                if self.preserve_sandbox and self.result:
-                    if not self.sandbox.is_persistent:
-                        # Sandbox is in a temp dir — copy to artifacts (legacy path)
-                        artifacts_dir = self.run_dir / "artifacts"
-                        preserved_path = await asyncio.to_thread(self.sandbox.preserve_to, artifacts_dir)
-                        self.result.sandbox_path = str(preserved_path)
-                        logger.info(f"Sandbox preserved to: {preserved_path}")
-                    else:
-                        # Sandbox already lives in the artifacts directory — no copy needed
-                        self.result.sandbox_path = str(self.sandbox.sandbox_dir)
-                        logger.info(f"Sandbox preserved (in-place): {self.sandbox.sandbox_dir}")
+                if self.preservation_mode == PreservationMode.MOVE_ON_WRITE and self.result:
+                    # Sandbox ran in a tempdir — move it into run_dir/artifacts.
+                    artifacts_dir = self.run_dir / "artifacts"
+                    preserved_path = await asyncio.to_thread(self.sandbox.preserve_to, artifacts_dir)
+                    self.result.sandbox_path = str(preserved_path)
+                    logger.info(f"Sandbox preserved to: {preserved_path}")
+                elif self.preservation_mode == PreservationMode.DIRECT_WRITE and self.result:
+                    # Sandbox already lives in run_dir/artifacts — nothing to move.
+                    # Set sandbox_path first, then grant a+rX (a fallible chmod) so
+                    # artifacts written by a root-owned docker container stay
+                    # traversable across the host uid boundary (MOVE_ON_WRITE gets
+                    # this via preserve_to; DIRECT_WRITE skips it, so apply it here).
+                    self.result.sandbox_path = str(self.sandbox.sandbox_dir)
+                    await asyncio.to_thread(self.sandbox.grant_read_access)
+                    logger.info(f"Sandbox preserved (in-place): {self.sandbox.sandbox_dir}")
+                elif self.preservation_mode == PreservationMode.NONE and self.result:
+                    # Sandbox will be deleted by cleanup() below; clear stale path.
+                    self.result.sandbox_path = None
                 elif self.result:
-                    # Sandbox will be deleted; clear stale tempdir path
+                    # Defensive: a future PreservationMode member with no arm here
+                    # would otherwise silently fall through. Treat as no-preserve.
+                    logger.warning("Unhandled preservation_mode %s; not preserving sandbox.", self.preservation_mode)
                     self.result.sandbox_path = None
 
                 # cleanup() is a no-op for persistent dirs (is_persistent=True)

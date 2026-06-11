@@ -97,7 +97,16 @@ class TestSemanticErrorsCleanExit:
         task_file = self._task_file(tmp_path)
         result = runner.invoke(
             app,
-            ["run", str(task_file), "--run-dir", str(tmp_path / "run"), "--no-preserve", "-D", "sandbox.driver=bogus"],
+            [
+                "run",
+                str(task_file),
+                "--run-dir",
+                str(tmp_path / "run"),
+                "--preservation-mode",
+                "NONE",
+                "-D",
+                "sandbox.driver=bogus",
+            ],
         )
         self._assert_clean_nonzero(result)
 
@@ -110,7 +119,8 @@ class TestSemanticErrorsCleanExit:
                 str(task_file),
                 "--run-dir",
                 str(tmp_path / "run"),
-                "--no-preserve",
+                "--preservation-mode",
+                "NONE",
                 "-D",
                 "agent.sdk_options.hooks={}",
             ],

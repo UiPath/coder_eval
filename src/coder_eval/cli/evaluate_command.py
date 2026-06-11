@@ -6,7 +6,14 @@ from pathlib import Path
 import typer
 
 from ..logging_config import setup_logging
-from ..models import AgentKind, EvaluationResult, FinalStatus, TemplateDirSource, parse_agent_config
+from ..models import (
+    AgentKind,
+    EvaluationResult,
+    FinalStatus,
+    PreservationMode,
+    TemplateDirSource,
+    parse_agent_config,
+)
 from ..orchestration.task_loader import load_task
 from ..orchestrator import Orchestrator
 from ..sandbox import Sandbox
@@ -37,7 +44,7 @@ def evaluate_command(
         True,
         "--preserve/--no-preserve",
         "-p/-P",
-        help="Copy sandbox artifacts to run directory (default: preserve). The temp sandbox is always removed.",
+        help="Move sandbox artifacts to run directory (default: preserve). The temp sandbox is always removed.",
     ),
     run_dir: Path | None = typer.Option(  # noqa: B008
         None,
@@ -102,7 +109,7 @@ def evaluate_command(
         orchestrator = Orchestrator(
             task=task,
             run_dir=prepared_run_dir,
-            preserve_sandbox=preserve,
+            preservation_mode=PreservationMode.MOVE_ON_WRITE if preserve else PreservationMode.NONE,
             task_file=task_file,
             sandbox=sandbox,
             variant_id="evaluate",

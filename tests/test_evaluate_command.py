@@ -70,6 +70,46 @@ def test_evaluate_command_defaults_agent_type_when_missing(tmp_path):
         assert exc_info.value.exit_code == 0
 
 
+@pytest.mark.parametrize(
+    ("preserve", "expected_mode"),
+    [(True, "MOVE_ON_WRITE"), (False, "NONE")],
+)
+def test_evaluate_command_maps_preserve_to_mode(tmp_path, preserve, expected_mode):
+    """evaluate maps its boolean --preserve to MOVE_ON_WRITE / NONE on the real Orchestrator."""
+    from coder_eval.models import PreservationMode
+
+    task_file = FIXTURES_DIR / "tasks" / "test_task_pass.yaml"
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "app.py").write_text("print('hello')")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    from coder_eval.cli.evaluate_command import evaluate_command
+
+    captured: dict[str, PreservationMode] = {}
+
+    class _StopError(Exception):
+        pass
+
+    class _CapturingOrchestrator:
+        def __init__(self, **kwargs):
+            captured["mode"] = kwargs["preservation_mode"]
+
+        async def run(self):
+            raise _StopError  # short-circuit before the display logic; we only need the kwarg
+
+    with (
+        patch("coder_eval.cli.console.console.print"),
+        patch("coder_eval.logging_config.setup_logging"),
+        patch("coder_eval.cli.evaluate_command.Orchestrator", _CapturingOrchestrator),
+        pytest.raises(_StopError),
+    ):
+        evaluate_command(task_file=task_file, work_dir=work_dir, run_dir=run_dir, preserve=preserve)
+
+    assert captured["mode"] == PreservationMode(expected_mode)
+
+
 def test_evaluate_command_failure(tmp_path):
     """Test evaluate command with failing criteria."""
     task_file = FIXTURES_DIR / "tasks" / "test_task_pass.yaml"
