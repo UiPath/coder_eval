@@ -1,6 +1,6 @@
 [project]
 name = "coder-eval"
-version = "0.2.0"
+version = "0.2.1"
 description = "A robust, extensible framework for evaluating AI coding agents"
 readme = "README.md"
 license = "MIT"

@@ -2,6 +2,28 @@
 
 <!-- version list -->
 
+## v0.2.1 (2026-06-11)
+
+### Bug Fixes
+
+- Pin BYOD smoke template to coder-eval-agent:latest
+  ([#401](https://github.com/UiPath/coder_eval/pull/401),
+  [`6405391`](https://github.com/UiPath/coder_eval/commit/64053914411ae3b82e888de3b44246a6ea2155b6))
+
+- Sync uv.lock with the 0.2.0 version bump ([#401](https://github.com/UiPath/coder_eval/pull/401),
+  [`6405391`](https://github.com/UiPath/coder_eval/commit/64053914411ae3b82e888de3b44246a6ea2155b6))
+
+### Refactoring
+
+- Remove UiPath eval content moved to coder-eval-uipath
+  ([#401](https://github.com/UiPath/coder_eval/pull/401),
+  [`6405391`](https://github.com/UiPath/coder_eval/commit/64053914411ae3b82e888de3b44246a6ea2155b6))
+
+- Sweep remaining references to moved eval content
+  ([#401](https://github.com/UiPath/coder_eval/pull/401),
+  [`6405391`](https://github.com/UiPath/coder_eval/commit/64053914411ae3b82e888de3b44246a6ea2155b6))
+
+
 ## v0.2.0 (2026-06-11)
 
 ### Bug Fixes
