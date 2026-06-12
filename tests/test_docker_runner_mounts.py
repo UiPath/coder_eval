@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from coder_eval.isolation.docker_runner import (
+    CONTAINER_ENTRYPOINT,
     CONTAINER_OUTPUT_DIR,
     DockerRunner,
     _sanitize_container_name_component,
@@ -161,14 +162,38 @@ class TestDockerRunnerUserAndOutput:
 
             argv = runner._build_argv(input_dir, output_dir, container_name="test-container")
 
-            # Find the --output argument
-            if "--output" in argv:
-                output_idx = argv.index("--output")
-                output_arg = argv[output_idx + 1]
+            # --output must always be present (a vacuous `if` would let a dropped
+            # flag pass silently).
+            assert "--output" in argv
+            output_arg = argv[argv.index("--output") + 1]
+            # Should be the container-side path, not the host path
+            assert output_arg == str(CONTAINER_OUTPUT_DIR)
+            assert str(output_dir) not in output_arg
 
-                # Should be the container-side path, not the host path
-                assert output_arg == str(CONTAINER_OUTPUT_DIR)
-                assert str(output_dir) not in output_arg
+    def test_entrypoint_pinned_before_image(self):
+        """Host pins the framework entrypoint via `docker run --entrypoint`.
+
+        It must (a) point at the framework entrypoint, and (b) appear BEFORE the
+        image reference -- `--entrypoint` is a `docker run` option, so it has to
+        precede the image; anything after the image is the command, not a flag.
+        """
+        runner = self._make_runner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = Path(tmpdir) / "input"
+            output_dir = Path(tmpdir) / "output"
+            input_dir.mkdir()
+            output_dir.mkdir()
+
+            argv = runner._build_argv(
+                input_dir, output_dir, container_name="test-container", image="some-task-image:built"
+            )
+
+            assert "--entrypoint" in argv
+            ep_idx = argv.index("--entrypoint")
+            assert argv[ep_idx + 1] == CONTAINER_ENTRYPOINT
+            # --entrypoint is a run option, so it precedes the image reference.
+            assert ep_idx < argv.index("some-task-image:built")
 
 
 class TestStagingPrefixSanitized:

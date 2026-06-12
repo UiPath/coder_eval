@@ -21,26 +21,37 @@ data) — no separate "build and push an image" step.
 
 ## Contract: extend the framework image
 
-The container runs the **whole orchestrator** via the framework image's
-`ENTRYPOINT` (`coder-eval _run-task-internal "$@"`), so a task Dockerfile cannot
-*replace* that image — it must **extend** it:
+The container runs the **whole orchestrator**, with the host pinning the
+framework entrypoint at run time (`coder-eval _run-task-internal "$@"`), so a task
+Dockerfile cannot *replace* the framework image — it must **extend** it:
 
 ```dockerfile
-FROM coder-eval-agent:latest   # inherit runtime + entrypoint
+FROM coder-eval-agent:latest   # inherit the runtime (CLI + entrypoint script + version label)
 RUN apt-get install -y poppler-utils
 COPY input/ /root/input/
 ```
 
-A bare `FROM ubuntu` has no entrypoint; `docker run <image> --output ...` then
-tries to exec `--output` and fails with
-`exec: "--output": executable file not found in $PATH`. To turn that cryptic
-runtime failure into an actionable one, `_build_image` runs
-`_assert_runtime_entrypoint` after the build: it `docker image inspect`s the
-`Config.Entrypoint` and raises `DockerRunError` (pointing at
-`FROM coder-eval-agent:<version>`) unless the framework entrypoint
-(`entrypoint.sh`) was inherited. An inspect failure is soft (the subsequent
-`docker run` surfaces real problems). This was the gap behind the first reported
-bug — the original cut built a bare image and failed opaquely at `docker run`.
+The framework image bakes **no** `ENTRYPOINT`; instead the host pins it at run
+time with `docker run --entrypoint /usr/local/bin/coder_eval_entrypoint.sh`
+(see `DockerRunner._build_argv` / `CONTAINER_ENTRYPOINT`). This makes the
+in-container orchestrator launch robust to whatever a task image's own Dockerfile
+declares for `ENTRYPOINT`/`CMD` (a task-body `ENTRYPOINT [...]`, a cleared
+`ENTRYPOINT []`, or an inherited base entrypoint can no longer hijack PID 1). The
+coder-eval-specific script name avoids colliding with a base image's own
+`/usr/local/bin/entrypoint.sh`.
+
+To keep the actionable error for a misconfigured task Dockerfile (a bare
+`FROM ubuntu` builds fine, then would die at `docker run` with a cryptic
+`exec ...coder_eval_entrypoint.sh: no such file`), `_build_image` runs
+`_assert_runtime_image` after the build: it `docker image inspect`s the
+`org.coder-eval.version` label (stamped by docker/Dockerfile, inherited by any
+`FROM coder-eval-agent` task) and raises `DockerRunError` pointing at
+`FROM coder-eval-agent:<version>` if it is absent. This replaces the older
+`_assert_runtime_entrypoint` guard, which inspected the now-removed baked
+`ENTRYPOINT`. An inspect failure is soft (the subsequent `docker run` surfaces
+real problems). Note `run()` skips the separate `_preflight_image_version`
+soft-warn for `dockerfile_path` tasks, so this post-build label check is their
+only pre-run validation.
 
 (The alternative models — auto-layering the runtime onto an arbitrary base, or
 running the task image as a *separate* agent-env container à la terminal-bench —

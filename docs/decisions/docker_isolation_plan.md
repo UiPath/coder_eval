@@ -43,7 +43,7 @@ Cleaner than abstracting `SandboxBackend`: keep `Sandbox`/`Orchestrator`/criteri
 
 ### Phase 2 — Docker image
 - `docker/Dockerfile`: pinned Python 3.13 + Node LTS + `@anthropic-ai/claude-code` + `uv` + `git`. `coder_eval` installed from the build context wheel (host + container versions guaranteed identical).
-- `docker/entrypoint.sh`: thin wrapper that execs `coder-eval _run-task-internal "$@"`.
+- `docker/coder_eval_entrypoint.sh`: thin wrapper that execs `coder-eval _run-task-internal "$@"`. The image bakes no `ENTRYPOINT`; the host pins it via `docker run --entrypoint /usr/local/bin/coder_eval_entrypoint.sh`.
 - `make docker-image` target: builds and tags `coder-eval-agent:<pkg-version>`.
 
 ### Phase 3 — DockerRunner wiring

@@ -45,15 +45,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Container-side paths. Kept in lockstep with docker/entrypoint.sh.
+# Container-side paths. Kept in lockstep with docker/coder_eval_entrypoint.sh.
 CONTAINER_WORK_DIR = "/work"
 CONTAINER_INPUT_DIR = "/work/input"
 CONTAINER_OUTPUT_DIR = "/work/output"
 CONTAINER_TASK_DIR = "/work/task_dir"
 
-# Substring that must appear in a task-built image's inherited ENTRYPOINT for it
-# to be a valid coder-eval runtime image (see docker/Dockerfile + entrypoint.sh).
-_RUNTIME_ENTRYPOINT_MARKER = "entrypoint.sh"
+# In-image path of the framework entrypoint, pinned by the host via
+# `docker run --entrypoint` (the image bakes no ENTRYPOINT). MUST equal the
+# `COPY` destination in docker/Dockerfile -- a drift guard test enforces that.
+CONTAINER_ENTRYPOINT = "/usr/local/bin/coder_eval_entrypoint.sh"
 
 # Host-side heartbeat: the runner touches this file every HEARTBEAT_INTERVAL
 # seconds while alive. The in-container watchdog exits if the file is stale
@@ -631,14 +632,16 @@ class DockerRunner:
         BuildKit enabled. Otherwise the configured ``image`` is returned
         unchanged.
 
-        **Contract:** the container runs the coder-eval orchestrator via the
-        framework image's entrypoint (``coder-eval _run-task-internal "$@"``).
-        A task Dockerfile must therefore start ``FROM coder-eval-agent:<version>``
-        and only ADD task-specific layers; it inherits the runtime + entrypoint.
-        After building we assert the entrypoint was inherited and fail with an
-        actionable error otherwise -- without this, a bare ``FROM ubuntu`` image
-        produces a cryptic ``exec: "--output": executable file not found`` at
-        ``docker run`` (the run args get treated as the command).
+        **Contract:** the container runs the coder-eval orchestrator. The image
+        bakes no ``ENTRYPOINT``; the host pins it at run time via
+        ``docker run --entrypoint`` (see :meth:`_build_argv`). A task Dockerfile
+        must therefore start ``FROM coder-eval-agent:<version>`` and only ADD
+        task-specific layers, so the runtime (the ``coder_eval_entrypoint.sh``
+        script + the ``coder-eval`` CLI + the ``org.coder-eval.version`` label)
+        is present. After building we assert that label is present and fail with
+        an actionable error otherwise -- without this, a bare ``FROM ubuntu``
+        image builds fine, then dies at ``docker run`` with a cryptic
+        ``exec: "/usr/local/bin/coder_eval_entrypoint.sh": no such file``.
 
         Side-effecting (network + docker daemon state); call via
         ``asyncio.to_thread`` from :meth:`run`, never from :meth:`_build_argv`,
@@ -649,7 +652,8 @@ class DockerRunner:
 
         Raises:
             DockerRunError: If ``docker build`` exits non-zero, or the built
-                image does not inherit the coder-eval runtime entrypoint.
+                image is not a coder-eval runtime image (missing the
+                ``org.coder-eval.version`` label).
         """
         cfg = self._docker_config
         if not cfg.dockerfile_path:
@@ -691,50 +695,57 @@ class DockerRunner:
             subprocess.run(argv, check=True, capture_output=True, text=True, encoding="utf-8", env=env)
         except subprocess.CalledProcessError as exc:
             raise DockerRunError(f"Failed to build Docker image from {dockerfile}: {exc.stderr}") from exc
-        self._assert_runtime_entrypoint(image, dockerfile)
+        self._assert_runtime_image(image, dockerfile)
         return image
 
-    def _assert_runtime_entrypoint(self, image: str, dockerfile: Path) -> None:
-        """Fail fast unless ``image`` inherited the coder-eval runtime entrypoint.
+    def _assert_runtime_image(self, image: str, dockerfile: Path) -> None:
+        """Fail fast unless the built image carries the coder-eval runtime.
 
-        The orchestrator-in-container model requires the image's ``ENTRYPOINT``
-        to be the framework's ``entrypoint.sh`` (which execs
-        ``coder-eval _run-task-internal``). A task Dockerfile gets this by
-        starting ``FROM coder-eval-agent:<version>``. We inspect the built
-        image's ``Config.Entrypoint`` rather than spawning a probe container --
-        cheap, and it catches the exact failure mode (a null/foreign entrypoint
-        makes ``docker run <image> --output ...`` exec ``--output``).
-
-        A docker/inspect failure is treated as soft (debug-logged, no raise):
-        the subsequent ``docker run`` will surface any real problem, and we
-        don't want a flaky inspect to block an otherwise-valid run.
+        The host pins ``--entrypoint`` at run time, so we no longer inspect the
+        baked ``ENTRYPOINT``; instead we verify the image is a coder-eval runtime
+        image by checking for the ``org.coder-eval.version`` label, which
+        docker/Dockerfile stamps and any ``FROM coder-eval-agent`` task inherits.
+        This is the only pre-run validation for a ``dockerfile_path`` task
+        (``run()`` skips :func:`_preflight_image_version` for that case), so
+        without it a bare ``FROM ubuntu`` image would build, then die at
+        ``docker run`` with a cryptic ``exec ...coder_eval_entrypoint.sh: no
+        such file``. A docker/inspect failure is soft (debug-logged, no raise):
+        the subsequent ``docker run`` surfaces any real problem.
 
         Raises:
-            DockerRunError: If the entrypoint is missing or is not the
-                framework runtime entrypoint.
+            DockerRunError: If the image carries no ``org.coder-eval.version``
+                label (i.e. it is not built ``FROM coder-eval-agent``).
         """
         try:
             result = subprocess.run(
-                ["docker", "image", "inspect", "--format", "{{json .Config.Entrypoint}}", image],
+                [
+                    "docker",
+                    "image",
+                    "inspect",
+                    "--format",
+                    '{{ index .Config.Labels "org.coder-eval.version" }}',
+                    image,
+                ],
                 check=True,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 timeout=10,
             )
-            entrypoint = json.loads(result.stdout.strip() or "null")
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, ValueError) as exc:
-            logger.debug("Could not inspect entrypoint of built image %s: %s", image, exc)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            logger.debug("Could not inspect labels of built image %s: %s", image, exc)
             return
-        parts = entrypoint if isinstance(entrypoint, list) else []
-        if not any(_RUNTIME_ENTRYPOINT_MARKER in str(part) for part in parts):
+        # `docker inspect` renders a missing label as the empty string (the Go
+        # template's zero value); "<no value>" can occur on older clients.
+        label = result.stdout.strip()
+        if not label or label == "<no value>":
             base = get_default_docker_image_tag()
             raise DockerRunError(
-                f"Image built from {dockerfile} does not inherit the coder-eval runtime entrypoint "
-                + f"(found ENTRYPOINT={entrypoint!r}). The container must run the in-container "
-                + f"orchestrator, so a task Dockerfile must start `FROM {base}` (the framework image, "
-                + "built via `make docker-image`) and only add task-specific layers on top. "
-                + "See docs/DOCKER_ISOLATION.md."
+                f"Image built from {dockerfile} is not a coder-eval runtime image "
+                + "(missing the org.coder-eval.version label). The container must run the "
+                + f"in-container orchestrator, so a task Dockerfile must start `FROM {base}` "
+                + "(the framework image, built via `make docker-image`) and only add "
+                + "task-specific layers on top. See docs/DOCKER_ISOLATION.md."
             )
 
     def _build_argv(
@@ -749,6 +760,14 @@ class DockerRunner:
             image = cfg.image
 
         argv: list[str] = ["docker", "run", "--rm", "--name", container_name]
+
+        # Pin the framework entrypoint at run time rather than trusting whatever
+        # the task image baked into ENTRYPOINT. This makes the orchestrator launch
+        # robust to a task Dockerfile that sets its own ENTRYPOINT/CMD (or clears
+        # it via `ENTRYPOINT []`). `--entrypoint` resets the image CMD, which is
+        # fine -- the run command (`--output`/`--task-dir`, appended after the
+        # image) is passed explicitly below and is forwarded to the entrypoint.
+        argv += ["--entrypoint", CONTAINER_ENTRYPOINT]
 
         if cfg.network == "none":
             argv += ["--network", "none"]

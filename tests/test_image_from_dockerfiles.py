@@ -14,7 +14,6 @@ Covers the three layers of the `sandbox.docker.dockerfile_path` feature:
 
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
 import tempfile
@@ -25,7 +24,7 @@ import pytest
 import yaml
 
 from coder_eval.isolation import docker_runner as dr
-from coder_eval.isolation.docker_runner import DockerRunError, DockerRunner
+from coder_eval.isolation.docker_runner import CONTAINER_ENTRYPOINT, DockerRunError, DockerRunner
 from coder_eval.models import (
     DockerBuildConfig,
     DockerDriverConfig,
@@ -86,12 +85,14 @@ def _make_runner(
     return DockerRunner(rt)
 
 
-def _docker_side_effect(*, entrypoint=("/usr/local/bin/entrypoint.sh",), build_ok=True):
+def _docker_side_effect(*, build_ok=True, version_label="0.3.0"):
     """subprocess.run side_effect faking `docker build` + `docker image inspect`.
 
-    - `docker build ...`   -> success CompletedProcess (or CalledProcessError if build_ok=False)
-    - `docker image inspect ... {{json .Config.Entrypoint}}` -> CompletedProcess whose
-      stdout is the JSON-encoded `entrypoint` (a list, or None for "no entrypoint").
+    - `docker build ...` -> success (or CalledProcessError if build_ok=False)
+    - `docker image inspect ... org.coder-eval.version` -> CompletedProcess whose
+      stdout is `version_label` (use "" to simulate a non-framework image with no
+      label; `docker inspect` renders a missing label as the empty string).
+    - any other docker call -> generic success.
     """
 
     def _run(argv, *args, **kwargs):
@@ -100,8 +101,7 @@ def _docker_side_effect(*, entrypoint=("/usr/local/bin/entrypoint.sh",), build_o
                 raise subprocess.CalledProcessError(1, argv, stderr="boom: bad layer")
             return subprocess.CompletedProcess(argv, 0, "", "")
         if "inspect" in argv:
-            payload = json.dumps(list(entrypoint) if entrypoint is not None else None)
-            return subprocess.CompletedProcess(argv, 0, payload, "")
+            return subprocess.CompletedProcess(argv, 0, f"{version_label}\n", "")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     return _run
@@ -202,7 +202,7 @@ class TestBuildImage:
 
         # Deterministic, lowercased per-task tag.
         assert image == "coder-eval-task-edit-pdf:built"
-        # First subprocess call is the build (a second `docker image inspect` validates the entrypoint).
+        # The build is the only subprocess call (no post-build entrypoint inspection).
         build_argv = run.call_args_list[0].args[0]
         assert build_argv[:3] == ["docker", "build", "-t"]
         assert build_argv[3] == "coder-eval-task-edit-pdf:built"
@@ -219,35 +219,28 @@ class TestBuildImage:
         with pytest.raises(DockerRunError, match=r"Failed to build Docker image.*boom: bad layer"):
             runner._build_image()
 
-    def test_rejects_image_without_entrypoint(self, tmp_path: Path, mocker) -> None:
-        """A built image with no inherited entrypoint -> actionable DockerRunError (FROM coder-eval-agent)."""
+    def test_accepts_runtime_image_with_version_label(self, tmp_path: Path, mocker) -> None:
+        """An image carrying org.coder-eval.version (FROM coder-eval-agent) passes."""
+        dockerfile = tmp_path / "Dockerfile"
+        dockerfile.write_text("FROM coder-eval-agent:latest\n")
+        mocker.patch.object(dr.subprocess, "run", side_effect=_docker_side_effect(version_label="0.3.0"))
+        runner = _make_runner(task_id="ok", dockerfile_path=str(dockerfile))
+        assert runner._build_image() == "coder-eval-task-ok:built"
+
+    def test_rejects_image_without_version_label(self, tmp_path: Path, mocker) -> None:
+        """A non-framework image (no org.coder-eval.version label) -> actionable DockerRunError.
+
+        The host pins --entrypoint, so the build is no longer gated on the baked
+        ENTRYPOINT; the runtime-image check uses the version label instead.
+        """
         dockerfile = tmp_path / "Dockerfile"
         dockerfile.write_text("FROM ubuntu:24.04\n")
-        mocker.patch.object(dr.subprocess, "run", side_effect=_docker_side_effect(entrypoint=None))
+        mocker.patch.object(dr.subprocess, "run", side_effect=_docker_side_effect(version_label=""))
         runner = _make_runner(dockerfile_path=str(dockerfile))
         with pytest.raises(DockerRunError, match=r"FROM coder-eval-agent"):
             runner._build_image()
 
-    def test_rejects_foreign_entrypoint(self, tmp_path: Path, mocker) -> None:
-        """An entrypoint that isn't the framework runtime -> DockerRunError."""
-        dockerfile = tmp_path / "Dockerfile"
-        dockerfile.write_text("FROM ubuntu:24.04\n")
-        mocker.patch.object(dr.subprocess, "run", side_effect=_docker_side_effect(entrypoint=["/bin/bash"]))
-        runner = _make_runner(dockerfile_path=str(dockerfile))
-        with pytest.raises(DockerRunError, match=r"does not inherit the coder-eval runtime entrypoint"):
-            runner._build_image()
-
-    def test_accepts_inherited_framework_entrypoint(self, tmp_path: Path, mocker) -> None:
-        """An image inheriting the framework entrypoint passes and returns the tag."""
-        dockerfile = tmp_path / "Dockerfile"
-        dockerfile.write_text("FROM coder-eval-agent:latest\n")
-        mocker.patch.object(
-            dr.subprocess, "run", side_effect=_docker_side_effect(entrypoint=["/usr/local/bin/entrypoint.sh"])
-        )
-        runner = _make_runner(task_id="ok", dockerfile_path=str(dockerfile))
-        assert runner._build_image() == "coder-eval-task-ok:built"
-
-    def test_entrypoint_inspect_failure_is_soft(self, tmp_path: Path, mocker) -> None:
+    def test_label_inspect_failure_is_soft(self, tmp_path: Path, mocker) -> None:
         """If `docker image inspect` itself fails, don't block -- the run surfaces real issues."""
         dockerfile = tmp_path / "Dockerfile"
         dockerfile.write_text("FROM coder-eval-agent:latest\n")
@@ -394,3 +387,24 @@ class TestBuildArgvImage:
             out_dir.mkdir()
             runner._build_argv(in_dir, out_dir, container_name="c", image="built:xyz")
         run.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# Drift guard: the host's pinned --entrypoint path MUST equal the script's
+# install location baked by docker/Dockerfile. A rename of either alone would
+# pass lint/type-check/unit tests and fail only at `docker run`.
+# --------------------------------------------------------------------------- #
+def test_container_entrypoint_matches_dockerfile_copy_destination() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    dockerfile = (repo_root / "docker" / "Dockerfile").read_text(encoding="utf-8")
+    # Find the COPY line whose destination installs the framework entrypoint script.
+    copy_dests = [
+        line.split()[-1]
+        for line in dockerfile.splitlines()
+        if line.startswith("COPY ") and line.rstrip().endswith(".sh")
+    ]
+    assert CONTAINER_ENTRYPOINT in copy_dests, (
+        f"CONTAINER_ENTRYPOINT={CONTAINER_ENTRYPOINT!r} is not a COPY destination in "
+        f"docker/Dockerfile (found {copy_dests!r}); host --entrypoint and the baked "
+        "script path have drifted."
+    )

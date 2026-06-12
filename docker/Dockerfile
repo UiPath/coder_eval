@@ -82,7 +82,10 @@ ARG CODER_EVAL_VERSION=unknown
 LABEL org.coder-eval.version="${CODER_EVAL_VERSION}"
 
 WORKDIR /work
-COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
-
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+# Coder-eval-specific filename so it never collides with a base image's own
+# /usr/local/bin/entrypoint.sh. Deliberately NO `ENTRYPOINT` is baked: the host
+# pins it at run time via `docker run --entrypoint
+# /usr/local/bin/coder_eval_entrypoint.sh`, which makes the in-container
+# orchestrator launch robust to whatever a task image's Dockerfile declares.
+COPY docker/coder_eval_entrypoint.sh /usr/local/bin/coder_eval_entrypoint.sh
+RUN chmod +x /usr/local/bin/coder_eval_entrypoint.sh
