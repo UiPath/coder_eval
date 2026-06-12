@@ -2,6 +2,59 @@
 
 <!-- version list -->
 
+## v0.5.0 (2026-06-12)
+
+### Bug Fixes
+
+- **agents**: Address PR #416 review feedback
+  ([#416](https://github.com/UiPath/coder_eval/pull/416),
+  [`df9ac29`](https://github.com/UiPath/coder_eval/commit/df9ac2909760d1083fc42760fa2bf1ddf941e6f1))
+
+- **agents**: Break plugins<->registry import cycle (CodeQL)
+  ([#416](https://github.com/UiPath/coder_eval/pull/416),
+  [`df9ac29`](https://github.com/UiPath/coder_eval/commit/df9ac2909760d1083fc42760fa2bf1ddf941e6f1))
+
+- **agents**: Code review fixes for phase 1 ([#416](https://github.com/UiPath/coder_eval/pull/416),
+  [`df9ac29`](https://github.com/UiPath/coder_eval/commit/df9ac2909760d1083fc42760fa2bf1ddf941e6f1))
+
+- **agents**: Code review fixes for phase 2 — uniform ResolvedAgentConfig
+  ([#416](https://github.com/UiPath/coder_eval/pull/416),
+  [`df9ac29`](https://github.com/UiPath/coder_eval/commit/df9ac2909760d1083fc42760fa2bf1ddf941e6f1))
+
+- **agents**: Code review fixes for phase 3 ([#416](https://github.com/UiPath/coder_eval/pull/416),
+  [`df9ac29`](https://github.com/UiPath/coder_eval/commit/df9ac2909760d1083fc42760fa2bf1ddf941e6f1))
+
+- **agents**: Full code review fixes for BYOA SPI
+  ([#416](https://github.com/UiPath/coder_eval/pull/416),
+  [`df9ac29`](https://github.com/UiPath/coder_eval/commit/df9ac2909760d1083fc42760fa2bf1ddf941e6f1))
+
+- **agents**: Guard duplicate plugin-kind registration + review polish
+  ([#416](https://github.com/UiPath/coder_eval/pull/416),
+  [`df9ac29`](https://github.com/UiPath/coder_eval/commit/df9ac2909760d1083fc42760fa2bf1ddf941e6f1))
+
+- **ci**: Byoa fixture plugin uses hatchling only-include, not setuptools py-modules
+  ([#416](https://github.com/UiPath/coder_eval/pull/416),
+  [`df9ac29`](https://github.com/UiPath/coder_eval/commit/df9ac2909760d1083fc42760fa2bf1ddf941e6f1))
+
+### Features
+
+- **agents**: Bring-your-own-agent (BYOA) plugin SPI
+  ([#416](https://github.com/UiPath/coder_eval/pull/416),
+  [`df9ac29`](https://github.com/UiPath/coder_eval/commit/df9ac2909760d1083fc42760fa2bf1ddf941e6f1))
+
+- **agents**: Phase 1 — entry-point plugin discovery + string-keyed registry
+  ([#416](https://github.com/UiPath/coder_eval/pull/416),
+  [`df9ac29`](https://github.com/UiPath/coder_eval/commit/df9ac2909760d1083fc42760fa2bf1ddf941e6f1))
+
+- **agents**: Phase 2 — registry-driven agent config dispatch
+  ([#416](https://github.com/UiPath/coder_eval/pull/416),
+  [`df9ac29`](https://github.com/UiPath/coder_eval/commit/df9ac2909760d1083fc42760fa2bf1ddf941e6f1))
+
+- **agents**: Phase 3 — worked BYOA plugin, live test + CI, docs
+  ([#416](https://github.com/UiPath/coder_eval/pull/416),
+  [`df9ac29`](https://github.com/UiPath/coder_eval/commit/df9ac2909760d1083fc42760fa2bf1ddf941e6f1))
+
+
 ## v0.4.0 (2026-06-12)
 
 ### Bug Fixes
