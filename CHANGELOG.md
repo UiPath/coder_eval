@@ -2,6 +2,31 @@
 
 <!-- version list -->
 
+## v0.4.0 (2026-06-12)
+
+### Bug Fixes
+
+- **docker**: Pin framework entrypoint via docker run --entrypoint
+  ([#418](https://github.com/UiPath/coder_eval/pull/418),
+  [`a86ad2b`](https://github.com/UiPath/coder_eval/commit/a86ad2b192856d97d58c288992c86556bbce8bfd))
+
+- **docker**: Restore actionable runtime-image guard; reconcile docs
+  ([#418](https://github.com/UiPath/coder_eval/pull/418),
+  [`a86ad2b`](https://github.com/UiPath/coder_eval/commit/a86ad2b192856d97d58c288992c86556bbce8bfd))
+
+### Features
+
+- **docker**: Pin framework entrypoint via `docker run --entrypoint`
+  ([#418](https://github.com/UiPath/coder_eval/pull/418),
+  [`a86ad2b`](https://github.com/UiPath/coder_eval/commit/a86ad2b192856d97d58c288992c86556bbce8bfd))
+
+### Refactoring
+
+- **docker**: Coder-eval-specific entrypoint, drop baked ENTRYPOINT
+  ([#418](https://github.com/UiPath/coder_eval/pull/418),
+  [`a86ad2b`](https://github.com/UiPath/coder_eval/commit/a86ad2b192856d97d58c288992c86556bbce8bfd))
+
+
 ## v0.3.0 (2026-06-12)
 
 ### Chores
