@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from ..config import settings
 from ..logging_config import setup_logging
-from ..models import AgentKind, PreservationMode, ResolvedTask, RunSummary, TaskResult
+from ..models import PreservationMode, ResolvedTask, RunSummary, TaskResult
 from ..orchestration.config import BatchRunConfig
 from ..path_utils import create_latest_symlink, format_task_log_id
 from ..streaming.callbacks import CompositeStreamCallback
@@ -211,12 +211,11 @@ def run_command(
         None,
         "--type",
         "-T",
-        # NOTE: Choices are restricted to agent kinds the orchestrator can actually
-        # construct today. AgentKind has unsupported placeholder members; let
-        # AgentKind() coercion fail at override time rather than silently
-        # accepting them at the CLI boundary.
-        click_type=click.Choice([AgentKind.CLAUDE_CODE.value, AgentKind.CODEX.value], case_sensitive=False),
-        help="Override agent type for all tasks (e.g. 'claude-code', 'codex')",
+        # Open string, not a closed click.Choice: the agent registry (incl. plugin
+        # kinds discovered at startup) is the source of truth, and it isn't populated
+        # at CLI-definition time. An unregistered kind fails at parse_agent_config with
+        # a clear "No agent registered for type ...; Registered kinds: [...]" message.
+        help="Override agent type for all tasks (e.g. 'claude-code', 'codex', or a plugin kind)",
     ),
     model: str | None = typer.Option(
         None,

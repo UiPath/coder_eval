@@ -16,9 +16,13 @@ def test_register_decorator_preserves_class_type():
         def __init__(self, config, route=None, **kwargs):
             self.config = config
 
-    # Register it (would normally be via @AgentRegistry.register(...))
-    registration = AgentRegistry.register(AgentKind.CLAUDE_CODE, ClaudeCodeAgentConfig)(FakeAgent)
-    assert registration is FakeAgent
+    # Register under a unique kind (not a built-in) to avoid the shadow-collision
+    # guard, then roll it back so the process-global registry doesn't leak.
+    try:
+        registration = AgentRegistry.register("fake-identity-kind", ClaudeCodeAgentConfig)(FakeAgent)
+        assert registration is FakeAgent
+    finally:
+        AgentRegistry._registry.pop("fake-identity-kind", None)
 
 
 def test_create_agent_unregistered_kind_raises_with_kinds_listed():

@@ -1,0 +1,22 @@
+[project]
+name = "byoa-demo-plugin"
+version = "0.0.0"
+description = "Test-only coder-eval plugin: registers a 'byoa-demo' agent kind via the entry-point SPI."
+requires-python = ">=3.13"
+# Intentionally NO dependency on coder-eval here: this package is installed into
+# the same environment that already has coder-eval, and it only imports it lazily
+# inside register(). Keeping it dependency-free makes editable install in CI cheap.
+
+# The BYOA seam: declaring this group is the ONLY wiring an external package needs.
+[project.entry-points."coder_eval.plugins"]
+byoa_demo = "byoa_demo:register"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Single top-level module (flat layout). hatchling's file-selection key is
+# `only-include` (NOT setuptools' `py-modules`); name it explicitly since the
+# project name (byoa_demo_plugin) doesn't match the module (byoa_demo).
+[tool.hatch.build.targets.wheel]
+only-include = ["byoa_demo.py"]

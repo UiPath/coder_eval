@@ -368,9 +368,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         if not self.working_directory:
             raise RuntimeError("Agent not started. Call start() first.")
 
-        # AgentConfig.type is `AgentKind | None` (Phase 3) but the orchestrator,
-        # SubAgentRunner, and UserSimulator all set it before construction. Assert
-        # the invariant so streaming-event sites below can safely call `type.value`.
+        # AgentConfig.type is `str | None`, but the orchestrator, SubAgentRunner,
+        # and UserSimulator all set it before construction. Assert the invariant so
+        # streaming-event sites below can safely use `str(self.config.type)`.
         assert self.config.type is not None, "ClaudeCodeAgent requires AgentConfig.type to be set before communicate()"
 
         # Reset the pending slot + bump the iteration counter (shared lifecycle).
@@ -473,7 +473,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # Event emission: the agent is the SOLE emitter. Events fan out to an
         # internal EventCollector (which assembles the TurnRecord — the single,
         # agent-agnostic capture path) and the caller's stream_callback.
-        task_id = self.config.type.value
+        task_id = str(self.config.type)  # str() so a plugin subclass with a non-enum kind also works
         collector = EventCollector()
         emit = CompositeStreamCallback([c for c in (collector, stream_callback) if c is not None])
 

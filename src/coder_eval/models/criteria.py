@@ -971,13 +971,17 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
         ge=10,
         description="Wall-clock timeout for the judge turn (seconds). Minimum 10.",
     )
+    # Intentionally the closed built-in AgentConfig union, NOT ResolvedAgentConfig:
+    # agent_judge spawns a Claude Code SDK sub-agent (SubAgentRunner) with evaluator
+    # credentials, so a plugin agent kind is deliberately not accepted as a judge.
     agent: AgentConfig = Field(
         default_factory=_default_judge_agent_config,
         description=(
-            "Judge agent configuration. Defaults to a sonnet, bypass-permissions, read-only "
-            "toolkit suitable for investigation-style judging. Override fields per task as "
-            "needed. For security, the judge always runs with setting_sources=[] regardless "
-            "of what this field declares — see _build_agent_config."
+            "Judge agent configuration (built-in kinds only — agent_judge runs a Claude Code "
+            "sub-agent). Defaults to a sonnet, bypass-permissions, read-only toolkit suitable "
+            "for investigation-style judging. Override fields per task as needed. For security, "
+            "the judge always runs with setting_sources=[] regardless of what this field "
+            "declares — see _build_agent_config."
         ),
     )
     capture_transcript: bool = Field(

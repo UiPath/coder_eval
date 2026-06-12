@@ -361,7 +361,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         # Event emission: the agent is the SOLE emitter; events fan out to an
         # internal EventCollector (which assembles the TurnRecord — the single,
         # agent-agnostic capture path) and the caller's stream_callback.
-        task_id = self.config.type.value
+        task_id = str(self.config.type)  # str() so a plugin subclass with a non-enum kind also works
         collector = EventCollector()
         emit = CompositeStreamCallback([c for c in (collector, stream_callback) if c is not None])
 

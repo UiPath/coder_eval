@@ -32,6 +32,12 @@ def main(ctx: typer.Context) -> None:
     - report: Display or export evaluation reports
     - proxy: Start a local LLM Gateway proxy for Claude Code CLI
     """
+    # Discover and register agents (built-in + third-party plugins) before any
+    # subcommand resolves a task or builds an agent.
+    from coder_eval.plugins import load_plugins
+
+    load_plugins()
+
     # If no subcommand was invoked, show help and exit
     if ctx.invoked_subcommand is None:
         console.print(ctx.get_help())

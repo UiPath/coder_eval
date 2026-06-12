@@ -817,6 +817,88 @@ jobs:
           path: tmp/
           retention-days: 7
 
+  byoa-live-tests:
+    name: Live Integration Tests (BYOA Plugin)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Skip on fork PRs where secrets aren't available.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    env:
+      # DirectRoute: a plugin agent that subclasses ClaudeCodeAgent uses ANTHROPIC_API_KEY.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # uv sync resolves named-index credentials from UV_INDEX_<NAME>_{USERNAME,PASSWORD}.
+      UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
+      UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
+      UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "20"
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+
+      - name: Install project dependencies (hash-verified from uv.lock)
+        run: uv sync --frozen --extra dev --extra uipath
+
+      # Install the out-of-tree fixture plugin so coder-eval discovers 'byoa-demo'
+      # through the REAL coder_eval.plugins entry point (not a test monkeypatch).
+      - name: Install BYOA demo plugin (entry-point discovery)
+        run: uv pip install -e tests/fixtures/byoa_demo_plugin
+
+      - name: Verify required secrets are present
+        run: |
+          : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY missing}"
+          echo "ANTHROPIC_API_KEY present."
+
+      - name: Run BYOA plugin live test
+        run: |
+          mkdir -p tmp
+          .venv/bin/pytest tests/test_byoa_plugin_live.py \
+            -m live -v --tb=short --strict-markers -ra \
+            --junit-xml=tmp/junit-byoa-live.xml
+
+      - name: Assert BYOA live test actually ran (not silently skipped)
+        run: |
+          python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse("tmp/junit-byoa-live.xml").getroot()
+          suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+          total = sum(int(s.get("tests", 0)) for s in suites)
+          skipped = sum(int(s.get("skipped", 0)) for s in suites)
+          errors = sum(int(s.get("errors", 0)) for s in suites)
+          failures = sum(int(s.get("failures", 0)) for s in suites)
+          passed = total - skipped - errors - failures
+          print(f"byoa-live passed={passed} skipped={skipped} errors={errors} failures={failures}")
+          if passed < 1:
+              sys.exit("test_byoa_plugin_live.py reported zero PASSED tests (missing API key / silent skip?)")
+          PY
+
+      - name: Upload BYOA live-test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: byoa-live-output
+          path: tmp/
+          retention-days: 7
+
   validate-skills-yamls:
     name: Validate Skills Task YAMLs
     runs-on: uipath-ubuntu-latest

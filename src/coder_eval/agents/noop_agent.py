@@ -73,7 +73,7 @@ class NoOpAgent(Agent[NoneAgentConfig]):
         """
         self._begin_turn()
 
-        task_id = self.config.type.value
+        task_id = str(self.config.type)  # str() so a plugin subclass with a non-enum kind also works
         turn_id = f"none-{self._iteration}"
         collector = EventCollector()
         emit = CompositeStreamCallback([c for c in (collector, stream_callback) if c is not None])

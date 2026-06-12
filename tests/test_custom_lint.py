@@ -57,3 +57,32 @@ class TestCE016NoComputedTokenUsageKwargs:
         # AssistantMessage / ReconciliationMessage DO have a settable input_tokens.
         assert not self._run("AssistantMessage(input_tokens=10)")
         assert not self._run("ReconciliationMessage(input_tokens=-5)")
+
+
+@pytest.mark.lint
+class TestCE017ModelsLazyAgentImports:
+    """CE017 flags only module-level agents/plugins imports inside models/."""
+
+    @staticmethod
+    def _run(src: str, *, in_models: bool = True):
+        import ast
+
+        from tests.lint.rules.ce017_models_lazy_agent_imports import ModelsLazyAgentImports
+
+        path = "src/coder_eval/models/agent_config.py" if in_models else "src/coder_eval/orchestration/x.py"
+        return ModelsLazyAgentImports(path).check(ast.parse(src))
+
+    def test_flags_module_level_agents_import_in_models(self):
+        assert self._run("from coder_eval.agents.registry import AgentRegistry")
+        assert self._run("import coder_eval.plugins")
+
+    def test_allows_function_local_import_in_models(self):
+        src = "def f():\n    from coder_eval.agents.registry import AgentRegistry\n    return AgentRegistry"
+        assert not self._run(src)
+
+    def test_allows_type_checking_guarded_import_in_models(self):
+        src = "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import coder_eval.plugins"
+        assert not self._run(src)
+
+    def test_ignores_files_outside_models(self):
+        assert not self._run("from coder_eval.agents.registry import AgentRegistry", in_models=False)

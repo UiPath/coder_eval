@@ -8,7 +8,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from coder_eval.models.agent_config import AgentConfig, BaseAgentConfig
+from coder_eval.models.agent_config import ResolvedAgentConfig
 from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind
 from coder_eval.models.limits import RunLimits
@@ -337,7 +337,11 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
             "the YAML — pair with a comment citing the blocker (e.g. Jira link, upstream dependency)."
         ),
     )
-    agent: AgentConfig | BaseAgentConfig | None = Field(
+    # ResolvedAgentConfig = base-typed + registry-driven dict coercion + SerializeAsAny:
+    # the concrete subclass (built-in or plugin) is chosen by parse_agent_config, not a
+    # static discriminated union, so any registered plugin kind validates here and its
+    # subclass-only fields (e.g. sdk_options) survive model_dump().
+    agent: ResolvedAgentConfig | None = Field(
         default=None,
         description=(
             "Agent configuration (resolved from experiment if omitted). Set `agent: {type: none}` for a "

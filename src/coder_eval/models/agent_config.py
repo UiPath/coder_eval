@@ -6,7 +6,16 @@ import dataclasses
 from typing import Annotated, Any, ClassVar, Literal, Self
 
 from claude_agent_sdk import ClaudeAgentOptions, SdkPluginConfig, SettingSource
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    SerializeAsAny,
+    field_validator,
+    model_validator,
+)
 
 from coder_eval.models.enums import AgentKind, PermissionMode
 from coder_eval.models.merge_strategy import MergeField
@@ -100,11 +109,12 @@ class BaseAgentConfig(BaseModel):
     # model field; Pydantic does not validate/assign it.
     _merge_exclusive_groups: ClassVar[tuple[tuple[str, ...], ...]] = (("system_prompt", "system_prompt_file"),)
 
-    type: AgentKind | None = Field(
+    type: str | None = Field(
         default=None,
         description=(
-            "The type of agent to use (claude-code, codex, etc.). "
-            "May be omitted on the task and supplied via experiment defaults or --type."
+            "The type of agent to use (claude-code, codex, or any plugin-registered kind). "
+            "May be omitted on the task and supplied via experiment defaults or --type. "
+            "Validated against the agent registry by parse_agent_config / task resolution."
         ),
     )
     model: str | None = Field(default=None, description="Specific model to use (if applicable)")
@@ -251,32 +261,37 @@ type AgentConfig = Annotated[
 ]
 
 
-# Factory function for backward-compatible instantiation
-def parse_agent_config(**kwargs: Any) -> ClaudeCodeAgentConfig | CodexAgentConfig | BaseAgentConfig:
-    """Factory function for agent configuration with discriminated union dispatch.
+def parse_agent_config(**kwargs: Any) -> BaseAgentConfig:
+    """Factory function for agent configuration with registry-driven dispatch.
 
-    Automatically routes to the appropriate config class (ClaudeCodeAgentConfig or
-    CodexAgentConfig) based on the `type` field. If type is not provided or is None,
-    defaults to ClaudeCodeAgentConfig (for backward compatibility).
+    Routes to the config class the agent registry binds to the ``type`` kind —
+    ``ClaudeCodeAgentConfig`` / ``CodexAgentConfig`` / ``NoneAgentConfig`` for the
+    built-ins, or any plugin-registered config subclass. If ``type`` is None (or
+    omitted) returns a bare ``BaseAgentConfig`` so type resolution can happen
+    later at the experiment / CLI layer.
 
-    This maintains the callable interface that tests and code expect while
-    using Pydantic's discriminated union validation for type-aware cases.
+    This replaces the import-time ``TypeAdapter(AgentConfig)`` discriminated-union
+    dispatch (which could only ever see the built-in kinds) with a per-kind
+    lookup resolved *after* plugin load — the BYOA seam.
 
     Args:
-        **kwargs: Configuration fields including 'type' discriminator
+        **kwargs: Configuration fields including the ``type`` kind.
 
     Returns:
-        ClaudeCodeAgentConfig, CodexAgentConfig, or BaseAgentConfig instance
+        The registered config subclass for ``type``, or ``BaseAgentConfig`` when
+        ``type`` is None.
 
     Raises:
-        ValidationError: If configuration is invalid
+        ValueError: If ``type`` is a kind no agent is registered for.
+        ValidationError: If configuration values are invalid for the config class.
 
     Example:
         >>> cfg = parse_agent_config(type="claude-code", model="claude-opus-4-7")
         >>> isinstance(cfg, ClaudeCodeAgentConfig)
         True
     """
-    from pydantic import TypeAdapter
+    from coder_eval.agents.registry import AgentRegistry
+    from coder_eval.plugins import ensure_plugins_loaded
 
     agent_type = kwargs.get("type")
 
@@ -286,5 +301,27 @@ def parse_agent_config(**kwargs: Any) -> ClaudeCodeAgentConfig | CodexAgentConfi
         filtered_kwargs = {k: v for k, v in kwargs.items() if k != "type"}
         return BaseAgentConfig(**filtered_kwargs)
 
-    # Type specified - use discriminated union dispatch
-    return TypeAdapter(AgentConfig).validate_python(kwargs)
+    ensure_plugins_loaded()
+    registration = AgentRegistry.get(agent_type)
+    if registration is None:
+        raise AgentRegistry.unregistered_kind_error(agent_type)
+    return registration.config_class.model_validate(kwargs)
+
+
+def _coerce_agent_config(value: Any) -> Any:
+    """Coerce a raw agent-config dict to its registered subclass via the registry.
+
+    Already-built config instances (and ``None``) pass through untouched.
+    """
+    if isinstance(value, dict):
+        return parse_agent_config(**value)
+    return value
+
+
+# The canonical annotation for any field that holds a resolved agent config.
+# BeforeValidator routes a dict through registry dispatch (so plugin kinds resolve
+# to their subclass); SerializeAsAny keeps subclass-only fields on model_dump()
+# instead of the base schema silently dropping them. Used by every persisted
+# agent-config field (TaskDefinition.agent, EvaluationResult.agent_config) so the
+# round-trip guarantee is uniform across the built-in union and plugin kinds.
+type ResolvedAgentConfig = Annotated[SerializeAsAny[BaseAgentConfig], BeforeValidator(_coerce_agent_config)]

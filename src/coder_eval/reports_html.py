@@ -331,7 +331,7 @@ def _render_header(result: EvaluationResult) -> str:
     duration = _format_duration(result.duration_seconds)
     score_badge = _score_pill(result.weighted_score) if result.weighted_score is not None else ""
     model = _esc(result.model_used or "—")
-    agent_type = _esc(getattr(result.agent_type, "value", result.agent_type))
+    agent_type = _esc(result.agent_type)
     subtitle = _esc(result.task_description.strip().splitlines()[0] if result.task_description else "")
     turns_count = result.total_assistant_turns or 0
     cost_badge = ""

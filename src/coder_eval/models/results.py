@@ -8,9 +8,9 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
 
-from coder_eval.models.agent_config import AgentConfig, BaseAgentConfig
+from coder_eval.models.agent_config import ResolvedAgentConfig
 from coder_eval.models.criteria import SuccessCriterion
-from coder_eval.models.enums import AgentKind, FinalStatus
+from coder_eval.models.enums import FinalStatus
 from coder_eval.models.telemetry import (
     CommandStatistics,
     CommandTelemetry,
@@ -390,7 +390,7 @@ class EvaluationResult(BaseModel):
     task_id: str = Field(description="ID of the evaluated task")
     task_description: str = Field(description="Description of the task")
     variant_id: str = Field(default="default", description="ID of the experiment variant")
-    agent_type: AgentKind = Field(description="Type of agent used")
+    agent_type: str = Field(description="Type of agent used (registered kind string, e.g. 'claude-code')")
     model_used: str | None = Field(
         default=None, description="Model identifier used for the evaluation (resolved from iterations or agent config)"
     )
@@ -446,8 +446,10 @@ class EvaluationResult(BaseModel):
         default_factory=dict, description="Version information and environment details"
     )
 
-    # Agent configuration
-    agent_config: AgentConfig | BaseAgentConfig | None = Field(
+    # Agent configuration. ResolvedAgentConfig (base-typed + SerializeAsAny + registry
+    # coercion) so a plugin kind's subclass-only fields survive the dump to task.json
+    # and reload — the same round-trip guarantee TaskDefinition.agent has.
+    agent_config: ResolvedAgentConfig | None = Field(
         default=None,
         description="Agent configuration used for the evaluation (from task YAML)",
     )

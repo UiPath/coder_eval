@@ -78,11 +78,16 @@ class PreservationMode(StrEnum):
 
 
 class AgentKind(StrEnum):
-    """Supported agent types."""
+    """Named constants for the built-in agent kinds.
+
+    These are NOT the closed set of valid agent types: ``agent.type`` is an open
+    string validated against the ``AgentRegistry`` (which plugins extend via the
+    ``coder_eval.plugins`` entry point). This enum just gives the framework's own
+    code stable references to the built-ins; the registry is authoritative.
+    """
 
     CLAUDE_CODE = "claude-code"
     CODEX = "codex"
-    AIDER = "aider"
     NONE = "none"  # Agentless / system task — no coding agent runs; success criteria do all the work.
     UNKNOWN = "unknown"  # Used when agent type cannot be determined (e.g., task loading failure)
 

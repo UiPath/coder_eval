@@ -60,6 +60,11 @@ codex = [
 [project.scripts]
 coder-eval = "coder_eval.cli:app"
 
+# Built-in agents register through the same entry-point group third-party
+# plugins use, so the BYOA discovery path is exercised by core itself.
+[project.entry-points."coder_eval.plugins"]
+coder_eval = "coder_eval.agents:register_builtins"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

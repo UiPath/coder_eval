@@ -113,7 +113,7 @@ def plan_command(
             elif task.agent.type is None:
                 console.print("  [dim]Agent type: (deferred to experiment / --type)[/dim]")
             else:
-                console.print(f"  [dim]Agent: {task.agent.type.value}[/dim]")
+                console.print(f"  [dim]Agent: {task.agent.type}[/dim]")
 
             console.print(f"  [dim]Success criteria: {len(task.success_criteria)}[/dim]")
 
@@ -133,7 +133,7 @@ def plan_command(
             for variant in exp_def.variants:
                 try:
                     resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, exp_def, variant)
-                    agent_type = resolved.agent.type.value if resolved.agent else "unknown"
+                    agent_type = str(resolved.agent.type) if resolved.agent else "unknown"
                     agent_model = resolved.agent.model if resolved.agent else None
                     model_str = f" ({agent_model})" if agent_model else ""
                     console.print(f"    [dim]Variant '{variant.variant_id}': {agent_type}{model_str}[/dim]")

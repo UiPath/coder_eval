@@ -31,11 +31,16 @@ def test_cli_rejects_invalid_type() -> None:
 
 
 def test_cli_rejects_unsupported_agent_kind() -> None:
-    """`--type aider` (a placeholder AgentKind member, no orchestrator support) is rejected at the CLI."""
+    """`--type aider` (an unregistered kind — no plugin provides it) is rejected: it
+    flows through to parse_agent_config, which raises the BYOA "no agent registered"
+    error listing the registered kinds. Asserted explicitly (not OR'd with a generic
+    Click fallback) so a regression in that UX surfaces as a failure."""
     result = runner.invoke(app, ["run", "--type", "aider"])
     assert result.exit_code != 0
     output = _strip_ansi(result.output).lower()
-    assert "claude-code" in output or "invalid" in output
+    assert "no agent registered" in output
+    # The error must enumerate the registered kinds so the author knows the valid set.
+    assert "claude-code" in output
 
 
 def test_cli_accepts_known_type() -> None:

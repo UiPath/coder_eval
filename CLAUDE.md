@@ -140,7 +140,7 @@ templates/                         # Sandbox template directories
 - **Callback Streaming**: `StreamCallback` protocol with `TaskScopedCallback` wrapper for real-time LLM event output
 - **Experiment Layer**: Pre-processing config resolver (`ExperimentRunner`) that resolves task × variant combinations via 5-layer merge (default → experiment defaults → task → variant → CLI) before passing to `run_batch`. For running A/B comparisons (model vs. model, skill on vs. off, prompt vs. prompt), see [docs/AB_EXPERIMENTS.md](docs/AB_EXPERIMENTS.md).
 - **Single declarative merge resolver**: All five config layers merge through ONE engine (`orchestration/config_merge.py::resolve_root`) for the three `-D`-reachable roots (`agent`/`run_limits`/`sandbox`). Each field declares *how it merges* once, on the model, via `MergeField(strategy="deep"|"append"|"replace")` (or a type-aware default: nested `BaseModel`/free-form `dict` → `deep`; `list`/scalar → `replace`). `resolve_task_for_variant` (layers 1–4) and `apply_overrides` (layer 5) build `Layer` lists and call the same `resolve_root`, so a field merges identically regardless of which layer supplied it (the unification invariant, enforced by `tests/test_merge_unification.py`). Lint rule CE014 forces every list field to declare its strategy explicitly. See `docs/features/2026-06-01-declarative-merge-strategies.md`.
-- **Generic CLI overrides (`-D`/`--set`)**: Layer 5 is a thin wrapper (`orchestration/overrides.py`) over the resolver above. `coder-eval run -D agent.model=opus -D run_limits.max_turns=30` overrides any field on the resolved `TaskDefinition` (`agent`/`run_limits`/`sandbox` roots), schema-validated with did-you-mean. Only `--model` (→ `agent.model`) and `--driver` (→ `sandbox.driver`) survive as active thin aliases that emit the equivalent `-D` entry; an alias and `-D` targeting the same path is a hard error. Tools, plugins, and SDK options are `-D`-only; the legacy `--permission-mode`/`--max-turns`/`--task-timeout`/`--turn-timeout` flags remain as hidden deprecated aliases that warn and forward to the equivalent `-D`. See `docs/features/2026-06-01-generic-d-overrides.md`.
+- **Generic CLI overrides (`-D`/`--set`)**: Layer 5 is a thin wrapper (`orchestration/overrides.py`) over the resolver above. `coder-eval run -D agent.model=opus -D run_limits.max_turns=30` overrides any field on the resolved `TaskDefinition` (`agent`/`run_limits`/`sandbox` roots), schema-validated with did-you-mean. Only `--model` (→ `agent.model`) and `--driver` (→ `sandbox.driver`) survive as active thin aliases that emit the equivalent `-D` entry; an alias and `-D` targeting the same path is a hard error. `--type` (→ `agent.type`) is a separate, lighter alias that does NOT route through that collision check — `--type` and `-D agent.type=…` last-win rather than hard-error (the `-D` value wins). Tools, plugins, and SDK options are `-D`-only; the legacy `--permission-mode`/`--max-turns`/`--task-timeout`/`--turn-timeout` flags remain as hidden deprecated aliases that warn and forward to the equivalent `-D`. See `docs/features/2026-06-01-generic-d-overrides.md`.
 - **All core models importable from `coder_eval.models`** regardless of submodule
 - **Dataset fan-out**: `TaskDefinition.dataset` (inline rows or JSONL path) expands a single task into N row-tasks with `${row.<field>}` substitution in `initial_prompt` and `success_criteria` string fields. Expansion runs in `task_loader.expand_dataset` **before** variant resolution, so variants cannot override the dataset. Row sampling: CLI `--sample N` (fixed-seed uniform-random N over the whole dataset) overrides `dataset.sample_per_stratum` (fixed/seedable stratified random N-per-stratum, keyed on `stratify_field`, default `expected_skill` — for classification suites like activation).
 - **Per-criterion aggregation**: Each `BaseCriterion` subclass exposes `aggregate(criterion, per_row_results) -> CriterionAggregate | None`. Default emits `count / mean / median / std / min / max` so every criterion is suite-thresholdable for free. Classification-style criteria return `ClassificationCriterionResult` (subclass of `CriterionResult`) and layer accuracy / P/R/F1 / confusion via the shared `overlay_classification_metrics` utility. `BaseSuccessCriterion.suite_thresholds` gates the suite on those metrics; CLI exits non-zero on any gate failure.
@@ -228,10 +228,19 @@ When fixing a bug, ask: *could a custom lint rule have prevented this?* If the r
 
 ### Adding a New Agent
 
-1. Implement `Agent` ABC in `agents/`
-2. Add to `AgentKind` enum in `models/enums.py`
-3. Register in `Orchestrator._create_agent()`
-4. Before raising on any mid-turn failure, set `self.pending_turn` to a
+Agents are registered through the **plugin SPI** (entry-point group
+`coder_eval.plugins`) — there is no closed `AgentKind` enum or
+`Orchestrator._create_agent` dispatch to edit. `agent.type` is an open string
+validated against `AgentRegistry`; in-tree and third-party agents register the
+same way. See `docs/features/2026-06-11-byoa-agent-plugin-spi.md`.
+
+1. Define a `BaseAgentConfig` subclass (its own `type: Literal["your-kind"]`) and
+   implement the `Agent` ABC in `agents/` (or a separate package for a plugin).
+2. Bind them with `registry.register("your-kind", YourConfig)(YourAgent)` inside a
+   `register(registry)` hook, exposed via an entry point in the
+   `coder_eval.plugins` group (built-ins do this via
+   `coder_eval = "coder_eval.agents:register_builtins"`).
+3. Before raising on any mid-turn failure, set `self.pending_turn` to a
    `crashed=True` `TurnRecord` built from captured telemetry, then raise
    `AgentCrashError` or `TurnTimeoutError` (bare — no payload on the exception).
    The orchestrator's `_on_attempt_failure` callback drains the slot into
@@ -256,11 +265,14 @@ When fixing a bug, ask: *could a custom lint rule have prevented this?* If the r
    `kill()` / `kill_sync()` teardown — `kill_sync()` is called from the
    watchdog's non-asyncio thread, so it must not await.
 
-**Registration pattern:** Unlike `criteria/` which uses `pkgutil` auto-discovery,
-`agents/` relies on an explicit import side-effect in `agents/__init__.py`. The
-`@AgentRegistry.register(...)` decorator runs at module import time. New agents
-must be imported in `agents/__init__.py` to trigger registration, and must be
-exposed in `__all__` for re-export.
+**Registration pattern:** agents register via the `coder_eval.plugins`
+entry-point group (`coder_eval/plugins.py::load_plugins`). The built-in agents
+travel the same path — `coder_eval/agents/__init__.py::register_builtins` imports
+the agent modules so their `@AgentRegistry.register(...)` decorators fire, and it
+asserts the built-ins actually registered (rot-protection). `load_plugins` is
+called at CLI init; `ensure_plugins_loaded()` is the lazy safety-net for library
+use. A failing third-party plugin is logged and skipped; a failing built-in
+registration is fatal.
 
 ## Task Definition
 

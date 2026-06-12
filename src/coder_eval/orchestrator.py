@@ -282,7 +282,7 @@ class Orchestrator:
         # Note: artifacts directory (run_dir/artifacts) is created on-demand during sandbox preservation
 
         # Components (initialized in run())
-        self.agent: Agent | None = None
+        self.agent: Agent[Any] | None = None
         self.success_checker: SuccessChecker | None = None
 
         # Proxy (initialized in _setup if enabled)
@@ -312,12 +312,13 @@ class Orchestrator:
     def _agent_name(self) -> str:
         """Agent name for error-context telemetry.
 
-        ``agent.type.value`` for any resolved task (``"none"`` for no-op tasks);
+        The agent kind string for any resolved task (``"none"`` for no-op tasks);
         falls back to ``"none"`` only on the evaluate-only path, where no agent
-        is attached.
+        is attached. ``str(...)`` handles both built-in ``AgentKind`` members and
+        plugin-registered raw-string kinds.
         """
         if self.task.agent is not None and self.task.agent.type is not None:
-            return self.task.agent.type.value
+            return str(self.task.agent.type)
         return AgentKind.NONE.value
 
     async def run(self) -> EvaluationResult:
@@ -826,7 +827,7 @@ class Orchestrator:
         # validate_api_keys exempts the no-op agent (type: none) internally — it
         # makes no API call, so it needs no agent keys.
         assert self.task.agent is not None and self.task.agent.type is not None
-        settings.validate_api_keys(self.task.agent.type.value)
+        settings.validate_api_keys(str(self.task.agent.type))
 
         # Create sandbox with retry logic
         task_dir = self.task_file.parent.resolve() if self.task_file else None
@@ -1059,7 +1060,12 @@ class Orchestrator:
             TypeError: If config doesn't match agent's expected type
         """
         from coder_eval.agents import create_agent
+        from coder_eval.plugins import ensure_plugins_loaded
 
+        # Safety net for the production agent-construction path: create_agent no
+        # longer self-loads (to keep plugins -> registry a one-way import edge), so
+        # ensure plugin kinds are registered here before dispatch.
+        ensure_plugins_loaded()
         assert self.task.agent is not None
         assert self.task.agent.type is not None
         return create_agent(self.task.agent.type, self.task.agent, route=self.route)

@@ -96,21 +96,29 @@ class Layer:
 
 
 def _root_model_types(root: str) -> tuple[type[BaseModel], ...]:
-    """Concrete model types a root resolves to, derived from ``TaskDefinition``.
+    """Concrete model types a root resolves to.
 
-    For ``agent`` this is the ``AgentConfig`` union members plus ``BaseAgentConfig``
-    (so subclass-only fields like ``sdk_options`` are recognized) — derived via
-    :func:`classify_annotation` (the single annotation-walker for the feature),
-    never a hardcoded tuple. Raises :class:`MergeError` for an unknown root.
+    For ``agent`` this is every *registered* agent config class (built-in or
+    plugin) plus ``BaseAgentConfig`` (so subclass-only fields like ``sdk_options``
+    and plugin fields are recognized for ``-D`` validation / did-you-mean) — read
+    from the registry after plugin load, not a static annotation. ``run_limits`` /
+    ``sandbox`` derive from ``TaskDefinition`` via :func:`classify_annotation`.
+    Raises :class:`MergeError` for an unknown root.
     """
     if root not in ALLOWED_OVERRIDE_ROOTS:
         raise MergeError(f"unknown override root {root!r}; allowed roots: {', '.join(ALLOWED_OVERRIDE_ROOTS)}")
-    annotation = TaskDefinition.model_fields[root].annotation
-    # Reuse the shared walker; we only need its nested-model list here and
-    # discard the free-form-dict flag.
-    models, _is_free_form_dict = classify_annotation(annotation)
-    if root == "agent" and BaseAgentConfig not in models:
+    if root == "agent":
+        from coder_eval.agents.registry import AgentRegistry
+        from coder_eval.plugins import ensure_plugins_loaded
+
+        ensure_plugins_loaded()
+        models = [reg.config_class for reg in AgentRegistry.registrations()]
         models.append(BaseAgentConfig)
+    else:
+        annotation = TaskDefinition.model_fields[root].annotation
+        # Reuse the shared walker; we only need its nested-model list here and
+        # discard the free-form-dict flag.
+        models, _is_free_form_dict = classify_annotation(annotation)
     # Dedupe preserving order.
     seen: set[type[BaseModel]] = set()
     deduped = [m for m in models if not (m in seen or seen.add(m))]
