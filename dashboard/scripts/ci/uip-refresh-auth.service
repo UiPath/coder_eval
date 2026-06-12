@@ -1,8 +1,0 @@
-[Unit]
-Description=Refresh uip access token via ROPC (username/password grant)
-Documentation=https://github.com/UiPath/coder_eval/blob/main/dashboard/CI_DESIGN.md
-
-[Service]
-Type=oneshot
-EnvironmentFile=%h/uipath/coder_eval/dashboard/scripts/ci/.uipath-auth.env
-ExecStart=/bin/bash -c "echo \"[$(date -u +%%FT%%TZ)] refreshing\" >> %h/refresh.log && %h/uipath/coder_eval/dashboard/scripts/ci/refresh-auth.sh >> %h/refresh.log 2>&1"

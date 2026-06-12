@@ -43,7 +43,7 @@ For each failed task, write `<run_path>/<variant_id>/<task_id>/<NN>/review.json`
 
 Field rules:
 
-- **`task_id`** — exact `task_id` from the corresponding `task.json`. **Must equal the parent directory name** — the dashboard validator rejects mismatches because they would silently misattribute reviews. (variant_id and replicate are encoded by the file path; no need to repeat them.)
+- **`task_id`** — exact `task_id` from the corresponding `task.json`. **Must equal the parent directory name** — the review validator rejects mismatches because they would silently misattribute reviews. (variant_id and replicate are encoded by the file path; no need to repeat them.)
 - **`summary`** — 1-3 sentences of plain prose describing what happened. Cite specific evidence: error string, criterion name, agent behavior, or a quote from `analysis.md`. ≤ 480 chars. This is the human-readable explanation; tags are the machine-readable filter.
 - **`tags`** — array of kebab-case strings. ≤ 8 per task. Prefer names from `tags.yaml`; new ones are fine when nothing fits. Each tag must match `^[a-z0-9]+(-[a-z0-9]+)*$`.
 - **`created_at`** — ISO 8601 UTC timestamp matching `YYYY-MM-DDTHH:MM:SS(.fff)?(Z|±HH:MM)` (e.g. `2026-05-08T12:00:00Z`). Bare strings like `"yesterday"` are rejected.
@@ -82,7 +82,7 @@ After all per-task reviews are written, write `<run_path>/review_index.json`:
 }
 ```
 
-- One entry per `(task_id, variant_id, replicate)` triple corresponding to a `review.json` you wrote — the dashboard validator rejects index/file set mismatches.
+- One entry per `(task_id, variant_id, replicate)` triple corresponding to a `review.json` you wrote — the review validator rejects index/file set mismatches.
 - `summary_excerpt` (required): first 160 chars of the per-task `summary`, ellipsized if truncated. ≤ 200 chars hard cap.
 - The index is a *digest*: it lets the run-grid UI and the cross-run hotspots view aggregate without fetching N per-task files. The per-task `review.json` remains the source of truth.
 
@@ -100,4 +100,4 @@ Wrote 7 review.json files + review_index.json to runs/2026-05-08_04-46-07: 4 dis
 - **Vocabulary first, free-form last**: prefer names from `tags.yaml`. Make up new ones only when nothing fits — drift lint will surface them.
 - **Evidence in `summary`**: every summary must cite specific failure data — error string, criterion description, observed behavior, quote from `analysis.md`.
 - **Skip passing tasks** (for now): keeps the review set focused. The schema can extend to positive reviews later (e.g. `tags: ["optimal-path"]`).
-- **Don't validate against the vocabulary**: emit whatever fits. The dashboard and the lint script handle drift.
+- **Don't validate against the vocabulary**: emit whatever fits. The review tooling and the lint script handle drift.

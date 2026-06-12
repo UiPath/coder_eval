@@ -90,11 +90,10 @@ jobs:
         # chance an advisory slips through.
         #
         # Scope: only coder_eval's own ``uv.lock`` — the same surface
-        # pip-audit covers. Sibling lockfiles in this monorepo
-        # (``dashboard/uv.lock``, ``evalboard/pnpm-lock.yaml``, template
-        # node_modules) are intentionally out of scope here; widen scope in
-        # a follow-up once those packages have a maintainer-owned bump
-        # cadence.
+        # pip-audit covers. Sibling lockfiles in this repo
+        # (``evalboard/pnpm-lock.yaml``, template node_modules) are
+        # intentionally out of scope here; widen scope in a follow-up once
+        # those packages have a maintainer-owned bump cadence.
         #
         # Binary pinned by version + sha256 against the upstream release
         # (https://github.com/google/osv-scanner/releases) so a registry
@@ -135,16 +134,6 @@ jobs:
             --cov-report=term-missing \
             --cov-report=xml \
             --cov-fail-under=80
-
-      # PHASE 4b: Dashboard package test suite. The dashboard is a separate
-      # package (own pyproject + lockfile under dashboard/), so the root
-      # `pytest tests/` above never reaches it. Install it editable into the
-      # same venv (mirrors dashboard/scripts/ci/daily.sh) and run its hermetic
-      # suite from the package dir so its pythonpath=["src"] config applies.
-      - name: Run dashboard test suite
-        run: |
-          uv pip install --python .venv/bin/python -e ./dashboard
-          cd dashboard && "$GITHUB_WORKSPACE/.venv/bin/pytest" tests/ -v --no-header
 
       - name: Upload coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -898,82 +887,3 @@ jobs:
           name: byoa-live-output
           path: tmp/
           retention-days: 7
-
-  validate-skills-yamls:
-    name: Validate Skills Task YAMLs
-    runs-on: uipath-ubuntu-latest
-    timeout-minutes: 8
-    # Soft gate: failures show red in the checks UI for visibility but the
-    # workflow's overall conclusion stays "success", so merge isn't blocked.
-    # Skills main currently carries pre-existing schema breaks (max_count on
-    # CommandExecutedCriterion) that the skills team owns fixing — until
-    # then, this gate is advisory. Flip to hard-fail by removing this line
-    # once those are resolved.
-    continue-on-error: true
-    # Skip on fork PRs where the UV_INDEX secrets for the UiPath pypi feed
-    # aren't available (matches e2e-smoke / live-tests). The skills checkout
-    # itself works fine on forks since UiPath/skills is public.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-
-    env:
-      # uv sync resolves named-index credentials from UV_INDEX_<NAME>_{USERNAME,PASSWORD}
-      # (the segment after UV_INDEX_ is the pyproject.toml index name uppercased).
-      # UV_EXTRA_INDEX_URL is kept in parallel for any uv pip-style invocations.
-      UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
-      UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
-      UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
-      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
-
-    steps:
-      - name: Checkout coder_eval
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-
-      - name: Checkout UiPath/skills @ main
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          repository: UiPath/skills
-          ref: main
-          path: skills
-          fetch-depth: 1
-
-      - name: Set up Python 3.13
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
-        with:
-          python-version: "3.13"
-
-      - name: Cache dependencies
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
-        with:
-          path: |
-            ~/.cache/uv
-            ~/.cache/pip
-            .venv
-          key: ${{ runner.os }}-py3.13-validate-skills-${{ hashFiles('pyproject.toml', 'uv.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-py3.13-validate-skills-
-            ${{ runner.os }}-py3.13-
-
-      - name: Install uv
-        run: |
-          python -m pip install --upgrade pip
-          pip install uv
-
-      - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev --extra uipath --extra codex
-
-      - name: Validate every skills task YAML loads under current TaskDefinition schema
-        # Hard gate. Catches the class of bug where a coder_eval PR renames or
-        # removes a TaskDefinition / loader field that skills task YAMLs still
-        # reference. Historically this only surfaced in the nightly skills
-        # suite on the VM — by then the change was already on main.
-        #
-        # Uses `coder-eval plan` (the existing dry-run validator) over every
-        # *.yaml under skills/tests/tasks/. Variant resolution against the
-        # default experiment may print noise for tasks not designed for it,
-        # but only schema-loader failures flip the exit code.
-        run: |
-          set -euo pipefail
-          mapfile -t YAMLS < <(find skills/tests/tasks -type f -name '*.yaml' | sort)
-          echo "Discovered ${#YAMLS[@]} task YAMLs under skills/tests/tasks/"
-          test "${#YAMLS[@]}" -gt 0 || { echo "No skills task YAMLs found — checkout layout drift?"; exit 1; }
-          .venv/bin/coder-eval plan "${YAMLS[@]}"

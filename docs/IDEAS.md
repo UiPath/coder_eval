@@ -70,7 +70,7 @@ we just don't aggregate or surface it at the top.
 - `run_limits.expected_turns` is the per-task budget source.
 
 **Rough approach:** aggregate overage across a run → add a field to the run summary →
-render on the evalboard + add one line to [dashboard/scripts/ci/slack_summary.py](../dashboard/scripts/ci/slack_summary.py).
+render on the evalboard + add one line to the nightly Slack summary.
 
 **Open questions:**
 - What's the right headline statistic — % within budget, mean overage, or count exceeded?
@@ -186,7 +186,7 @@ run-level, diffable fingerprint.
 - Per-task `task_config` + dotted-path config lineage —
   [src/coder_eval/reports_experiment.py:42](../src/coder_eval/reports_experiment.py#L42)
 - Component SHAs (coder_eval / skills / cli) already in the run summary and Slack
-  footer — [dashboard/scripts/ci/slack_summary.py](../dashboard/scripts/ci/slack_summary.py)
+  footer — the nightly Slack summary
 - Single declarative merge resolver produces the resolved config —
   [src/coder_eval/orchestration/config_merge.py](../src/coder_eval/orchestration/config_merge.py)
 
@@ -284,7 +284,7 @@ but nothing aggregates them into one actionable breakdown — the input that mak
 - Error categorization for crashes/timeouts —
   [src/coder_eval/errors/categorization.py](../src/coder_eval/errors/categorization.py)
 - Per-task review tags indexed in `review_index.json` —
-  [dashboard/scripts/ci/slack_summary.py](../dashboard/scripts/ci/slack_summary.py)
+  the nightly Slack summary
 
 **Rough approach:** aggregate per-task statuses + flags + tags into a `failure_modes`
 block on the run summary → add one section to the Slack summary → render as a

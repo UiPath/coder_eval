@@ -439,7 +439,7 @@ def get_version_info(sandbox_path: Path | None = None) -> dict[str, Any]:
 
     # Sibling repos that contribute to the agent's runtime context.
     # Path resolution: env var first (CODER_EVAL_SKILLS_DIR), then sibling-of-coder_eval default.
-    # The dashboard sets this env var to its configured path so custom layouts get the right SHA.
+    # A downstream runner can set this env var to its configured path so custom layouts get the right SHA.
     sibling_root = project_root.parent.parent
     skills_override = os.environ.get("CODER_EVAL_SKILLS_DIR")
     skills_path = Path(skills_override) if skills_override else sibling_root / "skills"
@@ -447,7 +447,7 @@ def get_version_info(sandbox_path: Path | None = None) -> dict[str, Any]:
 
     # uip CLI is installed via npm; read its version from @uipath/cli's
     # package.json (same source tool_plugins uses), falling back to a validated
-    # `uip --version`. Read by dashboard/scripts/ci/slack_summary.py.
+    # `uip --version`. Consumed by downstream run-summary tooling.
     tools_dir = resolve_uipath_plugin_dir()
     version_info["cli_version"] = _resolve_cli_version(tools_dir, None)
 

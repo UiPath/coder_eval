@@ -2,8 +2,8 @@
 #
 # This file is a *suggested* vocabulary, not a strict allowlist. The
 # /coder-eval-review skill prefers names from this list but emits whatever
-# fits. A weekly lint (dashboard/scripts/lint_review_vocabulary.py) reports
-# tags appearing in review.json files that aren't here, so drift is visible
+# fits. A periodic vocabulary lint reports tags appearing in review.json
+# files that aren't here, so drift is visible
 # without blocking new categories from emerging.
 #
 # Tags can describe failure modes, agent behaviors, or positive traits

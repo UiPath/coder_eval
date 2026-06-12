@@ -62,9 +62,6 @@ reports/
 .DS_Store
 tmp/
 refs/
-# Cross-repo checkouts created by claude-pr-review.yml / validate-skills-yamls jobs
-# (CI clones UiPath/skills into ./skills/; ignored locally to prevent accidental commits)
-skills/
 
 # Visual companion (brainstorming) scratch
 .superpowers/

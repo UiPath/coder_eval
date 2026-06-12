@@ -44,36 +44,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Checkout UiPath/skills @ main (cross-repo context for reviewer)
-        # Pulls skills into ./skills so the reviewer can grep for downstream
-        # usages of TaskDefinition / loader fields it sees changing in the
-        # diff. UiPath/skills is public — no PAT needed.
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          repository: UiPath/skills
-          ref: main
-          path: skills
-          fetch-depth: 1
-
-      - name: Set up Python 3.13
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
-        with:
-          python-version: "3.13"
-
-      - name: Install uv and project dependencies (hash-verified from uv.lock)
-        run: |
-          python -m pip install --upgrade pip
-          pip install uv
-          uv sync --frozen --extra dev
-        env:
-          # uv sync resolves named-index credentials from UV_INDEX_<NAME>_{USERNAME,PASSWORD}
-          # (the segment after UV_INDEX_ is the pyproject.toml index name uppercased).
-          # UV_EXTRA_INDEX_URL is kept in parallel for any uv pip-style invocations.
-          UV_INDEX_UIPATH_USERNAME: ${{ secrets.UV_INDEX_UIPATH_USERNAME }}
-          UV_INDEX_UIPATH_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
-          UV_EXTRA_INDEX_URL: "https://${{ secrets.UV_INDEX_UIPATH_USERNAME }}:${{ secrets.UV_INDEX_UIPATH_PASSWORD }}@uipath.pkgs.visualstudio.com/_packaging/ml-packages/pypi/simple/"
-          SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
-
       - name: Claude Code Action
         # Route through AWS Bedrock via the bearer-token path. The `use_bedrock`
         # input causes the action's composite inner step to set
@@ -111,7 +81,5 @@ jobs:
             4. Run `gh pr view ${{ github.event.pull_request.number || github.event.issue.number }} --comments` to read existing PR conversation.
             5. For each changed file, read the FULL file (not just the diff hunk) so you see surrounding context.
             6. Follow the cross-file consistency checks, "what's missing" analysis, and design-level scrutiny sections from code_review.md. Do not skip these.
-
-            Cross-repo check: the UiPath/skills repo is checked out at ./skills/ and is a primary downstream consumer (226 task YAMLs under skills/tests/tasks/). Decide whether the diff has plausible cross-repo blast radius based on what it changes, not which files it touches — pydantic schema or field changes, validator logic, loader/orchestration code, experiment defaults, success-criterion shapes, agent-config surface, or dependency bumps that affect YAML parsing all qualify regardless of file path. If yes, grep ./skills/tests/tasks/ for usages of the changed surface and flag any skills task YAML that would break. When you need ground truth on a specific suspicious YAML, run `.venv/bin/coder-eval plan ./skills/tests/tasks/<file>` — the same deterministic validator the validate-skills-yamls CI job uses. The validate-skills-yamls CI job catches schema-load failures, but it won't catch semantic drift (e.g. a field renamed AND added back as an alias) — that's your job. If the diff has no plausible consumer impact (docs, dashboard, evalboard, tests for unrelated subsystems), skip this check.
 
             Follow the output format specified in code_review.md. Include the "What's Missing" section even if empty.
