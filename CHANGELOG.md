@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v0.6.1 (2026-06-15)
+
+### Bug Fixes
+
+- **docker**: Pin Claude Code CLI version (was @latest)
+  ([#425](https://github.com/UiPath/coder_eval/pull/425),
+  [`ae47e87`](https://github.com/UiPath/coder_eval/commit/ae47e875274b428825b9482365df2745e132fe70))
+
+### Continuous Integration
+
+- Remove validate-skills-yamls job from PR checks
+  ([#413](https://github.com/UiPath/coder_eval/pull/413),
+  [`c205207`](https://github.com/UiPath/coder_eval/commit/c2052072fc0421b852046723749b74f6d1002fcf))
+
+### Documentation
+
+- **docker**: Trim historical narrative from Claude Code pin comment
+  ([#425](https://github.com/UiPath/coder_eval/pull/425),
+  [`ae47e87`](https://github.com/UiPath/coder_eval/commit/ae47e875274b428825b9482365df2745e132fe70))
+
+
 ## v0.6.0 (2026-06-15)
 
 ### Chores
