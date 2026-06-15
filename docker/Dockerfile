@@ -25,11 +25,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Node LTS + bun (matches host sandbox.py's `bun add` fast path)
+# Node LTS + the Claude Code CLI, pinned. The agent binary is a dominant
+# non-model driver of eval results, so it travels with the coder_eval release
+# tag and is bumped deliberately -- mirrors the codex CLI pin
+# (`openai-codex-cli-bin==…` in pyproject). Leaving it at `@latest` let Docker
+# layer caching freeze it nondeterministically across rebuilds.
+ARG CLAUDE_CODE_VERSION=2.1.177
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g @anthropic-ai/claude-code@latest
+    && npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 # uv: matches host sandbox.py's `uv venv` + `uv pip install` fast path
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
@@ -80,6 +85,9 @@ RUN coder-eval _run-task-internal --help > /dev/null
 # AFTER the (billed) run completes via the version field in task.json.
 ARG CODER_EVAL_VERSION=unknown
 LABEL org.coder-eval.version="${CODER_EVAL_VERSION}"
+# Stamp the pinned agent binary too, so the host can assert it via
+# `docker image inspect` before a (billed) run — same rationale as above.
+LABEL org.coder-eval.claude-code-version="${CLAUDE_CODE_VERSION}"
 
 WORKDIR /work
 # Coder-eval-specific filename so it never collides with a base image's own
