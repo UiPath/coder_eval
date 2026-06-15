@@ -2,6 +2,36 @@
 
 <!-- version list -->
 
+## v0.6.0 (2026-06-15)
+
+### Chores
+
+- Drop leftover eval-runner config refs from coder_eval
+  ([#419](https://github.com/UiPath/coder_eval/pull/419),
+  [`b862794`](https://github.com/UiPath/coder_eval/commit/b8627940ee940cbddd6ccf1c5a8c9c831f7af79b))
+
+### Continuous Integration
+
+- Drop UiPath/skills cross-repo checks ([#419](https://github.com/UiPath/coder_eval/pull/419),
+  [`b862794`](https://github.com/UiPath/coder_eval/commit/b8627940ee940cbddd6ccf1c5a8c9c831f7af79b))
+
+### Features
+
+- **review**: Add workflow-orchestrated code-review skill + harden the full review command
+  ([#423](https://github.com/UiPath/coder_eval/pull/423),
+  [`ac7b2e0`](https://github.com/UiPath/coder_eval/commit/ac7b2e01b25ca9ee5133aaf492af1358309e3587))
+
+### Refactoring
+
+- Move dashboard CI to coder_eval_uipath (as eval-runner)
+  ([#419](https://github.com/UiPath/coder_eval/pull/419),
+  [`b862794`](https://github.com/UiPath/coder_eval/commit/b8627940ee940cbddd6ccf1c5a8c9c831f7af79b))
+
+- Remove dashboard CI (moved to coder_eval_uipath as eval-runner)
+  ([#419](https://github.com/UiPath/coder_eval/pull/419),
+  [`b862794`](https://github.com/UiPath/coder_eval/commit/b8627940ee940cbddd6ccf1c5a8c9c831f7af79b))
+
+
 ## v0.5.0 (2026-06-12)
 
 ### Bug Fixes
