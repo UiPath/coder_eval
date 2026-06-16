@@ -2,6 +2,37 @@
 
 <!-- version list -->
 
+## v0.6.2 (2026-06-16)
+
+### Build System
+
+- **deps**: Bump aiohttp, cryptography, python-multipart, starlette for CVEs
+  ([#426](https://github.com/UiPath/coder_eval/pull/426),
+  [`633628c`](https://github.com/UiPath/coder_eval/commit/633628c1fc6d0fb96987aa317c87f7b36c817ab3))
+
+### Continuous Integration
+
+- **release**: Drop dry-run input; dispatch always cuts a release
+  ([#426](https://github.com/UiPath/coder_eval/pull/426),
+  [`633628c`](https://github.com/UiPath/coder_eval/commit/633628c1fc6d0fb96987aa317c87f7b36c817ab3))
+
+- **release**: Make releases manual via dispatch with dry-run preview
+  ([#426](https://github.com/UiPath/coder_eval/pull/426),
+  [`633628c`](https://github.com/UiPath/coder_eval/commit/633628c1fc6d0fb96987aa317c87f7b36c817ab3))
+
+- **release**: Manual dispatch-triggered release + versioned agent image
+  ([#426](https://github.com/UiPath/coder_eval/pull/426),
+  [`633628c`](https://github.com/UiPath/coder_eval/commit/633628c1fc6d0fb96987aa317c87f7b36c817ab3))
+
+- **release**: Pick bump level at dispatch, not from commit messages
+  ([#426](https://github.com/UiPath/coder_eval/pull/426),
+  [`633628c`](https://github.com/UiPath/coder_eval/commit/633628c1fc6d0fb96987aa317c87f7b36c817ab3))
+
+- **release**: Publish versioned agent image from the release job
+  ([#426](https://github.com/UiPath/coder_eval/pull/426),
+  [`633628c`](https://github.com/UiPath/coder_eval/commit/633628c1fc6d0fb96987aa317c87f7b36c817ab3))
+
+
 ## v0.6.1 (2026-06-15)
 
 ### Bug Fixes
