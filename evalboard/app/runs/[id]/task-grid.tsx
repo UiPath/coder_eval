@@ -7,7 +7,7 @@ import type { ReviewIndexEntry } from "@/lib/reviews-types";
 import { fmtCompact, fmtUsd, humanizeTaskId } from "@/lib/format";
 import { tokenBucketUsd, type TokenKind } from "@/lib/pricing";
 import { type Unit, UnitToggle } from "@/app/_components/unit-toggle";
-import { StatusPill } from "@/lib/pills";
+import { MATURE_TOOLTIP, MaturePill, StatusPill } from "@/lib/pills";
 import { statusSortRank } from "@/lib/status";
 import {
     displayedTurns,
@@ -48,6 +48,35 @@ const COLUMN_HELP: Partial<Record<SortKey, ColHelp>> = {
         fix: "fewer turns, less context, more concise output; use a cheaper model where acceptable.",
     },
 };
+
+// Task-id cell. A mature task that was skipped this run wasn't executed, so it
+// has no detail page — render it as non-clickable (with a tooltip) instead of a
+// Link. Shared by the desktop table and the mobile cards.
+function TaskIdCell({
+    runId,
+    t,
+    className,
+}: {
+    runId: string;
+    t: TaskResultSummary;
+    className: string;
+}) {
+    if (t.matureSkipped) {
+        return (
+            <span
+                title={MATURE_TOOLTIP}
+                className={`${className} cursor-not-allowed text-gray-400`}
+            >
+                {humanizeTaskId(t.taskId)}
+            </span>
+        );
+    }
+    return (
+        <Link href={`/runs/${runId}/${t.taskId}`} className={className}>
+            {humanizeTaskId(t.taskId)}
+        </Link>
+    );
+}
 
 function fmtTableDuration(s: number | null): string {
     if (s == null) return "—";
@@ -463,12 +492,11 @@ export function TaskGrid({
                         >
                             <td className="py-3 px-4 text-gray-700 sticky left-0 z-10 bg-white group-hover:bg-gray-50">
                                 <div className="flex flex-col min-w-0 gap-0.5">
-                                    <Link
-                                        href={`/runs/${runId}/${t.taskId}`}
+                                    <TaskIdCell
+                                        runId={runId}
+                                        t={t}
                                         className="text-gray-900 hover:text-studio-blue font-semibold"
-                                    >
-                                        {humanizeTaskId(t.taskId)}
-                                    </Link>
+                                    />
                                     <TaskTagChips
                                         t={t}
                                         review={review}
@@ -480,7 +508,11 @@ export function TaskGrid({
                                 </div>
                             </td>
                             <td className="py-3 px-4">
-                                <StatusPill status={t.status} relabel />
+                                {t.matureSkipped ? (
+                                    <MaturePill />
+                                ) : (
+                                    <StatusPill status={t.status} relabel />
+                                )}
                             </td>
                             <td className="py-3 px-4 text-right tabular-nums text-gray-700">
                                 {t.weightedScore != null
@@ -593,14 +625,17 @@ export function TaskGrid({
                             className="rounded-lg border border-gray-200 bg-white p-3 space-y-2"
                         >
                             <div className="flex items-start justify-between gap-2">
-                                <Link
-                                    href={`/runs/${runId}/${t.taskId}`}
+                                <TaskIdCell
+                                    runId={runId}
+                                    t={t}
                                     className="min-w-0 break-words font-semibold text-gray-900 hover:text-studio-blue"
-                                >
-                                    {humanizeTaskId(t.taskId)}
-                                </Link>
+                                />
                                 <span className="shrink-0">
-                                    <StatusPill status={t.status} relabel />
+                                    {t.matureSkipped ? (
+                                        <MaturePill />
+                                    ) : (
+                                        <StatusPill status={t.status} relabel />
+                                    )}
                                 </span>
                             </div>
                             <TaskTagChips

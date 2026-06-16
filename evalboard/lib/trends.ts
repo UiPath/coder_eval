@@ -43,6 +43,10 @@ export interface TaskHistoryEntry {
     hasFinalReply: boolean;
     componentShas: ComponentSha[];
     failureTags: string[];
+    // True when this run skipped the task as mature and carried it forward as a
+    // pass. The history row then dashes out the un-measured cost/duration/turns
+    // rather than showing the carried-forward zeros as if they were real.
+    matureSkipped: boolean;
 }
 
 const DOMINANT_TAG_LIMIT = 4;
@@ -111,10 +115,17 @@ export function aggregate(perRun: PerRun[]): TrendsData {
             b.statuses.push({ runId: id, status: t.status });
             if (t.status === "SUCCESS") {
                 b.successCount += 1;
-                if (t.durationSeconds != null) b.durations.push(t.durationSeconds);
-                if (t.totalCostUsd != null) b.costs.push(t.totalCostUsd);
-                if (t.actualCommands != null) b.tools.push(t.actualCommands);
-                if (t.totalTurns != null) b.totalTurns.push(t.totalTurns);
+                // A mature task the nightly skipped still counts as a pass, but
+                // it wasn't executed — its row carries 0 cost / 0 duration and
+                // no turns. Folding those zeros into the averages would make the
+                // task look like it ran for free, so skip the metric pushes
+                // (pass rate above is unaffected).
+                if (!t.matureSkipped) {
+                    if (t.durationSeconds != null) b.durations.push(t.durationSeconds);
+                    if (t.totalCostUsd != null) b.costs.push(t.totalCostUsd);
+                    if (t.actualCommands != null) b.tools.push(t.actualCommands);
+                    if (t.totalTurns != null) b.totalTurns.push(t.totalTurns);
+                }
             }
             const failTags = reviewTagsByTask[t.taskId];
             if (failTags) {
@@ -209,6 +220,7 @@ export async function historyForTaskInner(
             hasFinalReply: t.hasFinalReply,
             componentShas: overview.componentShas,
             failureTags: reviewTagsByTask[taskId] ?? [],
+            matureSkipped: t.matureSkipped ?? false,
         });
     }
     out.sort((a, b) => b.runId.localeCompare(a.runId));

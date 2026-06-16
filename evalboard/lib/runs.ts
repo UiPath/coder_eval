@@ -87,6 +87,10 @@ export interface TaskResultSummary {
     // Derived primary group. See deriveSkill below for the resolution chain
     // (new runs use task_path; older runs fall back to a tag heuristic).
     skill: string | null;
+    // True when this row is a "mature" task the nightly skipped this run and
+    // carried forward as a pass (run.json `mature_skipped`). The task wasn't
+    // executed, so it has no per-task detail to link to. False on normal rows.
+    matureSkipped: boolean;
 }
 
 export interface CriterionResult {
@@ -342,6 +346,9 @@ interface RawTaskResult {
     prompt?: string | null;
     expected_skill?: string | null;
     triggered_skill?: string | null;
+    // Set by the nightly runner (eval_runner) on a carried-forward row for a
+    // "mature" task it skipped this run. Absent on normal rows.
+    mature_skipped?: boolean;
 }
 
 interface RawRunJson {
@@ -613,6 +620,7 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
         model: t.model_used ?? null,
         tags,
         skill: deriveSkill(t.task_path, tags),
+        matureSkipped: t.mature_skipped ?? false,
     };
 }
 
@@ -708,6 +716,13 @@ export interface RunOverviewTask {
     expectedTurns: number | null;
     visibleTurns: number | null;
     hasFinalReply: boolean;
+    // True when the nightly skipped this mature task and carried it forward as a
+    // pass (run.json `mature_skipped`). It still counts as a SUCCESS outcome,
+    // but it wasn't executed — so its 0-cost/0-duration row must be excluded
+    // from per-task averages (see lib/trends.ts) rather than dragging them down.
+    // Optional so test factories that predate the field stay valid (undefined
+    // === a normal executed row).
+    matureSkipped?: boolean;
 }
 
 export interface RunOverview {
@@ -761,6 +776,7 @@ export async function readRunOverview(
                 expectedTurns: t.expected_turns ?? null,
                 visibleTurns: visibleTurnsFromRaw(t),
                 hasFinalReply: t.has_final_reply ?? false,
+                matureSkipped: t.mature_skipped ?? false,
             };
         });
     const totalCost = taskResults.reduce(

@@ -26,6 +26,70 @@ function percentile(values: number[], p: number): number | null {
     return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
 }
 
+export interface RunMetrics {
+    total: number;
+    passed: number;
+    failed: number;
+    errored: number;
+    failedTotal: number;
+    pct: number;
+    cost: number | null;
+    costP50: number | null;
+    costP90: number | null;
+    duration: number | null;
+    durationP50: number | null;
+    durationP90: number | null;
+}
+
+// Aggregate run-level metrics from a set of task rows. Status categorization is
+// centralized in lib/status.ts and mirrors coder_eval FinalStatus.category.
+//
+// Mature-skipped tasks are carried forward as passes (so they count toward
+// total / passed / pct) but never ran this run. Their 0 cost / 0 duration would
+// deflate the totals and drag p50/p90 toward zero, so they are excluded from
+// both the cost/duration totals and the percentile samples — every cost and
+// duration figure reflects only the tasks that actually executed. Mirrors the
+// same exclusion in lib/trends.ts::aggregate.
+export function computeRunMetrics(tasks: TaskResultSummary[]): RunMetrics {
+    const total = tasks.length;
+    let passed = 0;
+    let failed = 0;
+    let errored = 0;
+    let cost = 0;
+    let durationSum = 0;
+    const costSamples: number[] = [];
+    const durSamples: number[] = [];
+    for (const t of tasks) {
+        const cat = statusCategory(t.status);
+        if (cat === "passed") passed++;
+        else if (cat === "error") errored++;
+        else failed++;
+        if (t.matureSkipped) continue;
+        if (t.totalCostUsd != null) {
+            cost += t.totalCostUsd;
+            costSamples.push(t.totalCostUsd);
+        }
+        if (t.durationSeconds != null) {
+            durationSum += t.durationSeconds;
+            durSamples.push(t.durationSeconds);
+        }
+    }
+    return {
+        total,
+        passed,
+        failed,
+        errored,
+        failedTotal: failed + errored,
+        pct: total ? (passed / total) * 100 : 0,
+        cost: costSamples.length ? cost : null,
+        costP50: percentile(costSamples, 0.5),
+        costP90: percentile(costSamples, 0.9),
+        duration: durSamples.length ? durationSum : null,
+        durationP50: percentile(durSamples, 0.5),
+        durationP90: percentile(durSamples, 0.9),
+    };
+}
+
 function parseTagsParam(raw: string | null): string[] {
     if (!raw) return [];
     return raw
@@ -221,46 +285,8 @@ export function RunView({
         selectedReviewTags.length > 0 ||
         qLower.length > 0;
 
-    // Filter-aware metrics computed from `filtered`. Status categorization
-    // is centralized in lib/status.ts and mirrors coder_eval FinalStatus.category.
-    const metrics = useMemo(() => {
-        const total = filtered.length;
-        let passed = 0;
-        let failed = 0;
-        let errored = 0;
-        let cost = 0;
-        let durationSum = 0;
-        const costSamples: number[] = [];
-        const durSamples: number[] = [];
-        for (const t of filtered) {
-            const cat = statusCategory(t.status);
-            if (cat === "passed") passed++;
-            else if (cat === "error") errored++;
-            else failed++;
-            if (t.totalCostUsd != null) {
-                cost += t.totalCostUsd;
-                costSamples.push(t.totalCostUsd);
-            }
-            if (t.durationSeconds != null) {
-                durationSum += t.durationSeconds;
-                durSamples.push(t.durationSeconds);
-            }
-        }
-        return {
-            total,
-            passed,
-            failed,
-            errored,
-            failedTotal: failed + errored,
-            pct: total ? (passed / total) * 100 : 0,
-            cost: costSamples.length ? cost : null,
-            costP50: percentile(costSamples, 0.5),
-            costP90: percentile(costSamples, 0.9),
-            duration: durSamples.length ? durationSum : null,
-            durationP50: percentile(durSamples, 0.5),
-            durationP90: percentile(durSamples, 0.9),
-        };
-    }, [filtered]);
+    // Filter-aware metrics computed from `filtered`.
+    const metrics = useMemo(() => computeRunMetrics(filtered), [filtered]);
 
     // Top-N visible tags + sticky-selected tags not in top-N.
     const visibleTags = useMemo(() => {

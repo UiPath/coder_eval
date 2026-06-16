@@ -78,6 +78,41 @@ describe("aggregate — avgTotalTurns", () => {
     });
 });
 
+describe("aggregate — mature-skipped rows", () => {
+    test("count as a pass but stay out of cost/duration/turns averages", () => {
+        const { trends } = aggregate([
+            perRun("r2", [
+                task({
+                    status: "SUCCESS",
+                    totalCostUsd: 1.0,
+                    durationSeconds: 100,
+                    totalTurns: 6,
+                }),
+            ]),
+            // Skipped this run: carried-forward pass with 0 cost / 0 duration
+            // and no turns. It must lift neither the averages toward zero...
+            perRun("r1", [
+                task({
+                    status: "SUCCESS",
+                    matureSkipped: true,
+                    totalCostUsd: 0,
+                    durationSeconds: 0,
+                    totalTurns: null,
+                }),
+            ]),
+        ]);
+        expect(trends).toHaveLength(1);
+        // ...nor drop the pass rate: the skip still counts as a SUCCESS run.
+        expect(trends[0].totalRuns).toBe(2);
+        expect(trends[0].successRuns).toBe(2);
+        expect(trends[0].passRate).toBe(1);
+        // Averages reflect only the executed run, not the carried-forward zero.
+        expect(trends[0].avgCostUsd).toBe(1.0);
+        expect(trends[0].avgDurationSeconds).toBe(100);
+        expect(trends[0].avgTotalTurns).toBe(6);
+    });
+});
+
 describe("aggregate — run axis", () => {
     test("empty input yields an empty axis and no trends", () => {
         expect(aggregate([])).toEqual({ runIds: [], trends: [] });
@@ -164,5 +199,20 @@ describe("historyForTaskInner", () => {
         const entries = await historyForTaskInner("t1", 10);
         expect(entries[0].totalTurns).toBeNull();
         expect(entries[0].expectedTurns).toBeNull();
+    });
+
+    test("flags mature-skipped entries; normal rows are false", async () => {
+        vi.mocked(loadRecentRuns).mockResolvedValueOnce([
+            perRun("r2", [task({ taskId: "t1", status: "SUCCESS" })]),
+            perRun("r1", [
+                task({ taskId: "t1", status: "SUCCESS", matureSkipped: true }),
+            ]),
+        ]);
+        const entries = await historyForTaskInner("t1", 10);
+        const byRun = Object.fromEntries(
+            entries.map((e) => [e.runId, e.matureSkipped]),
+        );
+        expect(byRun.r1).toBe(true);
+        expect(byRun.r2).toBe(false);
     });
 });

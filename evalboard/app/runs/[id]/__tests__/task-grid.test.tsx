@@ -26,6 +26,7 @@ function row(
         model: null,
         tags: [],
         skill: null,
+        matureSkipped: false,
         ...extra,
     };
 }
@@ -48,6 +49,34 @@ function turnsCellFor(taskId: string): HTMLElement {
     // Layout: Task, Status, Score, Duration, Cost, Turns, Out, Cache+, Cache↺
     return cells[5]!;
 }
+
+describe("TaskGrid — mature rows", () => {
+    test("renders a non-clickable Mature badge for skipped-mature tasks", () => {
+        render(
+            <TaskGrid
+                runId="r1"
+                tasks={[
+                    row("rantask", 3, 5),
+                    row("skippedtask", 0, 5, { matureSkipped: true }),
+                ]}
+            />,
+        );
+
+        const table = screen.getByRole("table");
+        // The mature task has no detail link...
+        expect(
+            within(table).queryByRole("link", { name: /skippedtask/i }),
+        ).toBeNull();
+        // ...but the normal one does.
+        expect(
+            within(table).getByRole("link", { name: /rantask/i }),
+        ).toBeTruthy();
+        // The Mature badge appears (desktop + mobile = 2) with the why-tooltip.
+        const badges = screen.getAllByText("Mature");
+        expect(badges.length).toBeGreaterThanOrEqual(1);
+        expect(badges[0]).toHaveAttribute("title", expect.stringContaining("skipped this run"));
+    });
+});
 
 describe("TaskGrid — Turns column", () => {
     test("colorizes the digits per ratio bucket (no background)", () => {
