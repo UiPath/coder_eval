@@ -1,19 +1,30 @@
 name: Release
 
-# Auto-bump version from Conventional Commits and publish to the UiPath
-# `coder_eval` Azure Artifacts feed (ML Platform project).
+# Manually-triggered release: bump the version, tag, build, and publish to the
+# UiPath `coder_eval` Azure Artifacts feed (wheel) and GHCR (agent image).
+# Merges to main do NOT auto-release -- run this workflow from the Actions tab
+# when you want to cut a release.
 #
-#   feat:           → minor bump
-#   fix: / perf:    → patch bump
-#   BREAKING CHANGE → major bump (also `feat!:` / `fix!:`)
-#
-# Driven by python-semantic-release; config lives in pyproject.toml under
-# [tool.semantic_release]. Runs only on push to main.
+# The bump level is CHOSEN at dispatch, not derived from commit messages:
+# `patch` (default), `minor`, or `major`. A dispatch always cuts a release.
+# semantic-release only does the mechanics -- write the new version to
+# pyproject.toml + __init__.py, tag `v<version>`, regenerate the changelog from
+# the commits since the last tag (notes only -- they don't affect the version),
+# and push.
+# (Continuous :latest / :sha- agent images still publish on every main push via
+# docker-publish.yml -- only the versioned release artifacts gate on this run.)
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump to release'
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
 
 concurrency:
   group: release-${{ github.ref }}
@@ -25,13 +36,12 @@ concurrency:
 # for the checkout's read access.
 permissions:
   contents: read
+  packages: write  # push the versioned agent image to ghcr.io on release
 
 jobs:
   release:
     name: Bump version and publish
     runs-on: uipath-ubuntu-latest
-    # Skip the release commit semantic-release pushes back, otherwise we loop.
-    if: "!contains(github.event.head_commit.message, 'chore(release):')"
     timeout-minutes: 15
     env:
       # uipath-ubuntu-latest runners enforce a minimum package-age safe-chain
@@ -50,7 +60,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          fetch-depth: 0  # semantic-release needs full history to parse commits
+          fetch-depth: 0  # semantic-release needs full history for tags + changelog
           # Persisted in .git config so semantic-release's push to main is
           # authenticated as the app (which bypasses branch protection).
           token: ${{ steps.app-token.outputs.token }}
@@ -72,19 +82,20 @@ jobs:
         id: release
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Passed via env (not interpolated into the script) per GitHub's
+          # injection guidance; it's a constrained choice input regardless.
+          BUMP: ${{ inputs.bump }}
         run: |
-          # `version` mutates files, commits, and tags but does not push yet
-          # (--no-push) so we can regenerate uv.lock and amend before sending.
-          # --strict makes a no-op exit non-zero so the if/else gate works.
-          if uv tool run --from python-semantic-release semantic-release --strict version \
-              --no-vcs-release \
-              --no-push \
-              --changelog; then
-            NEW_VERSION=$(uv tool run --from python-semantic-release semantic-release version --print)
-          else
-            NEW_VERSION=""
-          fi
-          echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          # The bump level comes from the dispatch input, not commit messages:
+          # force a patch/minor/major bump outright. `version` writes the new
+          # version to pyproject.toml + __init__.py, tags it, and regenerates the
+          # changelog, but does not push yet (--no-push) so we can regenerate
+          # uv.lock and amend before sending.
+          PSR="uv tool run --from python-semantic-release semantic-release"
+          $PSR version "--$BUMP" --no-vcs-release --no-push --changelog
+          # A dispatch always cuts a release; report the just-published version.
+          echo "version=$($PSR version --print)" >> "$GITHUB_OUTPUT"
 
       - name: Regenerate uv.lock and amend release commit
         if: steps.release.outputs.version != ''
@@ -117,3 +128,45 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.UV_INDEX_UIPATH_PASSWORD }}
           TWINE_REPOSITORY_URL: https://pkgs.dev.azure.com/uipath/ML%20Platform/_packaging/coder_eval/pypi/upload/
         run: uv tool run --from twine twine upload --non-interactive --verbose dist/*
+
+      # Build + push the agent image HERE, in the same job that cut the release,
+      # so the `:<version>` tag is built from the BUMPED pyproject (the version
+      # only exists after the semantic-release step above). docker-publish.yml
+      # runs on the triggering commit, BEFORE the bump, so it can never tag the
+      # release version -- this is the authoritative versioned image. It also
+      # repoints `:latest` to the exact release artifact.
+      - name: Lowercase owner for GHCR
+        if: steps.release.outputs.version != ''
+        id: img
+        run: echo "owner_lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        if: steps.release.outputs.version != ''
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.release.outputs.version != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push versioned agent image
+        if: steps.release.outputs.version != ''
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ steps.img.outputs.owner_lc }}/coder-eval-agent:${{ steps.release.outputs.version }}
+            ghcr.io/${{ steps.img.outputs.owner_lc }}/coder-eval-agent:latest
+          build-args: |
+            CODER_EVAL_VERSION=${{ steps.release.outputs.version }}
+          secrets: |
+            "uv_index_username=${{ secrets.UV_INDEX_UIPATH_USERNAME }}"
+            "uv_index_password=${{ secrets.UV_INDEX_UIPATH_PASSWORD }}"
+          # Read the shared buildcache docker-publish.yml writes; don't write it
+          # back from here, to avoid two concurrent writers racing the cache tag.
+          cache-from: type=registry,ref=ghcr.io/${{ steps.img.outputs.owner_lc }}/coder-eval-agent:buildcache

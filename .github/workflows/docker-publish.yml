@@ -4,10 +4,14 @@ name: Publish Docker Image
 # Container Registry (ghcr.io) on every push to main.
 #
 # Tags applied:
-#   :latest                    — always points at tip-of-main
-#   :sha-<short-sha>           — immutable per-commit tag
-#   :<version-from-pyproject>  — also pushed (useful as semantic-release
-#                                rewrites the version on releases)
+#   :latest          — always points at tip-of-main
+#   :sha-<short-sha> — immutable per-commit tag
+#
+# The authoritative `:<version>` tag is published by release.yml, in the same
+# job that cuts the release (where pyproject is already bumped). This workflow
+# runs on the triggering commit, BEFORE the bump, so it cannot tag the release
+# version -- it would lag by one release and mislabel the image -- so it
+# deliberately no longer pushes a version tag.
 #
 # Auth: built-in GITHUB_TOKEN. No PAT, no Azure setup. The package inherits
 # the visibility of this repo (private), and is then promoted to `internal`
@@ -78,7 +82,6 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ steps.ver.outputs.owner_lc }}/coder-eval-agent:latest
-            ${{ env.REGISTRY }}/${{ steps.ver.outputs.owner_lc }}/coder-eval-agent:${{ steps.ver.outputs.version }}
             ${{ env.REGISTRY }}/${{ steps.ver.outputs.owner_lc }}/coder-eval-agent:sha-${{ steps.ver.outputs.short_sha }}
           build-args: |
             CODER_EVAL_VERSION=${{ steps.ver.outputs.version }}
