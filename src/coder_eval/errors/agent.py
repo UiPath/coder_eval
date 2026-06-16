@@ -15,3 +15,12 @@ def truncate_crash_message(message: str, *, limit: int = CRASH_REASON_MAX_CHARS)
 
 class AgentCrashError(RuntimeError):
     """Mid-turn agent failure; routed to AGENT_CRASH by isinstance."""
+
+
+class AgentConfigError(RuntimeError):
+    """Agent prerequisite missing (env var, SDK path, build artifact). Non-retryable.
+
+    Routed to ``AGENT_CONFIG_ERROR`` by isinstance — preferred over substring
+    matching on a message, which can silently re-categorise a reworded
+    RuntimeError as the retryable ``AGENT_API_ERROR``.
+    """

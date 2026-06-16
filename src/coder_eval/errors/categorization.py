@@ -7,7 +7,7 @@ and maps them to appropriate ErrorCategory values for retry logic.
 import logging
 from typing import Any
 
-from .agent import AgentCrashError
+from .agent import AgentConfigError, AgentCrashError
 from .budget import BudgetExceededError
 from .categories import ErrorCategory
 from .timeout import EvaluationTimeoutError
@@ -74,6 +74,12 @@ def categorize_error(
     # genuinely unexpected crashes.
 
     # 2. Check specific exception types (most reliable)
+    # AgentConfigError subclasses RuntimeError, so this typed check must precede
+    # any string-pattern fallback that could re-categorise a missing-prerequisite
+    # message as the retryable AGENT_API_ERROR.
+    if isinstance(error, AgentConfigError):
+        return ErrorCategory.AGENT_CONFIG_ERROR
+
     if isinstance(error, TimeoutError):
         if component == "agent":
             return ErrorCategory.AGENT_TIMEOUT

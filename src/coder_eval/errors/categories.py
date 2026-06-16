@@ -20,6 +20,15 @@ class ErrorCategory(Enum):
     - System errors (DISK_FULL, OUT_OF_MEMORY)
 
     Each category has an associated retry policy in RETRY_CONFIG.
+
+    NB: each ``value`` is persisted verbatim into task.json's
+    ``error_details.error_category`` — a cross-repo contract surface read by the
+    external eval-runner/dashboard. Adding/renaming/removing a member is a
+    contract change: update the pinned set in
+    ``tests/test_error_handling.py::test_error_category_values_are_a_pinned_contract``
+    and flag in the PR that a new persisted value now appears downstream (which
+    needs a display label/icon). FinalStatus bucketing is unchanged, so the
+    blast radius is display/filter only.
     """
 
     # Agent Errors - Communication and execution errors
@@ -30,6 +39,7 @@ class ErrorCategory(Enum):
     AGENT_BILLING_ERROR = "agent_billing_error"  # Insufficient credits/billing issue (NOT retryable)
     AGENT_CRASH = "agent_crash"  # Agent process crashed (retryable — CLI crashes are often transient)
     AGENT_INVALID_OUTPUT = "agent_invalid_output"  # Malformed response (NOT retryable)
+    AGENT_CONFIG_ERROR = "agent_config_error"  # Missing prerequisite/misconfiguration (NOT retryable)
 
     # Sandbox Errors - Environment setup and execution
     SANDBOX_SETUP_ERROR = "sandbox_setup_error"  # Failed to create sandbox (retryable)
@@ -188,5 +198,10 @@ ERROR_TIPS = {
     ErrorCategory.BUDGET_EXCEEDED: (
         "RunLimits budget exceeded. Raise the cap in the task's run_limits block, or simplify "
         "the prompt to use fewer tokens. See docs/features/2026-05-11-run-limits.md."
+    ),
+    ErrorCategory.AGENT_CONFIG_ERROR: (
+        "Agent configuration error — a required environment variable, SDK path, or "
+        "build artifact is missing. Check the error message for the specific prerequisite, "
+        "and see the agent plugin's setup docs."
     ),
 }

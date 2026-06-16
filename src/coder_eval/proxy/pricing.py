@@ -1,6 +1,8 @@
-"""Official Anthropic model pricing for cost calculation.
+"""Model pricing for cost calculation.
 
-Prices are per million tokens (MTok). Source: https://www.anthropic.com/pricing
+Anthropic/OpenAI built-in rates; plugins contribute additional rates via
+``register_pricing()``. Prices are per million tokens (MTok).
+Source: https://www.anthropic.com/pricing
 """
 
 from dataclasses import dataclass
@@ -63,6 +65,44 @@ _PRICING: dict[str, ModelPricing] = {
 }
 
 
+# Plugin-contributed rates (e.g. coder_eval_uipath registers UiPath models).
+# Merged over the built-in table at lookup time.
+_REGISTERED_PRICING: dict[str, ModelPricing] = {}
+
+
+def _lookup_rate(key: str) -> ModelPricing | None:
+    """Resolve a (normalized) pricing key: plugin overlay first, then built-ins.
+
+    Uses ``is not None`` rather than truthiness so a later ``__bool__`` on
+    ``ModelPricing`` (or a type change) can't make a falsy-but-present rate fall
+    through to the built-in table.
+    """
+    registered = _REGISTERED_PRICING.get(key)
+    return registered if registered is not None else _PRICING.get(key)
+
+
+def register_pricing(rates: dict[str, ModelPricing]) -> None:
+    """Merge plugin model rates into the pricing table.
+
+    Re-registering an identical rate for an existing key is idempotent; a
+    *conflicting* rate raises (reproducibility — mirrors AgentRegistry's
+    anti-shadow rule, so load order can't change a model's price).
+
+    All-or-nothing: every key is validated against the existing table before
+    any is committed, so a conflict on a later key in a multi-model batch does
+    not leave earlier keys half-registered.
+    """
+    for key, rate in rates.items():
+        existing = _lookup_rate(key)
+        if existing is not None and existing != rate:
+            raise ValueError(
+                f"pricing for {key!r} already registered as {existing}; refusing to shadow with {rate}. "
+                + "A built-in or another plugin already prices this model — check plugin load order "
+                + "(two plugins must not register conflicting rates for the same model id)."
+            )
+    _REGISTERED_PRICING.update(rates)
+
+
 # Bedrock cross-region inference-profile prefixes (mirrors
 # models.routing._BEDROCK_KNOWN_PREFIXES). A Bedrock route qualifies a bare
 # alias into e.g. ``eu.anthropic.claude-opus-4-8``; the pricing table is keyed
@@ -105,7 +145,7 @@ def calculate_cost(
     the same as the bare ``claude-opus-4-8``. Returns None if the (normalized)
     model is not in the pricing table.
     """
-    pricing = _PRICING.get(_normalize_model(model))
+    pricing = _lookup_rate(_normalize_model(model))
     if pricing is None:
         return None
 

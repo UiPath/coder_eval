@@ -8,11 +8,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from coder_eval.errors import AgentCrashError
-from coder_eval.errors.categories import RETRY_CONFIG, ErrorCategory, RetryConfig
+from coder_eval.errors import AgentConfigError, AgentCrashError
+from coder_eval.errors.categories import ERROR_TIPS, RETRY_CONFIG, ErrorCategory, RetryConfig
 from coder_eval.errors.categorization import categorize_error
 from coder_eval.errors.executor import execute_with_retry
-from coder_eval.errors.retry import create_error_context, truncate_log
+from coder_eval.errors.retry import create_error_context, should_retry, truncate_log
 
 
 class TestErrorCategory:
@@ -57,16 +57,51 @@ class TestErrorCategory:
             ErrorCategory.AGENT_INVALID_OUTPUT,
             ErrorCategory.AGENT_AUTH_ERROR,
             ErrorCategory.AGENT_BILLING_ERROR,
+            ErrorCategory.AGENT_CONFIG_ERROR,
             ErrorCategory.TASK_NOT_FOUND,
             ErrorCategory.TASK_INVALID,
             ErrorCategory.UNKNOWN,
             ErrorCategory.CRITERION_CHECK_ERROR,  # Changed from CONFIG_ERROR/PERMISSION_ERROR
             ErrorCategory.DISK_FULL,  # Added valid non-retryable
             ErrorCategory.OUT_OF_MEMORY,  # Added valid non-retryable
+            ErrorCategory.BUDGET_EXCEEDED,  # RunLimits breach — retrying compounds it
         ]
 
         for category in non_retryable:
             assert category not in RETRY_CONFIG, f"{category} should not be retryable (not in RETRY_CONFIG)"
+
+    def test_error_category_values_are_a_pinned_contract(self):
+        """ErrorCategory.value strings are persisted verbatim into task.json's
+        error_details.error_category — the cross-repo contract surface consumed
+        by the external eval-runner/dashboard. Pin the frozen set so that
+        adding/renaming/removing a member is a deliberate, reviewed act: update
+        this set AND flag in the PR that a new persisted task.json value now
+        appears downstream (the dashboard needs a label/icon for it)."""
+        expected = {
+            "agent_timeout",
+            "agent_api_error",
+            "agent_rate_limit",
+            "agent_auth_error",
+            "agent_billing_error",
+            "agent_crash",
+            "agent_invalid_output",
+            "agent_config_error",
+            "sandbox_setup_error",
+            "sandbox_command_error",
+            "venv_creation_error",
+            "package_install_error",
+            "template_copy_error",
+            "git_clone_error",
+            "criterion_check_error",
+            "task_not_found",
+            "task_invalid",
+            "tests_failed",
+            "disk_full",
+            "out_of_memory",
+            "budget_exceeded",
+            "unknown",
+        }
+        assert {c.value for c in ErrorCategory} == expected
 
 
 class TestCategorizeError:
@@ -165,6 +200,32 @@ class TestCategorizeError:
     def test_categorize_agent_crash_without_component_hint(self):
         """The typed-AgentCrashError fallback also fires when no component is provided."""
         assert categorize_error(AgentCrashError("anything"), {}) == ErrorCategory.AGENT_CRASH
+
+    def test_categorize_agent_config_error(self):
+        """AgentConfigError → AGENT_CONFIG_ERROR via typed check."""
+        result = categorize_error(AgentConfigError("boom"), {"component": "agent"})
+        assert result == ErrorCategory.AGENT_CONFIG_ERROR
+
+    def test_categorize_agent_config_error_message_does_not_misroute(self):
+        """The typed check wins even when the message would match a retryable string pattern."""
+        # "connection" would otherwise route to the retryable AGENT_API_ERROR.
+        result = categorize_error(
+            AgentConfigError("DELEGATE_STDIO_PATH unset; cannot establish connection"),
+            {"component": "agent"},
+        )
+        assert result == ErrorCategory.AGENT_CONFIG_ERROR
+
+    def test_agent_config_error_non_retryable(self):
+        """AGENT_CONFIG_ERROR is non-retryable (absent from RETRY_CONFIG)."""
+        assert ErrorCategory.AGENT_CONFIG_ERROR not in RETRY_CONFIG
+        assert should_retry(ErrorCategory.AGENT_CONFIG_ERROR, 0) is False
+
+    def test_agent_config_error_tip_is_generic(self):
+        """The tip exists, is non-empty, and stays provider-agnostic."""
+        tip = ERROR_TIPS[ErrorCategory.AGENT_CONFIG_ERROR]
+        assert tip
+        assert "npm" not in tip.lower()
+        assert "delegate" not in tip.lower()
 
     def test_categorize_agent_generic_exit_code_not_crash(self):
         """Generic mention of 'exit code' should NOT match AGENT_CRASH."""

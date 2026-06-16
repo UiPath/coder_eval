@@ -232,7 +232,10 @@ Agents are registered through the **plugin SPI** (entry-point group
 `coder_eval.plugins`) — there is no closed `AgentKind` enum or
 `Orchestrator._create_agent` dispatch to edit. `agent.type` is an open string
 validated against `AgentRegistry`; in-tree and third-party agents register the
-same way. See `docs/features/2026-06-11-byoa-agent-plugin-spi.md`.
+same way. See `docs/features/2026-06-11-byoa-agent-plugin-spi.md`. The
+`coder_eval_uipath` Delegate SDK agent is the first real **out-of-tree** worked
+example of this SPI (entry point → `register()` hook → `AgentRegistry.register`
++ `register_pricing`, with zero base edits).
 
 1. Define a `BaseAgentConfig` subclass (its own `type: Literal["your-kind"]`) and
    implement the `Agent` ABC in `agents/` (or a separate package for a plugin).
@@ -273,6 +276,27 @@ asserts the built-ins actually registered (rot-protection). `load_plugins` is
 called at CLI init; `ensure_plugins_loaded()` is the lazy safety-net for library
 use. A failing third-party plugin is logged and skipped; a failing built-in
 registration is fatal.
+
+### Registering Model Pricing (plugins)
+
+Plugins that run their own models contribute USD rates through the
+`register_pricing` seam — there is **no** separate entry-point group; call it
+from the same `register(registry)` hook used for the agent.
+
+1. Define `dict[str, ModelPricing]` rates (import `ModelPricing` from
+   `coder_eval.proxy.pricing`); the key is the bare model id as it appears in
+   `agent.model` (vendor/Bedrock prefixes are normalized off at lookup).
+2. Call `register_pricing(YOUR_RATES)` inside the plugin's `register()` hook.
+   `calculate_cost` then consults the registered overlay before the built-in
+   table, so every existing consumer (proxy, agents, reports) prices the model
+   transparently.
+3. Registration is **idempotent** for identical rates and **raises** on a
+   conflicting rate for an existing key (anti-shadow rule — mirrors
+   `AgentRegistry`, so plugin load order can never silently reprice a model). An
+   all-zero rate is a valid free-model entry (the lookup uses `is not None`, not
+   truthiness). Base ships **no** plugin rates. See
+   `docs/features/2026-06-14-pricing-registration-seam.md`;
+   `coder_eval_uipath/pricing.py` is the worked example.
 
 ## Task Definition
 

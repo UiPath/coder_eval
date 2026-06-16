@@ -22,6 +22,14 @@ coder-eval registers its own built-in agents (Claude Code, Codex, NoOp) through
 the *same* entry point (`coder_eval = "coder_eval.agents:register_builtins"`), so
 the discovery path is always exercised and cannot silently rot.
 
+**Worked example (out-of-tree):** the `coder_eval_uipath` **Delegate SDK agent**
+is the first real third-party plugin built on this SPI — entry point →
+`register(registry)` hook → `AgentRegistry.register("delegate-sdk", …)` plus
+`register_pricing(...)` for its UiPath model rates, with **zero** edits to
+coder-eval. See its `src/coder_eval_uipath/__init__.py` (hook) and
+`docs/DELEGATE_AGENT_GUIDE.md`. The in-repo `tests/fixtures/byoa_demo_plugin` is
+the minimal offline example.
+
 ## Authoring a plugin
 
 `pyproject.toml`:
