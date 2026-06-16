@@ -2,6 +2,54 @@
 
 <!-- version list -->
 
+## v0.7.0 (2026-06-16)
+
+### Bug Fixes
+
+- Address pr:424 review nits (pricing seam + error-category contract)
+  ([#424](https://github.com/UiPath/coder_eval/pull/424),
+  [`b24010e`](https://github.com/UiPath/coder_eval/commit/b24010e28f6768a62ba456de4e473ca04a3e9a85))
+
+- Code review findings for pricing seam + error category
+  ([#424](https://github.com/UiPath/coder_eval/pull/424),
+  [`b24010e`](https://github.com/UiPath/coder_eval/commit/b24010e28f6768a62ba456de4e473ca04a3e9a85))
+
+- Full code review fixes for delegate-sdk base primitives (phases 1-3)
+  ([#424](https://github.com/UiPath/coder_eval/pull/424),
+  [`b24010e`](https://github.com/UiPath/coder_eval/commit/b24010e28f6768a62ba456de4e473ca04a3e9a85))
+
+- **errors**: Code review fixes for phase 1 ([#424](https://github.com/UiPath/coder_eval/pull/424),
+  [`b24010e`](https://github.com/UiPath/coder_eval/commit/b24010e28f6768a62ba456de4e473ca04a3e9a85))
+
+### Documentation
+
+- Correct the is-not-None lookup rationale (review follow-up)
+  ([#424](https://github.com/UiPath/coder_eval/pull/424),
+  [`b24010e`](https://github.com/UiPath/coder_eval/commit/b24010e28f6768a62ba456de4e473ca04a3e9a85))
+
+- Surface register_pricing extension point + BYOA worked example
+  ([#424](https://github.com/UiPath/coder_eval/pull/424),
+  [`b24010e`](https://github.com/UiPath/coder_eval/commit/b24010e28f6768a62ba456de4e473ca04a3e9a85))
+
+- **pricing**: Add feature spec for the pricing registration seam
+  ([#424](https://github.com/UiPath/coder_eval/pull/424),
+  [`b24010e`](https://github.com/UiPath/coder_eval/commit/b24010e28f6768a62ba456de4e473ca04a3e9a85))
+
+### Features
+
+- Delegate-sdk base primitives — AgentConfigError + pricing registration seam
+  ([#424](https://github.com/UiPath/coder_eval/pull/424),
+  [`b24010e`](https://github.com/UiPath/coder_eval/commit/b24010e28f6768a62ba456de4e473ca04a3e9a85))
+
+- **errors**: Add generic AgentConfigError + AGENT_CONFIG_ERROR category
+  ([#424](https://github.com/UiPath/coder_eval/pull/424),
+  [`b24010e`](https://github.com/UiPath/coder_eval/commit/b24010e28f6768a62ba456de4e473ca04a3e9a85))
+
+- **pricing**: Add register_pricing seam for plugin-contributed model rates
+  ([#424](https://github.com/UiPath/coder_eval/pull/424),
+  [`b24010e`](https://github.com/UiPath/coder_eval/commit/b24010e28f6768a62ba456de4e473ca04a3e9a85))
+
+
 ## v0.6.2 (2026-06-16)
 
 ### Build System
