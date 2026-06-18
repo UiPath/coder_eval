@@ -5,7 +5,7 @@ import {
     getRunListing,
     type TagCount,
 } from "@/lib/overview";
-import { fmtDuration, fmtRunTime } from "@/lib/format";
+import { fmtDuration, fmtRunTime, fmtTimestamp } from "@/lib/format";
 import { WindowSelector } from "./_components/window-selector";
 import { WINDOWS, type Window } from "@/lib/reviews-types";
 import { DailySuccessChart } from "./_overview/daily-chart";
@@ -17,7 +17,7 @@ import { CollapsibleRail } from "./_components/collapsible-rail";
 export const dynamic = "force-dynamic";
 
 const DEFAULT_LIMIT = 20;
-const ADHOC_LIMIT = 25;
+const ADHOC_LIMIT = 10;
 
 function parseWindow(raw: string | string[] | undefined): Window {
     const v = Array.isArray(raw) ? raw[0] : raw;
@@ -48,6 +48,17 @@ function parseLimit(raw: string | string[] | undefined): number | null {
     if (!v) return DEFAULT_LIMIT;
     const n = parseInt(v, 10);
     if (!Number.isFinite(n) || n <= 0) return DEFAULT_LIMIT;
+    return Math.min(n, 10000);
+}
+
+// Separate from the main table's `limit` so expanding one section doesn't
+// reset the other's pagination. null = show all matching ad-hoc runs.
+function parseAdhocLimit(raw: string | string[] | undefined): number | null {
+    const v = Array.isArray(raw) ? raw[0] : raw;
+    if (v === "all") return null;
+    if (!v) return ADHOC_LIMIT;
+    const n = parseInt(v, 10);
+    if (!Number.isFinite(n) || n <= 0) return ADHOC_LIMIT;
     return Math.min(n, 10000);
 }
 
@@ -92,6 +103,7 @@ export default async function Page({
         tag?: string;
         q?: string;
         limit?: string;
+        alimit?: string;
     }>;
 }) {
     const params = await searchParams;
@@ -99,12 +111,13 @@ export default async function Page({
     const activeTag = parseTag(params.tag);
     const q = parseQ(params.q);
     const limit = parseLimit(params.limit);
+    const adhocLimit = parseAdhocLimit(params.alimit);
     const isFiltered = activeTag != null || q != null;
 
-    const [overview, listing, adhocRows] = await Promise.all([
+    const [overview, listing, adhoc] = await Promise.all([
         getOverview(window, activeTag, q),
         getRunListing(window, activeTag, q, limit),
-        getAdhocRunListing(ADHOC_LIMIT),
+        getAdhocRunListing(adhocLimit),
     ]);
 
     const skills = filterTagsByQuery(overview.skills, q);
@@ -117,14 +130,35 @@ export default async function Page({
     const tableTotalLabel = isFiltered ? matchedCount : totalInWindow;
     const hasMore = limit != null && shownCount < tableTotalLabel;
 
-    const showMoreHref = buildHref({
+    // Current URL params, normalized to scalars. Spread as the base of every
+    // href so toggling one section (main `limit` or ad-hoc `alimit`) carries
+    // the other's state through instead of silently resetting it.
+    const rawLimit = Array.isArray(params.limit) ? params.limit[0] : params.limit;
+    const rawAlimit = Array.isArray(params.alimit)
+        ? params.alimit[0]
+        : params.alimit;
+    const base = {
         window,
         tag: activeTag,
         q,
+        limit: rawLimit,
+        alimit: rawAlimit,
+    };
+
+    const showMoreHref = buildHref({
+        ...base,
         limit: Math.min(tableTotalLabel, shownCount + DEFAULT_LIMIT),
     });
-    const showAllHref = buildHref({ window, tag: activeTag, q, limit: "all" });
+    const showAllHref = buildHref({ ...base, limit: "all" });
     const clearAllHref = buildHref({ window });
+
+    // Ad-hoc section disclosure: rows are filtered (by `q`) then capped to
+    // adhocLimit; offer "Show all" while more match than are shown, and a
+    // collapse back to the default once expanded past it.
+    const adhocExpandable = adhoc.rows.length < adhoc.total;
+    const adhocExpanded = adhocLimit == null && adhoc.total > ADHOC_LIMIT;
+    const adhocShowAllHref = buildHref({ ...base, alimit: "all" });
+    const adhocShowLessHref = buildHref({ ...base, alimit: undefined });
 
     return (
         <div className="space-y-6">
@@ -364,23 +398,56 @@ export default async function Page({
                 </table>
             </TableScroll>
 
-            {adhocRows.length > 0 && (
+            {adhoc.total > 0 && (
                 <div className="space-y-2 pt-2">
                     <div className="flex items-baseline gap-3 flex-wrap">
                         <h2 className="text-sm font-semibold text-gray-900">
                             Ad-hoc runs
                         </h2>
+                        <span className="text-xs text-gray-500 tabular-nums">
+                            {adhocExpandable
+                                ? `${adhoc.rows.length} of ${adhoc.total}`
+                                : `${adhoc.total}`}
+                        </span>
                         <span className="text-xs text-gray-500">
                             Manually uploaded · excluded from the chart, run
                             list, and trends above
                         </span>
                     </div>
-                    <TableScroll>
+                    <TableScroll
+                        footer={
+                            adhocExpandable || adhocExpanded ? (
+                                <div className="flex items-center justify-center gap-3 px-4 py-3 border-t border-gray-100 bg-gray-50 text-xs">
+                                    {adhocExpandable && (
+                                        <Link
+                                            href={adhocShowAllHref}
+                                            scroll={false}
+                                            className="text-studio-blue hover:underline"
+                                        >
+                                            Show all ({adhoc.total})
+                                        </Link>
+                                    )}
+                                    {adhocExpanded && (
+                                        <Link
+                                            href={adhocShowLessHref}
+                                            scroll={false}
+                                            className="text-studio-blue hover:underline"
+                                        >
+                                            Show fewer
+                                        </Link>
+                                    )}
+                                </div>
+                            ) : undefined
+                        }
+                    >
                         <table className="w-full text-sm">
                             <thead>
                                 <tr className="bg-gray-50 border-b border-gray-200 text-left text-gray-600">
                                     <th className="py-3 px-4 font-medium">
                                         Run
+                                    </th>
+                                    <th className="py-3 px-4 font-medium">
+                                        Date
                                     </th>
                                     <th className="py-3 px-4 font-medium">
                                         Pass rate
@@ -397,7 +464,7 @@ export default async function Page({
                                 </tr>
                             </thead>
                             <tbody>
-                                {adhocRows.map((r) => {
+                                {adhoc.rows.map((r) => {
                                     const total = r.tasksRun;
                                     const pct = total
                                         ? (r.tasksSucceeded / total) * 100
@@ -410,14 +477,14 @@ export default async function Page({
                                             <td className="py-3 px-4">
                                                 <Link
                                                     href={`/runs/${r.id}`}
-                                                    className="text-studio-blue hover:underline"
+                                                    className="text-gray-900 hover:text-studio-blue"
                                                 >
                                                     {r.title ? (
-                                                        <span className="font-medium text-gray-900">
+                                                        <span className="font-medium">
                                                             {r.title}
                                                         </span>
                                                     ) : (
-                                                        <span className="font-mono text-xs">
+                                                        <span className="font-mono text-xs font-semibold tabular-nums">
                                                             {r.id}
                                                         </span>
                                                     )}
@@ -427,6 +494,9 @@ export default async function Page({
                                                         {r.id}
                                                     </div>
                                                 )}
+                                            </td>
+                                            <td className="py-3 px-4 font-mono text-xs text-gray-700 tabular-nums whitespace-nowrap">
+                                                {fmtTimestamp(r.startedAt)}
                                             </td>
                                             <td className="py-3 px-4 tabular-nums">
                                                 <span

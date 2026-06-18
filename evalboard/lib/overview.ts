@@ -575,25 +575,40 @@ export interface AdhocRunRow extends RunListingRow {
     // From meta.json; null when the run predates the feature (then the UI
     // falls back to the run id).
     title: string | null;
+    // run.json start_time (ISO). The ad-hoc id carries no date, so this is the
+    // row's only date — used to sort the section and render the Date column.
+    // null on a run whose run.json omitted start_time.
+    startedAt: string | null;
 }
 
-// The Ad-hoc runs section (front page, below the daily listing). "Ad-hoc"
-// here means "not a daily-pipeline run" — i.e. the id isn't date-shaped, which
-// is exactly the set listRunIdsInWindow excludes from the chart and main table.
-// Bounded to the most recent `limit` candidates: the date-shape check is free
-// (no IO), and only the shown slice is loaded. Runs without a run.json (e.g.
-// aborted uploads that left only default/) are skipped.
-export async function getAdhocRunListing(limit: number): Promise<AdhocRunRow[]> {
-    const ids = (await listRunIds())
-        .filter((id) => parseRunIdDate(id) == null)
-        .slice(0, limit);
-    const perRun = await mapWithConcurrency(ids, FETCH_CONCURRENCY, cachedLoadPerRun);
+export interface AdhocListing {
+    // Sorted newest-first and capped to the caller's limit.
+    rows: AdhocRunRow[];
+    // Pre-limit count — drives the section's "{shown} of {total}" label and
+    // whether a "Show all" affordance is offered.
+    total: number;
+}
+
+// Project loaded ad-hoc runs into rows, newest-first by run start_time, and
+// capped to `limit` (null = unlimited). Ad-hoc ids aren't date-shaped, so —
+// unlike the pipeline listing, which sorts/windows by id — the date lives in
+// run.json (startedAt). ISO timestamps sort chronologically as strings, so a
+// plain descending string compare orders them; runs missing a start_time sort
+// last (empty key), then by id descending for a deterministic tie-break. Runs
+// without a readable overview (aborted uploads that left only default/) are
+// dropped. `total` is the pre-limit count, so the UI can offer "Show all".
+// Exported for testing.
+export function buildAdhocRows(
+    perRun: PerRun[],
+    limit: number | null,
+): AdhocListing {
     const rows: AdhocRunRow[] = [];
     for (const { id, overview, title } of perRun) {
         if (!overview) continue;
         rows.push({
             id,
             title: title ?? null,
+            startedAt: overview.startedAt ?? null,
             tasksSucceeded: overview.tasks.filter((t) => t.status === "SUCCESS")
                 .length,
             tasksRun: overview.tasks.length,
@@ -601,5 +616,26 @@ export async function getAdhocRunListing(limit: number): Promise<AdhocRunRow[]> 
             taskDurationSeconds: overview.taskDurationSeconds,
         });
     }
-    return rows;
+    rows.sort(
+        (a, b) =>
+            (b.startedAt ?? "").localeCompare(a.startedAt ?? "") ||
+            b.id.localeCompare(a.id),
+    );
+    return {
+        rows: limit == null ? rows : rows.slice(0, limit),
+        total: rows.length,
+    };
+}
+
+// The Ad-hoc runs section (front page, below the daily listing). "Ad-hoc" here
+// means "not a daily-pipeline run" — i.e. the id isn't date-shaped, which is
+// exactly the set listRunIdsInWindow excludes from the chart and main table.
+// Every ad-hoc candidate is loaded before sorting (the date lives in run.json,
+// not the id, so we can't window by id and still show the most recent): the
+// ad-hoc set is small by construction (manual uploads only) and per-run reads
+// are memoized for 5 min, so a warm front page pays no extra IO.
+export async function getAdhocRunListing(limit: number | null): Promise<AdhocListing> {
+    const ids = (await listRunIds()).filter((id) => parseRunIdDate(id) == null);
+    const perRun = await mapWithConcurrency(ids, FETCH_CONCURRENCY, cachedLoadPerRun);
+    return buildAdhocRows(perRun, limit);
 }

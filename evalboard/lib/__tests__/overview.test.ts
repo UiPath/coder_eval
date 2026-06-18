@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import {
+    buildAdhocRows,
     collectPipelineRuns,
     turnBudgetRateForTasks,
     type PerRun,
@@ -227,5 +228,119 @@ describe("collectPipelineRuns", () => {
         expect(await collectPipelineRuns(["r1"], 0, load)).toEqual([]);
         expect(await collectPipelineRuns([], 5, load)).toEqual([]);
         expect(load).not.toHaveBeenCalled();
+    });
+});
+
+describe("buildAdhocRows", () => {
+    function adhocRun(
+        id: string,
+        startedAt: string | null,
+        title: string | null = null,
+    ): PerRun {
+        return {
+            id,
+            overview: {
+                id,
+                tasks: [task({ taskId: "t" })],
+                totalCostUsd: null,
+                taskDurationSeconds: null,
+                componentShas: [],
+                startedAt,
+            },
+            reviewTagCounts: {},
+            reviewTagsByTask: {},
+            adhoc: true,
+            title,
+        };
+    }
+
+    test("orders newest-first by run start_time, not by id", () => {
+        // Ids sort lexically the opposite way to their dates — proving the sort
+        // keys off start_time, not the id.
+        const { rows } = buildAdhocRows(
+            [
+                adhocRun("aaa", "2026-06-01T08:00:00"),
+                adhocRun("zzz", "2026-06-10T08:00:00"),
+                adhocRun("mmm", "2026-06-05T08:00:00"),
+            ],
+            10,
+        );
+        expect(rows.map((r) => r.id)).toEqual(["zzz", "mmm", "aaa"]);
+        expect(rows[0].startedAt).toBe("2026-06-10T08:00:00");
+    });
+
+    test("caps to the limit after sorting, total stays the full count", () => {
+        // limit 2 shows the two newest but total still reports 3, so the UI can
+        // offer "Show all (3)".
+        const { rows, total } = buildAdhocRows(
+            [
+                adhocRun("a", "2026-06-01T08:00:00"),
+                adhocRun("b", "2026-06-02T08:00:00"),
+                adhocRun("c", "2026-06-03T08:00:00"),
+            ],
+            2,
+        );
+        expect(rows.map((r) => r.id)).toEqual(["c", "b"]);
+        expect(total).toBe(3);
+    });
+
+    test("limit null returns every row uncapped", () => {
+        const { rows, total } = buildAdhocRows(
+            [
+                adhocRun("a", "2026-06-01T08:00:00"),
+                adhocRun("b", "2026-06-02T08:00:00"),
+                adhocRun("c", "2026-06-03T08:00:00"),
+            ],
+            null,
+        );
+        expect(rows).toHaveLength(3);
+        expect(total).toBe(3);
+    });
+
+    test("runs missing a start_time sort last, deterministic by id", () => {
+        const { rows } = buildAdhocRows(
+            [
+                adhocRun("no-date-b", null),
+                adhocRun("dated", "2026-06-01T08:00:00"),
+                adhocRun("no-date-a", null),
+            ],
+            10,
+        );
+        // Dated run first; the two undated runs follow, id-descending.
+        expect(rows.map((r) => r.id)).toEqual([
+            "dated",
+            "no-date-b",
+            "no-date-a",
+        ]);
+    });
+
+    test("drops runs without a readable overview", () => {
+        const broken: PerRun = {
+            id: "broken",
+            overview: null,
+            reviewTagCounts: {},
+            reviewTagsByTask: {},
+            adhoc: true,
+            title: null,
+        };
+        const { rows } = buildAdhocRows(
+            [broken, adhocRun("ok", "2026-06-01T08:00:00")],
+            10,
+        );
+        expect(rows.map((r) => r.id)).toEqual(["ok"]);
+    });
+
+    test("projects title and pass counts", () => {
+        const run = adhocRun("r", "2026-06-01T08:00:00", "My run");
+        run.overview!.tasks = [
+            task({ taskId: "a", status: "SUCCESS" }),
+            task({ taskId: "b", status: "FAILURE" }),
+        ];
+        const {
+            rows: [row],
+        } = buildAdhocRows([run], 10);
+        expect(row.title).toBe("My run");
+        expect(row.tasksSucceeded).toBe(1);
+        expect(row.tasksRun).toBe(2);
     });
 });

@@ -17,6 +17,18 @@ export function fmtRunTime(id: string): string {
     return `${d} · ${t.replace(/-/g, ":")}`;
 }
 
+// Format a run.json ISO timestamp (`start_time`, "YYYY-MM-DDTHH:MM:SS[.ffffff]")
+// into the same "YYYY-MM-DD · HH:MM:SS" shape fmtRunTime renders for date-shaped
+// run ids — so an ad-hoc run, whose id carries no date, shows a comparable
+// timestamp. The literal date/time digits are taken verbatim (no Date parse, no
+// timezone conversion), mirroring fmtRunTime, which likewise shows the run id's
+// wall-clock as-is. "—" when absent or not in the expected shape.
+export function fmtTimestamp(iso: string | null | undefined): string {
+    if (!iso) return "—";
+    const m = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/.exec(iso);
+    return m ? `${m[1]} · ${m[2]}` : "—";
+}
+
 // Compact human-readable count: 1234 -> "1.2k", 1_500_000 -> "1.5M".
 // Used by the task page token cell where dense numbers compete for space
 // with five other stats in the same dl grid.

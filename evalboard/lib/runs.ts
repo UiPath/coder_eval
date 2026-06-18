@@ -733,6 +733,10 @@ export interface RunOverview {
     totalCostUsd: number | null;
     taskDurationSeconds: number | null;
     componentShas: ComponentSha[];
+    // run.json `start_time` (ISO wall-clock). Pipeline runs derive their date
+    // from the date-shaped id; ad-hoc ids carry no date, so the ad-hoc listing
+    // orders by this instead. Optional so test factories predating it stay valid.
+    startedAt?: string | null;
 }
 
 // Visible-turn count for a task row: the persisted `visible_turns` field when
@@ -798,6 +802,7 @@ export async function readRunOverview(
             ? taskDurationSum
             : (data.total_duration_seconds ?? null),
         componentShas: extractComponentShas(data.environment_info),
+        startedAt: data.start_time ?? null,
     };
 }
 
