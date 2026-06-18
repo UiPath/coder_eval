@@ -120,7 +120,7 @@ class TestRoundTrip:
             criteria=[
                 CriterionSummary(criterion_type="file_exists", description="x", score=1.0, passed=True),
                 CriterionSummary(
-                    criterion_type="pytest", description="y", score=0.0, passed=False, failure_reason="oops"
+                    criterion_type="run_command", description="y", score=0.0, passed=False, failure_reason="oops"
                 ),
             ],
         )

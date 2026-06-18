@@ -22,12 +22,10 @@ constructor.
 
 Only two bespoke flags survive as **active thin aliases** that emit the
 equivalent `-D` entry: `--model` (→ `agent.model`) and `--driver`
-(→ `sandbox.driver`). Four legacy flags — `--permission-mode`, `--max-turns`,
-`--task-timeout`, `--turn-timeout` — remain as **hidden deprecated aliases**:
-they still work and route through the same `-D` engine path, but print a
-one-line deprecation hint to stderr nudging you to the `-D` form. The remaining
-four — `--allowed-tools`, `--disallowed-tools`, `--plugins`, `--sdk-option` —
-have been **removed** outright; express those via `-D` (e.g.
+(→ `sandbox.driver`). The legacy flags — `--permission-mode`, `--max-turns`,
+`--task-timeout`, `--turn-timeout`, `--allowed-tools`, `--disallowed-tools`,
+`--plugins`, `--sdk-option` — have been **removed** outright; express those via
+`-D` (e.g. `-D agent.permission_mode=plan`, `-D run_limits.max_turns=30`,
 `-D agent.sdk_options.effort=high`). There is one engine path for the aliases
 and `-D` alike.
 
@@ -74,20 +72,15 @@ The only surviving task-config aliases:
 | `--model` | `agent.model` |
 | `--driver` | `sandbox.driver` |
 
-Everything else is expressed via `-D`. These four remain as **hidden deprecated
-aliases** (still work, warn to stderr, route through `-D`):
+Everything else is expressed via `-D`. These flags are **removed** — only the
+`-D` form works:
 
-| Deprecated alias | Equivalent `-D` |
+| Removed flag | Equivalent `-D` |
 |------|---------------|
 | `--permission-mode plan` | `-D agent.permission_mode=plan` |
 | `--max-turns 30` | `-D run_limits.max_turns=30` |
 | `--task-timeout 600` | `-D run_limits.task_timeout=600` |
 | `--turn-timeout 120` | `-D run_limits.turn_timeout=120` |
-
-These four are **removed** — only the `-D` form works:
-
-| Removed flag | Equivalent `-D` |
-|------|---------------|
 | `--allowed-tools Read,Write` | `-D agent.allowed_tools=[Read,Write]` |
 | `--disallowed-tools Bash` | `-D agent.disallowed_tools=[Bash]` |
 | `--plugins '[…]'` | `-D agent.plugins=[…]` |

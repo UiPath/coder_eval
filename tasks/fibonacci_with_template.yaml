@@ -26,7 +26,7 @@ initial_prompt: |
   Make all tests pass.
 
 success_criteria:
-  - type: pytest
+  - type: run_command
     description: "All tests pass"
-    path: "tests/"
+    command: "python -m pytest tests/"
     timeout: 60

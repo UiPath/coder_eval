@@ -7,7 +7,6 @@ from coder_eval.models import (
     FileContainsCriterion,
     FileExistsCriterion,
     FileMatchesRegexCriterion,
-    PytestCriterion,
     RunCommandCriterion,
     SandboxConfig,
 )
@@ -186,7 +185,6 @@ def test_success_checker_dispatch():
         FileContainsCriterion(path="app.py", includes=["test"], description="Test file contains"),
         RunCommandCriterion(command="echo test", description="Test run command"),
         RunCommandCriterion(command="echo test", expected_stdout="test", description="Test stdout match"),
-        PytestCriterion(path="tests/", description="Test pytest"),
         FileMatchesRegexCriterion(path="app.py", pattern="test", description="Test regex"),
     ]
 

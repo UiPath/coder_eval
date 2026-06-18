@@ -881,7 +881,7 @@ class Sandbox:
             # Shell execution is intentional for sandbox - allows pipes, redirects, and complex commands.
             # Decode stdout/stderr as UTF-8 with replacement on bad bytes so an agent that emits
             # non-UTF-8 output (e.g. raw binary, locale-encoded compiler errors on Windows) does not
-            # kill the run with UnicodeDecodeError. Downstream callers (e.g. import_check) only need
+            # kill the run with UnicodeDecodeError. Downstream callers (e.g. json_check) only need
             # JSON-parseable strings; a replacement char is preferable to a crash.
             result = subprocess.run(
                 command,

@@ -526,7 +526,7 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
             raise ValueError(
                 f"A 'type: none' task cannot use criteria that require an agent trajectory: {offending}. "
                 "Use agent-independent criteria (run_command, file_exists, file_contains, json_check, "
-                "pytest, file_matches_regex, pylint_score, import_check, ...)."
+                "file_matches_regex, reference_comparison, ...)."
             )
         return self
 

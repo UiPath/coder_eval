@@ -93,7 +93,10 @@ def test_get_version_info_includes_tool_plugins(tmp_path: Path, monkeypatch: pyt
     """environment_info carries a ``tool_plugins`` block with the captured versions."""
     tools_dir = tmp_path / "node_modules" / "@uipath"
     _make_tool_plugin(tools_dir, "maestro-tool", name="@uipath/maestro-tool", version="9.9.9")
-    monkeypatch.setenv("PLUGIN_TOOLS_DIR", str(tools_dir))
+    # get_version_info() resolves the plugin-tools dir via resolve_uipath_plugin_dir()
+    # (PATH-based), which ignores PLUGIN_TOOLS_DIR — so pin the resolver itself at the
+    # fixture. A bare setenv leaks the host's real @uipath CLI in when one is installed.
+    monkeypatch.setattr("coder_eval.utils.resolve_uipath_plugin_dir", lambda search_path=None: tools_dir)
 
     info = get_version_info()
 
@@ -113,7 +116,9 @@ def test_run_summary_round_trips_nested_tool_plugins(tmp_path: Path, monkeypatch
     tools_dir = tmp_path / "node_modules" / "@uipath"
     _make_tool_plugin(tools_dir, "maestro-tool", name="@uipath/maestro-tool", version="1.2.0-alpha.20260604")
     _make_tool_plugin(tools_dir, "studio-tool", name="@uipath/studio-tool", version="3.4.5")
-    monkeypatch.setenv("PLUGIN_TOOLS_DIR", str(tools_dir))
+    # get_version_info() resolves via resolve_uipath_plugin_dir() (ignores PLUGIN_TOOLS_DIR);
+    # pin the resolver so the host's real @uipath CLI, if installed, can't leak in.
+    monkeypatch.setattr("coder_eval.utils.resolve_uipath_plugin_dir", lambda search_path=None: tools_dir)
 
     info = get_version_info()
     expected_plugins = {"maestro-tool": "1.2.0-alpha.20260604", "studio-tool": "3.4.5"}

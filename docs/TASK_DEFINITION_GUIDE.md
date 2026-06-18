@@ -15,9 +15,7 @@ Complete reference for defining evaluation tasks in coder_eval.
   - [file_check](#file_check)
   - [json_check](#json_check)
   - [run_command](#run_command)
-  - [pytest](#pytest)
   - [file_matches_regex](#file_matches_regex)
-  - [pylint_score](#pylint_score)
   - [reference_comparison](#reference_comparison)
   - [command_executed](#command_executed)
   - [uipath_eval](#uipath_eval)
@@ -330,8 +328,8 @@ All criteria share these fields:
 
 **Scoring types:**
 - **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`
-- **Fractional** (0.0–1.0): `file_contains`, `file_check`, `json_check`, `pytest`, `command_executed`, `uipath_eval`
-- **Continuous** (0.0–1.0): `pylint_score`, `reference_comparison`, `llm_judge`, `agent_judge`
+- **Fractional** (0.0–1.0): `file_contains`, `file_check`, `json_check`, `command_executed`, `uipath_eval`
+- **Continuous** (0.0–1.0): `reference_comparison`, `llm_judge`, `agent_judge`
 
 **Task success:** ALL criteria must score >= their `pass_threshold`.
 
@@ -492,20 +490,6 @@ Runs a command and checks the exit code, with optional stdout matching. **Binary
 | `expected_stdout` | `null` | When set, stdout is also checked |
 | `stdout_match` | `"exact"` | Match mode: `exact` (stripped), `contains` (substring), `regex` (pattern) |
 
-### `pytest`
-
-Runs pytest and scores based on test results. **Fractional scoring:** `tests_passed / tests_total`.
-
-```yaml
-- type: "pytest"
-  path: "tests/"                      # Test directory or file (default: ".")
-  args: ["-v"]                        # Additional pytest arguments
-  timeout: 60                         # Timeout in seconds (default: 60)
-  description: "All tests must pass"
-  weight: 3.0
-  pass_threshold: 0.9                 # 90% of tests must pass
-```
-
 ### `file_matches_regex`
 
 Checks if file content matches a regular expression pattern. **Binary scoring.**
@@ -518,27 +502,6 @@ Checks if file content matches a regular expression pattern. **Binary scoring.**
   flags: 0                            # Regex flags (re.IGNORECASE=2, re.MULTILINE=8)
   description: "Config must define API_KEY"
 ```
-
-### `pylint_score`
-
-Runs pylint and evaluates code quality. **Continuous scoring:** pylint score (0–10) normalized to 0.0–1.0.
-
-```yaml
-- type: "pylint_score"
-  path: "src/"
-  min_score: 8.5                      # Optional: minimum in pylint's 0-10 scale
-  pass_threshold: 0.85                # Alternative: 0.0-1.0 scale (default: 0.9)
-  fail_under: 5.0                     # Optional: pylint --fail-under flag
-  args: ["--disable=C0111"]           # Additional pylint arguments
-  rcfile: ".pylintrc"                 # Optional: path to config file
-  timeout: 120                        # Timeout in seconds (default: 120)
-  description: "Code must meet quality standards"
-  weight: 1.5
-```
-
-**Notes:**
-- `min_score` (0–10 scale) overrides `pass_threshold` when both are set
-- Install pylint in sandbox: `python: { env_packages: [pylint>=3.0] }`
 
 ### `reference_comparison`
 
@@ -1006,19 +969,6 @@ success_criteria:
     command: "python -m py_compile main.py"
     timeout: 10
     description: "Valid Python syntax"
-
-  - type: "pytest"
-    path: "tests/"
-    timeout: 60
-    description: "All tests pass"
-    weight: 3.0
-    pass_threshold: 1.0
-
-  - type: "pylint_score"
-    path: "main.py"
-    min_score: 8.0
-    description: "Code quality >= 8/10"
-    weight: 1.5
 
   - type: "reference_comparison"
     agent_file: "main.py"

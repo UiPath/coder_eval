@@ -20,7 +20,6 @@ from coder_eval.models import (
     EvaluationResult,
     FileContainsCriterion,
     FileExistsCriterion,
-    PytestCriterion,
     SandboxConfig,
 )
 from coder_eval.sandbox import Sandbox
@@ -441,39 +440,6 @@ class TestFractionalScoring:
         result = checker.check(criterion)
         # includes: 1/1 = 1.0, excludes: 0 found out of 2 = 1.0, avg = 1.0
         assert result.score == 1.0
-
-    def test_pytest_partial_success(self, tmp_path):
-        """Test pytest scoring with some tests passing."""
-        sandbox_dir = tmp_path / "sandbox"
-        sandbox_dir.mkdir()
-
-        # Create a pytest file with mixed results
-        test_file = sandbox_dir / "test_sample.py"
-        test_file.write_text("""
-def test_pass():
-    assert True
-
-def test_fail():
-    assert False
-""")
-
-        from coder_eval.models import PythonEnvConfig
-
-        config = SandboxConfig(driver="tempdir", python=PythonEnvConfig(env_packages=["pytest"]))
-        sandbox = Sandbox(config=config, task_id="test")
-        sandbox.sandbox_dir = sandbox_dir
-        sandbox._setup_virtualenv()
-        sandbox._install_packages()
-
-        checker = SuccessChecker(sandbox)
-
-        criterion = PytestCriterion(description="Run tests")
-
-        result = checker.check(criterion)
-        # Should have 1 passed, 1 failed = score of 0.5
-        assert result.score == 0.5
-        assert "1 passed" in result.details
-        assert "1 failed" in result.details
 
 
 class TestPassThresholdBehavior:

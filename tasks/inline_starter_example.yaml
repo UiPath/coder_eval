@@ -43,7 +43,7 @@ success_criteria:
     description: "date_formatter.py exists"
     path: "date_formatter.py"
 
-  - type: pytest
+  - type: run_command
     description: "All tests pass"
-    path: "."
+    command: "python -m pytest ."
     timeout: 30

@@ -32,7 +32,7 @@ coder_eval/
 ├── models/                        # Pydantic data models (subpackage)
 │   ├── __init__.py                # Unified exports for all models
 │   ├── enums.py                   # AgentKind, AgentState, FinalStatus, ApiBackend
-│   ├── criteria.py                # 16 success criterion types + base + union
+│   ├── criteria.py                # 14 success criterion types + base + union
 │   ├── experiment.py              # ExperimentDefinition, ExperimentVariant, ResolvedTask, result models
 │   ├── gateway.py                 # DEFAULT_GATEWAY_MODEL constant (cycle-free leaf)
 │   ├── mutations.py               # PromptMutation variants (prefix/suffix/replace/template/rephrase)
@@ -54,11 +54,8 @@ coder_eval/
 │   ├── file_contains.py
 │   ├── file_exists.py
 │   ├── file_matches_regex.py
-│   ├── import_check.py
 │   ├── json_check.py
 │   ├── llm_judge.py
-│   ├── pylint_score.py
-│   ├── pytest_criterion.py
 │   ├── reference_comparison.py
 │   ├── run_command.py
 │   ├── skill_triggered.py         # Binary: did the agent engage the target skill (Skill tool / file read)?
@@ -140,7 +137,7 @@ templates/                         # Sandbox template directories
 - **Callback Streaming**: `StreamCallback` protocol with `TaskScopedCallback` wrapper for real-time LLM event output
 - **Experiment Layer**: Pre-processing config resolver (`ExperimentRunner`) that resolves task × variant combinations via 5-layer merge (default → experiment defaults → task → variant → CLI) before passing to `run_batch`. For running A/B comparisons (model vs. model, skill on vs. off, prompt vs. prompt), see [docs/AB_EXPERIMENTS.md](docs/AB_EXPERIMENTS.md).
 - **Single declarative merge resolver**: All five config layers merge through ONE engine (`orchestration/config_merge.py::resolve_root`) for the three `-D`-reachable roots (`agent`/`run_limits`/`sandbox`). Each field declares *how it merges* once, on the model, via `MergeField(strategy="deep"|"append"|"replace")` (or a type-aware default: nested `BaseModel`/free-form `dict` → `deep`; `list`/scalar → `replace`). `resolve_task_for_variant` (layers 1–4) and `apply_overrides` (layer 5) build `Layer` lists and call the same `resolve_root`, so a field merges identically regardless of which layer supplied it (the unification invariant, enforced by `tests/test_merge_unification.py`). Lint rule CE014 forces every list field to declare its strategy explicitly. See `docs/features/2026-06-01-declarative-merge-strategies.md`.
-- **Generic CLI overrides (`-D`/`--set`)**: Layer 5 is a thin wrapper (`orchestration/overrides.py`) over the resolver above. `coder-eval run -D agent.model=opus -D run_limits.max_turns=30` overrides any field on the resolved `TaskDefinition` (`agent`/`run_limits`/`sandbox` roots), schema-validated with did-you-mean. Only `--model` (→ `agent.model`) and `--driver` (→ `sandbox.driver`) survive as active thin aliases that emit the equivalent `-D` entry; an alias and `-D` targeting the same path is a hard error. `--type` (→ `agent.type`) is a separate, lighter alias that does NOT route through that collision check — `--type` and `-D agent.type=…` last-win rather than hard-error (the `-D` value wins). Tools, plugins, and SDK options are `-D`-only; the legacy `--permission-mode`/`--max-turns`/`--task-timeout`/`--turn-timeout` flags remain as hidden deprecated aliases that warn and forward to the equivalent `-D`. See `docs/features/2026-06-01-generic-d-overrides.md`.
+- **Generic CLI overrides (`-D`/`--set`)**: Layer 5 is a thin wrapper (`orchestration/overrides.py`) over the resolver above. `coder-eval run -D agent.model=opus -D run_limits.max_turns=30` overrides any field on the resolved `TaskDefinition` (`agent`/`run_limits`/`sandbox` roots), schema-validated with did-you-mean. Only `--model` (→ `agent.model`) and `--driver` (→ `sandbox.driver`) survive as active thin aliases that emit the equivalent `-D` entry; an alias and `-D` targeting the same path is a hard error. `--type` (→ `agent.type`) is a separate, lighter alias that does NOT route through that collision check — `--type` and `-D agent.type=…` last-win rather than hard-error (the `-D` value wins). Tools, plugins, and SDK options are `-D`-only. See `docs/features/2026-06-01-generic-d-overrides.md`.
 - **All core models importable from `coder_eval.models`** regardless of submodule
 - **Dataset fan-out**: `TaskDefinition.dataset` (inline rows or JSONL path) expands a single task into N row-tasks with `${row.<field>}` substitution in `initial_prompt` and `success_criteria` string fields. Expansion runs in `task_loader.expand_dataset` **before** variant resolution, so variants cannot override the dataset. Row sampling: CLI `--sample N` (fixed-seed uniform-random N over the whole dataset) overrides `dataset.sample_per_stratum` (fixed/seedable stratified random N-per-stratum, keyed on `stratify_field`, default `expected_skill` — for classification suites like activation).
 - **Per-criterion aggregation**: Each `BaseCriterion` subclass exposes `aggregate(criterion, per_row_results) -> CriterionAggregate | None`. Default emits `count / mean / median / std / min / max` so every criterion is suite-thresholdable for free. Classification-style criteria return `ClassificationCriterionResult` (subclass of `CriterionResult`) and layer accuracy / P/R/F1 / confusion via the shared `overlay_classification_metrics` utility. `BaseSuccessCriterion.suite_thresholds` gates the suite on those metrics; CLI exits non-zero on any gate failure.
@@ -149,7 +146,7 @@ templates/                         # Sandbox template directories
 - **sandbox isolation**: Tasks that don't need MCP servers should set `setting_sources: []` in their `agent:` block to isolate the sandbox from the host project's CLAUDE.md and settings. Without this, the host project's CLAUDE.md (often 20 KB+) is injected into every API call, inflating cache-creation tokens and cost significantly.
 - **Run-time caps (non-criterion enforcement)**: `TaskDefinition.run_limits` (`RunLimits` model) is the single namespace for all run-time caps — `max_turns` / `task_timeout` / `turn_timeout` (structural) and `max_input_tokens` / `max_output_tokens` / `max_total_tokens` / `max_usd` (cumulative budget). Token/USD breaches abort with `FinalStatus.TOKEN_BUDGET_EXCEEDED` or `COST_BUDGET_EXCEEDED` (both `category == "failed"`). Structural caps are set from the CLI via `-D run_limits.max_turns=…` / `-D run_limits.task_timeout=…` / `-D run_limits.turn_timeout=…` (field-merged into `run_limits`); budget caps via `-D run_limits.max_usd=…` etc. or YAML. Layered config uses field-merge — a variant block overrides individual keys without replacing the task's block. See `docs/features/2026-05-11-run-limits.md`.
 
-## Success Criteria (17 types)
+## Success Criteria (14 types)
 
 | Type | Scoring | Description |
 |------|---------|-------------|
@@ -158,13 +155,10 @@ templates/                         # Sandbox template directories
 | `file_check` | Fractional | Unified file existence + content + regex check |
 | `json_check` | Fractional | JSON validation + JSON Schema + JMESPath assertions |
 | `run_command` | Binary / Continuous | Command exit code + optional stdout matching or float scoring |
-| `pytest` | Fractional | tests_passed / total |
 | `file_matches_regex` | Binary | Regex match on file |
-| `pylint_score` | Continuous | pylint score / 10.0 |
 | `reference_comparison` | Continuous | AST/token/complexity similarity |
 | `command_executed` | Fractional | Agent tool usage verification |
 | `commands_efficiency` | Continuous | Agent tool-call efficiency relative to expected budget |
-| `import_check` | Fractional | AST-based import extraction + importlib validation |
 | `uipath_eval` | Fractional | UiPath agent evaluation results |
 | `classification_match` | Binary | File-based label match (observed vs expected) with `(none)`/`(other)` sentinels; emits `ClassificationCriterionResult` for suite-level P/R/F1 |
 | `skill_triggered` | Binary | Did the agent engage the target skill? Agent-agnostic — Claude's `Skill` tool call, or (Codex) reading the skill's files off disk. Emits `ClassificationCriterionResult` for suite-level P/R/F1 |
@@ -304,7 +298,7 @@ Tasks are YAML files. See [docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_G
 
 ## Dependencies
 
-**Runtime (always)**: pydantic, pydantic-settings, pyyaml, typer, rich, python-dotenv, anthropic, claude-agent-sdk, anyio, pylint, radon, tqdm, aiohttp, jmespath, jsonschema
+**Runtime (always)**: pydantic, pydantic-settings, pyyaml, typer, rich, python-dotenv, anthropic, claude-agent-sdk, anyio, radon, tqdm, aiohttp, jmespath, jsonschema
 
 **Runtime (optional, `[uipath]` extra)**: uipath — the in-host `uipath` SDK (handy for local sandbox parity with tasks that invoke `uv run uipath eval ...`). Base installs without this extra still run end-to-end; UiPath-dependent paths fail at dispatch with a clear `pip install 'coder-eval[uipath]'` hint. The LLM judge and the `rephrase` mutation no longer use the LLM Gateway client — they route through the run's backend (Bedrock / Anthropic / proxy), so `uipath-llmgw-client` is no longer a dependency. See `docs/features/2026-05-19-optional-uipath-packages.md`.
 

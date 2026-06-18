@@ -15,7 +15,6 @@ dependencies = [
     "anthropic>=0.86.0",
     "claude-agent-sdk>=0.2.82",
     "anyio>=4.13.0",
-    "pylint>=4.0.5",
     "radon>=6.0.1",
     "tqdm>=4.67.3",
     "aiohttp>=3.14.1",

@@ -71,7 +71,6 @@ def _build_overrides(
     model: str | None,
     driver: str | None,
     set_overrides: list[str],
-    deprecated: list[tuple[str, str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Translate the surviving alias flags (``--model`` / ``--driver``) +
     ``-D``/``--set`` entries into one validated override map (dotted path ->
@@ -83,11 +82,6 @@ def _build_overrides(
     against the schema; ``OverrideError`` is wrapped into ``typer.BadParameter``
     at this CLI boundary. All other task-config knobs (permission mode, turn
     limits, timeouts, tools, plugins, SDK options) are expressed via ``-D``.
-
-    ``deprecated`` carries ``(flag, dotted_path, value)`` tuples for the legacy
-    bespoke flags retired in favour of ``-D``; a supplied one emits a one-line
-    stderr deprecation hint and is then treated exactly like an alias (so it
-    still collision-checks against ``-D``).
     """
     from ..orchestration.config_merge import MergeError, validate_paths
     from ..orchestration.overrides import OverrideError, parse_override
@@ -103,14 +97,6 @@ def _build_overrides(
         _add_alias("agent.model", model, "--model")
     if driver is not None:
         _add_alias("sandbox.driver", driver, "--driver")
-
-    # Retired bespoke flags: emit the equivalent -D as a deprecation hint, then
-    # route them through the same alias path (so an alias+-D collision still errors).
-    for flag, path, value in deprecated or []:
-        if value is None:
-            continue
-        typer.echo(f"warning: {flag} is deprecated; use -D {path}={value} instead.", err=True)
-        _add_alias(path, value, flag)
 
     # -D / --set entries (hard error on collision with an alias or another -D).
     for raw in set_overrides:
@@ -293,21 +279,6 @@ def run_command(
             "-D sandbox.driver.)"
         ),
     ),
-    # Deprecated, hidden aliases for the retired bespoke flags. Each emits the
-    # equivalent `-D` plus a one-line "use -D ... instead" hint so existing run
-    # scripts don't hit a bare "No such option" cliff. Prefer `-D` going forward.
-    deprecated_max_turns: int | None = typer.Option(
-        None, "--max-turns", hidden=True, min=1, help="Deprecated: use -D run_limits.max_turns=N."
-    ),
-    deprecated_turn_timeout: int | None = typer.Option(
-        None, "--turn-timeout", hidden=True, help="Deprecated: use -D run_limits.turn_timeout=SECONDS."
-    ),
-    deprecated_task_timeout: int | None = typer.Option(
-        None, "--task-timeout", hidden=True, help="Deprecated: use -D run_limits.task_timeout=SECONDS."
-    ),
-    deprecated_permission_mode: str | None = typer.Option(
-        None, "--permission-mode", hidden=True, help="Deprecated: use -D agent.permission_mode=MODE."
-    ),
 ) -> None:
     """Run evaluation tasks (optionally in parallel).
 
@@ -348,12 +319,6 @@ def run_command(
         model=model,
         driver=driver,
         set_overrides=set_overrides,
-        deprecated=[
-            ("--max-turns", "run_limits.max_turns", deprecated_max_turns),
-            ("--turn-timeout", "run_limits.turn_timeout", deprecated_turn_timeout),
-            ("--task-timeout", "run_limits.task_timeout", deprecated_task_timeout),
-            ("--permission-mode", "agent.permission_mode", deprecated_permission_mode),
-        ],
     )
 
     # Override API backend if --backend was passed. The flag is shorthand for the

@@ -202,18 +202,6 @@ class RunCommandCriterion(BaseSuccessCriterion):
         return self
 
 
-class PytestCriterion(BaseSuccessCriterion):
-    """Run pytest and check for success.
-
-    Pure data model - checking logic in SuccessChecker._check_pytest()
-    """
-
-    type: Literal["pytest"] = "pytest"
-    path: str = Field(default=".", description="Path to test directory or file")
-    args: list[str] = Field(default_factory=list, description="Additional pytest arguments")
-    timeout: int = Field(default=60, description="Timeout in seconds")
-
-
 class FileMatchesRegexCriterion(BaseSuccessCriterion):
     """Check if file content matches a regex pattern.
 
@@ -358,79 +346,6 @@ class FileCheckCriterion(BaseSuccessCriterion):
     patterns: list[RegexPattern] = Field(
         default_factory=list, description="Regex patterns to check against file content"
     )
-
-
-class PylintScoreCriterion(BaseSuccessCriterion):
-    """Run pylint and evaluate code based on its quality score.
-
-    Pylint provides a comprehensive score from 0-10 that reflects:
-    - Code correctness (errors)
-    - Code quality (warnings, conventions)
-    - Maintainability (refactoring opportunities)
-    - Style compliance (formatting, naming)
-
-    This criterion normalizes pylint's score to 0.0-1.0 for evaluation.
-
-    Pure data model - checking logic in SuccessChecker._check_pylint_score()
-
-    Example YAML:
-        success_criteria:
-          - type: "pylint_score"
-            path: "src/"
-            pass_threshold: 0.85  # Requires 8.5/10
-            weight: 1.5
-            description: "Code must meet high quality standards"
-            min_score: 8.5        # Optional: explicit minimum (overrides pass_threshold)
-            args: ["--disable=C0111"]  # Optional: extra args
-            timeout: 120
-    """
-
-    type: Literal["pylint_score"] = "pylint_score"
-    path: str = Field(description="Path to analyze (file or directory)")
-    min_score: float | None = Field(
-        default=None,
-        le=10.0,
-        description=(
-            "Optional explicit minimum score (0-10, can be negative for very poor code). "
-            "If set, overrides pass_threshold for clarity."
-        ),
-    )
-    fail_under: float | None = Field(
-        default=None,
-        ge=0.0,
-        le=10.0,
-        description="Optional pylint --fail-under flag (0-10). Causes pylint to exit non-zero below this.",
-    )
-    args: list[str] = Field(
-        default_factory=list,
-        description="Additional pylint arguments (e.g., ['--disable=C0111', '--max-line-length=120'])",
-    )
-    rcfile: str | None = Field(
-        default=None, description="Path to pylintrc configuration file (relative to sandbox root)"
-    )
-    timeout: int = Field(default=120, description="Timeout in seconds (pylint can be slow on large codebases)")
-
-    @model_validator(mode="after")
-    def normalize_min_score_to_threshold(self) -> PylintScoreCriterion:
-        """Convert min_score (0-10) to pass_threshold (0-1) if set.
-
-        This allows users to specify thresholds in the familiar pylint scale
-        while maintaining internal consistency with the 0-1 score range.
-
-        Handles negative scores by clamping to 0.0.
-
-        **Important:** If both min_score and pass_threshold are specified,
-        min_score takes precedence and overrides pass_threshold. This is
-        intentional to avoid confusion between the 0-10 and 0-1 scales.
-        """
-        if self.min_score is not None:
-            # Normalize to 0-1, clamping negative scores to 0
-            # Examples:
-            #   min_score=8.5  -> pass_threshold=0.85
-            #   min_score=-1.0 -> pass_threshold=0.0
-            #   min_score=10.0 -> pass_threshold=1.0
-            self.pass_threshold = max(0.0, min(1.0, self.min_score / 10.0))
-        return self
 
 
 class ReferenceComparisonCriterion(BaseSuccessCriterion):
@@ -660,31 +575,6 @@ class SkillTriggeredCriterion(BaseSuccessCriterion):
     skill_name: str = Field(
         description="Only count Skill invocations whose 'skill' parameter matches this name.",
     )
-
-
-class ImportCheckCriterion(BaseSuccessCriterion):
-    """Check that a Python file parses correctly and its imports resolve.
-
-    Parses the target file with ast.parse() (replacing py_compile syntax checks),
-    extracts all import/from-import statements from the entire AST (including
-    inside functions and try/except blocks), and validates each import resolves
-    to a real module using importlib in the sandbox environment.
-
-    Fractional scoring: valid_imports / total_checked_imports.
-    If the file has a syntax error, score is 0.0.
-
-    Pure data model - checking logic in ImportCheckChecker._check_impl()
-
-    Example YAML:
-        success_criteria:
-          - type: "import_check"
-            path: "main.py"
-            description: "All imports resolve correctly"
-    """
-
-    type: Literal["import_check"] = "import_check"
-    path: str = Field(description="Path to the Python file to check (relative to sandbox root)")
-    timeout: int = Field(default=30, description="Timeout in seconds for import resolution commands")
 
 
 class LLMJudgeCriterion(BaseSuccessCriterion):
@@ -1016,16 +906,13 @@ SuccessCriterion = (
     FileExistsCriterion
     | FileContainsCriterion
     | RunCommandCriterion
-    | PytestCriterion
     | FileMatchesRegexCriterion
     | FileCheckCriterion
     | JsonCheckCriterion
-    | PylintScoreCriterion
     | ReferenceComparisonCriterion
     | CommandExecutedCriterion
     | CommandsEfficiencyCriterion
     | UiPathEvalCriterion
-    | ImportCheckCriterion
     | ClassificationMatchCriterion
     | SkillTriggeredCriterion
     | LLMJudgeCriterion

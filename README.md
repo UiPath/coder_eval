@@ -9,7 +9,7 @@ A robust, extensible framework for evaluating AI coding agents with comprehensiv
 - **Sandboxed Execution** — Isolated environments with virtual environments and resource limits
 - **Agent Abstraction** — Generic agent interface (currently supports Claude Code, extensible to others)
 - **Dual Evaluation** — Objective success criteria plus optional qualitative LLM review
-- **14 Criterion Types** — From simple file checks to pytest scoring, pylint analysis, code similarity, and LLM-graded rubrics
+- **14 Criterion Types** — From simple file checks to code similarity and LLM-graded rubrics
 - **Command Telemetry** — Full traceability of every tool invocation with timing and status
 - **Token Usage Tracking** — Input/output token counts for cost analysis
 - **Reference Comparison** — Code similarity scoring using AST, token, and complexity analysis
