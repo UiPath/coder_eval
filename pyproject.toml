@@ -3,11 +3,11 @@ name = "coder-eval"
 version = "0.7.0"
 description = "A robust, extensible framework for evaluating AI coding agents"
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.13"
 dependencies = [
     "pydantic>=2.12.5",
-    "pydantic-settings>=2.13.1",
+    "pydantic-settings>=2.14.2",
     "pyyaml>=6.0.3",
     "typer>=0.24.1",
     "rich>=14.3.3",

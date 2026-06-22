@@ -545,7 +545,7 @@ For the running, stack-ranked backlog of proposed improvements (and how to add y
 
 ## License
 
-MIT
+© 2026 UiPath. Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ## Acknowledgments
 

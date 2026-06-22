@@ -8,7 +8,7 @@ Project reference for AI assistants working on the `coder_eval` codebase.
 
 - **Version**: 0.1.0
 - **Python**: >=3.13
-- **License**: MIT
+- **License**: Apache 2.0
 - **Entry point**: `coder_eval.cli:app` (command: `coder-eval`)
 
 ## Directory Structure
