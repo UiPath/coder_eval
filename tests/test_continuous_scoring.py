@@ -278,10 +278,10 @@ class TestWeightedScoreCalculation:
         result.calculate_weighted_score([])
         assert result.weighted_score == 0.0
 
-    def test_weighted_score_mismatch_fallback(self):
-        """Test weighted score when results and criteria counts don't match."""
+    def test_weighted_score_mismatch_raises(self):
+        """A results/criteria length mismatch fails loud instead of fabricating a score."""
         result = create_test_evaluation_result(
-            task_id="test",
+            task_id="my-task",
             final_status="SUCCESS",
             success_criteria_results=[
                 CriterionResult(criterion_type="file_exists", description="A", score=1.0),
@@ -290,43 +290,31 @@ class TestWeightedScoreCalculation:
             turns=[],
         )
 
-        # Only provide 1 criterion (mismatch)
+        # Only provide 1 criterion (mismatch with 2 results)
         criteria = [
             FileExistsCriterion(path="a.txt", description="A", weight=1.0),
         ]
 
-        result.calculate_weighted_score(criteria)
-        # Falls back to simple average: (1.0 + 0.5) / 2 = 0.75
-        assert result.weighted_score == 0.75
-
-    def test_weighted_score_mismatch_logs_warning(self, caplog):
-        """Test that results/criteria length mismatch logs a warning."""
-        import logging
-
-        result = create_test_evaluation_result(
-            task_id="test",
-            final_status="SUCCESS",
-            success_criteria_results=[
-                CriterionResult(criterion_type="file_exists", description="A", score=1.0),
-                CriterionResult(criterion_type="file_exists", description="B", score=0.5),
-            ],
-            turns=[],
-        )
-
-        criteria = [
-            FileExistsCriterion(path="a.txt", description="A", weight=1.0),
-        ]
-
-        with caplog.at_level(logging.WARNING, logger="coder_eval.models.results"):
+        with pytest.raises(ValueError, match="my-task"):
             result.calculate_weighted_score(criteria)
+        # No weight-ignoring score was fabricated.
+        assert result.weighted_score is None
 
-        # Should still compute fallback score
-        assert result.weighted_score == 0.75
-
-        # Should log a warning about the mismatch
-        assert any("mismatch" in record.message.lower() for record in caplog.records), (
-            f"Expected a warning about mismatch, got: {[r.message for r in caplog.records]}"
+    def test_weighted_score_empty_criteria_does_not_raise(self):
+        """Empty results/criteria still yields 0.0 without raising (ERROR rows rely on this)."""
+        result = create_test_evaluation_result(
+            task_id="test",
+            final_status="ERROR",
+            success_criteria_results=[],
+            turns=[],
         )
+
+        # Non-empty criteria but empty results -> empty guard, not the mismatch raise.
+        criteria = [
+            FileExistsCriterion(path="a.txt", description="A", weight=1.0),
+        ]
+        result.calculate_weighted_score(criteria)
+        assert result.weighted_score == 0.0
 
     def test_weighted_score_single_criterion(self):
         """Test weighted score with a single criterion."""

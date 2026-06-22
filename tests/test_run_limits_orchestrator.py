@@ -19,6 +19,7 @@ from coder_eval.models import (
     FinalStatus,
     RunLimits,
     SandboxConfig,
+    SimulationTelemetry,
     TaskDefinition,
     TokenUsage,
     TurnRecord,
@@ -594,3 +595,31 @@ class TestExpectedTurnsSimulation:
 
         assert "Visible turns (5) exceeded expected_turns (2)" in caplog.text
         assert orch._expected_turns_warning_emitted is True
+
+
+class TestBuildSimulationTelemetry:
+    """Direct field-mapping tests for the _build_simulation_telemetry SSOT builder."""
+
+    def test_maps_all_fields(self, tmp_path):
+        from coder_eval.simulation import DialogStopReason
+
+        orch = _make_orchestrator(_make_task(), tmp_path)
+        orch.replicate_index = 3
+
+        telemetry = orch._build_simulation_telemetry(
+            n_trials=5,
+            stop_reason=DialogStopReason.STOP_TOKEN,
+            total_turns=4,
+            sim_in=120,
+            sim_out=34,
+            sim_failures=1,
+        )
+
+        assert isinstance(telemetry, SimulationTelemetry)
+        assert telemetry.n_trials == 5
+        assert telemetry.replicate_index == 3  # pulled from the orchestrator, not a param
+        assert telemetry.stop_reason == "stop_token"
+        assert telemetry.total_turns == 4
+        assert telemetry.simulator_input_tokens == 120
+        assert telemetry.simulator_output_tokens == 34
+        assert telemetry.simulator_failures == 1

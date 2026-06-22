@@ -519,8 +519,25 @@ class Orchestrator:
         self.result.completed_at = datetime.now()
         self.result.duration_seconds = time.time() - start_time
 
-        # Weighted score
-        self.result.calculate_weighted_score(self.task.success_criteria)
+        # Weighted score. This call site is wrapped because _finalize_result runs
+        # inside run()'s finally — an unguarded raise here would skip persistence and
+        # lose task.json. The other calculate_weighted_score calls (the simulation
+        # path) run inside run()'s try, whose broad `except Exception` already converts
+        # a raise into a populated ERROR result, so they intentionally stay unwrapped.
+        try:
+            self.result.calculate_weighted_score(self.task.success_criteria)
+        except ValueError as e:
+            logger.error("Weighted-score computation failed; marking row ERROR: %s", e, exc_info=True)
+            self.result.weighted_score = None
+            self.result.final_status = FinalStatus.ERROR
+            self.result.error_message = str(e)
+            self.result.error_details = create_error_context(
+                error=e,
+                task_id=self.task.task_id,
+                attempt=max(self.result.iteration_count, 1),
+                component="orchestrator.finalize.weighted_score",
+                agent_name=self._agent_name,
+            )
 
         # Command statistics
         if self.result.iterations:
@@ -1415,6 +1432,27 @@ class Orchestrator:
 
         return all_passed
 
+    def _build_simulation_telemetry(
+        self,
+        *,
+        n_trials: int,
+        stop_reason: DialogStopReason,
+        total_turns: int,
+        sim_in: int,
+        sim_out: int,
+        sim_failures: int,
+    ) -> SimulationTelemetry:
+        """Single construction point for SimulationTelemetry across the dialog loop's exit paths."""
+        return SimulationTelemetry(
+            n_trials=n_trials,
+            replicate_index=self.replicate_index,
+            stop_reason=stop_reason.value,
+            simulator_input_tokens=sim_in,
+            simulator_output_tokens=sim_out,
+            simulator_failures=sim_failures,
+            total_turns=total_turns,
+        )
+
     async def _simulation_dialog_loop(self, initial_prompt: str | None, sandbox_dir: Path) -> bool:
         """Run the task as a multi-turn dialog driven by an LLM user simulator.
 
@@ -1490,14 +1528,13 @@ class Orchestrator:
                 except Exception:
                     simulator_failures += 1
                     logger.exception("User simulator failed to generate opening message — aborting dialog")
-                    self.result.simulation = SimulationTelemetry(
+                    self.result.simulation = self._build_simulation_telemetry(
                         n_trials=sim_config.n_trials,
-                        replicate_index=self.replicate_index,
-                        stop_reason=DialogStopReason.ERROR.value,
-                        simulator_input_tokens=simulator_input_tokens,
-                        simulator_output_tokens=simulator_output_tokens,
-                        simulator_failures=simulator_failures,
+                        stop_reason=DialogStopReason.ERROR,
                         total_turns=0,
+                        sim_in=simulator_input_tokens,
+                        sim_out=simulator_output_tokens,
+                        sim_failures=simulator_failures,
                     )
                     return False
                 user_completed_wall = datetime.now()
@@ -1526,14 +1563,13 @@ class Orchestrator:
                 if opener.stop_requested:
                     assert stop_reason is None
                     stop_reason = DialogStopReason.STOP_TOKEN
-                    self.result.simulation = SimulationTelemetry(
+                    self.result.simulation = self._build_simulation_telemetry(
                         n_trials=sim_config.n_trials,
-                        replicate_index=self.replicate_index,
-                        stop_reason=stop_reason.value,
-                        simulator_input_tokens=simulator_input_tokens,
-                        simulator_output_tokens=simulator_output_tokens,
-                        simulator_failures=simulator_failures,
+                        stop_reason=stop_reason,
                         total_turns=0,
+                        sim_in=simulator_input_tokens,
+                        sim_out=simulator_output_tokens,
+                        sim_failures=simulator_failures,
                     )
                     return False
             else:
@@ -1744,14 +1780,13 @@ class Orchestrator:
                 self._emit_criteria_event(criteria_results)
 
             assert stop_reason is not None, "dialog loop exited without picking a stop_reason"
-            self.result.simulation = SimulationTelemetry(
+            self.result.simulation = self._build_simulation_telemetry(
                 n_trials=sim_config.n_trials,
-                replicate_index=self.replicate_index,
-                stop_reason=stop_reason.value,
-                simulator_input_tokens=simulator_input_tokens,
-                simulator_output_tokens=simulator_output_tokens,
-                simulator_failures=simulator_failures,
+                stop_reason=stop_reason,
                 total_turns=turns_completed,
+                sim_in=simulator_input_tokens,
+                sim_out=simulator_output_tokens,
+                sim_failures=simulator_failures,
             )
             logger.info(
                 "Simulation dialog ended: stop_reason=%s turns=%s criteria_passed=%s",
@@ -1780,14 +1815,13 @@ class Orchestrator:
             # being None at this point means "exit was not an in-band stop
             # decision" (i.e., exception-driven), which we classify as ERROR.
             if self.result is not None and self.result.simulation is None:
-                self.result.simulation = SimulationTelemetry(
+                self.result.simulation = self._build_simulation_telemetry(
                     n_trials=sim_config.n_trials,
-                    replicate_index=self.replicate_index,
-                    stop_reason=(stop_reason or DialogStopReason.ERROR).value,
-                    simulator_input_tokens=simulator_input_tokens,
-                    simulator_output_tokens=simulator_output_tokens,
-                    simulator_failures=simulator_failures,
+                    stop_reason=stop_reason or DialogStopReason.ERROR,
                     total_turns=turns_completed,
+                    sim_in=simulator_input_tokens,
+                    sim_out=simulator_output_tokens,
+                    sim_failures=simulator_failures,
                 )
             # Always tear down the simulator agent (and its scratch dir) even
             # when the dialog bails out via exception.

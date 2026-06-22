@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from coder_eval.models import FinalStatus
+
 
 if TYPE_CHECKING:
     from coder_eval.models import (
@@ -274,17 +276,14 @@ def _score_pill(score: float | None, suffix: str = "") -> str:
 
 
 def _status_badge(status: Any) -> str:
-    """Render a colored status badge for FinalStatus."""
+    """Render a colored status badge for FinalStatus (dispatches on .category)."""
     status_str = getattr(status, "value", None) or str(status)
-    cls = "neutral"
-    su = status_str.upper()
-    if su == "SUCCESS":
-        cls = "success"
-    elif su in ("FAILURE", "MAX_TURNS_EXHAUSTED", "TIMEOUT", "TOKEN_BUDGET_EXCEEDED", "COST_BUDGET_EXCEEDED"):
-        cls = "failure"
-    elif su == "ERROR":
-        cls = "error"
-    return f'<span class="badge {cls}">{_esc(status_str)}</span>'
+    try:
+        fs = status if isinstance(status, FinalStatus) else FinalStatus(str(status))
+        cls = {"succeeded": "success", "failed": "failure", "error": "error"}[fs.category]
+    except (ValueError, KeyError):
+        cls = "neutral"  # unknown / non-FinalStatus input
+    return f'<span class="badge {_esc(cls)}">{_esc(status_str)}</span>'
 
 
 def _format_duration(seconds: float | None) -> str:

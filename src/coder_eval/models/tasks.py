@@ -239,7 +239,8 @@ class Dataset(BaseModel):
         default=None,
         description=(
             "Seed for the 'sample_per_stratum' draw. None => fresh nondeterministic RNG each run "
-            "(re-draws every night). Set an integer for a reproducible sample."
+            "(re-draws every night) — this holds whether the count comes from YAML or the CLI "
+            "--sample-per-stratum flag. Set an integer to pin a reproducible sample."
         ),
     )
 

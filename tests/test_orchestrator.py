@@ -112,6 +112,40 @@ def test_record_route_environment_info_proxy(tmp_path):
     assert "judge_transport" not in info  # Direct-only field
 
 
+def test_finalize_result_score_mismatch_marks_error_and_writes_task_json(tmp_path):
+    """A weighted-score length mismatch at finalize becomes a visible ERROR row, task.json still written."""
+    from coder_eval.models import CriterionResult, EvaluationResult, FinalStatus
+
+    task_file = Path("tasks/hello_date.yaml")
+    task, _ = load_task(task_file)
+    # hello_date carries 3 criteria; injecting a single result forces the mismatch.
+    assert len(task.success_criteria) != 1
+
+    run_dir = tmp_path / "run"
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="t")
+    assert task.agent is not None
+    orchestrator.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        agent_type=task.agent.type,
+        started_at=0.0,
+        final_status=FinalStatus.SUCCESS,
+        iteration_count=1,
+        success_criteria_results=[
+            CriterionResult(criterion_type="file_exists", description="A", score=1.0),
+        ],
+        environment_info={},
+    )
+
+    orchestrator._finalize_result(start_time=0.0)
+
+    assert orchestrator.result.final_status == FinalStatus.ERROR
+    assert orchestrator.result.weighted_score is None
+    assert orchestrator.result.error_details is not None
+    # task.json is still persisted despite the failed score computation.
+    assert orchestrator.report_path.exists()
+
+
 class _SdkOptionsAgent(MockAgent):
     """``MockAgent`` subclass that returns a configurable ``get_sdk_options``.
 

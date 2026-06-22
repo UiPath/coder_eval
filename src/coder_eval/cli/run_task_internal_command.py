@@ -38,6 +38,16 @@ from coder_eval.orchestration.task_loader import load_task
 logger = logging.getLogger(__name__)
 
 
+def heartbeat_is_alive(current: str, last_counter: str, current_mtime: float, last_mtime: float) -> bool:
+    """True when the heartbeat shows a fresh signal of life.
+
+    Counter advance OR mtime advance counts as alive. The mtime arm covers the empty-counter
+    startup race (host touch + delayed first write → both reads ""; mtime advanced); the counter
+    arm covers bind-mount mtime latency (macOS gRPC-FUSE/VirtioFS) where mtime lags the write.
+    """
+    return bool(current and current != last_counter) or current_mtime > last_mtime
+
+
 def run_task_internal_command(
     input_dir: Path = typer.Option(  # noqa: B008
         Path(CONTAINER_INPUT_DIR),
@@ -95,13 +105,7 @@ def run_task_internal_command(
             except (FileNotFoundError, OSError):
                 current_mtime = 0.0
             now = time.monotonic()
-            # Either signal of life resets the stale clock. mtime guards
-            # against the empty-counter startup race (heartbeat_path.touch
-            # on host + delayed first write_text → both reads return "" but
-            # mtime did advance). Counter guards against bind-mount mtime
-            # latency on macOS gRPC-FUSE / VirtioFS, where the inode-level
-            # mtime can lag the actual write by seconds.
-            if (current and current != last_counter) or current_mtime > last_mtime:
+            if heartbeat_is_alive(current, last_counter, current_mtime, last_mtime):
                 last_counter = current
                 last_mtime = current_mtime
                 last_change = now

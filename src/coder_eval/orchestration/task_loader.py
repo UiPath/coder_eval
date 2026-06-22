@@ -396,10 +396,15 @@ def expand_dataset(
     #      (the YAML), so a runner can cap a dataset without editing its task.
     ds = task.dataset
     n_per_stratum = sample_per_stratum if sample_per_stratum is not None else ds.sample_per_stratum
+    # Stratified sampling is seeded only by dataset.sample_seed. When that is None the sample is
+    # deliberately nondeterministic — re-drawn every run — regardless of whether the CLI
+    # --sample-per-stratum flag or the YAML supplied the count (see Dataset.sample_seed). The
+    # nightly activation suite relies on this to broaden coverage across runs.
+    stratum_seed = ds.sample_seed
     if max_rows is not None and max_rows < len(rows):
         rows = random.Random(_SMOKE_SAMPLE_SEED).sample(rows, max_rows)
     elif max_rows is None and n_per_stratum is not None:
-        rows = _stratified_sample(rows, ds.stratify_field, n_per_stratum, ds.sample_seed)
+        rows = _stratified_sample(rows, ds.stratify_field, n_per_stratum, stratum_seed)
 
     id_field = task.dataset.id_field
     seen_ids: set[str] = set()

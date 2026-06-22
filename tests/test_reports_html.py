@@ -29,11 +29,32 @@ from coder_eval.models import (
 )
 from coder_eval.reports_html import (
     HTMLReportGenerator,
+    _status_badge,
     safe_write,
     write_experiment_html,
     write_task_html,
     write_variant_html,
 )
+
+
+_CATEGORY_TO_CLASS = {"succeeded": "success", "failed": "failure", "error": "error"}
+
+
+@pytest.mark.parametrize("status", list(FinalStatus))
+def test_status_badge_dispatches_on_category(status: FinalStatus):
+    """Every FinalStatus member renders a non-neutral, category-correct badge."""
+    badge = _status_badge(status)
+    expected_cls = _CATEGORY_TO_CLASS[status.category]
+    assert f'class="badge {expected_cls}"' in badge
+    assert "neutral" not in badge
+    # The human-readable label is the status value.
+    assert status.value in badge
+
+
+@pytest.mark.parametrize("bogus", ["WAT", "", None])
+def test_status_badge_unknown_renders_neutral(bogus):
+    """Unknown / non-FinalStatus input falls back to the neutral badge."""
+    assert 'class="badge neutral"' in _status_badge(bogus)
 
 
 def _make_command(

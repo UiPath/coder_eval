@@ -245,6 +245,28 @@ class TestExpandDatasetStratifiedSample:
         expanded = expand_dataset(task, tmp_path, max_rows=4, sample_per_stratum=3)
         assert len(expanded) == 4
 
+    def test_cli_arg_is_nondeterministic_by_default(self, tmp_path: Path) -> None:
+        # The CLI --sample-per-stratum flag (no dataset sample_seed) re-draws each
+        # run, exactly like the YAML-configured path. This is how the nightly
+        # activation suite is wired (eval_runner/cli.py --sample-per-stratum 20,
+        # activation.yaml sets no sample_seed) — it must broaden coverage by
+        # sampling different rows every night, NOT freeze to one fixed slice.
+        rows = self._stratified_rows()
+        task = _make_task_with_dataset(rows=rows)
+        assert task.dataset is not None and task.dataset.sample_seed is None
+        draws = {frozenset(t.row_id for t in expand_dataset(task, tmp_path, sample_per_stratum=3)) for _ in range(6)}
+        assert len(draws) > 1
+
+    def test_dataset_seed_wins_over_cli_arg(self, tmp_path: Path) -> None:
+        # An explicit dataset.sample_seed always wins — the CLI flag does not
+        # override it, so the selection matches the seeded YAML-only path.
+        rows = self._stratified_rows()
+        yaml_only = _make_task_with_dataset(rows=rows, sample_per_stratum=3, sample_seed=99)
+        with_flag = _make_task_with_dataset(rows=rows, sample_seed=99)
+        ids_yaml = [t.row_id for t in expand_dataset(yaml_only, tmp_path)]
+        ids_flag = [t.row_id for t in expand_dataset(with_flag, tmp_path, sample_per_stratum=3)]
+        assert ids_flag == ids_yaml
+
 
 class TestExpandDatasetJsonl:
     def test_loads_jsonl(self, tmp_path: Path) -> None:

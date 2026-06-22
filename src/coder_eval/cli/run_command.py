@@ -244,7 +244,8 @@ def run_command(
         help=(
             "For dataset-backed tasks, keep up to N rows per stratum (stratify_field, "
             "default expected_skill) — a stratified sample that overrides the task's "
-            "dataset.sample_per_stratum without editing the YAML. Ignored when --sample is set."
+            "dataset.sample_per_stratum without editing the YAML. Ignored when --sample is set. "
+            "Nondeterministic (re-draws each run) unless the task sets dataset.sample_seed."
         ),
         min=1,
     ),

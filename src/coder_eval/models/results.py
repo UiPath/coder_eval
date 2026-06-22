@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
@@ -17,9 +16,6 @@ from coder_eval.models.telemetry import (
     TokenUsage,
     TranscriptMessage,
 )
-
-
-logger = logging.getLogger(__name__)
 
 
 class ConfigLineageEntry(BaseModel):
@@ -520,17 +516,11 @@ class EvaluationResult(BaseModel):
             return
 
         if len(self.success_criteria_results) != len(criteria):
-            # Length mismatch indicates a programming error upstream — log it
-            logger.warning(
-                "Results/criteria length mismatch: %d results vs %d criteria for task %s."
-                + " Falling back to unweighted average.",
-                len(self.success_criteria_results),
-                len(criteria),
-                self.task_id,
+            raise ValueError(
+                f"Results/criteria length mismatch: {len(self.success_criteria_results)} results "
+                f"vs {len(criteria)} criteria for task {self.task_id}. This indicates an upstream "
+                f"bug; refusing to fabricate a weight-ignoring score."
             )
-            total_score = sum(r.score for r in self.success_criteria_results)
-            self.weighted_score = total_score / len(self.success_criteria_results)
-            return
 
         total_weighted_score = 0.0
         total_weight = 0.0
