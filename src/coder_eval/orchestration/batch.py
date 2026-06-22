@@ -340,6 +340,60 @@ def _load_completed_result(rt: ResolvedTask) -> TaskResult | None:
     )
 
 
+def recover_task_results(run_dir: Path) -> list[TaskResult]:
+    """Reconstruct ``TaskResult``s from every finalized ``task.json`` under ``run_dir``.
+
+    The disk half of the run-summary seam: pairs with ``build_run_summary`` to
+    (re)aggregate a finished run without re-executing it. Each ``task.json`` is the
+    atomically-written ``EvaluationResult`` for one task, so a file that is missing,
+    unparseable, or carries no ``final_status`` is skipped as not-yet-finalized
+    (mirrors ``_load_completed_result``). ``task_id`` and ``variant_id`` come from
+    the result itself; ``replicate_index`` is recovered from the
+    ``<variant_id>/<task_id>/<NN>/`` layout (``build_task_run_dir``). ``suite_id`` /
+    ``row_id`` are not stored in ``task.json`` and are left ``None`` — they feed
+    suite rollups, not ``run.json``.
+
+    Results are sorted by ``(variant_id, task_id, replicate_index)`` so the rebuilt
+    ``run.json`` ordering is deterministic, independent of filesystem walk order.
+
+    A ``task.json`` that lives under a *nested* run dir — a subdirectory carrying its
+    own ``run.json`` — belongs to that sub-run, not this one, and is excluded so a
+    parent summary never absorbs a nested suite's tasks. Base runs have no nesting;
+    this only matters for composed layouts that stack sub-runs under one tree.
+    """
+    nested_roots = [p.parent for p in run_dir.rglob("run.json") if p.parent != run_dir]
+    recovered: list[TaskResult] = []
+    for task_json in run_dir.rglob("task.json"):
+        if any(root in task_json.parents for root in nested_roots):
+            continue  # belongs to a nested sub-run (its own run.json), not this one
+        try:
+            result = EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            # Unreadable / malformed / schema-mismatched. Skip so one corrupt file can't
+            # abort the rebuild, but warn — silently dropping it would shrink tasks_run
+            # (numerator and denominator) with no signal that a task was lost.
+            logger.warning("skipping unreadable/malformed task.json %s: %s", task_json, exc)
+            continue
+        if not result.final_status:
+            # Written but incomplete (no terminal status) → skip, same as --resume.
+            continue
+        # The leaf dir is the zero-padded replicate index (build_task_run_dir);
+        # tolerate non-standard layouts by falling back to replicate 0.
+        leaf = task_json.parent.name
+        replicate_index = int(leaf) if leaf.isdigit() else 0
+        recovered.append(
+            TaskResult(
+                task_id=result.task_id,
+                variant_id=result.variant_id,
+                result=result,
+                duration=result.duration_seconds or 0.0,
+                replicate_index=replicate_index,
+            )
+        )
+    recovered.sort(key=lambda r: (r.variant_id, r.task_id, r.replicate_index))
+    return recovered
+
+
 # --- resume config fingerprint ------------------------------------------------
 # The per-task path key (variant_id/task_id/NN) does NOT encode result-affecting
 # run config like the model or backend. So --resume, which matches finalized tasks
@@ -478,11 +532,43 @@ def _generate_run_summary(
     Returns:
         RunSummary with aggregated statistics.
     """
-    from ..reports import ReportGenerator
+    summary = build_run_summary(
+        run_dir.name,
+        task_results,
+        start_time,
+        end_time,
+        task_tags,
+        task_paths=task_paths,
+        max_parallel=max_parallel,
+        skipped_tasks=skipped_tasks,
+    )
+    write_run_summary(summary, run_dir)
+    return summary
 
-    # Create run directory first to eliminate race condition
-    run_dir.mkdir(parents=True, exist_ok=True)
 
+def build_run_summary(
+    run_id: str,
+    task_results: list[TaskResult],
+    start_time: datetime,
+    end_time: datetime,
+    task_tags: dict[str, list[str]] | None = None,
+    *,
+    task_paths: dict[str, str] | None = None,
+    max_parallel: int = 1,
+    skipped_tasks: list[SkippedTask] | None = None,
+) -> RunSummary:
+    """Aggregate task results into a ``RunSummary`` — pure, no disk I/O.
+
+    The run-summary builder, decoupled from execution so a run can be summarised
+    from any source of ``TaskResult``s: a live batch (``run_batch``), results
+    recovered from finalized ``task.json`` files on disk (``recover_task_results``),
+    or a combination of the two (e.g. splicing the slices of a split run). Pairs
+    with ``write_run_summary`` for the persist half.
+
+    Status buckets use the canonical ``FinalStatus.category`` mapping and the version
+    chip is reconciled from the per-task (in-container) captures, so callers never
+    re-implement either — the single source of truth for run-level aggregation.
+    """
     statuses = [r.result.final_status for r in task_results]
 
     version_info = get_version_info()
@@ -508,8 +594,8 @@ def _generate_run_summary(
             sorted(v for v in container_versions if v),
             host_coder_eval,
         )
-    summary = RunSummary(
-        run_id=run_dir.name,
+    return RunSummary(
+        run_id=run_id,
         start_time=start_time,
         end_time=end_time,
         total_duration_seconds=(end_time - start_time).total_seconds(),
@@ -535,16 +621,24 @@ def _generate_run_summary(
         environment_info=version_info,
     )
 
-    # Save run.json (run-level summary — distinct from experiment.json written by ExperimentReportGenerator)
-    summary_path = run_dir / "run.json"
-    summary_path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
 
-    # Generate run.md with command statistics
+def write_run_summary(summary: RunSummary, run_dir: Path) -> None:
+    """Persist a ``RunSummary`` to ``run_dir``: ``run.json`` + the ``run.md`` report.
+
+    The persist half of the run-summary seam (see ``build_run_summary``). ``run.md``
+    carries command statistics rendered from the per-task data under ``run_dir``.
+    """
+    from ..reports import ReportGenerator
+
+    # Create run directory first to eliminate race condition
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # run.json — run-level summary (distinct from experiment.json from ExperimentReportGenerator)
+    (run_dir / "run.json").write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+
+    # run.md — command statistics
     report_md = ReportGenerator.generate_markdown(summary, run_dir=run_dir)
-    report_path = run_dir / "run.md"
-    report_path.write_text(report_md, encoding="utf-8")
-
-    return summary
+    (run_dir / "run.md").write_text(report_md, encoding="utf-8")
 
 
 def filter_tasks_by_tags(

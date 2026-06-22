@@ -2,6 +2,7 @@
 
 import typer
 
+from .aggregate_command import aggregate_command
 from .console import console
 from .evaluate_command import evaluate_command
 from .plan_command import plan_command
@@ -30,6 +31,7 @@ def main(ctx: typer.Context) -> None:
     - plan: Validate task files (dry-run)
     - evaluate: Run criteria against a directory without an agent
     - report: Display or export evaluation reports
+    - aggregate: Rebuild run.json/run.md from finalized task.json files
     - proxy: Start a local LLM Gateway proxy for Claude Code CLI
     """
     # Discover and register agents (built-in + third-party plugins) before any
@@ -49,6 +51,7 @@ app.command(name="run")(run_command)
 app.command(name="plan")(plan_command)
 app.command(name="evaluate")(evaluate_command)
 app.command(name="report")(report_command)
+app.command(name="aggregate")(aggregate_command)
 app.command(name="proxy")(proxy_command)
 # Hidden internal command invoked inside the Docker container only.
 app.command(name="_run-task-internal", hidden=True)(run_task_internal_command)
