@@ -2,6 +2,92 @@
 
 <!-- version list -->
 
+## v0.7.1 (2026-06-22)
+
+### Bug Fixes
+
+- **cli**: Harden aggregate recovery path and disclose rebuild scope
+  ([#438](https://github.com/UiPath/coder_eval/pull/438),
+  [`5f32a13`](https://github.com/UiPath/coder_eval/commit/5f32a13003b51cdeb5be68c48ffcd5931d73a3be))
+
+- **deps**: Bump pydantic-settings and msgpack to patch CVEs
+  ([#435](https://github.com/UiPath/coder_eval/pull/435),
+  [`24a0e06`](https://github.com/UiPath/coder_eval/commit/24a0e06d7d78334b062cbb47dbf51a8d7a68c6d7))
+
+- **evalboard**: Date and sort ad-hoc runs by run start_time
+  ([#432](https://github.com/UiPath/coder_eval/pull/432),
+  [`f058ea8`](https://github.com/UiPath/coder_eval/commit/f058ea8a4c5e6276c8391229bcf585d084861c17))
+
+- **evalboard**: Exclude mature-skipped tasks from run-page cost/duration metrics
+  ([#427](https://github.com/UiPath/coder_eval/pull/427),
+  [`18f303c`](https://github.com/UiPath/coder_eval/commit/18f303c2e67008000a7d3d91ebf39f477b67f419))
+
+### Build System
+
+- Sync uv.lock after dropping pylint/radon scoring deps
+  ([#430](https://github.com/UiPath/coder_eval/pull/430),
+  [`1abf449`](https://github.com/UiPath/coder_eval/commit/1abf449359c7b9fb03e0c12bf03f77107fdc2b50))
+
+### Chores
+
+- Relicense from MIT to Apache 2.0 with UiPath copyright notice
+  ([#435](https://github.com/UiPath/coder_eval/pull/435),
+  [`24a0e06`](https://github.com/UiPath/coder_eval/commit/24a0e06d7d78334b062cbb47dbf51a8d7a68c6d7))
+
+### Features
+
+- Restore HTML report generation and the report command
+  ([#430](https://github.com/UiPath/coder_eval/pull/430),
+  [`1abf449`](https://github.com/UiPath/coder_eval/commit/1abf449359c7b9fb03e0c12bf03f77107fdc2b50))
+
+- **cli**: Add aggregate to rebuild run.json/run.md from task.json
+  ([#438](https://github.com/UiPath/coder_eval/pull/438),
+  [`5f32a13`](https://github.com/UiPath/coder_eval/commit/5f32a13003b51cdeb5be68c48ffcd5931d73a3be))
+
+- **cli**: Add summarize to rebuild run.json/run.md from task.json
+  ([#438](https://github.com/UiPath/coder_eval/pull/438),
+  [`5f32a13`](https://github.com/UiPath/coder_eval/commit/5f32a13003b51cdeb5be68c48ffcd5931d73a3be))
+
+- **evalboard**: Cap ad-hoc runs with a show-all toggle
+  ([#432](https://github.com/UiPath/coder_eval/pull/432),
+  [`f058ea8`](https://github.com/UiPath/coder_eval/commit/f058ea8a4c5e6276c8391229bcf585d084861c17))
+
+- **evalboard**: Date, sort, and paginate the ad-hoc runs section
+  ([#432](https://github.com/UiPath/coder_eval/pull/432),
+  [`f058ea8`](https://github.com/UiPath/coder_eval/commit/f058ea8a4c5e6276c8391229bcf585d084861c17))
+
+- **evalboard**: Mark skipped-mature tasks with a non-clickable badge
+  ([#427](https://github.com/UiPath/coder_eval/pull/427),
+  [`18f303c`](https://github.com/UiPath/coder_eval/commit/18f303c2e67008000a7d3d91ebf39f477b67f419))
+
+- **evalboard**: Show mature tasks as green passes, keep trend averages honest
+  ([#427](https://github.com/UiPath/coder_eval/pull/427),
+  [`18f303c`](https://github.com/UiPath/coder_eval/commit/18f303c2e67008000a7d3d91ebf39f477b67f419))
+
+### Refactoring
+
+- Remove dormant features ahead of open-sourcing
+  ([#430](https://github.com/UiPath/coder_eval/pull/430),
+  [`1abf449`](https://github.com/UiPath/coder_eval/commit/1abf449359c7b9fb03e0c12bf03f77107fdc2b50))
+
+- Remove dormant features ahead of open-sourcing (#422)
+  ([#430](https://github.com/UiPath/coder_eval/pull/430),
+  [`1abf449`](https://github.com/UiPath/coder_eval/commit/1abf449359c7b9fb03e0c12bf03f77107fdc2b50))
+
+- Scrub stale references to removed features ([#430](https://github.com/UiPath/coder_eval/pull/430),
+  [`1abf449`](https://github.com/UiPath/coder_eval/commit/1abf449359c7b9fb03e0c12bf03f77107fdc2b50))
+
+- **cli**: Rename summarize command to aggregate
+  ([#438](https://github.com/UiPath/coder_eval/pull/438),
+  [`5f32a13`](https://github.com/UiPath/coder_eval/commit/5f32a13003b51cdeb5be68c48ffcd5931d73a3be))
+
+### Testing
+
+- Isolate version-info tests from the host UiPath CLI
+  ([#430](https://github.com/UiPath/coder_eval/pull/430),
+  [`1abf449`](https://github.com/UiPath/coder_eval/commit/1abf449359c7b9fb03e0c12bf03f77107fdc2b50))
+
+
 ## v0.7.0 (2026-06-16)
 
 ### Bug Fixes
