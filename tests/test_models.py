@@ -48,6 +48,39 @@ def test_success_criterion_discriminated_union():
     assert criterion.type == "run_command"
 
 
+def test_base_type_field_flows_through_aggregate():
+    """The declared base `type` field is the source of criterion_type in aggregate()."""
+    from coder_eval.criteria import CriterionRegistry, init_criteria
+    from coder_eval.models import CriterionResult, FileExistsCriterion, JsonCheckCriterion
+
+    init_criteria()
+    for criterion in (
+        FileExistsCriterion(path="a.py", description="a"),
+        JsonCheckCriterion(path="b.json", description="b"),
+    ):
+        checker = CriterionRegistry.get_checker(criterion.type)()
+        row = CriterionResult(criterion_type=criterion.type, description="row", score=1.0, passed=True)
+        agg = checker.aggregate(criterion, [row])
+        assert agg is not None
+        assert agg.criterion_type == criterion.type
+
+
+def test_criterion_union_round_trips_via_type_tag():
+    """A dict with type='json_check' resolves to JsonCheckCriterion; a bogus tag is rejected."""
+    from pydantic import TypeAdapter, ValidationError
+
+    from coder_eval.models import JsonCheckCriterion, SuccessCriterion
+
+    adapter = TypeAdapter(SuccessCriterion)
+    parsed = adapter.validate_python({"type": "json_check", "path": "out.json", "description": "check json"})
+    assert isinstance(parsed, JsonCheckCriterion)
+    assert parsed.type == "json_check"
+
+    # A typo'd/unknown tag must not silently coerce to the first union member.
+    with pytest.raises(ValidationError):
+        adapter.validate_python({"type": "not_a_real_criterion", "description": "x"})
+
+
 def test_command_not_executed_alias_normalizes_before_union_dispatch():
     """Legacy negative command assertions normalize before union dispatch."""
     from coder_eval.models import CommandExecutedCriterion

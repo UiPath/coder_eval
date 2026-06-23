@@ -8,8 +8,6 @@ Task loading, config resolution, and CLI override application are handled
 upstream by resolve_all_tasks() in experiment.py.
 """
 
-# pyright: reportImportCycles=false
-
 import asyncio
 import json
 import logging
@@ -106,7 +104,7 @@ async def run_batch(
                 if config.preservation_mode == PreservationMode.DIRECT_WRITE and driver != "docker":
                     logger.warning(
                         "DIRECT_WRITE on driver=%s runs the sandbox under run_dir; parent-dir "
-                        "node_modules can contaminate Node tool resolution (MST-9795).",
+                        + "node_modules can contaminate Node tool resolution (MST-9795).",
                         driver,
                     )
                 if sandbox_cfg is not None and sandbox_cfg.driver == "docker":

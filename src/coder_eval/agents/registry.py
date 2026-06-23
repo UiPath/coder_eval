@@ -1,5 +1,8 @@
 """Agent registration and factory pattern for BYOA (bring-your-own-agent) support."""
 
+# by-design model-hub ↔ registry type-level cycle; runtime imports are lazy per CE017
+# pyright: reportImportCycles=false
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -73,9 +76,9 @@ class AgentRegistry:
             if existing is not None and (existing.agent_class, existing.config_class) != (agent_cls, config_class):
                 raise ValueError(
                     f"Agent kind {kind!r} is already registered to "
-                    f"{existing.agent_class.__name__} ({existing.config_class.__name__}); "
-                    f"{agent_cls.__name__} ({config_class.__name__}) cannot shadow it. "
-                    f"Two plugins must not claim the same agent.type."
+                    + f"{existing.agent_class.__name__} ({existing.config_class.__name__}); "
+                    + f"{agent_cls.__name__} ({config_class.__name__}) cannot shadow it. "
+                    + "Two plugins must not claim the same agent.type."
                 )
             cls._registry[kind] = AgentRegistration(
                 agent_class=agent_cls,  # type: ignore[arg-type]
@@ -151,8 +154,8 @@ def create_agent(
     if not isinstance(config, registration.config_class):
         raise TypeError(
             f"Agent {agent_kind!r} expects {registration.config_class.__name__} "
-            f"but received {type(config).__name__}. "
-            f"Did you pass --type {agent_kind} with mismatched config?"
+            + f"but received {type(config).__name__}. "
+            + f"Did you pass --type {agent_kind} with mismatched config?"
         )
 
     # Instantiate the agent with the typed config

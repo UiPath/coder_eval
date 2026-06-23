@@ -1,5 +1,8 @@
 """Abstract base class for coding agents."""
 
+# by-design model-hub ↔ registry type-level cycle; runtime imports are lazy per CE017
+# pyright: reportImportCycles=false
+
 from abc import ABC, abstractmethod
 from typing import Any
 

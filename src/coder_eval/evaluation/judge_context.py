@@ -155,7 +155,7 @@ def collect_reference_secrets(reference_dir: Path) -> list[str]:
         if len(secrets) >= _MAX_REFERENCE_FILES:
             logger.warning(
                 "collect_reference_secrets: reference directory %s exceeds file count budget "
-                "(>%d files) — remaining files left unscrubbed",
+                + "(>%d files) — remaining files left unscrubbed",
                 reference_dir,
                 _MAX_REFERENCE_FILES,
             )
@@ -180,7 +180,7 @@ def collect_reference_secrets(reference_dir: Path) -> list[str]:
         if file_size > remaining:
             logger.warning(
                 "collect_reference_secrets: reference directory %s exceeds byte budget "
-                "(file %s is %d bytes, remaining %d) — stopping",
+                + "(file %s is %d bytes, remaining %d) — stopping",
                 reference_dir,
                 path,
                 file_size,

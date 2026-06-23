@@ -468,9 +468,9 @@ def resolve_task_for_variant(
     # `type: none` satisfies it (type is set), so only a truly type-less agent trips.
     if config is None and resolved_agent is not None and resolved_agent.type is None:
         raise ValueError(
-            f"Agent 'type' is required but was not set by any layer (default experiment, "
-            f"experiment defaults, task, or variant) for task {task.task_id!r}. "
-            f"Set it in the task YAML or the experiment."
+            "Agent 'type' is required but was not set by any layer (default experiment, "
+            + f"experiment defaults, task, or variant) for task {task.task_id!r}. "
+            + "Set it in the task YAML or the experiment."
         )
 
     return resolved_task, lineage, effective_repeats
@@ -527,9 +527,9 @@ def _apply_cli_overrides(
     # Final guard: agent.type must be set after all 5 layers have merged.
     if task.agent.type is None:
         raise ValueError(
-            f"Agent 'type' is required but was not set by any layer (default experiment, "
-            f"experiment defaults, task, variant, or CLI) for task {task.task_id!r}. "
-            f"Set it in the task YAML, the experiment, or via --type."
+            "Agent 'type' is required but was not set by any layer (default experiment, "
+            + f"experiment defaults, task, variant, or CLI) for task {task.task_id!r}. "
+            + "Set it in the task YAML, the experiment, or via --type."
         )
 
 

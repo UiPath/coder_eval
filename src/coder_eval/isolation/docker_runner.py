@@ -308,7 +308,7 @@ class DockerRunner:
     def _limits(self) -> ResourceLimits:
         return self.rt.task.sandbox.limits
 
-    async def run(self) -> EvaluationResult:
+    async def run(self) -> EvaluationResult:  # noqa: PLR0915 — god-function tracked for decomposition (code-review 2026-06-22)
         """Run the task in a container and return the parsed EvaluationResult.
 
         The container is responsible for producing ``task.json`` in

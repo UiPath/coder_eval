@@ -125,6 +125,37 @@ def test_config_claude_code_no_key_direct_succeeds():
     settings.validate_api_keys("claude-code")
 
 
+def test_config_codex_direct_is_noop_without_key():
+    """codex self-authenticates (CODEX_API_KEY / ChatGPT login) — no key required under direct."""
+    from coder_eval.config import Settings
+    from coder_eval.models.enums import ApiBackend
+
+    settings = Settings(anthropic_api_key=None, api_backend=ApiBackend.DIRECT)
+
+    # Must NOT raise and must NOT demand any credential.
+    settings.validate_api_keys("codex")
+
+
+def test_config_codex_bedrock_validates_backend_for_judges():
+    """codex + bedrock is allowed: --backend also routes llm_judge/agent_judge, so the
+    Bedrock settings are validated (they're needed for the judges), not rejected."""
+    from coder_eval.config import Settings
+    from coder_eval.models.enums import ApiBackend
+
+    settings = Settings(
+        api_backend=ApiBackend.BEDROCK,
+        aws_bearer_token_bedrock=None,
+        aws_region=None,
+        bedrock_model=None,
+    )
+    # Missing Bedrock settings surface as the normal bedrock-validation error,
+    # NOT a codex-specific "unsupported backend" rejection.
+    with pytest.raises(ValueError) as exc:
+        settings.validate_api_keys("codex")
+    assert "Bedrock routing is enabled" in str(exc.value)
+    assert "does not support" not in str(exc.value)
+
+
 def test_config_claude_code_proxy_missing_gateway_settings():
     """Test that claude-code with proxy backend raises on missing gateway settings."""
     from coder_eval.config import Settings

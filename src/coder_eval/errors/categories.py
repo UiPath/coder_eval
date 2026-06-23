@@ -29,6 +29,11 @@ class ErrorCategory(Enum):
     and flag in the PR that a new persisted value now appears downstream (which
     needs a display label/icon). FinalStatus bucketing is unchanged, so the
     blast radius is display/filter only.
+
+    Removed 2026-06-22: ``TESTS_FAILED`` and ``SANDBOX_COMMAND_ERROR`` — neither
+    had a producing ``categorize_error`` path or a downstream consumer. The
+    liveness test in ``tests/test_error_handling.py`` now keeps every member
+    producible, so a future dead member fails CI.
     """
 
     # Agent Errors - Communication and execution errors
@@ -43,7 +48,6 @@ class ErrorCategory(Enum):
 
     # Sandbox Errors - Environment setup and execution
     SANDBOX_SETUP_ERROR = "sandbox_setup_error"  # Failed to create sandbox (retryable)
-    SANDBOX_COMMAND_ERROR = "sandbox_command_error"  # Command execution failed (retryable)
     VENV_CREATION_ERROR = "venv_creation_error"  # Virtual env creation failed (retryable)
     PACKAGE_INSTALL_ERROR = "package_install_error"  # pip install failed (retryable)
     TEMPLATE_COPY_ERROR = "template_copy_error"  # Template copy failed (retryable)
@@ -55,7 +59,6 @@ class ErrorCategory(Enum):
     # Task Errors - Task definition and loading
     TASK_NOT_FOUND = "task_not_found"  # Task file doesn't exist (NOT retryable)
     TASK_INVALID = "task_invalid"  # Malformed task.yaml (NOT retryable)
-    TESTS_FAILED = "tests_failed"  # Tests failed (expected, NOT retryable)
 
     # System Errors - Resource exhaustion
     DISK_FULL = "disk_full"  # No disk space (NOT retryable)
@@ -123,11 +126,6 @@ RETRY_CONFIG: dict[ErrorCategory, RetryConfig] = {
     ),
     # Sandbox errors - transient failures are retryable
     ErrorCategory.SANDBOX_SETUP_ERROR: RetryConfig(
-        max_retries=2,
-        backoff_multiplier=1.5,
-        initial_delay=10.0,
-    ),
-    ErrorCategory.SANDBOX_COMMAND_ERROR: RetryConfig(
         max_retries=2,
         backoff_multiplier=1.5,
         initial_delay=10.0,

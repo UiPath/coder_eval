@@ -337,7 +337,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             return effective
         return config_model or route_model
 
-    async def communicate(
+    async def communicate(  # noqa: PLR0912, PLR0915 — god-function tracked for decomposition (code-review 2026-06-22)
         self,
         user_input: str,
         *,

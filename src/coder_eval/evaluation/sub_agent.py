@@ -85,7 +85,7 @@ class SubAgentRunner:
         if agent_config.setting_sources != []:
             raise ValueError(
                 "SubAgentRunner requires agent_config.setting_sources=[] so the SDK does not "
-                "load .claude/settings.json or .mcp.json from the sub-agent's working directory."
+                + "load .claude/settings.json or .mcp.json from the sub-agent's working directory."
             )
         assert sandbox.sandbox_dir is not None, "sandbox not initialized"
         self._sandbox = sandbox

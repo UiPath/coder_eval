@@ -116,7 +116,7 @@ line-length = 120
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF", "PLR0915", "PLR0912"]
 external = [
     "CE001",
     "CE002",
@@ -131,7 +131,15 @@ external = [
     "CE011",
     "CE012",
     "CE013",
+    "CE018",
 ]  # custom architectural lint rules (tests/lint/)
+
+[tool.ruff.lint.pylint]
+# Function-size ceiling: gates NEW growth past these bounds (a god-function must
+# carry a visible `# noqa: PLR0915`/`PLR0912` debt marker). Existing offenders are
+# tracked, not auto-decomposed (decomposition is separate out-of-scope work).
+max-statements = 80
+max-branches = 25
 
 [tool.ruff.lint.per-file-ignores]
 "tests/lint/**" = ["N802"]  # visit_* methods must match AST node class names (PascalCase required by ast.NodeVisitor)
@@ -175,7 +183,7 @@ reportUnknownMemberType = "none"
 
 # Import/runtime hygiene (useful, low-noise)
 reportMissingImports = "error"
-reportImportCycles = "warning"
+reportImportCycles = "error"
 reportDuplicateImport = "information"
 
 # Catch real logic bugs with minimal churn
@@ -189,7 +197,7 @@ reportOptionalSubscript = "warning"
 reportOptionalOperand = "warning"
 
 # Generics hygiene (helps with List/Dict/etc. without demanding full typing)
-reportMissingTypeArgument = "warning"
+reportMissingTypeArgument = "error"
 reportInvalidTypeVarUse = "warning"
 
 # OO correctness, but not too strict
@@ -197,7 +205,7 @@ reportIncompatibleMethodOverride = "warning"
 reportInconsistentConstructor = "warning"
 
 # Small quality-of-life checks that catch slip-ups
-reportImplicitStringConcatenation = "warning"
+reportImplicitStringConcatenation = "error"
 
 # Keep these quiet unless you want more discipline later
 reportPrivateUsage = "none"

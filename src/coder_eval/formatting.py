@@ -88,7 +88,7 @@ def format_messages(
             warned_unknown_types.add(type_name)
             log.warning(
                 "Unhandled SDK message type %s in format_messages — "
-                "extend the isinstance chain when the SDK adds new types.",
+                + "extend the isinstance chain when the SDK adds new types.",
                 type_name,
             )
         formatted_parts.append(f"[{type_name}]")

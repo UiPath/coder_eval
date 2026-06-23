@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import re
+from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
 from coder_eval.cli import app
+from coder_eval.config import settings
 
 
 runner = CliRunner()
+
+
+async def _noop_run_all_tasks(*args: object, **kwargs: object) -> None:
+    return None
+
 
 # Click/Rich wraps tokens in ANSI escapes (e.g., `\x1b[1;36m--type\x1b[0m`) which
 # breaks naive substring matching against the rendered help. Strip them before
@@ -51,3 +59,23 @@ def test_cli_accepts_known_type() -> None:
     output = _strip_ansi(result.output)
     assert "--type" in output
     assert "-T" in output
+
+
+@pytest.mark.parametrize("backend", ["direct", "bedrock", "proxy"])
+def test_cli_allows_codex_with_any_backend(backend: str, monkeypatch) -> None:
+    """`--type codex` must NOT be rejected for any --backend at the CLI seam.
+
+    --backend doesn't only route the agent — the llm_judge/agent_judge calls share
+    config.api_backend, so `--type codex --backend bedrock` is the standard way to
+    run a codex agent with Bedrock judges (org policy mandates Bedrock). The CLI
+    must let it through to the run.
+    """
+    # `--backend` mutates the process-wide `settings` singleton and os.environ in
+    # place. Snapshot/restore both via monkeypatch so this test can't leak a
+    # backend into later tests (a leaked proxy/bedrock flips an unrelated
+    # claude-code task from FAILURE to ERROR on hosts without gateway creds).
+    monkeypatch.delenv("API_BACKEND", raising=False)
+    monkeypatch.setattr(settings, "api_backend", settings.api_backend)
+    with patch("coder_eval.cli.run_command._run_all_tasks", _noop_run_all_tasks):
+        result = runner.invoke(app, ["run", "tasks/hello_date.yaml", "--type", "codex", "--backend", backend])
+    assert result.exit_code == 0, _strip_ansi(result.output)

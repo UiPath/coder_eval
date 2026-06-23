@@ -238,9 +238,10 @@ class Dataset(BaseModel):
     sample_seed: int | None = Field(
         default=None,
         description=(
-            "Seed for the 'sample_per_stratum' draw. None => fresh nondeterministic RNG each run "
-            "(re-draws every night) — this holds whether the count comes from YAML or the CLI "
-            "--sample-per-stratum flag. Set an integer to pin a reproducible sample."
+            "(re-draws every night; broadens coverage for the nightly suites) — this holds whether "
+            "the count comes from YAML or the CLI --sample-per-stratum flag. NOTE: unlike CLI --sample "
+            "(fixed-seed, reproducible by default), the stratified sample_per_stratum draw is "
+            "NONDETERMINISTIC by default; set an integer here to pin a reproducible sample."
         ),
     )
 
@@ -451,8 +452,8 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         for key in unknown:
             warnings.warn(
                 f"TaskDefinition: unknown top-level field {key!r} will be ignored. "
-                "If this is a typo, fix it; if the field is stale from a previous "
-                "schema, remove it. Future versions may reject unknown fields.",
+                + "If this is a typo, fix it; if the field is stale from a previous "
+                + "schema, remove it. Future versions may reject unknown fields.",
                 UnknownTaskFieldWarning,
                 stacklevel=2,
             )
@@ -515,19 +516,19 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         if self.initial_prompt is not None or self.initial_prompt_file is not None:
             raise ValueError(
                 "A 'type: none' task must not set 'initial_prompt' / 'initial_prompt_file' "
-                "(no agent runs to read it). Remove the prompt or pick a real agent type."
+                + "(no agent runs to read it). Remove the prompt or pick a real agent type."
             )
         if self.simulation is not None and self.simulation.enabled:
             raise ValueError(
                 "A 'type: none' task cannot enable 'simulation' (no agent for the simulator to talk to). "
-                "Remove the simulation block or pick a real agent type."
+                + "Remove the simulation block or pick a real agent type."
             )
         offending = sorted({c.type for c in self.success_criteria if c.requires_agent})
         if offending:
             raise ValueError(
                 f"A 'type: none' task cannot use criteria that require an agent trajectory: {offending}. "
-                "Use agent-independent criteria (run_command, file_exists, file_contains, json_check, "
-                "file_matches_regex, reference_comparison, ...)."
+                + "Use agent-independent criteria (run_command, file_exists, file_contains, json_check, "
+                + "file_matches_regex, file_check, ...)."
             )
         return self
 
@@ -546,7 +547,7 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
             return self
         offenders: list[str] = []
         for c in self.success_criteria:
-            ctype = getattr(c, "type", None)
+            ctype = c.type
             if ctype == "reference_comparison":
                 offenders.append("reference_comparison")
             elif ctype == "llm_judge" and getattr(c, "include_reference", False):
@@ -554,7 +555,7 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         if offenders:
             raise ValueError(
                 "reference.directory is only consumed by agent_judge; the following "
-                f"criteria require a string reference (use 'code' or 'file' instead): {offenders}"
+                + f"criteria require a string reference (use 'code' or 'file' instead): {offenders}"
             )
         return self
 

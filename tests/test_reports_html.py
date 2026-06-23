@@ -1186,3 +1186,38 @@ def test_generation_metrics_breaks_down_crashed_partials():
     html = HTMLReportGenerator.generate_task_html(result)
     assert "Crashed Partials" in html
     assert "3 (1 recovered, 2 terminal)" in html
+
+
+# Expected badge class per FinalStatus member — single source of truth is
+# FinalStatus.category (SUCCESS→succeeded→success, ERROR→error, all else→failure).
+_EXPECTED_BADGE_CLASS = {
+    FinalStatus.SUCCESS: "success",
+    FinalStatus.FAILURE: "failure",
+    FinalStatus.ERROR: "error",
+    FinalStatus.TIMEOUT: "failure",
+    FinalStatus.MAX_TURNS_EXHAUSTED: "failure",
+    FinalStatus.TOKEN_BUDGET_EXCEEDED: "failure",
+    FinalStatus.COST_BUDGET_EXCEEDED: "failure",
+}
+
+
+@pytest.mark.parametrize("status", list(FinalStatus))
+def test_status_badge_maps_every_member_to_its_category(status: FinalStatus):
+    """Every FinalStatus member gets a non-neutral badge matching its category."""
+    badge = _status_badge(status)
+    expected_cls = _EXPECTED_BADGE_CLASS[status]
+    assert f'class="badge {expected_cls}"' in badge
+    assert "neutral" not in badge
+    assert status.value in badge
+
+
+def test_status_badge_accepts_raw_string_value():
+    """A bare status string (not the enum) is classified the same way."""
+    assert 'class="badge failure"' in _status_badge("TOKEN_BUDGET_EXCEEDED")
+
+
+def test_status_badge_unknown_string_is_neutral():
+    """A genuinely unknown status falls back to the neutral badge."""
+    badge = _status_badge("LEGACY_UNKNOWN")
+    assert 'class="badge neutral"' in badge
+    assert "LEGACY_UNKNOWN" in badge

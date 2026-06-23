@@ -317,7 +317,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         except Exception as e:
             raise RuntimeError(f"Failed to initialize Codex client: {e}") from e
 
-    async def communicate(
+    async def communicate(  # noqa: PLR0915 — god-function tracked for decomposition (code-review 2026-06-22)
         self,
         user_input: str,
         *,
@@ -617,7 +617,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                             hint = "env var likely unset" if "$" in expanded_path else "path does not exist"
                             self._log.warning(
                                 f"Plugin skills path did not resolve: {path_str!r} "
-                                f"→ {expanded_path!r} ({hint}); no skills linked from it"
+                                + f"→ {expanded_path!r} ({hint}); no skills linked from it"
                             )
 
         # Also check plugin_tools_dir parameter
@@ -671,9 +671,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 # skills/ subdir — codex will run without any skill context.
                 self._log.warning(
                     f"0 skills linked into {agents_skills_dir} despite "
-                    f"{len(skills_sources)} plugin source(s): "
-                    f"{[str(s) for s in skills_sources]}; "
-                    "check the plugin path points at a skills repo root"
+                    + f"{len(skills_sources)} plugin source(s): "
+                    + f"{[str(s) for s in skills_sources]}; "
+                    + "check the plugin path points at a skills repo root"
                 )
 
         except Exception as e:
@@ -845,7 +845,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             self._log.warning(f"Failed to format turn result: {e}")
             return str(turn_result)
 
-    async def _run_turn_with_streaming(
+    async def _run_turn_with_streaming(  # noqa: PLR0912, PLR0915 — god-function tracked for decomposition (code-review 2026-06-22)
         self,
         user_input: str,
         emit: CompositeStreamCallback,

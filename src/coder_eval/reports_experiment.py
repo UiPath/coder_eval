@@ -171,7 +171,7 @@ class ExperimentReportGenerator:
         return "\n".join(lines)
 
     @staticmethod
-    def generate_experiment_report(
+    def generate_experiment_report(  # noqa: PLR0912, PLR0915 — god-function tracked for decomposition (code-review 2026-06-22)
         result: ExperimentResult,
         experiment: ExperimentDefinition | None = None,
     ) -> str:
@@ -417,7 +417,7 @@ class ExperimentReportGenerator:
                 rep_count = agg.replicate_count if agg else 1
                 lines.append(
                     f"| {vid} | {rep_count} | {m:.3f} | [{lo:.3f}, {hi:.3f}]"
-                    f" | {passes}/{len(all_scores)} [{wlo:.2f}, {whi:.2f}] |"
+                    + f" | {passes}/{len(all_scores)} [{wlo:.2f}, {whi:.2f}] |"
                 )
 
             # Paired comparison for 2-variant experiments
@@ -449,7 +449,7 @@ class ExperimentReportGenerator:
                         [
                             "",
                             f"**Paired mean diff ({vid_a} - {vid_b})**: {mean_diff:+.3f}"
-                            f" [95% CI {d_lo:+.3f}, {d_hi:+.3f}], Cohen's d = {d_str}{suffix}",
+                            + f" [95% CI {d_lo:+.3f}, {d_hi:+.3f}], Cohen's d = {d_str}{suffix}",
                         ]
                     )
                 else:

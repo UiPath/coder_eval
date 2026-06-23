@@ -16,7 +16,7 @@ from .timeout import EvaluationTimeoutError
 logger = logging.getLogger(__name__)
 
 
-def categorize_error(
+def categorize_error(  # noqa: PLR0912 — branch-heavy classifier tracked for decomposition (code-review 2026-06-22)
     error: Exception,
     context: dict[str, Any],
     hint: ErrorCategory | None = None,

@@ -1,5 +1,11 @@
 """Success criteria models for task evaluation."""
 
+# Each concrete criterion narrows the base ``type: str`` to its ``Literal[...]`` tag
+# (the standard pydantic discriminated-union pattern). Pyright treats a Literal
+# subtype override of a mutable str field as variable-invariant-incompatible, but
+# the narrowing is exactly the intended discriminator behaviour here.
+# pyright: reportIncompatibleVariableOverride=false
+
 from __future__ import annotations
 
 from abc import ABC
@@ -37,7 +43,7 @@ def _reject_removed_verdict_channel(data: Any) -> Any:
     if isinstance(data, dict) and "verdict_channel" in data:
         raise ValueError(
             "verdict_channel field was removed on 2026-05-21; the submit_verdict "
-            "tool channel is the only path. Delete this field from your task YAML."
+            + "tool channel is the only path. Delete this field from your task YAML."
         )
     return data
 
@@ -84,6 +90,9 @@ class BaseSuccessCriterion(BaseModel, ABC):
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    # Discriminator; each concrete criterion narrows this to its Literal tag.
+    type: str
 
     description: str = Field(description="Human-readable description of what this criterion checks")
 

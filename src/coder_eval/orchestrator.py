@@ -46,20 +46,15 @@ from .models import (
     PreRunCommand,
     PreservationMode,
     ProxyRoute,
-    ResolvedTask,
-    RunSummary,
     SimulationTelemetry,
     TaskConfigRecord,
     TaskDefinition,
-    TaskResult,
     TokenUsage,
     TurnRecord,
     UserMessage,
     proxy_config_from_settings,
     resolve_route,
 )
-from .orchestration.batch import run_batch as run_batch_impl
-from .orchestration.config import BatchRunConfig
 from .orchestration.evaluation import load_reference
 from .path_utils import format_task_log_id, task_log_path
 from .sandbox import Sandbox
@@ -725,7 +720,7 @@ class Orchestrator:
         if total > limits.expected_turns:
             logger.warning(
                 "Visible turns (%d) exceeded expected_turns (%d) at iteration %d "
-                "for task %s. Run continues — max_turns remains the hard cap.",
+                + "for task %s. Run continues — max_turns remains the hard cap.",
                 total,
                 limits.expected_turns,
                 iteration,
@@ -801,7 +796,7 @@ class Orchestrator:
             else:
                 logger.warning(
                     "proxy usage gap: %d unattributed tokens (total=%d, main=%d, judges=%d) "
-                    "— likely agent startup / MCP probing / dropped retried partials",
+                    + "— likely agent startup / MCP probing / dropped retried partials",
                     gap,
                     total.total_tokens,
                     main.total_tokens,
@@ -865,7 +860,7 @@ class Orchestrator:
         if direct_target is not None and direct_target.exists() and any(direct_target.iterdir()):
             logger.warning(
                 "DIRECT_WRITE target %s already exists and is non-empty; "
-                "stale files from a prior run are not cleared and may affect criteria.",
+                + "stale files from a prior run are not cleared and may affect criteria.",
                 direct_target,
             )
 
@@ -1344,10 +1339,7 @@ class Orchestrator:
                 turn_records=self.result.iterations,
             )
             self.result.success_criteria_results = criteria_results
-            all_passed = all(
-                r.score >= c.pass_threshold for r, c in zip(criteria_results, self.task.success_criteria, strict=True)
-            )
-            return all_passed
+            return self.result.all_criteria_passed(self.task.success_criteria)
 
         # Working directory context prepended to every prompt (including feedback).
         # The agent resumes its session between iterations via session_id.
@@ -1403,11 +1395,13 @@ class Orchestrator:
         )
         self.result.success_criteria_results = criteria_results
 
-        # Determine if all criteria passed their thresholds
+        # Determine if all criteria passed their thresholds. all_passed is
+        # single-sourced via the model gate; passed_count/total_count are kept
+        # only for the human-readable log line below.
         pairs = list(zip(criteria_results, self.task.success_criteria, strict=True))
         passed_count = sum(1 for r, c in pairs if r.score >= c.pass_threshold)
         total_count = len(pairs)
-        all_passed = passed_count == total_count
+        all_passed = self.result.all_criteria_passed(self.task.success_criteria)
 
         # Reuse the model method for weighted score (single source of truth)
         self.result.calculate_weighted_score(self.task.success_criteria)
@@ -1453,7 +1447,7 @@ class Orchestrator:
             total_turns=total_turns,
         )
 
-    async def _simulation_dialog_loop(self, initial_prompt: str | None, sandbox_dir: Path) -> bool:
+    async def _simulation_dialog_loop(self, initial_prompt: str | None, sandbox_dir: Path) -> bool:  # noqa: PLR0915 — god-function tracked for decomposition (code-review 2026-06-22)
         """Run the task as a multi-turn dialog driven by an LLM user simulator.
 
         This replaces the criteria-feedback iteration loop for tasks that
@@ -1655,10 +1649,7 @@ class Orchestrator:
                     self.result.success_criteria_results = criteria_results
                     self.result.calculate_weighted_score(self.task.success_criteria)
                     criteria_checked_this_turn = True
-                    all_passed = all(
-                        r.score >= c.pass_threshold
-                        for r, c in zip(criteria_results, self.task.success_criteria, strict=True)
-                    )
+                    all_passed = self.result.all_criteria_passed(self.task.success_criteria)
                     self._emit_criteria_event(criteria_results)
 
                 # Budget gate: aborts the dialog with a dedicated stop reason and
@@ -1773,10 +1764,7 @@ class Orchestrator:
                 self._accumulate_judge_usage(criteria_results, judge_usage_accum)
                 self.result.success_criteria_results = criteria_results
                 self.result.calculate_weighted_score(self.task.success_criteria)
-                all_passed = all(
-                    r.score >= c.pass_threshold
-                    for r, c in zip(criteria_results, self.task.success_criteria, strict=True)
-                )
+                all_passed = self.result.all_criteria_passed(self.task.success_criteria)
                 self._emit_criteria_event(criteria_results)
 
             assert stop_reason is not None, "dialog loop exited without picking a stop_reason"
@@ -2059,33 +2047,3 @@ class Orchestrator:
                 await asyncio.to_thread(self.sandbox.cleanup, preserve=False)
             except Exception as e:
                 logger.warning(f"Failed to cleanup sandbox: {e}")
-
-    @classmethod
-    async def run_batch(
-        cls,
-        resolved_tasks: list[ResolvedTask],
-        config: BatchRunConfig,
-        on_task_complete: Callable[[TaskResult], None] | None = None,
-        on_batch_start: Callable[[int], None] | None = None,
-        stream_callback_factory: Callable[[str], StreamCallback] | None = None,
-    ) -> tuple[RunSummary, list[TaskResult]]:
-        """Run resolved tasks in batch with optional parallelism.
-
-        Delegates to orchestration.batch.run_batch() for the actual implementation.
-
-        Args:
-            resolved_tasks: List of fully-resolved tasks from resolve_all_tasks.
-            config: Batch execution configuration.
-            on_task_complete: Optional callback invoked after each task finishes.
-            on_batch_start: Optional callback invoked with the final task count.
-
-        Returns:
-            Tuple of (RunSummary, list[TaskResult]).
-        """
-        return await run_batch_impl(
-            resolved_tasks,
-            config,
-            on_task_complete=on_task_complete,
-            on_batch_start=on_batch_start,
-            stream_callback_factory=stream_callback_factory,
-        )

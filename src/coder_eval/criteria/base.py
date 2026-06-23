@@ -76,7 +76,7 @@ def handle_criterion_errors(func: Callable[..., CriterionResult]) -> Callable[..
             if os.getenv("CODER_EVAL_DEBUG") == "1":
                 tb = "\n" + "".join(traceback.format_exc(limit=5))
 
-            criterion_type = getattr(criterion, "type", "unknown")
+            criterion_type = criterion.type
             logger.error(
                 f"Error in {self.__class__.__name__}.check() for criterion type '{criterion_type}': {exc_info}",
                 exc_info=True,  # Adds full stack trace to logs
@@ -220,11 +220,8 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             "min": min(scores),
             "max": max(scores),
         }
-        # `type` is a Literal on every concrete subclass of BaseSuccessCriterion,
-        # but the bound doesn't expose it — reach through getattr for pyright.
-        criterion_type = getattr(criterion, "type", "unknown")
         return CriterionAggregate(
-            criterion_type=criterion_type,
+            criterion_type=criterion.type,
             metrics=metrics,
             threshold_checks=[],
             passed=True,

@@ -86,3 +86,53 @@ class TestCE017ModelsLazyAgentImports:
 
     def test_ignores_files_outside_models(self):
         assert not self._run("from coder_eval.agents.registry import AgentRegistry", in_models=False)
+
+
+@pytest.mark.lint
+class TestCE018NoFinalStatusNameDenylist:
+    """CE018 fires on string comparisons against FinalStatus member names."""
+
+    @staticmethod
+    def _run(src: str):
+        import ast
+
+        from tests.lint.rules.ce018_no_final_status_name_denylist import NoFinalStatusNameDenylist
+
+        return NoFinalStatusNameDenylist("<test>").check(ast.parse(src))
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            's == "SUCCESS"',
+            's != "ERROR"',
+            '"ERROR" == s',  # reversed
+            's in ("FAILURE", "TIMEOUT")',
+            's not in ("TOKEN_BUDGET_EXCEEDED", "COST_BUDGET_EXCEEDED")',
+            's in ("succeeded", "MAX_TURNS_EXHAUSTED")',  # tuple mixes a member name in
+            's in ["SUCCESS", "FAILURE"]',  # list literal
+            's in {"ERROR"}',  # set literal
+        ],
+    )
+    def test_flags_member_name_comparisons(self, src: str):
+        assert self._run(src), f"expected CE018 to fire on: {src}"
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            'x == "succeeded"',  # a category VALUE, not a member name
+            'x == "failed"',
+            'x == "hello"',  # unrelated string
+            'x in ("succeeded", "failed")',  # category values, not member names
+            'x in ["succeeded", "failed"]',  # list of category values
+            "isinstance(x, FinalStatus)",  # not a Compare against a literal
+        ],
+    )
+    def test_ignores_non_member_comparisons(self, src: str):
+        assert not self._run(src), f"expected CE018 NOT to fire on: {src}"
+
+    def test_denylist_stays_in_sync_with_enum(self):
+        """The rule's hardcoded name set must track FinalStatus (AST rules can't import it)."""
+        from coder_eval.models import FinalStatus
+        from tests.lint.rules.ce018_no_final_status_name_denylist import _FINAL_STATUS_NAMES
+
+        assert {s.value for s in FinalStatus} == _FINAL_STATUS_NAMES

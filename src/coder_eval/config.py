@@ -1,5 +1,8 @@
 """Configuration management using pydantic-settings."""
 
+# by-design model-hub ↔ config type-level cycle; runtime imports are lazy per CE017
+# pyright: reportImportCycles=false
+
 import os
 from pathlib import Path
 
@@ -157,7 +160,7 @@ class Settings(BaseSettings):
         # 2. Cached CLI authentication from 'claude-code login' (subscription account)
         # 3. LLM Gateway proxy (sets auth via proxy)
         # We don't validate the API key here because the SDK handles auth and fails clearly if missing.
-        if agent_type == "claude-code":
+        if agent_type == AgentKind.CLAUDE_CODE.value:
             return
 
 

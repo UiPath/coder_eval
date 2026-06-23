@@ -257,7 +257,7 @@ class ReportGenerator:
         return lines
 
     @staticmethod
-    def generate_markdown(summary: RunSummary, run_dir: Path | None = None) -> str:
+    def generate_markdown(summary: RunSummary, run_dir: Path | None = None) -> str:  # noqa: PLR0912, PLR0915 — god-function tracked for decomposition (code-review 2026-06-22)
         """Generate markdown report from run summary.
 
         Args:

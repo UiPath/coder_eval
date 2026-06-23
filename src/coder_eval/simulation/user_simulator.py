@@ -25,7 +25,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from coder_eval.models import AgentKind, ApiRoute, SimulationConfig, parse_agent_config
 
@@ -158,7 +158,7 @@ class UserSimulator:
         *,
         system_prompt_override: str | None = None,
         route: ApiRoute | None = None,
-        agent_override: Agent | None = None,
+        agent_override: Agent[Any] | None = None,
     ) -> None:
         """Initialize the simulator.
 
@@ -186,8 +186,8 @@ class UserSimulator:
         )
 
         self._route: ApiRoute | None = route
-        self._agent_override: Agent | None = agent_override
-        self._agent: Agent | None = None
+        self._agent_override: Agent[Any] | None = agent_override
+        self._agent: Agent[Any] | None = None
         self._scratch_dir: Path | None = None
 
         # model is intentionally left to the route: ClaudeCodeAgent._build_sdk_env

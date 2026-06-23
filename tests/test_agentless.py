@@ -118,6 +118,35 @@ class TestNoneAgentValidation:
         with pytest.raises(ValidationError, match="require an agent trajectory"):
             _none_task(criteria=[CommandExecutedCriterion(description="agent ran curl")])
 
+    def test_suggested_criteria_are_all_agent_independent(self) -> None:
+        """The rejection message must not recommend a criterion that itself requires an agent.
+
+        Guards against drift like the old text suggesting 'reference_comparison'
+        (which is requires_agent=True). Cross-check every criterion type named in
+        the suggestion list against the registry's requires_agent flag.
+        """
+        import re
+
+        from coder_eval.models.criteria import BaseSuccessCriterion
+
+        # type tag -> model class, so we can read each criterion's requires_agent flag.
+        by_type = {
+            cls.model_fields["type"].default: cls
+            for cls in BaseSuccessCriterion.__subclasses__()
+            if "type" in cls.model_fields
+        }
+        with pytest.raises(ValidationError) as exc:
+            _none_task(criteria=[CommandExecutedCriterion(description="agent ran curl")])
+        message = str(exc.value)
+        # Pull the parenthesized suggestion list: "...Use agent-independent criteria (a, b, ...)."
+        suggestion = re.search(r"agent-independent criteria \(([^)]*)\)", message)
+        assert suggestion is not None, message
+        suggested = {tok.strip() for tok in suggestion.group(1).split(",") if tok.strip() and tok.strip() != "..."}
+        assert suggested, "expected at least one suggested criterion type"
+        for ctype in suggested:
+            assert ctype in by_type, f"message suggests unknown criterion type {ctype!r}"
+            assert not by_type[ctype].requires_agent, f"message suggests agent-dependent criterion {ctype!r}"
+
     def test_allows_agent_independent_criteria(self) -> None:
         """run_command / file_exists / file_contains are all agent-independent."""
         task = _none_task(

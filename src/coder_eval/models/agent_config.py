@@ -217,7 +217,7 @@ class ClaudeCodeAgentConfig(BaseAgentConfig):
             if key not in _VALID_SDK_OPTION_FIELDS:
                 raise ValueError(
                     f"sdk_options key {key!r} is not a ClaudeAgentOptions field "
-                    f"(valid keys: {list(_USER_VISIBLE_SDK_FIELDS)})"
+                    + f"(valid keys: {list(_USER_VISIBLE_SDK_FIELDS)})"
                 )
             if key in _FRAMEWORK_OWNED_SDK_FIELDS:
                 raise ValueError(

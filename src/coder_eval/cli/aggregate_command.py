@@ -80,12 +80,12 @@ def aggregate_command(
     write_run_summary(summary, out_dir)
     console.print(
         f"[green][OK][/green] Aggregated {summary.tasks_run} task(s) "
-        f"({summary.tasks_succeeded} ok / {summary.tasks_failed} fail / {summary.tasks_error} err) "
-        f"→ {out_dir / 'run.json'}"
+        + f"({summary.tasks_succeeded} ok / {summary.tasks_failed} fail / {summary.tasks_error} err) "
+        + f"→ {out_dir / 'run.json'}"
     )
     console.print(
         "[dim]Note: run-level summary only — per-suite (suite.json/suite.md) and "
-        "experiment (experiment.json/experiment.md) rollups are not rebuilt.[/dim]"
+        + "experiment (experiment.json/experiment.md) rollups are not rebuilt.[/dim]"
     )
 
 

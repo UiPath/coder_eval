@@ -518,8 +518,8 @@ class EvaluationResult(BaseModel):
         if len(self.success_criteria_results) != len(criteria):
             raise ValueError(
                 f"Results/criteria length mismatch: {len(self.success_criteria_results)} results "
-                f"vs {len(criteria)} criteria for task {self.task_id}. This indicates an upstream "
-                f"bug; refusing to fabricate a weight-ignoring score."
+                + f"vs {len(criteria)} criteria for task {self.task_id}. This indicates an upstream "
+                + "bug; refusing to fabricate a weight-ignoring score."
             )
 
         total_weighted_score = 0.0
@@ -530,6 +530,22 @@ class EvaluationResult(BaseModel):
             total_weight += criterion.weight
 
         self.weighted_score = total_weighted_score / total_weight if total_weight > 0 else 0.0
+
+    def all_criteria_passed(self, criteria: list[SuccessCriterion]) -> bool:
+        """True iff every criterion result meets its pass_threshold.
+
+        Single source of truth for the success gate. A results/criteria length
+        mismatch raises ``ValueError`` rather than silently truncating — the
+        ``len()`` pre-check is required because ``all()`` short-circuits on the
+        first failing pair, so ``zip(strict=True)`` alone would not reliably
+        reach the length check.
+        """
+        if len(self.success_criteria_results) != len(criteria):
+            raise ValueError(
+                f"Results/criteria length mismatch for task {self.task_id}: "
+                + f"{len(self.success_criteria_results)} results vs {len(criteria)} criteria."
+            )
+        return all(r.score >= c.pass_threshold for r, c in zip(self.success_criteria_results, criteria, strict=True))
 
 
 class CriterionStats(BaseModel):

@@ -26,7 +26,6 @@ class TestErrorCategory:
             ErrorCategory.AGENT_RATE_LIMIT,
             ErrorCategory.AGENT_CRASH,
             ErrorCategory.SANDBOX_SETUP_ERROR,
-            ErrorCategory.SANDBOX_COMMAND_ERROR,
             ErrorCategory.VENV_CREATION_ERROR,
             ErrorCategory.PACKAGE_INSTALL_ERROR,
             ErrorCategory.GIT_CLONE_ERROR,
@@ -87,7 +86,6 @@ class TestErrorCategory:
             "agent_invalid_output",
             "agent_config_error",
             "sandbox_setup_error",
-            "sandbox_command_error",
             "venv_creation_error",
             "package_install_error",
             "template_copy_error",
@@ -95,13 +93,57 @@ class TestErrorCategory:
             "criterion_check_error",
             "task_not_found",
             "task_invalid",
-            "tests_failed",
             "disk_full",
             "out_of_memory",
             "budget_exceeded",
             "unknown",
         }
         assert {c.value for c in ErrorCategory} == expected
+
+    def test_every_category_is_producible_from_a_real_input(self):
+        """Liveness: every ErrorCategory member must be reachable from at least one
+        non-hint ``categorize_error(error, context)`` input. The ``hint=`` path is
+        excluded — it trivially returns any member, so it can't prove liveness.
+
+        Auth/rate-limit drivers use string patterns (not the anthropic SDK
+        exception types) so the test is independent of whether ``anthropic`` is
+        installed. A future member with no producing path fails this test,
+        keeping the enum free of dead categories."""
+        from coder_eval.errors.budget import BudgetExceededError
+
+        # member -> (error, context) that must categorize to that member.
+        drivers: dict[ErrorCategory, tuple[Exception, dict[str, str]]] = {
+            ErrorCategory.AGENT_TIMEOUT: (TimeoutError("agent timed out"), {"component": "agent"}),
+            ErrorCategory.AGENT_API_ERROR: (Exception("network connection error"), {"component": "agent"}),
+            ErrorCategory.AGENT_RATE_LIMIT: (Exception("rate limit hit"), {}),
+            ErrorCategory.AGENT_AUTH_ERROR: (Exception("authentication failed"), {}),
+            ErrorCategory.AGENT_BILLING_ERROR: (Exception("billing problem"), {}),
+            ErrorCategory.AGENT_CRASH: (AgentCrashError("unexpected exit"), {"component": "agent"}),
+            ErrorCategory.AGENT_INVALID_OUTPUT: (Exception("content filter blocked"), {}),
+            ErrorCategory.AGENT_CONFIG_ERROR: (AgentConfigError("missing prerequisite"), {}),
+            ErrorCategory.SANDBOX_SETUP_ERROR: (Exception("setup blew up"), {"component": "sandbox"}),
+            ErrorCategory.VENV_CREATION_ERROR: (Exception("venv failed"), {"component": "sandbox"}),
+            ErrorCategory.PACKAGE_INSTALL_ERROR: (Exception("pip install failed"), {"component": "sandbox"}),
+            ErrorCategory.TEMPLATE_COPY_ERROR: (Exception("template copy failed"), {"component": "sandbox"}),
+            ErrorCategory.GIT_CLONE_ERROR: (Exception("git clone failed"), {"component": "sandbox"}),
+            ErrorCategory.CRITERION_CHECK_ERROR: (Exception("checker failed"), {"component": "evaluator"}),
+            ErrorCategory.TASK_NOT_FOUND: (FileNotFoundError("task file missing"), {}),
+            ErrorCategory.TASK_INVALID: (Exception("malformed validation"), {"component": "task"}),
+            ErrorCategory.DISK_FULL: (Exception("no space left on disk"), {}),
+            ErrorCategory.OUT_OF_MEMORY: (MemoryError("oom"), {}),
+            ErrorCategory.BUDGET_EXCEEDED: (BudgetExceededError("max_usd", actual=2.0, limit=1.0), {}),
+            ErrorCategory.UNKNOWN: (Exception("???"), {}),
+        }
+
+        # Every member must have a driver — a new member with no path fails here.
+        assert set(drivers) == set(ErrorCategory), (
+            f"Missing liveness driver(s) for: {set(ErrorCategory) - set(drivers)}"
+        )
+
+        for member, (error, context) in drivers.items():
+            assert categorize_error(error, context) == member, (
+                f"{member} was not produced by its driving input {error!r} / {context}"
+            )
 
 
 class TestCategorizeError:

@@ -187,6 +187,8 @@ async def test_run_batch_dispatches_resolved_mode_for_tempdir(tmp_path):
         patch.object(Orchestrator, "__init__", capturing_init),
         patch.object(Orchestrator, "_create_agent", new=AsyncMock(return_value=mock_agent)),
     ):
-        await Orchestrator.run_batch([rt], config)
+        from coder_eval.orchestration.batch import run_batch
+
+        await run_batch([rt], config)
 
     assert captured["mode"] == PreservationMode.MOVE_ON_WRITE

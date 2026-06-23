@@ -212,6 +212,22 @@ class TestExpandDatasetStratifiedSample:
         }
         assert len(draws) > 1
 
+    def test_seeded_is_reproducible(self, tmp_path: Path) -> None:
+        # The reproducibility half of the documented --sample vs sample_per_stratum
+        # divergence: with an explicit sample_seed, two independent expansions draw
+        # the identical set of rows. (sample_per_stratum is nondeterministic by
+        # DEFAULT — see test_unseeded_redraws_each_run — but reproducible when seeded.)
+        rows = self._stratified_rows()
+        first = {
+            t.row_id
+            for t in expand_dataset(_make_task_with_dataset(rows=rows, sample_per_stratum=3, sample_seed=99), tmp_path)
+        }
+        second = {
+            t.row_id
+            for t in expand_dataset(_make_task_with_dataset(rows=rows, sample_per_stratum=3, sample_seed=99), tmp_path)
+        }
+        assert first == second
+
     def test_custom_stratify_field(self, tmp_path: Path) -> None:
         rows = [{"id": f"r{i}", "prompt": "p", "expected": "e", "bucket": "x" if i % 2 else "y"} for i in range(10)]
         task = _make_task_with_dataset(rows=rows, sample_per_stratum=2, stratify_field="bucket", sample_seed=0)

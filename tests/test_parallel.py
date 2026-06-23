@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from coder_eval.models import AgentState, PreservationMode, ResolvedTask, TaskDefinition
+from coder_eval.orchestration.batch import run_batch
 from coder_eval.orchestration.config import BatchRunConfig
 from coder_eval.orchestrator import Orchestrator
 
@@ -67,7 +68,7 @@ success_criteria:
     # This should complete without raising an exception
     # The task will fail (ERROR status) but that's expected - we're testing the execution flow
     with patch.object(Orchestrator, "_create_agent", new=AsyncMock(return_value=mock_agent)):
-        summary, _results = await Orchestrator.run_batch([resolved_task], config)
+        summary, _results = await run_batch([resolved_task], config)
 
     # Verify summary
     assert summary.tasks_run == 1

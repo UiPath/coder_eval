@@ -6,7 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import typer
+from typer.testing import CliRunner
 
+from coder_eval.cli import app
 from coder_eval.cli.proxy_command import _install_proxy_signal_handlers, _run_proxy
 
 
@@ -154,3 +156,29 @@ class TestProxyCommandOutput:
         assert "http://127.0.0.1:8080" in captured.err
         # No banner on stdout
         assert "LLM Gateway Proxy running" not in captured.out
+
+
+class TestProxyVendorChoice:
+    """`--vendor` is a closed click.Choice — invalid values fail at parse."""
+
+    runner = CliRunner()
+
+    def test_invalid_vendor_rejected_at_parse(self):
+        result = self.runner.invoke(app, ["proxy", "--vendor", "awsbedrok", "--quiet"])
+        assert result.exit_code == 2, result.output
+        # click.Choice surfaces the valid set in its error message.
+        assert "awsbedrock" in result.output and "anthropic" in result.output
+
+    @pytest.mark.parametrize("vendor", ["anthropic", "AWSBedrock"])
+    def test_valid_vendor_reaches_run_proxy(self, vendor: str):
+        """A valid vendor (case-insensitive) passes the parse gate and reaches _run_proxy."""
+        captured_args: dict[str, object] = {}
+
+        async def _capture(port, env_file, vendor_arg, api_flavor, quiet):
+            captured_args["vendor"] = vendor_arg
+
+        with patch("coder_eval.cli.proxy_command._run_proxy", _capture):
+            result = self.runner.invoke(app, ["proxy", "--vendor", vendor, "--quiet"])
+        assert result.exit_code == 0, result.output
+        # click.Choice normalizes the accepted value to the canonical lowercase form.
+        assert captured_args["vendor"] == vendor.lower()

@@ -121,13 +121,13 @@ class EventCollector:
         positive = d_in >= 0 and d_out >= 0 and d_cw >= 0 and d_cr >= 0
         note = (
             "Tokens the agent billed but never surfaced as a generation "
-            "(fixed prompt overhead + sub-agent input/cache the stream doesn't bubble up). "
-            "Booked here so the transcript reconciles to the turn total."
+            + "(fixed prompt overhead + sub-agent input/cache the stream doesn't bubble up). "
+            + "Booked here so the transcript reconciles to the turn total."
             if positive
             else (
                 "Per-bucket residual reconciling the captured generations to the turn total "
-                "(negative where the stream over-reports a bucket). "
-                "Booked here so the transcript sums to the authoritative usage."
+                + "(negative where the stream over-reports a bucket). "
+                + "Booked here so the transcript sums to the authoritative usage."
             )
         )
         return [

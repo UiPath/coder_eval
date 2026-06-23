@@ -5,6 +5,7 @@ import contextlib
 import signal
 from collections.abc import Callable
 
+import click
 import typer
 
 
@@ -32,7 +33,11 @@ def _install_proxy_signal_handlers(loop: asyncio.AbstractEventLoop, handler: Cal
 def proxy_command(
     port: int = typer.Option(0, help="Port to bind to (0 = auto-assign)"),
     env_file: str = typer.Option(".env", help="Path to .env file with LLM Gateway credentials"),
-    vendor: str = typer.Option("awsbedrock", help="Gateway vendor (awsbedrock, anthropic)"),
+    vendor: str = typer.Option(
+        "awsbedrock",
+        click_type=click.Choice(["awsbedrock", "anthropic"], case_sensitive=False),
+        help="Gateway vendor (awsbedrock, anthropic)",
+    ),
     api_flavor: str = typer.Option("invoke", help="Gateway API flavor"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Only print export commands (for eval-style usage)"),
 ) -> None:

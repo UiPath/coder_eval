@@ -368,12 +368,13 @@ success_criteria:
 @pytest.mark.asyncio
 async def test_run_batch_empty_list(tmp_path):
     """Test batch execution with empty task list (edge case from review)."""
+    from coder_eval.orchestration.batch import run_batch
     from coder_eval.orchestration.config import BatchRunConfig
 
     config = BatchRunConfig(run_dir=tmp_path / "run", max_parallel=1)
 
     # Should handle empty list gracefully (empty list of ResolvedTask)
-    summary, task_results = await Orchestrator.run_batch([], config)
+    summary, task_results = await run_batch([], config)
 
     # Verify empty summary
     assert task_results == []

@@ -1,213 +1,111 @@
-"""Integration test for pass_threshold enforcement in orchestrator.
+"""Pass-threshold enforcement, driven through the production model methods.
 
-Tests that the orchestrator correctly enforces pass_threshold for each
-criterion individually, even when the weighted score is high.
+These tests exercise ``EvaluationResult.calculate_weighted_score`` and
+``EvaluationResult.all_criteria_passed`` directly — the single source of truth
+the orchestrator's success gate now delegates to — rather than re-implementing
+the ``all(...)`` / weighted-average formula inline.
 """
+
+from datetime import datetime
+
+import pytest
 
 from coder_eval.models import (
     CriterionResult,
+    EvaluationResult,
     FileExistsCriterion,
+    FinalStatus,
 )
 
 
+def _make_result(scores: list[float]) -> EvaluationResult:
+    """Build a minimal EvaluationResult carrying one file_exists result per score."""
+    return EvaluationResult(
+        task_id="threshold-test",
+        task_description="d",
+        agent_type="claude-code",
+        started_at=datetime(2026, 1, 1, 12, 0, 0),
+        final_status=FinalStatus.FAILURE,
+        iteration_count=1,
+        success_criteria_results=[
+            CriterionResult(criterion_type="file_exists", description=f"crit-{i}", score=s)
+            for i, s in enumerate(scores)
+        ],
+    )
+
+
 class TestThresholdEnforcement:
-    """Test that pass_threshold is enforced consistently."""
+    """pass_threshold is enforced per-criterion via the model gate."""
 
-    def test_all_passed_requires_each_criterion_meets_threshold(self):
-        """Test that success requires EACH criterion to meet its pass_threshold.
+    def test_high_weighted_score_does_not_mask_a_failed_criterion(self):
+        """A below-threshold criterion fails the gate even when the weighted score is high."""
+        criteria = [
+            FileExistsCriterion(path="f1.txt", description="crit-0", weight=1.0, pass_threshold=0.9),
+            FileExistsCriterion(path="f2.txt", description="crit-1", weight=1.0, pass_threshold=0.9),
+        ]
+        result = _make_result([1.0, 0.8])  # second fails (< 0.9)
 
-        Scenario from issue:
-        - Criterion 1: score=1.0, threshold=0.9 → passes
-        - Criterion 2: score=0.8, threshold=0.9 → fails
-        - Task should FAIL despite high weighted score
+        result.calculate_weighted_score(criteria)
+        assert result.weighted_score == 0.9  # weighted average is still high
+        assert not result.all_criteria_passed(criteria)
+
+    def test_all_pass_when_every_criterion_meets_threshold(self):
+        criteria = [
+            FileExistsCriterion(path="f1.txt", description="crit-0", weight=1.0, pass_threshold=0.9),
+            FileExistsCriterion(path="f2.txt", description="crit-1", weight=1.0, pass_threshold=0.9),
+        ]
+        result = _make_result([0.95, 0.92])
+
+        assert result.all_criteria_passed(criteria)
+
+    def test_thresholds_enforced_independently(self):
+        """Each criterion is gated against its own threshold."""
+        criteria = [
+            FileExistsCriterion(path="f1.txt", description="crit-0", weight=3.0, pass_threshold=1.0),
+            FileExistsCriterion(path="f2.txt", description="crit-1", weight=1.0, pass_threshold=0.5),
+        ]
+        # Critical (threshold 1.0) at 0.99 fails; optional passes.
+        assert not _make_result([0.99, 1.0]).all_criteria_passed(criteria)
+        # Critical perfect; optional exactly at its threshold (0.5) — boundary passes.
+        assert _make_result([1.0, 0.5]).all_criteria_passed(criteria)
+
+    def test_high_weight_does_not_override_low_weight_failure(self):
+        """A heavily-weighted pass cannot rescue a low-weight criterion below threshold."""
+        criteria = [
+            FileExistsCriterion(path="f1.txt", description="crit-0", weight=10.0, pass_threshold=0.9),
+            FileExistsCriterion(path="f2.txt", description="crit-1", weight=1.0, pass_threshold=0.9),
+        ]
+        result = _make_result([1.0, 0.5])  # low-weight criterion fails
+
+        result.calculate_weighted_score(criteria)
+        assert result.weighted_score > 0.9
+        assert not result.all_criteria_passed(criteria)
+
+    def test_calculate_weighted_score_raises_on_length_mismatch(self):
+        """A results/criteria length mismatch is a loud bug signal, not a silent unweighted fallback."""
+        criteria = [FileExistsCriterion(path="f1.txt", description="crit-0", pass_threshold=0.9)]
+        result = _make_result([1.0, 0.8])  # 2 results vs 1 criterion
+
+        with pytest.raises(ValueError, match="length mismatch"):
+            result.calculate_weighted_score(criteria)
+
+    def test_all_criteria_passed_raises_on_length_mismatch(self):
+        """The gate refuses to silently truncate a mismatched results/criteria pairing.
+
+        The first result (0.1) is BELOW threshold on purpose: a naive
+        ``all(... zip(strict=True))`` would short-circuit to False before the
+        length check, so this pins that the explicit len() pre-check raises
+        regardless of element ordering.
         """
-        # Define criteria
-        criteria = [
-            FileExistsCriterion(
-                path="file1.txt",
-                description="First file",
-                weight=1.0,
-                pass_threshold=0.9,
-            ),
-            FileExistsCriterion(
-                path="file2.txt",
-                description="Second file",
-                weight=1.0,
-                pass_threshold=0.9,
-            ),
-        ]
+        criteria = [FileExistsCriterion(path="f1.txt", description="crit-0", pass_threshold=0.9)]
+        result = _make_result([0.1, 0.8])  # 2 results vs 1 criterion; first fails the threshold
 
-        # Simulate results
-        results = [
-            CriterionResult(
-                criterion_type="file_exists",
-                description="First file",
-                score=1.0,  # Passes threshold
-            ),
-            CriterionResult(
-                criterion_type="file_exists",
-                description="Second file",
-                score=0.8,  # FAILS threshold (< 0.9)
-            ),
-        ]
+        with pytest.raises(ValueError, match="length mismatch"):
+            result.all_criteria_passed(criteria)
 
-        # Calculate weighted score
-        total_weighted = sum(
-            result.score * criterion.weight for result, criterion in zip(results, criteria, strict=False)
-        )
-        total_weight = sum(c.weight for c in criteria)
-        weighted_score = total_weighted / total_weight if total_weight > 0 else 0.0
-
-        # Weighted score is high (0.9)
-        assert weighted_score == 0.9
-
-        # But all_passed should be False
-        all_passed = all(
-            result.score >= criterion.pass_threshold for result, criterion in zip(results, criteria, strict=False)
-        )
-
-        assert not all_passed, "Task should fail when any criterion is below threshold"
-
-    def test_all_passed_true_when_all_criteria_meet_threshold(self):
-        """Test that success occurs when ALL criteria meet their thresholds."""
-        criteria = [
-            FileExistsCriterion(
-                path="file1.txt",
-                description="First file",
-                weight=1.0,
-                pass_threshold=0.9,
-            ),
-            FileExistsCriterion(
-                path="file2.txt",
-                description="Second file",
-                weight=1.0,
-                pass_threshold=0.9,
-            ),
-        ]
-
-        results = [
-            CriterionResult(
-                criterion_type="file_exists",
-                description="First file",
-                score=0.95,  # Passes threshold
-            ),
-            CriterionResult(
-                criterion_type="file_exists",
-                description="Second file",
-                score=0.92,  # Passes threshold
-            ),
-        ]
-
-        all_passed = all(
-            result.score >= criterion.pass_threshold for result, criterion in zip(results, criteria, strict=False)
-        )
-
-        assert all_passed, "Task should pass when all criteria meet thresholds"
-
-    def test_different_thresholds_enforced_independently(self):
-        """Test that different thresholds are enforced independently."""
-        criteria = [
-            FileExistsCriterion(
-                path="file1.txt",
-                description="Critical file",
-                weight=3.0,
-                pass_threshold=1.0,  # Must be perfect
-            ),
-            FileExistsCriterion(
-                path="file2.txt",
-                description="Optional file",
-                weight=1.0,
-                pass_threshold=0.5,  # Lenient
-            ),
-        ]
-
-        # Case 1: Critical fails, optional passes → should fail
-        results_fail = [
-            CriterionResult(
-                criterion_type="file_exists",
-                description="Critical file",
-                score=0.99,  # FAILS (< 1.0)
-            ),
-            CriterionResult(
-                criterion_type="file_exists",
-                description="Optional file",
-                score=1.0,  # Passes
-            ),
-        ]
-
-        all_passed_fail = all(
-            result.score >= criterion.pass_threshold for result, criterion in zip(results_fail, criteria, strict=False)
-        )
-
-        assert not all_passed_fail, "Should fail when critical criterion doesn't meet threshold"
-
-        # Case 2: Critical passes, optional barely passes → should pass
-        results_pass = [
-            CriterionResult(
-                criterion_type="file_exists",
-                description="Critical file",
-                score=1.0,  # Passes
-            ),
-            CriterionResult(
-                criterion_type="file_exists",
-                description="Optional file",
-                score=0.5,  # Exactly meets threshold
-            ),
-        ]
-
-        all_passed_pass = all(
-            result.score >= criterion.pass_threshold for result, criterion in zip(results_pass, criteria, strict=False)
-        )
-
-        assert all_passed_pass, "Should pass when all criteria meet their thresholds"
-
-    def test_high_weighted_score_doesnt_override_failed_criterion(self):
-        """Test that high weighted score doesn't override individual failures.
-
-        This is the key test: even if the weighted average is excellent,
-        if ANY criterion fails its threshold, the task should fail.
-        """
-        criteria = [
-            FileExistsCriterion(
-                path="file1.txt",
-                description="High weight file",
-                weight=10.0,  # Very high weight
-                pass_threshold=0.9,
-            ),
-            FileExistsCriterion(
-                path="file2.txt",
-                description="Low weight file",
-                weight=1.0,  # Low weight
-                pass_threshold=0.9,
-            ),
-        ]
-
-        results = [
-            CriterionResult(
-                criterion_type="file_exists",
-                description="High weight file",
-                score=1.0,  # Perfect
-            ),
-            CriterionResult(
-                criterion_type="file_exists",
-                description="Low weight file",
-                score=0.5,  # FAILS threshold
-            ),
-        ]
-
-        # Calculate weighted score - should be very high
-        total_weighted = sum(
-            result.score * criterion.weight for result, criterion in zip(results, criteria, strict=False)
-        )
-        total_weight = sum(c.weight for c in criteria)
-        weighted_score = total_weighted / total_weight if total_weight > 0 else 0.0
-
-        # Weighted score is ~0.95 (very high)
-        assert weighted_score > 0.9
-
-        # But all_passed should still be False
-        all_passed = all(
-            result.score >= criterion.pass_threshold for result, criterion in zip(results, criteria, strict=False)
-        )
-
-        assert not all_passed, "Task should fail even with high weighted score if any criterion is below its threshold"
+    def test_empty_inputs_score_zero_without_raising(self):
+        """Empty results/criteria still yield 0.0 (not a raise) and an empty gate passes."""
+        result = _make_result([])
+        result.calculate_weighted_score([])
+        assert result.weighted_score == 0.0
+        assert result.all_criteria_passed([])  # all([]) is True
