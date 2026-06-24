@@ -57,7 +57,7 @@ defaults:
     allowed_tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"]
 
     # Claude Code plugins to load (null = none)
-    # Example: [{"name": "my-plugin", "path": "/path/to/plugin"}]
+    # Example: [{"type": "local", "path": "/path/to/skills"}]
     plugins: null
 
     # Additional patterns to ignore during file change detection (beyond defaults)

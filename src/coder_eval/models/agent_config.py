@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Annotated, Any, ClassVar, Literal, Self
+from typing import Annotated, Any, ClassVar, Literal, Self, TypedDict
 
-from claude_agent_sdk import ClaudeAgentOptions, SdkPluginConfig, SettingSource
+from claude_agent_sdk import ClaudeAgentOptions
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -19,6 +19,24 @@ from pydantic import (
 
 from coder_eval.models.enums import AgentKind, PermissionMode
 from coder_eval.models.merge_strategy import MergeField
+
+
+type SettingSource = Literal["user", "project", "local"]
+"""Vendor-neutral mirror of claude_agent_sdk.SettingSource (no SDK dependency)."""
+
+
+class LocalPluginConfig(TypedDict):
+    """Vendor-neutral local plugin/skills source: a directory the agent scans for skills.
+
+    Mirrors the runtime shape of claude_agent_sdk.SdkPluginConfig but carries no SDK
+    dependency, so the agnostic BaseAgentConfig can declare ``plugins`` without leaking a
+    Claude-Code type onto Codex / NoOp configs. Entries remain plain dicts at runtime
+    (TypedDict), so all consumers — Codex skill discovery, docker_runner auto-mount,
+    utils.process_plugins, and the Claude SDK pass-through — are unchanged.
+    """
+
+    type: Literal["local"]
+    path: str
 
 
 _VALID_SDK_OPTION_FIELDS: frozenset[str] = frozenset(f.name for f in dataclasses.fields(ClaudeAgentOptions))
@@ -127,7 +145,9 @@ class BaseAgentConfig(BaseModel):
     disallowed_tools: list[str] | None = MergeField(
         strategy="replace", default=None, description="List of disallowed tools (e.g., ['TodoWrite'])"
     )
-    plugins: list[SdkPluginConfig] | None = MergeField(strategy="replace", default=None, description="List of plugins")
+    plugins: list[LocalPluginConfig] | None = MergeField(
+        strategy="replace", default=None, description="List of plugins (local skills/plugin sources)"
+    )
     system_prompt: str | None = Field(
         default=None,
         description=(
@@ -155,17 +175,6 @@ class BaseAgentConfig(BaseModel):
             "prefixed with '!' remove a default (gitignore-style negation)."
         ),
         validation_alias=AliasChoices("ignore_patterns", "additional_ignore_patterns"),
-    )
-
-    setting_sources: list[SettingSource] | None = MergeField(
-        strategy="replace",
-        default=None,
-        description=(
-            "Claude Code setting sources to load (e.g., ['project', 'user']). "
-            "Set to [] for maximum isolation (no host settings or hooks) — used by judge agents and simulators. "
-            "Defaults to None, which at runtime becomes ['project'] so .mcp.json is discovered. "
-            "Users may override this value for custom setting loading behavior."
-        ),
     )
 
     @field_validator("ignore_patterns")
@@ -205,6 +214,16 @@ class ClaudeCodeAgentConfig(BaseAgentConfig):
             "does not own directly (e.g. 'effort'). Keys must be valid ClaudeAgentOptions "
             "fields and must NOT be framework-managed (model/allowed_tools/permission_mode/...). "
             "Validated at YAML load; values are forwarded verbatim to the SDK."
+        ),
+    )
+    setting_sources: list[SettingSource] | None = MergeField(
+        strategy="replace",
+        default=None,
+        description=(
+            "Claude Code setting sources to load (e.g., ['project', 'user']). "
+            "Set to [] for maximum isolation (no host settings or hooks) — used by judge agents and simulators. "
+            "Defaults to None, which at runtime becomes ['project'] so .mcp.json is discovered. "
+            "Users may override this value for custom setting loading behavior."
         ),
     )
 

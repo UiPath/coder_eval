@@ -15,6 +15,7 @@ from tests.lint.rules.ce016_no_computed_tokenusage_kwargs import NoComputedToken
 from tests.lint.rules.ce017_models_lazy_agent_imports import ModelsLazyAgentImports
 from tests.lint.rules.ce018_no_final_status_name_denylist import NoFinalStatusNameDenylist
 from tests.lint.rules.ce019_telemetry_non_fatal import TelemetryNonFatal
+from tests.lint.rules.ce020_no_sdk_typed_base_agent_fields import NoSdkTypedBaseAgentFields
 from tests.lint.rules.ce021_guarded_evaluationresult_parse import GuardedEvaluationResultParse
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
@@ -54,6 +55,7 @@ ALL_RULES: list[RuleClass] = [
     ModelsLazyAgentImports,
     NoFinalStatusNameDenylist,
     TelemetryNonFatal,
+    NoSdkTypedBaseAgentFields,
     GuardedEvaluationResultParse,
 ]
 

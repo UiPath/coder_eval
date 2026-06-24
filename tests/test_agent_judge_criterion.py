@@ -275,12 +275,12 @@ def test_agent_judge_build_agent_config_does_not_mutate_criterion(sandbox: Sandb
     doesn't leak back into the YAML-loaded criterion across dataset fan-out.
     """
     criterion = AgentJudgeCriterion(description="x", prompt="grade")
-    original_setting_sources = criterion.agent.setting_sources
+    original_setting_sources = cast(ClaudeCodeAgentConfig, criterion.agent).setting_sources
     original_system_prompt = criterion.agent.system_prompt
     mock_agent = _make_mock_agent('{"score": 1.0, "rationale": "ok"}')
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
         SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
-    assert criterion.agent.setting_sources == original_setting_sources
+    assert cast(ClaudeCodeAgentConfig, criterion.agent).setting_sources == original_setting_sources
     assert criterion.agent.system_prompt == original_system_prompt
 
 

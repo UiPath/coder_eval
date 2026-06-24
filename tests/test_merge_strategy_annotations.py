@@ -59,7 +59,6 @@ class TestAgentStrategies:
             ("disallowed_tools", "replace"),
             ("plugins", "replace"),
             ("ignore_patterns", "replace"),
-            ("setting_sources", "replace"),
             ("model", "replace"),
             ("permission_mode", "replace"),
         ],
@@ -71,6 +70,9 @@ class TestAgentStrategies:
         assert _strategy(ClaudeCodeAgentConfig, "claude_settings") == "deep"
         # free-form dict -> deep by type-aware default (no annotation)
         assert _strategy(ClaudeCodeAgentConfig, "sdk_options") == "deep"
+        # setting_sources moved down from the base to the Claude subclass (SDK-decoupling).
+        assert _strategy(ClaudeCodeAgentConfig, "setting_sources") == "replace"
+        assert "setting_sources" not in BaseAgentConfig.model_fields
 
 
 class TestExclusionGroups:

@@ -204,6 +204,92 @@ class TestCE019TelemetryNonFatal:
 
 
 @pytest.mark.lint
+class TestCE020NoSdkTypedBaseAgentFields:
+    """CE020 flags claude_agent_sdk-typed fields on BaseAgentConfig; allows them elsewhere."""
+
+    @staticmethod
+    def _run(src: str, *, in_target: bool = True):
+        import ast
+
+        from tests.lint.rules.ce020_no_sdk_typed_base_agent_fields import NoSdkTypedBaseAgentFields
+
+        path = "src/coder_eval/models/agent_config.py" if in_target else "src/coder_eval/models/other.py"
+        return NoSdkTypedBaseAgentFields(path).check(ast.parse(src))
+
+    def test_flags_sdk_typed_field_on_base(self):
+        src = (
+            "from claude_agent_sdk import SettingSource\n"
+            "class BaseAgentConfig:\n"
+            "    setting_sources: list[SettingSource] | None = None\n"
+        )
+        assert self._run(src)
+
+    def test_flags_aliased_sdk_typed_field_on_base(self):
+        src = (
+            "from claude_agent_sdk import SdkPluginConfig as P\n"
+            "class BaseAgentConfig:\n"
+            "    plugins: list[P] | None = None\n"
+        )
+        assert self._run(src)
+
+    def test_allows_local_typed_field_on_base(self):
+        src = (
+            "from claude_agent_sdk import ClaudeAgentOptions\n"
+            "_FIELDS = ClaudeAgentOptions\n"  # module-level use — not flagged
+            "class BaseAgentConfig:\n"
+            "    plugins: list[LocalPluginConfig] | None = None\n"
+        )
+        assert not self._run(src)
+
+    def test_flags_submodule_import_field_on_base(self):
+        src = (
+            "from claude_agent_sdk.types import SettingSource\n"
+            "class BaseAgentConfig:\n"
+            "    setting_sources: list[SettingSource] | None = None\n"
+        )
+        assert self._run(src)
+
+    def test_flags_module_attribute_field_on_base(self):
+        src = (
+            "import claude_agent_sdk as sdk\n"
+            "class BaseAgentConfig:\n"
+            "    setting_sources: list[sdk.SettingSource] | None = None\n"
+        )
+        assert self._run(src)
+
+    def test_ignores_unrelated_lookalike_module(self):
+        src = (
+            "from claude_agent_sdkx import SettingSource\n"  # not the SDK
+            "class BaseAgentConfig:\n"
+            "    setting_sources: list[SettingSource] | None = None\n"
+        )
+        assert not self._run(src)
+
+    def test_allows_sdk_typed_field_on_subclass(self):
+        src = (
+            "from claude_agent_sdk import SettingSource\n"
+            "class ClaudeCodeAgentConfig:\n"
+            "    setting_sources: list[SettingSource] | None = None\n"
+        )
+        assert not self._run(src)
+
+    def test_ignores_files_outside_target(self):
+        src = (
+            "from claude_agent_sdk import SettingSource\n"
+            "class BaseAgentConfig:\n"
+            "    setting_sources: list[SettingSource] | None = None\n"
+        )
+        assert not self._run(src, in_target=False)
+
+    def test_no_violations_on_real_agent_config(self):
+        """Phase 1 cleanup satisfies CE020: the real module has zero SDK-typed base fields."""
+        from tests.lint.rules.ce020_no_sdk_typed_base_agent_fields import NoSdkTypedBaseAgentFields
+
+        agent_config = SRC / "coder_eval" / "models" / "agent_config.py"
+        assert not check_paths([agent_config], rules=[NoSdkTypedBaseAgentFields])
+
+
+@pytest.mark.lint
 def test_rule_ids_unique() -> None:
     """No two lint rules may share a CE id (anti-shadow: a noqa keys on the id).
 

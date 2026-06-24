@@ -4,15 +4,13 @@ All models can be imported from coder_eval.models regardless of
 which submodule they're defined in.
 """
 
-# SDK Types
-from claude_agent_sdk import SdkPluginConfig
-
 # Agent config
 from coder_eval.models.agent_config import (
     AgentConfig,
     BaseAgentConfig,
     ClaudeCodeAgentConfig,
     CodexAgentConfig,
+    LocalPluginConfig,
     NoneAgentConfig,
     ResolvedAgentConfig,
     parse_agent_config,
@@ -180,13 +178,12 @@ from coder_eval.models.templates import (
 
 
 __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
-    # SDK Types
-    "SdkPluginConfig",
     # Agent config
     "AgentConfig",
     "BaseAgentConfig",
     "ClaudeCodeAgentConfig",
     "CodexAgentConfig",
+    "LocalPluginConfig",
     "NoneAgentConfig",
     "ResolvedAgentConfig",
     "parse_agent_config",
