@@ -614,11 +614,47 @@ class DockerRunner:
 
             # output_dir IS rt.run_dir -- no copy needed.
             task_json_text = await asyncio.to_thread(task_json.read_text, encoding="utf-8")
-            result = EvaluationResult.model_validate_json(task_json_text)
+            try:
+                result = EvaluationResult.model_validate_json(task_json_text)
+            except ValueError as exc:
+                # Present but unparseable (schema skew from a stale image, or a
+                # truncated/torn write). Degrade like the missing-file branch
+                # rather than crashing with an uncaught ValidationError/JSONDecodeError.
+                raise await self._handle_malformed_task_json(task_json, log_path, exc) from exc
             self._warn_on_version_mismatch(result)
             return result
         finally:
             await asyncio.to_thread(shutil.rmtree, staging, ignore_errors=True)
+
+    async def _handle_malformed_task_json(self, task_json: Path, log_path: Path, exc: ValueError) -> DockerRunError:
+        """Degrade a present-but-malformed task.json; return the DockerRunError to raise.
+
+        Triggered by a present-but-unparseable task.json -- most realistically a
+        schema skew between a stale ``:latest`` image and the host (the version
+        checks only warn), or a truncated/torn write. Mirrors the missing-file
+        branch and the batch.py recovery paths: log naming the path, move the
+        original aside to ``task.json.malformed`` (so its possibly-recoverable
+        content isn't masked AND so the synthetic write lands --
+        ``_write_synthetic_task_json`` never overwrites an existing file),
+        persist a synthetic ERROR record (per-task dashboard visibility), and
+        return the error for the caller to raise (the batch layer records the
+        run-level ERROR). Best-effort throughout: a failed move is logged, never
+        masking the raise.
+        """
+        logger.warning("Malformed task.json at %s: %s", task_json, exc)
+        sidecar = task_json.with_suffix(task_json.suffix + ".malformed")
+
+        def _move() -> None:
+            os.replace(task_json, sidecar)  # atomic; overwrites any stale prior .malformed
+
+        try:
+            await asyncio.to_thread(_move)
+        except OSError as move_exc:
+            logger.warning("Failed to preserve malformed task.json %s: %s", task_json, move_exc)
+
+        error = DockerRunError(f"task.json at {task_json} is malformed. See {log_path} for container output.")
+        await self._write_synthetic_task_json(task_json, error)
+        return error
 
     async def _write_synthetic_task_json(self, target: Path, error: DockerRunError) -> None:
         """Persist a minimal ERROR task.json for a container that died pre-write.

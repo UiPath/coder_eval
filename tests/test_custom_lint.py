@@ -201,3 +201,93 @@ class TestCE019TelemetryNonFatal:
     def test_ignores_non_telemetry_files(self):
         src = "def track_event(name):\n    do_work()"
         assert not self._run(src, in_telemetry=False)
+
+
+@pytest.mark.lint
+def test_rule_ids_unique() -> None:
+    """No two lint rules may share a CE id (anti-shadow: a noqa keys on the id).
+
+    Mirrors the AgentRegistry / register_pricing anti-shadow invariant. pytest
+    silently auto-suffixes duplicate parametrize ids, so without this a duplicate
+    CE number (e.g. two in-flight branches claiming the next number) would not
+    fail the suite on its own.
+    """
+    ids = [r.id for r in ALL_RULES]
+    assert len(set(ids)) == len(ids), f"duplicate CE rule id(s): {sorted({i for i in ids if ids.count(i) > 1})}"
+
+
+@pytest.mark.lint
+class TestCE021GuardedEvaluationResultParse:
+    """CE021 flags unguarded EvaluationResult.model_validate_json; allows guarded ones."""
+
+    @staticmethod
+    def _run(src: str):
+        import ast
+
+        from tests.lint.rules.ce021_guarded_evaluationresult_parse import GuardedEvaluationResultParse
+
+        return GuardedEvaluationResultParse("<test>").check(ast.parse(src))
+
+    def test_flags_unguarded_call(self):
+        assert self._run("result = EvaluationResult.model_validate_json(text)")
+
+    def test_allows_guarded_by_value_error(self):
+        src = "try:\n    r = EvaluationResult.model_validate_json(text)\nexcept ValueError:\n    pass"
+        assert not self._run(src)
+
+    def test_allows_guarded_by_exception(self):
+        src = "try:\n    r = EvaluationResult.model_validate_json(text)\nexcept Exception:\n    pass"
+        assert not self._run(src)
+
+    def test_allows_guarded_by_bare_except(self):
+        src = "try:\n    r = EvaluationResult.model_validate_json(text)\nexcept:\n    pass"
+        assert not self._run(src)
+
+    def test_allows_guarded_by_tuple_with_value_error(self):
+        # recover_task_results uses `except (OSError, ValueError)` — the tuple member guards.
+        src = "try:\n    r = EvaluationResult.model_validate_json(text)\nexcept (OSError, ValueError):\n    pass"
+        assert not self._run(src)
+
+    def test_flags_unrelated_handler_only(self):
+        # `except OSError` does NOT catch ValidationError/JSONDecodeError → still flagged.
+        src = "try:\n    r = EvaluationResult.model_validate_json(text)\nexcept OSError:\n    pass"
+        assert self._run(src)
+
+    def test_flags_call_in_finally_body(self):
+        # A parse in the finally is not protected by that try's handlers → flagged.
+        src = (
+            "try:\n    do_work()\nexcept ValueError:\n    pass\n"
+            "finally:\n    r = EvaluationResult.model_validate_json(text)"
+        )
+        assert self._run(src)
+
+    def test_flags_call_in_except_body(self):
+        # A parse in the except handler is not protected by that try → flagged.
+        src = "try:\n    do_work()\nexcept ValueError:\n    r = EvaluationResult.model_validate_json(text)"
+        assert self._run(src)
+
+    def test_flags_call_in_else_body(self):
+        # The else clause runs only after the body succeeds; an exception there
+        # propagates UNCAUGHT (not protected by this try's except) → flagged.
+        src = (
+            "try:\n    do_work()\nexcept ValueError:\n    pass\n"
+            "else:\n    r = EvaluationResult.model_validate_json(text)"
+        )
+        assert self._run(src)
+
+    def test_ignores_other_models(self):
+        # Narrow to EvaluationResult — other models' parses are out of scope.
+        assert not self._run("r = TaskDefinition.model_validate_json(text)")
+
+    def test_nested_try_propagates_guard(self):
+        src = (
+            "try:\n"
+            "    try:\n"
+            "        r = EvaluationResult.model_validate_json(text)\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "except ValueError:\n"
+            "    pass"
+        )
+        # Inner body is guarded by the OUTER try's except ValueError.
+        assert not self._run(src)

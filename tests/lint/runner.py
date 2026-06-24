@@ -15,6 +15,7 @@ from tests.lint.rules.ce016_no_computed_tokenusage_kwargs import NoComputedToken
 from tests.lint.rules.ce017_models_lazy_agent_imports import ModelsLazyAgentImports
 from tests.lint.rules.ce018_no_final_status_name_denylist import NoFinalStatusNameDenylist
 from tests.lint.rules.ce019_telemetry_non_fatal import TelemetryNonFatal
+from tests.lint.rules.ce021_guarded_evaluationresult_parse import GuardedEvaluationResultParse
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -53,7 +54,19 @@ ALL_RULES: list[RuleClass] = [
     ModelsLazyAgentImports,
     NoFinalStatusNameDenylist,
     TelemetryNonFatal,
+    GuardedEvaluationResultParse,
 ]
+
+# Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule
+# id must be unique. Suppression (`# noqa: CExxx`) and pytest parametrize ids key
+# on the id string, so two rules sharing one id would silently alias each other
+# (a single noqa would suppress both) — fail loudly at import time instead. A
+# duplicate most plausibly arises when two in-flight branches claim the same next
+# CE number; the loser must renumber.
+_rule_ids = [r.id for r in ALL_RULES]
+assert len(set(_rule_ids)) == len(_rule_ids), (
+    f"duplicate CE rule id(s): {sorted({i for i in _rule_ids if _rule_ids.count(i) > 1})}"
+)
 
 _NOQA_ALL = re.compile(r"#\s*noqa\s*$")
 _NOQA_CODES = re.compile(r"#\s*noqa:\s*([A-Z]+\d+(?:\s*,\s*[A-Z]+\d+)*)")

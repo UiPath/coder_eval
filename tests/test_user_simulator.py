@@ -8,6 +8,8 @@ canned response.
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -250,6 +252,110 @@ class TestLifecycle:
         await sim.stop()
         assert stub.stopped
         assert not scratch.exists()
+
+    async def test_start_failure_removes_scratch_dir(self):
+        """When _agent.start() raises, start() re-raises AND removes the sim-* scratch dir (no leak)."""
+
+        class FailingStartAgent(TextStubAgent):
+            def __init__(self) -> None:
+                super().__init__([])
+                self.captured_dir: Path | None = None
+
+            async def start(
+                self,
+                working_directory: str,
+                *,
+                env_path_prepend: list[str] | None = None,
+                plugin_tools_dir: str | None = None,
+            ) -> None:
+                self.captured_dir = Path(working_directory)
+                raise RuntimeError("boom")
+
+        stub = FailingStartAgent()
+        sim = UserSimulator(
+            config=_sim_cfg(),
+            task_description="T",
+            initial_prompt="start",
+            agent_override=stub,
+        )
+        with pytest.raises(RuntimeError, match="boom"):
+            await sim.start()
+
+        # The scratch dir was created (mkdtemp ran) but must be gone after the failed start.
+        assert stub.captured_dir is not None
+        assert not stub.captured_dir.exists()
+        # State reset, so a follow-up stop() is a safe no-op.
+        assert sim._scratch_dir is None
+        assert sim._agent is None
+        await sim.stop()  # must not raise
+
+    async def test_start_failure_on_base_exception_cleans_up(self):
+        """A BaseException (e.g. cancellation) during _agent.start() still triggers cleanup and re-raises."""
+
+        class CancelStartAgent(TextStubAgent):
+            def __init__(self) -> None:
+                super().__init__([])
+                self.captured_dir: Path | None = None
+
+            async def start(
+                self,
+                working_directory: str,
+                *,
+                env_path_prepend: list[str] | None = None,
+                plugin_tools_dir: str | None = None,
+            ) -> None:
+                self.captured_dir = Path(working_directory)
+                raise asyncio.CancelledError()
+
+        stub = CancelStartAgent()
+        sim = UserSimulator(
+            config=_sim_cfg(),
+            task_description="T",
+            initial_prompt="start",
+            agent_override=stub,
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await sim.start()
+
+        assert stub.captured_dir is not None
+        assert not stub.captured_dir.exists()
+        assert sim._scratch_dir is None
+
+    async def test_start_failure_during_agent_construction_cleans_up(self, monkeypatch):
+        """agent_override=None: a raise in ClaudeCodeAgent construction (before _agent.start())
+        still removes the sim-* scratch dir and resets state.
+
+        The other start-failure tests inject a fake via agent_override, so they
+        only exercise the _agent.start() branch. This covers the construction
+        branch the start() comment explicitly calls out as the newly-closed leak.
+        """
+        import coder_eval.agents.claude_code_agent as cca
+
+        captured: dict[str, Path | None] = {"dir": None}
+
+        sim = UserSimulator(
+            config=_sim_cfg(),
+            task_description="T",
+            initial_prompt="start",
+            agent_override=None,
+        )
+
+        def _boom(*_args, **_kwargs):
+            # mkdtemp has already run; capture the scratch dir before it is cleaned up.
+            captured["dir"] = sim._scratch_dir
+            raise RuntimeError("ctor boom")
+
+        monkeypatch.setattr(cca, "ClaudeCodeAgent", _boom)
+
+        with pytest.raises(RuntimeError, match="ctor boom"):
+            await sim.start()
+
+        # The scratch dir was created by mkdtemp but must be gone after the failed construction.
+        assert captured["dir"] is not None
+        assert not captured["dir"].exists()
+        assert sim._scratch_dir is None
+        assert sim._agent is None
+        await sim.stop()  # must not raise
 
     async def test_disabled_simulator_is_no_op(self):
         """When config.enabled is False, start/stop do nothing and no agent is created."""

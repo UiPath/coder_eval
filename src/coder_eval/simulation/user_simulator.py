@@ -227,6 +227,16 @@ class UserSimulator:
         """The fully-rendered system prompt given to the simulator LLM."""
         return self._system_prompt
 
+    async def _remove_scratch_dir(self) -> None:
+        """Remove the ephemeral scratch dir if present and reset the handle.
+
+        Shared by stop() and start()'s failure path so the rmtree idiom lives in
+        one place. Best-effort (ignore_errors=True); idempotent (safe to call twice).
+        """
+        if self._scratch_dir is not None and self._scratch_dir.exists():
+            await asyncio.to_thread(shutil.rmtree, self._scratch_dir, ignore_errors=True)
+        self._scratch_dir = None
+
     async def start(self) -> None:
         """Spin up the underlying Claude Code agent in an ephemeral scratch dir.
 
@@ -236,13 +246,26 @@ class UserSimulator:
         if not self.config.enabled:
             return
         self._scratch_dir = Path(tempfile.mkdtemp(prefix="sim-"))
-        if self._agent_override is not None:
-            self._agent = self._agent_override
-        else:
-            from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
+        try:
+            if self._agent_override is not None:
+                self._agent = self._agent_override
+            else:
+                from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 
-            self._agent = ClaudeCodeAgent(self._agent_config, route=self._route, instance_name="simulator")
-        await self._agent.start(str(self._scratch_dir))
+                self._agent = ClaudeCodeAgent(self._agent_config, route=self._route, instance_name="simulator")
+            await self._agent.start(str(self._scratch_dir))
+        except BaseException:
+            # Agent construction or _agent.start() failed (SDK/transport
+            # startup, missing CLI, bad config, or cancellation). The dialog
+            # loop's finally (its only caller of stop()) is never entered on
+            # this path, so clean up our own scratch dir here to avoid a sim-*
+            # tempdir leak that compounds across a batch of simulation tasks.
+            # Wrapping construction too (not just start) closes the leak for
+            # every failure after mkdtemp. Re-raise to preserve the original
+            # failure (incl. cancellation/interrupt) semantics.
+            await self._remove_scratch_dir()
+            self._agent = None
+            raise
 
     async def stop(self) -> None:
         """Tear down the simulator agent and remove its scratch dir."""
@@ -252,9 +275,7 @@ class UserSimulator:
             except Exception:
                 logger.exception("Error stopping simulator agent")
             self._agent = None
-        if self._scratch_dir is not None and self._scratch_dir.exists():
-            await asyncio.to_thread(shutil.rmtree, self._scratch_dir, ignore_errors=True)
-            self._scratch_dir = None
+        await self._remove_scratch_dir()
 
     async def next_user_message(self, dialog_pairs: list[tuple[str, str]]) -> SimulatorResult:
         """Generate the next simulated-user utterance.

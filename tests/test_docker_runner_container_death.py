@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from coder_eval.isolation.docker_runner import DockerRunError, DockerRunner
-from coder_eval.models import FileExistsCriterion, SandboxConfig, TaskDefinition
+from coder_eval.models import EvaluationResult, FileExistsCriterion, FinalStatus, SandboxConfig, TaskDefinition
 
 
 # DockerRunner targets Linux containers from POSIX hosts; see
@@ -61,9 +61,13 @@ class TestSyntheticTaskJson:
 
         asyncio.run(runner._write_synthetic_task_json(target, error))
 
+        # Round-trips through the SAME parse every downstream consumer uses
+        # (batch.py / reports.py / reports_stats.py) — not just a raw key check —
+        # so a schema change that broke validation on the synthetic record fails here.
+        parsed = EvaluationResult.model_validate_json(target.read_text(encoding="utf-8"))
+        assert parsed.final_status == FinalStatus.ERROR
+        assert parsed.task_id == "test-container-death"
         payload = json.loads(target.read_text(encoding="utf-8"))
-        assert payload["final_status"] == "ERROR"
-        assert payload["task_id"] == "test-container-death"
         assert "code 137" in payload["error_message"]
 
     def test_never_overwrites_existing_task_json(self, run_dir):
@@ -95,6 +99,122 @@ class TestSyntheticTaskJson:
         asyncio.run(runner._write_synthetic_task_json(target, DockerRunError("boom")))
 
         assert not target.exists()
+
+
+class TestMalformedTaskJson:
+    """A present-but-malformed task.json degrades to a synthetic ERROR record.
+
+    Mirrors the missing-file branch: a stale ``:latest`` image producing a
+    schema-skewed task.json (the version checks only warn), or a truncated/torn
+    write, must not surface as an uncaught ``ValidationError``/``JSONDecodeError``.
+    Instead the runner preserves the original aside (``task.json.malformed``),
+    persists a parseable synthetic ERROR task.json, and returns a ``DockerRunError``
+    for the caller to raise. Tests drive the container-free
+    ``_handle_malformed_task_json`` seam directly.
+    """
+
+    @staticmethod
+    def _malformed_exc(text: str) -> Exception:
+        """Parse ``text`` as an EvaluationResult and return the raised ValueError."""
+        from coder_eval.models import EvaluationResult
+
+        try:
+            EvaluationResult.model_validate_json(text)
+        except ValueError as exc:
+            return exc
+        raise AssertionError("expected EvaluationResult parse to fail")
+
+    def test_schema_skew_degrades(self, run_dir):
+        """Valid JSON but wrong schema → synthetic ERROR + preserved sidecar + DockerRunError."""
+        runner = _make_runner(run_dir)
+        task_json = run_dir / "task.json"
+        original = '{"task_id": 123, "final_status": "NOPE"}'
+        task_json.write_text(original, encoding="utf-8")
+        log_path = run_dir / "docker.log"
+        exc = self._malformed_exc(original)
+
+        returned = asyncio.run(runner._handle_malformed_task_json(task_json, log_path, exc))
+
+        assert isinstance(returned, DockerRunError)
+        # Synthetic ERROR task.json now present and round-trips through the real
+        # EvaluationResult parse every downstream consumer relies on.
+        parsed = EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8"))
+        assert parsed.final_status == FinalStatus.ERROR
+        # Original preserved byte-identically in the sidecar.
+        sidecar = run_dir / "task.json.malformed"
+        assert sidecar.exists()
+        assert sidecar.read_text(encoding="utf-8") == original
+
+    def test_truncated_degrades(self, run_dir):
+        """Unterminated JSON → same degraded outcome."""
+        runner = _make_runner(run_dir)
+        task_json = run_dir / "task.json"
+        original = '{"task_id": "x"'
+        task_json.write_text(original, encoding="utf-8")
+        log_path = run_dir / "docker.log"
+        exc = self._malformed_exc(original)
+
+        returned = asyncio.run(runner._handle_malformed_task_json(task_json, log_path, exc))
+
+        assert isinstance(returned, DockerRunError)
+        parsed = EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8"))
+        assert parsed.final_status == FinalStatus.ERROR
+        sidecar = run_dir / "task.json.malformed"
+        assert sidecar.exists()
+        assert sidecar.read_text(encoding="utf-8") == original
+
+    def test_error_message_names_path(self, run_dir):
+        """The returned DockerRunError references the malformed path and log."""
+        runner = _make_runner(run_dir)
+        task_json = run_dir / "task.json"
+        task_json.write_text("not json", encoding="utf-8")
+        log_path = run_dir / "docker.log"
+        exc = self._malformed_exc("not json")
+
+        returned = asyncio.run(runner._handle_malformed_task_json(task_json, log_path, exc))
+
+        assert str(task_json) in str(returned)
+        assert str(log_path) in str(returned)
+
+    def test_move_aside_failure_is_swallowed(self, run_dir, monkeypatch):
+        """A failed move-aside is logged and swallowed; the DockerRunError still returns (degrade, don't crash)."""
+        runner = _make_runner(run_dir)
+        task_json = run_dir / "task.json"
+        original = "still malformed"
+        task_json.write_text(original, encoding="utf-8")
+        log_path = run_dir / "docker.log"
+        exc = self._malformed_exc("not json")
+
+        def _boom(*_args, **_kwargs):
+            raise OSError("cannot move")
+
+        # String target avoids importing docker_runner under both `import` and
+        # `from ... import` (CodeQL py/import-and-import-from).
+        monkeypatch.setattr("coder_eval.isolation.docker_runner.os.replace", _boom)
+
+        returned = asyncio.run(runner._handle_malformed_task_json(task_json, log_path, exc))
+
+        # Error still returned for the caller to raise (no crash).
+        assert isinstance(returned, DockerRunError)
+        # Move failed → original malformed file stays put; synthetic write no-ops
+        # (never-overwrite guard) — strictly no worse than today, and now warned.
+        assert task_json.read_text(encoding="utf-8") == original
+        assert not (run_dir / "task.json.malformed").exists()
+
+    def test_stale_sidecar_overwritten(self, run_dir):
+        """A leftover .malformed from a prior run is atomically overwritten (no FileExistsError)."""
+        runner = _make_runner(run_dir)
+        task_json = run_dir / "task.json"
+        original = "current malformed bytes"
+        task_json.write_text(original, encoding="utf-8")
+        sidecar = run_dir / "task.json.malformed"
+        sidecar.write_text("stale prior-run bytes", encoding="utf-8")
+        log_path = run_dir / "docker.log"
+        exc = self._malformed_exc("not json")
+
+        asyncio.run(runner._handle_malformed_task_json(task_json, log_path, exc))
+
+        assert sidecar.read_text(encoding="utf-8") == original
 
 
 class TestContainerAutoRemoval:
