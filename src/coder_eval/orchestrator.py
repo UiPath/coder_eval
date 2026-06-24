@@ -61,6 +61,7 @@ from .sandbox import Sandbox
 from .simulation import DialogStopReason, UserSimulator, evaluate_stop
 from .streaming.callbacks import StreamCallback, TaskScopedCallback, safe_emit
 from .streaming.events import CriteriaCheckEvent, CriterionSummary
+from .telemetry import Scalar, hash_identifier
 from .utils import get_version_info, looks_like_version, runtime_uip_versions
 
 
@@ -216,6 +217,64 @@ def _extract_failure_reason(result: CriterionResult) -> str | None:
         return None
     reason = _short_failure_reason(result)
     return reason if reason != "no details" else None
+
+
+# Every FinalStatus maps to exactly one telemetry event name: hard failures →
+# CoderEval.Task.Failed, everything else → CoderEval.Task.End. Both buckets are
+# listed EXPLICITLY (not "failed-allowlist + default") and the assert below
+# enforces an exhaustive, disjoint partition — so a FinalStatus added to
+# coder_eval/models/enums.py fails fast here until it's classified, rather than
+# silently landing in Task.End and skewing the failed/succeeded split. Mirrors
+# the _STATUS_ICONS exhaustiveness guard in models/enums.py.
+_TELEMETRY_FAILED_STATUSES = frozenset(
+    {
+        FinalStatus.ERROR,
+        FinalStatus.TIMEOUT,
+        FinalStatus.TOKEN_BUDGET_EXCEEDED,
+        FinalStatus.COST_BUDGET_EXCEEDED,
+    }
+)
+_TELEMETRY_END_STATUSES = frozenset(
+    {
+        FinalStatus.SUCCESS,
+        FinalStatus.FAILURE,
+        FinalStatus.MAX_TURNS_EXHAUSTED,
+    }
+)
+assert _TELEMETRY_FAILED_STATUSES.isdisjoint(_TELEMETRY_END_STATUSES), "FinalStatus in both telemetry buckets"
+assert not (set(FinalStatus) - _TELEMETRY_FAILED_STATUSES - _TELEMETRY_END_STATUSES), (
+    "FinalStatus missing a telemetry bucket — classify it in orchestrator._TELEMETRY_{FAILED,END}_STATUSES"
+)
+
+
+def build_task_event(result: EvaluationResult, *, driver: str, variant_id: str) -> tuple[str, dict[str, Scalar]]:
+    """Build the (event_name, properties) for a finalized task's telemetry event.
+
+    Shared by the in-process path (``Orchestrator._finalize_result``) and the
+    docker path (``orchestration/batch.py``) so both drivers emit identical
+    ``CoderEval.Task.End`` / ``CoderEval.Task.Failed`` events. Carries only
+    enums/counts/durations/config-derived ids — no user content. None-safe.
+
+    The return type is the scalar event contract (``dict[str, Scalar]``) so a
+    non-scalar property is caught here by pyright, not just str()-coerced at
+    runtime by the telemetry layer. Token counts are intentionally NOT emitted —
+    this is usage telemetry, not eval analytics. Task/variant ids are emitted as
+    stable one-way hashes (``hash_identifier``) so an author-defined free-text id
+    that could encode sensitive data never reaches the telemetry store verbatim.
+    """
+    failed = result.final_status in _TELEMETRY_FAILED_STATUSES
+    props: dict[str, Scalar] = {
+        "TaskId": hash_identifier(result.task_id),
+        "VariantId": hash_identifier(variant_id),
+        "Status": result.final_status.value,
+        "DurationMs": int((result.duration_seconds or 0.0) * 1000),
+        "Score": float(result.weighted_score or 0.0),
+        "Iterations": result.iteration_count,
+        "AgentType": result.agent_type or "",
+        "Model": result.model_used or "",
+        "Driver": driver,
+    }
+    return ("CoderEval.Task.Failed" if failed else "CoderEval.Task.End"), props
 
 
 class Orchestrator:
@@ -590,6 +649,17 @@ class Orchestrator:
             self.result.weighted_score or 0.0,
             self.result.iteration_count,
         )
+
+        # Usage telemetry (non-fatal; placed before persistence since track_event
+        # cannot raise). For the docker driver this in-process emit runs INSIDE the
+        # container where telemetry is off (the connection-string env vars aren't
+        # forwarded), so the host emits the event from batch.py instead — see
+        # build_task_event. Non-docker tasks finalize on the host and emit here.
+        from .telemetry import track_event
+
+        driver = self.task.sandbox.driver if self.task.sandbox else ""
+        name, props = build_task_event(self.result, driver=driver, variant_id=self.variant_id or "")
+        track_event(name, props)
 
         # Persist
         self.report_path.parent.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds

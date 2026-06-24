@@ -21,6 +21,12 @@ dependencies = [
     "jmespath>=1.1.0",
     "jsonschema>=4.26.0",
     "starlette>=1.3.1",
+    # Telemetry: the OTel logs SDK lives under the (canonical, only) module
+    # opentelemetry.sdk._logs and uses the deprecated-but-functional LoggingHandler.
+    # Cap the major to guard against a 2.0 moving/removing either; the Azure exporter
+    # is a beta, so cap the minor since betas can break compatibility between releases.
+    "opentelemetry-sdk>=1.30.0,<2.0.0",
+    "azure-monitor-opentelemetry-exporter>=1.0.0b30,<1.1.0",
 ]
 
 [project.optional-dependencies]

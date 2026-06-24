@@ -434,18 +434,41 @@ async def _run_all_tasks(
         include_skipped=include_skipped,
     )
 
-    # Always run through experiment layer (defaults to experiments/default.yaml)
-    summary, failed_suite_gates = await _run_with_experiment(
-        all_task_files, config, experiment_path, stream_mode, max_parallel, resume=resume
+    from ..telemetry import flush_telemetry, track_event
+
+    # TaskFileCount is the pre-expansion file count (dataset fan-out and variant
+    # resolution happen later); per-task counts are reconstructable from the
+    # CoderEval.Task.End/.Failed events.
+    track_event(
+        "CoderEval.Run.Start",
+        {
+            "TaskFileCount": len(all_task_files),
+            "MaxParallel": max_parallel,
+            "AgentType": agent_type or "default",
+            "StreamMode": stream_mode or "none",
+            "Resume": resume,
+            "ExperimentProvided": experiment_path is not None,
+        },
     )
 
-    # Aggregate task logs into run.log
-    from ..logging_config import aggregate_task_logs
+    try:
+        # Always run through experiment layer (defaults to experiments/default.yaml)
+        summary, failed_suite_gates = await _run_with_experiment(
+            all_task_files, config, experiment_path, stream_mode, max_parallel, resume=resume
+        )
 
-    aggregate_task_logs(run_dir)
+        # Aggregate task logs into run.log
+        from ..logging_config import aggregate_task_logs
 
-    # Print execution summary
-    print_execution_summary(run_dir, summary)
+        aggregate_task_logs(run_dir)
+
+        # Print execution summary
+        print_execution_summary(run_dir, summary)
+    finally:
+        # Explicit flush before process exit (belt-and-suspenders with atexit).
+        # In a `finally` so it runs on the success path and on any raised
+        # exception, but never catches/swallows the typer.Exit decided below.
+        flush_telemetry()
 
     # Exit with non-zero code if any tasks failed, errored, or any suite failed its thresholds.
     if summary.tasks_failed > 0 or summary.tasks_error > 0 or failed_suite_gates > 0:

@@ -2,6 +2,8 @@
 
 import typer
 
+from coder_eval.telemetry import track_command
+
 from .aggregate_command import aggregate_command
 from .console import console
 from .evaluate_command import evaluate_command
@@ -40,20 +42,30 @@ def main(ctx: typer.Context) -> None:
 
     load_plugins()
 
+    # One-time telemetry init (no-op when disabled / no connection string).
+    # Runs before the no-subcommand early-exit so even `--help` inits harmlessly.
+    from coder_eval import __version__
+    from coder_eval.telemetry import init_telemetry
+
+    init_telemetry(version=__version__)
+
     # If no subcommand was invoked, show help and exit
     if ctx.invoked_subcommand is None:
         console.print(ctx.get_help())
         raise typer.Exit(0)
 
 
-# Register core commands
-app.command(name="run")(run_command)
-app.command(name="plan")(plan_command)
-app.command(name="evaluate")(evaluate_command)
-app.command(name="report")(report_command)
-app.command(name="aggregate")(aggregate_command)
-app.command(name="proxy")(proxy_command)
-# Hidden internal command invoked inside the Docker container only.
+# Register core commands. Each public command is wrapped with track_command so it
+# emits a CoderEval.Cli.<name> event (Status/DurationMs/ErrorType) on completion;
+# functools.wraps preserves the signature so Typer still parses each command's flags.
+app.command(name="run")(track_command("run")(run_command))
+app.command(name="plan")(track_command("plan")(plan_command))
+app.command(name="evaluate")(track_command("evaluate")(evaluate_command))
+app.command(name="report")(track_command("report")(report_command))
+app.command(name="aggregate")(track_command("aggregate")(aggregate_command))
+app.command(name="proxy")(track_command("proxy")(proxy_command))
+# Hidden internal command invoked inside the Docker container only — UNWRAPPED
+# (it runs inside the run-task subprocess and would double-count / pollute events).
 app.command(name="_run-task-internal", hidden=True)(run_task_internal_command)
 
 

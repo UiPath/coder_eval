@@ -14,6 +14,7 @@ from tests.lint.rules.ce015_create_subprocess_limit import CreateSubprocessExpli
 from tests.lint.rules.ce016_no_computed_tokenusage_kwargs import NoComputedTokenUsageKwargs
 from tests.lint.rules.ce017_models_lazy_agent_imports import ModelsLazyAgentImports
 from tests.lint.rules.ce018_no_final_status_name_denylist import NoFinalStatusNameDenylist
+from tests.lint.rules.ce019_telemetry_non_fatal import TelemetryNonFatal
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -51,6 +52,7 @@ ALL_RULES: list[RuleClass] = [
     NoComputedTokenUsageKwargs,
     ModelsLazyAgentImports,
     NoFinalStatusNameDenylist,
+    TelemetryNonFatal,
 ]
 
 _NOQA_ALL = re.compile(r"#\s*noqa\s*$")

@@ -136,3 +136,68 @@ class TestCE018NoFinalStatusNameDenylist:
         from tests.lint.rules.ce018_no_final_status_name_denylist import _FINAL_STATUS_NAMES
 
         assert {s.value for s in FinalStatus} == _FINAL_STATUS_NAMES
+
+
+@pytest.mark.lint
+class TestCE019TelemetryNonFatal:
+    """CE019 flags unguarded telemetry public functions; allows guarded ones."""
+
+    @staticmethod
+    def _run(src: str, *, in_telemetry: bool = True):
+        import ast
+
+        from tests.lint.rules.ce019_telemetry_non_fatal import TelemetryNonFatal
+
+        path = "src/coder_eval/telemetry.py" if in_telemetry else "src/coder_eval/orchestrator.py"
+        return TelemetryNonFatal(path).check(ast.parse(src))
+
+    def test_flags_unguarded_public_function(self):
+        src = "def track_event(name):\n    do_work()\n    more_work()"
+        assert self._run(src)
+
+    def test_allows_guarded_function(self):
+        src = "def track_event(name):\n    try:\n        do_work()\n    except Exception:\n        pass"
+        assert not self._run(src)
+
+    def test_allows_bare_except(self):
+        src = "def flush_telemetry():\n    try:\n        do_work()\n    except:\n        pass"
+        assert not self._run(src)
+
+    def test_flags_narrow_handler(self):
+        # A narrow `except ValueError` is not broad → must be flagged.
+        src = "def track_event(name):\n    try:\n        do_work()\n    except ValueError:\n        pass"
+        assert self._run(src)
+
+    def test_flags_try_without_except(self):
+        # try/finally with no except handler → must be flagged.
+        src = "def track_event(name):\n    try:\n        do_work()\n    finally:\n        cleanup()"
+        assert self._run(src)
+
+    def test_flags_unguarded_async_function(self):
+        # The invariant must hold for async defs too (rule must not be defeatable
+        # by converting a function to `async def`).
+        src = "async def track_event(name):\n    do_work()"
+        assert self._run(src)
+
+    def test_allows_leading_docstring_global_and_guards(self):
+        src = (
+            "def init_telemetry(v):\n"
+            '    """doc."""\n'
+            "    global x\n"
+            "    if x is None:\n"
+            "        return\n"
+            "    try:\n"
+            "        do_work()\n"
+            "    except Exception:\n"
+            "        pass"
+        )
+        assert not self._run(src)
+
+    def test_ignores_private_helpers_and_decorator(self):
+        # _coerce_props / track_command are out of scope (not in the allowlist).
+        assert not self._run("def _coerce_props(p):\n    return p")
+        assert not self._run("def track_command(name):\n    return name")
+
+    def test_ignores_non_telemetry_files(self):
+        src = "def track_event(name):\n    do_work()"
+        assert not self._run(src, in_telemetry=False)

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from dotenv import dotenv_values, load_dotenv
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from coder_eval.models import AgentKind, ApiBackend, PermissionMode
@@ -87,6 +88,19 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"  # Default log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     log_to_file: bool = False  # Whether to enable file logging
+
+    # Usage telemetry (OpenTelemetry → Azure Application Insights customEvents).
+    # Off unless a connection string is set; see coder_eval/telemetry.py.
+    # telemetry_enabled (TELEMETRY_ENABLED) is the single canonical disable gate.
+    telemetry_enabled: bool = True
+    telemetry_connection_string: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "telemetry_connection_string",
+            "applicationinsights_connection_string",
+            "uipath_ai_connection_string",
+        ),
+    )
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore")
 

@@ -121,6 +121,15 @@ async def run_batch(
                         stream_callback=task_callback,
                         verbose=config.verbose,
                     ).run()
+                    # The in-container _finalize_result can't emit task telemetry
+                    # (connection-string env vars aren't forwarded into the
+                    # container), so emit the Task.End/.Failed event host-side here
+                    # — keeping docker runs at parity with the in-process path.
+                    from ..orchestrator import build_task_event
+                    from ..telemetry import track_event
+
+                    name, props = build_task_event(result, driver="docker", variant_id=rt.variant_id)
+                    track_event(name, props)
                 else:
                     orchestrator = Orchestrator(
                         task=rt.task,
