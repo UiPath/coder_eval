@@ -1,8 +1,9 @@
 """Tests for the agent implementations."""
 
 import tempfile
+import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from claude_agent_sdk import ProcessError
@@ -1591,3 +1592,217 @@ def test_setting_sources_custom_list():
     agent = ClaudeCodeAgent(config)
 
     assert agent.config.setting_sources == ["project", "user"]
+
+
+class TestClaudeTurnState:
+    """Unit tests for the per-turn state object extracted from communicate().
+
+    Driving its handler methods directly gives independent coverage of the
+    stream-dispatch logic without standing up a full communicate() turn.
+    """
+
+    @staticmethod
+    def _state(agent):
+        from coder_eval.agents.claude_code_agent import _ClaudeTurnState
+        from coder_eval.streaming.callbacks import CompositeStreamCallback
+        from coder_eval.streaming.collector import EventCollector
+
+        events: list = []
+
+        class _Collect:
+            def on_event(self, event):
+                events.append(event)
+
+        collector = EventCollector()
+        emit = CompositeStreamCallback([collector, _Collect()])
+        state = _ClaudeTurnState(
+            agent,
+            emit=emit,
+            collector=collector,
+            task_id="claude_code",
+            user_input="hi",
+            iteration=1,
+            max_turns=None,
+            log=agent._log,
+            turn_start_time=time.monotonic(),
+            deadline=None,
+        )
+        return state, events
+
+    def test_on_assistant_message_records_command_and_emits_tool_start(self):
+        from coder_eval.streaming.events import ToolStartEvent
+        from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage, ToolUseBlock
+
+        agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+        state, events = self._state(agent)
+
+        msg = AssistantMessage(
+            [ToolUseBlock("t1", "Bash", {"command": "ls"})],
+            usage={"input_tokens": 10, "output_tokens": 5},
+            message_id="m1",
+        )
+        state.on_assistant_message(msg)
+
+        # One AssistantMessage telemetry record captured with its per-message tokens.
+        assert len(state.sdk_messages) == 1
+        assert state.sdk_messages[0].input_tokens == 10
+        # The tool_use block registered a pending command + emitted ToolStart.
+        assert "t1" in state.pending_commands
+        assert state.pending_commands["t1"]["telemetry"].tool_name == "Bash"
+        tool_starts = [e for e in events if isinstance(e, ToolStartEvent)]
+        assert len(tool_starts) == 1
+        assert tool_starts[0].tool.tool_id == "t1"
+
+    def test_on_user_message_resolves_pending_command(self):
+        from coder_eval.streaming.events import ToolEndEvent, ToolEndStatus
+        from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage, ToolUseBlock, UserMessage
+
+        agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+        state, events = self._state(agent)
+
+        state.on_assistant_message(AssistantMessage([ToolUseBlock("t1", "Bash", {"command": "ls"})], message_id="m1"))
+        state.on_user_message(UserMessage("t1", False, "file1.py\nfile2.py"))
+
+        cmd = state.pending_commands["t1"]["telemetry"]
+        assert cmd.result_status == "success"
+        assert cmd.result_summary == "file1.py\nfile2.py"
+        tool_ends = [e for e in events if isinstance(e, ToolEndEvent)]
+        assert len(tool_ends) == 1
+        assert tool_ends[0].status == ToolEndStatus.OK
+
+
+class TestAgentBaseHelpers:
+    """Unit tests for the shared mid-turn failure kernels on the Agent base."""
+
+    @staticmethod
+    def _agent():
+        return ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+
+    def test_finalize_and_raise_timeout(self):
+        from coder_eval.errors.agent import format_timeout_reason
+        from coder_eval.streaming.events import AgentEndStatus
+
+        agent = self._agent()
+        agent._iteration = 3
+        calls: list = []
+
+        def fake_finalize(status, *, crashed, crash_reason):
+            # Asserting here locks the ORDER: _state must already be ERROR by the
+            # time finalize runs (i.e. _state=ERROR precedes finalize precedes raise).
+            assert agent._state == AgentState.ERROR
+            calls.append((status, crashed, crash_reason))
+
+        with pytest.raises(TurnTimeoutError) as exc:
+            agent._finalize_and_raise_timeout(fake_finalize, 30.0)
+
+        # _state=ERROR -> finalize(TIMEOUT, crashed=True, reason) -> raise, in order.
+        assert agent._state == AgentState.ERROR
+        assert calls == [(AgentEndStatus.TIMEOUT, True, format_timeout_reason(30.0))]
+        assert exc.value.timeout_seconds == 30.0
+        assert exc.value.iteration == 3
+
+    def test_finalize_and_raise_crash_truncates_reason_but_raises_full(self):
+        from coder_eval.errors.agent import truncate_crash_message
+        from coder_eval.streaming.events import AgentEndStatus
+
+        agent = self._agent()
+        calls: list = []
+
+        def fake_finalize(status, *, crashed, crash_reason):
+            assert agent._state == AgentState.ERROR  # order: _state precedes finalize
+            calls.append((status, crashed, crash_reason))
+
+        long_message = "x" * 300
+        with pytest.raises(AgentCrashError) as exc:
+            agent._finalize_and_raise_crash(fake_finalize, long_message)
+
+        assert agent._state == AgentState.ERROR
+        assert calls[0][0] == AgentEndStatus.CRASHED
+        assert calls[0][1] is True
+        # crash_reason is truncated for storage...
+        assert calls[0][2] == truncate_crash_message(long_message)
+        assert len(calls[0][2]) < len(long_message)
+        # ...but the raised AgentCrashError carries the message as passed.
+        assert str(exc.value) == long_message
+
+    def test_capture_partial_turn_sets_pending_from_collector(self):
+        from coder_eval.streaming.collector import EventCollector
+
+        agent = self._agent()
+        agent._capture_partial_turn(EventCollector())
+        assert agent.pending_turn is not None
+
+    def test_capture_partial_turn_falls_back_to_none_on_build_error(self):
+        from coder_eval.models import TurnRecord
+
+        agent = self._agent()
+        # Pre-seed a stale partial to prove it gets cleared on a build failure.
+        agent.pending_turn = TurnRecord(iteration=1, user_input="p", agent_output="stale", crashed=True)
+
+        class _BadCollector:
+            def build_turn_record(self):
+                raise RuntimeError("cannot build")
+
+        agent._capture_partial_turn(_BadCollector())
+        assert agent.pending_turn is None
+
+
+@pytest.mark.asyncio
+async def test_watchdog_callback_targets_its_own_turn_transport_across_calls():
+    """A turn's watchdog on_timeout closure must capture its OWN transport
+    (``watchdog_target``), never ``self._active_transport``.
+
+    Regression guard for the Phase-2 state-object extraction: a stale turn-1
+    watchdog firing after turn 2 has started (and turn 1's transport reference
+    cleared from ``self._active_transport``) must still kill turn 1's subprocess
+    and never touch turn 2's. This cross-turn property is invisible to the
+    (single-turn, mocked) golden master.
+    """
+    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+
+    captured_callbacks: list = []
+
+    class _FakeWatchdog:
+        def __init__(self, *, timeout_seconds=None, on_timeout=None, asyncio_task_to_cancel=None, label=""):
+            captured_callbacks.append(on_timeout)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _make_transport():
+        transport = MagicMock()
+        transport._process = MagicMock()
+        transport._process.returncode = None  # still running, so kill() would fire
+        return transport
+
+    transport_a = _make_transport()
+    transport_b = _make_transport()
+
+    async def mock_query(prompt, options, transport=None):
+        # Clean turn: yield nothing so communicate finalizes via COMPLETED.
+        if False:  # pragma: no cover - keep this an async generator
+            yield None
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+        with (
+            patch("coder_eval.agents.claude_code_agent.ThreadedWatchdog", _FakeWatchdog),
+            patch(
+                "coder_eval.agents.claude_code_agent.SubprocessCLITransport",
+                side_effect=[transport_a, transport_b],
+            ),
+            patch("coder_eval.agents.claude_code_agent.query", mock_query),
+        ):
+            await agent.communicate("turn 1", timeout=30.0)
+            await agent.communicate("turn 2", timeout=30.0)
+
+    assert len(captured_callbacks) == 2
+    # Both turns finished, so self._active_transport is None. Fire turn 1's
+    # watchdog: it must kill turn 1's captured transport (not no-op on the
+    # cleared instance attr) and must not touch turn 2's transport.
+    captured_callbacks[0]()
+    transport_a._process.kill.assert_called_once()
+    transport_b._process.kill.assert_not_called()

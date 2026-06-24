@@ -171,23 +171,9 @@ class ExperimentReportGenerator:
         return "\n".join(lines)
 
     @staticmethod
-    def generate_experiment_report(  # noqa: PLR0912, PLR0915 — god-function tracked for decomposition (code-review 2026-06-22)
-        result: ExperimentResult,
-        experiment: ExperimentDefinition | None = None,
-    ) -> str:
-        """Generate experiment-report content for the full experiment.
-
-        Produces a vertical "Aggregate Metrics" table (metrics as rows, variants
-        as columns) with mean ± stddev and Welch's t-test p-values.
-
-        Args:
-            result: Complete experiment result.
-            experiment: Optional experiment definition (enables prompt config display).
-
-        Returns:
-            Markdown string.
-        """
-        lines = [
+    def _experiment_header_lines(result: ExperimentResult) -> list[str]:
+        """Title + Description / Variants / Total Duration. First block (no leading blank)."""
+        return [
             f"# Experiment Report: {result.experiment_id}",
             "",
             f"**Description**: {result.description}",
@@ -195,21 +181,32 @@ class ExperimentReportGenerator:
             f"**Total Duration**: {result.total_duration_seconds:.1f}s",
         ]
 
+    @staticmethod
+    def _prompt_config_lines(result: ExperimentResult, experiment: ExperimentDefinition | None) -> list[str]:
+        """The ``## Prompt Configuration`` block. Returns ``[]`` when there is no
+        experiment definition or no variant carries prompt config (both guards preserved)."""
         # ── Variant prompt configuration (if experiment definition available) ──
-        if experiment is not None:
-            variant_map = {v.variant_id: v for v in experiment.variants}
-            has_prompt_config = bool(experiment.defaults and experiment.defaults.prompt_mutations) or any(
-                v.prompt_mutations or v.initial_prompt or v.initial_prompt_file for v in experiment.variants
-            )
-            if has_prompt_config:
-                lines.extend(["", "## Prompt Configuration", ""])
-                for vid in result.variant_ids:
-                    v = variant_map.get(vid)
-                    desc = describe_prompt_config(v) if v else "(unknown)"
-                    lines.append(f"- **{vid}**: {desc}")
+        if experiment is None:
+            return []
+        variant_map = {v.variant_id: v for v in experiment.variants}
+        has_prompt_config = bool(experiment.defaults and experiment.defaults.prompt_mutations) or any(
+            v.prompt_mutations or v.initial_prompt or v.initial_prompt_file for v in experiment.variants
+        )
+        if not has_prompt_config:
+            return []
+        lines = ["", "## Prompt Configuration", ""]
+        for vid in result.variant_ids:
+            v = variant_map.get(vid)
+            desc = describe_prompt_config(v) if v else "(unknown)"
+            lines.append(f"- **{vid}**: {desc}")
+        return lines
 
-        # ── Aggregate Metrics (vertical: metrics as rows, variants as columns) ──
-        # Collect per-task values for each variant
+    @staticmethod
+    def _collect_variant_series(
+        result: ExperimentResult,
+    ) -> tuple[dict[str, list[float]], dict[str, list[float]], dict[str, list[float]], dict[str, list[float]]]:
+        """Per-variant (scores, durations, tokens, assistant-turns) series collected
+        across all task summaries — the raw inputs to the Aggregate Metrics stat rows."""
         variant_scores: dict[str, list[float]] = {vid: [] for vid in result.variant_ids}
         variant_durations: dict[str, list[float]] = {vid: [] for vid in result.variant_ids}
         variant_tokens: dict[str, list[float]] = {vid: [] for vid in result.variant_ids}
@@ -223,20 +220,14 @@ class ExperimentReportGenerator:
                     variant_tokens[vr.variant_id].append(float(vr.total_tokens))
                 if vr.total_assistant_turns is not None:
                     variant_asst_turns[vr.variant_id].append(float(vr.total_assistant_turns))
+        return variant_scores, variant_durations, variant_tokens, variant_asst_turns
 
-        show_p_values = len(result.variant_ids) == 2
-        vid_a, vid_b = (result.variant_ids[0], result.variant_ids[1]) if show_p_values else ("", "")
-
-        # Build header
-        header = "| Metric | " + " | ".join(result.variant_ids)
-        sep = "|--------|" + "|".join("--------" for _ in result.variant_ids)
-        if show_p_values:
-            header += " | p-value"
-            sep += "|--------"
-        header += " |"
-        sep += "|"
-
-        lines.extend(["", "## Aggregate Metrics", "", header, sep])
+    @staticmethod
+    def _aggregate_count_rows(result: ExperimentResult, show_p_values: bool) -> list[str]:
+        """The integer-aggregate rows of the Aggregate Metrics table: Tasks Run,
+        Succeeded, Failed, the optional budget sub-rows, Errors, and Success Rate.
+        Each row appends ``" | —"`` in the p-value column when ``show_p_values``."""
+        lines: list[str] = []
 
         # Row: Tasks Run (count, no stddev)
         row = "| Tasks Run"
@@ -301,6 +292,24 @@ class ExperimentReportGenerator:
             row += " | —"
         lines.append(row + " |")
 
+        return lines
+
+    @staticmethod
+    def _aggregate_stat_rows(
+        result: ExperimentResult,
+        variant_scores: dict[str, list[float]],
+        variant_durations: dict[str, list[float]],
+        variant_tokens: dict[str, list[float]],
+        variant_asst_turns: dict[str, list[float]],
+        show_p_values: bool,
+        vid_a: str,
+        vid_b: str,
+    ) -> list[str]:
+        """The mean ± stddev rows of the Aggregate Metrics table (Score, Avg Duration,
+        and the optional Assistant Turns / Tokens rows), each with a Welch t-test
+        p-value when ``show_p_values``."""
+        lines: list[str] = []
+
         # Row: Score (mean ± stddev, p-value)
         row = "| Score"
         for vid in result.variant_ids:
@@ -339,6 +348,36 @@ class ExperimentReportGenerator:
                 row += f" | {fmt_p(p)}"
             lines.append(row + " |")
 
+        return lines
+
+    @staticmethod
+    def _aggregate_metrics_lines(result: ExperimentResult) -> list[str]:
+        """The ``## Aggregate Metrics`` vertical table (metrics as rows, variants as
+        columns). The p-value column + Welch t-tests appear only for exactly 2 variants;
+        ``vid_a``/``vid_b`` stay local so the 3+-variant path never indexes them."""
+        # ── Aggregate Metrics (vertical: metrics as rows, variants as columns) ──
+        variant_scores, variant_durations, variant_tokens, variant_asst_turns = (
+            ExperimentReportGenerator._collect_variant_series(result)
+        )
+
+        show_p_values = len(result.variant_ids) == 2
+        vid_a, vid_b = (result.variant_ids[0], result.variant_ids[1]) if show_p_values else ("", "")
+
+        # Build header
+        header = "| Metric | " + " | ".join(result.variant_ids)
+        sep = "|--------|" + "|".join("--------" for _ in result.variant_ids)
+        if show_p_values:
+            header += " | p-value"
+            sep += "|--------"
+        header += " |"
+        sep += "|"
+
+        lines = ["", "## Aggregate Metrics", "", header, sep]
+        lines += ExperimentReportGenerator._aggregate_count_rows(result, show_p_values)
+        lines += ExperimentReportGenerator._aggregate_stat_rows(
+            result, variant_scores, variant_durations, variant_tokens, variant_asst_turns, show_p_values, vid_a, vid_b
+        )
+
         # Row: Replicates/task (if any variant ran >1 replicate)
         if any(result.variant_aggregates[vid].replicate_count > 1 for vid in result.variant_ids):
             row = "| Replicates/task"
@@ -349,117 +388,152 @@ class ExperimentReportGenerator:
                 row += " | —"
             lines.append(row + " |")
 
+        return lines
+
+    @staticmethod
+    def _win_loss_lines(result: ExperimentResult) -> list[str]:
+        """The ``## Win Rates`` + ``## Per-Task Comparison`` + ``## Most Divergent Tasks``
+        block. Returns ``[]`` when there are no task summaries."""
         # ── Win/loss/tie analysis ──
-        if result.task_summaries:
-            lines.extend(["", "## Win Rates", ""])
-            win_counts: dict[str, int] = {vid: 0 for vid in result.variant_ids}
-            tie_count = 0
-            for ts in result.task_summaries:
-                if ts.is_tie:
-                    tie_count += 1
-                else:
-                    win_counts[ts.best_variant] = win_counts.get(ts.best_variant, 0) + 1
-            total_tasks = len(result.task_summaries)
-            for vid in result.variant_ids:
-                wins = win_counts.get(vid, 0)
-                lines.append(f"- **{vid}**: {wins}/{total_tasks} tasks ({wins / total_tasks * 100:.0f}%)")
-            if tie_count > 0:
-                lines.append(f"- **Ties**: {tie_count}/{total_tasks} tasks ({tie_count / total_tasks * 100:.0f}%)")
+        if not result.task_summaries:
+            return []
+        lines = ["", "## Win Rates", ""]
+        win_counts: dict[str, int] = {vid: 0 for vid in result.variant_ids}
+        tie_count = 0
+        for ts in result.task_summaries:
+            if ts.is_tie:
+                tie_count += 1
+            else:
+                win_counts[ts.best_variant] = win_counts.get(ts.best_variant, 0) + 1
+        total_tasks = len(result.task_summaries)
+        for vid in result.variant_ids:
+            wins = win_counts.get(vid, 0)
+            lines.append(f"- **{vid}**: {wins}/{total_tasks} tasks ({wins / total_tasks * 100:.0f}%)")
+        if tie_count > 0:
+            lines.append(f"- **Ties**: {tie_count}/{total_tasks} tasks ({tie_count / total_tasks * 100:.0f}%)")
 
-            # ── Per-task detailed comparison ──
-            show_reps = any(ts.replicate_count > 1 for ts in result.task_summaries)
-            lines.extend(["", "## Per-Task Comparison", ""])
-            header = "| Task | " + " | ".join(result.variant_ids) + " | Best | Spread |"
-            sep = "|------|" + "|".join("------" for _ in result.variant_ids) + "|------|--------|"
+        # ── Per-task detailed comparison ──
+        show_reps = any(ts.replicate_count > 1 for ts in result.task_summaries)
+        lines.extend(["", "## Per-Task Comparison", ""])
+        header = "| Task | " + " | ".join(result.variant_ids) + " | Best | Spread |"
+        sep = "|------|" + "|".join("------" for _ in result.variant_ids) + "|------|--------|"
+        if show_reps:
+            header += " Reps |"
+            sep += "------|"
+        lines.append(header)
+        lines.append(sep)
+
+        for ts in result.task_summaries:
+            scores_by_variant = {vr.variant_id: vr for vr in ts.variant_results}
+            cells = []
+            for vid in result.variant_ids:
+                vr = scores_by_variant.get(vid)
+                if vr:
+                    status_icon = vr.final_status.icon
+                    cells.append(f"{vr.weighted_score:.3f} ({status_icon})")
+                else:
+                    cells.append("N/A")
+            best_str = f"{'TIE' if ts.is_tie else ts.best_variant}"
+            row = f"| {ts.task_id} | " + " | ".join(cells) + f" | {best_str} | {ts.score_spread:.3f} |"
             if show_reps:
-                header += " Reps |"
-                sep += "------|"
-            lines.append(header)
-            lines.append(sep)
+                row += f" {ts.replicate_count} |"
+            lines.append(row)
 
-            for ts in result.task_summaries:
-                scores_by_variant = {vr.variant_id: vr for vr in ts.variant_results}
-                cells = []
-                for vid in result.variant_ids:
-                    vr = scores_by_variant.get(vid)
-                    if vr:
-                        status_icon = vr.final_status.icon
-                        cells.append(f"{vr.weighted_score:.3f} ({status_icon})")
-                    else:
-                        cells.append("N/A")
-                best_str = f"{'TIE' if ts.is_tie else ts.best_variant}"
-                row = f"| {ts.task_id} | " + " | ".join(cells) + f" | {best_str} | {ts.score_spread:.3f} |"
-                if show_reps:
-                    row += f" {ts.replicate_count} |"
-                lines.append(row)
+        # ── Highest divergence ──
+        sorted_tasks = sorted(result.task_summaries, key=lambda t: t.score_spread, reverse=True)
+        if sorted_tasks and sorted_tasks[0].score_spread > 0:
+            lines.extend(["", "## Most Divergent Tasks", ""])
+            for ts in sorted_tasks[:5]:
+                lines.append(f"- **{ts.task_id}**: spread={ts.score_spread:.3f}, best={ts.best_variant}")
+        return lines
 
-            # ── Highest divergence ──
-            sorted_tasks = sorted(result.task_summaries, key=lambda t: t.score_spread, reverse=True)
-            if sorted_tasks and sorted_tasks[0].score_spread > 0:
-                lines.extend(["", "## Most Divergent Tasks", ""])
-                for ts in sorted_tasks[:5]:
-                    lines.append(f"- **{ts.task_id}**: spread={ts.score_spread:.3f}, best={ts.best_variant}")
-
+    @staticmethod
+    def _replicate_stats_lines(result: ExperimentResult) -> list[str]:
+        """The ``## Replicate Statistics`` block: per-variant bootstrap-CI / Wilson
+        pass-rate table + the 2-variant paired-bootstrap comparison. Returns ``[]``
+        when no variant ran more than one replicate."""
         # ── Replicate Statistics (only when any variant ran >1 replicate) ──
-        if any(ts.replicate_count > 1 for ts in result.task_summaries):
-            lines.extend(["", "## Replicate Statistics", ""])
+        if not any(ts.replicate_count > 1 for ts in result.task_summaries):
+            return []
+        lines = ["", "## Replicate Statistics", ""]
 
-            # Per-variant bootstrap CI + Wilson pass-rate table
-            lines.append("| Variant | Replicates/task | Mean score | 95% CI | Pass-rate (Wilson 95%) |")
-            lines.append("|---------|-----------------|------------|--------|------------------------|")
-            for vid in result.variant_ids:
-                per_rep = result.per_replicate_scores.get(vid, {})
-                all_scores: list[float] = [s for scores in per_rep.values() for s in scores]
-                passes = sum(1 for s in all_scores if s >= _REPLICATE_PASS_THRESHOLD)
-                m, lo, hi = bootstrap_mean_ci(all_scores)
-                wlo, whi = wilson_interval(passes, len(all_scores))
-                agg = result.variant_aggregates.get(vid)
-                rep_count = agg.replicate_count if agg else 1
-                lines.append(
-                    f"| {vid} | {rep_count} | {m:.3f} | [{lo:.3f}, {hi:.3f}]"
-                    + f" | {passes}/{len(all_scores)} [{wlo:.2f}, {whi:.2f}] |"
-                )
+        # Per-variant bootstrap CI + Wilson pass-rate table
+        lines.append("| Variant | Replicates/task | Mean score | 95% CI | Pass-rate (Wilson 95%) |")
+        lines.append("|---------|-----------------|------------|--------|------------------------|")
+        for vid in result.variant_ids:
+            per_rep = result.per_replicate_scores.get(vid, {})
+            all_scores: list[float] = [s for scores in per_rep.values() for s in scores]
+            passes = sum(1 for s in all_scores if s >= _REPLICATE_PASS_THRESHOLD)
+            m, lo, hi = bootstrap_mean_ci(all_scores)
+            wlo, whi = wilson_interval(passes, len(all_scores))
+            agg = result.variant_aggregates.get(vid)
+            rep_count = agg.replicate_count if agg else 1
+            lines.append(
+                f"| {vid} | {rep_count} | {m:.3f} | [{lo:.3f}, {hi:.3f}]"
+                + f" | {passes}/{len(all_scores)} [{wlo:.2f}, {whi:.2f}] |"
+            )
 
-            # Paired comparison for 2-variant experiments
-            if len(result.variant_ids) == 2:
-                vid_a, vid_b = result.variant_ids[0], result.variant_ids[1]
-                per_rep_a = result.per_replicate_scores.get(vid_a, {})
-                per_rep_b = result.per_replicate_scores.get(vid_b, {})
-                common_tasks = sorted(set(per_rep_a) & set(per_rep_b))
-                a_scores: list[float] = []
-                b_scores: list[float] = []
-                skipped_tasks: list[str] = []
-                for task_id in common_tasks:
-                    rep_a = per_rep_a[task_id]
-                    rep_b = per_rep_b[task_id]
-                    if len(rep_a) == len(rep_b):
-                        a_scores.extend(rep_a)
-                        b_scores.extend(rep_b)
-                    else:
-                        skipped_tasks.append(task_id)
-                diff = paired_bootstrap_diff_ci(a_scores, b_scores)
-                if diff is not None:
-                    mean_diff, d_lo, d_hi = diff
-                    d_val = cohens_d(a_scores, b_scores)
-                    d_str = f"{d_val:.2f}" if d_val is not None else "n/a"
-                    suffix = (
-                        f" ({len(skipped_tasks)} task(s) excluded: unequal replicate counts)" if skipped_tasks else ""
-                    )
-                    lines.extend(
-                        [
-                            "",
-                            f"**Paired mean diff ({vid_a} - {vid_b})**: {mean_diff:+.3f}"
-                            + f" [95% CI {d_lo:+.3f}, {d_hi:+.3f}], Cohen's d = {d_str}{suffix}",
-                        ]
-                    )
+        # Paired comparison for 2-variant experiments
+        if len(result.variant_ids) == 2:
+            vid_a, vid_b = result.variant_ids[0], result.variant_ids[1]
+            per_rep_a = result.per_replicate_scores.get(vid_a, {})
+            per_rep_b = result.per_replicate_scores.get(vid_b, {})
+            common_tasks = sorted(set(per_rep_a) & set(per_rep_b))
+            a_scores: list[float] = []
+            b_scores: list[float] = []
+            skipped_tasks: list[str] = []
+            for task_id in common_tasks:
+                rep_a = per_rep_a[task_id]
+                rep_b = per_rep_b[task_id]
+                if len(rep_a) == len(rep_b):
+                    a_scores.extend(rep_a)
+                    b_scores.extend(rep_b)
                 else:
-                    lines.extend(
-                        [
-                            "",
-                            f"*Paired statistics skipped — unequal replicate counts between {vid_a} and {vid_b}.*",
-                        ]
-                    )
+                    skipped_tasks.append(task_id)
+            diff = paired_bootstrap_diff_ci(a_scores, b_scores)
+            if diff is not None:
+                mean_diff, d_lo, d_hi = diff
+                d_val = cohens_d(a_scores, b_scores)
+                d_str = f"{d_val:.2f}" if d_val is not None else "n/a"
+                suffix = f" ({len(skipped_tasks)} task(s) excluded: unequal replicate counts)" if skipped_tasks else ""
+                lines.extend(
+                    [
+                        "",
+                        f"**Paired mean diff ({vid_a} - {vid_b})**: {mean_diff:+.3f}"
+                        + f" [95% CI {d_lo:+.3f}, {d_hi:+.3f}], Cohen's d = {d_str}{suffix}",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        "",
+                        f"*Paired statistics skipped — unequal replicate counts between {vid_a} and {vid_b}.*",
+                    ]
+                )
+        return lines
 
+    @staticmethod
+    def generate_experiment_report(
+        result: ExperimentResult,
+        experiment: ExperimentDefinition | None = None,
+    ) -> str:
+        """Generate experiment-report content for the full experiment.
+
+        Produces a vertical "Aggregate Metrics" table (metrics as rows, variants
+        as columns) with mean ± stddev and Welch's t-test p-values.
+
+        Args:
+            result: Complete experiment result.
+            experiment: Optional experiment definition (enables prompt config display).
+
+        Returns:
+            Markdown string.
+        """
+        lines = ExperimentReportGenerator._experiment_header_lines(result)
+        lines += ExperimentReportGenerator._prompt_config_lines(result, experiment)
+        lines += ExperimentReportGenerator._aggregate_metrics_lines(result)
+        lines += ExperimentReportGenerator._win_loss_lines(result)
+        lines += ExperimentReportGenerator._replicate_stats_lines(result)
         return "\n".join(lines)
 
     @staticmethod

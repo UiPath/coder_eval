@@ -6,6 +6,7 @@ import re
 import time
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime
 from inspect import isawaitable
 from pathlib import Path
@@ -46,6 +47,7 @@ from .models import (
     PreRunCommand,
     PreservationMode,
     ProxyRoute,
+    SimulationConfig,
     SimulationTelemetry,
     TaskConfigRecord,
     TaskDefinition,
@@ -58,7 +60,7 @@ from .models import (
 from .orchestration.evaluation import load_reference
 from .path_utils import format_task_log_id, task_log_path
 from .sandbox import Sandbox
-from .simulation import DialogStopReason, UserSimulator, evaluate_stop
+from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
 from .streaming.callbacks import StreamCallback, TaskScopedCallback, safe_emit
 from .streaming.events import CriteriaCheckEvent, CriterionSummary
 from .telemetry import Scalar, hash_identifier
@@ -275,6 +277,41 @@ def build_task_event(result: EvaluationResult, *, driver: str, variant_id: str) 
         "Driver": driver,
     }
     return ("CoderEval.Task.Failed" if failed else "CoderEval.Task.End"), props
+
+
+@dataclass
+class _SolicitedMessage:
+    """Result of asking the user simulator for one utterance (opener or in-loop).
+
+    ``message is None`` signals a simulator failure (the caller bumps
+    ``simulator_failures`` and reacts); otherwise the caller inspects
+    ``message.stop_requested`` and folds ``sim_in``/``sim_out`` into its running
+    token totals. Module-private — NOT a public model.
+    """
+
+    message: UserMessage | None
+    sim_in: int
+    sim_out: int
+
+
+@dataclass
+class _OpenerOutcome:
+    """Result of the pure-simulation opener acquisition (``initial_prompt is None``).
+
+    When ``short_circuit`` is True the opener already wrote simulation telemetry and the
+    dialog loop must ``return return_value`` immediately (simulator failure → ERROR, or an
+    opener carrying the stop token → STOP_TOKEN, both before any agent turn). Otherwise the
+    caller folds ``sim_in``/``sim_out``/``failures`` into its counters and binds
+    ``current_prompt``/``pending_user_turn``. Module-private — NOT a public model.
+    """
+
+    short_circuit: bool
+    return_value: bool = False
+    current_prompt: str | None = None
+    pending_user_turn: UserMessage | None = None
+    sim_in: int = 0
+    sim_out: int = 0
+    failures: int = 0
 
 
 class Orchestrator:
@@ -1517,7 +1554,150 @@ class Orchestrator:
             total_turns=total_turns,
         )
 
-    async def _simulation_dialog_loop(self, initial_prompt: str | None, sandbox_dir: Path) -> bool:  # noqa: PLR0915 — god-function tracked for decomposition (code-review 2026-06-22)
+    async def _run_dialog_criteria_check(
+        self, judge_usage_accum: dict[tuple[int, str], TokenUsage]
+    ) -> list[CriterionResult]:
+        """Run the success criteria against the current dialog state and record them.
+
+        The block lifted verbatim from the three identical sites (per-turn,
+        budget-gate fallback, end-of-dialog): (re)load the reference, run
+        ``check_all`` off the event loop, fold this turn's judge usage into the
+        dialog-wide accumulator, store the results, and recompute the weighted score.
+        Whether to additionally set ``all_passed`` and emit a ``CriteriaCheckEvent`` is
+        left to the caller — those differ across the sites (the budget-gate fallback
+        does neither).
+        """
+        assert self.result is not None
+        assert self.success_checker is not None
+        reference_code, reference_dir, self._reference_code = load_reference(
+            task=self.task,
+            task_file=self.task_file,
+            cached_reference=self._reference_code,
+        )
+        criteria_results = await asyncio.to_thread(
+            self.success_checker.check_all,
+            self.task.success_criteria,
+            reference_code=reference_code,
+            reference_dir=reference_dir,
+            turn_records=self.result.iterations,
+        )
+        self._accumulate_judge_usage(criteria_results, judge_usage_accum)
+        self.result.success_criteria_results = criteria_results
+        self.result.calculate_weighted_score(self.task.success_criteria)
+        return criteria_results
+
+    def _user_message_from_sim(
+        self,
+        sim_result: SimulatorResult,
+        started_at: datetime,
+        completed_at: datetime,
+        duration_ms: float,
+        model_id: str | None,
+    ) -> UserMessage:
+        """Map a ``SimulatorResult`` + timing onto the pending-user-turn ``UserMessage``.
+
+        Distinct from the trivial pinned-prompt ``UserMessage(text=initial_prompt)``,
+        which stays inline. Isolated as a named, independently-testable field mapping.
+        """
+        return UserMessage(
+            text=sim_result.text,
+            raw_text=sim_result.raw_text,
+            stop_requested=sim_result.stop_requested,
+            started_at=started_at,
+            completed_at=completed_at,
+            generation_duration_ms=duration_ms,
+            input_tokens=sim_result.input_tokens or 0,
+            output_tokens=sim_result.output_tokens or 0,
+            model=model_id,
+        )
+
+    async def _solicit_user_message(
+        self,
+        simulator: UserSimulator,
+        history: list[tuple[str, str]],
+        sim_model_id: str | None,
+        failure_log_msg: str,
+    ) -> _SolicitedMessage:
+        """Ask the simulator for one utterance, time it, and map it to a ``UserMessage``.
+
+        The DRY unification of the opener and the in-loop next-user-message sites, which
+        are structurally identical apart from the failure log string. Carries NO
+        control-flow decision: on a simulator exception it logs ``failure_log_msg`` and
+        returns ``message=None`` (with ``sim_in=sim_out=0``); callers inspect
+        ``message is None`` (failure) and ``message.stop_requested``, and fold
+        ``sim_in``/``sim_out`` into their running totals.
+        """
+        started_wall = datetime.now()
+        started_mono = time.monotonic()
+        try:
+            sim_result = await simulator.next_user_message(history)
+        except Exception:
+            logger.exception(failure_log_msg)
+            return _SolicitedMessage(message=None, sim_in=0, sim_out=0)
+        completed_wall = datetime.now()
+        duration_ms = (time.monotonic() - started_mono) * 1000
+        message = self._user_message_from_sim(sim_result, started_wall, completed_wall, duration_ms, sim_model_id)
+        return _SolicitedMessage(
+            message=message,
+            sim_in=sim_result.input_tokens or 0,
+            sim_out=sim_result.output_tokens or 0,
+        )
+
+    async def _acquire_opener(
+        self, simulator: UserSimulator, sim_config: SimulationConfig, sim_model_id: str | None
+    ) -> _OpenerOutcome:
+        """Pure-simulation opener (``initial_prompt is None``): ask the simulator to
+        generate turn 1 from empty history.
+
+        Two short-circuit paths write simulation telemetry inline and tell the caller to
+        return immediately: a simulator failure (ERROR, total_turns=0) and an opener that
+        already carries the stop token (STOP_TOKEN, total_turns=0 — running an agent turn
+        just to learn this wastes a turn budget). Otherwise returns the opener message and
+        its token deltas for the caller to fold in.
+        """
+        assert self.result is not None
+        solicited = await self._solicit_user_message(
+            simulator,
+            [],
+            sim_model_id,
+            "User simulator failed to generate opening message — aborting dialog",
+        )
+        if solicited.message is None:
+            self.result.simulation = self._build_simulation_telemetry(
+                n_trials=sim_config.n_trials,
+                stop_reason=DialogStopReason.ERROR,
+                total_turns=0,
+                sim_in=0,
+                sim_out=0,
+                sim_failures=1,
+            )
+            return _OpenerOutcome(short_circuit=True, return_value=False)
+
+        self._log_conversation("USER", 1, solicited.message.text, metadata="simulator-generated opener")
+
+        # Opener carrying the stop token means the simulator judged the task done
+        # before any agent turn ran. Record telemetry and short-circuit.
+        if solicited.message.stop_requested:
+            self.result.simulation = self._build_simulation_telemetry(
+                n_trials=sim_config.n_trials,
+                stop_reason=DialogStopReason.STOP_TOKEN,
+                total_turns=0,
+                sim_in=solicited.sim_in,
+                sim_out=solicited.sim_out,
+                sim_failures=0,
+            )
+            return _OpenerOutcome(short_circuit=True, return_value=False)
+
+        return _OpenerOutcome(
+            short_circuit=False,
+            current_prompt=solicited.message.text,
+            pending_user_turn=solicited.message,
+            sim_in=solicited.sim_in,
+            sim_out=solicited.sim_out,
+            failures=0,
+        )
+
+    async def _simulation_dialog_loop(self, initial_prompt: str | None, sandbox_dir: Path) -> bool:  # noqa: PLR0915 — sequential dialog driver; decomposed into helpers, residual length is irreducible without a _DialogState rewrite (see plan Phase 5). Statement count ratcheted by CE022.
         """Run the task as a multi-turn dialog driven by an LLM user simulator.
 
         This replaces the criteria-feedback iteration loop for tasks that
@@ -1585,57 +1765,18 @@ class Orchestrator:
             # Pure-simulation mode: no pinned opener — ask the simulator to
             # generate turn 1 from empty history before the agent sees anything.
             if initial_prompt is None:
-                user_started_wall = datetime.now()
-                user_started_mono = time.monotonic()
-                try:
-                    opener = await simulator.next_user_message([])
-                except Exception:
-                    simulator_failures += 1
-                    logger.exception("User simulator failed to generate opening message — aborting dialog")
-                    self.result.simulation = self._build_simulation_telemetry(
-                        n_trials=sim_config.n_trials,
-                        stop_reason=DialogStopReason.ERROR,
-                        total_turns=0,
-                        sim_in=simulator_input_tokens,
-                        sim_out=simulator_output_tokens,
-                        sim_failures=simulator_failures,
-                    )
-                    return False
-                user_completed_wall = datetime.now()
-                user_duration_ms = (time.monotonic() - user_started_mono) * 1000
-                simulator_input_tokens += opener.input_tokens or 0
-                simulator_output_tokens += opener.output_tokens or 0
-                total_tokens_used += (opener.input_tokens or 0) + (opener.output_tokens or 0)
-                current_prompt = opener.text
-                pending_user_turn = UserMessage(
-                    text=opener.text,
-                    raw_text=opener.raw_text,
-                    stop_requested=opener.stop_requested,
-                    started_at=user_started_wall,
-                    completed_at=user_completed_wall,
-                    generation_duration_ms=user_duration_ms,
-                    input_tokens=opener.input_tokens or 0,
-                    output_tokens=opener.output_tokens or 0,
-                    model=sim_model_id,
-                )
-                self._log_conversation("USER", 1, current_prompt, metadata="simulator-generated opener")
-
-                # Opener carrying the stop token means the simulator judged the
-                # task done before any agent turn ran. Record the telemetry and
-                # short-circuit — running an agent turn just to learn this after
-                # the fact wastes a turn budget.
-                if opener.stop_requested:
-                    assert stop_reason is None
-                    stop_reason = DialogStopReason.STOP_TOKEN
-                    self.result.simulation = self._build_simulation_telemetry(
-                        n_trials=sim_config.n_trials,
-                        stop_reason=stop_reason,
-                        total_turns=0,
-                        sim_in=simulator_input_tokens,
-                        sim_out=simulator_output_tokens,
-                        sim_failures=simulator_failures,
-                    )
-                    return False
+                opener_outcome = await self._acquire_opener(simulator, sim_config, sim_model_id)
+                if opener_outcome.short_circuit:
+                    # _acquire_opener already wrote the simulation telemetry (ERROR
+                    # on simulator failure, STOP_TOKEN on a stop-carrying opener).
+                    return opener_outcome.return_value
+                assert opener_outcome.current_prompt is not None
+                simulator_input_tokens += opener_outcome.sim_in
+                simulator_output_tokens += opener_outcome.sim_out
+                total_tokens_used += opener_outcome.sim_in + opener_outcome.sim_out
+                simulator_failures += opener_outcome.failures
+                current_prompt = opener_outcome.current_prompt
+                pending_user_turn = opener_outcome.pending_user_turn
             else:
                 current_prompt = initial_prompt
                 pending_user_turn = UserMessage(text=initial_prompt)
@@ -1703,21 +1844,7 @@ class Orchestrator:
 
                 criteria_checked_this_turn = False
                 if check_every_turn:
-                    reference_code, reference_dir, self._reference_code = load_reference(
-                        task=self.task,
-                        task_file=self.task_file,
-                        cached_reference=self._reference_code,
-                    )
-                    criteria_results = await asyncio.to_thread(
-                        self.success_checker.check_all,
-                        self.task.success_criteria,
-                        reference_code=reference_code,
-                        reference_dir=reference_dir,
-                        turn_records=self.result.iterations,
-                    )
-                    self._accumulate_judge_usage(criteria_results, judge_usage_accum)
-                    self.result.success_criteria_results = criteria_results
-                    self.result.calculate_weighted_score(self.task.success_criteria)
+                    criteria_results = await self._run_dialog_criteria_check(judge_usage_accum)
                     criteria_checked_this_turn = True
                     all_passed = self.result.all_criteria_passed(self.task.success_criteria)
                     self._emit_criteria_event(criteria_results)
@@ -1729,21 +1856,11 @@ class Orchestrator:
                 except BudgetExceededError:
                     stop_reason = DialogStopReason.RUN_LIMIT_EXCEEDED
                     if not criteria_checked_this_turn:
-                        reference_code, reference_dir, self._reference_code = load_reference(
-                            task=self.task,
-                            task_file=self.task_file,
-                            cached_reference=self._reference_code,
-                        )
-                        criteria_results = await asyncio.to_thread(
-                            self.success_checker.check_all,
-                            self.task.success_criteria,
-                            reference_code=reference_code,
-                            reference_dir=reference_dir,
-                            turn_records=self.result.iterations,
-                        )
-                        self._accumulate_judge_usage(criteria_results, judge_usage_accum)
-                        self.result.success_criteria_results = criteria_results
-                        self.result.calculate_weighted_score(self.task.success_criteria)
+                        # Run for partial-credit side effects only (stores results
+                        # on self.result + recomputes score). This fallback site
+                        # deliberately neither sets all_passed nor emits an event,
+                        # so the return value is unused.
+                        await self._run_dialog_criteria_check(judge_usage_accum)
                     raise
 
                 stop_decision = evaluate_stop(
@@ -1772,45 +1889,31 @@ class Orchestrator:
                     )
                     break
 
-                user_started_wall = datetime.now()
-                user_started_mono = time.monotonic()
-                try:
-                    sim_result = await simulator.next_user_message(dialog_pairs)
-                except Exception:
+                solicited = await self._solicit_user_message(
+                    simulator, dialog_pairs, sim_model_id, "User simulator failed — ending dialog"
+                )
+                if solicited.message is None:
                     simulator_failures += 1
-                    logger.exception("User simulator failed — ending dialog")
                     stop_reason = DialogStopReason.ERROR
                     break
-                user_completed_wall = datetime.now()
-                user_duration_ms = (time.monotonic() - user_started_mono) * 1000
 
-                simulator_input_tokens += sim_result.input_tokens or 0
-                simulator_output_tokens += sim_result.output_tokens or 0
-                total_tokens_used += (sim_result.input_tokens or 0) + (sim_result.output_tokens or 0)
+                simulator_input_tokens += solicited.sim_in
+                simulator_output_tokens += solicited.sim_out
+                total_tokens_used += solicited.sim_in + solicited.sim_out
 
-                pending_user_turn = UserMessage(
-                    text=sim_result.text,
-                    raw_text=sim_result.raw_text,
-                    stop_requested=sim_result.stop_requested,
-                    started_at=user_started_wall,
-                    completed_at=user_completed_wall,
-                    generation_duration_ms=user_duration_ms,
-                    input_tokens=sim_result.input_tokens or 0,
-                    output_tokens=sim_result.output_tokens or 0,
-                    model=sim_model_id,
-                )
+                pending_user_turn = solicited.message
 
-                if sim_result.stop_requested:
+                if solicited.message.stop_requested:
                     self._log_conversation(
                         "USER",
                         turns_completed + 1,
-                        sim_result.text,
+                        solicited.message.text,
                         metadata="stop token — dialog ending",
                     )
                     stop_reason = DialogStopReason.STOP_TOKEN
                     break
 
-                current_prompt = sim_result.text
+                current_prompt = solicited.message.text
                 self._log_conversation("USER", turns_completed + 1, current_prompt)
 
             # Final criteria check for end_of_dialog (or both) modes, or when
@@ -1819,21 +1922,7 @@ class Orchestrator:
                 sim_config.check_criteria in ("end_of_dialog", "both") or not criteria_checked_this_turn
             )
             if end_of_dialog_needed:
-                reference_code, reference_dir, self._reference_code = load_reference(
-                    task=self.task,
-                    task_file=self.task_file,
-                    cached_reference=self._reference_code,
-                )
-                criteria_results = await asyncio.to_thread(
-                    self.success_checker.check_all,
-                    self.task.success_criteria,
-                    reference_code=reference_code,
-                    reference_dir=reference_dir,
-                    turn_records=self.result.iterations,
-                )
-                self._accumulate_judge_usage(criteria_results, judge_usage_accum)
-                self.result.success_criteria_results = criteria_results
-                self.result.calculate_weighted_score(self.task.success_criteria)
+                criteria_results = await self._run_dialog_criteria_check(judge_usage_accum)
                 all_passed = self.result.all_criteria_passed(self.task.success_criteria)
                 self._emit_criteria_event(criteria_results)
 

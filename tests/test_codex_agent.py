@@ -14,7 +14,6 @@ pytest.importorskip("openai_codex")
 
 from coder_eval.agent import AgentState
 from coder_eval.agents.codex_agent import (
-    _CLAUDE_TO_CODEX_TOOL_MAP,
     _CODEX_APPROVAL_MODE,
     _PERMISSION_MODE_TO_SANDBOX,
     CodexAgent,
@@ -74,38 +73,9 @@ class TestCodexAgentInitialization:
         assert agent.get_state() == AgentState.WORKING
 
 
-class TestToolNameMapping:
-    """Test tool name mapping between Claude Code and Codex SDK."""
-
-    def test_bash_maps_to_shell(self):
-        """Bash tool maps to shell in Codex."""
-        assert _CLAUDE_TO_CODEX_TOOL_MAP["Bash"] == "shell"
-
-    def test_write_maps_to_apply_patch(self):
-        """Write tool maps to apply_patch in Codex."""
-        assert _CLAUDE_TO_CODEX_TOOL_MAP["Write"] == "apply_patch"
-
-    def test_edit_maps_to_apply_patch(self):
-        """Edit tool maps to apply_patch in Codex."""
-        assert _CLAUDE_TO_CODEX_TOOL_MAP["Edit"] == "apply_patch"
-
-    def test_read_maps_to_shell(self):
-        """Read tool maps to shell in Codex (no dedicated read tool)."""
-        assert _CLAUDE_TO_CODEX_TOOL_MAP["Read"] == "shell"
-
-    def test_grep_maps_to_shell(self):
-        """Grep tool maps to shell in Codex."""
-        assert _CLAUDE_TO_CODEX_TOOL_MAP["Grep"] == "shell"
-
-    def test_glob_maps_to_shell(self):
-        """Glob tool maps to shell in Codex."""
-        assert _CLAUDE_TO_CODEX_TOOL_MAP["Glob"] == "shell"
-
-    def test_all_tools_mapped(self):
-        """Verify all expected tools have mappings."""
-        expected_tools = {"Bash", "Write", "Edit", "Read", "Grep", "Glob"}
-        actual_tools = set(_CLAUDE_TO_CODEX_TOOL_MAP.keys())
-        assert expected_tools.issubset(actual_tools)
+# NOTE: SDK-independent tests (TestToolNameMapping, TestCodexTurnState) live in
+# test_codex_agent_unit.py so they run in the base Quality Gate without the
+# optional `openai_codex` extra. Keep new pure-logic tests there, not here.
 
 
 class TestPermissionModeMapping:
@@ -1379,7 +1349,7 @@ class _BlockingStream:
 
 class TestCommunicateTimeoutFunnel:
     async def test_timeout_raises_turn_timeout_with_pending(self):
-        handle = SimpleNamespace(stream=lambda: _BlockingStream(), interrupt=lambda: None)
+        handle = SimpleNamespace(stream=_BlockingStream, interrupt=lambda: None)
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         agent.working_directory = __import__("pathlib").Path(".")
         agent.codex_client = SimpleNamespace(close=lambda: None)
@@ -1391,6 +1361,47 @@ class TestCommunicateTimeoutFunnel:
         assert agent.pending_turn is not None
         assert agent.pending_turn.crashed is True
         assert agent.get_state() == AgentState.ERROR
+
+
+class _ImmediateTimeoutWatchdog:
+    """A watchdog stub that fires on_timeout synchronously on __enter__ (setting
+    state.timeout_hit) but does NOT cancel the task — so the pump runs to
+    completion and the turn is handled by the POST-watchdog timeout block (the
+    'watchdog fired but the pump finished before the cancel landed' race)."""
+
+    def __init__(self, *, timeout_seconds=None, on_timeout=None, asyncio_task_to_cancel=None, label=""):
+        self._on_timeout = on_timeout
+
+    def __enter__(self):
+        if self._on_timeout is not None:
+            self._on_timeout()
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class TestCommunicatePostWatchdogTimeoutRace:
+    """Regression for the post-watchdog timeout race: when the watchdog fires but
+    the pump completes before the cancel lands, the trailing `if timeout_hit`
+    block must set _state=ERROR (consistent with every other timeout/crash path).
+    Previously this path left _state unchanged — a latent inconsistency now fixed
+    by routing it through the shared _finalize_and_raise_timeout kernel."""
+
+    async def test_post_watchdog_timeout_sets_error_state_and_partial(self, monkeypatch):
+        notifications = [_delta("done"), _turn_completed()]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+        # Fire the watchdog synchronously without cancelling, so the pump returns
+        # normally and the post-watchdog `if state.timeout_hit:` block fires.
+        monkeypatch.setattr("coder_eval.agents.codex_agent.ThreadedWatchdog", _ImmediateTimeoutWatchdog)
+
+        with pytest.raises(TurnTimeoutError):
+            await agent.communicate("do it", timeout=30.0)
+
+        # The fix: this race path now ends in ERROR (would be WORKING before).
+        assert agent.get_state() == AgentState.ERROR
+        assert agent.pending_turn is not None
+        assert agent.pending_turn.crashed is True
 
 
 class TestDiscardIdempotency:

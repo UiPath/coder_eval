@@ -291,3 +291,31 @@ async def test_simulation_records_simulator_failure(tmp_path, monkeypatch):
     assert result.simulation is not None
     assert result.simulation.stop_reason == "error"
     assert result.simulation.simulator_failures == 1
+
+
+@pytest.mark.asyncio
+async def test_simulation_pending_user_turn_prepended_to_each_turn(tmp_path, monkeypatch):
+    """Each agent turn's ``messages[0]`` is the UserMessage that drove it — the pinned
+    opener on turn 1, then each simulator utterance — and the end-of-dialog criteria
+    check populates ``success_criteria_results``. This pins the seam most affected by the
+    ``_solicit_user_message`` / ``_user_message_from_sim`` / ``pending_user_turn`` extraction.
+    """
+    _install_fake_agent(monkeypatch, scenario="failure")  # never satisfies criteria → dialog continues
+    _install_fake_simulator(monkeypatch, responses=["try again please", "all good now <<<DONE>>>"])
+
+    task = _build_task({"max_turns": 4})  # default initial_prompt is the pinned opener
+    orch = Orchestrator(task=task, run_dir=tmp_path / "run" / "prepend", variant_id="default")
+
+    result = await orch.run()
+
+    assert result.simulation is not None
+    assert result.simulation.stop_reason == "stop_token"
+    assert result.simulation.total_turns == 2
+    # Two real agent turns; each carries the driving user utterance as messages[0].
+    assert result.iterations[0].messages[0].text == "Please create the file."
+    assert result.iterations[1].messages[0].text == "try again please"
+    # Token accounting aggregates the two simulator calls (5, 7) each.
+    assert result.simulation.simulator_input_tokens == 10
+    assert result.simulation.simulator_output_tokens == 14
+    # End-of-dialog criteria check ran (success_criteria_results populated).
+    assert result.success_criteria_results

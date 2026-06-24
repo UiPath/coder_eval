@@ -3,12 +3,38 @@
 # by-design model-hub ↔ registry type-level cycle; runtime imports are lazy per CE017
 # pyright: reportImportCycles=false
 
+import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, NoReturn, Protocol
 
+from .errors import AgentCrashError, TurnTimeoutError
+from .errors.agent import format_timeout_reason, truncate_crash_message
 from .models import AgentState as AgentState
 from .models import BaseAgentConfig, TurnRecord
 from .streaming.callbacks import StreamCallback
+from .streaming.collector import EventCollector
+from .streaming.events import AgentEndStatus
+
+
+logger = logging.getLogger(__name__)
+
+
+class _FinalizeFn(Protocol):
+    """The per-turn ``finalize`` callback shared by every agent's turn-state.
+
+    Pinning the exact keyword-only signature here (instead of a loose
+    ``Callable[..., None]``) lets pyright catch a future ``Agent`` subclass that
+    wires an incompatible ``finalize`` into the shared mid-turn failure kernels.
+    """
+
+    def __call__(
+        self,
+        status: AgentEndStatus,
+        *,
+        crashed: bool = ...,
+        crash_reason: str | None = ...,
+    ) -> None:
+        """Finalize the current turn with the given end status."""
 
 
 class Agent[ConfigT: BaseAgentConfig](ABC):
@@ -69,6 +95,62 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         """
         self.pending_turn = None
         self._state = AgentState.FINISHED
+
+    # --- Shared mid-turn failure kernels --------------------------------------
+    #
+    # Tiny, byte-identical fragments that recur across (and within) the agent
+    # turn-loops. Each agent keeps its OWN outer try/except/finally bracket — the
+    # brackets genuinely differ (flat vs nested, finally vs not) — and calls these
+    # from inside its existing branches. They take the agent's own per-turn
+    # ``finalize`` callable (the turn-state's method) so the helper never needs to
+    # know how each agent assembles its AgentEndEvent payload.
+
+    def _finalize_and_raise_timeout(
+        self, finalize: _FinalizeFn, timeout: float, *, cause: BaseException | None = None
+    ) -> NoReturn:
+        """Mark ERROR, finalize the turn as a timed-out crash, raise TurnTimeoutError.
+
+        Reproduces the per-branch ``_state=ERROR -> finalize(TIMEOUT) -> raise`` triple
+        that appears three times in Claude plus once in Codex. When called from inside
+        an ``except ... as e`` block, pass ``cause=e`` to preserve the explicit
+        ``__cause__`` link; otherwise Python's implicit ``__context__`` chaining stands.
+        """
+        self._state = AgentState.ERROR
+        finalize(AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout))
+        if cause is not None:
+            raise TurnTimeoutError(timeout, iteration=self._iteration) from cause
+        raise TurnTimeoutError(timeout, iteration=self._iteration)
+
+    def _finalize_and_raise_crash(
+        self, finalize: _FinalizeFn, message: str, *, cause: BaseException | None = None
+    ) -> NoReturn:
+        """Mark ERROR, finalize the turn as a crash, raise AgentCrashError.
+
+        ``message`` is the agent-built error string (the helper does NOT construct
+        it). ``crash_reason`` is truncated for storage while the raised
+        ``AgentCrashError`` carries ``message`` as passed (truncation is idempotent,
+        so an already-truncated message round-trips unchanged). When called from
+        inside an ``except ... as e`` block, pass ``cause=e`` to preserve the explicit
+        ``__cause__`` link; otherwise Python's implicit ``__context__`` chaining stands.
+        """
+        self._state = AgentState.ERROR
+        finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason=truncate_crash_message(message))
+        if cause is not None:
+            raise AgentCrashError(message) from cause
+        raise AgentCrashError(message)
+
+    def _capture_partial_turn(self, collector: EventCollector) -> None:
+        """Build the crashed partial ``TurnRecord`` into ``pending_turn`` (best-effort).
+
+        Shared crash-tail of each agent's ``finalize``: if assembling the partial
+        record itself raises, swallow it and leave ``pending_turn`` None rather than
+        masking the original mid-turn failure.
+        """
+        try:
+            self.pending_turn = collector.build_turn_record()
+        except Exception:
+            logger.exception("Failed to build partial turn record")
+            self.pending_turn = None
 
     @abstractmethod
     async def start(

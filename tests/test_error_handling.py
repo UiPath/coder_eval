@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from coder_eval.errors import AgentConfigError, AgentCrashError
+from coder_eval.errors import AgentConfigError, AgentCrashError, BudgetExceededError, EvaluationTimeoutError
 from coder_eval.errors.categories import ERROR_TIPS, RETRY_CONFIG, ErrorCategory, RetryConfig
 from coder_eval.errors.categorization import categorize_error
 from coder_eval.errors.executor import execute_with_retry
@@ -404,6 +404,73 @@ class TestCategorizeError:
         error = Exception("Some error")
         result = categorize_error(error, {})
         assert result == ErrorCategory.UNKNOWN
+
+    # Precedence table — one case per branch, locking the exact verdict for the
+    # documented order: hint → typed-exception group → message-string group →
+    # component group → final typed-AgentCrashError fallback → UNKNOWN. This is the
+    # characterization gate for the decomposition: the verdict for every branch must
+    # be byte-identical before and after extracting the three group-classifiers.
+    @pytest.mark.parametrize(
+        "error, context, expected",
+        [
+            # --- typed-exception group (runs before any string match) ---
+            (
+                EvaluationTimeoutError("timed out", timeout_seconds=1.0, layer="turn"),
+                {"component": "sandbox"},
+                ErrorCategory.AGENT_TIMEOUT,
+            ),
+            (BudgetExceededError("max_usd", actual=2.0, limit=1.0), {}, ErrorCategory.BUDGET_EXCEEDED),
+            (AgentConfigError("missing prerequisite"), {"component": "agent"}, ErrorCategory.AGENT_CONFIG_ERROR),
+            (TimeoutError("boom"), {"component": "agent"}, ErrorCategory.AGENT_TIMEOUT),
+            (TimeoutError("boom"), {"component": "sandbox"}, ErrorCategory.UNKNOWN),
+            (FileNotFoundError("task.yaml missing"), {}, ErrorCategory.TASK_NOT_FOUND),
+            (MemoryError("oom"), {}, ErrorCategory.OUT_OF_MEMORY),
+            # --- message-string group (component-agnostic patterns first) ---
+            (Exception("Unauthorized request"), {}, ErrorCategory.AGENT_AUTH_ERROR),
+            (Exception("insufficient credit on account"), {}, ErrorCategory.AGENT_BILLING_ERROR),
+            (Exception("rate limit reached"), {}, ErrorCategory.AGENT_RATE_LIMIT),
+            (Exception("blocked by content filter"), {}, ErrorCategory.AGENT_INVALID_OUTPUT),
+            (Exception("connection refused"), {"component": "agent"}, ErrorCategory.AGENT_API_ERROR),
+            (Exception("connection refused"), {"component": "sandbox"}, ErrorCategory.UNKNOWN),
+            (Exception("no space left on device"), {}, ErrorCategory.DISK_FULL),
+            # --- component group: sandbox sub-cases + fallback ---
+            (Exception("venv creation failed"), {"component": "sandbox"}, ErrorCategory.VENV_CREATION_ERROR),
+            (Exception("pip install failed"), {"component": "sandbox"}, ErrorCategory.PACKAGE_INSTALL_ERROR),
+            (Exception("git clone failed"), {"component": "sandbox"}, ErrorCategory.GIT_CLONE_ERROR),
+            (Exception("template copy failed"), {"component": "sandbox"}, ErrorCategory.TEMPLATE_COPY_ERROR),
+            (Exception("something odd"), {"component": "sandbox"}, ErrorCategory.SANDBOX_SETUP_ERROR),
+            # --- component group: agent sub-cases + default ---
+            (Exception("process killed"), {"component": "agent"}, ErrorCategory.AGENT_CRASH),
+            (AgentCrashError(), {"component": "agent"}, ErrorCategory.AGENT_CRASH),
+            (RuntimeError("plain failure"), {"component": "agent"}, ErrorCategory.AGENT_API_ERROR),
+            # --- component group: evaluator / task ---
+            (Exception("checker blew up"), {"component": "evaluator"}, ErrorCategory.CRITERION_CHECK_ERROR),
+            (Exception("validation error"), {"component": "task"}, ErrorCategory.TASK_INVALID),
+            (Exception("not here"), {"component": "task"}, ErrorCategory.TASK_NOT_FOUND),
+            # --- final typed-AgentCrashError fallback (no component hint) ---
+            (AgentCrashError(), {}, ErrorCategory.AGENT_CRASH),
+            # --- UNKNOWN default ---
+            (Exception("xyz"), {}, ErrorCategory.UNKNOWN),
+        ],
+    )
+    def test_categorize_error_precedence_table(self, error, context, expected):
+        assert categorize_error(error, context) == expected
+
+    def test_categorize_hint_short_circuits_every_branch(self):
+        """An explicit hint wins regardless of the error type or component."""
+        assert (
+            categorize_error(MemoryError("oom"), {"component": "agent"}, hint=ErrorCategory.TASK_INVALID)
+            == ErrorCategory.TASK_INVALID
+        )
+
+    def test_categorize_string_group_beats_component_agent_default(self):
+        """Precedence regression: a string-pattern match runs before the component-agent
+        default, so a RuntimeError whose message reads 'authentication failed' routes to
+        AGENT_AUTH_ERROR — NOT the AGENT_API_ERROR agent-component fallback."""
+        assert (
+            categorize_error(RuntimeError("authentication failed"), {"component": "agent"})
+            == ErrorCategory.AGENT_AUTH_ERROR
+        )
 
 
 # Note: get_retry_delay is an internal function not exported from error_handling module

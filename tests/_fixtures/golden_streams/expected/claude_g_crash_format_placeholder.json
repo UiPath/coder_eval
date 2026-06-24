@@ -1,0 +1,17 @@
+{
+  "agent_output": "<partial record: message formatting failed: RuntimeError: boom formatting>",
+  "assistant_turn_count": 0,
+  "commands": [],
+  "crash_reason": "Communication with agent failed: crash after poison\nStderr output:\nNo stderr captured",
+  "crashed": true,
+  "duration_seconds": "<scrubbed>",
+  "iteration": 1,
+  "max_turns_exhausted": false,
+  "messages": [],
+  "model_used": null,
+  "num_turns": null,
+  "result_summary": null,
+  "timestamp": "<scrubbed>",
+  "token_usage": null,
+  "user_input": "do the thing"
+}

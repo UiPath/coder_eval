@@ -20,7 +20,7 @@ import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TextIO
 
 import yaml
 
@@ -403,7 +403,7 @@ class DockerRunner:
     def _limits(self) -> ResourceLimits:
         return self.rt.task.sandbox.limits
 
-    async def run(self) -> EvaluationResult:  # noqa: PLR0915 — god-function tracked for decomposition (code-review 2026-06-22)
+    async def run(self) -> EvaluationResult:
         """Run the task in a container and return the parsed EvaluationResult.
 
         The container is responsible for producing ``task.json`` in
@@ -436,32 +436,7 @@ class DockerRunner:
         output_dir = self.rt.run_dir.resolve()
 
         try:
-            # Always serialise the *post-override* TaskDefinition. We can't use
-            # rt.source_yaml because that's the raw on-disk text -- _apply_cli_overrides
-            # has since mutated rt.task in-memory (e.g. --model, -D run_limits.max_turns), and the
-            # container needs to see those mutations.
-            task_yaml_in = input_dir / "task.yaml"
-
-            def _dump_task_yaml() -> str:
-                return yaml.safe_dump(self.rt.task.model_dump(mode="json"), sort_keys=False)
-
-            task_yaml_text = await asyncio.to_thread(_dump_task_yaml)
-            await asyncio.to_thread(task_yaml_in.write_text, task_yaml_text, encoding="utf-8")
-            # Lineage + variant metadata so the in-container Orchestrator
-            # reconstructs the same context (variant_id is load-bearing for
-            # report grouping). source_yaml carries the *raw* on-disk text
-            # so the in-container Orchestrator records the same audit trail
-            # as the in-process driver (task.json.task_config.source_yaml).
-            context_payload = json.dumps(
-                {
-                    "variant_id": self.rt.variant_id,
-                    "replicate_index": self.rt.replicate_index,
-                    "config_lineage": {k: v.model_dump(mode="json") for k, v in self.rt.config_lineage.items()},
-                    "preservation_mode": self.preservation_mode.value,
-                    "source_yaml": self.rt.source_yaml,
-                }
-            )
-            await asyncio.to_thread((input_dir / "context.json").write_text, context_payload, encoding="utf-8")
+            await self._stage_inputs(input_dir)
 
             # Give the container a stable, *unique* name so cancellation can
             # target it. PID alone collides under --max-parallel >1 (same
@@ -494,7 +469,6 @@ class DockerRunner:
                 stderr=asyncio.subprocess.STDOUT,
                 limit=STDOUT_LINE_LIMIT_BYTES,
             )
-            assert proc.stdout is not None
             log_path = self.rt.run_dir / "docker.log"
             log_fh = await asyncio.to_thread(log_path.open, "w", encoding="utf-8")
             # Cancellation guard: `docker run --rm` does NOT propagate kill
@@ -503,48 +477,7 @@ class DockerRunner:
             # budget. Covers CancelledError, KeyboardInterrupt, and any
             # other exit-by-exception path uniformly.
             try:
-                # Explicit readline loop (not `async for`) so a single
-                # over-limit line degrades to a dropped line instead of a
-                # ValueError that tears the whole task down -- see below.
-                while True:
-                    try:
-                        raw_line = await proc.stdout.readline()
-                    except ValueError:
-                        # A single line exceeded STDOUT_LINE_LIMIT_BYTES.
-                        # readline() drains the offending bytes and resyncs at
-                        # the next newline, so we keep streaming. The dropped
-                        # line is a STREAM_EVENT (host-side live render) or a
-                        # log line; task.json crosses via the bind mount, not
-                        # stdout, so the task result is unaffected. Degrade,
-                        # don't die.
-                        logger.warning(
-                            "Dropped a stdout line over %d bytes from task %r's container; continuing to stream.",
-                            STDOUT_LINE_LIMIT_BYTES,
-                            self.rt.task.task_id,
-                        )
-                        continue
-                    if not raw_line:
-                        break
-                    line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
-                    # Three-way split:
-                    #   - Has the wire-format prefix AND parses cleanly -> emit
-                    #     to the host StreamCallback; do not echo to docker.log
-                    #     (the StreamCallback is the canonical destination).
-                    #   - Has the prefix but parses badly -> wire bug;
-                    #     deserialize_event already logged a WARN. Preserve
-                    #     the raw line in docker.log so it isn't lost.
-                    #   - No prefix -> plain log line.
-                    if has_prefix(line):
-                        event = deserialize_event(line)
-                        if event is not None:
-                            safe_emit(self.stream_callback, event)
-                            continue
-                        # fall through to log preservation
-                    log_fn = logger.info if self.verbose else logger.debug
-                    log_fn("[docker:%s] %s", self.rt.task.task_id, line)
-                    await asyncio.to_thread(log_fh.write, line + "\n")
-                    await asyncio.to_thread(log_fh.flush)
-                returncode = await proc.wait()
+                returncode = await self._stream_container_output(proc, log_fh)
             finally:
                 heartbeat_task.cancel()
                 # await the cancellation so the task doesn't outlive us;
@@ -557,74 +490,179 @@ class DockerRunner:
                 # the container *and* the docker CLI subprocess. Best-effort,
                 # no exception leak from cleanup.
                 if proc.returncode is None:
-                    logger.warning("Cleanup: killing container %s", container_name)
-                    try:
-                        kill_result = await asyncio.to_thread(
-                            subprocess.run,
-                            ["docker", "kill", container_name],
-                            capture_output=True,
-                            check=False,
-                            timeout=10,
-                        )
-                        if kill_result.returncode == 0:
-                            logger.info("Container %s killed cleanly.", container_name)
-                        else:
-                            # Non-zero from `docker kill` typically means the
-                            # container was already gone (race with --rm) OR
-                            # the daemon refused. Surface stderr so the
-                            # ambiguity is debuggable.
-                            logger.warning(
-                                "docker kill %s returned %s; container may already be gone or daemon refused: %s",
-                                container_name,
-                                kill_result.returncode,
-                                kill_result.stderr.decode("utf-8", errors="replace").strip(),
-                            )
-                    except subprocess.TimeoutExpired:
-                        # Daemon hung; container may now be orphaned daemon-side.
-                        # Loud so an operator notices and prunes manually.
-                        logger.error(
-                            "docker kill %s timed out after 10s; container may be orphaned. Investigate `docker ps`.",
-                            container_name,
-                        )
-                    except (OSError, subprocess.SubprocessError) as kill_exc:
-                        logger.warning("docker kill failed: %s", kill_exc)
-                    with contextlib.suppress(ProcessLookupError):
-                        proc.kill()
-                    # Narrow to CancelledError -- a generic BaseException
-                    # catch here would silently eat KeyboardInterrupt /
-                    # SystemExit propagation from parallel tasks.
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await proc.wait()
+                    await self._kill_container(proc, container_name)
 
-            task_json = output_dir / "task.json"
-            if not await asyncio.to_thread(task_json.exists):
-                # The container died before its orchestrator's `finally` could
-                # write task.json (e.g. it was torn down by the cleanup above
-                # after a host-side stream failure, or killed externally).
-                # Persist a synthetic ERROR task.json so the test stays
-                # visible on dashboards/timelines instead of silently
-                # vanishing -- the batch layer's in-memory skeleton never
-                # reaches the per-task dir.
-                error = DockerRunError(
-                    f"Container exited with code {returncode} without producing task.json. "
-                    + f"See {log_path} for container output."
-                )
-                await self._write_synthetic_task_json(task_json, error)
-                raise error
-
-            # output_dir IS rt.run_dir -- no copy needed.
-            task_json_text = await asyncio.to_thread(task_json.read_text, encoding="utf-8")
-            try:
-                result = EvaluationResult.model_validate_json(task_json_text)
-            except ValueError as exc:
-                # Present but unparseable (schema skew from a stale image, or a
-                # truncated/torn write). Degrade like the missing-file branch
-                # rather than crashing with an uncaught ValidationError/JSONDecodeError.
-                raise await self._handle_malformed_task_json(task_json, log_path, exc) from exc
-            self._warn_on_version_mismatch(result)
-            return result
+            return await self._parse_result_or_raise(output_dir, returncode, log_path)
         finally:
             await asyncio.to_thread(shutil.rmtree, staging, ignore_errors=True)
+
+    async def _stage_inputs(self, input_dir: Path) -> None:
+        """Serialise the post-override TaskDefinition + lineage/variant context into the
+        staging ``input_dir`` (``task.yaml`` + ``context.json``). Pure I/O off the event
+        loop; no control-flow change.
+        """
+        # Always serialise the *post-override* TaskDefinition. We can't use
+        # rt.source_yaml because that's the raw on-disk text -- _apply_cli_overrides
+        # has since mutated rt.task in-memory (e.g. --model, -D run_limits.max_turns), and the
+        # container needs to see those mutations.
+        task_yaml_in = input_dir / "task.yaml"
+
+        def _dump_task_yaml() -> str:
+            return yaml.safe_dump(self.rt.task.model_dump(mode="json"), sort_keys=False)
+
+        task_yaml_text = await asyncio.to_thread(_dump_task_yaml)
+        await asyncio.to_thread(task_yaml_in.write_text, task_yaml_text, encoding="utf-8")
+        # Lineage + variant metadata so the in-container Orchestrator
+        # reconstructs the same context (variant_id is load-bearing for
+        # report grouping). source_yaml carries the *raw* on-disk text
+        # so the in-container Orchestrator records the same audit trail
+        # as the in-process driver (task.json.task_config.source_yaml).
+        context_payload = json.dumps(
+            {
+                "variant_id": self.rt.variant_id,
+                "replicate_index": self.rt.replicate_index,
+                "config_lineage": {k: v.model_dump(mode="json") for k, v in self.rt.config_lineage.items()},
+                "preservation_mode": self.preservation_mode.value,
+                "source_yaml": self.rt.source_yaml,
+            }
+        )
+        await asyncio.to_thread((input_dir / "context.json").write_text, context_payload, encoding="utf-8")
+
+    async def _stream_container_output(self, proc: asyncio.subprocess.Process, log_fh: TextIO) -> int:
+        """Stream the container's stdout, returning its exit code.
+
+        Wire-format lines emit to the host ``StreamCallback``; plain lines are written
+        to ``docker.log``. A single over-limit line is dropped (degrade, not die) — the
+        ``readline`` ``ValueError`` resyncs at the next newline. Runs as the inner-``try``
+        body of ``run``; the caller owns the ``finally`` cleanup, so this helper never
+        touches the heartbeat/log-fh/container teardown.
+        """
+        assert proc.stdout is not None
+        # Explicit readline loop (not `async for`) so a single
+        # over-limit line degrades to a dropped line instead of a
+        # ValueError that tears the whole task down -- see below.
+        while True:
+            try:
+                raw_line = await proc.stdout.readline()
+            except ValueError:
+                # A single line exceeded STDOUT_LINE_LIMIT_BYTES.
+                # readline() drains the offending bytes and resyncs at
+                # the next newline, so we keep streaming. The dropped
+                # line is a STREAM_EVENT (host-side live render) or a
+                # log line; task.json crosses via the bind mount, not
+                # stdout, so the task result is unaffected. Degrade,
+                # don't die.
+                logger.warning(
+                    "Dropped a stdout line over %d bytes from task %r's container; continuing to stream.",
+                    STDOUT_LINE_LIMIT_BYTES,
+                    self.rt.task.task_id,
+                )
+                continue
+            if not raw_line:
+                break
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+            # Three-way split:
+            #   - Has the wire-format prefix AND parses cleanly -> emit
+            #     to the host StreamCallback; do not echo to docker.log
+            #     (the StreamCallback is the canonical destination).
+            #   - Has the prefix but parses badly -> wire bug;
+            #     deserialize_event already logged a WARN. Preserve
+            #     the raw line in docker.log so it isn't lost.
+            #   - No prefix -> plain log line.
+            if has_prefix(line):
+                event = deserialize_event(line)
+                if event is not None:
+                    safe_emit(self.stream_callback, event)
+                    continue
+                # fall through to log preservation
+            log_fn = logger.info if self.verbose else logger.debug
+            log_fn("[docker:%s] %s", self.rt.task.task_id, line)
+            await asyncio.to_thread(log_fh.write, line + "\n")
+            await asyncio.to_thread(log_fh.flush)
+        return await proc.wait()
+
+    async def _kill_container(self, proc: asyncio.subprocess.Process, container_name: str) -> None:
+        """Best-effort teardown when cancelled mid-stream with the container still alive.
+
+        Called from ``run``'s inner ``finally`` (after heartbeat-cancel + log-fh close),
+        guarded by ``if proc.returncode is None``. ``docker run --rm`` does NOT propagate
+        a host-side kill to the daemon, so kill the container by name and then the docker
+        CLI subprocess. No exception leaks from cleanup; suppression is narrowed to
+        CancelledError so KeyboardInterrupt / SystemExit from parallel siblings propagate.
+        """
+        logger.warning("Cleanup: killing container %s", container_name)
+        try:
+            kill_result = await asyncio.to_thread(
+                subprocess.run,
+                ["docker", "kill", container_name],
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+            if kill_result.returncode == 0:
+                logger.info("Container %s killed cleanly.", container_name)
+            else:
+                # Non-zero from `docker kill` typically means the
+                # container was already gone (race with --rm) OR
+                # the daemon refused. Surface stderr so the
+                # ambiguity is debuggable.
+                logger.warning(
+                    "docker kill %s returned %s; container may already be gone or daemon refused: %s",
+                    container_name,
+                    kill_result.returncode,
+                    kill_result.stderr.decode("utf-8", errors="replace").strip(),
+                )
+        except subprocess.TimeoutExpired:
+            # Daemon hung; container may now be orphaned daemon-side.
+            # Loud so an operator notices and prunes manually.
+            logger.error(
+                "docker kill %s timed out after 10s; container may be orphaned. Investigate `docker ps`.",
+                container_name,
+            )
+        except (OSError, subprocess.SubprocessError) as kill_exc:
+            logger.warning("docker kill failed: %s", kill_exc)
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        # Narrow to CancelledError -- a generic BaseException
+        # catch here would silently eat KeyboardInterrupt /
+        # SystemExit propagation from parallel tasks.
+        with contextlib.suppress(asyncio.CancelledError):
+            await proc.wait()
+
+    async def _parse_result_or_raise(self, output_dir: Path, returncode: int, log_path: Path) -> EvaluationResult:
+        """Read back ``task.json`` (the only artifact crossing the boundary) and parse it.
+
+        If the container exited without producing it, persist a synthetic ERROR
+        task.json and raise ``DockerRunError`` so the batch dispatcher records the
+        failure as an ERROR-status result.
+        """
+        task_json = output_dir / "task.json"
+        if not await asyncio.to_thread(task_json.exists):
+            # The container died before its orchestrator's `finally` could
+            # write task.json (e.g. it was torn down by the cleanup above
+            # after a host-side stream failure, or killed externally).
+            # Persist a synthetic ERROR task.json so the test stays
+            # visible on dashboards/timelines instead of silently
+            # vanishing -- the batch layer's in-memory skeleton never
+            # reaches the per-task dir.
+            error = DockerRunError(
+                f"Container exited with code {returncode} without producing task.json. "
+                + f"See {log_path} for container output."
+            )
+            await self._write_synthetic_task_json(task_json, error)
+            raise error
+
+        # output_dir IS rt.run_dir -- no copy needed.
+        task_json_text = await asyncio.to_thread(task_json.read_text, encoding="utf-8")
+        try:
+            result = EvaluationResult.model_validate_json(task_json_text)
+        except ValueError as exc:
+            # Present but unparseable (schema skew from a stale image, or a
+            # truncated/torn write). Degrade like the missing-file branch
+            # rather than crashing with an uncaught ValidationError/JSONDecodeError.
+            raise await self._handle_malformed_task_json(task_json, log_path, exc) from exc
+        self._warn_on_version_mismatch(result)
+        return result
 
     async def _handle_malformed_task_json(self, task_json: Path, log_path: Path, exc: ValueError) -> DockerRunError:
         """Degrade a present-but-malformed task.json; return the DockerRunError to raise.

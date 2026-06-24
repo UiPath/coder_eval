@@ -377,3 +377,54 @@ class TestCE021GuardedEvaluationResultParse:
         )
         # Inner body is guarded by the OUTER try's except ValueError.
         assert not self._run(src)
+
+
+@pytest.mark.lint
+class TestCE022SimulationDialogLoopStatementCap:
+    """CE022 bounds the regrowth of the noqa'd _simulation_dialog_loop.
+
+    The whole-tree zero-violations guarantee (the live function is at/under the cap)
+    is asserted by the parametrized ``test_no_violations`` above; these pin that the
+    rule actually fires on regrowth and stays narrow.
+    """
+
+    @staticmethod
+    def _run(src: str, *, path: str = "src/coder_eval/orchestrator.py"):
+        import ast
+
+        from tests.lint.rules.ce022_dialog_loop_statement_cap import SimulationDialogLoopStatementCap
+
+        return SimulationDialogLoopStatementCap(path).check(ast.parse(src))
+
+    @staticmethod
+    def _padded_loop(name: str, n_statements: int) -> str:
+        body = "\n".join(f"    x{i} = {i}" for i in range(n_statements))
+        return f"async def {name}(self, initial_prompt, sandbox_dir):\n{body}"
+
+    def test_flags_oversized_dialog_loop(self):
+        """A _simulation_dialog_loop padded well past the cap fires exactly once."""
+        violations = self._run(self._padded_loop("_simulation_dialog_loop", 200))
+        assert len(violations) == 1
+        assert violations[0].rule_id == "CE022"
+
+    def test_allows_small_dialog_loop(self):
+        """A short _simulation_dialog_loop body is under the cap → no violation."""
+        assert not self._run("async def _simulation_dialog_loop(self, initial_prompt, sandbox_dir):\n    return True")
+
+    def test_ignores_other_function_names(self):
+        """The rule is narrow: a different oversized function is ruff's job, not CE022's."""
+        assert not self._run(self._padded_loop("some_other_async_method", 200))
+
+    def test_ignores_dialog_loop_outside_orchestrator(self):
+        """File-scoped to orchestrator.py — a same-named function elsewhere is ignored."""
+        assert not self._run(self._padded_loop("_simulation_dialog_loop", 200), path="src/coder_eval/other.py")
+
+    def test_basename_match_ignores_sibling_suffix_file(self):
+        """Exact-basename scoping: a sibling like x_orchestrator.py must NOT match."""
+        assert not self._run(self._padded_loop("_simulation_dialog_loop", 200), path="src/coder_eval/x_orchestrator.py")
+
+    def test_flags_oversized_sync_dialog_loop(self):
+        """A future async→sync conversion must not silently drop the guard."""
+        body = "\n".join(f"    x{i} = {i}" for i in range(200))
+        src = f"def _simulation_dialog_loop(self, initial_prompt, sandbox_dir):\n{body}"
+        assert len(self._run(src)) == 1

@@ -16,6 +16,7 @@ from coder_eval.models import (
 )
 from coder_eval.reports_experiment import ExperimentReportGenerator
 from coder_eval.reports_stats import describe_prompt_config
+from tests._fixtures.report_snapshots import assert_matches_snapshot
 
 
 class TestResultModels:
@@ -1114,3 +1115,233 @@ class TestReplicateStatistics:
         result = self._make_result(replicate_count=1, variant_ids=["a"])
         md = ExperimentReportGenerator.generate_variant_report("a", result)
         assert "Score 95% CI" not in md
+
+
+class TestExperimentReportSnapshots:
+    """Byte-identical characterization snapshots for generate_experiment_report — the
+    safety net for its decomposition. Output is deterministic: bootstrap_mean_ci /
+    paired_bootstrap_diff_ci in reports_stats use a fixed default seed, so no scrubbing
+    is needed (do not pass a varying seed)."""
+
+    def test_experiment_report_snapshot_2variant(self):
+        """2 variants → p-value column shown; plus prompt config, budget sub-rows,
+        Assistant Turns + Tokens rows, Win Rates, Per-Task, Most Divergent."""
+        experiment = ExperimentDefinition(
+            experiment_id="model-comparison",
+            variants=[
+                ExperimentVariant(variant_id="baseline"),
+                ExperimentVariant(
+                    variant_id="mutated",
+                    prompt_mutations=[PromptPrefix(content="Think step by step.")],
+                ),
+            ],
+        )
+        result = ExperimentResult(
+            experiment_id="model-comparison",
+            description="Compare baseline vs mutated",
+            variant_ids=["baseline", "mutated"],
+            task_summaries=[
+                TaskExperimentSummary(
+                    task_id="task-a",
+                    variant_results=[
+                        VariantResult(
+                            variant_id="baseline",
+                            task_id="task-a",
+                            weighted_score=0.9,
+                            final_status="SUCCESS",
+                            duration_seconds=30.0,
+                            total_tokens=1000,
+                            total_assistant_turns=5,
+                        ),
+                        VariantResult(
+                            variant_id="mutated",
+                            task_id="task-a",
+                            weighted_score=0.7,
+                            final_status="FAILURE",
+                            duration_seconds=60.0,
+                            total_tokens=2000,
+                            total_assistant_turns=8,
+                        ),
+                    ],
+                    best_variant="baseline",
+                    score_spread=0.2,
+                ),
+                TaskExperimentSummary(
+                    task_id="task-b",
+                    variant_results=[
+                        VariantResult(
+                            variant_id="baseline",
+                            task_id="task-b",
+                            weighted_score=0.5,
+                            final_status="FAILURE",
+                            duration_seconds=40.0,
+                            total_tokens=1200,
+                            total_assistant_turns=6,
+                        ),
+                        VariantResult(
+                            variant_id="mutated",
+                            task_id="task-b",
+                            weighted_score=0.95,
+                            final_status="SUCCESS",
+                            duration_seconds=50.0,
+                            total_tokens=1800,
+                            total_assistant_turns=7,
+                        ),
+                    ],
+                    best_variant="mutated",
+                    score_spread=0.45,
+                ),
+            ],
+            variant_aggregates={
+                "baseline": VariantAggregate(
+                    variant_id="baseline",
+                    tasks_run=2,
+                    tasks_succeeded=1,
+                    tasks_failed=1,
+                    tasks_error=0,
+                    average_score=0.7,
+                    average_duration=35.0,
+                    total_tokens=2200,
+                    tasks_token_budget_exceeded=1,
+                ),
+                "mutated": VariantAggregate(
+                    variant_id="mutated",
+                    tasks_run=2,
+                    tasks_succeeded=1,
+                    tasks_failed=1,
+                    tasks_error=0,
+                    average_score=0.825,
+                    average_duration=55.0,
+                    total_tokens=3800,
+                    tasks_cost_budget_exceeded=1,
+                ),
+            },
+            total_duration_seconds=180.0,
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result, experiment=experiment)
+        assert_matches_snapshot(md, "experiment_2variant.md")
+
+    def test_experiment_report_snapshot_3variant(self):
+        """3 variants → p-value column hidden; no prompt config; Win Rates over 3
+        variants, Per-Task with 3 columns, Most Divergent."""
+        result = ExperimentResult(
+            experiment_id="three-way",
+            description="Three-way comparison",
+            variant_ids=["a", "b", "c"],
+            task_summaries=[
+                TaskExperimentSummary(
+                    task_id="task-1",
+                    variant_results=[
+                        VariantResult(
+                            variant_id=vid,
+                            task_id="task-1",
+                            weighted_score=score,
+                            final_status="SUCCESS" if score >= 0.9 else "FAILURE",
+                            duration_seconds=dur,
+                            total_tokens=tok,
+                            total_assistant_turns=turns,
+                        )
+                        for vid, score, dur, tok, turns in [
+                            ("a", 0.9, 20.0, 900, 4),
+                            ("b", 0.6, 25.0, 1100, 5),
+                            ("c", 0.8, 30.0, 1300, 6),
+                        ]
+                    ],
+                    best_variant="a",
+                    score_spread=0.3,
+                ),
+                TaskExperimentSummary(
+                    task_id="task-2",
+                    variant_results=[
+                        VariantResult(
+                            variant_id=vid,
+                            task_id="task-2",
+                            weighted_score=score,
+                            final_status="SUCCESS" if score >= 0.9 else "FAILURE",
+                            duration_seconds=dur,
+                            total_tokens=tok,
+                            total_assistant_turns=turns,
+                        )
+                        for vid, score, dur, tok, turns in [
+                            ("a", 0.4, 22.0, 950, 3),
+                            ("b", 0.95, 28.0, 1150, 7),
+                            ("c", 0.5, 33.0, 1350, 5),
+                        ]
+                    ],
+                    best_variant="b",
+                    score_spread=0.55,
+                ),
+            ],
+            variant_aggregates={
+                vid: VariantAggregate(
+                    variant_id=vid,
+                    tasks_run=2,
+                    tasks_succeeded=1,
+                    tasks_failed=1,
+                    tasks_error=0,
+                    average_score=avg,
+                    average_duration=dur,
+                    total_tokens=tok,
+                )
+                for vid, avg, dur, tok in [
+                    ("a", 0.65, 21.0, 1850),
+                    ("b", 0.775, 26.5, 2250),
+                    ("c", 0.65, 31.5, 2650),
+                ]
+            },
+            total_duration_seconds=240.0,
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert_matches_snapshot(md, "experiment_3variant.md")
+
+    def test_experiment_report_snapshot_replicates(self):
+        """A variant ran >1 replicate → Replicate Statistics section present, with
+        the bootstrap CI / Wilson table, the Replicates/task aggregate row, the
+        Per-Task Reps column, and the 2-variant paired-bootstrap diff line."""
+        per_rep = {
+            "a": {"task-1": [0.9, 0.85, 0.95]},
+            "b": {"task-1": [0.6, 0.65, 0.7]},
+        }
+        result = ExperimentResult(
+            experiment_id="rep-test",
+            description="Replicate comparison",
+            variant_ids=["a", "b"],
+            task_summaries=[
+                TaskExperimentSummary(
+                    task_id="task-1",
+                    variant_results=[
+                        VariantResult(
+                            variant_id=vid,
+                            task_id="task-1",
+                            weighted_score=score,
+                            final_status="SUCCESS",
+                            duration_seconds=10.0,
+                            total_tokens=1000,
+                            replicate_count=3,
+                        )
+                        for vid, score in [("a", 0.9), ("b", 0.65)]
+                    ],
+                    best_variant="a",
+                    score_spread=0.25,
+                    replicate_count=3,
+                ),
+            ],
+            variant_aggregates={
+                vid: VariantAggregate(
+                    variant_id=vid,
+                    tasks_run=1,
+                    tasks_succeeded=1,
+                    tasks_failed=0,
+                    tasks_error=0,
+                    average_score=score,
+                    average_duration=10.0,
+                    total_tokens=1000,
+                    replicate_count=3,
+                )
+                for vid, score in [("a", 0.9), ("b", 0.65)]
+            },
+            total_duration_seconds=60.0,
+            per_replicate_scores=per_rep,
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert_matches_snapshot(md, "experiment_replicates.md")

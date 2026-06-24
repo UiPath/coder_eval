@@ -257,19 +257,12 @@ class ReportGenerator:
         return lines
 
     @staticmethod
-    def generate_markdown(summary: RunSummary, run_dir: Path | None = None) -> str:  # noqa: PLR0912, PLR0915 — god-function tracked for decomposition (code-review 2026-06-22)
-        """Generate markdown report from run summary.
+    def _report_header_lines(summary: RunSummary) -> list[str]:
+        """Title + Run ID / Date / Duration + the Model(s) line.
 
-        Args:
-            summary: RunSummary object containing evaluation results
-            run_dir: Optional path to run directory to load command statistics
-
-        Returns:
-            Markdown-formatted report string
+        First block — returns the title with no leading blank (the caller prepends
+        the blanks between sections).
         """
-        evaluable = summary.tasks_run - summary.tasks_error
-        success_rate = (summary.tasks_succeeded / evaluable * 100) if evaluable > 0 else 0
-
         # Collect unique models across all tasks
         models = sorted({t["model_used"] for t in summary.task_results if t.get("model_used")})
 
@@ -285,6 +278,16 @@ class ReportGenerator:
             lines.append(f"**Model**: `{models[0]}`")
         elif len(models) > 1:
             lines.append(f"**Models**: {', '.join(f'`{m}`' for m in models)}")
+        return lines
+
+    @staticmethod
+    def _summary_section_lines(summary: RunSummary) -> list[str]:
+        """The ``## Summary`` block: totals, success rate, and the P0 metrics.
+
+        Returns a ``## Header``-led block with no leading blank (caller prepends it).
+        """
+        evaluable = summary.tasks_run - summary.tasks_error
+        success_rate = (summary.tasks_succeeded / evaluable * 100) if evaluable > 0 else 0
 
         failed_line = f"- **Failed**: {summary.tasks_failed}"
         if summary.tasks_token_budget_exceeded or summary.tasks_cost_budget_exceeded:
@@ -293,18 +296,15 @@ class ReportGenerator:
                 f"{summary.tasks_cost_budget_exceeded} cost budget exceeded)"
             )
 
-        lines.extend(
-            [
-                "",
-                "## Summary",
-                "",
-                f"- **Total Tasks**: {summary.tasks_run}",
-                f"- **Succeeded**: {summary.tasks_succeeded}",
-                failed_line,
-                f"- **Errors**: {summary.tasks_error}",
-                f"- **Success Rate**: {success_rate:.1f}%",
-            ]
-        )
+        lines = [
+            "## Summary",
+            "",
+            f"- **Total Tasks**: {summary.tasks_run}",
+            f"- **Succeeded**: {summary.tasks_succeeded}",
+            failed_line,
+            f"- **Errors**: {summary.tasks_error}",
+            f"- **Success Rate**: {success_rate:.1f}%",
+        ]
 
         # Aggregate P0 metrics
         scores = [t["weighted_score"] for t in summary.task_results if t.get("weighted_score") is not None]
@@ -334,7 +334,16 @@ class ReportGenerator:
         if similarities:
             lines.append(f"- **Avg Ground Truth Similarity**: {sum(similarities) / len(similarities):.3f}")
 
-        # Task Details table
+        return lines
+
+    @staticmethod
+    def _task_details_lines(summary: RunSummary) -> list[str]:
+        """The ``## Task Details`` dynamic-column table.
+
+        The ``has_*`` column flags are computed over ALL task_results, then every row
+        renders exactly the columns those flags enable. Returns a ``## Header``-led
+        block with no leading blank (caller prepends it).
+        """
         has_similarity = any(t.get("reference_similarity") is not None for t in summary.task_results)
         has_model = any(t.get("model_used") for t in summary.task_results)
         has_tags = any(t.get("tags") for t in summary.task_results)
@@ -355,7 +364,7 @@ class ReportGenerator:
             header += " Cmd Efficiency |"
             separator += "----------------|"
 
-        lines.extend(["", "## Task Details", "", header, separator])
+        lines = ["## Task Details", "", header, separator]
 
         for task_result in summary.task_results:
             weighted_score = task_result.get("weighted_score")
@@ -384,9 +393,16 @@ class ReportGenerator:
                 row += f" {eff_str} |"
             lines.append(row)
 
-        # Run-time notes: surface per-task max_turns exhaustion and expected_turns
-        # overage as plain blockquote one-liners. Same surface for both signals so
-        # the Markdown report has parity with the HTML report's badges.
+        return lines
+
+    @staticmethod
+    def _runtime_notes_lines(summary: RunSummary) -> list[str]:
+        """The ``## Run-time Notes`` blockquotes (max_turns exhaustion + expected_turns
+        overage). Returns ``[]`` when there are no notes so the caller adds nothing —
+        preserving the "only render the section when notes exist" behavior.
+        """
+        # Surface per-task signals as plain blockquote one-liners. Same surface for
+        # both so the Markdown report has parity with the HTML report's badges.
         notes: list[str] = []
         for t in summary.task_results:
             task_id = t.get("task_id", "?")
@@ -402,9 +418,42 @@ class ReportGenerator:
                 notes.append(
                     f"> **WARNING:** [{task_id}] expected_turns exceeded: {actual}/{expected} (cumulative SDK turns)"
                 )
-        if notes:
-            lines.extend(["", "## Run-time Notes", ""])
-            lines.extend(notes)
+        if not notes:
+            return []
+        return ["## Run-time Notes", "", *notes]
+
+    @staticmethod
+    def _environment_lines(summary: RunSummary) -> list[str]:
+        """The ``## Environment`` block. Returns a ``## Header``-led block with no leading
+        blank (caller prepends it)."""
+        lines = ["## Environment", ""]
+        for key, value in summary.environment_info.items():
+            lines.append(f"- **{key}**: {value}")
+        return lines
+
+    @staticmethod
+    def generate_markdown(summary: RunSummary, run_dir: Path | None = None) -> str:
+        """Generate markdown report from run summary.
+
+        Args:
+            summary: RunSummary object containing evaluation results
+            run_dir: Optional path to run directory to load command statistics
+
+        Returns:
+            Markdown-formatted report string
+        """
+        lines = ReportGenerator._report_header_lines(summary)
+
+        lines.append("")
+        lines.extend(ReportGenerator._summary_section_lines(summary))
+
+        lines.append("")
+        lines.extend(ReportGenerator._task_details_lines(summary))
+
+        notes_lines = ReportGenerator._runtime_notes_lines(summary)
+        if notes_lines:
+            lines.append("")
+            lines.extend(notes_lines)
 
         # Generation Metrics section
         if any(t.get("iterations") for t in summary.task_results):
@@ -436,16 +485,8 @@ class ReportGenerator:
             lines.extend([""])
             lines.extend(installed_tools_lines)
 
-        lines.extend(
-            [
-                "",
-                "## Environment",
-                "",
-            ]
-        )
-
-        for key, value in summary.environment_info.items():
-            lines.append(f"- **{key}**: {value}")
+        lines.append("")
+        lines.extend(ReportGenerator._environment_lines(summary))
 
         return "\n".join(lines)
 

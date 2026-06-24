@@ -20,7 +20,6 @@ from coder_eval.config import settings
 from coder_eval.errors import (
     AgentCrashError,
     TurnTimeoutError,
-    format_timeout_reason,
     truncate_crash_message,
 )
 from coder_eval.models import (
@@ -230,6 +229,401 @@ def _get_item_root(notification: Any) -> Any:
     return getattr(item, "root", None)
 
 
+class _CodexTurnState:
+    """Per-turn mutable scratch state for one ``CodexAgent.communicate`` call.
+
+    Holds the stream-pump locals and the assistant-transcript reconstruction
+    buffers, with one method per notification kind (``on_*``) plus ``dispatch``
+    (returns True on ``turn/completed`` to break the pump), ``_record_block`` /
+    ``_flush_message`` (the per-generation message cutter) and ``finalize`` (the
+    terminal ``AgentEndEvent`` + partial-record build). A plain module-private
+    class (NOT Pydantic, NOT exported) with a back-reference to the agent for its
+    existing helpers (``_tool_name`` / ``_telemetry_for_item`` / … ).
+
+    ``commands`` and ``messages`` are the SAME list objects ``communicate`` owns,
+    held by identity (no copy) so a mid-turn crash keeps the partial transcript.
+    The finalize inputs (``sdk_token_usage`` / ``result_turn`` / ``result_text``)
+    are COMMITTED by ``communicate`` only after the pump returns cleanly — they
+    default to None/None/"" so a crashed turn finalizes from the captured messages
+    (the live pump scratch ``turn_result`` / ``latest_token_usage`` /
+    ``agent_message_chunks`` is intentionally NOT what finalize reads).
+    """
+
+    def __init__(
+        self,
+        agent: "CodexAgent",
+        *,
+        emit: CompositeStreamCallback,
+        task_id: str,
+        turn_id: str,
+        collector: EventCollector,
+        commands: list[CommandTelemetry],
+        messages: list[TranscriptMessage],
+        user_input: str,
+        iteration: int,
+        turn_start_time: float,
+    ) -> None:
+        self._agent = agent
+        self.emit = emit
+        self.task_id = task_id
+        self.turn_id = turn_id
+        self.collector = collector
+        self.commands = commands
+        self.messages = messages
+        self.user_input = user_input
+        self.iteration = iteration
+        self.turn_start_time = turn_start_time
+        self.timeout_hit = False
+        self.finalized = False
+
+        # Live pump scratch (set during streaming).
+        self.turn_result: Any = None
+        self.latest_token_usage: Any = None
+        self.agent_message_chunks: list[str] = []
+        # Sequence per executable item, assigned at item/started and reused at
+        # item/completed via this id->seq map.
+        self.next_sequence = 0
+        self.seq_by_id: dict[str, int] = {}
+        # Spawned sub-agent child thread id -> spawning Agent call tool_use_id.
+        self.collab_spawn_by_thread: dict[str, str] = {}
+        # (child_thread_id, spawning Agent tool_use_id, spawned model) per spawn.
+        self.spawned_children: list[tuple[str, str, str | None]] = []
+        # child thread id -> returned message (fallback when the rollout is absent).
+        self.collab_results: dict[str, str] = {}
+
+        # Assistant-transcript reconstruction buffers (one AssistantMessage per gen).
+        self.open_blocks: list[ContentBlock] = []
+        self.open_start_ms: int | None = None
+        self.open_end_ms: int | None = None
+        self.start_ms_by_id: dict[str, int] = {}
+        self.blocks_by_id: dict[str, ContentBlock] = {}
+        # Tools that emitted item/started but not item/completed; whatever remains
+        # at turn end is an orphan, force-closed unresolved.
+        self.open_tools: dict[str, CommandTelemetry] = {}
+        # Text-less reasoning blocks, resolved at flush once reasoning tokens known.
+        self.reasoning_placeholders: list[ContentBlock] = []
+        self.gen_index = 0
+
+        # Finalize inputs, COMMITTED by communicate after a clean pump return.
+        # Defaults are the crash values (no terminal usage; format from messages).
+        self.sdk_token_usage: Any = None
+        self.result_turn: Any = None
+        self.result_text: str = ""
+
+    def _record_block(self, block: ContentBlock, item_id: str, completed_ms: int | None) -> None:
+        self.open_blocks.append(block)
+        start_ms = self.start_ms_by_id.get(item_id)
+        if start_ms is not None and (self.open_start_ms is None or start_ms < self.open_start_ms):
+            self.open_start_ms = start_ms
+        if completed_ms is not None and (self.open_end_ms is None or completed_ms > self.open_end_ms):
+            self.open_end_ms = completed_ms
+
+    def _flush_message(self, last: Any) -> None:
+        """Cut the open buffer into AssistantMessage(s) for one generation.
+
+        ``last`` is the SDK ``TokenUsageBreakdown`` for the generation that
+        produced these blocks (or None for a safety flush with no usage). Emits
+        ONE sub-message per block kind (thinking vs tool/text), all sharing this
+        generation's ``message_id``; the first carries the gen's input/cache, the
+        rest carry 0 so per-message_id sums don't double-count.
+        """
+        if not self.open_blocks:
+            self.reasoning_placeholders = []
+            return
+        # Per-generation tokens from the matching tokenUsage `last` delta.
+        cached = (getattr(last, "cached_input_tokens", 0) or 0) if last else 0
+        raw_input = (getattr(last, "input_tokens", 0) or 0) if last else 0
+        total_output = (getattr(last, "output_tokens", 0) or 0) if last else 0
+        # The fresh (uncached) prompt slice is plain input — OpenAI bills no
+        # separate cache-write fee, so Codex carries 0 cache_creation.
+        gen_input = _fresh_input_tokens(raw_input, cached)
+        gen_cache_write = 0
+        reasoning_tok = (getattr(last, "reasoning_output_tokens", 0) or 0) if last else 0
+        # Resolve text-less reasoning blocks: show a policy placeholder when
+        # reasoning was billed, else drop the block.
+        if self.reasoning_placeholders:
+            if reasoning_tok > 0:
+                for blk in self.reasoning_placeholders:
+                    blk.thinking = "_Reasoning hidden by OpenAI policy_"
+            else:
+                for blk in self.reasoning_placeholders:
+                    if blk in self.open_blocks:
+                        self.open_blocks.remove(blk)
+            self.reasoning_placeholders = []
+        if not self.open_blocks:
+            self.open_start_ms = self.open_end_ms = None
+            return
+
+        thinking_blocks = [b for b in self.open_blocks if b.block_type == "thinking"]
+        action_blocks = [b for b in self.open_blocks if b.block_type != "thinking"]
+        started = _ms_to_dt(self.open_start_ms)
+        completed = _ms_to_dt(self.open_end_ms if self.open_end_ms is not None else self.open_start_ms)
+        gen_ms = max((completed - started).total_seconds() * 1000.0, 0.0)
+        message_id = f"{self.turn_id}-msg-{self.gen_index}"
+
+        # Output split: reasoning portion to the thinking row, the remainder to
+        # the action row. With only one kind present, that kind gets all output.
+        think_out = reasoning_tok if action_blocks else total_output
+        action_out = max(total_output - reasoning_tok, 0) if thinking_blocks else total_output
+
+        # Sub-message specs in generation order (thinking first). The FIRST carries
+        # the gen's input/cache + gen-time; the rest carry 0 (no double-count).
+        specs: list[tuple[list[ContentBlock], int, int]] = []
+        if thinking_blocks:
+            specs.append((thinking_blocks, think_out, reasoning_tok))
+        if action_blocks:
+            specs.append((action_blocks, action_out, 0))
+
+        for idx, (blocks, out_tok, reas_tok) in enumerate(specs):
+            for i, blk in enumerate(blocks):
+                blk.sequence = i
+            first = idx == 0
+            self.messages.append(
+                AssistantMessage(
+                    started_at=started,
+                    completed_at=completed,
+                    generation_duration_ms=gen_ms if first else 0.0,
+                    content_blocks=blocks,
+                    tool_use_ids=[b.tool_use_id for b in blocks if b.block_type == "tool_use" and b.tool_use_id],
+                    input_tokens=gen_input if first else 0,
+                    output_tokens=out_tok,
+                    cache_creation_tokens=gen_cache_write if first else 0,
+                    cache_read_tokens=cached if first else 0,
+                    reasoning_tokens=reas_tok,
+                    model=self._agent._effective_model(),
+                    message_id=message_id,
+                )
+            )
+        self.gen_index += 1
+        self.open_blocks = []
+        self.open_start_ms = None
+        self.open_end_ms = None
+
+    def dispatch(self, notification: Any) -> bool:
+        """Route a notification to its handler. Returns True on ``turn/completed``
+        (a valid TurnCompletedNotification) so the pump loop breaks."""
+        root = _get_item_root(notification)
+        method = notification.method
+        log_raw_sdk_event(
+            self._agent._log,
+            repr_target=notification,
+            attr_target=root,
+            method=method,
+            root_type=getattr(root, "type", None),
+        )
+        if method == "item/started":
+            self.on_item_started(notification)
+        elif method == "item/completed":
+            self.on_item_completed(notification)
+        elif method == "item/agentMessage/delta":
+            self.on_agent_message_delta(notification)
+        elif method == "thread/tokenUsage/updated":
+            self.on_token_usage_updated(notification)
+        elif method == "turn/completed":
+            return self.on_turn_completed(notification)
+        return False
+
+    def on_item_started(self, notification: Any) -> None:
+        """Emit ToolStartEvent + record the tool_use block for every tool-like item."""
+        root = _get_item_root(notification)
+        if root is None:
+            return
+        # Record the start time for every item kind so flushed messages get real timing.
+        item_id = getattr(root, "id", None)
+        started_at_ms = getattr(notification.payload, "started_at_ms", None)
+        if item_id is not None and started_at_ms is not None:
+            self.start_ms_by_id[item_id] = started_at_ms
+        root_type = getattr(root, "type", None)
+        # Any item that isn't transcript content is a tool call (generic capture).
+        if root_type is not None and root_type not in _CONTENT_ITEM_TYPES:
+            tool_id = item_id or f"{root_type}_{self.next_sequence}"
+            self.seq_by_id[tool_id] = self.next_sequence
+            start_tel = CommandTelemetry(
+                tool_name=self._agent._tool_name(root_type),
+                tool_id=tool_id,
+                timestamp=datetime.now(),
+                parameters=self._agent._tool_parameters(root, root_type),
+                sequence_number=self.next_sequence,
+            )
+            self.open_tools[tool_id] = start_tel
+            self.emit.on_event(ToolStartEvent(task_id=self.task_id, turn_id=self.turn_id, tool=start_tel))
+            self.next_sequence += 1
+            # Record the tool_use block now; is_error patched at item/completed,
+            # even after the message is flushed (held by reference in blocks_by_id).
+            block = ContentBlock(block_type="tool_use", sequence=0, tool_use_id=tool_id)
+            self.blocks_by_id[tool_id] = block
+            self._record_block(block, tool_id, None)
+
+    def on_item_completed(self, notification: Any) -> None:
+        """Emit ToolEndEvent + capture telemetry / sub-agents / transcript blocks."""
+        root = _get_item_root(notification)
+        if root is None:
+            return
+        completed_ms = getattr(notification.payload, "completed_at_ms", None)
+        root_type = getattr(root, "type", None)
+        if root_type is not None and root_type not in _CONTENT_ITEM_TYPES:
+            tool_id = getattr(root, "id", None) or f"{root_type}_{self.next_sequence}"
+            seq = self.seq_by_id.get(tool_id, self.next_sequence)
+            # This tool is now resolved — drop it from the orphan set.
+            self.open_tools.pop(tool_id, None)
+
+            telemetry, is_error = self._agent._telemetry_for_item(root, root_type, tool_id, seq)
+            if telemetry:
+                self.commands.append(telemetry)
+            self.emit.on_event(
+                ToolEndEvent(
+                    task_id=self.task_id,
+                    turn_id=self.turn_id,
+                    tool=telemetry
+                    or CommandTelemetry(
+                        tool_name=self._agent._tool_name(root_type),
+                        tool_id=tool_id,
+                        timestamp=datetime.now(),
+                        sequence_number=seq,
+                    ),
+                    status=ToolEndStatus.ERROR if is_error else ToolEndStatus.OK,
+                )
+            )
+            # Patch the block recorded at item/started (held by reference, so this
+            # lands even post-flush) + extend the still-open message's end time.
+            if tool_id in self.blocks_by_id:
+                self.blocks_by_id[tool_id].is_error = is_error
+            if (
+                self.open_blocks
+                and completed_ms is not None
+                and (self.open_end_ms is None or completed_ms > self.open_end_ms)
+            ):
+                self.open_end_ms = completed_ms
+
+            # Codex's native multi-agent calls land here as collabAgentToolCall items.
+            if root_type == "collabAgentToolCall":
+                self._agent._handle_collab_completion(
+                    root,
+                    tool_id,
+                    self.collab_spawn_by_thread,
+                    self.spawned_children,
+                    self.collab_results,
+                )
+
+        elif root_type == "reasoning":
+            # OpenAI never returns raw CoT, so a text-less item becomes a
+            # placeholder block, resolved with its token count at flush.
+            reasoning_id = getattr(root, "id", f"reasoning_{self.next_sequence}")
+            parts = getattr(root, "content", None) or getattr(root, "summary", None) or []
+            text = "\n".join(p for p in parts if p)
+            block = ContentBlock(block_type="thinking", sequence=0, thinking=text or None)
+            self._record_block(block, reasoning_id, completed_ms)
+            if not text:
+                self.reasoning_placeholders.append(block)
+
+        elif root_type == "agentMessage":
+            # Full assistant text — append a text block. The message is cut at the
+            # following tokenUsage event (the generation boundary), not here.
+            message_item_id = getattr(root, "id", f"msg_{self.next_sequence}")
+            text = getattr(root, "text", "") or ""
+            if text:
+                self._record_block(
+                    ContentBlock(block_type="text", sequence=0, text=text),
+                    message_item_id,
+                    completed_ms,
+                )
+
+    def on_agent_message_delta(self, notification: Any) -> None:
+        """Emit TextChunkEvent for streaming assistant text."""
+        if notification.payload:
+            delta = getattr(notification.payload, "delta", None)
+            if delta:
+                self.agent_message_chunks.append(delta)
+                self.emit.on_event(TextChunkEvent(task_id=self.task_id, turn_id=self.turn_id, text=delta))
+
+    def on_token_usage_updated(self, notification: Any) -> None:
+        """One per generation → cut a message. Carries `total` (cumulative turn
+        figure) and `last` (this generation's delta)."""
+        if notification.payload:
+            self.latest_token_usage = getattr(notification.payload, "token_usage", None)
+            self._flush_message(getattr(self.latest_token_usage, "last", None))
+
+    def on_turn_completed(self, notification: Any) -> bool:
+        """Capture the final Turn. Returns True (break the pump) iff the payload is
+        a valid TurnCompletedNotification."""
+        from openai_codex.generated.v2_all import TurnCompletedNotification
+
+        if isinstance(notification.payload, TurnCompletedNotification):
+            self.turn_result = notification.payload.turn
+            return True
+        return False
+
+    def close_open_tools(self) -> None:
+        """Force-close any tool that started but never completed (an orphan) as
+        ``unresolved``, so its transcript block keeps a real tool name + count."""
+        for start_tel in sorted(self.open_tools.values(), key=lambda t: getattr(t, "sequence_number", 0)):
+            start_tel.result_status = "unknown"
+            self.emit.on_event(
+                ToolEndEvent(
+                    task_id=self.task_id,
+                    turn_id=self.turn_id,
+                    tool=start_tel,
+                    status=ToolEndStatus.UNRESOLVED,
+                )
+            )
+        self.open_tools.clear()
+
+    def finalize(self, status: AgentEndStatus, *, crashed: bool = False, crash_reason: str | None = None) -> None:
+        """Emit the terminal TurnEnd + AgentEnd and, on a crash, build the partial
+        TurnRecord. Idempotent. Reads the COMMITTED finalize inputs (None/"" on a
+        crash) so a crashed turn under-reports nothing it didn't actually commit."""
+        if self.finalized:
+            return
+        self.finalized = True
+
+        # Prefer the SDK total; on crash/timeout it stays None, so fall back to the
+        # per-generation tokens already captured on the messages.
+        token_usage = self._agent._token_usage_from_sdk(self.sdk_token_usage) or self._agent._token_usage_from_messages(
+            self.messages
+        )
+        # Codex bills sub-agents on separate threads, so fold the recovered child
+        # generations into the turn total — matching Claude's bubbled-up totals.
+        token_usage = self._agent._fold_subagent_tokens(token_usage, self.messages)
+
+        self.emit.on_event(
+            TurnEndEvent(
+                task_id=self.task_id,
+                turn_id=self.turn_id,
+                status=TurnEndStatus(status.value),
+                tokens=token_usage,
+            )
+        )
+
+        model_used = getattr(self.result_turn, "model", None) or self._agent.config.model
+        usage = token_usage or TokenUsage()
+        # Real assistant text arrives as agentMessage deltas; fall back to the raw
+        # Turn dump only when nothing streamed.
+        agent_output = self.result_text or (
+            self._agent._format_turn_result(self.result_turn) if self.result_turn is not None else ""
+        )
+
+        self.emit.on_event(
+            AgentEndEvent(
+                task_id=self.task_id,
+                status=status,
+                usage=usage,
+                iteration=self.iteration,
+                user_input=self.user_input,
+                agent_output=agent_output,
+                model_used=model_used,
+                assistant_turn_count=1,
+                messages=self.messages,
+                num_turns=1,
+                crashed=crashed,
+                crash_reason=crash_reason,
+                duration_seconds=time.monotonic() - self.turn_start_time,
+            )
+        )
+
+        if crashed:
+            self._agent._capture_partial_turn(self.collector)
+
+
 @AgentRegistry.register(AgentKind.CODEX, CodexAgentConfig)
 class CodexAgent(Agent[CodexAgentConfig]):
     """Implementation of the Agent interface for OpenAI Codex using the Codex SDK."""
@@ -317,7 +711,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         except Exception as e:
             raise RuntimeError(f"Failed to initialize Codex client: {e}") from e
 
-    async def communicate(  # noqa: PLR0915 — god-function tracked for decomposition (code-review 2026-06-22)
+    async def communicate(
         self,
         user_input: str,
         *,
@@ -350,13 +744,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._begin_turn()
 
         turn_start_time = time.monotonic()
-        timeout_hit = False
-
-        commands: list[CommandTelemetry] = []
-        messages: list[TranscriptMessage] = []
-        streamed_text = ""
-        sdk_token_usage: Any = None
-        turn_result: Any = None
 
         # Event emission: the agent is the SOLE emitter; events fan out to an
         # internal EventCollector (which assembles the TurnRecord — the single,
@@ -367,67 +754,21 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         # Codex has no per-API-call boundary: one thread.turn() == one turn_id.
         turn_id = f"codex-{self._iteration}"
-        finalized = False
-
-        def _finalize(status: AgentEndStatus, *, crashed: bool, crash_reason: str | None) -> None:
-            nonlocal finalized
-            if finalized:
-                return
-            finalized = True
-
-            # Prefer the SDK total. On a crash/timeout the stream raises before it
-            # returns its usage tuple (sdk_token_usage stays None), so fall back to
-            # the per-generation tokens already captured on the messages — otherwise
-            # a crashed turn under-reports tokens/cost it actually spent.
-            token_usage = self._token_usage_from_sdk(sdk_token_usage) or self._token_usage_from_messages(messages)
-            # Codex bills sub-agents on separate threads, so the parent total
-            # excludes them. Fold the recovered child generations (the
-            # ``parent_tool_use_id`` messages, carrying their real per-generation
-            # tokens) into the turn total — matching Claude, whose total already
-            # includes its bubbled-up sub-agent messages.
-            token_usage = self._fold_subagent_tokens(token_usage, messages)
-
-            # AgentEndStatus and TurnEndStatus share identical members; map by value
-            # (no duplicated dict, no KeyError if a member is ever added).
-            emit.on_event(
-                TurnEndEvent(
-                    task_id=task_id,
-                    turn_id=turn_id,
-                    status=TurnEndStatus(status.value),
-                    tokens=token_usage,
-                )
-            )
-
-            model_used = getattr(turn_result, "model", None) or self.config.model
-            usage = token_usage or TokenUsage()
-            # Real assistant text arrives as agentMessage deltas; fall back to the
-            # raw Turn dump only when nothing streamed.
-            agent_output = streamed_text or (self._format_turn_result(turn_result) if turn_result is not None else "")
-
-            emit.on_event(
-                AgentEndEvent(
-                    task_id=task_id,
-                    status=status,
-                    usage=usage,
-                    iteration=self._iteration,
-                    user_input=user_input,
-                    agent_output=agent_output,
-                    model_used=model_used,
-                    assistant_turn_count=1,
-                    messages=messages,
-                    num_turns=1,
-                    crashed=crashed,
-                    crash_reason=crash_reason,
-                    duration_seconds=time.monotonic() - turn_start_time,
-                )
-            )
-
-            if crashed:
-                try:
-                    self.pending_turn = collector.build_turn_record()
-                except Exception:
-                    logger.exception("Failed to build partial turn record")
-                    self.pending_turn = None
+        # All per-turn scratch lives on the state so the stream-pump branches are
+        # methods; the same commands/messages lists flow through the pump and
+        # finalize. timeout_hit is set by the watchdog callback (atomic bool).
+        state = _CodexTurnState(
+            self,
+            emit=emit,
+            task_id=task_id,
+            turn_id=turn_id,
+            collector=collector,
+            commands=[],
+            messages=[],
+            user_input=user_input,
+            iteration=self._iteration,
+            turn_start_time=turn_start_time,
+        )
 
         try:
             emit.on_event(
@@ -447,8 +788,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 self.thread = await self._run_async(self.codex_client.thread_start, **thread_kwargs)
 
             def _on_turn_timeout() -> None:
-                nonlocal timeout_hit
-                timeout_hit = True
+                state.timeout_hit = True
 
             with ThreadedWatchdog(
                 timeout_seconds=timeout,
@@ -460,61 +800,55 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 emit.on_event(TurnStartEvent(task_id=task_id, turn_id=turn_id, model=self._effective_model()))
 
                 try:
-                    turn_result, sdk_token_usage, streamed_text = await self._run_turn_with_streaming(
-                        user_input, emit, task_id, turn_id, commands, messages
+                    # Commit the pump's results onto the state only on a CLEAN
+                    # return; a crash skips this, so finalize reads the crash
+                    # defaults (None/"") and falls back to the captured messages.
+                    state.result_turn, state.sdk_token_usage, state.result_text = await self._run_turn_with_streaming(
+                        state
                     )
                 except asyncio.CancelledError:
-                    if timeout_hit:
-                        self._state = AgentState.ERROR
-                        _finalize(
-                            AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout or 0)
-                        )
-                        raise TurnTimeoutError(timeout or 0, iteration=self._iteration) from None
+                    if state.timeout_hit:
+                        self._finalize_and_raise_timeout(state.finalize, timeout or 0)
                     raise
                 except Exception as e:
-                    if timeout_hit:
-                        self._state = AgentState.ERROR
-                        _finalize(
-                            AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout or 0)
-                        )
-                        raise TurnTimeoutError(timeout or 0, iteration=self._iteration) from e
-                    self._state = AgentState.ERROR
-                    message = truncate_crash_message(f"Codex turn failed: {e!s}")
-                    _finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason=message)
-                    raise AgentCrashError(message) from e
+                    if state.timeout_hit:
+                        self._finalize_and_raise_timeout(state.finalize, timeout or 0, cause=e)
+                    self._finalize_and_raise_crash(
+                        state.finalize, truncate_crash_message(f"Codex turn failed: {e!s}"), cause=e
+                    )
 
-            if timeout_hit:
+            if state.timeout_hit:
+                # Watchdog fired but the pump finished before the cancel landed.
+                # Route through the shared kernel so this path sets _state=ERROR
+                # like every other timeout/crash path (it previously did not — a
+                # latent inconsistency now fixed).
                 assert timeout is not None
-                _finalize(AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout))
-                raise TurnTimeoutError(timeout, iteration=self._iteration)
+                self._finalize_and_raise_timeout(state.finalize, timeout)
         except (AgentCrashError, TurnTimeoutError):
-            # Already funneled through _finalize by the inner handlers.
+            # Already funneled through finalize by the inner handlers.
             raise
         except asyncio.CancelledError:
             # Non-timeout cancel (external cancellation, or a cancel during
             # thread_start before the watchdog block). The timeout path already
             # finalized above; otherwise close the AgentStart so the event tree
-            # stays balanced and the pending-turn contract holds. _finalize is
+            # stays balanced and the pending-turn contract holds. finalize is
             # idempotent, so the timeout case is a no-op here.
-            if not finalized:
+            if not state.finalized:
                 self._state = AgentState.ERROR
-                _finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason="turn cancelled")
+                state.finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason="turn cancelled")
             raise
         except Exception as e:
             # Catches failures OUTSIDE the inner turn block — notably thread_start
             # and _format_turn_result. Without this, such errors escape as a bare
             # exception: the orchestrator never drains pending_turn and _iteration
             # stays incremented, violating the pending-turn contract.
-            self._state = AgentState.ERROR
-            message = truncate_crash_message(f"Codex turn failed: {e!s}")
-            _finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason=message)
-            raise AgentCrashError(message) from e
+            self._finalize_and_raise_crash(state.finalize, truncate_crash_message(f"Codex turn failed: {e!s}"), cause=e)
 
         self._state = AgentState.WORKING
         self._end_turn_ok()
 
         # The TurnRecord is the EventCollector's reduction of the emitted events.
-        _finalize(AgentEndStatus.COMPLETED, crashed=False, crash_reason=None)
+        state.finalize(AgentEndStatus.COMPLETED, crashed=False, crash_reason=None)
         return collector.build_turn_record()
 
     async def stop(self) -> None:
@@ -845,420 +1179,65 @@ class CodexAgent(Agent[CodexAgentConfig]):
             self._log.warning(f"Failed to format turn result: {e}")
             return str(turn_result)
 
-    async def _run_turn_with_streaming(  # noqa: PLR0912, PLR0915 — god-function tracked for decomposition (code-review 2026-06-22)
-        self,
-        user_input: str,
-        emit: CompositeStreamCallback,
-        task_id: str,
-        turn_id: str,
-        commands: list[CommandTelemetry],
-        messages: list[TranscriptMessage],
-    ) -> tuple[Any, Any, str]:
-        """Run a turn with streaming support, emitting the standard event protocol.
+    async def _run_turn_with_streaming(self, state: _CodexTurnState) -> tuple[Any, Any, str]:
+        """Drive ``turn.stream()`` through the per-turn state, emitting the standard
+        event protocol; returns ``(turn_result, latest_token_usage, agent_text)``.
 
-        Uses turn.stream() to get notifications and emits ToolStartEvent,
-        ToolEndEvent, and TextChunkEvent (the enclosing communicate() owns the
-        TurnStart/TurnEnd/AgentEnd boundaries). EVERY tool-bearing item kind is
-        captured generically (see _CONTENT_ITEM_TYPES) — command/file-change keep
-        rich extractors, the rest route through _extract_generic_telemetry — so
-        MCP, web-search and collab-agent calls aren't dropped.
-
-        Also reconstructs the assistant transcript into ``messages`` (mutated in
-        place, like ``commands``, so a mid-turn crash keeps the partial transcript):
-        ``reasoning`` items → thinking blocks, every tool item → tool_use blocks
-        (id == the CommandTelemetry ``tool_id``, so the evalboard joins them), and
-        ``agentMessage`` items → text blocks. Codex collab-agent spawns also append
-        a nested child AssistantMessage (``parent_tool_use_id``) carrying the
-        sub-agent's returned result. Each ``agentMessage`` closes one
-        AssistantMessage; any trailing tool/reasoning blocks flush at stream end.
-
-        Returns:
-            Tuple of (turn_result, latest_token_usage, agent_text) where turn_result
-            is the final Turn object, latest_token_usage is the SDK's ThreadTokenUsage
-            (or None), and agent_text is the assistant message assembled from the
-            streamed agentMessage deltas.
+        The enclosing ``communicate()`` owns the TurnStart/TurnEnd/AgentEnd
+        boundaries; this drives the inner notification pump. ``state`` accumulates
+        commands, the assistant transcript, sub-agent spawns and per-generation
+        tokens — all mutated in place so a mid-turn crash keeps the partial.
         """
-        from openai_codex.generated.v2_all import TurnCompletedNotification
-
-        # Create turn handle (starts the turn but doesn't block)
-        turn_handle = await self._run_async(self.thread.turn, user_input)
+        # Create the turn handle (starts the turn but doesn't block) + event stream.
+        turn_handle = await self._run_async(self.thread.turn, state.user_input)
         self._active_turn_handle = turn_handle
-
-        # Get the event stream
         stream = await self._run_async(turn_handle.stream)
-
-        turn_result = None
-        latest_token_usage: Any = None
-        agent_message_chunks: list[str] = []
-        # Sequence per executable item, assigned at item/started and reused at
-        # item/completed via this id->seq map. Advancing only on successful
-        # telemetry extraction (the old behavior) collided fallback IDs and froze
-        # the counter whenever extraction returned None.
-        next_sequence = 0
-        seq_by_id: dict[str, int] = {}
-        # Maps a spawned sub-agent's child thread id -> the spawning Agent call's
-        # tool_use_id, so the child's returned result can be nested under THAT
-        # call in the transcript (parent_tool_use_id) — which is what makes the
-        # Agent row expandable in the evalboard.
-        collab_spawn_by_thread: dict[str, str] = {}
-        # Every spawned sub-agent: (child_thread_id, spawning Agent tool_use_id,
-        # spawned model). Unlike collab_spawn_by_thread (popped once the result
-        # nests), this is the durable record used AFTER the turn to recover each
-        # child's inner tool calls AND per-generation token usage from its on-disk
-        # rollout (the parent stream carries neither), reconstructed as nested
-        # ``parent_tool_use_id`` messages.
-        spawned_children: list[tuple[str, str, str | None]] = []
-        # child thread id -> the message it returned to the parent (from the wait
-        # collab call). Only used as a FALLBACK when the child's rollout can't be
-        # found: then we nest just this returned text. When the rollout IS found,
-        # the child's own final generation already carries it.
-        collab_results: dict[str, str] = {}
-
-        # --- Assistant-transcript reconstruction state ---
-        # One AssistantMessage per model generation. Codex emits exactly one
-        # ``thread/tokenUsage/updated`` per generation (carrying that response's
-        # ``last`` delta) AFTER the generation's items, so it is the reliable
-        # generation boundary AND the per-message token source. Tool-call items
-        # start (item/started) before that tokenUsage but may complete after it,
-        # so tool_use blocks are recorded at item/started — held by reference in
-        # ``blocks_by_id`` so a later item/completed can patch ``is_error`` even
-        # after the message has been flushed.
-        open_blocks: list[ContentBlock] = []
-        open_start_ms: int | None = None
-        open_end_ms: int | None = None
-        start_ms_by_id: dict[str, int] = {}
-        blocks_by_id: dict[str, ContentBlock] = {}
-        # Tools that emitted item/started but not yet item/completed, keyed by
-        # tool_id → the start-time CommandTelemetry (carries the name we know from
-        # the item type). Popped at item/completed. Whatever remains at turn end is
-        # an ORPHAN — a tool the stream never closed (e.g. a Codex collab op that
-        # starts without a discrete completion) — and is force-closed as
-        # ``unresolved`` in ``finally`` so its transcript block keeps a real tool
-        # name + countable telemetry instead of rendering as "unknown".
-        open_tools: dict[str, CommandTelemetry] = {}
-        # Thinking blocks for reasoning items that arrived WITHOUT visible text
-        # (OpenAI hides raw chain-of-thought; summaries are off). Resolved at flush
-        # once the generation's reasoning-token count is known: filled with a
-        # policy placeholder, or dropped if no reasoning was billed.
-        reasoning_placeholders: list[ContentBlock] = []
-        gen_index = 0  # one per generation; sub-messages of a gen share its message_id
-        # Prompt size (input_tokens) of the previous generation. Used to tell a
-        # genuine cache WRITE (the prompt grew → new prefix cached) apart from a
-        # cache MISS (the prompt didn't grow but fewer tokens hit cache — a re-send
-        # of previously-cached content, e.g. after the spawn/wait pause). Only the
-        # growth is bucketed as cache_creation; the rest of the fresh slice is
-        # plain input_tokens. Same cost (write rate == input rate), truthful label.
-        prev_prompt_tokens = 0
-
-        def _record_block(block: ContentBlock, item_id: str, completed_ms: int | None) -> None:
-            open_blocks.append(block)
-            nonlocal open_start_ms, open_end_ms
-            start_ms = start_ms_by_id.get(item_id)
-            if start_ms is not None and (open_start_ms is None or start_ms < open_start_ms):
-                open_start_ms = start_ms
-            if completed_ms is not None and (open_end_ms is None or completed_ms > open_end_ms):
-                open_end_ms = completed_ms
-
-        def _flush_message(last: Any) -> None:
-            """Cut the open buffer into AssistantMessage(s) for one generation.
-
-            ``last`` is the SDK ``TokenUsageBreakdown`` for the generation that
-            produced these blocks (or None for a safety flush with no usage).
-
-            Emits ONE sub-message per block kind (thinking vs tool/text), all
-            sharing this generation's ``message_id`` — mirroring how the Claude
-            agent emits per-block-kind so the evalboard attributes output tokens
-            per block (reasoning output → the thinking row, the rest → the tool/
-            text row). Reasoning output tokens ARE output tokens (a subset), so
-            the thinking row's usage shows them as output.
-            """
-            nonlocal open_blocks, open_start_ms, open_end_ms, reasoning_placeholders, gen_index
-            nonlocal prev_prompt_tokens
-            if not open_blocks:
-                reasoning_placeholders = []
-                return
-            # Per-generation tokens from the matching tokenUsage `last` delta;
-            # these sum to the turn `total`, so summing messages won't double-count.
-            cached = (getattr(last, "cached_input_tokens", 0) or 0) if last else 0
-            raw_input = (getattr(last, "input_tokens", 0) or 0) if last else 0
-            total_output = (getattr(last, "output_tokens", 0) or 0) if last else 0
-            # The fresh (uncached) prompt slice is plain input — OpenAI bills no
-            # separate cache-write fee, so Codex carries 0 cache_creation. (Cost is
-            # unchanged; the cache-write rate == input rate for OpenAI.)
-            gen_input = _fresh_input_tokens(raw_input, cached)
-            gen_cache_write = 0
-            prev_prompt_tokens = max(prev_prompt_tokens, raw_input)
-            reasoning_tok = (getattr(last, "reasoning_output_tokens", 0) or 0) if last else 0
-            # Resolve text-less reasoning blocks: OpenAI hides the raw CoT, so show
-            # a policy placeholder when reasoning was billed, else drop the block.
-            if reasoning_placeholders:
-                if reasoning_tok > 0:
-                    for blk in reasoning_placeholders:
-                        blk.thinking = "_Reasoning hidden by OpenAI policy_"
-                else:
-                    for blk in reasoning_placeholders:
-                        if blk in open_blocks:
-                            open_blocks.remove(blk)
-                reasoning_placeholders = []
-            if not open_blocks:
-                open_start_ms = open_end_ms = None
-                return
-
-            thinking_blocks = [b for b in open_blocks if b.block_type == "thinking"]
-            action_blocks = [b for b in open_blocks if b.block_type != "thinking"]
-            started = _ms_to_dt(open_start_ms)
-            completed = _ms_to_dt(open_end_ms if open_end_ms is not None else open_start_ms)
-            gen_ms = max((completed - started).total_seconds() * 1000.0, 0.0)
-            message_id = f"{turn_id}-msg-{gen_index}"
-
-            # Output split: reasoning portion to the thinking row, the remainder to
-            # the action row. With only one kind present, that kind gets all output.
-            think_out = reasoning_tok if action_blocks else total_output
-            action_out = max(total_output - reasoning_tok, 0) if thinking_blocks else total_output
-
-            # Sub-message specs in generation order (thinking first). The FIRST one
-            # carries the generation's input/cache + gen-time; the rest carry 0 so
-            # the evalboard's per-message_id sums aren't double-counted.
-            specs: list[tuple[list[ContentBlock], int, int]] = []
-            if thinking_blocks:
-                specs.append((thinking_blocks, think_out, reasoning_tok))
-            if action_blocks:
-                specs.append((action_blocks, action_out, 0))
-
-            for idx, (blocks, out_tok, reas_tok) in enumerate(specs):
-                for i, blk in enumerate(blocks):
-                    blk.sequence = i
-                first = idx == 0
-                messages.append(
-                    AssistantMessage(
-                        started_at=started,
-                        completed_at=completed,
-                        generation_duration_ms=gen_ms if first else 0.0,
-                        content_blocks=blocks,
-                        tool_use_ids=[b.tool_use_id for b in blocks if b.block_type == "tool_use" and b.tool_use_id],
-                        input_tokens=gen_input if first else 0,
-                        output_tokens=out_tok,
-                        cache_creation_tokens=gen_cache_write if first else 0,
-                        cache_read_tokens=cached if first else 0,
-                        reasoning_tokens=reas_tok,
-                        model=self._effective_model(),
-                        message_id=message_id,
-                    )
-                )
-            gen_index += 1
-            open_blocks = []
-            open_start_ms = None
-            open_end_ms = None
 
         stream_iter = iter(stream)
         try:
             while True:
-                # Offload the blocking SDK iteration to a worker thread so the
-                # event loop stays free (parallel agents don't serialize) and the
+                # Offload the blocking SDK iteration to a worker thread so the event
+                # loop stays free (parallel agents don't serialize) and the
                 # watchdog's task.cancel() can actually land at this await point.
                 notification: Any = await asyncio.to_thread(next, stream_iter, _STREAM_DONE)
                 if notification is _STREAM_DONE:
                     break
-
-                root = _get_item_root(notification)
-                method = notification.method
-                log_raw_sdk_event(
-                    self._log,
-                    repr_target=notification,
-                    attr_target=root,
-                    method=method,
-                    root_type=getattr(root, "type", None),
-                )
-
-                # --- item/started: Emit ToolStartEvent for every tool-like item ---
-                if method == "item/started":
-                    root = _get_item_root(notification)
-                    if root is not None:
-                        # Record the start time for every item kind so flushed
-                        # AssistantMessages get real per-message generation timing.
-                        item_id = getattr(root, "id", None)
-                        started_at_ms = getattr(notification.payload, "started_at_ms", None)
-                        if item_id is not None and started_at_ms is not None:
-                            start_ms_by_id[item_id] = started_at_ms
-                        root_type = getattr(root, "type", None)
-                        # Any item that isn't transcript content is a tool call.
-                        # Generic handling (vs the old commandExecution/fileChange
-                        # allowlist) captures MCP, web-search, collab-agent and any
-                        # future Codex tool kind automatically instead of dropping it.
-                        if root_type is not None and root_type not in _CONTENT_ITEM_TYPES:
-                            tool_id = item_id or f"{root_type}_{next_sequence}"
-                            seq_by_id[tool_id] = next_sequence
-                            start_tel = CommandTelemetry(
-                                tool_name=self._tool_name(root_type),
-                                tool_id=tool_id,
-                                timestamp=datetime.now(),
-                                parameters=self._tool_parameters(root, root_type),
-                                sequence_number=next_sequence,
-                            )
-                            # Remember it until item/completed; whatever is left
-                            # open at turn end is force-closed as unresolved.
-                            open_tools[tool_id] = start_tel
-                            emit.on_event(ToolStartEvent(task_id=task_id, turn_id=turn_id, tool=start_tel))
-                            next_sequence += 1
-                            # Record the tool_use block now (item/started precedes
-                            # this generation's tokenUsage flush); is_error patched
-                            # at item/completed, even after the message is flushed.
-                            block = ContentBlock(block_type="tool_use", sequence=0, tool_use_id=tool_id)
-                            blocks_by_id[tool_id] = block
-                            _record_block(block, tool_id, None)
-
-                # --- item/completed: Emit ToolEndEvent + capture telemetry/sub-agents ---
-                elif method == "item/completed":
-                    root = _get_item_root(notification)
-                    if root is not None:
-                        completed_ms = getattr(notification.payload, "completed_at_ms", None)
-                        root_type = getattr(root, "type", None)
-                        if root_type is not None and root_type not in _CONTENT_ITEM_TYPES:
-                            tool_id = getattr(root, "id", None) or f"{root_type}_{next_sequence}"
-                            seq = seq_by_id.get(tool_id, next_sequence)
-                            # This tool is now resolved — drop it from the orphan set.
-                            open_tools.pop(tool_id, None)
-
-                            # commandExecution/fileChange keep their rich extractors;
-                            # every other tool kind gets generic telemetry so it still
-                            # counts toward command_executed / commands_efficiency and
-                            # renders in the transcript.
-                            telemetry, is_error = self._telemetry_for_item(root, root_type, tool_id, seq)
-                            if telemetry:
-                                commands.append(telemetry)
-                            emit.on_event(
-                                ToolEndEvent(
-                                    task_id=task_id,
-                                    turn_id=turn_id,
-                                    tool=telemetry
-                                    or CommandTelemetry(
-                                        tool_name=self._tool_name(root_type),
-                                        tool_id=tool_id,
-                                        timestamp=datetime.now(),
-                                        sequence_number=seq,
-                                    ),
-                                    status=ToolEndStatus.ERROR if is_error else ToolEndStatus.OK,
-                                )
-                            )
-                            # Patch the block recorded at item/started (held by
-                            # reference, so this lands even post-flush) + extend the
-                            # still-open message's end time.
-                            if tool_id in blocks_by_id:
-                                blocks_by_id[tool_id].is_error = is_error
-                            if (
-                                open_blocks
-                                and completed_ms is not None
-                                and (open_end_ms is None or completed_ms > open_end_ms)
-                            ):
-                                open_end_ms = completed_ms
-
-                            # Codex's native multi-agent calls land here as
-                            # collabAgentToolCall items — record spawns as
-                            # sub-agents and nest each child's returned result
-                            # under the spawning Agent call.
-                            if root_type == "collabAgentToolCall":
-                                self._handle_collab_completion(
-                                    root,
-                                    tool_id,
-                                    collab_spawn_by_thread,
-                                    spawned_children,
-                                    collab_results,
-                                )
-
-                        elif root_type == "reasoning":
-                            # Reasoning items: use the summary text when present
-                            # (only if summaries are enabled). OpenAI never returns
-                            # the raw CoT, so a text-less item becomes a placeholder
-                            # block, resolved with its token count at flush.
-                            reasoning_id = getattr(root, "id", f"reasoning_{next_sequence}")
-                            parts = getattr(root, "content", None) or getattr(root, "summary", None) or []
-                            text = "\n".join(p for p in parts if p)
-                            block = ContentBlock(block_type="thinking", sequence=0, thinking=text or None)
-                            _record_block(block, reasoning_id, completed_ms)
-                            if not text:
-                                reasoning_placeholders.append(block)
-
-                        elif root_type == "agentMessage":
-                            # Full assistant text — append a text block. The
-                            # message is cut at the following tokenUsage event (the
-                            # generation boundary), not here.
-                            message_item_id = getattr(root, "id", f"msg_{next_sequence}")
-                            text = getattr(root, "text", "") or ""
-                            if text:
-                                _record_block(
-                                    ContentBlock(block_type="text", sequence=0, text=text),
-                                    message_item_id,
-                                    completed_ms,
-                                )
-
-                # --- item/agentMessage/delta: Emit TextChunkEvent for streaming text ---
-                elif method == "item/agentMessage/delta":
-                    if notification.payload:
-                        delta = getattr(notification.payload, "delta", None)
-                        if delta:
-                            agent_message_chunks.append(delta)
-                            emit.on_event(TextChunkEvent(task_id=task_id, turn_id=turn_id, text=delta))
-
-                # --- thread/tokenUsage/updated: one per generation → cut a message ---
-                # Carries `total` (cumulative; the turn-level figure) and `last`
-                # (this generation's delta). Fires AFTER the generation's items, so
-                # it is the generation boundary: attribute `last` to the open buffer
-                # and flush it as one AssistantMessage.
-                elif method == "thread/tokenUsage/updated":
-                    if notification.payload:
-                        latest_token_usage = getattr(notification.payload, "token_usage", None)
-                        _flush_message(getattr(latest_token_usage, "last", None))
-
-                # --- turn/completed: Capture final result ---
-                elif method == "turn/completed":
-                    if isinstance(notification.payload, TurnCompletedNotification):
-                        turn_result = notification.payload.turn
-                        break
+                if state.dispatch(notification):  # True on a valid turn/completed
+                    break
         finally:
             self._active_turn_handle = None
-            # Close any tool that started but never completed (an orphan): some
-            # Codex collab ops emit item/started without a discrete item/completed,
-            # so their transcript block would otherwise have no telemetry and the
-            # evalboard would render it "unknown". Emit a ToolEndEvent(unresolved)
-            # carrying the name known at item/started, so it keeps a real tool name
-            # and counts. Mirrors the crash-path orphan closure in _finalize; runs
-            # on every exit (normal completion, crash, timeout).
-            for start_tel in sorted(open_tools.values(), key=lambda t: getattr(t, "sequence_number", 0)):
-                start_tel.result_status = "unknown"
-                emit.on_event(
-                    ToolEndEvent(
-                        task_id=task_id,
-                        turn_id=turn_id,
-                        tool=start_tel,
-                        status=ToolEndStatus.UNRESOLVED,
-                    )
-                )
-            open_tools.clear()
-            # Flush any trailing blocks not closed by a tokenUsage event (e.g. a
-            # crash mid-generation) so the partial transcript survives.
-            _flush_message(None)
+            # Close any orphan tool (item/started without item/completed), flush any
+            # trailing blocks not closed by a tokenUsage event (e.g. a crash
+            # mid-generation), then close the stream. Runs on every exit path.
+            state.close_open_tools()
+            state._flush_message(None)
             with contextlib.suppress(Exception):
                 await self._run_async(stream.close)
 
-        if turn_result is None:
+        if state.turn_result is None:
             raise RuntimeError("Turn did not complete (no turn/completed notification received)")
 
         # Belt-and-suspenders: if streaming surfaced no assistant transcript,
         # rebuild it from the terminal Turn's ordered item list.
-        if not messages:
-            messages.extend(self._messages_from_items(getattr(turn_result, "items", None), turn_id))
+        if not state.messages:
+            state.messages.extend(self._messages_from_items(getattr(state.turn_result, "items", None), state.turn_id))
 
-        # Recover each spawned sub-agent's INNER tool calls from its on-disk
-        # rollout and nest them under the spawning Agent call. The parent stream
-        # never carries the child's commands (the child thread persists with
-        # Limited mode, which drops commandExecution events), but its rollout
-        # always persists the raw function_call/local_shell_call ResponseItems.
-        if spawned_children:
+        # Recover each spawned sub-agent's INNER tool calls from its on-disk rollout
+        # and nest them under the spawning Agent call. The parent stream never
+        # carries the child's commands (Limited persistence drops them), but its
+        # rollout always persists the raw function_call/local_shell_call items.
+        if state.spawned_children:
             await self._recover_subagent_tool_calls(
-                spawned_children, collab_results, messages, commands, emit, task_id, turn_id
+                state.spawned_children,
+                state.collab_results,
+                state.messages,
+                state.commands,
+                state.emit,
+                state.task_id,
+                state.turn_id,
             )
 
-        return turn_result, latest_token_usage, "".join(agent_message_chunks)
+        return state.turn_result, state.latest_token_usage, "".join(state.agent_message_chunks)
 
     def _messages_from_items(self, items: Any, turn_id: str) -> list[AssistantMessage]:
         """Rebuild the assistant transcript from a Turn's ``items`` list (fallback).

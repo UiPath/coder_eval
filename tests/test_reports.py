@@ -7,6 +7,7 @@ import pytest
 
 from coder_eval.models import RunSummary
 from coder_eval.reports import ReportGenerator
+from tests._fixtures.report_snapshots import assert_matches_snapshot
 
 
 _SKIP_NO_SYMLINK = pytest.mark.skipif(
@@ -42,6 +43,107 @@ def _make_task_result(
         "sdk_options": sdk_options,
         "installed_tools": installed_tools,
     }
+
+
+def test_generate_markdown_snapshot_full():
+    """Byte-identical characterization snapshot exercising EVERY dynamic column and
+    optional section of generate_markdown — the safety net for its decomposition.
+
+    Triggers: multiple distinct models (Models line), all P0 metrics (scores,
+    latency, assistant turns, crashed partials, ground-truth similarity), all four
+    dynamic table columns (model/tags/similarity/cmd-efficiency incl. expected/actual),
+    run-time notes (max_turns_exhausted + expected_turns_overage), generation metrics,
+    token usage (incl. cache + cost), agent settings, installed tools, and a non-empty
+    environment block. All inputs are fixed values so the output is deterministic.
+    """
+    summary = RunSummary(
+        run_id="2025-10-11_12-00-00",
+        start_time=datetime(2025, 10, 11, 12, 0, 0),
+        end_time=datetime(2025, 10, 11, 12, 5, 30),
+        total_duration_seconds=330.0,
+        tasks_run=2,
+        tasks_succeeded=1,
+        tasks_failed=1,
+        tasks_error=0,
+        tasks_token_budget_exceeded=1,
+        tasks_cost_budget_exceeded=0,
+        task_results=[
+            {
+                "task_id": "alpha",
+                "status": "success",
+                "weighted_score": 0.95,
+                "duration": 12.5,
+                "model_used": "claude-haiku-4-5",
+                "tags": ["smoke", "fast"],
+                "reference_similarity": 0.88,
+                "commands_efficiency": 0.75,
+                "expected_commands": 4,
+                "actual_commands": 6,
+                "max_turns_exhausted": True,
+                "iterations": [
+                    {"iteration": 1, "crashed": False, "assistant_turn_count": 3, "duration_seconds": 4.2},
+                ],
+                "total_tokens": 1500,
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "cache_creation_input_tokens": 200,
+                "cache_read_input_tokens": 300,
+                "total_cost_usd": 0.0123,
+                "installed_tools": {"node": "20.1.0"},
+                "sdk_options": {"model": "claude-haiku-4-5", "max_turns": 30},
+                "agent_config": None,
+            },
+            {
+                "task_id": "beta",
+                "status": "failure",
+                "weighted_score": 0.30,
+                "duration": 8.0,
+                "model_used": "claude-sonnet-4-6",
+                "tags": ["regression"],
+                "reference_similarity": 0.55,
+                "commands_efficiency": 1.0,
+                "expected_commands": 3,
+                "actual_commands": 3,
+                "expected_turns_overage": [10, 5],
+                "iterations": [
+                    {"iteration": 1, "crashed": True, "assistant_turn_count": 1, "duration_seconds": 2.0},
+                ],
+                "total_tokens": 800,
+                "input_tokens": 600,
+                "output_tokens": 200,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "total_cost_usd": 0.0077,
+                "installed_tools": None,
+                "sdk_options": None,
+                "agent_config": None,
+            },
+        ],
+        framework_version="0.1.0",
+        environment_info={"python": "3.13.11", "platform": "darwin"},
+    )
+
+    assert_matches_snapshot(ReportGenerator.generate_markdown(summary), "run_full.md")
+
+
+def test_generate_markdown_snapshot_minimal():
+    """Zero-task summary: header + empty summary + table header/separator with no rows,
+    no notes, no optional sections, environment block. Guards the empty-input path."""
+    summary = RunSummary(
+        run_id="2025-10-11_00-00-00",
+        start_time=datetime(2025, 10, 11, 0, 0, 0),
+        end_time=datetime(2025, 10, 11, 0, 0, 0),
+        total_duration_seconds=0.0,
+        tasks_run=0,
+        tasks_succeeded=0,
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=[],
+        framework_version="0.1.0",
+        environment_info={"python": "3.13.11"},
+    )
+
+    assert_matches_snapshot(ReportGenerator.generate_markdown(summary), "run_minimal.md")
 
 
 def test_generate_markdown_basic():

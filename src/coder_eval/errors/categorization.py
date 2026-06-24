@@ -16,45 +16,17 @@ from .timeout import EvaluationTimeoutError
 logger = logging.getLogger(__name__)
 
 
-def categorize_error(  # noqa: PLR0912 — branch-heavy classifier tracked for decomposition (code-review 2026-06-22)
-    error: Exception,
-    context: dict[str, Any],
-    hint: ErrorCategory | None = None,
-) -> ErrorCategory:
-    """Categorize an exception into an ErrorCategory.
+def _categorize_by_exception_type(error: Exception, component: str) -> ErrorCategory | None:
+    """Typed-exception checks (most reliable), in precedence order.
 
-    Uses pattern matching on error message and exception type,
-    plus context hints (component name) to determine category.
-
-    Prioritizes:
-    1. Explicit hint (if provided by caller who knows the context)
-    2. Exception type checking (most reliable)
-    3. Known SDK exceptions (if available)
-    4. String pattern matching (fallback)
-
-    Args:
-        error: The exception to categorize
-        context: Additional context dict with keys:
-            - component: "agent", "sandbox", "evaluator", etc.
-            - task_id: Task identifier (for logging)
-        hint: Optional explicit category (when caller knows the type)
-
-    Returns:
-        ErrorCategory enum value
-
-    Example:
-        >>> categorize_error(TimeoutError(), {"component": "agent"})
-        <ErrorCategory.AGENT_TIMEOUT: 'agent_timeout'>
-        >>> categorize_error(Exception("Rate limit"), {"component": "agent"})
-        <ErrorCategory.AGENT_RATE_LIMIT: 'agent_rate_limit'>
+    Returns None when no typed check matches, so the caller falls through to
+    string-pattern matching. ``AgentCrashError`` is deliberately NOT checked here:
+    it is the last resort (see ``categorize_error``), after string patterns get a
+    chance to recognise auth / rate-limit / billing / content-filter signatures
+    stamped into the message. The component-gated branches return ``UNKNOWN`` (not
+    ``None``) so they short-circuit exactly as the original inline checks did.
     """
-    # Use hint if provided (caller knows best)
-    if hint:
-        return hint
-
-    component = context.get("component", "")
-
-    # 1. Check custom timeout exceptions first (before generic TimeoutError)
+    # Check custom timeout exceptions first (before generic TimeoutError)
     if isinstance(error, EvaluationTimeoutError):
         return ErrorCategory.AGENT_TIMEOUT
 
@@ -62,18 +34,6 @@ def categorize_error(  # noqa: PLR0912 — branch-heavy classifier tracked for d
     if isinstance(error, BudgetExceededError):
         return ErrorCategory.BUDGET_EXCEEDED
 
-    # NB: the ``AgentCrashError`` typed check is intentionally placed at the
-    # END of this function (after string-pattern matching), not here. The
-    # SDK has no dedicated exception classes for auth / rate-limit / billing /
-    # content-filter — those all surface as ``ProcessError(exit_code=1)``
-    # with the categorical info in ``ResultMessage.subtype``/``result``,
-    # which the agent stamps into the ``AgentCrashError`` message. We want
-    # those to route to their real category (non-retryable for auth/billing,
-    # 60s-backoff for rate-limit, etc.), not to AGENT_CRASH's 2x retry. So
-    # AGENT_CRASH is reserved for "no specific pattern matched" — i.e.
-    # genuinely unexpected crashes.
-
-    # 2. Check specific exception types (most reliable)
     # AgentConfigError subclasses RuntimeError, so this typed check must precede
     # any string-pattern fallback that could re-categorise a missing-prerequisite
     # message as the retryable AGENT_API_ERROR.
@@ -93,7 +53,7 @@ def categorize_error(  # noqa: PLR0912 — branch-heavy classifier tracked for d
     if isinstance(error, MemoryError):
         return ErrorCategory.OUT_OF_MEMORY
 
-    # 3. Check for known SDK exceptions (if available)
+    # Check for known SDK exceptions (if available)
     try:
         from anthropic import AuthenticationError, RateLimitError
 
@@ -104,9 +64,17 @@ def categorize_error(  # noqa: PLR0912 — branch-heavy classifier tracked for d
     except ImportError:
         pass  # anthropic package not installed; fall through to string matching
 
-    # 4. Fallback to string matching
-    error_str = str(error).lower()
+    return None
 
+
+def _categorize_by_message(error_str: str, component: str) -> ErrorCategory | None:
+    """String-pattern matching on the already-lowercased error message.
+
+    ``error_str`` is the caller's ``str(error).lower()``. Patterns run in precedence
+    order; returns None when no pattern matches (fall through to component
+    categorization). The component-gated branches return ``UNKNOWN`` (not ``None``)
+    so they short-circuit exactly as the original inline checks did.
+    """
     # Authentication errors
     if any(pat in error_str for pat in ["authentication", "unauthorized", "invalid api key", "401"]):
         return ErrorCategory.AGENT_AUTH_ERROR
@@ -149,7 +117,15 @@ def categorize_error(  # noqa: PLR0912 — branch-heavy classifier tracked for d
     if any(pat in error_str for pat in ["memory", "oom", "out of memory"]):
         return ErrorCategory.OUT_OF_MEMORY
 
-    # Component-specific categorization
+    return None
+
+
+def _categorize_by_component(error: Exception, error_str: str, component: str) -> ErrorCategory | None:
+    """Component-specific categorization for callers that supplied a component hint.
+
+    Returns None **only** when ``component`` is not one of sandbox/agent/evaluator/task,
+    so the main function reaches the final AgentCrashError / UNKNOWN fallback.
+    """
     if component == "sandbox":
         if "venv" in error_str or "virtualenv" in error_str:
             return ErrorCategory.VENV_CREATION_ERROR
@@ -195,6 +171,60 @@ def categorize_error(  # noqa: PLR0912 — branch-heavy classifier tracked for d
         if "invalid" in error_str or "malformed" in error_str or "validation" in error_str:
             return ErrorCategory.TASK_INVALID
         return ErrorCategory.TASK_NOT_FOUND
+
+    return None
+
+
+def categorize_error(
+    error: Exception,
+    context: dict[str, Any],
+    hint: ErrorCategory | None = None,
+) -> ErrorCategory:
+    """Categorize an exception into an ErrorCategory.
+
+    Uses pattern matching on error message and exception type,
+    plus context hints (component name) to determine category.
+
+    Prioritizes:
+    1. Explicit hint (if provided by caller who knows the context)
+    2. Exception type checking (most reliable)
+    3. Known SDK exceptions (if available)
+    4. String pattern matching (fallback)
+
+    Args:
+        error: The exception to categorize
+        context: Additional context dict with keys:
+            - component: "agent", "sandbox", "evaluator", etc.
+            - task_id: Task identifier (for logging)
+        hint: Optional explicit category (when caller knows the type)
+
+    Returns:
+        ErrorCategory enum value
+
+    Example:
+        >>> categorize_error(TimeoutError(), {"component": "agent"})
+        <ErrorCategory.AGENT_TIMEOUT: 'agent_timeout'>
+        >>> categorize_error(Exception("Rate limit"), {"component": "agent"})
+        <ErrorCategory.AGENT_RATE_LIMIT: 'agent_rate_limit'>
+    """
+    # Use hint if provided (caller knows best)
+    if hint:
+        return hint
+
+    component = context.get("component", "")
+
+    # Precedence: typed-exception group → message-string group → component group.
+    # A helper returning None means "no match in my group, fall through"; a non-None
+    # value (including UNKNOWN from a short-circuiting component-gated branch) wins.
+    if (category := _categorize_by_exception_type(error, component)) is not None:
+        return category
+
+    error_str = str(error).lower()
+    if (category := _categorize_by_message(error_str, component)) is not None:
+        return category
+
+    if (category := _categorize_by_component(error, error_str, component)) is not None:
+        return category
 
     # Final typed-AgentCrashError fallback for callers without a component hint:
     # nothing more specific matched, treat as a genuinely unexpected crash.

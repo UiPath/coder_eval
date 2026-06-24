@@ -1,0 +1,106 @@
+{
+  "agent_output": "[AssistantMessage]\n[UserMessage]\n[ResultMessage]",
+  "assistant_turn_count": 1,
+  "commands": [
+    {
+      "assistant_turn_index": 0,
+      "duration_ms": "<scrubbed>",
+      "error_message": null,
+      "execution_completed_at": "<scrubbed>",
+      "execution_started_at": "<scrubbed>",
+      "generation_completed_at": "<scrubbed>",
+      "parameters": {
+        "prompt": "compute the sum"
+      },
+      "result_data": null,
+      "result_status": "success",
+      "result_summary": "the sub-agent answer",
+      "result_tokens": 5,
+      "sequence_number": 0,
+      "timestamp": "<scrubbed>",
+      "tool_id": "toolu_agent_d",
+      "tool_name": "Agent"
+    }
+  ],
+  "crash_reason": null,
+  "crashed": false,
+  "duration_seconds": "<scrubbed>",
+  "iteration": 1,
+  "max_turns_exhausted": false,
+  "messages": [
+    {
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "completed_at": "<scrubbed>",
+      "content_blocks": [
+        {
+          "block_type": "tool_use",
+          "is_error": false,
+          "sequence": 0,
+          "signature": null,
+          "text": null,
+          "thinking": null,
+          "tool_use_id": "toolu_agent_d"
+        }
+      ],
+      "generation_duration_ms": "<scrubbed>",
+      "input_tokens": 90,
+      "message_id": "msg_d",
+      "model": "mock-model",
+      "output_tokens": 8,
+      "parent_tool_use_id": null,
+      "reasoning_tokens": 0,
+      "role": "assistant",
+      "started_at": "<scrubbed>",
+      "stop_reason": "end_turn",
+      "tool_use_ids": [
+        "toolu_agent_d"
+      ]
+    },
+    {
+      "cache_creation_tokens": 40,
+      "cache_read_tokens": 60,
+      "completed_at": "<scrubbed>",
+      "content_blocks": [
+        {
+          "block_type": "text",
+          "is_error": false,
+          "sequence": 0,
+          "signature": null,
+          "text": "the sub-agent answer",
+          "thinking": null,
+          "tool_use_id": null
+        }
+      ],
+      "generation_duration_ms": "<scrubbed>",
+      "input_tokens": 300,
+      "message_id": "subagent-toolu_agent_d",
+      "model": "mock-model",
+      "output_tokens": 120,
+      "parent_tool_use_id": "toolu_agent_d",
+      "reasoning_tokens": 0,
+      "role": "assistant",
+      "started_at": "<scrubbed>",
+      "stop_reason": null,
+      "tool_use_ids": []
+    }
+  ],
+  "model_used": "mock-model",
+  "num_turns": 1,
+  "result_summary": {
+    "is_error": false,
+    "result": "done",
+    "stop_reason": "end_turn",
+    "subtype": "success"
+  },
+  "timestamp": "<scrubbed>",
+  "token_usage": {
+    "cache_creation_input_tokens": 40,
+    "cache_read_input_tokens": 60,
+    "input_tokens": 490,
+    "output_tokens": 128,
+    "total_cost_usd": "<scrubbed>",
+    "uncached_input_tokens": 390
+  },
+  "user_input": "do the thing"
+}

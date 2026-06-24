@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from coder_eval.isolation.docker_runner import DockerRunError, DockerRunner
+from coder_eval.isolation.docker_runner import DockerRunError, DockerRunner, build_error_result
 from coder_eval.models import EvaluationResult, FileExistsCriterion, FinalStatus, SandboxConfig, TaskDefinition
 
 
@@ -215,6 +215,48 @@ class TestMalformedTaskJson:
         asyncio.run(runner._handle_malformed_task_json(task_json, log_path, exc))
 
         assert sidecar.read_text(encoding="utf-8") == original
+
+
+class TestParseResultOrRaise:
+    """The decision wrapper extracted from ``run()``: read back task.json or,
+    if the container died before writing it, persist a synthetic ERROR
+    task.json and raise. Operates on a path + returncode, so it needs no
+    docker daemon.
+    """
+
+    def test_missing_task_json_writes_synthetic_and_raises(self, run_dir):
+        """No task.json -> synthetic ERROR task.json written AND DockerRunError raised."""
+        runner = _make_runner(run_dir)
+        log_path = run_dir / "docker.log"
+
+        with pytest.raises(DockerRunError) as excinfo:
+            asyncio.run(runner._parse_result_or_raise(run_dir, returncode=137, log_path=log_path))
+
+        # The raised error names the returncode and points at the log.
+        assert "code 137" in str(excinfo.value)
+        assert str(log_path) in str(excinfo.value)
+
+        # A parseable synthetic ERROR task.json now exists for dashboards.
+        task_json = run_dir / "task.json"
+        assert task_json.exists()
+        payload = json.loads(task_json.read_text(encoding="utf-8"))
+        assert payload["final_status"] == "ERROR"
+        assert payload["task_id"] == "test-container-death"
+
+    def test_present_task_json_parsed_and_returned(self, run_dir):
+        """A real task.json -> parsed EvaluationResult returned, nothing raised."""
+        runner = _make_runner(run_dir)
+        task_json = run_dir / "task.json"
+        # A valid (non-synthetic) result the in-container orchestrator would have written.
+        expected = build_error_result(runner.rt, DockerRunError("in-container failure"))
+        task_json.write_text(expected.model_dump_json(indent=2), encoding="utf-8")
+
+        result = asyncio.run(runner._parse_result_or_raise(run_dir, returncode=0, log_path=run_dir / "docker.log"))
+
+        assert isinstance(result, EvaluationResult)
+        assert result.task_id == "test-container-death"
+        # The pre-existing file is left untouched (no synthetic overwrite on the happy path).
+        assert json.loads(task_json.read_text(encoding="utf-8"))["error_message"] == "in-container failure"
 
 
 class TestContainerAutoRemoval:

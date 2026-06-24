@@ -1,0 +1,125 @@
+{
+  "agent_output": "done",
+  "assistant_turn_count": 1,
+  "commands": [
+    {
+      "assistant_turn_index": null,
+      "duration_ms": null,
+      "error_message": null,
+      "execution_completed_at": null,
+      "execution_started_at": null,
+      "generation_completed_at": null,
+      "parameters": {
+        "model": "gpt-5.5",
+        "operation": "spawnagent",
+        "prompt": "sum 1..100"
+      },
+      "result_data": null,
+      "result_status": "success",
+      "result_summary": "collab spawnagent",
+      "result_tokens": 5,
+      "sequence_number": 0,
+      "timestamp": "<scrubbed>",
+      "tool_id": "call_spawn",
+      "tool_name": "Agent"
+    },
+    {
+      "assistant_turn_index": null,
+      "duration_ms": null,
+      "error_message": null,
+      "execution_completed_at": null,
+      "execution_started_at": null,
+      "generation_completed_at": null,
+      "parameters": {
+        "operation": "wait"
+      },
+      "result_data": null,
+      "result_status": "success",
+      "result_summary": "collab wait: 5050",
+      "result_tokens": 5,
+      "sequence_number": 1,
+      "timestamp": "<scrubbed>",
+      "tool_id": "call_wait",
+      "tool_name": "Agent"
+    }
+  ],
+  "crash_reason": null,
+  "crashed": false,
+  "duration_seconds": "<scrubbed>",
+  "iteration": 1,
+  "max_turns_exhausted": false,
+  "messages": [
+    {
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "completed_at": "<scrubbed>",
+      "content_blocks": [
+        {
+          "block_type": "tool_use",
+          "is_error": false,
+          "sequence": 0,
+          "signature": null,
+          "text": null,
+          "thinking": null,
+          "tool_use_id": "call_spawn"
+        },
+        {
+          "block_type": "tool_use",
+          "is_error": false,
+          "sequence": 1,
+          "signature": null,
+          "text": null,
+          "thinking": null,
+          "tool_use_id": "call_wait"
+        }
+      ],
+      "generation_duration_ms": "<scrubbed>",
+      "input_tokens": 0,
+      "message_id": "codex-1-msg-0",
+      "model": "gpt-5-codex",
+      "output_tokens": 0,
+      "parent_tool_use_id": null,
+      "reasoning_tokens": 0,
+      "role": "assistant",
+      "started_at": "<scrubbed>",
+      "stop_reason": null,
+      "tool_use_ids": [
+        "call_spawn",
+        "call_wait"
+      ]
+    },
+    {
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "completed_at": "<scrubbed>",
+      "content_blocks": [
+        {
+          "block_type": "text",
+          "is_error": false,
+          "sequence": 0,
+          "signature": null,
+          "text": "5050",
+          "thinking": null,
+          "tool_use_id": null
+        }
+      ],
+      "generation_duration_ms": "<scrubbed>",
+      "input_tokens": 0,
+      "message_id": "codex-1-subagent-1",
+      "model": "gpt-5.5",
+      "output_tokens": 0,
+      "parent_tool_use_id": "call_spawn",
+      "reasoning_tokens": 0,
+      "role": "assistant",
+      "started_at": "<scrubbed>",
+      "stop_reason": null,
+      "tool_use_ids": []
+    }
+  ],
+  "model_used": "gpt-5-codex",
+  "num_turns": 1,
+  "result_summary": null,
+  "timestamp": "<scrubbed>",
+  "token_usage": null,
+  "user_input": "do it"
+}

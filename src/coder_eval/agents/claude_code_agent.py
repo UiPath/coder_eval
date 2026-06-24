@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -33,10 +33,8 @@ from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
 from coder_eval.errors import (
-    AgentCrashError,
     TurnTimeoutError,
     format_timeout_reason,
-    truncate_crash_message,
 )
 from coder_eval.formatting import format_messages, format_payload
 from coder_eval.models import (
@@ -178,6 +176,458 @@ def _is_sdk_result_message(message: Any) -> bool:
 
 
 _JSON_START_SEARCH_LIMIT = 200
+
+
+class _ClaudeTurnState:
+    """Per-turn mutable scratch state for one ``ClaudeCodeAgent.communicate`` call.
+
+    Holds every cross-branch local the SDK-stream pump mutates and exposes one
+    method per message kind (``on_*``) plus ``dispatch`` (the type-dispatch
+    ladder, order-preserving) and ``finalize`` (terminal ``AgentEndEvent`` +
+    partial-record build). A plain module-private class (NOT Pydantic, NOT
+    exported) — it carries a back-reference to the agent so it can reuse the
+    agent's existing helpers (``_finalize_commands`` / ``_build_token_usage`` /
+    ``_format_messages`` / …). The two raw lists are kept DISTINCT and typed
+    separately: ``messages`` (raw SDK ``Message`` objects, fed to
+    ``_update_state_from_messages`` / ``_format_messages``) and ``sdk_messages``
+    (telemetry ``TranscriptMessage`` objects, carried on ``AgentEndEvent``).
+    """
+
+    def __init__(
+        self,
+        agent: "ClaudeCodeAgent",
+        *,
+        emit: CompositeStreamCallback,
+        collector: EventCollector,
+        task_id: str,
+        user_input: str,
+        iteration: int,
+        max_turns: int | None,
+        log: PrefixedAdapter,
+        turn_start_time: float,
+        deadline: float | None,
+    ) -> None:
+        self._agent = agent
+        self.emit = emit
+        self.collector = collector
+        self.task_id = task_id
+        self.user_input = user_input
+        self.iteration = iteration
+        self.max_turns = max_turns
+        self.log = log
+        self.turn_start_time = turn_start_time
+        self.deadline = deadline
+        # Set True by the in-loop deadline break OR the watchdog callback.
+        self.timeout_hit = False
+        # Resolved by _build_claude_query, set on the state before any finalize
+        # path. Stays None if we crash before setup (finalize reads it for cost
+        # backfill).
+        self.effective_model: str | None = None
+
+        # Two distinct lists (do NOT merge): raw SDK objects vs. telemetry.
+        self.messages: list[Message] = []
+        self.sdk_messages: list[TranscriptMessage] = []
+
+        # Two-phase command tracking (tool_id -> {telemetry, command_start_time}).
+        self.pending_commands: dict[str, dict[str, Any]] = {}
+        self.processed_results: set[str] = set()
+        self.sequence_number = 0
+
+        self.last_assistant_message_index: int | None = None
+        self.last_event_monotonic: float = turn_start_time
+        self.last_event_wall: datetime = datetime.now()
+
+        # SDK ResultMessage capture.
+        self.sdk_result_usage: dict[str, Any] | None = None
+        self.sdk_result_model_usage: dict[str, Any] | None = None
+        self.sdk_result_cost: float | None = None
+        self.num_turns: int | None = None
+        self.sdk_result_summary: ResultSummary | None = None
+
+        self.sdk_model_used: str | None = None
+
+        # Per-emission output_tokens recovery from raw stream events.
+        self.pending_delta_output_tokens: int | None = None
+        self.current_stream_message_id: str | None = None
+        self.emissions_by_id: dict[str, list[AssistantMessageTelemetry]] = {}
+        self.emission_proxies_by_id: dict[str, list[int]] = {}
+
+        # Dedup of multi-emission API calls sharing a message_id.
+        self.seen_message_ids: set[str] = set()
+        self.last_message_had_id: bool = False
+
+        self.assistant_turn_count = 0
+
+        # Turn/tool bracketing (self-describing event tree).
+        self.current_turn_id: str | None = None
+        self.tool_turn_ids: dict[str, str] = {}  # tool_id -> spawning turn_id
+        self.emitted_tool_ends: set[str] = set()  # tool_ids already closed
+        self.finalized = False
+
+    def turn_tokens(self, turn_id: str) -> TokenUsage | None:
+        """Best-effort per-turn tokens, summed over that call's block emissions."""
+        records = self.emissions_by_id.get(turn_id)
+        if not records:
+            return None
+        total = TokenUsage()
+        for rec in records:
+            total = total + TokenUsage(
+                uncached_input_tokens=rec.input_tokens,
+                output_tokens=rec.output_tokens,
+                cache_creation_input_tokens=rec.cache_creation_tokens,
+                cache_read_input_tokens=rec.cache_read_tokens,
+            )
+        return total
+
+    def dispatch(self, message: Message) -> None:
+        """Record the raw message and route it to its per-kind handler.
+
+        Order is load-bearing: ``_is_sdk_result_message`` must be checked before
+        ``_is_user_message``; the TaskNotification guard before the result guard.
+        """
+        self.messages.append(message)
+        msg_type = type(message).__name__
+        log_raw_sdk_event(self.log, repr_target=message, type=msg_type)
+
+        if _is_assistant_message(message):
+            self.on_assistant_message(message)
+        elif _is_task_notification(message):
+            self.on_task_notification(message)
+        elif _is_sdk_result_message(message):
+            self.on_result_message(message)
+        elif isinstance(getattr(message, "event", None), dict):
+            self.on_stream_event(message)
+        elif _is_user_message(message):
+            self.on_user_message(message)
+
+    def on_assistant_message(self, message: Message) -> None:
+        """Capture ToolUseBlocks + build the AssistantMessage telemetry record."""
+        message_arrival_monotonic = time.monotonic()
+        message_arrival_wall = datetime.now()
+        generation_started_wall = self.last_event_wall
+        generation_duration_ms = (message_arrival_monotonic - self.last_event_monotonic) * 1000
+
+        current_turn_index = len(self.sdk_messages)
+        self.assistant_turn_count += 1
+        model_attr = getattr(message, "model", None)
+        if isinstance(model_attr, str):
+            self.sdk_model_used = model_attr
+
+        # Inner-turn boundary: one TurnStart per new message_id (one API call).
+        raw_mid = getattr(message, "message_id", None)
+        turn_id = raw_mid if isinstance(raw_mid, str) else f"turn-{self.assistant_turn_count}"
+        if turn_id != self.current_turn_id:
+            if self.current_turn_id is not None:
+                self.emit.on_event(
+                    TurnEndEvent(
+                        task_id=self.task_id,
+                        turn_id=self.current_turn_id,
+                        status=TurnEndStatus.COMPLETED,
+                        tokens=self.turn_tokens(self.current_turn_id),
+                    )
+                )
+            self.current_turn_id = turn_id
+            self.emit.on_event(TurnStartEvent(task_id=self.task_id, turn_id=turn_id, model=self.sdk_model_used))
+
+        content = getattr(message, "content", None)
+        turn_content_blocks: list[ContentBlock] = []
+        turn_tool_use_ids: list[str] = []
+        emission_content_chars = 0
+
+        if content and isinstance(content, list):
+            for block in content:
+                block_seq = len(turn_content_blocks)
+
+                if _is_tool_use_block(block):
+                    tool_args = block.input if isinstance(block.input, dict) else {"raw": block.input}
+                    emission_content_chars += len(str(getattr(block, "name", "") or "")) + len(
+                        json.dumps(tool_args, default=str)
+                    )
+                    command_start_time = time.monotonic()
+
+                    telemetry = CommandTelemetry(
+                        tool_name=block.name,
+                        tool_id=block.id,
+                        timestamp=message_arrival_wall,
+                        generation_completed_at=message_arrival_wall,
+                        assistant_turn_index=current_turn_index,
+                        parameters=block.input if isinstance(block.input, dict) else {"raw": block.input},
+                        sequence_number=self.sequence_number,
+                        result_status=None,
+                        duration_ms=None,
+                    )
+
+                    self.pending_commands[block.id] = {
+                        "telemetry": telemetry,
+                        "command_start_time": command_start_time,
+                    }
+                    self.sequence_number += 1
+
+                    turn_content_blocks.append(
+                        ContentBlock(block_type="tool_use", sequence=block_seq, tool_use_id=block.id)
+                    )
+                    turn_tool_use_ids.append(block.id)
+
+                    self.tool_turn_ids[block.id] = self.current_turn_id or ""
+                    self.emit.on_event(
+                        ToolStartEvent(task_id=self.task_id, turn_id=self.current_turn_id or "", tool=telemetry)
+                    )
+                elif _is_thinking_block(block):
+                    thinking_text = getattr(block, "thinking", None)
+                    if thinking_text:
+                        emission_content_chars += len(str(thinking_text))
+                    turn_content_blocks.append(
+                        ContentBlock(
+                            block_type="thinking",
+                            sequence=block_seq,
+                            thinking=str(thinking_text) if thinking_text else None,
+                            signature=getattr(block, "signature", None),
+                        )
+                    )
+                elif _is_text_block(block):
+                    text_value = str(block.text)
+                    emission_content_chars += len(text_value)
+                    turn_content_blocks.append(ContentBlock(block_type="text", sequence=block_seq, text=text_value))
+                    self.emit.on_event(
+                        TextChunkEvent(task_id=self.task_id, turn_id=self.current_turn_id or "", text=text_value)
+                    )
+
+        msg_usage = getattr(message, "usage", None) or {}
+        message_id = getattr(message, "message_id", None)
+        parent_tool_use_id = getattr(message, "parent_tool_use_id", None)
+        is_duplicate_emission = isinstance(message_id, str) and message_id in self.seen_message_ids
+        if isinstance(message_id, str):
+            self.seen_message_ids.add(message_id)
+            self.last_message_had_id = True
+        else:
+            self.last_message_had_id = False
+
+        if is_duplicate_emission:
+            in_tok = out_tok = cw_tok = cr_tok = rt_tok = 0
+        else:
+            in_tok = int(msg_usage.get("input_tokens", 0) or 0)
+            cw_tok = int(msg_usage.get("cache_creation_input_tokens", 0) or 0)
+            cr_tok = int(msg_usage.get("cache_read_input_tokens", 0) or 0)
+            rt_tok = int(msg_usage.get("reasoning_tokens", 0) or 0)
+            if self.pending_delta_output_tokens is not None:
+                out_tok = self.pending_delta_output_tokens
+            else:
+                out_tok = int(msg_usage.get("output_tokens", 0) or 0)
+            self.pending_delta_output_tokens = None
+
+        assistant_telemetry = AssistantMessageTelemetry(
+            started_at=generation_started_wall,
+            completed_at=message_arrival_wall,
+            generation_duration_ms=max(0.0, generation_duration_ms),
+            content_blocks=turn_content_blocks,
+            tool_use_ids=turn_tool_use_ids,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cache_creation_tokens=cw_tok,
+            cache_read_tokens=cr_tok,
+            reasoning_tokens=rt_tok,
+            stop_reason=(
+                getattr(message, "stop_reason", None)
+                if isinstance(getattr(message, "stop_reason", None), str)
+                else None
+            ),
+            model=self.sdk_model_used,
+            message_id=message_id if isinstance(message_id, str) else None,
+            parent_tool_use_id=(parent_tool_use_id if isinstance(parent_tool_use_id, str) else None),
+        )
+        self.sdk_messages.append(assistant_telemetry)
+        if isinstance(message_id, str):
+            self.emissions_by_id.setdefault(message_id, []).append(assistant_telemetry)
+            self.emission_proxies_by_id.setdefault(message_id, []).append(emission_content_chars)
+        self.last_assistant_message_index = len(self.sdk_messages) - 1
+
+        self.last_event_monotonic = message_arrival_monotonic
+        self.last_event_wall = message_arrival_wall
+
+    def on_task_notification(self, message: Message) -> None:
+        """TaskNotification carries lossy per-sub-agent usage; we capture it from
+        the Agent tool-result instead. This guard exists only to keep
+        ``_is_sdk_result_message`` from misreading it (session_id + usage)."""
+        pass
+
+    def on_result_message(self, message: Message) -> None:
+        """Capture the SDK ResultMessage usage/cost/session + the id-less backfill."""
+        self.sdk_result_usage = getattr(message, "usage", None)
+        self.sdk_result_model_usage = getattr(message, "model_usage", None)
+        self.sdk_result_cost = getattr(message, "total_cost_usd", None)
+        self.num_turns = getattr(message, "num_turns", None)
+        self.sdk_result_summary = self._agent._summarize_result(message)
+        # Only advance session_id on clean turns.
+        new_session_id = getattr(message, "session_id", None)
+        if self.sdk_result_summary is not None and self.sdk_result_summary.is_error:
+            self.log.debug(
+                "is_error ResultMessage; not advancing session_id (kept %s)",
+                self._agent._session_id,
+            )
+        else:
+            if new_session_id != self._agent._session_id:
+                self.log.debug("session_id changed: %s -> %s", self._agent._session_id, new_session_id)
+            self._agent._session_id = new_session_id
+
+        # Retro-populate the last AssistantMessage from ResultMessage.usage when
+        # per-message capture was not in effect for THAT message (no message_id).
+        if self.last_assistant_message_index is not None and self.sdk_result_usage and not self.last_message_had_id:
+            last_msg = self.sdk_messages[self.last_assistant_message_index]
+            if isinstance(last_msg, AssistantMessageTelemetry):
+                last_msg.input_tokens = int(self.sdk_result_usage.get("input_tokens", 0) or 0)
+                last_msg.output_tokens = int(self.sdk_result_usage.get("output_tokens", 0) or 0)
+                last_msg.cache_creation_tokens = int(self.sdk_result_usage.get("cache_creation_input_tokens", 0) or 0)
+                last_msg.cache_read_tokens = int(self.sdk_result_usage.get("cache_read_input_tokens", 0) or 0)
+                last_msg.reasoning_tokens = int(self.sdk_result_usage.get("reasoning_tokens", 0) or 0)
+
+    def on_stream_event(self, message: Message) -> None:
+        """Recover cumulative output_tokens from raw ``message_start`` /
+        ``message_delta`` stream events (handles both sub-cases internally)."""
+        evt: dict[str, Any] = getattr(message, "event", None) or {}
+        evt_type = evt.get("type")
+        if evt_type == "message_start":
+            mid = (evt.get("message") or {}).get("id")
+            self.current_stream_message_id = mid if isinstance(mid, str) else None
+        elif evt_type == "message_delta":
+            usage = evt.get("usage") or {}
+            ot = usage.get("output_tokens")
+            if isinstance(ot, int):
+                records: list[AssistantMessageTelemetry] | None = None
+                proxies: list[int] = []
+                if self.current_stream_message_id is not None:
+                    records = self.emissions_by_id.get(self.current_stream_message_id)
+                    proxies = self.emission_proxies_by_id.get(self.current_stream_message_id, [])
+                if records:
+                    shares = _distribute_output_tokens(ot, proxies)
+                    for record, share in zip(records, shares, strict=False):
+                        record.output_tokens = share
+                else:
+                    self.pending_delta_output_tokens = ot
+
+    def on_user_message(self, message: Message) -> None:
+        """Process tool results (and a sub-agent's terminal generation) from a
+        tool-result UserMessage. The sub-agent message is appended BEFORE the
+        tool-result loop — its position in ``sdk_messages`` is observable."""
+        self.last_event_monotonic = time.monotonic()
+        self.last_event_wall = datetime.now()
+
+        sub_msg = self._agent._synthesize_subagent_terminal_message(message, self.sdk_model_used)
+        if sub_msg is not None:
+            self.sdk_messages.append(sub_msg)
+
+        content = getattr(message, "content", None)
+        if content and isinstance(content, list):
+            for block in content:
+                if _is_tool_result_block(block):
+                    tool_name = ""
+                    if block.tool_use_id in self.pending_commands:
+                        tool_name = self.pending_commands[block.tool_use_id]["telemetry"].tool_name
+                    self._agent._resolve_pending_command(
+                        block.tool_use_id,
+                        getattr(block, "is_error", False) or False,
+                        block.content,
+                        self.pending_commands,
+                        self.processed_results,
+                    )
+                    is_error_flag = getattr(block, "is_error", False) or False
+                    resolved = self.pending_commands.get(block.tool_use_id, {}).get("telemetry")
+                    tool_for_event = resolved or CommandTelemetry(
+                        tool_name=tool_name or "unknown",
+                        tool_id=block.tool_use_id,
+                        timestamp=datetime.now(),
+                        result_status="error" if is_error_flag else "success",
+                        result_summary=format_payload(block.content),
+                    )
+                    status = self._agent._tool_end_status(is_error_flag, block.content)
+                    self.emitted_tool_ends.add(block.tool_use_id)
+                    self.emit.on_event(
+                        ToolEndEvent(
+                            task_id=self.task_id,
+                            turn_id=self.tool_turn_ids.get(block.tool_use_id, self.current_turn_id or ""),
+                            tool=tool_for_event,
+                            status=status,
+                        )
+                    )
+
+    def finalize(self, status: AgentEndStatus, *, crashed: bool = False, crash_reason: str | None = None) -> None:
+        """Close orphaned tools + the open turn, emit the terminal AgentEndEvent,
+        and on a crash build the partial TurnRecord. Idempotent."""
+        if self.finalized:
+            return
+        self.finalized = True
+
+        commands = self._agent._finalize_commands(self.pending_commands, self.messages)
+        for cmd in commands:
+            if cmd.tool_id in self.emitted_tool_ends:
+                continue
+            self.emitted_tool_ends.add(cmd.tool_id)
+            self.emit.on_event(
+                ToolEndEvent(
+                    task_id=self.task_id,
+                    turn_id=self.tool_turn_ids.get(cmd.tool_id, self.current_turn_id or ""),
+                    tool=cmd,
+                    status=ToolEndStatus.UNRESOLVED,
+                )
+            )
+
+        max_turns_exhausted = not crashed and (
+            self._agent._is_max_turns_result(self.sdk_result_summary)
+            or (self.max_turns is not None and self.num_turns is not None and self.num_turns > self.max_turns)
+        )
+        if max_turns_exhausted and status == AgentEndStatus.COMPLETED:
+            status = AgentEndStatus.MAX_TURNS_EXHAUSTED
+            self.log.warning("Agent exhausted max_turns (%s); turn ended without completing", self.max_turns)
+
+        if self.current_turn_id is not None:
+            self.emit.on_event(
+                TurnEndEvent(
+                    task_id=self.task_id,
+                    turn_id=self.current_turn_id,
+                    status=TurnEndStatus(status.value),
+                    tokens=self.turn_tokens(self.current_turn_id),
+                )
+            )
+            self.current_turn_id = None
+
+        usage = (
+            self._agent._build_token_usage(
+                self.sdk_messages,
+                self.sdk_result_usage,
+                self.sdk_result_cost,
+                self.sdk_result_model_usage,
+                self.effective_model,
+            )
+            or TokenUsage()
+        )
+
+        try:
+            agent_output = self._agent._format_messages(self.messages)
+        except Exception as fmt_err:
+            logger.warning("Failed to format messages for AgentEndEvent; using placeholder", exc_info=True)
+            agent_output = f"<partial record: message formatting failed: {type(fmt_err).__name__}: {fmt_err}>"
+
+        self.emit.on_event(
+            AgentEndEvent(
+                task_id=self.task_id,
+                status=status,
+                usage=usage,
+                iteration=self.iteration,
+                user_input=self.user_input,
+                agent_output=agent_output,
+                model_used=self.sdk_model_used,
+                assistant_turn_count=self.assistant_turn_count,
+                messages=list(self.sdk_messages),
+                num_turns=self.num_turns,
+                max_turns_exhausted=max_turns_exhausted,
+                result_summary=self.sdk_result_summary,
+                crashed=crashed,
+                crash_reason=crash_reason,
+                duration_seconds=time.monotonic() - self.turn_start_time,
+            )
+        )
+
+        if crashed:
+            self._agent._capture_partial_turn(self.collector)
 
 
 @AgentRegistry.register(AgentKind.CLAUDE_CODE, ClaudeCodeAgentConfig)
@@ -337,7 +787,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             return effective
         return config_model or route_model
 
-    async def communicate(  # noqa: PLR0912, PLR0915 — god-function tracked for decomposition (code-review 2026-06-22)
+    async def communicate(
         self,
         user_input: str,
         *,
@@ -378,97 +828,6 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         turn_start_time = time.monotonic()
         deadline = turn_start_time + timeout if timeout is not None else None
-        # timeout_hit is set by _on_turn_timeout (timer thread) and read by
-        # the asyncio thread via _timed_out(). Python bool assignment is
-        # atomic under the GIL; no explicit lock needed here.
-        timeout_hit = False
-
-        # Collect all messages from the turn
-        messages = []
-
-        # NEW: Two-phase command tracking with precise duration measurement
-        # Phase 1: Store pending commands keyed by tool_id with start time
-        # Phase 2: Update status and duration when ResultMessage arrives
-        pending_commands: dict[str, dict[str, Any]] = {}  # tool_id -> {telemetry, command_start_time}
-        processed_results: set[str] = set()  # Track duplicate ResultMessages
-        sequence_number = 0
-
-        # Per-message telemetry (SDK messages). The list index is the
-        # assistant_turn_index attached to commands emitted in that turn.
-        sdk_messages: list[TranscriptMessage] = []
-        last_assistant_message_index: int | None = None  # Track last AssistantMessage to populate with final tokens
-        # The SDK does not surface a "message started" event, so we approximate
-        # generation_duration_ms as wall-clock between SDK events: previous tool
-        # result (or turn start) to AssistantMessage arrival.
-        last_event_monotonic: float = turn_start_time
-        last_event_wall: datetime = datetime.now()
-
-        # SDK ResultMessage token usage (captured from final message)
-        sdk_result_usage: dict[str, Any] | None = None
-        # Cumulative per-model billing (authoritative for token_usage + cost —
-        # see _build_token_usage). Captured from the final ResultMessage.
-        sdk_result_model_usage: dict[str, Any] | None = None
-        sdk_result_cost: float | None = None
-        num_turns: int | None = None
-        # Diagnostic summary of the final ResultMessage (status + error fields).
-        # Populated on every ResultMessage (last one wins). Consumed by the
-        # session-id retention branch, the debug-log path, and the error-path
-        # formatter; persisted on TurnRecord only on the success path (the
-        # error paths raise before the TurnRecord constructor runs).
-        sdk_result_summary: ResultSummary | None = None
-
-        # Model identifier from AssistantMessage (last one wins)
-        sdk_model_used: str | None = None
-
-        # Per-emission output_tokens recovered from raw stream events.
-        # The CLI emits AssistantMessage.usage.output_tokens with only a
-        # partial streaming snapshot (anthropics/claude-code#22686); the
-        # authoritative cumulative count for an API call arrives later, on
-        # that call's ``message_delta`` stream event.
-        #
-        # The ``message_delta`` event has no message_id, but the preceding
-        # ``message_start`` does, and both bracket the same API call. So we
-        # track the in-flight message_id (current_stream_message_id) and, when
-        # the delta arrives, split the call's cumulative output_tokens across
-        # that call's block-emissions (emissions_by_id) by a content-length
-        # proxy (emission_proxies_by_id) via _distribute_output_tokens. This
-        # fixes both the off-by-one of the old "stamp on the next message"
-        # scheme (which credited call N's output to call N+1) and the
-        # all-on-the-first-block dump (which left tool emissions reading 0).
-        # input / cache stay on the first emission only — those are per-call
-        # read costs, not generated per block.
-        #
-        # pending_delta_output_tokens is retained only as a fallback for
-        # streams that never surface a message_start id (legacy SDKs / mocks).
-        pending_delta_output_tokens: int | None = None
-        current_stream_message_id: str | None = None
-        emissions_by_id: dict[str, list[AssistantMessageTelemetry]] = {}
-        emission_proxies_by_id: dict[str, list[int]] = {}
-
-        # Anthropic's CLI splits one API call into multiple "assistant"
-        # JSON events (one per content-block kind) that all share the
-        # same ``message_id`` and repeat the SAME usage dict. Summing
-        # tokens across them double-counts. We populate tokens only on
-        # the first AssistantMessage for each id; subsequent ones for
-        # the same id get zeros so naive sums reconcile with the
-        # iteration aggregate.
-        seen_message_ids: set[str] = set()
-
-        # Whether the most recent AssistantMessage carried a ``message_id``.
-        # Used to gate the ResultMessage backfill *per-message* (not per-turn):
-        # if the SDK emits some events with an id and some without (mixed
-        # streams), we want the backfill to apply only to the last one when
-        # it lacked an id, and stay suppressed when it had one.
-        last_message_had_id: bool = False
-
-        # Count of AssistantMessage objects in this turn
-        assistant_turn_count = 0
-
-        # Capture stderr for debugging
-        stderr_lines = []
-
-        def capture_stderr(line: str) -> None:
-            stderr_lines.append(line)
 
         # Event emission: the agent is the SOLE emitter. Events fan out to an
         # internal EventCollector (which assembles the TurnRecord — the single,
@@ -477,130 +836,41 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         collector = EventCollector()
         emit = CompositeStreamCallback([c for c in (collector, stream_callback) if c is not None])
 
-        # Turn/tool bracketing state (self-describing event tree).
-        current_turn_id: str | None = None
-        tool_turn_ids: dict[str, str] = {}  # tool_id -> the turn_id that spawned it
-        emitted_tool_ends: set[str] = set()  # tool_ids already closed with a ToolEndEvent
-        finalized = False
-        # Resolved model id, captured for cost backfill in _finalize. Set once the
-        # SDK env/model is resolved (below); stays None if we crash before then.
-        effective_model: str | None = None
+        # All per-turn scratch state lives on the state object so each stream
+        # branch is a method. Built BEFORE the try so the except/finally can
+        # finalize even when setup (_build_claude_query) crashes — `timeout_hit`
+        # is set by both the in-loop deadline break and the watchdog callback;
+        # Python bool assignment is atomic under the GIL, so no lock is needed.
+        state = _ClaudeTurnState(
+            self,
+            emit=emit,
+            collector=collector,
+            task_id=task_id,
+            user_input=user_input,
+            iteration=self._iteration,
+            max_turns=max_turns,
+            log=self._log,
+            turn_start_time=turn_start_time,
+            deadline=deadline,
+        )
 
-        def _turn_tokens(turn_id: str) -> TokenUsage | None:
-            """Best-effort per-turn tokens, summed over that call's block emissions."""
-            records = emissions_by_id.get(turn_id)
-            if not records:
-                return None
-            total = TokenUsage()
-            for rec in records:
-                total = total + TokenUsage(
-                    uncached_input_tokens=rec.input_tokens,
-                    output_tokens=rec.output_tokens,
-                    cache_creation_input_tokens=rec.cache_creation_tokens,
-                    cache_read_input_tokens=rec.cache_read_tokens,
-                )
-            return total
+        # stderr capture STAYS a communicate local: it is wired into the SDK
+        # options during setup (a construction-order hazard if it lived on the
+        # state, which is built first), and only the error ladder reads its lines.
+        stderr_lines: list[str] = []
 
-        # Single finalization path: close orphaned tool calls + the open turn,
-        # then emit the terminal AgentEndEvent carrying the cumulative usage and
-        # the per-message/token payload. The EventCollector reduces all of this
-        # into the TurnRecord. Idempotent (guarded by ``finalized``) so it fires
-        # exactly once whether the turn completed, crashed, or timed out.
-        def _finalize(status: AgentEndStatus, *, crashed: bool, crash_reason: str | None) -> None:
-            nonlocal finalized, current_turn_id, effective_model
-            if finalized:
-                return
-            finalized = True
-
-            commands = self._finalize_commands(pending_commands, messages)
-            # Close any tool that never produced a result with an unresolved end.
-            for cmd in commands:
-                if cmd.tool_id in emitted_tool_ends:
-                    continue
-                emitted_tool_ends.add(cmd.tool_id)
-                emit.on_event(
-                    ToolEndEvent(
-                        task_id=task_id,
-                        turn_id=tool_turn_ids.get(cmd.tool_id, current_turn_id or ""),
-                        tool=cmd,
-                        status=ToolEndStatus.UNRESOLVED,
-                    )
-                )
-
-            # max_turns exhaustion (clean turns only): ResultMessage subtype OR num_turns > max_turns.
-            max_turns_exhausted = not crashed and (
-                self._is_max_turns_result(sdk_result_summary)
-                or (max_turns is not None and num_turns is not None and num_turns > max_turns)
-            )
-            if max_turns_exhausted and status == AgentEndStatus.COMPLETED:
-                status = AgentEndStatus.MAX_TURNS_EXHAUSTED
-                self._log.warning("Agent exhausted max_turns (%s); turn ended without completing", max_turns)
-
-            # Close the open inner turn. AgentEndStatus and TurnEndStatus share
-            # identical members; map by value (no duplicated dict / KeyError risk).
-            if current_turn_id is not None:
-                emit.on_event(
-                    TurnEndEvent(
-                        task_id=task_id,
-                        turn_id=current_turn_id,
-                        status=TurnEndStatus(status.value),
-                        tokens=_turn_tokens(current_turn_id),
-                    )
-                )
-                current_turn_id = None
-
-            usage = (
-                self._build_token_usage(
-                    sdk_messages, sdk_result_usage, sdk_result_cost, sdk_result_model_usage, effective_model
-                )
-                or TokenUsage()
-            )
-
-            try:
-                agent_output = self._format_messages(messages)
-            except Exception as fmt_err:
-                logger.warning("Failed to format messages for AgentEndEvent; using placeholder", exc_info=True)
-                agent_output = f"<partial record: message formatting failed: {type(fmt_err).__name__}: {fmt_err}>"
-
-            emit.on_event(
-                AgentEndEvent(
-                    task_id=task_id,
-                    status=status,
-                    usage=usage,
-                    iteration=self._iteration,
-                    user_input=user_input,
-                    agent_output=agent_output,
-                    model_used=sdk_model_used,
-                    assistant_turn_count=assistant_turn_count,
-                    messages=list(sdk_messages),
-                    num_turns=num_turns,
-                    max_turns_exhausted=max_turns_exhausted,
-                    result_summary=sdk_result_summary,
-                    crashed=crashed,
-                    crash_reason=crash_reason,
-                    duration_seconds=time.monotonic() - turn_start_time,
-                )
-            )
-
-            if crashed:
-                try:
-                    self.pending_turn = collector.build_turn_record()
-                except Exception:
-                    logger.exception("Failed to build partial turn record; continuing without partial")
-                    self.pending_turn = None
+        def capture_stderr(line: str) -> None:
+            stderr_lines.append(line)
 
         try:
-            # Process plugins: copy from config and replace env vars in paths
-            plugins = process_plugins(self.config.plugins or [], log=self._log)  # type: ignore[arg-type]
-
-            # Build env overrides and resolve model for the configured API route.
-            # Precedence: task/CLI agent.model > route default (e.g. BEDROCK_MODEL).
-            env, route_model = self._build_sdk_env(
-                self.route,
-                path_prepend=self._env_path_prepend,
-                plugin_tools_dir=self._plugin_tools_dir,
+            options, transport, effective_model = self._build_claude_query(
+                user_input, timeout, max_turns, capture_stderr
             )
-            effective_model = self._resolve_effective_model(self.config.model, env, route_model)
+            # Set on the state BEFORE the AgentStart emit and any finalize path
+            # (finalize reads it for cost backfill); stays None if setup crashed.
+            state.effective_model = effective_model
+            if transport is not None:
+                self._active_transport = transport
 
             # Agent lifecycle opens here (the agent — not the orchestrator — owns it).
             emit.on_event(
@@ -612,79 +882,24 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 )
             )
 
-            disallowed_tools = list(self.config.disallowed_tools or [])
-            # Do not allow ToolSearch. This is required to keep Bedrock backend in sync with the other backends.
-            if "ToolSearch" not in disallowed_tools:
-                disallowed_tools.append("ToolSearch")
-
-            # as_posix(), not str(): bash on Windows strips backslashes from unquoted
-            # paths, so a redirect like `> D:\foo\bar` ends up writing to "Dfoobar".
-            options = ClaudeAgentOptions(
-                cwd=self.working_directory.as_posix(),
-                permission_mode=self.config.permission_mode.value,
-                allowed_tools=self.config.allowed_tools or [],
-                disallowed_tools=disallowed_tools,
-                model=effective_model,
-                max_turns=max_turns,
-                plugins=plugins,  # type: ignore[arg-type]
-                stderr=capture_stderr,  # Capture stderr for better error messages
-                env=env,
-                # Subscribe to raw stream events so we can recover the
-                # *cumulative* output_tokens for each emission from
-                # ``message_delta.usage`` events. Claude Code CLI ships
-                # AssistantMessage.usage.output_tokens with only a partial
-                # streaming snapshot (see anthropics/claude-code#22686),
-                # so summing per-message values undercounts by 10x+.
-                # ``message_delta`` carries the final per-emission output
-                # tally; we stamp that onto the next AssistantMessage we
-                # record. Without this flag StreamEvents are suppressed
-                # by the SDK.
-                include_partial_messages=True,
-                system_prompt=self.config.system_prompt,
-                setting_sources=self.config.setting_sources if self.config.setting_sources is not None else ["project"],
-                resume=self._session_id,
-                settings=json.dumps(self.config.claude_settings)
-                if isinstance(self.config.claude_settings, dict)
-                else self.config.claude_settings,
-                mcp_servers=self._extra_mcp_servers,
-                **self.config.sdk_options,
-            )
-
-            # Dump SDK options for later inspection (captures all 37+ fields including defaults)
-            self._sdk_options_dump = dump_dataclass(options)
-
-            # When a timeout is set, pre-construct the transport ourselves and
-            # hand it to query() so we retain a reference to the subprocess
-            # for hard-kill. The SDK's default path creates this internally
-            # and never exposes it. When no timeout is set we pass
-            # transport=None so the SDK uses its own default (keeps the door
-            # open for tests that mock query() without needing a real CLI).
-            transport: SubprocessCLITransport | None = None
-            if timeout is not None:
-                transport = SubprocessCLITransport(prompt=user_input, options=options)
-                self._active_transport = transport
-
-            # IMPORTANT: the transport is captured in the closure (not read
-            # from self._active_transport) so a stale watchdog from an
-            # earlier turn cannot kill a subsequent turn's subprocess.
+            # IMPORTANT: the transport is captured in the closure (not read from
+            # self._active_transport) so a stale watchdog from an earlier turn
+            # cannot kill a subsequent turn's subprocess.
             watchdog_target = transport
 
             def _on_turn_timeout() -> None:
-                nonlocal timeout_hit
-                timeout_hit = True
+                state.timeout_hit = True
                 self._kill_transport(watchdog_target)
 
-            # Use the query function for one-shot interaction. Only forward
-            # the transport kwarg when we actually built one — otherwise keep
-            # the call shape identical to the pre-timeout code path so mocks
-            # with strict signatures (prompt, options) keep working.
+            # Only forward the transport kwarg when we actually built one —
+            # otherwise keep the call shape identical to the no-timeout path so
+            # mocks with strict (prompt, options) signatures keep working.
             query_kwargs: dict[str, Any] = {"prompt": user_input, "options": options}
             if transport is not None:
                 query_kwargs["transport"] = transport
             self._log.debug("Starting agent query stream...")
             # OS-thread watchdog: fires at `timeout` seconds regardless of
-            # event-loop liveness. Immune to anyio cancel-scope suppression,
-            # which is why an asyncio.sleep-based watchdog was unreliable.
+            # event-loop liveness. Immune to anyio cancel-scope suppression.
             with ThreadedWatchdog(
                 timeout_seconds=timeout,
                 on_timeout=_on_turn_timeout,
@@ -692,388 +907,15 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 label=f"Turn timeout ({timeout:g}s)" if timeout else "turn_timeout",
             ):
                 async for message in query(**query_kwargs):
-                    # Wall-clock guard inside the loop. Triggers the cooperative
-                    # exit path when messages are still flowing; the watchdog is
-                    # the fallback when they aren't.
+                    # Wall-clock guard at the TOP of the loop: it breaks BEFORE
+                    # the message is dispatched (and appended), so the
+                    # over-deadline message is DISCARDED — no append, no events.
+                    # Do NOT relocate this to a post-loop check.
                     if deadline is not None and time.monotonic() > deadline:
-                        timeout_hit = True
+                        state.timeout_hit = True
                         self._log.warning("Turn timeout reached mid-stream; breaking out of message loop")
                         break
-
-                    messages.append(message)
-                    msg_type = type(message).__name__
-
-                    # Raw, untruncated dump of every SDK event exactly as it
-                    # arrives — opt-in via CODER_EVAL_RAW_SDK_LOG so normal runs
-                    # stay quiet. Use this to inspect what (if any) token usage
-                    # rides on each message type (e.g. Agent tool-result vs.
-                    # TaskNotification vs. ResultMessage).
-                    log_raw_sdk_event(self._log, repr_target=message, type=msg_type)
-
-                    # Two-phase command telemetry capture using type guards
-
-                    # PHASE 1: Capture ToolUseBlock + build AssistantTurn record.
-                    if _is_assistant_message(message):
-                        message_arrival_monotonic = time.monotonic()
-                        message_arrival_wall = datetime.now()
-                        generation_started_wall = last_event_wall
-                        generation_duration_ms = (message_arrival_monotonic - last_event_monotonic) * 1000
-
-                        current_turn_index = len(sdk_messages)
-                        assistant_turn_count += 1
-                        model_attr = getattr(message, "model", None)
-                        if isinstance(model_attr, str):
-                            sdk_model_used = model_attr
-
-                        # Inner-turn boundary: one TurnStart per new message_id (one
-                        # API call). Split emissions that share an id stay on the
-                        # same turn. Falls back to a synthetic id when none is set.
-                        raw_mid = getattr(message, "message_id", None)
-                        turn_id = raw_mid if isinstance(raw_mid, str) else f"turn-{assistant_turn_count}"
-                        if turn_id != current_turn_id:
-                            if current_turn_id is not None:
-                                emit.on_event(
-                                    TurnEndEvent(
-                                        task_id=task_id,
-                                        turn_id=current_turn_id,
-                                        status=TurnEndStatus.COMPLETED,
-                                        tokens=_turn_tokens(current_turn_id),
-                                    )
-                                )
-                            current_turn_id = turn_id
-                            emit.on_event(TurnStartEvent(task_id=task_id, turn_id=turn_id, model=sdk_model_used))
-
-                        content = getattr(message, "content", None)
-                        turn_content_blocks: list[ContentBlock] = []
-                        turn_tool_use_ids: list[str] = []
-                        # Length of generated content in this emission, used to
-                        # weight its share of the call's output_tokens.
-                        emission_content_chars = 0
-
-                        # Content can be a list of blocks (text, thinking, tool_use, etc.)
-                        if content and isinstance(content, list):
-                            for block in content:
-                                block_seq = len(turn_content_blocks)
-
-                                if _is_tool_use_block(block):
-                                    tool_args = block.input if isinstance(block.input, dict) else {"raw": block.input}
-                                    emission_content_chars += len(str(getattr(block, "name", "") or "")) + len(
-                                        json.dumps(tool_args, default=str)
-                                    )
-                                    command_start_time = time.monotonic()  # Precise command start time
-
-                                    telemetry = CommandTelemetry(
-                                        tool_name=block.name,
-                                        tool_id=block.id,
-                                        timestamp=message_arrival_wall,
-                                        generation_completed_at=message_arrival_wall,
-                                        assistant_turn_index=current_turn_index,
-                                        parameters=block.input
-                                        if isinstance(block.input, dict)
-                                        else {"raw": block.input},
-                                        sequence_number=sequence_number,
-                                        result_status=None,  # Pending result
-                                        duration_ms=None,  # Not complete yet
-                                    )
-
-                                    # Store command with start time for duration calculation
-                                    pending_commands[block.id] = {
-                                        "telemetry": telemetry,
-                                        "command_start_time": command_start_time,
-                                    }
-                                    sequence_number += 1
-
-                                    turn_content_blocks.append(
-                                        ContentBlock(
-                                            block_type="tool_use",
-                                            sequence=block_seq,
-                                            tool_use_id=block.id,
-                                        )
-                                    )
-                                    turn_tool_use_ids.append(block.id)
-
-                                    tool_turn_ids[block.id] = current_turn_id or ""
-                                    emit.on_event(
-                                        ToolStartEvent(
-                                            task_id=task_id,
-                                            turn_id=current_turn_id or "",
-                                            tool=telemetry,
-                                        )
-                                    )
-                                elif _is_thinking_block(block):
-                                    thinking_text = getattr(block, "thinking", None)
-                                    if thinking_text:
-                                        emission_content_chars += len(str(thinking_text))
-                                    turn_content_blocks.append(
-                                        ContentBlock(
-                                            block_type="thinking",
-                                            sequence=block_seq,
-                                            thinking=str(thinking_text) if thinking_text else None,
-                                            signature=getattr(block, "signature", None),
-                                        )
-                                    )
-                                elif _is_text_block(block):
-                                    text_value = str(block.text)
-                                    emission_content_chars += len(text_value)
-                                    turn_content_blocks.append(
-                                        ContentBlock(
-                                            block_type="text",
-                                            sequence=block_seq,
-                                            text=text_value,
-                                        )
-                                    )
-                                    emit.on_event(
-                                        TextChunkEvent(
-                                            task_id=task_id,
-                                            turn_id=current_turn_id or "",
-                                            text=text_value,
-                                        )
-                                    )
-
-                        # Per-message token usage with two corrections layered on
-                        # the raw SDK values:
-                        #
-                        # 1. **Dedup by message_id.** Claude Code's CLI splits one
-                        #    Anthropic API call into multiple "assistant" JSON
-                        #    events (one per content-block kind) that share a
-                        #    ``message_id`` and repeat the SAME usage dict.
-                        #    Naively recording usage on each duplicates input /
-                        #    cache_creation / cache_read. We populate tokens
-                        #    only on the first AssistantMessage per id and
-                        #    write zeros on follow-ups so naive sums match the
-                        #    iteration aggregate.
-                        # 2. **Override output_tokens from message_delta.** The
-                        #    CLI's per-event ``usage.output_tokens`` is a
-                        #    streaming snapshot, not cumulative (see
-                        #    anthropics/claude-code#22686). We capture the
-                        #    final cumulative value from the
-                        #    ``message_delta`` stream event handler below and
-                        #    stamp it here. Falls back to the raw SDK value
-                        #    when ``include_partial_messages`` is off or the
-                        #    delta wasn't observed.
-                        msg_usage = getattr(message, "usage", None) or {}
-                        message_id = getattr(message, "message_id", None)
-                        # Branch identity: the Task tool_use_id that spawned this
-                        # message's sub-agent (None for the main thread). Sub-agent
-                        # calls bubble up into this same stream; this is the only
-                        # link back to which branch they belong to — needed to model
-                        # the cache cascade as a tree, not a flat list.
-                        parent_tool_use_id = getattr(message, "parent_tool_use_id", None)
-                        is_duplicate_emission = isinstance(message_id, str) and message_id in seen_message_ids
-                        if isinstance(message_id, str):
-                            seen_message_ids.add(message_id)
-                            last_message_had_id = True
-                        else:
-                            last_message_had_id = False
-
-                        if is_duplicate_emission:
-                            # Same API call, additional content block — billing
-                            # was already accounted for on the first one.
-                            in_tok = out_tok = cw_tok = cr_tok = rt_tok = 0
-                        else:
-                            in_tok = int(msg_usage.get("input_tokens", 0) or 0)
-                            cw_tok = int(msg_usage.get("cache_creation_input_tokens", 0) or 0)
-                            cr_tok = int(msg_usage.get("cache_read_input_tokens", 0) or 0)
-                            rt_tok = int(msg_usage.get("reasoning_tokens", 0) or 0)
-                            # Prefer the stream-event delta value if we got one;
-                            # else fall back to the (partial) SDK value so we
-                            # don't regress relative to pre-fix behavior.
-                            if pending_delta_output_tokens is not None:
-                                out_tok = pending_delta_output_tokens
-                            else:
-                                out_tok = int(msg_usage.get("output_tokens", 0) or 0)
-                            # Consume the pending value; the next emission will
-                            # set its own via the StreamEvent handler.
-                            pending_delta_output_tokens = None
-
-                        assistant_telemetry = AssistantMessageTelemetry(
-                            started_at=generation_started_wall,
-                            completed_at=message_arrival_wall,
-                            generation_duration_ms=max(0.0, generation_duration_ms),
-                            content_blocks=turn_content_blocks,
-                            tool_use_ids=turn_tool_use_ids,
-                            input_tokens=in_tok,
-                            output_tokens=out_tok,
-                            cache_creation_tokens=cw_tok,
-                            cache_read_tokens=cr_tok,
-                            reasoning_tokens=rt_tok,
-                            stop_reason=(
-                                getattr(message, "stop_reason", None)
-                                if isinstance(getattr(message, "stop_reason", None), str)
-                                else None
-                            ),
-                            model=sdk_model_used,
-                            message_id=message_id if isinstance(message_id, str) else None,
-                            parent_tool_use_id=(parent_tool_use_id if isinstance(parent_tool_use_id, str) else None),
-                        )
-                        sdk_messages.append(assistant_telemetry)
-                        # Register every block-emission of this id (with its
-                        # content-length proxy) so the matching ``message_delta``
-                        # can split the call's output_tokens across them.
-                        if isinstance(message_id, str):
-                            emissions_by_id.setdefault(message_id, []).append(assistant_telemetry)
-                            emission_proxies_by_id.setdefault(message_id, []).append(emission_content_chars)
-                        # Track last AssistantMessage to populate with final tokens from ResultMessage
-                        last_assistant_message_index = len(sdk_messages) - 1
-
-                        # Mark this point as the latest event for the next
-                        # generation_duration_ms calculation.
-                        last_event_monotonic = message_arrival_monotonic
-                        last_event_wall = message_arrival_wall
-
-                    # TaskNotification fires when an Agent-tool spawn finishes,
-                    # but its ``usage`` is lossy (omits cache-read). We capture
-                    # per-sub-agent usage from the Agent tool-result instead (see
-                    # the _is_user_message branch). This guard stays solely to
-                    # stop _is_sdk_result_message from misreading it (session_id
-                    # + usage would otherwise match).
-                    elif _is_task_notification(message):
-                        pass
-
-                    # Capture SDK ResultMessage with token usage (check BEFORE tool results
-                    # to avoid misclassification if SDK message also has tool_use_id/is_error)
-                    elif _is_sdk_result_message(message):
-                        sdk_result_usage = getattr(message, "usage", None)
-                        sdk_result_model_usage = getattr(message, "model_usage", None)
-                        sdk_result_cost = getattr(message, "total_cost_usd", None)
-                        num_turns = getattr(message, "num_turns", None)
-                        sdk_result_summary = self._summarize_result(message)
-                        # Only advance session_id on clean turns. Resuming
-                        # via --resume from an errored ResultMessage often
-                        # reproduces the same crash (e.g. Windows PowerShell
-                        # binary stdout case), so we keep the prior good id.
-                        new_session_id = getattr(message, "session_id", None)
-                        if sdk_result_summary is not None and sdk_result_summary.is_error:
-                            self._log.debug(
-                                "is_error ResultMessage; not advancing session_id (kept %s)",
-                                self._session_id,
-                            )
-                        else:
-                            if new_session_id != self._session_id:
-                                self._log.debug("session_id changed: %s -> %s", self._session_id, new_session_id)
-                            self._session_id = new_session_id
-
-                        # Fallback: retro-populate the last AssistantMessage
-                        # from ResultMessage.usage when per-message capture
-                        # was not in effect for *that specific message* —
-                        # i.e. it lacked a ``message_id`` (legacy SDKs / mock
-                        # streams). We gate per-message rather than per-turn
-                        # so mixed streams (some emissions with id, some
-                        # without) still backfill the trailing id-less one
-                        # without clobbering the id'd emissions whose tokens
-                        # were already captured correctly. When per-message
-                        # capture IS working, follow-up AssistantMessages
-                        # from the same API call are intentionally zeroed;
-                        # overwriting them with the ResultMessage cumulative
-                        # would double-count against the first message.
-                        if last_assistant_message_index is not None and sdk_result_usage and not last_message_had_id:
-                            last_msg = sdk_messages[last_assistant_message_index]
-                            if isinstance(last_msg, AssistantMessageTelemetry):
-                                last_msg.input_tokens = int(sdk_result_usage.get("input_tokens", 0) or 0)
-                                last_msg.output_tokens = int(sdk_result_usage.get("output_tokens", 0) or 0)
-                                last_msg.cache_creation_tokens = int(
-                                    sdk_result_usage.get("cache_creation_input_tokens", 0) or 0
-                                )
-                                last_msg.cache_read_tokens = int(
-                                    sdk_result_usage.get("cache_read_input_tokens", 0) or 0
-                                )
-                                last_msg.reasoning_tokens = int(sdk_result_usage.get("reasoning_tokens", 0) or 0)
-
-                    # Raw Anthropic stream events (only delivered when
-                    # ``include_partial_messages=True``). We use these
-                    # exclusively to recover the cumulative
-                    # ``output_tokens`` for each emission — the CLI's
-                    # AssistantMessage.usage.output_tokens carries only a
-                    # streaming snapshot (anthropics/claude-code#22686).
-                    # The ``message_delta`` event carries the final value
-                    # right before ``message_stop``; we stash it so the
-                    # next AssistantMessage we record can stamp it on.
-                    elif isinstance(getattr(message, "event", None), dict):
-                        evt: dict[str, Any] = getattr(message, "event", None) or {}
-                        evt_type = evt.get("type")
-                        if evt_type == "message_start":
-                            # Opens an API call; carries the message_id that the
-                            # call's later message_delta (which has none) belongs to.
-                            mid = (evt.get("message") or {}).get("id")
-                            current_stream_message_id = mid if isinstance(mid, str) else None
-                        elif evt_type == "message_delta":
-                            # Carries the authoritative cumulative output_tokens
-                            # for the in-flight call. Split it across that call's
-                            # block-emissions by content length so each emission
-                            # reads a sensible share (and the parts sum exactly).
-                            # Fall back to the stamp-on-next scheme only when we
-                            # never saw a message_start id (legacy SDKs / mocks).
-                            usage = evt.get("usage") or {}
-                            ot = usage.get("output_tokens")
-                            if isinstance(ot, int):
-                                records: list[AssistantMessageTelemetry] | None = None
-                                proxies: list[int] = []
-                                if current_stream_message_id is not None:
-                                    records = emissions_by_id.get(current_stream_message_id)
-                                    proxies = emission_proxies_by_id.get(current_stream_message_id, [])
-                                if records:
-                                    shares = _distribute_output_tokens(ot, proxies)
-                                    for record, share in zip(records, shares, strict=False):
-                                        record.output_tokens = share
-                                else:
-                                    # No message_start id to attribute the delta to:
-                                    # fall back to stamping it on the next emission.
-                                    pending_delta_output_tokens = ot
-
-                    # PHASE 2: Process tool results from UserMessage content blocks.
-                    # The SDK delivers tool results as UserMessage objects containing
-                    # ToolResultBlock in their content list (not as standalone messages).
-                    elif _is_user_message(message):
-                        # A user/tool-result message is what Claude reads
-                        # next; the LLM's generation clock for the *next*
-                        # assistant turn starts here.
-                        last_event_monotonic = time.monotonic()
-                        last_event_wall = datetime.now()
-
-                        # A sub-agent's TERMINAL generation rides on this
-                        # message's ``tool_use_result`` (never as a streamed
-                        # assistant message). Materialize it as a
-                        # ``parent_tool_use_id``-tagged transcript message so the
-                        # sub-agent's full lifecycle is captured and per-sub-agent
-                        # usage stays derivable by grouping on that id.
-                        sub_msg = self._synthesize_subagent_terminal_message(message, sdk_model_used)
-                        if sub_msg is not None:
-                            sdk_messages.append(sub_msg)
-
-                        content = getattr(message, "content", None)
-                        if content and isinstance(content, list):
-                            for block in content:
-                                if _is_tool_result_block(block):
-                                    # Extract tool_name before resolve (defensive: resolve could remove entries)
-                                    tool_name = ""
-                                    if block.tool_use_id in pending_commands:
-                                        tool_name = pending_commands[block.tool_use_id]["telemetry"].tool_name
-                                    self._resolve_pending_command(
-                                        block.tool_use_id,
-                                        getattr(block, "is_error", False) or False,
-                                        block.content,
-                                        pending_commands,
-                                        processed_results,
-                                    )
-                                    is_error_flag = getattr(block, "is_error", False) or False
-                                    resolved = pending_commands.get(block.tool_use_id, {}).get("telemetry")
-                                    tool_for_event = resolved or CommandTelemetry(
-                                        tool_name=tool_name or "unknown",
-                                        tool_id=block.tool_use_id,
-                                        timestamp=datetime.now(),
-                                        result_status="error" if is_error_flag else "success",
-                                        result_summary=format_payload(block.content),
-                                    )
-                                    status = self._tool_end_status(is_error_flag, block.content)
-                                    emitted_tool_ends.add(block.tool_use_id)
-                                    emit.on_event(
-                                        ToolEndEvent(
-                                            task_id=task_id,
-                                            turn_id=tool_turn_ids.get(block.tool_use_id, current_turn_id or ""),
-                                            tool=tool_for_event,
-                                            status=status,
-                                        )
-                                    )
+                    state.dispatch(message)
 
             self._log.debug("Agent query stream ended")
 
@@ -1081,47 +923,36 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             # The threaded watchdog cancels the running task via
             # loop.call_soon_threadsafe(task.cancel) when it fires. If that
             # cancel landed *because* of the timeout, re-raise as
-            # TurnTimeoutError so the retry system sees a terminal timeout
-            # (not a transient cancel). External cancels (not our watchdog)
-            # propagate unchanged.
-            if self._timed_out(timeout_hit, deadline):
-                self._state = AgentState.ERROR
+            # TurnTimeoutError so the retry system sees a terminal timeout (not a
+            # transient cancel). External cancels propagate unchanged.
+            if self._timed_out(state.timeout_hit, deadline):
                 assert timeout is not None
-                _finalize(AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout))
-                raise TurnTimeoutError(timeout, iteration=self._iteration) from None
+                self._finalize_and_raise_timeout(state.finalize, timeout)
             raise
         except ProcessError as e:
-            # When the watchdog SIGKILLs the subprocess, the SDK surfaces it
-            # as a ProcessError (exit code -9). Classify as a timeout so the
-            # retry system doesn't treat it as a transient AGENT_CRASH.
-            if self._timed_out(timeout_hit, deadline):
-                self._state = AgentState.ERROR
+            # When the watchdog SIGKILLs the subprocess, the SDK surfaces it as a
+            # ProcessError (exit code -9). Classify as a timeout so the retry
+            # system doesn't treat it as a transient AGENT_CRASH.
+            if self._timed_out(state.timeout_hit, deadline):
                 assert timeout is not None
-                _finalize(AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout))
-                raise TurnTimeoutError(timeout, iteration=self._iteration) from e
-            if not self._max_turns_short_circuit(sdk_result_summary, f"ProcessError(exit={e.exit_code})"):
-                self._state = AgentState.ERROR
+                self._finalize_and_raise_timeout(state.finalize, timeout, cause=e)
+            if not self._max_turns_short_circuit(state.sdk_result_summary, f"ProcessError(exit={e.exit_code})"):
                 stderr = self._build_stderr_message(e.stderr, stderr_lines)
-                error_info = self._format_error_summary(sdk_result_summary)
+                error_info = self._format_error_summary(state.sdk_result_summary)
                 detail = error_info or stderr
                 message = f"CLI process failed (exit code {e.exit_code}): {detail}"
-                _finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason=truncate_crash_message(message))
-                raise AgentCrashError(message) from e
+                self._finalize_and_raise_crash(state.finalize, message, cause=e)
         except Exception as e:
-            # Same race as above: the watchdog may have killed the subprocess
-            # and the SDK may have re-raised as a generic Exception. Check
-            # both the flag AND the wall-clock in case the flag flip races
-            # with our catch-entry.
-            if self._timed_out(timeout_hit, deadline):
-                self._state = AgentState.ERROR
+            # Same race as above: the watchdog may have killed the subprocess and
+            # the SDK may have re-raised as a generic Exception. Check both the
+            # flag AND the wall-clock in case the flag flip races with our catch.
+            if self._timed_out(state.timeout_hit, deadline):
                 assert timeout is not None
-                _finalize(AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout))
-                raise TurnTimeoutError(timeout, iteration=self._iteration) from e
-            if not self._max_turns_short_circuit(sdk_result_summary, "Generic Exception"):
-                self._state = AgentState.ERROR
+                self._finalize_and_raise_timeout(state.finalize, timeout, cause=e)
+            if not self._max_turns_short_circuit(state.sdk_result_summary, "Generic Exception"):
                 # The SDK wraps ProcessError as a generic Exception via the message stream.
                 # Read the captured ResultMessage summary (if any) for diagnostic context.
-                error_info = self._format_error_summary(sdk_result_summary)
+                error_info = self._format_error_summary(state.sdk_result_summary)
                 cause_stderr = self._extract_cause_stderr(e)
                 stderr = self._build_stderr_message(cause_stderr, stderr_lines)
                 error_details = self._clean_error_message(str(e))
@@ -1130,32 +961,31 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 elif stderr:
                     error_details += f"\nStderr output:\n{stderr}"
                 message = f"Communication with agent failed: {error_details}"
-                _finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason=truncate_crash_message(message))
-                raise AgentCrashError(message) from e
+                self._finalize_and_raise_crash(state.finalize, message, cause=e)
         finally:
             # Auto-finalize any path the except blocks didn't (happy path,
-            # max_turns short-circuit, in-loop timeout break). Guarded by
-            # ``finalized`` so the crash/timeout branches that already finalized
-            # are a no-op here. The AgentEndEvent + the EventCollector-built
-            # TurnRecord are produced exactly once, on every exit path.
-            if not finalized:
-                if timeout_hit:
+            # max_turns short-circuit, in-loop timeout break). Idempotent
+            # (guarded by state.finalized) so the crash/timeout branches that
+            # already finalized are a no-op here. Exactly one AgentEndEvent + one
+            # EventCollector-built TurnRecord are produced on every exit path.
+            if not state.finalized:
+                if state.timeout_hit:
                     assert timeout is not None
-                    _finalize(AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout))
+                    state.finalize(AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout))
                 else:
-                    _finalize(AgentEndStatus.COMPLETED, crashed=False, crash_reason=None)
+                    state.finalize(AgentEndStatus.COMPLETED, crashed=False, crash_reason=None)
             self._active_transport = None
 
         # Only trust `timeout_hit` in the happy path: if the loop completed
         # cleanly, a wall-clock drift during post-loop cleanup would falsely
-        # classify a successful turn as a timeout. The watchdog and in-loop
-        # guard are the authoritative signals. (pending_turn already set by the
-        # _finalize(TIMEOUT) call in the finally above.)
-        if timeout_hit:
+        # classify a successful turn as a timeout. The watchdog and in-loop guard
+        # are the authoritative signals. (pending_turn already set by the
+        # finalize(TIMEOUT) call in the finally above.)
+        if state.timeout_hit:
             assert timeout is not None
             raise TurnTimeoutError(timeout, iteration=self._iteration)
 
-        self._update_state_from_messages(messages)
+        self._update_state_from_messages(state.messages)
 
         # This turn completed successfully — the iteration increment stands.
         self._end_turn_ok()
@@ -1163,6 +993,85 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # The TurnRecord is the EventCollector's reduction of the events emitted
         # above — single, agent-agnostic capture path (no parallel record build).
         return collector.build_turn_record()
+
+    def _build_claude_query(
+        self,
+        user_input: str,
+        timeout: float | None,
+        max_turns: int | None,
+        stderr_callback: Callable[[str], None],
+    ) -> tuple[ClaudeAgentOptions, SubprocessCLITransport | None, str | None]:
+        """Build the SDK options (+ a timeout-only transport) for one turn.
+
+        Returns ``(options, transport, effective_model)``. ``transport`` is None
+        unless a ``timeout`` is set — it is pre-constructed only so the watchdog
+        can hard-kill the subprocess (the SDK's default path creates it internally
+        and never exposes it). ``effective_model`` is the resolved model id (may be
+        None on a DirectRoute with no configured model). ``stderr_callback`` is
+        wired into the options here but owned by ``communicate`` — it must exist
+        before the options are built, and only the error ladder reads its lines.
+        """
+        assert self.working_directory is not None  # guaranteed by communicate's guard above
+
+        # Process plugins: copy from config and replace env vars in paths.
+        plugins = process_plugins(self.config.plugins or [], log=self._log)  # type: ignore[arg-type]
+
+        # Build env overrides and resolve model for the configured API route.
+        # Precedence: task/CLI agent.model > route default (e.g. BEDROCK_MODEL).
+        env, route_model = self._build_sdk_env(
+            self.route,
+            path_prepend=self._env_path_prepend,
+            plugin_tools_dir=self._plugin_tools_dir,
+        )
+        effective_model = self._resolve_effective_model(self.config.model, env, route_model)
+
+        disallowed_tools = list(self.config.disallowed_tools or [])
+        # Do not allow ToolSearch. This is required to keep Bedrock backend in sync with the other backends.
+        if "ToolSearch" not in disallowed_tools:
+            disallowed_tools.append("ToolSearch")
+
+        # as_posix(), not str(): bash on Windows strips backslashes from unquoted
+        # paths, so a redirect like `> D:\foo\bar` ends up writing to "Dfoobar".
+        options = ClaudeAgentOptions(
+            cwd=self.working_directory.as_posix(),
+            permission_mode=self.config.permission_mode.value,
+            allowed_tools=self.config.allowed_tools or [],
+            disallowed_tools=disallowed_tools,
+            model=effective_model,
+            max_turns=max_turns,
+            plugins=plugins,  # type: ignore[arg-type]
+            stderr=stderr_callback,  # Capture stderr for better error messages
+            env=env,
+            # Subscribe to raw stream events so we can recover the *cumulative*
+            # output_tokens for each emission from ``message_delta.usage`` events.
+            # Claude Code CLI ships AssistantMessage.usage.output_tokens with only
+            # a partial streaming snapshot (anthropics/claude-code#22686), so
+            # summing per-message values undercounts by 10x+. Without this flag
+            # StreamEvents are suppressed by the SDK.
+            include_partial_messages=True,
+            system_prompt=self.config.system_prompt,
+            setting_sources=self.config.setting_sources if self.config.setting_sources is not None else ["project"],
+            resume=self._session_id,
+            settings=json.dumps(self.config.claude_settings)
+            if isinstance(self.config.claude_settings, dict)
+            else self.config.claude_settings,
+            mcp_servers=self._extra_mcp_servers,
+            **self.config.sdk_options,
+        )
+
+        # Dump SDK options for later inspection (captures all 37+ fields including defaults).
+        self._sdk_options_dump = dump_dataclass(options)
+
+        # When a timeout is set, pre-construct the transport so we retain a
+        # reference to the subprocess for hard-kill; the SDK's default path
+        # creates this internally and never exposes it. When no timeout is set we
+        # leave it None so the SDK uses its own default (keeps the door open for
+        # tests that mock query() without a real CLI).
+        transport: SubprocessCLITransport | None = None
+        if timeout is not None:
+            transport = SubprocessCLITransport(prompt=user_input, options=options)
+
+        return options, transport, effective_model
 
     async def stop(self) -> None:
         """Stop the agent and clean up resources."""
