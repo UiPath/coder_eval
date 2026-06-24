@@ -10,6 +10,8 @@ directory mounted to /work/output, and --output argument using container path.
 
 from __future__ import annotations
 
+import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -18,9 +20,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from coder_eval.isolation.docker_runner import (
+    CLAUDE_COPY_IGNORE,
+    CLAUDE_COPY_MAX_ATTEMPTS,
     CONTAINER_ENTRYPOINT,
     CONTAINER_OUTPUT_DIR,
+    DockerRunError,
     DockerRunner,
+    _copy_claude_home,
     _sanitize_container_name_component,
     _validate_extra_mount,
 )
@@ -311,3 +317,191 @@ class TestApiBackendForwarding:
         argv = self._build(self._make_runner())
         assert not self._forwarded_name_only(argv)
         assert not self._forwarded_value_form(argv)
+
+
+class TestClaudeHomeRWCopyMount:
+    """``~/.claude`` is forwarded as a throwaway lean RW copy, not the host dir.
+
+    ``_prepare_host_mounts`` copies the host ``~/.claude`` (minus heavy
+    per-session state) into a tmp dir and records it on
+    ``_claude_mount_src``; ``_build_argv`` then mounts that copy read-WRITE at
+    the symmetric ``$HOME/.claude`` path. The old two-layer (``:ro`` parent +
+    ``session-env`` RW child) scheme is gone.
+    """
+
+    def _make_runner(self) -> DockerRunner:
+        task = TaskDefinition(
+            task_id="test",
+            description="test task",
+            initial_prompt="test",
+            sandbox=SandboxConfig(),
+            success_criteria=[FileExistsCriterion(description="c", path="t.txt")],
+        )
+        rt = MagicMock()
+        rt.task = task
+        rt.run_dir = Path(tempfile.gettempdir()) / "test_run"
+        rt.task_file = None
+        return DockerRunner(rt)
+
+    def _volume_mounts(self, argv: list[str]) -> list[str]:
+        return [argv[i + 1] for i, arg in enumerate(argv) if arg == "-v" and i + 1 < len(argv)]
+
+    @pytest.fixture
+    def fake_home(self, tmp_path, monkeypatch):
+        """A fake ``$HOME`` whose ``~/.claude`` seeds one entry per CLAUDE_COPY_IGNORE pattern.
+
+        Driven by the constant so every current AND future denylist member gets
+        drop-coverage for free (the prior fixture seeded only 4 of 13). Also seeds
+        a top-level ``*.lock`` and a NESTED one (basename-glob matches at every
+        level) plus an unrelated ``keep-me.json`` control that must survive.
+        """
+        home = tmp_path / "home"
+        claude = home / ".claude"
+        claude.mkdir(parents=True)
+        # Kept: the small set the container needs + an unrelated control file.
+        (claude / "plugins").mkdir()
+        (claude / ".credentials.json").write_text("{}", encoding="utf-8")
+        (claude / "settings.json").write_text("{}", encoding="utf-8")
+        (claude / "keep-me.json").write_text("{}", encoding="utf-8")
+        # Dropped: one seed per denylist pattern.
+        for pattern in CLAUDE_COPY_IGNORE:
+            if pattern == "*.lock":
+                (claude / "top.lock").write_text("x", encoding="utf-8")
+                (claude / "plugins" / "nested.lock").write_text("x", encoding="utf-8")  # nested → basename-glob
+            elif "." in pattern and not pattern.startswith("."):
+                (claude / pattern).write_text("x", encoding="utf-8")  # exact filename (history.jsonl)
+            else:
+                (claude / pattern).mkdir()  # directory entry (incl. dotdirs like .statusline_cache)
+                (claude / pattern / "f").write_text("x", encoding="utf-8")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.delenv("CODER_EVAL_NO_CLAUDE_MOUNT", raising=False)
+        return home
+
+    def test_rw_copy_mounted_at_symmetric_path(self, fake_home, tmp_path):
+        runner = self._make_runner()
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        runner._prepare_host_mounts(staging)
+
+        copy = runner._claude_mount_src
+        assert copy is not None
+        assert copy == staging / "claude-home"
+
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        argv = runner._build_argv(input_dir, output_dir, container_name="c")
+        mounts = self._volume_mounts(argv)
+
+        host_claude = fake_home / ".claude"
+        # Exactly one claude mount: the copy → symmetric path, read-WRITE (no :ro).
+        assert f"{copy}:{host_claude}" in mounts
+        claude_mounts = [m for m in mounts if m.endswith(str(host_claude)) or f":{host_claude}" in m]
+        assert claude_mounts == [f"{copy}:{host_claude}"]
+        # The retired two-layer scheme leaves no trace.
+        assert f"{host_claude}:{host_claude}:ro" not in mounts
+        assert not any("session-env" in m for m in mounts)
+
+    def test_lean_copy_drops_every_denylist_entry_keeps_auth(self, fake_home, tmp_path):
+        """Every CLAUDE_COPY_IGNORE pattern is dropped; auth/settings/plugins + control survive.
+
+        Drives the drop assertions off the constant so no denylist member (incl. the
+        ``*.lock`` basename-glob and the largest ``security/``) can be removed or
+        silently fail to match without this test failing.
+        """
+        runner = self._make_runner()
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        runner._prepare_host_mounts(staging)
+
+        copy = runner._claude_mount_src
+        assert copy is not None
+        # Kept: auth + settings + plugins + the unrelated control file.
+        assert (copy / ".credentials.json").is_file()
+        assert (copy / "settings.json").is_file()
+        assert (copy / "plugins").is_dir()
+        assert (copy / "keep-me.json").is_file()
+        # Dropped: every denylist pattern (constant-driven so future entries are covered).
+        for pattern in CLAUDE_COPY_IGNORE:
+            if pattern == "*.lock":
+                assert not (copy / "top.lock").exists()
+                assert not (copy / "plugins" / "nested.lock").exists()  # basename-glob: every level
+            else:
+                assert not (copy / pattern).exists()
+
+    def test_opt_out_skips_copy_and_mount(self, fake_home, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODER_EVAL_NO_CLAUDE_MOUNT", "1")
+        runner = self._make_runner()
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        runner._prepare_host_mounts(staging)
+
+        assert runner._claude_mount_src is None
+        assert not (staging / "claude-home").exists()
+
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        argv = runner._build_argv(input_dir, output_dir, container_name="c")
+        host_claude = fake_home / ".claude"
+        assert not any(str(host_claude) in m for m in self._volume_mounts(argv))
+
+    def test_copy_retries_transient_oserror_then_succeeds(self, fake_home, tmp_path, monkeypatch):
+        """A file vanishing mid-walk (live host churn) is retried, not flipped to a task ERROR.
+
+        The harness runs inside Claude Code, so the live ~/.claude is rewritten while
+        copied; under --max-parallel a copytree can raise FileNotFoundError mid-walk.
+        The bounded retry must recover so identical agent output isn't scored as ERROR
+        by luck of timing.
+        """
+        real_copytree = shutil.copytree
+        dest = tmp_path / "copy"
+        calls = {"n": 0}
+
+        # copytree recurses through the module-global name, so count only top-level
+        # (dst == dest) invocations — the recursive subdir copies aren't retries.
+        def flaky(src, dst, *args, **kwargs):
+            if Path(dst) == dest:
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise FileNotFoundError("entry vanished mid-walk")
+            return real_copytree(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr("coder_eval.isolation.docker_runner.shutil.copytree", flaky)
+        _copy_claude_home(fake_home / ".claude", dest)
+
+        assert calls["n"] == 2  # failed once, succeeded on the retry
+        assert (dest / ".credentials.json").is_file()  # clean copy after the partial was cleared
+
+    def test_copy_raises_after_exhausting_retries(self, fake_home, tmp_path, monkeypatch):
+        """A persistent copy failure raises DockerRunError after CLAUDE_COPY_MAX_ATTEMPTS tries."""
+        calls = {"n": 0}
+
+        def always_fail(*args, **kwargs):
+            calls["n"] += 1
+            raise FileNotFoundError("keeps vanishing")
+
+        monkeypatch.setattr("coder_eval.isolation.docker_runner.shutil.copytree", always_fail)
+        with pytest.raises(DockerRunError):
+            _copy_claude_home(fake_home / ".claude", tmp_path / "copy")
+        assert calls["n"] == CLAUDE_COPY_MAX_ATTEMPTS  # bounded, not infinite
+
+
+def test_docker_isolation_doc_names_only_real_denylist_entries():
+    """The DOCKER_ISOLATION.md lean-copy bullet must agree with CLAUDE_COPY_IGNORE.
+
+    Drift-guard for the doc finding: the prose may enumerate a subset, but every
+    directory it names in the *drops* clause must be a real denylist member, and the
+    headline ``security/`` (the largest, previously-omitted drop) must be named — so
+    the user-facing contract can't silently diverge from the source-of-truth constant.
+    """
+    doc = (Path(__file__).parent.parent / "docs" / "DOCKER_ISOLATION.md").read_text(encoding="utf-8")
+    line = next(line for line in doc.splitlines() if "throwaway *lean copy*" in line)
+    drops_clause = line.split("drops", 1)[1]  # exclude the kept set (plugins/ etc.) named before "drops"
+    named = set(re.findall(r"`([A-Za-z0-9._-]+)/`", drops_clause))  # backticked `dir/` tokens
+    assert named, "expected the doc to name some dropped dirs"
+    extra = named - set(CLAUDE_COPY_IGNORE)
+    assert not extra, f"doc names skip entries not in CLAUDE_COPY_IGNORE: {extra}"
+    assert "security" in named, "doc must name the headline `security/` drop"

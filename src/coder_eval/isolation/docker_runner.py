@@ -56,6 +56,52 @@ CONTAINER_TASK_DIR = "/work/task_dir"
 # `COPY` destination in docker/Dockerfile -- a drift guard test enforces that.
 CONTAINER_ENTRYPOINT = "/usr/local/bin/coder_eval_entrypoint.sh"
 
+# Top-level entries under ~/.claude that the per-task RW copy SKIPS. We copy
+# the host's ~/.claude into a throwaway tmp dir and mount that copy read-WRITE
+# so the in-container CLI can write anywhere it needs without ever touching the
+# host's real ~/.claude. The container needs only auth + settings + plugins;
+# everything else under ~/.claude is heavy, transient, or host-local state it
+# never reads, so we drop it to keep the per-task copy cheap. On a real host
+# this is the difference between a ~300 MB copy and a few MB: `security/` (the
+# security plugin's data) alone is often hundreds of MB, and `projects/`
+# (transcripts), `cache/`, `file-history/`, `backups/`, `sessions/`,
+# `telemetry/`, `downloads/`, and `shell-snapshots/` all accumulate without
+# bound. `session-env/` (per-Bash ephemera) is recreated fresh in the copy by
+# the container. The last group is volatile per-session churn the *running* CLI
+# rewrites continuously (this harness itself runs inside Claude Code, so the live
+# host ~/.claude is mutating while we copy): dropping it both keeps the copy lean
+# AND shrinks the window for a mid-walk vanish/rewrite race under --max-parallel
+# (the residual race is covered by the bounded retry in `_copy_claude_home`).
+# Patterns match by basename at every level (shutil.ignore_patterns semantics), so
+# this is a denylist: anything NOT listed here (settings.json, .credentials.json,
+# plugins/) is copied through.
+CLAUDE_COPY_IGNORE = (
+    "projects",
+    "shell-snapshots",
+    "todos",
+    "session-env",
+    "security",
+    "cache",
+    "file-history",
+    "backups",
+    "downloads",
+    "sessions",
+    "telemetry",
+    "history.jsonl",
+    "*.lock",
+    # Volatile per-session churn rewritten by the live host CLI (race-prone):
+    "statsig",
+    ".statusline_cache",
+    "paste-cache",
+    "tasks",
+)
+
+# Bounded retries for the lean ~/.claude copy. The live host dir is rewritten by
+# the running CLI while we walk it, so a file can vanish mid-copy and raise; a
+# couple of retries clears the transient case before we give up (see
+# `_copy_claude_home`).
+CLAUDE_COPY_MAX_ATTEMPTS = 3
+
 # Host-side heartbeat: the runner touches this file every HEARTBEAT_INTERVAL
 # seconds while alive. The in-container watchdog exits if the file is stale
 # (older than HEARTBEAT_STALE_SECONDS) -- our only defence against the host
@@ -281,6 +327,51 @@ class DockerRunError(RuntimeError):
     """
 
 
+def _copy_claude_home(host_claude_dir: Path, claude_copy: Path) -> None:
+    """Copy the host ``~/.claude`` into ``claude_copy`` with bounded retries.
+
+    The harness itself runs inside Claude Code, so the *live* host ``~/.claude``
+    is actively rewritten (small state JSON, session ephemera) while this walks
+    it. Under ``--max-parallel>1`` N tasks copy it concurrently, and a file that
+    vanishes or is rewritten mid-walk makes ``shutil.copytree`` raise
+    ``FileNotFoundError`` / ``shutil.Error`` (both ``OSError`` subclasses). Left
+    uncaught that propagates to ``run_single``'s broad ``except`` and flips an
+    otherwise-passing task to ``FinalStatus.ERROR`` — scoring identical agent
+    output differently by luck of timing. ``CLAUDE_COPY_IGNORE`` already drops the
+    noisiest churn dirs; this retries the residual race a bounded number of times
+    (clearing the partial copy between attempts) before giving up. Persistent
+    failure still raises — at that point it is a real problem (e.g. perms), and
+    the container could not authenticate without ``~/.claude`` anyway.
+    """
+    last_exc: OSError | None = None
+    for attempt in range(1, CLAUDE_COPY_MAX_ATTEMPTS + 1):
+        try:
+            shutil.copytree(
+                host_claude_dir,
+                claude_copy,
+                ignore=shutil.ignore_patterns(*CLAUDE_COPY_IGNORE),
+                symlinks=False,
+                ignore_dangling_symlinks=True,
+                dirs_exist_ok=True,
+            )
+            return
+        except OSError as exc:  # FileNotFoundError / shutil.Error — transient under concurrent host churn
+            last_exc = exc
+            # Clear the partial tree so the retry (dirs_exist_ok) starts clean.
+            shutil.rmtree(claude_copy, ignore_errors=True)
+            logger.warning(
+                "Copy of host ~/.claude failed (attempt %d/%d), retrying: %s",
+                attempt,
+                CLAUDE_COPY_MAX_ATTEMPTS,
+                exc,
+            )
+    raise DockerRunError(
+        f"Failed to copy host ~/.claude into the container staging dir after {CLAUDE_COPY_MAX_ATTEMPTS} "
+        + f"attempts (last error: {last_exc}). The host dir may be churning faster than the copy "
+        + "completes, or be unreadable."
+    ) from last_exc
+
+
 class DockerRunner:
     """Spawns a per-task container and reconstructs the EvaluationResult.
 
@@ -299,6 +390,10 @@ class DockerRunner:
         self.preservation_mode = preservation_mode
         self.stream_callback = stream_callback
         self.verbose = verbose
+        # Set by _prepare_host_mounts: the tmp lean copy of ~/.claude that
+        # _build_argv mounts read-write. None when there is no ~/.claude to
+        # forward or the mount is opted out (CODER_EVAL_NO_CLAUDE_MOUNT).
+        self._claude_mount_src: Path | None = None
 
     @property
     def _docker_config(self) -> DockerDriverConfig:
@@ -382,9 +477,10 @@ class DockerRunner:
             safe_task_id = _sanitize_container_name_component(self.rt.task.task_id)[:80]
             container_name = f"coder-eval-{safe_task_id}-r{self.rt.replicate_index}-{os.getpid()}-{short_uuid}"
             # Side-effecting prep that _build_argv must NOT do (argv rendering
-            # stays pure for testability). Creates ~/.claude/session-env on
-            # the host so the RW child mount in _build_argv resolves cleanly.
-            await asyncio.to_thread(self._prepare_host_mounts)
+            # stays pure for testability). Makes a lean RW copy of ~/.claude
+            # under `staging` and records it on self._claude_mount_src for
+            # _build_argv to mount. Cleaned up with `staging` in the finally.
+            await asyncio.to_thread(self._prepare_host_mounts, staging)
             argv = self._build_argv(input_dir, output_dir, container_name=container_name, image=image)
             logger.info("Running task '%s' in docker: %s", self.rt.task.task_id, " ".join(argv))
             # Prime the heartbeat before the container starts so the
@@ -606,19 +702,33 @@ class DockerRunner:
         ]
         return [p.resolve() for p in candidates if p.exists()]
 
-    def _prepare_host_mounts(self) -> None:
+    def _prepare_host_mounts(self, staging: Path) -> None:
         """Side-effecting prep that ``_build_argv`` must not do.
 
-        Currently: create ``~/.claude/session-env`` so the RW child mount has
-        a directory to bind. Argv rendering needs to stay pure — calling it
-        twice (e.g. for logging then exec) must not double-create dirs under
-        ``$HOME``.
+        Makes a *lean copy* of the host's ``~/.claude`` into a throwaway dir
+        under ``staging`` and records it on ``self._claude_mount_src``.
+        ``_build_argv`` then bind-mounts that copy read-WRITE at the host's
+        ``~/.claude`` path (HOME is forwarded, so the path is symmetric inside
+        the container). Mounting a copy — rather than the host dir read-only —
+        lets the in-container CLI write anywhere under ``~/.claude`` without
+        ever mutating the host's real state.
+
+        The copy skips heavy, container-irrelevant per-session state
+        (``CLAUDE_COPY_IGNORE``) so it stays cheap even in parallel batches.
+
+        The copy lives under ``staging``, which ``run()`` removes in its
+        ``finally``, so there is no extra cleanup to track. Argv rendering must
+        stay pure (it may run twice — for logging then exec), so the copy is
+        made here, exactly once, rather than in ``_build_argv``.
         """
         if os.environ.get("CODER_EVAL_NO_CLAUDE_MOUNT"):
             return
         host_claude_dir = Path.home() / ".claude"
-        if host_claude_dir.is_dir():
-            (host_claude_dir / "session-env").mkdir(parents=True, exist_ok=True)
+        if not host_claude_dir.is_dir():
+            return
+        claude_copy = staging / "claude-home"
+        _copy_claude_home(host_claude_dir, claude_copy)
+        self._claude_mount_src = claude_copy
 
     def _build_image(self) -> str:
         """Resolve the image to run, building from a Dockerfile when configured.
@@ -808,24 +918,17 @@ class DockerRunner:
         if self.rt.task_file:
             host_task_dir = self.rt.task_file.parent.resolve()
             argv += ["-v", f"{host_task_dir}:{host_task_dir}:ro"]
-        # Forward the host's Claude Code OAuth state so the in-container
-        # CLI inherits the same login as the host. Two-layer mount:
-        #   1. ~/.claude itself: read-ONLY (settings, OAuth token, cache).
-        #   2. ~/.claude/session-env: read-WRITE; the CLI creates a fresh
-        #      `<uuid>/` subdir per Bash tool invocation. Without RW here
-        #      every Bash call fails with EROFS. Child mount overrides the
-        #      parent's :ro mode for this subtree only.
-        # Net effect: container can write the per-session ephemera the
-        # CLI needs, can't touch settings/OAuth/etc.
-        # Opt out via CODER_EVAL_NO_CLAUDE_MOUNT=1.
-        if not os.environ.get("CODER_EVAL_NO_CLAUDE_MOUNT"):
+        # Forward the host's Claude Code OAuth state so the in-container CLI
+        # inherits the same login as the host. We mount a *throwaway lean copy*
+        # of ~/.claude (made by _prepare_host_mounts) read-WRITE at the host's
+        # ~/.claude path — HOME is forwarded, so the path is symmetric inside
+        # the container. The container can therefore write anywhere under
+        # ~/.claude (settings, session ephemera, cache) without ever mutating
+        # the host's real ~/.claude. _claude_mount_src is None when ~/.claude
+        # doesn't exist or the mount is opted out (CODER_EVAL_NO_CLAUDE_MOUNT=1).
+        if self._claude_mount_src is not None:
             host_claude_dir = Path.home() / ".claude"
-            if host_claude_dir.is_dir():
-                argv += ["-v", f"{host_claude_dir}:{host_claude_dir}:ro"]
-                # session-env is created in _prepare_host_mounts before argv
-                # rendering so this stays a pure argv builder.
-                session_env = host_claude_dir / "session-env"
-                argv += ["-v", f"{session_env}:{session_env}"]
+            argv += ["-v", f"{self._claude_mount_src}:{host_claude_dir}"]
 
         # Auto-mount host paths the task references so they resolve inside
         # the container at the *same* path they have on the host.
