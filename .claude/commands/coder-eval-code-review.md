@@ -65,7 +65,7 @@ If it fails, report what's failing and stop — code review on broken code is pr
 
 Launch two reviews **in parallel**:
 
-**Review A — Multi-model (Gemini + Codex)**: Use `mcp__multi__codereview` with `models: ["gemini-3", "codex"]`, `relevant_files`: absolute paths of all changed files, `content`: review request referencing the Severity Standard, Review Principles, and Checklist below, `step_number`: 1, `next_action`: "stop", `base_path`: project root. If `mcp__multi__codereview` is not available, launch two additional Opus sub-agents instead.
+**Review A — Multi-model (via `mcp__multi__codereview`)**: run it per the shared procedure in `.claude/shared/multi-model-review.md` — `models: ["gemini-3", "codex"]`, `relevant_files` = absolute paths of all changed files, `content` = a review request citing the Severity Standard, Review Principles, and Checklist. **Heed the multi-step protocol described there** (the step-1 response is usually an `in_progress` checklist, not findings — you must make the `step_number: 2` follow-up call with the same `thread_id`). Falls back to two Opus sub-agents if the tool is unavailable.
 
 **Review B — Opus sub-agent**: Use the `Agent` tool with `model: "opus"`. Give it the list of changed files and the following specialized tasks to run in parallel internally:
 
@@ -103,7 +103,7 @@ Fix all critical, high, and medium severity findings that survived the confidenc
 
 - **Logic/correctness bugs**: Write a unit test that fails first, fix the code, re-run the test. If not reproducible, mark as false positive.
 - **Structural issues** (naming, KISS/DRY violations): Fix directly — no test required.
-- **Regression lint**: For each logic/correctness bug fixed, ask: _is this pattern mechanically detectable by an AST rule?_ If yes, add a custom lint rule to `tests/lint/rules/` following the CE001–CE005 pattern and wire it in `tests/lint/runner.py`. Run `make lint` to confirm.
+- **Regression lint**: For each logic/correctness bug fixed, ask: _is this pattern mechanically detectable by an AST rule?_ If yes, add a custom lint rule to `tests/lint/rules/` following the existing CE001–CExxx pattern and wire it in `tests/lint/runner.py`. Run `make lint` to confirm.
 
 After all fixes, re-run `make verify`. Commit fixes if there are any (e.g., `fix: code review fixes`). Low-severity issues are noted but not fixed.
 
@@ -151,33 +151,4 @@ across sessions and provides forensic context if a fix later proves wrong:
 
 ## Review Criteria
 
-**Principles** — evaluate against all of these:
-
-- **Bug-free code**: Logic errors, edge cases, off-by-one errors, unhandled states
-- **KISS**: Is the code as simple as it can be? No unnecessary abstractions or indirection
-- **DRY**: No duplicated logic that should be consolidated; no premature abstraction either
-- **Not over-engineered**: No unnecessary generalization, no speculative features, no "just in case" code
-- **Simplicity**: Could a junior developer understand this? Is the intent clear?
-- **No unnecessary comments**: Don't describe what the code obviously does
-- **CLAUDE.md adherence**: Follows patterns defined in CLAUDE.md and the codebase — no ad-hoc solutions that bypass established abstractions
-
-**Checklist** — check every item:
-
-1. **Correctness**: Are all edge cases handled? Does logic match intent?
-2. **Type safety**: Proper annotations, no `Any` escape hatches, Pydantic fields have correct types/defaults/descriptions
-3. **Ripple completeness**: All references updated when a model field/config key/CLI flag is added/removed/renamed (task YAMLs, experiment YAMLs, `.claude/commands/`, docs, `experiments/default.yaml`, `models/__init__.py`)
-4. **Test quality**: No hardcoded magic values from config; at least one test for the exact edge case; sandbox cleanup via `try/finally` or fixtures; coverage of happy path, invalid input, error paths, boundary conditions
-5. **Shell safety**: Commands built via f-string use `shlex.quote()` or argument lists
-6. **Allowlist over denylist**: Status classification uses explicit allowlists, not denylists
-7. **Resource cleanup**: No file handle, subprocess, or temp directory leaks — especially in error paths
-8. **Public API surface**: New exports from `coder_eval.models` are intentional; discriminated unions updated if needed
-9. **Regression lint**: For each correctness bug found, consider whether it is mechanically detectable (wrong import path, missing decorator, blocking call in async, silent exception). If so, flag it as a candidate for a new rule in `tests/lint/rules/`.
-10. **Layer-merge coverage**: New fields on `ResolvedTask` / `AgentConfig` / `BatchRunConfig` have explicit coverage in `test_experiment_resolver.py` exercising all 5 merge layers (default → exp defaults → task → variant → CLI), and a matching CLI override in `_apply_cli_overrides`.
-11. **Pydantic round-trip integrity**: Changes to layered configs or polymorphic `CriterionResult` subclasses preserve `model_fields_set` and the discriminator across `model_dump(exclude_unset=True)` → `model_validate()`. Round-trip tests exist for new variants.
-12. **Discriminated unions**: New or modified Pydantic unions use `Annotated[..., Field(discriminator="type")]`. Bare `A | B | C` unions silently coerce to the first variant on a missing or typo'd `type`.
-13. **Cross-retry state hygiene**: After `AgentCrashError` / `TurnTimeoutError` / `is_error=True` SDK message, the agent resets `_session_id`, `pending_turn`, watchdog references, streaming-event `ContextVar`s, and iteration counters before the next attempt. Test covers a crashing turn followed by a successful turn in the same `Orchestrator` instance.
-14. **Untrusted text in evaluator prompts**: Strings derived from agent output (tool-call args, stdout, file contents, dialog history) injected into a judge / simulator / reviewer prompt are wrapped in a fenced block with explicit untrusted-data framing; the system prompt instructs the model to treat that block as adversarial.
-15. **NaN / non-finite guards**: Score and threshold clamps via `max(lo, min(hi, x))` are preceded by `math.isfinite(x)`. Bad parses fail explicitly instead of silently returning the upper bound (`max(0.0, min(1.0, nan)) == 1.0`).
-16. **Registry over hardcoded dispatch**: New agent / criterion / template / route variants go through the existing registry (`@register_criterion`, etc.). `if x.type == ...` / `isinstance(...)` ladders in `orchestrator.py`, `simulation/`, or `evaluation/` are rejected.
-17. **Test mocks match real SDK shape**: Mocks of `claude_agent_sdk` types only set attributes present on the installed class. Use `Mock(spec=RealType)` or assert `hasattr(RealType, attr)` in test setup so production reads of fabricated fields surface as test failures.
-18. **`extra="forbid"` on configs**: Pydantic models that consume YAML or CLI input declare `model_config = ConfigDict(extra="forbid")`. Unknown keys raise instead of being silently dropped.
+**Defined in `.claude/shared/review-rubric.md`** — read both the **Review Principles** (KISS/DRY/simplicity/CLAUDE.md-adherence) and the 18-item **Review Criteria** checklist (correctness, type safety, ripple completeness, shell safety, allowlist-over-denylist, resource cleanup, public-API surface, regression-lint candidates, layer-merge coverage, Pydantic round-trip integrity, discriminated unions, cross-retry state hygiene, untrusted-prompt framing, NaN guards, registry-over-dispatch, SDK-mock shape, `extra="forbid"`). The Severity Standard, False-Positives list, and procedure above are specific to this command and stay here. Reviewers must read the shared sections rather than work from memory; the `Trigger` field of each finding cites the Principle or Checklist item it matched.

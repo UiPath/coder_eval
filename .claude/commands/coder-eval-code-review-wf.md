@@ -26,13 +26,27 @@ output files, PR comment) but replaces the inline parallel-`Agent` fan-out
   is **corrected** in place (the verifier returns a `corrected_title` carrying
   the verified facts). 🔵 (low) findings pass through unverified. A
   **verification ledger** (proposed / verified / refuted / corrected counts +
-  the refuted list with reasons) is surfaced in the report and `results.json`,
-  so false-positive rate is measurable and comparable run-over-run.
-- **Dedup + theme-group before scoring.** One synthesis agent merges findings
-  that are the same root cause (incl. the same issue surfaced under two axes) and
-  collapses same-class themes (e.g. several god-functions) into one scored
-  finding that lists its members — so a single issue isn't counted multiple
-  times and one theme can't tank an axis. Scoring runs on the merged set.
+  the refuted list with reasons, plus the cross-axis-reconcile drops) is surfaced
+  in the report and `results.json`, so false-positive rate is measurable and
+  comparable run-over-run. To keep that correction rate low at the source, each
+  axis agent is held to an **accuracy gate** — cite `file`/`line`/metrics only
+  from a direct Read (or verbatim tool output), quoting the offending line — and
+  must record a per-axis **signal disposition** stating, for each routed
+  automated signal, whether it was filed or why not (so a genuinely clean axis
+  reads as deliberately clean rather than as if the tool output was ignored).
+- **Dedup + theme-group + cross-axis reconcile before scoring.** One synthesis
+  agent merges findings that are the same root cause (incl. the same issue
+  surfaced under two axes) and collapses same-class themes (e.g. several
+  god-functions) into one scored finding that lists its members — so a single
+  issue isn't counted multiple times and one theme can't tank an axis. It is
+  **also handed the refuted ledger** and **drops** any survivor that is the same
+  claim a sibling axis's verifier already refuted with evidence — because the
+  per-axis verifiers run independently, the same finding can be refuted under one
+  axis yet survive under another, and the survivor would otherwise score against
+  its axis. Cross-axis convergence is taken from this agent's **semantic** merge
+  judgment (which findings it ruled the same issue), not from exact `file:line`
+  string-matching (which almost never coincides for a real cross-axis issue).
+  Scoring runs on the merged, reconciled set.
 - **Deterministic scoring AND rendering in JS.** Counts → score, overall mean,
   weakest axis, and cross-axis convergence are computed in the workflow script;
   the workflow also **renders the report markdown itself** and returns a
@@ -65,15 +79,22 @@ runtime** rather than receiving a pasted copy. You pass the **absolute path** to
 agent prompts (baked into the scripts) instruct each agent to `Read` the
 sections it needs by heading:
 
-- **Review Principles**, **Severity Standard** (incl. the per-axis anchor table,
-  the Axis-4 CVSS requirement, and the Axis-8 scoring-correctness rule),
-  **Output Format**, and the **Techniques to apply** block → read by every axis
-  agent.
+- **Review Principles** → read from `.claude/shared/review-rubric.md` (the shared
+  rubric); **Severity Standard** (incl. the per-axis anchor table, the Axis-4 CVSS
+  requirement, and the Axis-8 scoring-correctness rule), **Output Format**, and the
+  **Techniques to apply** block → read from `coder-eval-code-review-full.md`. Both
+  read by every axis agent.
 - The **What's Missing** and **Harness & Lint Improvements** synthesis-pass
   bullets (under step 5 of the sibling's Procedure) → read by the two synthesis
   agents.
+- **Axis catalog (num ↔ name ↔ slug)** → the canonical spine is
+  `.claude/shared/axes.md`. Build each `axes[].num` / `axes[].name` from that
+  table (rather than re-deriving names from the sibling's headings).
 - **Axis starting points** — passed per-axis in the `axes` payload (small), so
-  each agent gets its own entry point without scanning the file.
+  each agent gets its own entry point without scanning the file. The
+  `startingPoint` text is still the **verbatim** `Axis starting points` bullet
+  from `coder-eval-code-review-full.md` (it carries per-axis emphasis beyond the
+  bare entry-point list, so it is not reduced to the catalog's one-line scope).
 
 The scoring formula is pinned in the workflow script and **must stay in sync**
 with the sibling's Scoring section:
@@ -87,7 +108,10 @@ with the sibling's Scoring section:
    `verify = false` (else `true`). Capture reproducibility metadata:
    `git rev-parse HEAD` (SHA), `git rev-parse --abbrev-ref HEAD` (branch), an ISO
    timestamp (`date -u +%Y-%m-%dT%H:%MZ`), and the model identifier — these go
-   into `args.meta` so the workflow can render the metadata block.
+   into `args.meta` so the workflow can render the metadata block. For any
+   **non-`all`** scope, also classify the change per the sibling's **## Change
+   Classification** section (`trivial` / `simple` / `complex`) and stash it as
+   `"<class> — <one-line reason>"`; for `all` scope leave it unset.
 
 2. **Prepare checkout, run automated checks (save raw output), discover
    packages** — as the sibling's steps 2, 2b, 3, with two additions:
@@ -112,7 +136,7 @@ with the sibling's Scoring section:
    no verbatim rubric text; the agents read it themselves):
 
    ```
-   meta = { sha, branch, timestamp, scope, model }   // for the rendered metadata block
+   meta = { sha, branch, timestamp, scope, model, changeClass }   // for the rendered metadata block; changeClass = "<trivial|simple|complex> — <reason>" for non-`all` scopes, omit/unset for `all`
 
    shared = {
      verify:        <true|false>,
@@ -124,7 +148,7 @@ with the sibling's Scoring section:
      packages:      "<package list from step 2>"
    }
 
-   axes = [ { num, name, startingPoint: "<verbatim Agent-N starting-point bullet>", automatedSummary: "<routed digest from step 2>" }, ... ]  // one per SELECTED axis
+   axes = [ { num, name, startingPoint: "<verbatim Agent-N starting-point bullet>", automatedSummary: "<routed digest from step 2>" }, ... ]  // one per SELECTED axis; num/name from .claude/shared/axes.md, startingPoint verbatim from the full command
    ```
 
    Keep `automatedSummary` tight (a digest, not full dumps — the raw output is
@@ -148,18 +172,21 @@ with the sibling's Scoring section:
    The scripts normalize `args` whether it arrives as an object or a JSON string.
    The parent fans out one `cr-axis` sub-workflow per axis (each reads its rubric
    from `siblingPath`, reviews, then verifies/corrects its own medium+ findings),
-   **de-duplicates/theme-groups the findings (one agent) and scores
-   deterministically from the merged set**, runs three synthesis agents (What's
-   Missing, Harness & Lint, and a verdict/Top-5 summarizer), and **renders the
-   full report markdown plus a machine-readable `results.json`**. It returns:
+   **de-duplicates/theme-groups the findings AND cross-axis-reconciles them
+   against the refuted ledger (one agent), then scores deterministically from the
+   merged, reconciled set**, runs three synthesis agents (What's Missing, Harness
+   & Lint, and a verdict/Top-5 summarizer), and **renders the full report markdown
+   plus a machine-readable `results.json`**. It returns:
 
    ```
    {
      scored, overall, weakest, findings, whatsMissing, harnessLint, summary,
-     missingAxes,
+     verification, missingAxes,
      files: { "00-summary.md": "...", "01-code-quality.md": "...", ..., "99-pr-comment.md": "...", "results.json": "..." }
    }
    ```
+   (`verification` carries the per-axis + total verify counts, the refuted list,
+   and the cross-axis-reconcile drops.)
 
    If `missingAxes` is non-empty, note it explicitly (those axes produced no
    results — do not treat them as clean).

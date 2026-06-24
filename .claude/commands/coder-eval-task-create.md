@@ -52,12 +52,15 @@ Choose criteria types based on what needs to be verified:
 | File has expected content | `file_contains` | String presence/absence |
 | File + content + regex | `file_check` | Unified check (preferred over file_exists + file_contains) |
 | JSON structure/values | `json_check` | JSON validation + JMESPath assertions |
-| Script runs correctly | `run_command` | Exit code + optional stdout matching |
-| Tests pass | `pytest` | Test pass rate |
+| Script runs / tests pass | `run_command` | Exit code + optional stdout matching or float scoring (e.g. run `pytest` and check exit code / parse output) |
 | Regex match on file | `file_matches_regex` | Binary regex match on file content |
-| Code quality | `pylint_score` | Lint score threshold |
-| Code similarity | `reference_comparison` | AST/token/complexity similarity vs reference |
-| Agent used specific tool | `command_executed` | Verify agent ran expected commands |
+| Code similarity vs reference | `reference_comparison` | AST/token/complexity/quality similarity vs a reference solution |
+| Subjective / open-ended quality | `llm_judge` | An LLM grades the artifacts (+ optional trajectory / reference) against a rubric prompt |
+| Deep, tool-using verdict | `agent_judge` | Spawns a Claude Code SDK sub-agent to investigate the sandbox and return a JSON verdict (expensive) |
+| Agent used a specific tool | `command_executed` | Verify the agent ran expected commands |
+| Agent tool-call efficiency | `commands_efficiency` | Score tool-call count against an expected budget |
+| Agent engaged a skill | `skill_triggered` | Did the agent invoke the target skill (Skill tool / file read)? |
+| Observed vs expected label | `classification_match` | File-based label match for classification suites (emits P/R/F1) |
 | UiPath agent eval | `uipath_eval` | UiPath agent evaluation results |
 
 **Criteria design rules:**
@@ -162,10 +165,13 @@ Quick reference of available types:
 | `file_contains` | Fractional | `path`, `includes`, `excludes` |
 | `file_check` | Fractional | `path`, `includes`, `excludes`, `patterns` (preferred over file_exists + file_contains) |
 | `json_check` | Fractional | `path`, `schema`, `assertions` (JMESPath) |
-| `run_command` | Binary | `command`, `expected_exit_code`, `expected_stdout`, `stdout_match` |
-| `pytest` | Fractional | `path` |
-| `command_executed` | Fractional | `tool_name`, `command_pattern`, `min_count`, `require_success` |
-| `pylint_score` | Continuous | `path` |
+| `run_command` | Binary / Continuous | `command`, `expected_exit_code`, `expected_stdout`, `stdout_match` |
 | `file_matches_regex` | Binary | `path`, `pattern` |
 | `reference_comparison` | Continuous | `agent_file` (requires `reference` block) |
+| `command_executed` | Fractional | `tool_name`, `command_pattern`, `min_count`, `require_success` |
+| `commands_efficiency` | Continuous | `expected_commands` |
+| `classification_match` | Binary | `path`, `expected_label`, `allowed_labels`, `case_sensitive` |
+| `skill_triggered` | Binary | `expected_skill`, `skill_name` |
+| `llm_judge` | Continuous | `prompt`, `files`, `include_reference`, `include_agent_output`, `include_tool_calls` |
+| `agent_judge` | Continuous | `prompt`, `files`, `include_*` (runs with evaluator creds — see the guide's SECURITY note) |
 | `uipath_eval` | Fractional | `agent_name`, `eval_set`, `thresholds` |

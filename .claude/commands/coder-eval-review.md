@@ -19,7 +19,7 @@ If the vocabulary file is missing or unparseable, continue with an empty suggest
 
 ## Step 2: Discover failed tasks
 
-The run layout is `runs/<run_id>/<variant_id>/<task_id>/<NN>/{task.json,task.log,artifacts/}`, where `<NN>` is a zero-padded replicate index.
+The run layout (`runs/<run_id>/<variant_id>/<task_id>/<NN>/…`, `<NN>` a zero-padded replicate index) is defined in `.claude/shared/run-layout.md`.
 
 1. Read `<run_path>/run.json` if present (for context — `run_id`, `start_time`).
 2. Glob `<run_path>/*/*/*/task.json` and read each one.

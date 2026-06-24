@@ -9,7 +9,7 @@ You analyze a coder-eval run and write `analysis.md` to the target directory. Th
 
 **Do all reasoning yourself in this session — no sub-agents, no `Agent` tool calls.** Read files in parallel (batch Read calls in a single assistant turn) and write the report inline.
 
-Run layout: `<run_path>/<variant_id>/<task_id>/<NN>/{task.json, task.log, artifacts/}`, where `<NN>` is a zero-padded replicate index.
+Run layout and scope-marker files (`run.json` / `variant.json` / `experiment.json`) are defined in `.claude/shared/run-layout.md` — read it; Step 1 below relies on those markers.
 
 ## Step 1: Determine scope
 

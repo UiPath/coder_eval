@@ -23,7 +23,10 @@ const FINDING_SCHEMA = {
 const AXIS_SCHEMA = {
   type: 'object',
   required: ['findings'],
-  properties: { findings: { type: 'array', items: FINDING_SCHEMA } },
+  properties: {
+    findings: { type: 'array', items: FINDING_SCHEMA },
+    automated_disposition: { type: 'string' },
+  },
   additionalProperties: false,
 }
 const VERDICT_SCHEMA = {
@@ -49,8 +52,8 @@ const reviewPrompt =
 `You are reviewing **Axis ${a.num}: ${a.name}** of the coder_eval codebase.
 
 ## Rubric — READ THIS FIRST (do not work from memory)
-Open ${s.siblingPath} and read these sections; they are your binding rubric:
-- "## Review Principles"
+Open .claude/shared/review-rubric.md and read its "## Review Principles" section — these are your binding principles.
+Then open ${s.siblingPath} and read these sections; they are your binding rubric:
 - "## Severity Standard" — the entire section, including the per-axis anchor table, the "Axis 4 (Security) additional requirement", and the "Axis 8 (Harness) scoring-correctness rule".
 - "## Output Format" — the per-axis finding shape.
 - The "Techniques to apply" fenced block (inside step 4 of "## Procedure") — run every check it lists while reading the code (including the extension-point conformance checks).
@@ -58,6 +61,10 @@ Calibrate severity against that anchor table exactly; do not summarize it from m
 
 ## Output
 Return findings as structured data ONLY — do NOT compute a score (it is derived from your severity tags downstream). Put the line number (or "n/a") in \`line\` as a string.${a.num === 4 ? ' For every finding include a CVSS v3.1 vector in the `cvss` field; its base score must match the severity column.' : ''}
+
+**Accuracy gate (before filing each finding):** every \`file\`, \`line\`, and metric you cite MUST come from a direct Read of that exact location (or verbatim from the routed tool output) — never an estimate. Quote the specific offending line(s) inside your \`recommendation\` so the fact is self-evidencing. Wrong line numbers and metrics are the single thing the downstream verifier most often has to correct; getting them exact here is cheaper than a correction round.
+
+**Automated-signal disposition:** in \`automated_disposition\`, account for EACH distinct signal in "Automated results routed to this axis" below — for each, state whether you filed it (as which finding #) or did NOT file it and why (e.g. "tracked debt — out of scope", "false positive on re-read", "below this axis's bar"). This makes a genuinely clean axis read as deliberately clean rather than as if the tool output was ignored. If no automated signal was routed, write "none routed".
 
 ## Scope
 ${s.scopeSpec}
@@ -80,7 +87,9 @@ const review = await agent(reviewPrompt, {
   phase: 'Review',
   schema: AXIS_SCHEMA,
 })
-if (!review) return { axis: a.num, name: a.name, findings: [] }
+// Review agent died/skipped (terminal API error or user skip). Signal it so the parent
+// routes this axis into `missingAxes` instead of scoring an empty finding set as a clean 10/10.
+if (!review) return { axis: a.num, name: a.name, reviewFailed: true, findings: [], automatedDisposition: '' }
 
 const raw = review.findings ?? []
 
@@ -92,6 +101,7 @@ if (!s.verify) {
     name: a.name,
     findings: raw.map((f) => ({ ...f, kept: true })),
     refuted: [],
+    automatedDisposition: review.automated_disposition ?? '',
     verifyStats: { proposed: raw.length, verified: 0, refuted: 0, corrected: 0, lows: raw.length },
   }
 }
@@ -145,6 +155,7 @@ return {
   name: a.name,
   findings: [...confirmed, ...lows],
   refuted,
+  automatedDisposition: review.automated_disposition ?? '',
   verifyStats: {
     proposed: raw.length,
     verified: toVerify.length,

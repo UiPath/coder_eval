@@ -13,6 +13,9 @@ const round1 = (x) => Math.round(x * 10) / 10
 const EMOJI = { critical: '🔴', high: '🟠', medium: '🟡', low: '🔵' }
 const SEVNAME = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low' }
 const SEV_RANK = { critical: 0, high: 1, medium: 2, low: 3 }
+// Mirror of the Slug column in .claude/shared/axes.md (canonical axis catalog).
+// The workflow sandbox has no filesystem access, so this must be a literal — keep it
+// in sync with that table when an axis is added / renamed / re-slugged.
 const AXIS_FILE = {
   1: '01-code-quality', 2: '02-type-safety', 3: '03-test-health', 4: '04-security',
   5: '05-architecture', 6: '06-error-handling', 7: '07-api-surface', 8: '08-harness-quality',
@@ -101,6 +104,18 @@ const MERGE_SCHEMA = {
         additionalProperties: false,
       },
     },
+    drop: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['index', 'reason'],
+        properties: {
+          index: { type: 'integer' },
+          reason: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+    },
   },
   additionalProperties: false,
 }
@@ -161,19 +176,32 @@ const sib = ARGS.shared.siblingPath
 const indexed = rawFindings
   .map((f, i) => `${i}: [A${f.axisNum} ${f.severity}] ${f.title} @ ${f.file}:${f.line}`)
   .join('\n')
+const trunc = (str, n) => (str && str.length > n ? str.slice(0, n) + '…' : str || '')
+const refutedForPrompt = verification.refuted.length
+  ? verification.refuted
+      .map((r, i) => `R${i}: [A${r.axisNum} ${r.severity}] ${r.title} @ ${r.file}:${r.line} — refuted because: ${trunc(r.reason, 400)}`)
+      .join('\n')
+  : '(none — no medium+ finding was refuted this run)'
 const mergePlan = await agent(
-`You are de-duplicating and theme-grouping confirmed code-review findings BEFORE they are scored, so the same issue is not counted multiple times and a single theme is not scored N times (which would unfairly tank an axis). Each finding has an integer index.
+`You are de-duplicating, theme-grouping, AND cross-axis-reconciling confirmed code-review findings BEFORE they are scored — so the same issue is not counted multiple times, a single theme is not scored N times (which would unfairly tank an axis), and a false positive cannot survive under one axis just because that axis's verifier happened to keep it. Each finding has an integer index.
 
-Return "groups". Each group merges 2+ findings that are EITHER (a) the SAME root cause surfaced under different axes or at the same location, OR (b) the SAME mechanical theme/class (e.g. several god-functions / high-CC functions; several instances of one stringly-typed-dict pattern). For each group set:
+Return "groups" (merges) and, when applicable, "drop" (cross-axis false-positive reconcile).
+
+**groups** — each group merges 2+ findings that are EITHER (a) the SAME root cause surfaced under different axes or at the same location, OR (b) the SAME mechanical theme/class (e.g. several god-functions / high-CC functions; several instances of one stringly-typed-dict pattern). For each group set:
 - keep: index of the single canonical finding to retain (prefer the highest-severity, most-precise one),
 - merge: the other indices folded into it (do NOT include keep),
 - canonical_severity (optional): severity the merged finding scores at (default = keep's severity),
 - canonical_title (optional): a title covering the whole cluster,
 - reason: one line.
 
-Be CONSERVATIVE: only group findings that are genuinely the same root cause or the same mechanical theme. Distinct bugs — even in the same file — stay separate. Any index you do not place in a group is kept and scored as-is.
+**drop** — the per-axis verifiers run independently, so the SAME claim can be refuted under one axis yet survive under another; the surviving copy then wrongly scores against its axis. For each surviving finding below that is the SAME underlying claim as one of the "Already-refuted findings" (same root cause AND location AND essentially the same recommendation), add { index, reason } to "drop": the sibling verifier already refuted it with evidence, so it must not score under this axis either. Be STRICT — only drop on a genuine match to a refuted item, never on your own fresh disagreement with a finding.
 
-## Findings
+Be CONSERVATIVE on groups too: only group findings that are genuinely the same root cause or the same mechanical theme. Distinct bugs — even in the same file — stay separate. Any index you neither group nor drop is kept and scored as-is.
+
+## Already-refuted findings (false positives the per-axis verifiers dropped — match survivors against these for "drop")
+${refutedForPrompt}
+
+## Findings (survivors to dedup / theme-group / reconcile)
 ${indexed}`,
   { label: 'dedup-group', phase: 'Synthesize', schema: MERGE_SCHEMA },
 )
@@ -185,9 +213,21 @@ for (const g of (mergePlan && mergePlan.groups) || []) {
   groupByKeep.set(g.keep, g)
   for (const m of g.merge || []) if (m !== g.keep) mergedAway.add(m)
 }
+// Cross-axis reconcile: the dedup agent flags survivors that are the same claim a
+// sibling axis's verifier already refuted — drop them BEFORE scoring so a false
+// positive can't survive under one axis just because it was verified there.
+const dropped = new Map()
+for (const d of (mergePlan && mergePlan.drop) || []) {
+  if (typeof d.index === 'number') dropped.set(d.index, d.reason || '')
+}
+verification.reconciled = []
 const all = []
 rawFindings.forEach((f, idx) => {
   if (mergedAway.has(idx)) return
+  if (dropped.has(idx)) {
+    verification.reconciled.push({ axisNum: f.axisNum, severity: f.severity, title: f.title, file: f.file, line: f.line, reason: dropped.get(idx) })
+    return
+  }
   const g = groupByKeep.get(idx)
   if (g) {
     if (g.canonical_severity) f.severity = g.canonical_severity
@@ -196,13 +236,19 @@ rawFindings.forEach((f, idx) => {
     if (members.length) {
       f.grouped = members.map((m) => `${m.file}:${m.line} [A${m.axisNum} ${m.severity}]`)
       f.groupNote = g.reason || ''
+      // semantic cross-axis: the axes whose findings the dedup agent judged to be the same issue
+      f.mergeAxes = [...new Set([f.axisNum, ...members.map((m) => m.axisNum)])].sort((x, y) => x - y)
     }
   }
   all.push(f)
 })
 
 // ---- deterministic per-axis scoring from the DEDUPED set (exact; no agent arithmetic) ----
-const scored = axisResults.map((r) => {
+// Axes whose review agent died (reviewFailed) are NOT scored — an empty finding set must not
+// read as a clean 10/10. Excluding them from `scored` also routes them into `missingAxes`
+// below (computed as requested − scored), so a crashed reviewer surfaces as "no result".
+const reviewedAxes = axisResults.filter((r) => !r.reviewFailed)
+const scored = reviewedAxes.map((r) => {
   const counts = { critical: 0, high: 0, medium: 0, low: 0 }
   for (const f of all) {
     if (f.axisNum === r.axis && counts[f.severity] !== undefined) counts[f.severity] += 1
@@ -222,8 +268,12 @@ for (const f of all) {
   axesAtLoc.get(key).add(f.axisNum)
 }
 for (const f of all) {
-  const axesHere = [...axesAtLoc.get(`${f.file}:${f.line}`)].sort((x, y) => x - y)
-  f.crossAxis = axesHere.length > 1 ? axesHere : null
+  // cross-axis convergence = exact same location (cheap) UNION the dedup agent's
+  // semantic judgment that findings from different axes were the same issue (merge-derived).
+  const here = new Set(axesAtLoc.get(`${f.file}:${f.line}`))
+  for (const ax of f.mergeAxes || []) here.add(ax)
+  const axes = [...here].sort((x, y) => x - y)
+  f.crossAxis = axes.length > 1 ? axes : null
 }
 
 // ---- synthesis agents (read their own instructions from the sibling) ----
@@ -335,12 +385,17 @@ const refutalRate = vt.verified ? Math.round((vt.refuted / vt.verified) * 100) :
 const refutedBlock = verification.refuted.length
   ? verification.refuted.map((f, i) => `${i + 1}. [Axis ${f.axisNum} ${f.severity}] ${f.title} — \`${f.file}:${f.line}\` — _refuted:_ ${f.reason || '(no reason given)'}`).join('\n')
   : 'None — every medium+ finding was confirmed (no false positives this run).'
+const reconciled = verification.reconciled || []
+const reconciledLine = reconciled.length
+  ? `\n\n**Cross-axis reconcile:** ${reconciled.length} surviving finding(s) dropped at dedup as the same claim a sibling axis's verifier already refuted (so a false positive can't score under one axis just because it was verified there):\n` +
+    reconciled.map((f, i) => `${i + 1}. [Axis ${f.axisNum} ${f.severity}] ${f.title} — \`${f.file}:${f.line}\` — _reason:_ ${f.reason || '(no reason given)'}`).join('\n')
+  : ''
 const verificationBlock =
 `**Medium+ findings:** ${vt.verified} verified · **${vt.refuted} refuted as false-positive (dropped)** · ${vt.corrected} corrected in place · ${vt.lows} low passed through unverified. Refutal rate: ${refutalRate}%.
 
 _Refuted (dropped) findings — compare run-over-run to confirm the same false positives keep being caught:_
 
-${refutedBlock}`
+${refutedBlock}${reconciledLine}`
 
 const metaBlock =
 `## Review Metadata
@@ -349,7 +404,7 @@ const metaBlock =
 - Branch: ${META.branch || '?'}
 - Scope: ${META.scope || ARGS.shared.scopeSpec}
 - Axes reviewed: ${scored.map((s) => s.axis).join(',')}
-- Model: ${META.model || '?'}
+- Model: ${META.model || '?'}${META.changeClass ? `\n- **Change class:** ${META.changeClass}` : ''}
 - Orchestration: workflow variant (per-axis sub-workflows, adversarial verify/correct, deterministic JS scoring + rendering)
 - Verify stage: ${ARGS.shared.verify ? 'ON' : 'OFF'}${missingAxes.length ? `\n- Missing axes (no result): ${missingAxes.join(', ')}` : ''}`
 
@@ -388,17 +443,19 @@ ${top5Block}
 ${verificationBlock}
 `
 
+const dispositionByAxis = new Map(axisResults.map((r) => [r.axis, r.automatedDisposition || '']))
 const axisMd = (s) => {
   const ax = ARGS.axes.find((x) => x.num === s.axis) || {}
   const v = verification.perAxis.find((p) => p.axis === s.axis) || { verified: 0, refuted: 0, corrected: 0 }
   const fs = findingsFor(s.axis)
+  const disp = dispositionByAxis.get(s.axis)
   let out =
 `### Axis ${s.axis}: ${s.name}
 **Score**: ${s.score} / 10
 **Counts**: 🔴 ${s.counts.critical} · 🟠 ${s.counts.high} · 🟡 ${s.counts.medium} · 🔵 ${s.counts.low}
 **Verification**: ${v.verified} verified · ${v.refuted} refuted (false-positive) · ${v.corrected} corrected
 
-**Automated Results**: ${ax.automatedSummary || '—'}
+**Automated Results**: ${ax.automatedSummary || '—'}${disp ? `\n**Signal disposition**: ${disp}` : ''}
 
 **Findings**:
 `
@@ -431,7 +488,7 @@ const prMd =
 `# Review: coder_eval — ${META.scope || ARGS.shared.scopeSpec}
 
 Scope: ${META.scope || ARGS.shared.scopeSpec} · branch \`${META.branch || '?'}\` · \`${(META.sha || '').slice(0, 7)}\` · ${META.timestamp || '?'} · workflow variant
-
+${META.changeClass ? `\n**Change class:** ${META.changeClass}\n` : ''}
 ${verdict}
 
 ## Summary

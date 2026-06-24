@@ -70,12 +70,12 @@ Default axes are all 8.
 
 ## Review Principles
 
-All analysis must evaluate against these core principles:
-- **Bug-free code**: Logic errors, edge cases, off-by-one errors, unhandled states
-- **KISS**: Is the code as simple as it can be? Are there unnecessary abstractions or indirection?
-- **DRY**: Is there duplicated logic that should be consolidated? But also: is DRY being over-applied (premature abstraction)?
-- **Not over-engineered**: No unnecessary generalization, no speculative features, no abstractions for one-time operations, no "just in case" code
-- **Simplicity**: Could a junior developer understand this? Is the intent clear?
+All analysis must evaluate against the core principles defined in
+`.claude/shared/review-rubric.md` → **"Review Principles"** (bug-free code, KISS,
+DRY without over-applying it, not over-engineered, simplicity, no unnecessary
+comments, CLAUDE.md adherence). Read that section; do not work from memory. The
+per-axis **Severity Standard** below is specific to this command and is defined
+locally — it is NOT governed by the shared rubric.
 
 ## Severity Standard
 
@@ -159,34 +159,38 @@ For any **non-`all`** scope (a specific diff: `pr:<N>`, `branch`, `local`,
 `staged`, `unpushed`), classify the *nature of the change* — independent of how
 many findings it has — as exactly one of:
 
-- **simple** — mechanical, simple, or obvious: rote or trivially-correct with no
-  design decision a reviewer must reason about. Examples: adding
-  `encoding="utf-8"` to IO calls; pure renames/moves; formatting-only edits;
-  dependency / lockfile bumps; config / env-var / CSV / data-row additions;
-  docs, comments, or metadata; mechanically plumbing an existing value through
-  call sites; a one-line, obviously-correct guard or default whose effect is
-  self-evident.
-- **non-trivial** — anything else: introduces or changes control flow,
-  algorithms, data structures, error handling, concurrency, public API / schema
-  semantics, or security-sensitive code — i.e. correctness requires reasoning.
-  **When uncertain, choose `non-trivial`.**
+- **trivial** — no logic touched; reviewing it is a formality. Examples: pure
+  renames/moves; formatting- or whitespace-only edits; dependency / lockfile
+  bumps; docs, comments, or metadata; config / env-var / CSV / data-row
+  additions that don't alter a code path.
+- **simple** — straightforward to verify, **regardless of size**: a reviewer can
+  confirm correctness at a glance even when the diff is sizable (tens of lines,
+  ~50+ is fine). It touches logic, but there's no design decision and no subtle
+  correctness reasoning. Size is not the criterion — straightforwardness is.
+  Examples: adding `encoding="utf-8"` across many IO calls; mechanically
+  plumbing an existing value through call sites; a guard or default whose effect
+  is self-evident; a localized, obviously-correct refactor.
+- **complex** — anything else: introduces or changes control flow, algorithms,
+  data structures, error handling, concurrency, public API / schema semantics,
+  or security-sensitive code — i.e. correctness requires reasoning. **When
+  uncertain, choose `complex`.**
 
 This verdict is consumed by automation (auto-approval gating), so it must be
 machine-parseable. Emit it **verbatim** as a line of the form:
 
 ```
-**Change class:** <simple|non-trivial> — <one-line reason>
+**Change class:** <trivial|simple|complex> — <one-line reason>
 ```
 
 in both `00-summary.md` and `99-pr-comment.md`. The class reflects the change's
 *nature*, not its findings — a `simple` change can still carry 🟡/🔵 findings,
-and a clean review of a behavioral refactor is still `non-trivial`. For `all`
+and a clean review of a behavioral refactor is still `complex`. For `all`
 scope (whole-codebase review) there is no single change under review — omit the
 line entirely.
 
 ## Critical Axes
 
-Review the codebase across these **8 critical axes**, producing a structured report with findings, severity, and actionable recommendations for each.
+Review the codebase across these **8 critical axes**, producing a structured report with findings, severity, and actionable recommendations for each. The axis number ↔ name ↔ output-file-slug spine is canonicalized in `.claude/shared/axes.md`; the per-axis review criteria, severity anchors, and starting points below are the rich, command-local material (not duplicated there).
 
 ### Axis 1: Code Quality & Style
 - Run `uv run ruff check src/coder_eval/` and `uv run ruff format --check src/coder_eval/`
@@ -364,7 +368,7 @@ in a value that doesn't match the formula.
 
    6. **Verify conformance to extension-point contracts (agents, criteria, backends, drivers, renderers).**
       coder_eval is a plugin-based, agnostic, multi-agent core (Claude / Codex / NoOp agents via the BYOA SPI; auto-discovered criteria; Bedrock / Anthropic / proxy backends; in-process / docker drivers). For every registered member of one of these extension points, confirm it honors the documented contract — a member that *registers* but silently *violates* the contract is a high-severity defect that a "read the code" pass misses because the code looks locally fine.
-        - **Agents** (every `Agent` subclass in `agents/`): `communicate()` calls `self._begin_turn()` at the top and `self._end_turn_ok()` on the success path; `stop()` calls `self._mark_stopped()`; it does NOT override `discard_pending_turn()` / `get_state()`. It emits one `AgentStartEvent` at the top and a matching `AgentEndEvent` on EVERY exit path (success / crash / timeout — from a `finally`), with `TurnStart`/`TurnEnd` per turn and `ToolStart`/`ToolEnd` per tool (orphaned tools closed `status=unresolved`). Before any mid-turn `raise AgentCrashError` / `TurnTimeoutError`, `self.pending_turn` is set to a `crashed=True` `TurnRecord`. The returned `TurnRecord` is built ONLY by the internal `EventCollector` — flag any `TurnRecord(` hand-assembled outside the synthetic-crash path. If the agent shells out / holds OS resources, `stop()` / `kill()` / `kill_sync()` are real, and `kill_sync()` is synchronous (no `await` — it runs on the watchdog's non-asyncio thread). It registers via `registry.register("kind", Config)(Agent)` in a `register(registry)` hook on a `coder_eval.plugins` entry point with its own `type: Literal["kind"]` config — and there is no leftover reference to a removed `AgentKind` enum or `Orchestrator._create_agent` dispatch.
+        - **Agents** (every `Agent` subclass in `agents/`): `communicate()` calls `self._begin_turn()` at the top and `self._end_turn_ok()` on the success path; `stop()` calls `self._mark_stopped()`; it does NOT override `discard_pending_turn()` / `get_state()`. It emits one `AgentStartEvent` at the top and a matching `AgentEndEvent` on EVERY exit path (success / crash / timeout — from a `finally`), with `TurnStart`/`TurnEnd` per turn and `ToolStart`/`ToolEnd` per tool (orphaned tools closed `status=unresolved`). Before any mid-turn `raise AgentCrashError` / `TurnTimeoutError`, `self.pending_turn` is set to a `crashed=True` `TurnRecord`. The returned `TurnRecord` is built ONLY by the internal `EventCollector` — flag any `TurnRecord(` hand-assembled outside the synthetic-crash path. If the agent shells out / holds OS resources, `stop()` / `kill()` / `kill_sync()` are real, and `kill_sync()` is synchronous (no `await` — it runs on the watchdog's non-asyncio thread). It registers via `registry.register("kind", Config)(Agent)` in a `register(registry)` hook on a `coder_eval.plugins` entry point with its own `type: Literal["kind"]` config — and it does NOT wire itself in by editing the `AgentKind` enum or `Orchestrator._create_agent` (which delegates to the registry's `create_agent()` factory); registration is via the SPI hook only.
         - **Per-agent coverage when a new agent is added:** `Settings.validate_api_keys` has a branch for it (don't let it fall through silently — a recurring gap); it supports the run's backends (Bedrock / Anthropic / proxy / Azure-OpenAI) or fails with a clear error; it surfaces per-turn `total_cost_usd` so the `max_usd` budget gate can fire; and the token-bucket reconciliation invariant (Σ buckets across `TurnRecord.messages` == `token_usage`) holds, with a test. Agnostic-core litmus: `grep -ri <agent-name> src/coder_eval/` outside the agent's own package + the registry should be ~zero.
         - **Criteria** (every file in `criteria/`): carries `@register_criterion`, implements `_check_impl`, exposes `aggregate()`, is a member of the `SuccessCriterion` union, AND is re-exported from `coder_eval.models`.
         - **Backends / drivers / renderers:** every `ApiBackend` is handled in judge routing + proxy + pricing + `validate_api_keys`; every sandbox driver / preservation mode preserves the stale-artifact-clear, synthetic-`task.json`-on-death, and env-scrub contracts; every `reports*.py` renderer covers each `EvaluationResult` field / `FinalStatus`.
@@ -387,7 +391,7 @@ in a value that doesn't match the formula.
    - **Agent 8 — Evaluation Harness Quality**: Start at `orchestrator.py`, `sandbox.py`, `evaluation/`, `criteria/`, `models/tasks.py`, `models/criteria.py`, task YAMLs in `tasks/`, and `docs/TASK_DEFINITION_GUIDE.md`. Always assess **daily/nightly blast radius**: trace whether the change touches the production run path — the cron/nightly entrypoint, the `DockerRunner` container entrypoint, or the `--backend bedrock` judge route — and state the impact explicitly, including whether a container image or persisted schema must be rebuilt in lockstep (a wire-format or schema change that isn't rebuilt breaks the nightly under version skew). **The nightly pipeline and its dashboard/reporting now live in a separate repo (`coder-eval-uipath` / eval-runner), so a contract change here can break a consumer this repo no longer contains — call that out explicitly** (the run-record/`task.json` schema, report JSON shape, and CLI output are the cross-repo contract surface). The team gates merges on this — review threads regularly lead with a daily-run trace; "does this break the nightly?" is a required answer, not an optional one. For any agent change, also apply Technique 6's **agent-conformance** checks (lifecycle hooks, `AgentEndEvent` on every exit path, the `crashed=True` partial-turn contract, `EventCollector`-only `TurnRecord`, and `validate_api_keys` + backend + per-turn-cost coverage) — agent extensibility is only real if every agent honors the contract the orchestrator assumes.
 
 5. **Synthesize results**: Assemble the report in the **Output Format defined above** by concatenating each sub-agent's axis section, then writing the Summary block:
-   - **Recompute every axis score from its `Counts` line using the published formula** (`max(0, 10 − 3.0·🔴 − 1.0·🟠 − 0.5·🟡 − 0.1·🔵)`, rounded to one decimal). If a sub-agent's reported score doesn't match, replace it with the formula result — sub-agent arithmetic is unreliable (observed in practice: agents off by 0.1–0.5 on multiple axes in a single run). The Counts are the source of truth; the Score is a pure function of them. Do the same for the Overall Score (mean across axes) and Weakest Axis after the per-axis fixups.
+   - **Recompute every axis score from its `Counts` line using the published formula** (the per-axis formula in the **## Scoring** section above, rounded to one decimal). If a sub-agent's reported score doesn't match, replace it with the formula result — sub-agent arithmetic is unreliable (observed in practice: agents off by 0.1–0.5 on multiple axes in a single run). The Counts are the source of truth; the Score is a pure function of them. Do the same for the Overall Score (mean across axes) and Weakest Axis after the per-axis fixups.
    - Deduplicate findings: if the same `file:line` appears in two sub-agents' outputs with the same root cause, merge them into one entry. **Re-decrement the Counts and re-run the score formula** on the affected axis after a merge — a finding folded into another shouldn't keep contributing to the count. This includes **semantic** duplicates that aren't at the same `file:line` (e.g. the same root cause surfaced under two different axes); merge those too and keep it under the single most-relevant axis.
    - **Theme-group same-class findings before scoring.** When N findings are instances of one mechanical theme (e.g. several god-functions / radon-F functions; several instances of one stringly-typed-dict pattern), collapse them into ONE scored finding that **enumerates its members** (list each file:line in the recommendation), scored **once** at the cluster's highest severity. Do not let one theme tank an axis by counting N times — e.g. four separate "god-function" 🟠s scoring an axis at 4.4 is a scoring artifact, not a 4.4-quality axis. Be conservative: only group genuinely same-class items; distinct bugs stay separate and count individually.
    - When two or more axes flag the same `file:line` (different lenses converging on one location), add a `Cross-axis: flagged by axes <list>` note to the merged finding. This is a stronger signal than any single axis — a systemic issue visible through multiple lenses. Do not use a "confirmed by N/8" framing: sub-agents are siloed per axis, so "confirmation" isn't what's happening; cross-axis convergence is.
@@ -426,17 +430,10 @@ in a value that doesn't match the formula.
      - In-scope files: <count> (full list in body if non-`all`)
      - Axes reviewed: <comma list>
      - Model: <model identifier running this command>
-     - Change class: <simple|non-trivial> — <one-line reason> (omit for `all` scope)
+     - Change class: <trivial|simple|complex> — <one-line reason> (omit for `all` scope)
      ```
      Then: Summary table, Critical & High Issues section (🔴/🟠 only, sorted by severity then axis; security findings include CVSS vector), **What's Missing** section (the synthesis-pass output from step 5, grouped by bucket; or "Nothing identified."), **Harness & Lint Improvements** section (the synthesis-pass output from step 5, split into the two buckets — *Static checks (lint / type)* and *Harness improvements* — each suggestion tied to the finding(s) it prevents; or "Nothing identified."), Top 5 Priority Actions.
-   - `<dir>/01-code-quality.md` — Axis 1 full report (omit if Axis 1 not in scope)
-   - `<dir>/02-type-safety.md` — Axis 2 full report (omit if Axis 2 not in scope)
-   - `<dir>/03-test-health.md` — Axis 3 full report (omit if Axis 3 not in scope)
-   - `<dir>/04-security.md` — Axis 4 full report (omit if Axis 4 not in scope)
-   - `<dir>/05-architecture.md` — Axis 5 full report (omit if Axis 5 not in scope)
-   - `<dir>/06-error-handling.md` — Axis 6 full report (omit if Axis 6 not in scope)
-   - `<dir>/07-api-surface.md` — Axis 7 full report (omit if Axis 7 not in scope)
-   - `<dir>/08-harness-quality.md` — Axis 8 full report (omit if Axis 8 not in scope)
+   - `<dir>/<slug>.md` — one full per-axis report per reviewed axis, named by the **Slug** column of the axis catalog in `.claude/shared/axes.md` (e.g. `01-code-quality.md`, `04-security.md`, … `08-harness-quality.md`). Omit any axis not in scope.
 
    After writing, print the resolved `<dir>` path so the user can find the report.
 
@@ -444,7 +441,7 @@ in a value that doesn't match the formula.
 
    The on-screen summary MUST include, in this order:
    - One-sentence verdict (e.g. "Solid feature work, but blocked on test coverage and one Linux-only privilege escalation.").
-   - The **Change class** line (`simple` / `non-trivial`) for non-`all` scopes — same verbatim form as the files.
+   - The **Change class** line (`trivial` / `simple` / `complex`) for non-`all` scopes — same verbatim form as the files.
    - The Summary table (axes × scores × counts × top issue) — same shape as `00-summary.md`.
    - `Overall Score`, `Weakest Axis`, and the `Totals` line.
    - The full **Critical & High Issues** list (🔴 / 🟠 only) — one line per finding in the form `[Axis N] <description> (file:line)`. Security findings include the CVSS vector.
@@ -539,7 +536,7 @@ in a value that doesn't match the formula.
 
    ---
 
-   **Change class:** <simple|non-trivial> — <one-line reason>
+   **Change class:** <trivial|simple|complex> — <one-line reason>
    <!-- machine-parseable; emit for non-`all` scopes only. See "Change Classification". -->
    **Stats:** N 🔴 · N 🟠 · N 🟡 · N 🔵 across <N> axes reviewed.
    Full per-axis breakdown: `<dir>/01-code-quality.md` … `<dir>/08-harness-quality.md`.
