@@ -8,14 +8,23 @@ from pathlib import Path
 
 from coder_eval.models import (
     AgentKind,
+    ClassificationCriterionResult,
+    CriterionAggregate,
     CriterionResult,
     EvaluationResult,
     FileExistsCriterion,
     FinalStatus,
+    SkillTriggeredCriterion,
     SuiteRollup,
     TaskResult,
 )
-from coder_eval.reports import _compute_suite_rollup, _render_suite_markdown, write_suite_rollups
+from coder_eval.reports import (
+    _attach_row_accounting,
+    _compute_suite_rollup,
+    _render_criterion_aggregate,
+    _render_suite_markdown,
+    write_suite_rollups,
+)
 
 
 def _make_result(
@@ -526,3 +535,191 @@ class TestStackedSameTypeAggregation:
         # Pooling by type (the old bug) would feed BOTH the combined [1,1,0,0] -> 0.5.
         assert by_desc["crit-A"].metrics["mean"] == 1.0
         assert by_desc["crit-B"].metrics["mean"] == 0.0
+
+
+class TestRowAccounting:
+    """Phase 1: CriterionAggregate row-accounting fields + _attach_row_accounting."""
+
+    def test_aggregate_defaults_are_zero(self) -> None:
+        # Existing call sites construct without the new fields — they must default to 0.
+        agg = CriterionAggregate(criterion_type="file_exists", passed=True)
+        assert agg.rows_total == 0
+        assert agg.rows_excluded == 0
+
+    def test_attach_row_accounting_with_excluded_rows(self) -> None:
+        agg = CriterionAggregate(criterion_type="skill_triggered", metrics={"mean": 1.0}, passed=True)
+        out = _attach_row_accounting(agg, rows_total=4, rows_aggregated=3)
+        assert out.rows_total == 4
+        assert out.rows_excluded == 1
+        assert out.metrics["completion_rate"] == 0.75
+        # Base metrics preserved.
+        assert out.metrics["mean"] == 1.0
+
+    def test_attach_row_accounting_zero_total_no_div_error(self) -> None:
+        agg = CriterionAggregate(criterion_type="file_exists", passed=True)
+        out = _attach_row_accounting(agg, rows_total=0, rows_aggregated=0)
+        assert out.rows_total == 0
+        assert out.rows_excluded == 0
+        assert out.metrics["completion_rate"] == 0.0
+
+    def test_render_includes_denominator_line_when_excluded(self) -> None:
+        agg = CriterionAggregate(
+            criterion_type="skill_triggered",
+            metrics={"completion_rate": 0.75},
+            passed=True,
+            rows_total=4,
+            rows_excluded=1,
+        )
+        text = "\n".join(_render_criterion_aggregate(agg))
+        assert "Denominator: 3/4 rows (1 excluded" in text
+
+    def test_render_omits_denominator_line_when_no_exclusions(self) -> None:
+        agg = CriterionAggregate(
+            criterion_type="file_exists",
+            metrics={"completion_rate": 1.0},
+            passed=True,
+            rows_total=4,
+            rows_excluded=0,
+        )
+        text = "\n".join(_render_criterion_aggregate(agg))
+        assert "Denominator:" not in text
+
+
+class TestErrorRowDenominator:
+    """Phase 2: an ERROR row (success_criteria_results=[]) is silently dropped from a
+    classification criterion's per-row slice, shrinking the recall denominator. The
+    row-accounting fields make that drop auditable, and completion_rate makes it
+    gateable. Rows carry ClassificationCriterionResult so the skill_triggered overlay
+    (accuracy / recall / F1) actually runs."""
+
+    @staticmethod
+    def _labelled_row(row_id: str, expected: str, observed: str) -> TaskResult:
+        score = 1.0 if expected == observed else 0.0
+        status = FinalStatus.SUCCESS if score == 1.0 else FinalStatus.FAILURE
+        result = EvaluationResult(
+            task_id=f"s/{row_id}",
+            task_description="t",
+            agent_type=AgentKind.CLAUDE_CODE,
+            started_at=datetime.now(),
+            final_status=status,
+            weighted_score=score,
+            iteration_count=1,
+            success_criteria_results=[
+                ClassificationCriterionResult(
+                    criterion_type="skill_triggered",
+                    description="foo activation",
+                    score=score,
+                    observed_label=observed,
+                    expected_label=expected,
+                )
+            ],
+        )
+        return TaskResult(
+            task_id=f"s/{row_id}",
+            variant_id="v1",
+            duration=1.0,
+            suite_id="s",
+            row_id=row_id,
+            replicate_index=0,
+            result=result,
+        )
+
+    @staticmethod
+    def _error_row(row_id: str) -> TaskResult:
+        result = EvaluationResult(
+            task_id=f"s/{row_id}",
+            task_description="t",
+            agent_type=AgentKind.CLAUDE_CODE,
+            started_at=datetime.now(),
+            final_status=FinalStatus.ERROR,
+            weighted_score=None,
+            iteration_count=1,
+            success_criteria_results=[],
+            error_message="boom",
+        )
+        return TaskResult(
+            task_id=f"s/{row_id}",
+            variant_id="v1",
+            duration=1.0,
+            suite_id="s",
+            row_id=row_id,
+            replicate_index=0,
+            result=result,
+        )
+
+    def _rows(self) -> list[TaskResult]:
+        # 3 labelled rows (2 expected 'yes', 1 expected 'no') + 1 ERROR row.
+        return [
+            self._labelled_row("r1", expected="yes", observed="yes"),
+            self._labelled_row("r2", expected="yes", observed="no"),
+            self._labelled_row("r3", expected="no", observed="no"),
+            self._error_row("r4"),
+        ]
+
+    def _criterion(self, suite_thresholds: dict[str, float] | None = None) -> SkillTriggeredCriterion:
+        return SkillTriggeredCriterion(
+            description="foo activation",
+            skill_name="foo",
+            expected_skill="foo",
+            suite_thresholds=suite_thresholds,
+        )
+
+    def test_error_row_excluded_from_recall_denominator(self, tmp_path: Path) -> None:
+        rollup = _compute_suite_rollup("s", "v1", self._rows(), tmp_path, task_criteria=[self._criterion()])
+        assert len(rollup.criterion_aggregates) == 1
+        agg = rollup.criterion_aggregates[0]
+        # The classification overlay only saw the 3 labelled rows — the ERROR row dropped.
+        assert agg.details["total_pairs"] == 3
+        # recall.yes denominator = the 2 expected-'yes' rows (r1 hit, r2 miss) → 0.5,
+        # NOT diluted by the 4th (errored) row.
+        assert agg.metrics["recall.yes"] == 0.5
+        # Row accounting captures the drop.
+        assert agg.rows_total == 4
+        assert agg.rows_excluded == 1
+        assert agg.metrics["completion_rate"] == 0.75
+
+    def test_completion_rate_gate_fails_when_too_many_errored(self, tmp_path: Path) -> None:
+        rollup = _compute_suite_rollup(
+            "s",
+            "v1",
+            self._rows(),
+            tmp_path,
+            task_criteria=[self._criterion(suite_thresholds={"completion_rate": 0.95})],
+        )
+        assert rollup.passed is False
+
+    def test_completion_rate_gate_passes_when_few_errored(self, tmp_path: Path) -> None:
+        rollup = _compute_suite_rollup(
+            "s",
+            "v1",
+            self._rows(),
+            tmp_path,
+            task_criteria=[self._criterion(suite_thresholds={"completion_rate": 0.5})],
+        )
+        assert rollup.passed is True
+
+    def test_missing_aggregator_threshold_check_matches_injected_metric(self, tmp_path: Path) -> None:
+        # All rows errored → aggregate() returns None → missing-aggregator path.
+        # The injected completion_rate (0.0 here) must be reflected in BOTH metrics
+        # AND its threshold check (no contradiction), while the stub still fails
+        # loudly because the real metrics could not be computed.
+        rows = [self._error_row("r1"), self._error_row("r2")]
+        rollup = _compute_suite_rollup(
+            "s",
+            "v1",
+            rows,
+            tmp_path,
+            task_criteria=[self._criterion(suite_thresholds={"completion_rate": 0.95})],
+        )
+        assert len(rollup.criterion_aggregates) == 1
+        agg = rollup.criterion_aggregates[0]
+        assert agg.error is not None  # fail-loudly semantics preserved
+        assert agg.passed is False
+        assert agg.rows_total == 2
+        assert agg.rows_excluded == 2
+        assert agg.metrics["completion_rate"] == 0.0
+        cr_check = next(c for c in agg.threshold_checks if c.metric == "completion_rate")
+        # Threshold table and metrics table must not disagree on the same metric.
+        assert cr_check.actual_value == agg.metrics["completion_rate"]
+        assert cr_check.passed is False
+        assert rollup.passed is False

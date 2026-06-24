@@ -632,6 +632,23 @@ def _evaluate_thresholds(
     return aggregate.model_copy(update={"threshold_checks": checks, "passed": all(c.passed for c in checks)})
 
 
+def _attach_row_accounting(agg: CriterionAggregate, rows_total: int, rows_aggregated: int) -> CriterionAggregate:
+    """Record the suite-size denominator on an aggregate and derive completion_rate.
+
+    ERROR rows carry ``success_criteria_results=[]`` and are silently dropped by
+    the per-criterion position slice, shrinking the denominator behind metrics
+    like ``recall``. This stamps the visible counts (``rows_total`` /
+    ``rows_excluded``) and mirrors a gateable ``completion_rate`` into ``metrics``
+    so a ``suite_thresholds: {completion_rate: ...}`` gate can fail when too many
+    rows errored. ``rows_aggregated`` is ``len(per_rows)`` — never read back from
+    ``metrics["count"]`` (the missing-aggregator stub has no ``count`` key).
+    """
+    excluded = rows_total - rows_aggregated
+    metrics = dict(agg.metrics)
+    metrics["completion_rate"] = (rows_aggregated / rows_total) if rows_total else 0.0
+    return agg.model_copy(update={"rows_total": rows_total, "rows_excluded": excluded, "metrics": metrics})
+
+
 def _build_missing_aggregator(
     criterion_type: str, suite_thresholds: dict[str, float], description: str | None = None
 ) -> CriterionAggregate:
@@ -726,9 +743,16 @@ def _compute_suite_rollup(
             if aggregate is None:
                 if suite_thresholds:
                     # Thresholds declared but nothing produced — fail loudly.
-                    criterion_aggregates.append(_build_missing_aggregator(ctype, suite_thresholds, description))
+                    stub = _build_missing_aggregator(ctype, suite_thresholds, description)
+                    stub = _attach_row_accounting(stub, rows_total, len(per_rows))
+                    # completion_rate is now a real value in metrics; refresh the
+                    # threshold checks so the rendered actual matches it, but keep
+                    # the aggregate failed because the real metrics are absent.
+                    stub = _evaluate_thresholds(stub, suite_thresholds).model_copy(update={"passed": False})
+                    criterion_aggregates.append(stub)
                 continue
             aggregate = aggregate.model_copy(update={"description": description})
+            aggregate = _attach_row_accounting(aggregate, rows_total, len(per_rows))
             criterion_aggregates.append(_evaluate_thresholds(aggregate, suite_thresholds))
 
     suite_passed = all(a.passed for a in criterion_aggregates)
@@ -871,6 +895,14 @@ def _render_criterion_aggregate(aggregate: CriterionAggregate) -> list[str]:
     ]
     if aggregate.error:
         lines.append(f"_Error: {aggregate.error}_")
+        lines.append("")
+
+    if aggregate.rows_excluded > 0:
+        included = aggregate.rows_total - aggregate.rows_excluded
+        lines.append(
+            f"_Denominator: {included}/{aggregate.rows_total} rows"
+            + f" ({aggregate.rows_excluded} excluded — errored before criteria ran)_"
+        )
         lines.append("")
 
     if aggregate.metrics:

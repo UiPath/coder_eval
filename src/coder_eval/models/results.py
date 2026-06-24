@@ -629,6 +629,23 @@ class CriterionAggregate(BaseModel):
             "distinguishable in the rollup; None for single-criterion-per-type suites."
         ),
     )
+    rows_total: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Total rows in the suite for this variant — the denominator a reader expects. 0 when not "
+            "computed at suite level (e.g. a criterion-level aggregate() called outside a rollup)."
+        ),
+    )
+    rows_excluded: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Rows dropped from this aggregate's per-row slice because they produced no result at this "
+            "criterion's position (e.g. ERROR rows landing before criteria ran). The classification/score "
+            "denominator is rows_total - rows_excluded."
+        ),
+    )
     metrics: dict[str, float] = Field(default_factory=dict, description="Flat metric name -> value")
     threshold_checks: list[ThresholdCheck] = Field(default_factory=list)
     passed: bool = Field(description="True when all threshold_checks passed (trivially true when no thresholds).")
