@@ -1,6 +1,6 @@
 // Per-million-token prices and cost math. Ported from
-// src/coder_eval/proxy/pricing.py — keep in sync when that table changes.
-// Source: Anthropic / OpenAI public pricing.
+// src/coder_eval/pricing.py — keep in sync when that table changes.
+// Source: Anthropic / OpenAI / Google public pricing.
 //
 // This is the single source of truth for rates on the frontend: the
 // cascade-aware thinking-cost simulator (lib/thinkingSim.ts) and the
@@ -15,7 +15,7 @@ export interface Pricing {
 }
 
 // Exported so a unit test can assert key-and-rate parity against the
-// authoritative Python table (src/coder_eval/proxy/pricing.py) and fail the
+// authoritative Python table (src/coder_eval/pricing.py) and fail the
 // build on drift — this hand-copied mirror is otherwise guarded only by a
 // comment. Not part of the consumer API; use resolvePricing() instead.
 export const PRICING: Record<string, Pricing> = {
@@ -41,6 +41,15 @@ export const PRICING: Record<string, Pricing> = {
     "gpt-5.3-codex": p(1.75, 14, 1.75, 0.175),
     "gpt-5.4": p(2.5, 15, 2.5, 0.25),
     "gpt-5.5": p(5, 30, 5, 0.5),
+    // Google Gemini (AntigravityAgent). Gemini bills no separate cache-write
+    // fee (cache_write == input, effectively unused); cache_read is the cached-
+    // input rate. Pro's >200K-token tier is higher — this flat rate reads low
+    // for very-large-context runs, fine for typical eval tasks.
+    "gemini-3-pro-preview": p(2, 12, 2, 0.2),
+    "gemini-3.1-pro-preview": p(2, 12, 2, 0.2),
+    "gemini-3.1-pro-preview-customtools": p(2, 12, 2, 0.2),
+    "gemini-3.5-flash": p(1.5, 9, 1.5, 0.15),
+    "gemini-3-flash-preview": p(1.5, 9, 1.5, 0.15),
 };
 
 function p(
