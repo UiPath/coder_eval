@@ -1,0 +1,98 @@
+name: Publish to TestPyPI (dry run)
+
+# Manually-triggered dry run of the public-PyPI publish path against
+# https://test.pypi.org. Use this to validate the build + OIDC Trusted
+# Publishing flow BEFORE cutting a real release (release.yml -> pypi.org).
+#
+# This does NOT bump the version, tag, or touch main / the Azure feed. It
+# stamps a throwaway PEP 440 dev version (`<current>.dev<run#>`) so repeated
+# runs never collide with an already-uploaded TestPyPI file, builds, and
+# publishes via OIDC (no stored token).
+#
+# One-time setup (mirrors the real PyPI publisher, on the TEST instance):
+#   test.pypi.org -> Account settings -> Publishing -> add a pending publisher:
+#     Project name:    coder-eval
+#     Owner:           UiPath
+#     Repository:      coder_eval
+#     Workflow name:   publish-testpypi.yml
+#     Environment:     testpypi
+#
+# Install the dry-run build to smoke-test it:
+#   uv pip install --index-url https://test.pypi.org/simple/ \
+#     --extra-index-url https://pypi.org/simple/ coder-eval
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: publish-testpypi
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish-testpypi:
+    name: Build and publish to TestPyPI
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/coder-eval/
+    permissions:
+      # OIDC token minting for Trusted Publishing; no long-lived credentials.
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4.2.0
+        with:
+          enable-cache: true
+
+      - name: Stamp a throwaway dev version
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          CURRENT_VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          # PEP 440 dev release: sorts before the base release, unique per run.
+          DEV_VERSION="${CURRENT_VERSION}.dev${RUN_NUMBER}"
+          python3 - <<PY
+          import re, pathlib
+          # pyproject.toml is the canonical source; __init__ is kept in sync.
+          for path, pat in (
+              ("pyproject.toml", r'(?m)^version\s*=\s*".+?"$'),
+              ("src/coder_eval/__init__.py", r'(?m)^__version__\s*=\s*".+?"$'),
+          ):
+              p = pathlib.Path(path)
+              key = "version" if path.endswith("toml") else "__version__"
+              # re.subn (not re.sub) so a version-line format drift aborts loudly
+              # instead of silently no-op'ing (rc=0) and publishing a stale/base
+              # version that then collides on TestPyPI (masked by skip-existing).
+              new, n = re.subn(pat, f'{key} = "${DEV_VERSION}"', p.read_text(), count=1)
+              if n != 1:
+                  raise SystemExit(f"version pattern did not match {path} (matched {n}); refusing to publish a stale/colliding artifact")
+              p.write_text(new)
+          PY
+          echo "Stamped dev version: ${DEV_VERSION}"
+
+      - name: Build wheel + sdist
+        run: uv build
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e  # v1.13.0
+        with:
+          # Trusted Publisher is configured on test.pypi.org for this repo +
+          # workflow (publish-testpypi.yml) + environment (testpypi); no
+          # password needed.
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+          # A re-run at the same dev version is a no-op rather than a hard fail.
+          skip-existing: true

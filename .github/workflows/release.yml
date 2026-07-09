@@ -41,12 +41,20 @@ permissions:
 jobs:
   release:
     name: Bump version and publish
-    runs-on: uipath-ubuntu-latest
+    # GitHub-hosted so cutting a release does not depend on the self-hosted
+    # `uipath-ubuntu-latest` pool. semantic-release, uv, twine, and the docker
+    # buildx -> GHCR push all run fine here.
+    runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      # Exposed so the downstream publish-pypi job can gate on a real release
+      # having been cut (empty => no version bumped => skip PyPI publish).
+      version: ${{ steps.release.outputs.version }}
     env:
-      # uipath-ubuntu-latest runners enforce a minimum package-age safe-chain
-      # check on uv installs; match the exclusions used by pr-checks.yml so
-      # parity is maintained if/when codex deps flow through the release path.
+      # The self-hosted `uipath-ubuntu-latest` runners enforce a minimum
+      # package-age safe-chain check on uv installs; on GitHub-hosted runners
+      # this is a no-op. Kept (matching pr-checks.yml) so parity is preserved
+      # if the job ever moves back to the self-hosted pool.
       SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: "openai-codex-cli-bin,openai-codex"
 
     steps:
@@ -71,7 +79,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4.2.0
         with:
           enable-cache: true
 
@@ -118,6 +126,17 @@ jobs:
         if: steps.release.outputs.version != ''
         run: uv build
 
+      # Hand the exact built artifacts to the publish-pypi job. Publishing to
+      # public PyPI runs in its own environment-gated job (OIDC), so it must
+      # consume these files rather than rebuild them.
+      - name: Upload dist for PyPI publish
+        if: steps.release.outputs.version != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: release-dist
+          path: dist/
+          if-no-files-found: error
+
       - name: Publish to coder_eval feed
         if: steps.release.outputs.version != ''
         env:
@@ -142,11 +161,11 @@ jobs:
 
       - name: Set up Docker Buildx
         if: steps.release.outputs.version != ''
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
 
       - name: Log in to GHCR
         if: steps.release.outputs.version != ''
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -154,7 +173,7 @@ jobs:
 
       - name: Build and push versioned agent image
         if: steps.release.outputs.version != ''
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6.19.2
         with:
           context: .
           file: docker/Dockerfile
@@ -170,3 +189,34 @@ jobs:
           # Read the shared buildcache docker-publish.yml writes; don't write it
           # back from here, to avoid two concurrent writers racing the cache tag.
           cache-from: type=registry,ref=ghcr.io/${{ steps.img.outputs.owner_lc }}/coder-eval-agent:buildcache
+
+  # Publish the SAME wheel+sdist to public PyPI (pkgs live alongside the private
+  # Azure Artifacts feed, which the release job above still populates). This runs
+  # as its own job so OIDC Trusted Publishing is scoped to a dedicated,
+  # environment-gated context on GitHub-hosted runners -- no PyPI token/secret is
+  # stored. Gated on the release job having actually cut a version.
+  publish-pypi:
+    name: Publish to PyPI
+    needs: release
+    if: needs.release.outputs.version != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/coder-eval/${{ needs.release.outputs.version }}/
+    permissions:
+      # OIDC token minting for Trusted Publishing; no long-lived credentials.
+      id-token: write
+    steps:
+      - name: Download built dist
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: release-dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e  # v1.13.0
+        with:
+          # Trusted Publisher is configured on pypi.org for this repo +
+          # workflow (release.yml) + environment (pypi); no password needed.
+          packages-dir: dist/
