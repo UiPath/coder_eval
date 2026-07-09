@@ -836,7 +836,14 @@ export function extractRunConfig(data: RawRunJson): {
     if (rc && typeof rc === "object" && !Array.isArray(rc)) {
         const r = rc as Record<string, unknown>;
         return {
-            harness: typeof r.harness === "string" ? r.harness : null,
+            // A present-but-partial stamp (run_config object with no/empty
+            // harness) falls back to the per-task agent_config vote rather
+            // than nulling out — otherwise a real codex/antigravity run is
+            // mislabeled as the claude-code default.
+            harness:
+                typeof r.harness === "string" && r.harness
+                    ? r.harness
+                    : mostCommonAgentType(data.task_results ?? []),
             environment:
                 typeof r.environment === "string" ? r.environment : null,
         };
