@@ -30,12 +30,12 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-# The version-bump commit + tag are pushed with a GitHub App installation
-# token (not GITHUB_TOKEN): main's branch protection blocks direct pushes,
-# and only the release app has a ruleset bypass. GITHUB_TOKEN is only used
-# for the checkout's read access.
+# `main` has no branch protection, so the version-bump commit + tag are
+# pushed directly with the built-in GITHUB_TOKEN (contents: write) -- no
+# GitHub App / ruleset bypass is required. If branch protection is added
+# later, either add a GITHUB_TOKEN bypass or restore an app-token step.
 permissions:
-  contents: read
+  contents: write  # push the version-bump commit + tag to main
   packages: write  # push the versioned agent image to ghcr.io on release
 
 jobs:
@@ -58,20 +58,12 @@ jobs:
       SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: "openai-codex-cli-bin,openai-codex"
 
     steps:
-      - name: Mint release app token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
-        with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0  # semantic-release needs full history for tags + changelog
-          # Persisted in .git config so semantic-release's push to main is
-          # authenticated as the app (which bypasses branch protection).
-          token: ${{ steps.app-token.outputs.token }}
+          # Default GITHUB_TOKEN is persisted in .git config so the bump
+          # commit + tag push to (unprotected) main is authenticated.
 
       - name: Set up Python 3.13
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
@@ -89,7 +81,7 @@ jobs:
       - name: Run semantic-release (bump + tag, no push yet)
         id: release
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Passed via env (not interpolated into the script) per GitHub's
           # injection guidance; it's a constrained choice input regardless.
           BUMP: ${{ inputs.bump }}
