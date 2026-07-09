@@ -41,16 +41,20 @@ permissions:
 jobs:
   release:
     name: Bump version and publish
-    runs-on: uipath-ubuntu-latest
+    # GitHub-hosted so cutting a release does not depend on the self-hosted
+    # `uipath-ubuntu-latest` pool. semantic-release, uv, twine, and the docker
+    # buildx -> GHCR push all run fine here.
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
       # Exposed so the downstream publish-pypi job can gate on a real release
       # having been cut (empty => no version bumped => skip PyPI publish).
       version: ${{ steps.release.outputs.version }}
     env:
-      # uipath-ubuntu-latest runners enforce a minimum package-age safe-chain
-      # check on uv installs; match the exclusions used by pr-checks.yml so
-      # parity is maintained if/when codex deps flow through the release path.
+      # The self-hosted `uipath-ubuntu-latest` runners enforce a minimum
+      # package-age safe-chain check on uv installs; on GitHub-hosted runners
+      # this is a no-op. Kept (matching pr-checks.yml) so parity is preserved
+      # if the job ever moves back to the self-hosted pool.
       SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: "openai-codex-cli-bin,openai-codex"
 
     steps:
