@@ -740,7 +740,7 @@ export function buildAdhocRows(
             tasksRun: overview.tasks.length,
             totalCostUsd: overview.totalCostUsd,
             taskDurationSeconds: overview.taskDurationSeconds,
-            harness: overview.harness ?? null,
+            // Harness is a main-table-only (internal) column; ad-hoc rows omit it.
         });
     }
     rows.sort(

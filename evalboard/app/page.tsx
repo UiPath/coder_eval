@@ -15,6 +15,7 @@ import { ChipLegend, MergedTagRail } from "./_overview/tag-rail";
 import { TableScroll } from "./_components/scroll-table";
 import { CollapsibleRail } from "./_components/collapsible-rail";
 import { isInternal } from "@/lib/edition";
+import { HarnessBadge } from "@/app/_components/harness-badge";
 
 export const dynamic = "force-dynamic";
 
@@ -330,7 +331,11 @@ export default async function Page({
                     <thead>
                         <tr className="bg-gray-50 border-b border-gray-200 text-left text-gray-600">
                             <th className="py-3 px-4 font-medium">Run</th>
-                            <th className="py-3 px-4 font-medium">Harness</th>
+                            {isInternal && (
+                                <th className="py-3 px-4 font-medium">
+                                    Harness
+                                </th>
+                            )}
                             <th className="py-3 px-4 font-medium">
                                 Pass rate
                             </th>
@@ -364,9 +369,13 @@ export default async function Page({
                                             {fmtRunTime(r.id)}
                                         </Link>
                                     </td>
-                                    <td className="py-3 px-4 text-xs text-gray-700">
-                                        {r.harness ?? "—"}
-                                    </td>
+                                    {isInternal && (
+                                        <td className="py-3 px-4">
+                                            <HarnessBadge
+                                                harness={r.harness}
+                                            />
+                                        </td>
+                                    )}
                                     <td className="py-3 px-4 tabular-nums">
                                         <span
                                             className={`font-medium ${passClass(
@@ -397,7 +406,7 @@ export default async function Page({
                         {listing.rows.length === 0 && (
                             <tr>
                                 <td
-                                    colSpan={6}
+                                    colSpan={isInternal ? 6 : 5}
                                     className="py-6 px-4 text-center text-sm text-gray-500"
                                 >
                                     {isFiltered
@@ -459,9 +468,6 @@ export default async function Page({
                                         Run
                                     </th>
                                     <th className="py-3 px-4 font-medium">
-                                        Harness
-                                    </th>
-                                    <th className="py-3 px-4 font-medium">
                                         Date
                                     </th>
                                     <th className="py-3 px-4 font-medium">
@@ -509,9 +515,6 @@ export default async function Page({
                                                         {r.id}
                                                     </div>
                                                 )}
-                                            </td>
-                                            <td className="py-3 px-4 text-xs text-gray-700">
-                                                {r.harness ?? "—"}
                                             </td>
                                             <td className="py-3 px-4 font-mono text-xs text-gray-700 tabular-nums whitespace-nowrap">
                                                 {fmtTimestamp(r.startedAt)}
