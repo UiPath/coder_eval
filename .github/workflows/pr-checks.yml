@@ -49,7 +49,7 @@ jobs:
           python-version: "3.13"
 
       - name: Cache dependencies
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           # ``.venv`` is deliberately NOT cached: its interpreter symlinks
           # point at the exact hosted-Python patch, so a patch bump (e.g.
@@ -242,7 +242,7 @@ jobs:
           python-version: "3.13"
 
       - name: Cache dependencies
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           # ``.venv`` is deliberately excluded: tarring/untarring tens of
           # thousands of small wheel files on Windows is what was tripping
@@ -381,7 +381,7 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code
 
       - name: Cache dependencies
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           # ``.venv`` excluded: a hosted-Python patch bump orphans its
           # interpreter symlink (dangling ``.venv/bin/python`` -> exit 127).
@@ -548,7 +548,7 @@ jobs:
       # AgentConfig.isolation=true, so the SDK doesn't shell out to bwrap.
 
       - name: Cache dependencies
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           # ``.venv`` excluded: a hosted-Python patch bump orphans its
           # interpreter symlink (dangling ``.venv/bin/python`` -> exit 127).
