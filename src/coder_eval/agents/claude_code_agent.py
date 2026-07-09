@@ -218,6 +218,9 @@ class _ClaudeTurnState:
         self.deadline = deadline
         # Set True by the in-loop deadline break OR the watchdog callback.
         self.timeout_hit = False
+        # Set True by the in-loop cooperative-stop break (early-stop-on-criterion).
+        # Distinct from timeout_hit: a clean, non-crash stop that must NOT raise.
+        self.stopped_early_hit = False
         # Resolved by _build_claude_query, set on the state before any finalize
         # path. Stays None if we crash before setup (finalize reads it for cost
         # backfill).
@@ -790,6 +793,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
         max_turns: int | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> TurnRecord:
         """Send a message to Claude and receive its response.
 
@@ -802,6 +806,12 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 asyncio.wait_for is not sufficient).
             max_turns: Hard cap on inner-loop turns for this call. None defers
                 to the SDK default.
+            should_stop: Cooperative early-stop poll (early-stop-on-criterion).
+                When provided, it is checked after each dispatched SDK message;
+                the first True finalizes the turn cleanly as STOPPED_EARLY
+                (``crashed=False``, no raise) at the next message boundary.
+                ``None`` (default) leaves the message loop behaviorally
+                identical to before.
 
         Returns:
             TurnRecord containing the complete interaction
@@ -902,16 +912,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 asyncio_task_to_cancel=asyncio.current_task(),
                 label=f"Turn timeout ({timeout:g}s)" if timeout else "turn_timeout",
             ):
-                async for message in query(**query_kwargs):
-                    # Wall-clock guard at the TOP of the loop: it breaks BEFORE
-                    # the message is dispatched (and appended), so the
-                    # over-deadline message is DISCARDED — no append, no events.
-                    # Do NOT relocate this to a post-loop check.
-                    if deadline is not None and time.monotonic() > deadline:
-                        state.timeout_hit = True
-                        self._log.warning("Turn timeout reached mid-stream; breaking out of message loop")
-                        break
-                    state.dispatch(message)
+                await self._pump_messages(state, query_kwargs, deadline, should_stop)
 
             self._log.debug("Agent query stream ended")
 
@@ -968,6 +969,12 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 if state.timeout_hit:
                     assert timeout is not None
                     state.finalize(AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout))
+                elif state.stopped_early_hit:
+                    # Clean cooperative stop: NOT a crash, NOT a timeout. The
+                    # max_turns_exhausted promotion in finalize() only fires for
+                    # COMPLETED, so STOPPED_EARLY survives; the post-finally
+                    # timeout raise is gated on timeout_hit, which is False here.
+                    state.finalize(AgentEndStatus.STOPPED_EARLY, crashed=False, crash_reason=None)
                 else:
                     state.finalize(AgentEndStatus.COMPLETED, crashed=False, crash_reason=None)
             self._active_transport = None
@@ -989,6 +996,42 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # The TurnRecord is the EventCollector's reduction of the events emitted
         # above — single, agent-agnostic capture path (no parallel record build).
         return collector.build_turn_record()
+
+    async def _pump_messages(
+        self,
+        state: _ClaudeTurnState,
+        query_kwargs: dict[str, Any],
+        deadline: float | None,
+        should_stop: Callable[[], bool] | None,
+    ) -> None:
+        """Drive the SDK message stream for one turn (extracted from ``communicate``).
+
+        Kept separate so the added cooperative-stop check keeps ``communicate``
+        under ruff's statement cap. ``query`` is still resolved as a module global
+        at call time, so ``patch("...claude_code_agent.query", ...)`` test mocks
+        keep working.
+
+        Two break conditions, and the order matters:
+
+        - The wall-clock guard runs at the TOP of the loop — it breaks BEFORE the
+          message is dispatched, so the over-deadline message is DISCARDED (no
+          append, no events). Do NOT relocate this to a post-loop check.
+        - The cooperative stop runs AFTER ``state.dispatch(message)`` so a watcher
+          observing events during dispatch can flip its flag on THIS message and
+          the next message is never pulled — the deciding message is kept, the
+          next is not. No-op when ``should_stop is None`` (behaviorally identical
+          to before).
+        """
+        async for message in query(**query_kwargs):
+            if deadline is not None and time.monotonic() > deadline:
+                state.timeout_hit = True
+                self._log.warning("Turn timeout reached mid-stream; breaking out of message loop")
+                break
+            state.dispatch(message)
+            if should_stop is not None and should_stop():
+                state.stopped_early_hit = True
+                self._log.debug("Cooperative stop requested; ending message loop at this boundary")
+                break
 
     def _build_claude_query(
         self,

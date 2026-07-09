@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -723,6 +724,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
         max_turns: int | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> TurnRecord:
         """Send a message to Codex and receive its response.
 
@@ -731,6 +733,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
             stream_callback: Optional callback for real-time event streaming
             timeout: Hard wall-clock deadline in seconds
             max_turns: Hard cap on inner-loop turns (unused for Codex single-turn)
+            should_stop: Accepted for ``Agent.communicate`` override compatibility
+                and ignored — Codex does not support cooperative early-stop
+                (``supports_cooperative_stop`` is False), so the orchestrator
+                never passes it.
 
         Returns:
             TurnRecord containing the complete interaction

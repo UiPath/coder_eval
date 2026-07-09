@@ -15,6 +15,8 @@ See ``docs/TASK_DEFINITION_GUIDE.md`` (No-op / System Tasks) and issue #203.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.models import AgentKind, ApiRoute, NoneAgentConfig, TurnRecord
@@ -63,8 +65,12 @@ class NoOpAgent(Agent[NoneAgentConfig]):
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
         max_turns: int | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> TurnRecord:
         """Return an empty turn without contacting any model.
+
+        ``should_stop`` is accepted for ``Agent.communicate`` override
+        compatibility and ignored — a no-op turn has nothing to interrupt.
 
         Honors the streaming contract — sole emitter of a balanced event tree
         (``AgentStart`` -> ``TurnStart`` -> ``TurnEnd`` -> ``AgentEnd``) — so the

@@ -10,11 +10,15 @@ observable criteria, and ``validate_early_stop``'s guardrails on both the
 
 from __future__ import annotations
 
+import tempfile
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
+from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.criteria import CriterionRegistry, init_criteria
 from coder_eval.criteria.base import BaseCriterion
 from coder_eval.criteria.command_executed import CommandExecutedChecker
@@ -33,6 +37,7 @@ from coder_eval.models import (
     parse_agent_config,
 )
 from coder_eval.orchestration.early_stop import EarlyStopConfigError, validate_early_stop
+from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, TurnEndStatus
 
 
 # --------------------------------------------------------------------------- #
@@ -337,3 +342,119 @@ class TestValidateEarlyStop:
         ]
         task = _task(criteria=crits, stop_early=True)
         validate_early_stop(task)  # no raise
+
+
+# --------------------------------------------------------------------------- #
+# Cooperative should_stop seam on ClaudeCodeAgent — still UNWIRED: the
+# orchestrator does not pass should_stop yet, so these drive the agent directly.
+# --------------------------------------------------------------------------- #
+
+
+class _DummyMsg:
+    """Minimal SDK-message stand-in.
+
+    ``dispatch`` records it and matches no message predicate (so it is ignored),
+    and it exposes no ``.error`` attribute so ``_update_state_from_messages``
+    leaves the agent in WORKING — unlike a MagicMock, whose ``.error`` would be a
+    truthy mock and wrongly flip the state to ERROR.
+    """
+
+    def __init__(self, index: int) -> None:
+        self.index = index
+
+
+class _EventSink:
+    """StreamCallback that records every emitted event."""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    def on_event(self, event: Any) -> None:
+        self.events.append(event)
+
+
+async def _run_claude_communicate(
+    *, stop_after: int | None = None, never: bool = False, n_messages: int = 3
+) -> tuple[ClaudeCodeAgent, TurnRecord, _EventSink, int]:
+    """Drive ``ClaudeCodeAgent.communicate`` over a mocked ``query`` yielding
+    ``n_messages`` dummy messages.
+
+    ``stop_after``: build a should_stop that returns True once that many messages
+    have been pulled (checked after each dispatch). ``never``: pass an explicit
+    always-False should_stop. Neither: pass ``should_stop=None``. Returns
+    ``(agent, record, sink, pulled_count)``.
+    """
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+    pulled = {"n": 0}
+
+    should_stop: Callable[[], bool] | None
+    if stop_after is not None:
+
+        def should_stop() -> bool:
+            return pulled["n"] >= stop_after
+
+    elif never:
+
+        def should_stop() -> bool:
+            return False
+
+    else:
+        should_stop = None
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        async def mock_query(prompt: Any, options: Any, transport: Any = None) -> Any:
+            for i in range(n_messages):
+                pulled["n"] += 1
+                yield _DummyMsg(i)
+
+        sink = _EventSink()
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            record = await agent.communicate("prompt", stream_callback=sink, should_stop=should_stop)
+    return agent, record, sink, pulled["n"]
+
+
+def _agent_end_events(sink: _EventSink) -> list[AgentEndEvent]:
+    return [e for e in sink.events if isinstance(e, AgentEndEvent)]
+
+
+class TestCooperativeStopSeam:
+    def test_stopped_early_member_on_both_enums(self) -> None:
+        assert AgentEndStatus.STOPPED_EARLY.value == "stopped_early"
+        assert TurnEndStatus.STOPPED_EARLY.value == "stopped_early"
+
+    def test_turnendstatus_conversion_from_agentendstatus(self) -> None:
+        # finalize() (and antigravity_agent) convert via TurnEndStatus(status.value);
+        # the new member must round-trip so an early-stopped open turn isn't mislabeled.
+        assert TurnEndStatus(AgentEndStatus.STOPPED_EARLY.value) == TurnEndStatus.STOPPED_EARLY
+
+    async def test_stop_after_first_dispatched_message(self) -> None:
+        _agent, record, sink, pulled = await _run_claude_communicate(stop_after=1, n_messages=3)
+        # The deciding message is kept; the next is never pulled.
+        assert pulled == 1
+        assert record.crashed is False
+        ends = _agent_end_events(sink)
+        assert len(ends) == 1
+        assert ends[0].status == AgentEndStatus.STOPPED_EARLY
+        assert ends[0].crashed is False
+
+    async def test_early_stop_is_clean_not_crashed(self) -> None:
+        agent, record, _sink, _pulled = await _run_claude_communicate(stop_after=1)
+        # A clean stop: no partial pending_turn, no ERROR state, no raise (we got here).
+        assert agent.pending_turn is None
+        assert agent.get_state().value != "error"
+        assert record.crashed is False
+
+    async def test_should_stop_none_consumes_full_stream(self) -> None:
+        _agent, _record, sink, pulled = await _run_claude_communicate(stop_after=None, n_messages=3)
+        assert pulled == 3
+        ends = _agent_end_events(sink)
+        assert len(ends) == 1
+        assert ends[0].status == AgentEndStatus.COMPLETED
+
+    async def test_should_stop_false_consumes_full_stream(self) -> None:
+        _agent, _record, sink, pulled = await _run_claude_communicate(never=True, n_messages=3)
+        assert pulled == 3
+        assert _agent_end_events(sink)[0].status == AgentEndStatus.COMPLETED

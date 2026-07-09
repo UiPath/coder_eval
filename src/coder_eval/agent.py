@@ -5,6 +5,7 @@
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any, ClassVar, NoReturn, Protocol
 
 from .errors import AgentCrashError, TurnTimeoutError
@@ -190,6 +191,7 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
         max_turns: int | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> TurnRecord:
         """Send a message to the agent and receive its response.
 
@@ -205,6 +207,15 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
                 ``communicate()`` call. When the agent would exceed it, the
                 returned ``TurnRecord`` has ``max_turns_exhausted=True``.
                 None defers to the underlying SDK default.
+            should_stop: Cooperative early-stop poll for early-stop-on-criterion.
+                When provided, an implementation that supports cooperative
+                stopping (``supports_cooperative_stop=True``) should call it at
+                each safe message boundary and, when it returns True, stop
+                pulling further work and finalize the turn cleanly
+                (``crashed=False``, no raise). ``None`` (default) preserves the
+                pre-existing behavior exactly. Agents that do not support it
+                accept the argument and ignore it (the orchestrator only passes
+                it to a capable agent).
 
         Returns:
             TurnRecord containing the complete interaction
