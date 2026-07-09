@@ -51,10 +51,14 @@ jobs:
       - name: Cache dependencies
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
+          # ``.venv`` is deliberately NOT cached: its interpreter symlinks
+          # point at the exact hosted-Python patch, so a patch bump (e.g.
+          # 3.13.13 -> 3.13.14) leaves a dangling ``.venv/bin/python`` and
+          # every ``.venv/bin/*`` fails with exit 127 (cannot execute).
+          # ``uv sync --frozen`` rehydrates ``.venv`` from the cached wheels.
           path: |
             ~/.cache/uv
             ~/.cache/pip
-            .venv
             .pytest_cache
             .ruff_cache
           key: ${{ runner.os }}-py3.13-${{ hashFiles('pyproject.toml', 'uv.lock') }}
@@ -379,10 +383,12 @@ jobs:
       - name: Cache dependencies
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
+          # ``.venv`` excluded: a hosted-Python patch bump orphans its
+          # interpreter symlink (dangling ``.venv/bin/python`` -> exit 127).
+          # ``uv sync --frozen`` rehydrates it from the cached wheels.
           path: |
             ~/.cache/uv
             ~/.cache/pip
-            .venv
           key: ${{ runner.os }}-py3.13-e2e-${{ hashFiles('pyproject.toml', 'uv.lock') }}
           restore-keys: |
             ${{ runner.os }}-py3.13-e2e-
@@ -544,10 +550,12 @@ jobs:
       - name: Cache dependencies
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
+          # ``.venv`` excluded: a hosted-Python patch bump orphans its
+          # interpreter symlink (dangling ``.venv/bin/python`` -> exit 127).
+          # ``uv sync --frozen`` rehydrates it from the cached wheels.
           path: |
             ~/.cache/uv
             ~/.cache/pip
-            .venv
           key: ${{ runner.os }}-py3.13-live-${{ hashFiles('pyproject.toml', 'uv.lock') }}
           restore-keys: |
             ${{ runner.os }}-py3.13-live-
@@ -714,8 +722,12 @@ jobs:
       - name: Run Codex live tests
         run: |
           mkdir -p tmp
+          # Run serially: `-n0` overrides the global `-n auto` (addopts).
+          # Parallel xdist workers share ~/.codex and race the Codex SQLite
+          # state migration (`duplicate column name: thread_id`); serial init
+          # migrates the fresh DB exactly once.
           .venv/bin/pytest tests/test_codex_agent_live.py \
-            -m live -v --tb=short --strict-markers -ra \
+            -m live -n0 -v --tb=short --strict-markers -ra \
             --junit-xml=tmp/junit-codex-live.xml
 
       - name: Assert Codex live tests actually ran (not silently skipped)
