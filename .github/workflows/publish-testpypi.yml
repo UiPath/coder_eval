@@ -73,7 +73,13 @@ jobs:
           ):
               p = pathlib.Path(path)
               key = "version" if path.endswith("toml") else "__version__"
-              p.write_text(re.sub(pat, f'{key} = "${DEV_VERSION}"', p.read_text(), count=1))
+              # re.subn (not re.sub) so a version-line format drift aborts loudly
+              # instead of silently no-op'ing (rc=0) and publishing a stale/base
+              # version that then collides on TestPyPI (masked by skip-existing).
+              new, n = re.subn(pat, f'{key} = "${DEV_VERSION}"', p.read_text(), count=1)
+              if n != 1:
+                  raise SystemExit(f"version pattern did not match {path} (matched {n}); refusing to publish a stale/colliding artifact")
+              p.write_text(new)
           PY
           echo "Stamped dev version: ${DEV_VERSION}"
 
