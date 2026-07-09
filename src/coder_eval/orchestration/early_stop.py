@@ -1,21 +1,42 @@
-"""Early-stop-on-criterion: resolution-time validation.
+"""Early-stop-on-criterion: resolution-time validation + runtime watcher.
 
 Opt-in mechanism (``run_limits.stop_early``) that ends a single-shot run as soon
 as its *armed* criteria (those with ``stop_when`` set) are decided mid-run — on
-pass or on a definitive fail. This module owns the resolution-time guardrails:
-``validate_early_stop`` rejects every configuration v1 cannot honor as a hard
-error, so an unsupported arming is never a silent no-op. The runtime watcher that
-actually observes the event stream and trips the interrupt lands in a later
-commit; until then arming is inert at runtime.
+pass or on a definitive fail. This module owns the whole feature:
+
+* ``validate_early_stop`` — resolution-time guardrails. Rejects every
+  configuration v1 cannot honor as a hard error, so an unsupported arming is
+  never a silent no-op.
+* ``EarlyStopWatcher`` — the runtime observer. A ``StreamCallback`` composed
+  into the agent's event stream that maintains its own ``EventCollector``,
+  evaluates every armed criterion's ``live_verdict`` on each tool completion,
+  applies the stop rule, and exposes ``should_stop()`` (the cooperative
+  interrupt the agent polls) plus ``info`` (the ``EarlyStopInfo`` the
+  orchestrator records). Fail-open: a raising ``live_verdict`` disarms the
+  watcher and degrades to a full run — a verdict bug can never cause a *false*
+  early stop.
+
+Live verdicts only *trigger* the stop; the authoritative scores always come
+from the standard ``check_all`` on the frozen trajectory after the cut.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import logging
+import time
+from typing import TYPE_CHECKING, Any
+
+from coder_eval.models import EarlyStopInfo, EarlyStopReason
+from coder_eval.streaming.collector import EventCollector
+from coder_eval.streaming.events import AgentStartEvent, StreamEvent, ToolEndEvent, TurnStartEvent
 
 
 if TYPE_CHECKING:
-    from coder_eval.models import TaskDefinition
+    from coder_eval.criteria.base import BaseCriterion, LiveVerdict
+    from coder_eval.models import BaseSuccessCriterion, TaskDefinition
+
+
+logger = logging.getLogger(__name__)
 
 
 class EarlyStopConfigError(ValueError):
@@ -108,3 +129,173 @@ def validate_early_stop(task: TaskDefinition) -> None:
                 f"criterion type {c.type!r} cannot decide polarity {missing} mid-run "
                 + f"(stop_when={polarity!r}); it supports {sorted(polarities)}."
             )
+
+
+# Type alias for the armed pairs the watcher holds: (criterion model, its checker).
+_ArmedPair = tuple["BaseSuccessCriterion", "BaseCriterion[Any]"]
+
+
+class EarlyStopWatcher:
+    """Observes the agent event stream and trips the cooperative interrupt.
+
+    A ``StreamCallback`` composed into the agent's callback chain (alone when
+    ``--stream`` is off, else beside the ``TaskScopedCallback``). It maintains
+    its OWN ``EventCollector`` — independent of the one the agent builds its
+    returned ``TurnRecord`` from — so each ``live_verdict`` sees a fresh,
+    single-element partial-trajectory list. On every tool completion it computes
+    all armed verdicts and applies the stop rule; once a stop fires (or the
+    watcher disarms on a raising verdict) the decision is latched and further
+    events are ignored.
+
+    The orchestrator polls ``should_stop`` (passed to ``agent.communicate``) and,
+    after the turn, reads ``info`` to populate ``EvaluationResult.early_stop``.
+
+    Fail-open: a ``live_verdict`` that raises disarms the watcher, logs
+    loudly, and degrades the run to a full run (``info`` stays ``None``). Because
+    live verdicts are triggers — not truth — this can never produce a *false*
+    early stop; it only ever errs toward running more.
+    """
+
+    def __init__(
+        self,
+        task_id: str,
+        armed: list[_ArmedPair],
+        *,
+        max_turns: int | None,
+    ) -> None:
+        self._task_id = task_id
+        self._armed = armed
+        self._max_turns = max_turns
+        self._collector = EventCollector()
+        self._sdk_turn_index = 0
+        self._tool_call_index = 0
+        self._started_monotonic: float | None = None
+        # Previous round's verdicts, for the "which criterion flipped to pass this
+        # round" attribution on pass-stop. Reassigned ONLY at the end of a
+        # non-firing evaluation, so it always holds the PREVIOUS round when a stop
+        # fires. Starts all-"undecided".
+        self._prev_verdicts: list[LiveVerdict] = ["undecided"] * len(armed)
+        self._info: EarlyStopInfo | None = None
+        self._disarmed = False
+
+    @classmethod
+    def for_task(cls, task: TaskDefinition) -> EarlyStopWatcher:
+        """Build a watcher for an armed task (instantiates the armed criteria's checkers).
+
+        The criteria registry is imported lazily here — it is not initialized at
+        module import time. Checker classes take no ctor args.
+        """
+        from coder_eval.criteria import CriterionRegistry, init_criteria
+
+        init_criteria(validate=False)
+        armed: list[_ArmedPair] = [
+            (c, CriterionRegistry.get_checker(c.type)()) for c in task.success_criteria if c.stop_when is not None
+        ]
+        max_turns = task.run_limits.max_turns if task.run_limits is not None else None
+        return cls(task.task_id, armed, max_turns=max_turns)
+
+    # --- StreamCallback -------------------------------------------------- #
+
+    def on_event(self, event: StreamEvent) -> None:
+        """Forward the event to the internal collector; evaluate on tool completions.
+
+        Short-circuits once the decision is latched (fired or disarmed). Counts
+        ``TurnStartEvent`` for ``sdk_turn_index`` and ``ToolEndEvent`` for the
+        1-based ``tool_call_index``, and stamps the wall-clock origin at the
+        FIRST ``AgentStartEvent`` only (a retry's second AgentStart does not
+        reset it).
+        """
+        if self._info is not None or self._disarmed:
+            return
+        if isinstance(event, AgentStartEvent):
+            if self._started_monotonic is None:
+                self._started_monotonic = time.monotonic()
+        elif isinstance(event, TurnStartEvent):
+            self._sdk_turn_index += 1
+        elif isinstance(event, ToolEndEvent):
+            self._tool_call_index += 1
+        self._collector.on_event(event)
+        if isinstance(event, ToolEndEvent):
+            self._evaluate()
+
+    def should_stop(self) -> bool:
+        """The cooperative interrupt the agent polls after each dispatched message."""
+        return self._info is not None
+
+    @property
+    def info(self) -> EarlyStopInfo | None:
+        """The recorded stop info, or ``None`` if no stop fired (incl. after disarm)."""
+        return self._info
+
+    @property
+    def disarmed(self) -> bool:
+        """True once a ``live_verdict`` raised and the watcher degraded to a full run."""
+        return self._disarmed
+
+    # --- Stop rule -------------------------------------------------- #
+
+    def _evaluate(self) -> None:
+        records = [self._collector.build_turn_record()]
+        verdicts: list[LiveVerdict] = []
+        for criterion, checker in self._armed:
+            try:
+                verdicts.append(checker.live_verdict(criterion, records))
+            except Exception:
+                # Fail-open: a raising verdict disarms; the run degrades to full.
+                self._disarmed = True
+                logger.error(
+                    "[%s] early-stop live_verdict raised for criterion %r; disarming watcher, "
+                    + "run degrades to a full run",
+                    self._task_id,
+                    criterion.type,
+                    exc_info=True,
+                )
+                return
+
+        # Fail-stop: first armed criterion (criteria order) that live-fails AND
+        # whose stop_when permits fail decides the run.
+        for (criterion, _checker), verdict in zip(self._armed, verdicts, strict=True):
+            if verdict == "fail" and criterion.stop_when in ("fail", "decided"):
+                self._fire(EarlyStopReason.CRITERION_FAILED, criterion)
+                return
+
+        # Pass-stop: EVERY armed criterion live-passes AND each permits pass.
+        all_pass = all(v == "pass" for v in verdicts)
+        all_permit_pass = all(c.stop_when in ("pass", "decided") for c, _ in self._armed)
+        if all_pass and all_permit_pass:
+            # Deciding criterion = the last armed (criteria order) whose verdict
+            # flipped vs the previous round; fall back to the last armed.
+            deciding = self._armed[-1][0]
+            for (criterion, _checker), verdict, prev in zip(self._armed, verdicts, self._prev_verdicts, strict=True):
+                if verdict != prev:
+                    deciding = criterion
+            self._fire(EarlyStopReason.CRITERION_PASSED, deciding)
+            return
+
+        # No stop this round — record the verdicts so the next round can detect flips.
+        self._prev_verdicts = verdicts
+
+    def _fire(self, reason: EarlyStopReason, criterion: BaseSuccessCriterion) -> None:
+        elapsed = 0.0
+        if self._started_monotonic is not None:
+            elapsed = max(time.monotonic() - self._started_monotonic, 0.0)
+        turns_remaining = None if self._max_turns is None else max(self._max_turns - self._sdk_turn_index, 0)
+        self._info = EarlyStopInfo(
+            reason=reason,
+            deciding_criterion_type=criterion.type,
+            deciding_criterion_description=criterion.description,
+            armed_criteria=[f"{c.type}: {c.description}" for c, _ in self._armed],
+            sdk_turn_index=self._sdk_turn_index,
+            tool_call_index=self._tool_call_index,
+            elapsed_seconds=elapsed,
+            turns_remaining_at_stop=turns_remaining,
+        )
+        logger.info(
+            "[%s] early-stop fired: reason=%s deciding=%s sdk_turn=%d tool_call=%d elapsed=%.2fs",
+            self._task_id,
+            reason.value,
+            criterion.type,
+            self._sdk_turn_index,
+            self._tool_call_index,
+            elapsed,
+        )

@@ -1,20 +1,29 @@
-"""Tests for early-stop-on-criterion: config surface, live-verdict
-contract, and resolution-time guardrails.
+"""Tests for early-stop-on-criterion (phases 1-3).
 
-This suite is inert at runtime (nothing invokes the interrupt yet); these tests
-cover the pieces that DO exist: the two new opt-in config fields, the
+Phase 1 (config + contract): the two new opt-in config fields, the
 ``live_verdict`` / ``live_stop_polarities`` observability contract on the two
 observable criteria, and ``validate_early_stop``'s guardrails on both the
 ``plan`` and ``run`` surfaces.
+
+Phase 2 (agent seam): the cooperative ``should_stop`` seam on
+``ClaudeCodeAgent.communicate`` and the ``STOPPED_EARLY`` status, plus the
+timeout-beats-stop precedence (a deadline breach wins over a pending stop).
+
+Phase 3 (feature live): the ``EarlyStopReason`` / ``EarlyStopInfo`` models and
+the ``armed_criteria_passed`` gate; the ``EarlyStopWatcher`` runtime observer
+(stop rule, fail-open, latching, attribution); and the orchestrator wiring
+(watcher composed into the stream, ``result.early_stop`` populated, armed-subset
+gate on an early-stopped run vs the full gate on a completed run).
 """
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -23,11 +32,17 @@ from coder_eval.criteria import CriterionRegistry, init_criteria
 from coder_eval.criteria.base import BaseCriterion
 from coder_eval.criteria.command_executed import CommandExecutedChecker
 from coder_eval.criteria.skill_triggered import SkillTriggeredChecker, _engaged_skill_names
+from coder_eval.errors import TurnTimeoutError
 from coder_eval.models import (
     AgentKind,
     CommandExecutedCriterion,
     CommandTelemetry,
+    CriterionResult,
+    EarlyStopInfo,
+    EarlyStopReason,
+    EvaluationResult,
     FileExistsCriterion,
+    FinalStatus,
     RunLimits,
     SandboxConfig,
     SimulationConfig,
@@ -36,8 +51,16 @@ from coder_eval.models import (
     TurnRecord,
     parse_agent_config,
 )
-from coder_eval.orchestration.early_stop import EarlyStopConfigError, validate_early_stop
-from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, TurnEndStatus
+from coder_eval.orchestration.early_stop import EarlyStopConfigError, EarlyStopWatcher, validate_early_stop
+from coder_eval.orchestrator import Orchestrator
+from coder_eval.streaming.events import (
+    AgentEndEvent,
+    AgentEndStatus,
+    AgentStartEvent,
+    ToolEndEvent,
+    TurnEndStatus,
+    TurnStartEvent,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -103,6 +126,63 @@ def _cmd_crit(
         max_count=max_count,
         stop_when=stop_when,  # type: ignore[arg-type]
     )
+
+
+# --- Phase-3 helpers: results / info / events ------------------------------ #
+
+
+def _crit_result(ctype: str, score: float) -> CriterionResult:
+    return CriterionResult(criterion_type=ctype, description=f"{ctype} result", score=score)
+
+
+def _result(*, criteria_results: list[CriterionResult] | None = None) -> EvaluationResult:
+    return EvaluationResult(
+        task_id="r",
+        task_description="d",
+        agent_type="claude-code",
+        started_at=_TS,
+        final_status=FinalStatus.FAILURE,
+        iteration_count=1,
+        success_criteria_results=criteria_results or [],
+    )
+
+
+def _info(**overrides: Any) -> EarlyStopInfo:
+    base: dict[str, Any] = dict(
+        reason=EarlyStopReason.CRITERION_PASSED,
+        deciding_criterion_type="skill_triggered",
+        deciding_criterion_description="skill activation",
+        armed_criteria=["skill_triggered: skill activation"],
+        sdk_turn_index=1,
+        tool_call_index=1,
+        elapsed_seconds=1.0,
+        turns_remaining_at_stop=14,
+    )
+    base.update(overrides)
+    return EarlyStopInfo(**base)
+
+
+def _agent_start() -> AgentStartEvent:
+    return AgentStartEvent(task_id="t")
+
+
+def _turn_start() -> TurnStartEvent:
+    return TurnStartEvent(task_id="t")
+
+
+def _skill_cmd(skill: str, *, tool_id: str) -> CommandTelemetry:
+    return CommandTelemetry(
+        tool_name="Skill", tool_id=tool_id, timestamp=_TS, parameters={"skill": skill}, result_status="success"
+    )
+
+
+def _tool_end(cmd: CommandTelemetry) -> ToolEndEvent:
+    return ToolEndEvent(task_id="t", tool=cmd)
+
+
+def _skill_events(skill: str, *, tool_id: str = "sk-1") -> list[Any]:
+    """AgentStart + TurnStart + a Skill ToolEnd engaging ``skill``."""
+    return [_agent_start(), _turn_start(), _tool_end(_skill_cmd(skill, tool_id=tool_id))]
 
 
 # --------------------------------------------------------------------------- #
@@ -420,6 +500,45 @@ def _agent_end_events(sink: _EventSink) -> list[AgentEndEvent]:
     return [e for e in sink.events if isinstance(e, AgentEndEvent)]
 
 
+class _NoopWatchdog:
+    """No-op stand-in for ThreadedWatchdog so only the in-loop deadline guard fires."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def __enter__(self) -> _NoopWatchdog:
+        return self
+
+    def __exit__(self, *args: Any) -> bool:
+        return False
+
+
+async def _run_claude_communicate_timeout() -> tuple[ClaudeCodeAgent, _EventSink, BaseException | None]:
+    """Drive ``communicate`` with a slow query (50ms) against a 10ms deadline AND
+    ``should_stop=True`` — the deadline guard must win. Returns
+    ``(agent, sink, raised_exception)``."""
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+    sink = _EventSink()
+    raised: BaseException | None = None
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        async def slow_query(prompt: Any, options: Any, transport: Any = None) -> Any:
+            await asyncio.sleep(0.05)
+            yield _DummyMsg(0)
+
+        with (
+            patch("coder_eval.agents.claude_code_agent.query", slow_query),
+            patch("coder_eval.agents.claude_code_agent.ThreadedWatchdog", _NoopWatchdog),
+        ):
+            try:
+                await agent.communicate("p", stream_callback=sink, timeout=0.01, should_stop=lambda: True)
+            except TurnTimeoutError as exc:
+                raised = exc
+    return agent, sink, raised
+
+
 class TestCooperativeStopSeam:
     def test_stopped_early_member_on_both_enums(self) -> None:
         assert AgentEndStatus.STOPPED_EARLY.value == "stopped_early"
@@ -458,3 +577,383 @@ class TestCooperativeStopSeam:
         _agent, _record, sink, pulled = await _run_claude_communicate(never=True, n_messages=3)
         assert pulled == 3
         assert _agent_end_events(sink)[0].status == AgentEndStatus.COMPLETED
+
+    async def test_timeout_beats_stop_precedence(self) -> None:
+        # Both signals live in one turn: a deadline breach AND should_stop=True.
+        # The top-of-loop deadline guard returns BEFORE dispatch, so the stop
+        # check is never reached — TIMEOUT wins over the pending stop.
+        agent, sink, raised = await _run_claude_communicate_timeout()
+        assert isinstance(raised, TurnTimeoutError)
+        ends = _agent_end_events(sink)
+        assert len(ends) == 1
+        assert ends[0].status == AgentEndStatus.TIMEOUT
+        assert ends[0].crashed is True
+        # The crashed partial is preserved for the orchestrator to drain.
+        assert agent.pending_turn is not None and agent.pending_turn.crashed is True
+        # STOPPED_EARLY must NOT appear — the stop lost the race.
+        assert AgentEndStatus.STOPPED_EARLY not in {e.status for e in ends}
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3: EarlyStopReason / EarlyStopInfo / armed_criteria_passed
+# --------------------------------------------------------------------------- #
+
+
+class TestEarlyStopModels:
+    def test_reason_values(self) -> None:
+        assert EarlyStopReason.CRITERION_PASSED.value == "criterion_passed"
+        assert EarlyStopReason.CRITERION_FAILED.value == "criterion_failed"
+
+    def test_info_defaults(self) -> None:
+        info = EarlyStopInfo(
+            reason=EarlyStopReason.CRITERION_FAILED,
+            deciding_criterion_type="command_executed",
+            deciding_criterion_description="d",
+            sdk_turn_index=2,
+            tool_call_index=3,
+            elapsed_seconds=1.5,
+        )
+        assert info.armed_criteria == []
+        assert info.turns_remaining_at_stop is None
+
+    def test_info_roundtrip(self) -> None:
+        info = _info()
+        assert EarlyStopInfo.model_validate_json(info.model_dump_json()) == info
+
+    def test_evaluation_result_early_stop_defaults_none(self) -> None:
+        assert _result().early_stop is None
+
+    def test_evaluation_result_roundtrip_with_early_stop(self) -> None:
+        result = _result(criteria_results=[_crit_result("skill_triggered", 1.0)])
+        result.early_stop = _info()
+        reloaded = EvaluationResult.model_validate_json(result.model_dump_json())
+        assert reloaded.early_stop == _info()
+
+    def test_armed_criteria_passed_gates_armed_only(self) -> None:
+        # Armed skill passes; advisory file_exists fails. armed gate -> True.
+        criteria = [
+            _skill_crit("date-teller", "date-teller", stop_when="decided"),
+            FileExistsCriterion(path="x", description="x must exist"),
+        ]
+        result = _result(criteria_results=[_crit_result("skill_triggered", 1.0), _crit_result("file_exists", 0.0)])
+        assert result.armed_criteria_passed(criteria) is True
+        # The full gate would (correctly) fail on the advisory 0.0.
+        assert result.all_criteria_passed(criteria) is False
+
+    def test_armed_criteria_passed_fails_when_armed_fails(self) -> None:
+        criteria = [
+            _skill_crit("date-teller", "date-teller", stop_when="decided"),
+            FileExistsCriterion(path="x", description="x must exist"),
+        ]
+        result = _result(criteria_results=[_crit_result("skill_triggered", 0.0), _crit_result("file_exists", 1.0)])
+        assert result.armed_criteria_passed(criteria) is False
+
+    def test_armed_criteria_passed_raises_on_empty_armed(self) -> None:
+        criteria = [FileExistsCriterion(path="x", description="x must exist")]
+        result = _result(criteria_results=[_crit_result("file_exists", 1.0)])
+        with pytest.raises(ValueError, match="no armed criteria"):
+            result.armed_criteria_passed(criteria)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3: EarlyStopWatcher
+# --------------------------------------------------------------------------- #
+
+
+def _watcher(criteria: list[Any], *, max_turns: int | None = 20) -> EarlyStopWatcher:
+    task = _task(criteria=criteria, stop_early=True)
+    assert task.run_limits is not None
+    task.run_limits.max_turns = max_turns
+    return EarlyStopWatcher.for_task(task)
+
+
+def _feed(watcher: EarlyStopWatcher, events: list[Any]) -> None:
+    for event in events:
+        watcher.on_event(event)
+
+
+class TestEarlyStopWatcher:
+    def test_for_task_arms_only_stop_criteria(self) -> None:
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_when="decided"),
+                FileExistsCriterion(path="x", description="x must exist"),
+            ]
+        )
+        # Only the armed criterion is tracked; the unarmed file_exists is ignored.
+        assert len(watcher._armed) == 1
+
+    def test_undecided_before_engagement_no_stop(self) -> None:
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        _feed(watcher, [_agent_start(), _turn_start()])
+        assert watcher.should_stop() is False
+        assert watcher.info is None
+
+    def test_pass_stop_fires_on_expected_skill(self) -> None:
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        _feed(watcher, _skill_events("date-teller"))
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+    def test_fail_stop_fires_on_wrong_skill(self) -> None:
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        _feed(watcher, _skill_events("weather-teller"))
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+
+    def test_pass_polarity_does_not_fire_on_fail(self) -> None:
+        # stop_when="pass": a wrong-skill (live-fail) engagement must NOT stop.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
+        _feed(watcher, _skill_events("weather-teller"))
+        assert watcher.should_stop() is False
+
+    def test_stacked_pass_stop(self) -> None:
+        # Two armed skill criteria, both expecting date-teller; engaging it passes both.
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_when="decided"),
+                _skill_crit("weather-teller", "", stop_when="decided"),
+            ]
+        )
+        _feed(watcher, _skill_events("date-teller"))
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+    def test_stacked_wrong_skill_fail_stop(self) -> None:
+        # Engaging weather-teller: date-teller row -> fail; the fail-stop fires first.
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_when="decided"),
+                _skill_crit("weather-teller", "date-teller", stop_when="decided"),
+            ]
+        )
+        _feed(watcher, _skill_events("weather-teller"))
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+
+    def test_records_turn_and_tool_index(self) -> None:
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        _feed(watcher, _skill_events("date-teller"))
+        assert watcher.info is not None
+        assert watcher.info.sdk_turn_index == 1
+        assert watcher.info.tool_call_index == 1
+
+    def test_turns_remaining_from_max_turns(self) -> None:
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")], max_turns=15)
+        _feed(watcher, _skill_events("date-teller"))
+        assert watcher.info is not None
+        assert watcher.info.turns_remaining_at_stop == 14  # 15 - sdk_turn_index(1)
+
+    def test_turns_remaining_none_when_max_turns_unset(self) -> None:
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")], max_turns=None)
+        _feed(watcher, _skill_events("date-teller"))
+        assert watcher.info is not None
+        assert watcher.info.turns_remaining_at_stop is None
+
+    def test_fail_open_on_raising_verdict(self) -> None:
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        with patch.object(SkillTriggeredChecker, "live_verdict", side_effect=RuntimeError("boom")):
+            _feed(watcher, _skill_events("date-teller"))
+        # Fail-open: disarmed, no false stop, degrades to a full run.
+        assert watcher.disarmed is True
+        assert watcher.should_stop() is False
+        assert watcher.info is None
+
+    def test_decision_latched_after_fire(self) -> None:
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        _feed(watcher, _skill_events("date-teller"))
+        fired = watcher.info
+        # A subsequent (wrong-skill) engagement must not overwrite the latched decision.
+        _feed(watcher, [_tool_end(_skill_cmd("weather-teller", tool_id="sk-2"))])
+        assert watcher.info is fired
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3: Orchestrator wiring
+# --------------------------------------------------------------------------- #
+
+
+class _ScriptedAgent:
+    """Duck-typed agent: replays scripted events through the callback, polling
+    ``should_stop`` after each and breaking when it flips (mirrors the real
+    message-boundary cut). Returns a fixed ``TurnRecord``."""
+
+    def __init__(self, events: list[Any], turn: TurnRecord) -> None:
+        self._events = events
+        self._turn = turn
+        self.pending_turn: TurnRecord | None = None
+        self.delivered = 0
+
+    def get_sdk_options(self) -> dict[str, Any] | None:
+        return None
+
+    async def communicate(
+        self,
+        prompt: str,
+        *,
+        stream_callback: Any = None,
+        timeout: float | None = None,
+        max_turns: int | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> TurnRecord:
+        for event in self._events:
+            if stream_callback is not None:
+                stream_callback.on_event(event)
+            self.delivered += 1
+            if should_stop is not None and should_stop():
+                break
+        return self._turn
+
+
+async def _run_wiring(
+    *,
+    criteria: list[Any],
+    events: list[Any],
+    scores: list[float],
+    stop_early: bool,
+    tmp_path,
+) -> tuple[EvaluationResult, _ScriptedAgent]:
+    """Drive ``Orchestrator._evaluation_loop`` with a scripted agent + mock checker.
+
+    ``scores`` are positional CriterionResult scores matching ``criteria``.
+    The early-stop watcher is built directly (_setup is not invoked here).
+    """
+    task = _task(criteria=criteria, stop_early=stop_early)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    orch = Orchestrator(task=task, run_dir=run_dir, variant_id="default")
+    orch.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        variant_id="default",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status=FinalStatus.FAILURE,
+        iteration_count=0,
+        environment_info={},
+    )
+    sandbox = MagicMock()
+    sandbox.sandbox_dir = tmp_path / "sandbox"
+    sandbox.sandbox_dir.mkdir()
+    orch.sandbox = sandbox
+
+    checker = MagicMock()
+    checker.check_all = MagicMock(return_value=[_crit_result(c.type, s) for c, s in zip(criteria, scores, strict=True)])
+    orch.success_checker = checker
+
+    if stop_early:
+        orch._early_stop_watcher = EarlyStopWatcher.for_task(task)
+
+    turn = TurnRecord(iteration=1, user_input="p", agent_output="done")
+    agent = _ScriptedAgent(events, turn)
+    orch.agent = agent  # type: ignore[assignment]
+
+    with patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)):
+        await orch._evaluation_loop()
+    assert orch.result is not None
+    return orch.result, agent
+
+
+class TestOrchestratorEarlyStopWiring:
+    _SKILL = "date-teller"
+
+    def _criteria(self, *, expected: str = "date-teller", stop_when: str | None = "decided") -> list[Any]:
+        # Armed skill_triggered + advisory file_exists (deliberately failing).
+        return [
+            _skill_crit(self._SKILL, expected, stop_when=stop_when),
+            FileExistsCriterion(path="artifact.txt", description="artifact must exist"),
+        ]
+
+    async def test_default_off_full_gate_no_early_stop(self, tmp_path) -> None:
+        # Unarmed: no watcher, all criteria gate, advisory 0.0 drags to FAILURE.
+        result, agent = await _run_wiring(
+            criteria=self._criteria(stop_when=None),
+            events=_skill_events(self._SKILL),
+            scores=[1.0, 0.0],
+            stop_early=False,
+            tmp_path=tmp_path,
+        )
+        assert result.early_stop is None
+        assert agent.delivered == 3  # full stream consumed (should_stop=None)
+
+    async def test_pass_stop_cuts_the_stream(self, tmp_path) -> None:
+        # A trailing event AFTER the deciding ToolEnd proves the cut: delivered == 3.
+        events = [*_skill_events(self._SKILL), _turn_start()]
+        result, agent = await _run_wiring(
+            criteria=self._criteria(),
+            events=events,
+            scores=[1.0, 0.0],
+            stop_early=True,
+            tmp_path=tmp_path,
+        )
+        assert agent.delivered == 3
+        assert result.early_stop is not None
+        assert result.early_stop.reason == EarlyStopReason.CRITERION_PASSED
+
+    async def test_fail_stop_wiring(self, tmp_path) -> None:
+        result, _agent = await _run_wiring(
+            criteria=self._criteria(),
+            events=_skill_events("weather-teller"),
+            scores=[0.0, 0.0],
+            stop_early=True,
+            tmp_path=tmp_path,
+        )
+        assert result.early_stop is not None
+        assert result.early_stop.reason == EarlyStopReason.CRITERION_FAILED
+
+    async def test_early_stop_info_fields_populated(self, tmp_path) -> None:
+        result, _agent = await _run_wiring(
+            criteria=self._criteria(),
+            events=_skill_events(self._SKILL),
+            scores=[1.0, 0.0],
+            stop_early=True,
+            tmp_path=tmp_path,
+        )
+        assert result.early_stop is not None
+        assert result.early_stop.sdk_turn_index == 1
+        assert result.early_stop.tool_call_index == 1
+        assert result.early_stop.deciding_criterion_type == "skill_triggered"
+
+    async def test_advisory_not_gated_on_early_stop(self, tmp_path) -> None:
+        # Armed skill passes (1.0), advisory file_exists fails (0.0): armed gate -> SUCCESS.
+        result, _agent = await _run_wiring(
+            criteria=self._criteria(),
+            events=_skill_events(self._SKILL),
+            scores=[1.0, 0.0],
+            stop_early=True,
+            tmp_path=tmp_path,
+        )
+        assert result.early_stop is not None
+        assert result.all_criteria_passed(self._criteria()) is False  # full gate would fail
+        assert result.armed_criteria_passed(self._criteria()) is True  # armed gate passes
+
+    async def test_completed_naturally_uses_full_gate(self, tmp_path) -> None:
+        # Armed, but the skill is never engaged -> watcher never fires -> full gate,
+        # so the advisory 0.0 legitimately drags the completed run to FAILURE.
+        result, agent = await _run_wiring(
+            criteria=self._criteria(),
+            events=[_agent_start(), _turn_start()],  # no skill engagement
+            scores=[0.0, 0.0],
+            stop_early=True,
+            tmp_path=tmp_path,
+        )
+        assert result.early_stop is None
+        assert agent.delivered == 2  # full (short) stream consumed
+        assert result.all_criteria_passed(self._criteria()) is False
+
+    async def test_fail_open_wiring_degrades_to_full_run(self, tmp_path) -> None:
+        with patch.object(SkillTriggeredChecker, "live_verdict", side_effect=RuntimeError("boom")):
+            result, _agent = await _run_wiring(
+                criteria=self._criteria(),
+                events=_skill_events(self._SKILL),
+                scores=[1.0, 0.0],
+                stop_early=True,
+                tmp_path=tmp_path,
+            )
+        # Fail-open: no early_stop recorded, full gate applies.
+        assert result.early_stop is None

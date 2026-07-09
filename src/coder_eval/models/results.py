@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
@@ -378,6 +379,56 @@ class SimulationTelemetry(BaseModel):
     total_turns: int = Field(description="Number of user↔agent exchanges completed in this dialog", ge=0)
 
 
+class EarlyStopReason(StrEnum):
+    """Why an early-stop-on-criterion run was cut short.
+
+    Lives in ``coder_eval.models`` (not ``simulation/``) because
+    ``EvaluationResult`` carries it and ``models/`` is a leaf package that
+    cannot import from ``simulation``. ``DialogStopReason`` is a stylistic
+    reference only. Early-stop is orthogonal telemetry, NOT a ``FinalStatus`` —
+    the terminal-status set stays closed.
+    """
+
+    CRITERION_PASSED = "criterion_passed"
+    CRITERION_FAILED = "criterion_failed"
+
+
+class EarlyStopInfo(BaseModel):
+    """Records why and when a run stopped early (``None`` when it ran to completion).
+
+    Populated by the orchestrator's ``EarlyStopWatcher`` at the moment the armed
+    criteria are decided mid-run. ``early_stop is not None`` is itself the
+    "stopped early" flag — no separate bool. Serialized as part of
+    ``EvaluationResult`` to ``task.json``; defaults to ``None`` on old files, so
+    the round-trip is safe.
+    """
+
+    reason: EarlyStopReason = Field(description="Why the run stopped: armed criteria passed, or definitively failed.")
+    deciding_criterion_type: str = Field(
+        description="Type of the criterion whose live verdict fired the stop (the failing one on "
+        + "fail-stop; the last-to-pass on pass-stop)."
+    )
+    deciding_criterion_description: str = Field(
+        description="Description of the deciding criterion (human-readable label from the task YAML)."
+    )
+    armed_criteria: list[str] = Field(
+        default_factory=list,
+        description="'type: description' strings for the armed set, so reports can mark the rest "
+        + "advisory without re-deriving from task_config.",
+    )
+    sdk_turn_index: int = Field(
+        description="SDK inner-turn count at the stop (watcher counts TurnStartEvents). NOT the "
+        + "orchestrator iteration, which is always 1 in single-shot."
+    )
+    tool_call_index: int = Field(description="1-based index of the tool call that decided the stop.")
+    elapsed_seconds: float = Field(description="Wall-clock seconds from the first agent-start event to the stop.")
+    turns_remaining_at_stop: int | None = Field(
+        default=None,
+        description="max_turns - sdk_turn_index (an upper bound on turns avoided, not a measured "
+        + "saving); None when max_turns is unset.",
+    )
+
+
 class EvaluationResult(BaseModel):
     """Complete result of a task evaluation."""
 
@@ -503,6 +554,16 @@ class EvaluationResult(BaseModel):
         ),
     )
 
+    # Early-stop telemetry (only populated when the run was cut short by the
+    # armed-criteria watcher; None on a full run). See EarlyStopInfo.
+    early_stop: EarlyStopInfo | None = Field(
+        default=None,
+        description=(
+            "Why/when the run stopped early (reason, deciding criterion, SDK turn/tool index, elapsed). "
+            "None on a full run — 'early_stop is not None' is itself the stopped-early flag."
+        ),
+    )
+
     def calculate_weighted_score(self, criteria: list[SuccessCriterion]) -> None:
         """Calculate weighted average score from criterion results.
 
@@ -546,6 +607,33 @@ class EvaluationResult(BaseModel):
                 + f"{len(self.success_criteria_results)} results vs {len(criteria)} criteria."
             )
         return all(r.score >= c.pass_threshold for r, c in zip(self.success_criteria_results, criteria, strict=True))
+
+    def armed_criteria_passed(self, criteria: list[SuccessCriterion]) -> bool:
+        """True iff every ARMED criterion (``stop_when`` set) meets its pass_threshold.
+
+        The early-stop gate: on an early-stopped run only the armed subset gates
+        ``final_status`` (non-armed criteria are advisory — recorded but never
+        decisive), so a smoke flavor is not dragged to FAILURE by criteria whose
+        work it deliberately skipped. Shares the same results/criteria length
+        pre-check as ``all_criteria_passed`` so the gate logic stays
+        single-sourced. Raises ``ValueError`` on an empty armed set — unreachable
+        when a stop actually fired (a stop requires an armed criterion), so this
+        is a defensive guard against misuse.
+        """
+        if len(self.success_criteria_results) != len(criteria):
+            raise ValueError(
+                f"Results/criteria length mismatch for task {self.task_id}: "
+                + f"{len(self.success_criteria_results)} results vs {len(criteria)} criteria."
+            )
+        armed = [
+            (r, c) for r, c in zip(self.success_criteria_results, criteria, strict=True) if c.stop_when is not None
+        ]
+        if not armed:
+            raise ValueError(
+                f"armed_criteria_passed called with no armed criteria for task {self.task_id}; "
+                + "the early-stop gate is only valid when at least one criterion sets stop_when."
+            )
+        return all(r.score >= c.pass_threshold for r, c in armed)
 
 
 class CriterionStats(BaseModel):
