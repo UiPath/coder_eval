@@ -50,6 +50,7 @@ from .models import (
     UserMessage,
     resolve_route,
 )
+from .orchestration.early_stop import validate_early_stop
 from .orchestration.evaluation import load_reference
 from .path_utils import format_task_log_id, task_log_path
 from .sandbox import Sandbox
@@ -845,6 +846,11 @@ class Orchestrator:
         Raises:
             RuntimeError: If setup fails
         """
+        # Defensive early-stop guardrails for the library-use and in-container
+        # paths (the CLI already validated during resolution). No-op unless
+        # run_limits.stop_early is armed.
+        validate_early_stop(self.task)
+
         if self.sandbox is not None:
             # evaluate-only mode: sandbox already set up, skip agent
             assert self.result is not None

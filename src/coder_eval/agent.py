@@ -5,7 +5,7 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, NoReturn, Protocol
+from typing import Any, ClassVar, NoReturn, Protocol
 
 from .errors import AgentCrashError, TurnTimeoutError
 from .errors.agent import format_timeout_reason, truncate_crash_message
@@ -70,6 +70,13 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
     _state: AgentState = AgentState.WORKING
     _iteration: int = 0
     _iteration_was_incremented: bool = False
+
+    # Capability flag: whether this agent honors the cooperative ``should_stop``
+    # interrupt threaded through ``communicate()`` (early-stop-on-criterion).
+    # Default False — arming early-stop on an agent that does not set this True
+    # is rejected at resolution time. Concrete agents that check ``should_stop``
+    # between messages override it to True.
+    supports_cooperative_stop: ClassVar[bool] = False
 
     def _begin_turn(self) -> None:
         """Mark the start of a ``communicate()`` turn: reset the pending slot and

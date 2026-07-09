@@ -122,6 +122,18 @@ class BaseSuccessCriterion(BaseModel, ABC):
         ),
     )
 
+    stop_when: Literal["pass", "fail", "decided"] | None = Field(
+        default=None,
+        description=(
+            "Opt-in early-stop polarity for this criterion (membership in the run's 'armed set'). "
+            "None (default) = not a stop criterion. 'pass' = a live PASS may contribute to a stop; "
+            "'fail' = a live definitive FAIL may trigger a stop; 'decided' = either. Inert unless "
+            "run_limits.stop_early is True. Only valid on criteria observable mid-run (e.g. "
+            "skill_triggered, command_executed); an unobservable armed criterion is rejected at "
+            "resolution time."
+        ),
+    )
+
     requires_agent: ClassVar[bool] = False
     """True if this criterion requires agent turn records to evaluate correctly."""
 

@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import wraps
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from coder_eval.errors import JudgeInfrastructureError
 from coder_eval.models import BaseSuccessCriterion, CriterionAggregate, CriterionResult
@@ -22,6 +22,10 @@ if TYPE_CHECKING:
     from coder_eval.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
+
+# A criterion's verdict from a PARTIAL, mid-run trajectory (early-stop observability).
+# "undecided" means the outcome is not yet knowable from the events seen so far.
+LiveVerdict = Literal["pass", "fail", "undecided"]
 
 
 @dataclass(frozen=True)
@@ -124,6 +128,13 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
     # Subclasses MUST define this as a class variable
     criterion_type: ClassVar[str]
 
+    # Which polarities this criterion can decide from a PARTIAL, mid-run trajectory.
+    # Empty (base default) = not observable mid-run, so it can never arm early-stop.
+    # A subclass that reads only turn_records and can decide mid-run declares the
+    # polarities it supports (e.g. frozenset({"pass", "fail"})) AND overrides
+    # live_verdict; CE025 enforces that the two stay consistent.
+    live_stop_polarities: ClassVar[frozenset[str]] = frozenset()
+
     @handle_criterion_errors
     def check(
         self,
@@ -190,6 +201,29 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             Any exception - will be caught by @handle_criterion_errors decorator
         """
         pass
+
+    def live_verdict(
+        self,
+        criterion: C,
+        turn_records: list["TurnRecord"],
+    ) -> LiveVerdict:
+        """Decide this criterion from a PARTIAL, mid-run trajectory (early-stop).
+
+        Reads ONLY ``turn_records`` — a live verdict, by definition, may not peek
+        at the finished sandbox (that would invite end-state peeking), so there is
+        no ``sandbox`` parameter. Returns ``"pass"``/``"fail"`` only when the
+        outcome is already knowable from the events seen so far, else
+        ``"undecided"``.
+
+        This only *triggers* an early stop; the authoritative scores always come
+        from ``check()``/``_check_impl`` run on the frozen trajectory after the
+        stop, so a live/final divergence can never corrupt scoring.
+
+        Base default: ``"undecided"`` (not observable mid-run). Subclasses that
+        override this MUST also declare a non-empty ``live_stop_polarities`` (and
+        vice versa) — enforced by lint rule CE025.
+        """
+        return "undecided"
 
     def aggregate(
         self,

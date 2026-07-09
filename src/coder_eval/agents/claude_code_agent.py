@@ -10,7 +10,7 @@ from collections.abc import Callable, Sequence
 from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from claude_agent_sdk import (
     ClaudeAgentOptions,
@@ -632,6 +632,10 @@ class _ClaudeTurnState:
 @AgentRegistry.register(AgentKind.CLAUDE_CODE, ClaudeCodeAgentConfig)
 class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     """Implementation of the Agent interface for Claude Code using the SDK."""
+
+    # The Claude message loop has a between-messages guard where the cooperative
+    # ``should_stop`` check runs, so this agent supports early-stop-on-criterion.
+    supports_cooperative_stop: ClassVar[bool] = True
 
     def __init__(
         self,
