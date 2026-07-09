@@ -93,6 +93,9 @@ jobs:
           if-no-files-found: error
 
       - name: Publish to coder_eval feed
+        # Best-effort: the private Azure feed is a UiPath-internal target; its
+        # failure (e.g. an expired PAT) must NOT block the public PyPI publish.
+        continue-on-error: true
         if: steps.release.outputs.version != ''
         env:
           # Azure Artifacts accepts any non-empty username when paired with a
@@ -113,10 +116,12 @@ jobs:
         run: echo "owner_lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
+        continue-on-error: true  # GHCR image is internal/best-effort; don't block PyPI
         if: steps.release.outputs.version != ''
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
 
       - name: Log in to GHCR
+        continue-on-error: true  # GHCR image is internal/best-effort; don't block PyPI
         if: steps.release.outputs.version != ''
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3.7.0
         with:
@@ -125,6 +130,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push versioned agent image
+        continue-on-error: true  # GHCR image is internal/best-effort; don't block PyPI
         if: steps.release.outputs.version != ''
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6.19.2
         with:
@@ -142,18 +148,6 @@ jobs:
           # Read the shared buildcache docker-publish.yml writes; don't write it
           # back from here, to avoid two concurrent writers racing the cache tag.
           cache-from: type=registry,ref=ghcr.io/${{ steps.img.outputs.owner_lc }}/coder-eval-agent:buildcache
-
-      # Tag LAST, once the artifacts are built + the feeds/image published, so a
-      # `v<version>` tag reliably marks a completed release. Only the tag is
-      # pushed -- never a commit to main (which the branch ruleset forbids).
-      - name: Push v<version> tag
-        if: steps.release.outputs.version != ''
-        run: |
-          set -euo pipefail
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-          git tag -a "v${{ steps.release.outputs.version }}" -m "Release v${{ steps.release.outputs.version }}"
-          git push origin "v${{ steps.release.outputs.version }}"
 
   # Publish the SAME wheel+sdist to public PyPI (pkgs live alongside the private
   # Azure Artifacts feed, which the release job above still populates). This runs
@@ -185,3 +179,28 @@ jobs:
           # Trusted Publisher is configured on pypi.org for this repo +
           # workflow (release.yml) + environment (pypi); no password needed.
           packages-dir: dist/
+
+  # Tag the release ONLY after PyPI has published, so a `v<version>` tag marks a
+  # completed public release and the re-release guard never blocks retrying a
+  # failed publish. Tags are outside the branch ruleset, so GITHUB_TOKEN suffices.
+  tag-release:
+    name: Push release tag
+    needs: [release, publish-pypi]
+    if: needs.release.outputs.version != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write  # push the v<version> tag
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Push v<version> tag
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git tag -a "v${VERSION}" -m "Release v${VERSION}"
+          git push origin "v${VERSION}"
