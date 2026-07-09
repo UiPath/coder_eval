@@ -5,7 +5,7 @@ import { describe, expect, test } from "vitest";
 import { PRICING } from "../pricing";
 
 // Drift guard: lib/pricing.ts is a hand-copied mirror of the authoritative
-// Python table in src/coder_eval/proxy/pricing.py. If the backend reprices a
+// Python table in src/coder_eval/pricing.py. If the backend reprices a
 // model (or adds one) and this mirror isn't updated, the frontend's "estimated"
 // USD figures silently disagree with the backend's authoritative Cost on the
 // same tokens. This test parses the Python table and asserts both tables have
@@ -13,7 +13,7 @@ import { PRICING } from "../pricing";
 // into a failing build.
 
 const here = dirname(fileURLToPath(import.meta.url));
-const PY_PATH = resolve(here, "../../../src/coder_eval/proxy/pricing.py");
+const PY_PATH = resolve(here, "../../../src/coder_eval/pricing.py");
 
 // Match: "model-id": ModelPricing(1.25, 10.0, 1.25, 0.125),
 const ROW_RE =
@@ -36,7 +36,7 @@ function parsePythonTable(): Record<
     return out;
 }
 
-describe("pricing.ts ↔ proxy/pricing.py parity", () => {
+describe("pricing.ts ↔ pricing.py parity", () => {
     const py = parsePythonTable();
 
     test("parses a non-trivial Python table", () => {

@@ -95,6 +95,10 @@ export interface RunListingRow {
     tasksRun: number;
     totalCostUsd: number | null;
     taskDurationSeconds: number | null;
+    // Run-level harness (coder-eval AgentKind) for the Harness column; null on
+    // legacy runs that predate the RunConfig stamp / carry no agent_config.type.
+    // Optional so existing test factories stay valid.
+    harness?: string | null;
 }
 
 // Window-level rollup across every matched run (pre-limit), so the front-page
@@ -680,6 +684,7 @@ export async function getRunListing(
             tasksRun: scopedTasks.length,
             totalCostUsd: scopedCost,
             taskDurationSeconds: scopedDur,
+            harness: overview.harness ?? null,
         });
     }
 
@@ -735,6 +740,7 @@ export function buildAdhocRows(
             tasksRun: overview.tasks.length,
             totalCostUsd: overview.totalCostUsd,
             taskDurationSeconds: overview.taskDurationSeconds,
+            // Harness is a main-table-only (internal) column; ad-hoc rows omit it.
         });
     }
     rows.sort(

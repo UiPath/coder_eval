@@ -15,6 +15,7 @@ import { ChipLegend, MergedTagRail } from "./_overview/tag-rail";
 import { TableScroll } from "./_components/scroll-table";
 import { CollapsibleRail } from "./_components/collapsible-rail";
 import { isInternal } from "@/lib/edition";
+import { HarnessBadge } from "@/app/_components/harness-badge";
 
 export const dynamic = "force-dynamic";
 
@@ -330,6 +331,11 @@ export default async function Page({
                     <thead>
                         <tr className="bg-gray-50 border-b border-gray-200 text-left text-gray-600">
                             <th className="py-3 px-4 font-medium">Run</th>
+                            {isInternal && (
+                                <th className="py-3 px-4 font-medium">
+                                    Harness
+                                </th>
+                            )}
                             <th className="py-3 px-4 font-medium">
                                 Pass rate
                             </th>
@@ -363,6 +369,13 @@ export default async function Page({
                                             {fmtRunTime(r.id)}
                                         </Link>
                                     </td>
+                                    {isInternal && (
+                                        <td className="py-3 px-4">
+                                            <HarnessBadge
+                                                harness={r.harness}
+                                            />
+                                        </td>
+                                    )}
                                     <td className="py-3 px-4 tabular-nums">
                                         <span
                                             className={`font-medium ${passClass(
@@ -393,7 +406,7 @@ export default async function Page({
                         {listing.rows.length === 0 && (
                             <tr>
                                 <td
-                                    colSpan={5}
+                                    colSpan={isInternal ? 6 : 5}
                                     className="py-6 px-4 text-center text-sm text-gray-500"
                                 >
                                     {isFiltered

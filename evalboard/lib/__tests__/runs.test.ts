@@ -15,6 +15,7 @@ import {
     type ArtifactRef,
     clearRunCacheDir,
     extractComponentShas,
+    extractRunConfig,
     findMatureSourceRuns,
     isExcludedArtifact,
     type MessageEvent,
@@ -343,6 +344,41 @@ describe("extractComponentShas", () => {
             tool_plugins: { "maestro-tool": "1.2.0-alpha.20260604.7394" },
         });
         expect(out.map((c) => c.name)).toEqual(["cli", "maestro-tool"]);
+    });
+});
+
+describe("extractRunConfig", () => {
+    test("prefers the run-level RunConfig stamp (harness + environment)", () => {
+        const out = extractRunConfig({
+            environment_info: {
+                run_config: {
+                    harness: "codex",
+                    model: "gpt-5.4",
+                    environment: "prod",
+                },
+            },
+        });
+        expect(out.harness).toBe("codex");
+        expect(out.environment).toBe("prod");
+    });
+
+    test("falls back to the most common per-task agent_config.type", () => {
+        const out = extractRunConfig({
+            task_results: [
+                { task_id: "a", agent_config: { type: "antigravity" } },
+                { task_id: "b", agent_config: { type: "antigravity" } },
+                { task_id: "c", agent_config: { type: "claude-code" } },
+            ],
+        });
+        expect(out.harness).toBe("antigravity");
+        // environment is only known from the run-level stamp, never derived.
+        expect(out.environment).toBeNull();
+    });
+
+    test("null harness when nothing identifies it (legacy runs)", () => {
+        const out = extractRunConfig({ task_results: [{ task_id: "a" }] });
+        expect(out.harness).toBeNull();
+        expect(out.environment).toBeNull();
     });
 });
 

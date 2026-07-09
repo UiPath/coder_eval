@@ -346,6 +346,10 @@ interface RawTaskResult {
     // Model the task ran on (e.g. "claude-sonnet-4-6"). Used to price token
     // buckets as USD. Absent on legacy runs.
     model_used?: string | null;
+    // Per-task agent config; `type` is the harness (coder-eval AgentKind, e.g.
+    // "claude-code" | "codex" | "antigravity"). Used to derive the run's harness
+    // when the run-level RunConfig stamp is absent (direct coder-eval / legacy runs).
+    agent_config?: { type?: string | null } | null;
     // Activation enrichment the dashboard folds onto each case row in the nested
     // activation run.json (see cli.py _finalize_activation_run). Absent on skills
     // rows. `prompt` = the case's prompt text; `expected_skill` = the skill the
@@ -790,6 +794,12 @@ export interface RunOverview {
     totalCostUsd: number | null;
     taskDurationSeconds: number | null;
     componentShas: ComponentSha[];
+    // Run-level harness (coder-eval AgentKind) from the RunConfig stamp
+    // (environment_info.run_config), falling back to the most common per-task
+    // agent_config.type. `environment` (alpha/prod) is captured but intentionally
+    // NOT surfaced in the UI yet. Both optional so test factories predating them stay valid.
+    harness?: string | null;
+    environment?: string | null;
     // run.json `start_time` (ISO wall-clock). Pipeline runs derive their date
     // from the date-shaped id; ad-hoc ids carry no date, so the ad-hoc listing
     // orders by this instead. Optional so test factories predating it stay valid.
@@ -812,6 +822,57 @@ export function visibleTurnsFromRaw(t: {
         return t.actual_commands + (t.has_final_reply ? 1 : 0);
     }
     return null;
+}
+
+// The run's harness + environment. Prefers the run-level RunConfig stamped by
+// eval_runner into environment_info.run_config; falls back to the most common
+// per-task agent_config.type (direct coder-eval / legacy runs carry no stamp).
+// Returns null harness when nothing identifies it (legacy pre-harness runs).
+export function extractRunConfig(data: RawRunJson): {
+    harness: string | null;
+    environment: string | null;
+} {
+    const rc = data.environment_info?.run_config;
+    if (rc && typeof rc === "object" && !Array.isArray(rc)) {
+        const r = rc as Record<string, unknown>;
+        return {
+            // A present-but-partial stamp (run_config object with no/empty
+            // harness) falls back to the per-task agent_config vote rather
+            // than nulling out — otherwise a real codex/antigravity run is
+            // mislabeled as the claude-code default.
+            harness:
+                typeof r.harness === "string" && r.harness
+                    ? r.harness
+                    : mostCommonAgentType(data.task_results ?? []),
+            environment:
+                typeof r.environment === "string" ? r.environment : null,
+        };
+    }
+    return {
+        harness: mostCommonAgentType(data.task_results ?? []),
+        environment: null,
+    };
+}
+
+// Most frequent per-task agent_config.type across a run's rows, or null if none
+// declare one. A run is single-harness in practice, so this is just a robust
+// "the harness these tasks ran on" for runs without the run-level stamp.
+function mostCommonAgentType(rows: RawTaskResult[]): string | null {
+    const counts = new Map<string, number>();
+    for (const r of rows) {
+        const t = r.agent_config?.type;
+        if (typeof t === "string" && t)
+            counts.set(t, (counts.get(t) ?? 0) + 1);
+    }
+    let best: string | null = null;
+    let bestN = 0;
+    for (const [t, n] of counts) {
+        if (n > bestN) {
+            best = t;
+            bestN = n;
+        }
+    }
+    return best;
 }
 
 export async function readRunOverview(
@@ -859,6 +920,7 @@ export async function readRunOverview(
             ? taskDurationSum
             : (data.total_duration_seconds ?? null),
         componentShas: extractComponentShas(data.environment_info),
+        ...extractRunConfig(data),
         startedAt: data.start_time ?? null,
     };
 }
