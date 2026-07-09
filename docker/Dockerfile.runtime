@@ -1,0 +1,114 @@
+# coder-eval-runtime: a self-contained, relocatable framework runtime "kit".
+#
+# This image is NEVER run directly. It exists only as a `COPY --from` source: a
+# task that brings its OWN base image (Fedora/RHEL/Ubuntu/…) overlays this kit
+# instead of being rebased onto coder-eval-agent (see the converter's
+# `--runtime-mode inject`). Everything the in-container orchestrator needs lives
+# under a single fixed path, /opt/coder-eval, so it can be dropped onto any
+# glibc base and work — the task's native package manager + recipe build
+# unchanged.
+#
+# Contract (must match convert_skillsbench_task.py's inject block + the host):
+#   /opt/coder-eval/venv/bin/coder-eval          the CLI (its own Python)
+#   /opt/coder-eval/node/bin/{node,claude}       Node + the Claude Code CLI
+#   /usr/local/bin/coder_eval_entrypoint.sh      entrypoint (host pins --entrypoint here)
+#   LABEL org.coder-eval.version=<ver>           for `docker inspect` / parity
+#
+# NOTE: the host's _assert_runtime_image gate inspects the *injected task image*,
+# not this kit image — labels don't survive `COPY --from`. The converter re-stamps
+# org.coder-eval.version on the injected image (that's the label the host asserts).
+# This kit carries it too purely for `docker inspect`/parity.
+#
+# Relocatability: the kit is glibc-only (standalone CPython + the official Node
+# linux-x64 build are glibc). It runs on debian/ubuntu/fedora/rhel/… but NOT
+# musl/Alpine — the converter refuses to inject onto those.
+
+FROM python:3.13-slim AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv drives the relocatable Python + the dependency install (same tool the main
+# image and host sandbox use).
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+# --- 1. A standalone CPython under the kit dir (relocatable; glibc baseline). --
+# UV_PYTHON_INSTALL_DIR puts the interpreter INSIDE /opt/coder-eval so the whole
+# tree travels together; COPY --from preserves the absolute path, keeping the
+# venv's absolute shebang valid in the task image.
+ENV UV_PYTHON_INSTALL_DIR=/opt/coder-eval/python
+ARG PYTHON_VERSION=3.13
+RUN uv python install ${PYTHON_VERSION}
+RUN uv venv --python ${PYTHON_VERSION} /opt/coder-eval/venv
+
+# --- 2. Install coder-eval (+ codex) into the kit venv. ----------------------
+# Build context is the repo root; copy the install-relevant subset for cache hits.
+WORKDIR /src
+COPY pyproject.toml uv.lock README.md ./
+COPY src/ ./src/
+COPY experiments/default.yaml ./experiments/default.yaml
+
+ARG SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="openai-codex-cli-bin,openai-codex"
+# Install the locked deps, then coder_eval itself NON-editable. An editable/path
+# install would leave the package source at /src (outside the kit), so the
+# `COPY --from /opt/coder-eval` overlay would ship a venv that can't import
+# coder_eval. --no-emit-project excludes the root from the export; we install it
+# explicitly from /src so its source lands in the venv's site-packages.
+RUN export SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="${SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS}" && \
+    uv export --frozen --no-emit-project --extra codex \
+      | uv pip install --python /opt/coder-eval/venv/bin/python -r /dev/stdin && \
+    uv pip install --python /opt/coder-eval/venv/bin/python --no-deps /src
+
+# --- 3. Node LTS + the Claude Code CLI, under the kit dir. -------------------
+ARG NODE_VERSION=22.14.0
+ARG CLAUDE_CODE_VERSION=2.1.177
+# Download to a file first so a bad URL fails the build loudly (a piped
+# `curl | tar` would mask a 404 and only surface later as a missing npm), and
+# verify the tarball against nodejs.org's published SHASUMS256 before extracting
+# — so a CDN compromise / TLS-MITM can't bake a tampered Node into every injected
+# task image. Run npm with the kit's node on PATH — npm's `#!/usr/bin/env node`
+# shebang needs `node` resolvable, otherwise it exits 127.
+RUN mkdir -p /opt/coder-eval/node \
+    && NODE_TARBALL="node-v${NODE_VERSION}-linux-x64.tar.xz" \
+    && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" -o /tmp/node.tar.xz \
+    && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o /tmp/node.shasums \
+    && grep " ${NODE_TARBALL}\$" /tmp/node.shasums | sed 's#  .*#  /tmp/node.tar.xz#' | sha256sum -c - \
+    && tar -xJf /tmp/node.tar.xz -C /opt/coder-eval/node --strip-components=1 \
+    && rm /tmp/node.tar.xz /tmp/node.shasums \
+    && PATH="/opt/coder-eval/node/bin:${PATH}" npm install -g --prefix /opt/coder-eval/node \
+       @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
+
+# Sanity: the CLI runs from the kit (no reliance on a system Python). Run it in
+# the builder, where the kit lives; the final stage is a bare carrier.
+RUN /opt/coder-eval/venv/bin/coder-eval _run-task-internal --help > /dev/null
+
+
+# --- final stage: a near-empty carrier image. ------------------------------- #
+# The runtime image is NEVER run directly — it's only a `COPY --from` source. So
+# the final image needs nothing but the self-contained kit + the entrypoint;
+# dropping the builder's base/apt/uv/source layers keeps the image (built and
+# pulled on every machine that injects) as lean as the kit itself.
+FROM debian:trixie-slim
+
+COPY --from=builder /opt/coder-eval /opt/coder-eval
+# Entrypoint: puts the kit's bins on PATH, then runs the orchestrator. Same
+# filename + location as the framework image, so the host's fixed
+# `--entrypoint /usr/local/bin/coder_eval_entrypoint.sh` works for injected
+# images too — coder-eval/claude/node all resolve from the kit regardless of what
+# the task's base image provides.
+COPY docker/coder_eval_runtime_entrypoint.sh /usr/local/bin/coder_eval_entrypoint.sh
+RUN chmod +x /usr/local/bin/coder_eval_entrypoint.sh
+
+# Labels for `docker inspect`/parity only — NOT the host gate (which inspects the
+# converter-emitted injected image, where the converter re-stamps the version
+# label; labels don't survive `COPY --from`). The claude-code pin mirrors the
+# framework image — a parity test (tests/test_image_from_dockerfiles.py) enforces it.
+ARG CODER_EVAL_VERSION=unknown
+ARG CLAUDE_CODE_VERSION=2.1.177
+LABEL org.coder-eval.version="${CODER_EVAL_VERSION}"
+LABEL org.coder-eval.claude-code-version="${CLAUDE_CODE_VERSION}"

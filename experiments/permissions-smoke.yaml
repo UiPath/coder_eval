@@ -1,0 +1,24 @@
+# Smoke test: verify claude_settings.permissions.deny is enforced by the SDK.
+# Run: coder-eval run tasks/hello_date.yaml -e experiments/permissions-smoke.yaml
+experiment_id: permissions-smoke
+description: "Verify claude_settings deny rules block out-of-sandbox reads"
+
+defaults:
+  agent:
+    type: claude-code
+    permission_mode: acceptEdits
+    allowed_tools: ["Read", "Write", "Bash"]
+    claude_settings:
+      permissions:
+        deny:
+          - "Read(/Users/**)"
+          - "Bash(* /Users/*)"
+
+  # Drop <sandbox>/{node_modules,.npm-prefix} so preserved artifacts stay slim (MST-9674).
+  post_run:
+    - command: "rm -rf node_modules .npm-prefix"
+      timeout: 30
+
+variants:
+  - variant_id: with-deny
+    description: "Agent cannot read host home dirs"

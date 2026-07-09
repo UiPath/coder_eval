@@ -1,0 +1,30 @@
+task_id: codex_skills_test
+description: Test that CodexAgent properly sets up and discovers SKILL.md files
+
+tags:
+  - codex
+  - streaming
+  - skills
+
+agent:
+  type: codex
+  model: gpt-5.5
+  permission_mode: acceptEdits
+  plugins:
+    - type: local
+      path: "$PLUGIN_PATH"
+
+initial_prompt: |
+  List all available skills in your environment by checking the .agents/skills directory.
+  Count how many SKILL.md files are available.
+
+success_criteria:
+  - type: run_command
+    description: .agents/skills directory should exist
+    command: test -d .agents/skills
+    expected_exit_code: 0
+
+  - type: run_command
+    description: Should have at least one SKILL.md file
+    command: find .agents/skills -name "SKILL.md" | wc -l | grep -v "^0$"
+    expected_exit_code: 0

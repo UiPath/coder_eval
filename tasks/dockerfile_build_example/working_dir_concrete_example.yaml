@@ -1,0 +1,67 @@
+task_id: working_dir_concrete_example
+description: |
+  Exercises docker WORKDIR alignment with a CONCRETE path
+  (sandbox.docker.working_dir: /app).
+
+  The task image (environment/Dockerfile.workdir) declares `WORKDIR /app` and
+  bakes `input.txt` there. With working_dir=/app the agent runs in-place at
+  /app — the framework does NOT bind-mount over it — so the Dockerfile-baked
+  input stays visible, and the whole WORKDIR is copied out to
+  run_dir/artifacts/<task> when the run ends. File-based criteria then resolve
+  their relative paths against that captured workspace.
+
+  Setup:
+    1. Build the framework base image once:   make docker-image
+    2. coder-eval run tasks/dockerfile_build_example/working_dir_concrete_example.yaml
+
+  The criteria below prove the feature end-to-end: the agent's cwd was the
+  image WORKDIR (it could read the baked input.txt), and the output it wrote
+  there was captured out.
+
+tags: [example, docker, working-dir]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash", "Read", "Write"]
+
+sandbox:
+  driver: docker
+  docker:
+    # Path is relative to this YAML and resolved at load time. Overrides `image`.
+    dockerfile_path: ./environment/Dockerfile.workdir
+    # Run the agent in-place at the image's own WORKDIR, then copy it out to
+    # run_dir/artifacts/<task> afterward. Docker driver only.
+    working_dir: /app
+  limits:
+    timeout: 120
+
+initial_prompt: |
+  Your current working directory contains a file named input.txt. Copy its
+  exact contents into a new file named result.txt in the same directory.
+
+run_limits:
+  max_turns: 3
+  task_timeout: 300
+  turn_timeout: 120
+
+success_criteria:
+  # The agent produced its output at the WORKDIR and it was captured out.
+  - type: file_exists
+    path: result.txt
+    description: Agent created result.txt at the working_dir (captured out to artifacts)
+    weight: 1.0
+
+  # The agent read the Dockerfile-baked input at cwd=/app — i.e. the WORKDIR was
+  # NOT shadowed by a mount, so the baked input was visible and copied verbatim.
+  - type: file_contains
+    path: result.txt
+    includes: ["hello there!"]
+    description: "result.txt holds the baked input's contents (agent ran in-place at /app)"
+    weight: 1.0
+
+  # The baked WORKDIR input itself was captured out alongside the agent's output.
+  - type: file_exists
+    path: input.txt
+    description: "Dockerfile-baked input.txt was preserved and captured from the WORKDIR"
+    weight: 1.0

@@ -1,0 +1,46 @@
+task_id: codex_hello_world
+description: |
+  A simple hello world task for testing the Codex agent.
+  The agent is asked to create a Python script that prints "Hello, Codex!".
+
+tags:
+  - codex
+  - streaming
+  - basic
+
+agent:
+  type: codex
+  model: gpt-5.5
+  permission_mode: acceptEdits
+  allowed_tools:
+    - Bash
+    - Read
+    - Write
+
+initial_prompt: |
+  Create a simple Python script called `hello.py` that prints "Hello, Codex!" when run.
+  The script should be executable and complete.
+
+success_criteria:
+  - type: file_exists
+    path: hello.py
+    description: "The file hello.py must be created."
+    weight: 0.3
+
+  - type: file_contains
+    path: hello.py
+    includes:
+      - "print"
+      - "Hello, Codex"
+    description: "The script must contain a print statement and the greeting."
+    weight: 0.4
+
+  - type: run_command
+    command: "python hello.py"
+    description: "The script must execute and output the greeting."
+    weight: 0.3
+
+run_limits:
+  max_turns: 5
+  task_timeout: 300
+  turn_timeout: 60

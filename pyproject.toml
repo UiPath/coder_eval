@@ -1,0 +1,360 @@
+[project]
+name = "coder-eval"
+version = "0.8.2"
+description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity) with sandboxed, reproducible YAML task suites."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.13"
+authors = [{ name = "UiPath", email = "coder-eval@uipath.com" }]
+keywords = [
+    "ai", "llm", "agent", "coding-agent", "evaluation", "eval", "evals",
+    "benchmark", "swe-bench", "claude", "claude-code", "codex", "anthropic",
+    "gemini", "antigravity", "sandbox", "code-generation", "agent-evaluation",
+    "llm-evaluation", "skills-evaluation", "claude-skills", "agent-skills",
+    "skillsbench",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Environment :: Console",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.14.2",
+    "pyyaml>=6.0.3",
+    "typer>=0.24.1",
+    "rich>=14.3.3",
+    "python-dotenv>=1.2.2",
+    "anthropic>=0.86.0",
+    "claude-agent-sdk>=0.2.82",
+    "anyio>=4.13.0",
+    "radon>=6.0.1",
+    "tqdm>=4.67.3",
+    "jmespath>=1.1.0",
+    "jsonschema>=4.26.0",
+    "starlette>=1.3.1",
+    # Telemetry: the OTel logs SDK lives under the (canonical, only) module
+    # opentelemetry.sdk._logs and uses the deprecated-but-functional LoggingHandler.
+    # Cap the major to guard against a 2.0 moving/removing either; the Azure exporter
+    # is a beta, so cap the minor since betas can break compatibility between releases.
+    "opentelemetry-sdk>=1.30.0,<2.0.0",
+    "azure-monitor-opentelemetry-exporter>=1.0.0b30,<1.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/UiPath/coder_eval"
+Repository = "https://github.com/UiPath/coder_eval"
+Documentation = "https://github.com/UiPath/coder_eval/tree/main/docs"
+Issues = "https://github.com/UiPath/coder_eval/issues"
+Changelog = "https://github.com/UiPath/coder_eval/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = [
+    "pytest-asyncio>=1.3.0",
+    "pytest>=9.0.2",
+    "pytest-mock>=3.15.1",
+    "pytest-cov>=7.1.0",
+    "pytest-xdist[psutil]>=3.0.0",
+    "mcp>=1.26.0",
+    "ruff>=0.15.7",
+    "pyright>=1.1.408",
+    "pip-audit>=2.10.0",
+    "bandit[toml]>=1.9.4",
+    "pre-commit>=4.5.1",
+]
+# Optional extra that enables UiPath-specific features:
+#   - the `uipath` Python SDK on the host (handy for local sandbox parity with
+#     tasks that invoke `uv run uipath eval ...`)
+# Without this extra, the framework still installs and runs; UiPath-dependent
+# code paths fail at dispatch with a clear hint pointing back here.
+# NOTE: the LLM judge and the prompt `rephrase` mutation route through the
+# run's backend (Bedrock / Anthropic); they need no UiPath packages.
+uipath = [
+    "uipath>=2.10.31",
+]
+# Optional extra that enables Codex agent support:
+#   - CodexAgent implementation using official openai-codex SDK
+# Without this extra, the framework still installs and runs; Codex-dependent
+# code paths fail at dispatch with a clear hint pointing back here.
+codex = [
+    "openai-codex>=0.1.0b3",
+]
+# Optional extra that enables Antigravity agent support:
+#   - AntigravityAgent implementation using Google's official google-antigravity SDK
+#     (drives the bundled `localharness` binary, authenticated via GEMINI_API_KEY).
+# Pinned exactly: the harness binary is a dominant non-model driver of eval results,
+# so it travels with the coder_eval release tag and is bumped deliberately (mirrors
+# the claude-code CLI / codex cli-bin pins). The wheel ships platform-specific
+# (manylinux x86_64 + aarch64, macOS, Windows), so CI/Linux/Docker installs work.
+# Without this extra the framework still installs and runs; Antigravity-dependent
+# code paths fail at start() with a clear hint pointing back here.
+antigravity = [
+    "google-antigravity==0.1.5",
+]
+
+[project.scripts]
+coder-eval = "coder_eval.cli:app"
+
+# Built-in agents register through the same entry-point group third-party
+# plugins use, so the BYOA discovery path is exercised by core itself.
+[project.entry-points."coder_eval.plugins"]
+coder_eval = "coder_eval.agents:register_builtins"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/coder_eval"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# `packages = ["src/coder_eval"]` above already maps `src/coder_eval/resources/`
+# into the wheel as `coder_eval/resources/`, so a `force-include` for the same
+# directory is a duplicate file path. Newer hatchling raises `ValueError: A
+# second file is being added to the wheel archive at the same path:
+# coder_eval/resources/__init__.py` and aborts the build. Only force-include
+# files that live OUTSIDE the package tree (experiments/default.yaml is at the
+# repo root and needs to ship inside the wheel as default_experiment.yaml).
+"experiments/default.yaml" = "coder_eval/resources/default_experiment.yaml"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.uv]
+# openai-codex 0.1.0b3 hardpins `openai-codex-cli-bin==0.137.0a4`, a
+# PRE-RELEASE. Because that pin is transitive (not referenced directly by us),
+# uv won't select it without an explicit opt-in. Naming it here as an override
+# both enables the pre-release and documents the pinned cli-bin build; 0.137.0a4
+# publishes manylinux wheels (x86_64 + aarch64), so CI/Linux installs work.
+override-dependencies = ["openai-codex-cli-bin==0.137.0a4"]
+
+constraint-dependencies = [
+    # Fix known CVEs in transitive dependencies
+    "cryptography>=48.0.1",
+    "langgraph>=1.0.10",
+    "langsmith>=0.6.3",
+    "orjson>=3.11.6",
+    "pyjwt>=2.13.0",
+    "python-multipart>=0.0.31",
+    "requests>=2.33.0",
+    "starlette>=1.3.1",
+    "urllib3>=2.6.3",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+# Vendored third-party sample tasks (benchflow-ai/skillsbench) are kept verbatim;
+# they are not framework code and are not linted/formatted.
+extend-exclude = ["tasks/samples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF", "PLR0915", "PLR0912"]
+external = [
+    "CE001",
+    "CE002",
+    "CE003",
+    "CE004",
+    "CE005",
+    "CE006",
+    "CE007",
+    "CE008",
+    "CE009",
+    "CE010",
+    "CE011",
+    "CE012",
+    "CE013",
+    "CE018",
+]  # custom architectural lint rules (tests/lint/)
+
+[tool.ruff.lint.pylint]
+# Function-size ceiling: gates NEW growth past these bounds (a god-function must
+# carry a visible `# noqa: PLR0915`/`PLR0912` debt marker). Existing offenders are
+# tracked, not auto-decomposed (decomposition is separate out-of-scope work).
+max-statements = 80
+max-branches = 25
+
+[tool.ruff.lint.per-file-ignores]
+"tests/lint/**" = ["N802"]  # visit_* methods must match AST node class names (PascalCase required by ast.NodeVisitor)
+
+[tool.ruff.lint.isort]
+known-first-party = ["coder_eval"]
+force-single-line = false
+lines-after-imports = 2
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.pyright]
+pythonVersion = "3.13"
+include = ["src/coder_eval"]
+exclude = [
+    "data",
+    "tmp",
+    "**/__pycache__",
+    "**/.pytest_cache",
+    "tests",
+    ".venv",
+    "ref",
+]
+venvPath = "."
+venv = ".venv"
+
+# Global baseline
+typeCheckingMode = "standard"
+useLibraryCodeForTypes = true
+
+# Keep "unknown type" noise off
+reportUnknownParameterType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownLambdaType = "none"
+reportUnknownVariableType = "none"
+reportUnknownMemberType = "none"
+
+# Import/runtime hygiene (useful, low-noise)
+reportMissingImports = "error"
+reportImportCycles = "error"
+reportDuplicateImport = "information"
+
+# Catch real logic bugs with minimal churn
+reportUnboundVariable = "error"
+reportPossiblyUnboundVariable = "warning"
+
+# None-safety (very helpful; tune as warnings)
+reportOptionalMemberAccess = "warning"
+reportOptionalCall = "warning"
+reportOptionalSubscript = "warning"
+reportOptionalOperand = "warning"
+
+# Generics hygiene (helps with List/Dict/etc. without demanding full typing)
+reportMissingTypeArgument = "error"
+reportInvalidTypeVarUse = "warning"
+
+# OO correctness, but not too strict
+reportIncompatibleMethodOverride = "warning"
+reportInconsistentConstructor = "warning"
+
+# Small quality-of-life checks that catch slip-ups
+reportImplicitStringConcatenation = "error"
+
+# Keep these quiet unless you want more discipline later
+reportPrivateUsage = "none"
+reportConstantRedefinition = "none"
+reportUntypedFunctionDecorator = "none"
+reportUntypedClassDecorator = "none"
+reportUntypedBaseClass = "none"
+reportUntypedNamedTuple = "none"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+# Exclude specific directories from test discovery
+norecursedirs = [
+    ".*",
+    "build",
+    "dist",
+    "*.egg",
+    "venv",
+    ".venv",
+    "node_modules",
+    "ref",
+]
+
+# Default pytest options
+addopts = [
+    "-n", "auto",       # Parallel execution across all CPU cores
+    "-v",               # Verbose output
+    "--strict-markers", # Fail on undefined markers
+    "--strict-config",  # Fail on config errors
+    "--tb=short",       # Shorter traceback format
+    "-ra",              # Show summary of all test outcomes
+    "--showlocals",     # Show local variables in tracebacks
+    "--color=yes",      # Force colored output
+]
+
+# Asyncio configuration
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+# Test markers (define all custom markers here)
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+    "e2e: marks tests as end-to-end tests",
+    "requires_api_key: marks tests that need real API keys",
+    "live: marks tests that hit real external services (Anthropic API, AWS Bedrock, etc.)",
+    "lint: marks tests that enforce custom architectural lint rules",
+    "divergence: pins a layer-4-vs-layer-5 merge divergence (or crash) that the declarative-merge refactor intentionally flips; see tests/test_merge_characterization.py",
+]
+
+# Test discovery patterns
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# Warnings configuration
+filterwarnings = [
+    "error",                             # Turn warnings into errors
+    "ignore::DeprecationWarning",        # Ignore deprecation warnings from dependencies
+    "ignore::PendingDeprecationWarning",
+    "ignore::ResourceWarning",           # Ignore unclosed resources (handled by cleanup)
+]
+
+# Coverage integration (when using --cov)
+[tool.coverage.run]
+source = ["src/coder_eval"]
+omit = ["*/tests/*", "*/__pycache__/*", "*/.venv/*", "*/test_*.py"]
+branch = true                                                       # Measure branch coverage
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "def __str__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+    "@abc.abstractmethod",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.semantic_release]
+# Conventional Commits → automatic version bumps on push to main.
+#   feat:           → minor bump
+#   fix: / perf:    → patch bump
+#   BREAKING CHANGE → major bump (also `feat!:` / `fix!:`)
+# Both files below are kept in sync; pyproject is the canonical source.
+version_toml = ["pyproject.toml:project.version"]
+version_variables = ["src/coder_eval/__init__.py:__version__"]
+build_command = "uv build"
+commit_parser = "conventional"
+commit_message = "chore(release): {version} [skip ci]"
+tag_format = "v{version}"
+major_on_zero = false  # while 0.x, breaking changes still bump minor (typical pre-1.0 behavior)
+allow_zero_version = true
+
+[tool.semantic_release.branches.main]
+match = "main"
+prerelease = false
+
+[tool.semantic_release.changelog]
+default_templates = { changelog_file = "CHANGELOG.md" }

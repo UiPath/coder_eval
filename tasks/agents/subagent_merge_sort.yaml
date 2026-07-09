@@ -1,0 +1,56 @@
+task_id: subagent-merge-sort
+description: |
+  Sort [2, 4, 1, 3] with merge sort by delegating each half to a sub-agent
+  (the Agent tool). Exercises depth-1 sub-agent invocation: the main agent
+  splits the array, delegates [2, 4] and [1, 3] to sub-agents, and merges.
+  Note: Claude Code does not support sub-agents spawning further sub-agents,
+  so recursion is limited to depth 1.
+
+tags:
+  - basic
+  - agent-comparison
+  - subagent
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools:
+    - Agent
+    - Bash
+    - Read
+    - Write
+  setting_sources: []
+
+initial_prompt: |
+  Sort the list [2, 4, 1, 3] using merge sort by delegating each half to a
+  sub-agent via the Agent tool.
+
+  1. Split into left=[2, 4] and right=[1, 3].
+  2. Call the Agent tool for the left half — have it sort [2, 4] and return the result.
+  3. Call the Agent tool for the right half — have it sort [1, 3] and return the result.
+  4. Merge the two sorted halves into [1, 2, 3, 4].
+  5. Write the final sorted list to sorted.json as a JSON array.
+
+success_criteria:
+  - type: json_check
+    path: sorted.json
+    description: "sorted.json contains the correctly sorted list [1, 2, 3, 4]."
+    assertions:
+      - expression: "@"
+        operator: "equals"
+        expected: [1, 2, 3, 4]
+    weight: 2.0
+    pass_threshold: 1.0
+
+  - type: command_executed
+    description: "The agent delegated work to sub-agents via the Agent tool."
+    tool_name: "Agent"
+    min_count: 2
+    require_success: false
+    weight: 1.0
+    pass_threshold: 1.0
+
+run_limits:
+  max_turns: 20
+  task_timeout: 300
+  turn_timeout: 120

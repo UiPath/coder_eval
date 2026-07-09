@@ -1,0 +1,17 @@
+{
+  "agent_output": "[No output]",
+  "assistant_turn_count": 0,
+  "commands": [],
+  "crash_reason": "Agent turn timed out after 30s",
+  "crashed": true,
+  "duration_seconds": "<scrubbed>",
+  "iteration": 1,
+  "max_turns_exhausted": false,
+  "messages": [],
+  "model_used": null,
+  "num_turns": null,
+  "result_summary": null,
+  "timestamp": "<scrubbed>",
+  "token_usage": null,
+  "user_input": "do the thing"
+}

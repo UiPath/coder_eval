@@ -1,0 +1,158 @@
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+
+# Cancel outdated runs when new commits are pushed
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+# Workflow-default: zero permissions. Each job must opt in to what it needs.
+# The claude-review job below escalates as required.
+permissions: {}
+
+jobs:
+  claude-review:
+    name: Claude Code Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Trusted triggers only — this repo is public.
+    # Comment & review events run privileged (repo secrets + write token, base-branch
+    # context) regardless of who authored the comment, so they are gated on
+    # author_association to keep untrusted users from invoking a privileged run.
+    #   - pull_request: non-fork PRs only (pushing a non-fork branch requires write access).
+    #   - issue_comment: PR comments only, @claude, from an owner / member / collaborator.
+    #   - review (comment / submission): non-fork PRs, @claude, from an owner / member / collaborator.
+    if: |
+      (github.event_name == 'pull_request' && !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '@claude') && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude') && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude') && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association))
+
+    # Least privilege. contents stays read (no push). pull-requests/issues:write
+    # are required by track_progress to post and update the review comment.
+    # actions:read dropped — this review never reads workflow-run data.
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+          # Do NOT persist the GITHUB_TOKEN into .git/config. Default-true
+          # persistence writes the write-scoped token to disk as an
+          # http.extraheader, where an injected instruction could read it off
+          # the filesystem. The prompt's `git diff origin/main...HEAD` needs no
+          # credentials once refs are fetched, and `gh` authenticates from the
+          # env token, so nothing here requires on-disk credentials.
+          persist-credentials: false
+
+      # The claude-code-action prepares the PR branch with its own
+      # `git fetch origin --depth=20 <branch>`. With persist-credentials: false
+      # above (which keeps the write-scoped token out of .git/config, where the
+      # allowlisted Read tool could otherwise exfil it), that fetch has no
+      # on-disk credentials and fails with "could not read Username" on a private
+      # repo. Restore auth via a credential helper that reads the token from the
+      # environment at fetch time: only the helper *script* (referencing the env
+      # var by name) lands in ~/.gitconfig — the token value is never written to
+      # disk, so the exact surface persist-credentials: false closes stays
+      # closed. GIT_FETCH_TOKEN is supplied on the action step's env below; it is
+      # env-only (on par with AWS_BEARER_TOKEN_BEDROCK) and unreachable by the
+      # read-only tool allowlist (Bash is limited to `git diff`). Scoped to
+      # github.com (credential.<url>.helper) so the token is never emitted to any
+      # other host git might contact via a remote or a cross-host redirect.
+      - name: Configure env-only git credentials for the action's fetch
+        run: |
+          git config --global credential.https://github.com.helper '!f() { echo "username=x-access-token"; echo "password=${GIT_FETCH_TOKEN}"; }; f'
+
+      - name: Claude Code Action
+        # Route through AWS Bedrock via the bearer-token path. The `use_bedrock`
+        # input causes the action's composite inner step to set
+        # CLAUDE_CODE_USE_BEDROCK=1 and forward AWS_BEARER_TOKEN_BEDROCK /
+        # AWS_REGION into the SDK env (see action.yml lines 299-309). Without
+        # this input the composite shadows our outer-env CLAUDE_CODE_USE_BEDROCK
+        # to empty and the SDK falls back to direct Anthropic, rejecting the
+        # dummy api_key. OIDC + IAM role is the action's documented Bedrock
+        # path; this bearer-token path skips that infra and is the same one
+        # the Claude CLI uses directly (exercised end-to-end by the
+        # live-tests BedrockRoute step).
+        uses: anthropics/claude-code-action@09f876c77e9d2d627cdf3e2f83d4d7b75106807e  # v1.0.134
+        env:
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          # FIXME(SDK#24168): Claude Code SDK injects x-anthropic-billing-header
+          # which Bedrock rejects as a reserved keyword (HTTP 400). Drop once SDK fixes this.
+          CLAUDE_CODE_ATTRIBUTION_HEADER: "0"
+          # Consumed only by the credential helper configured above so the action's
+          # internal `git fetch` authenticates. Env-only: never written to disk, and
+          # unreachable by the read-only tool allowlist. Same token as the
+          # github_token input below (which octokit uses for the PR comment API).
+          GIT_FETCH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          use_bedrock: ${{ vars.CLAUDE_REVIEWER_USE_BEDROCK }}
+          # Dummy value to satisfy the action's pre-flight validator, which
+          # requires anthropic_api_key OR claude_code_oauth_token regardless
+          # of provider. With use_bedrock: true the SDK ignores this key and
+          # uses AWS_BEARER_TOKEN_BEDROCK from env instead.
+          anthropic_api_key: "sk-ant-bedrock-routed-dummy"
+          track_progress: true
+          # Comment-source allowlist (public repo). Only comments authored by
+          # these actors are passed to Claude as context; everyone else's
+          # comments — including external contributors' — are ignored, closing
+          # the "trusted user triggers @claude on a thread containing a planted
+          # injection comment" vector. NOTE: this filters COMMENTS only; the PR
+          # diff, changed-file contents, PR body and title are still ingested,
+          # so this stacks on the tool allowlist below, it does not replace it.
+          # Keep this list in sync with the global CODEOWNERS maintainers
+          # (.github/CODEOWNERS `*` line).
+          include_comments_by_actor: "akshaylive,tmatup,uipreliga,bai-uipath"
+          # Drop all bot comments (dependabot, renovate, etc.). Exclusion wins
+          # over the include list if an actor somehow matches both.
+          exclude_comments_by_actor: "*[bot]"
+          # Tool allowlist (prompt-injection containment). This review reads
+          # attacker-controlled content (diff, PR comments, file contents), so
+          # Claude is restricted to read-only tools plus the single write tool
+          # track_progress needs to post its review comment. File reads and
+          # listing go through the native Read/Glob/Grep tools; no shell `cat`
+          # or `ls` is granted, so an injected instruction cannot `cat
+          # .git/config` to read on-disk credentials. `gh pr view --comments`
+          # is deliberately NOT granted — comment context arrives only through
+          # the include_comments_by_actor-filtered native ingestion above, so a
+          # planted comment from a non-allowlisted actor cannot re-enter the
+          # prompt via the shell. Arbitrary Bash, network tools
+          # (WebFetch/WebSearch/curl/wget), git push, and `gh api`/`gh secret`
+          # are NOT in the list and therefore blocked.
+          #   Secret handling: AWS_BEARER_TOKEN_BEDROCK is env-only (never on
+          #   disk). GITHUB_TOKEN would be persisted to .git/config by checkout,
+          #   but the checkout step above sets persist-credentials: false, so it
+          #   is not written to the filesystem either.
+          # Residual: readable repo content could be echoed into the PR comment.
+          claude_args: >-
+            --model ${{ vars.CLAUDE_REVIEWER_MODEL }}
+            --allowedTools "Read,Grep,Glob,Bash(git diff:*),mcp__github_comment__update_claude_comment"
+          prompt: |
+            Review this PR following the guidelines in .github/code_review.md.
+
+            1. Read .github/code_review.md for review standards, process, and output format.
+            2. Read CLAUDE.md for project conventions.
+            3. Run `git diff origin/main...HEAD` to see the full diff.
+            4. For each changed file, read the FULL file (not just the diff hunk) so you see surrounding context.
+            5. Follow the cross-file consistency checks, "what's missing" analysis, and design-level scrutiny sections from code_review.md. Do not skip these.
+
+            Existing PR conversation is already provided to you as context
+            (filtered to trusted maintainers); do not shell out to read comments.
+
+            Follow the output format specified in code_review.md. Include the "What's Missing" section even if empty.

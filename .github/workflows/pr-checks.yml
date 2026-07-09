@@ -1,0 +1,821 @@
+name: PR Quality Checks
+
+on:
+  pull_request:
+    branches: [main, develop]
+  merge_group:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+# Cancel outdated runs when new commits are pushed
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege default. No job in this workflow writes to the repo via
+# GITHUB_TOKEN — actions/upload-artifact and actions/cache use their own APIs.
+permissions:
+  contents: read
+
+# Hard-disable usage telemetry for the ENTIRE workflow. The app ships a baked-in
+# default Application Insights connection string (so a fresh install reports with
+# no config), which means CI's real `coder-eval run` invocations would otherwise
+# emit to the production telemetry resource and pollute dashboards. The in-process
+# pytest autouse guard can't reach those subprocesses, so disable at the env level
+# here — TELEMETRY_ENABLED is the single canonical disable gate.
+env:
+  TELEMETRY_ENABLED: "false"
+
+jobs:
+  quality-gate:
+    name: Quality Gate (Format, Lint, Type, Test, Security)
+    runs-on: uipath-ubuntu-latest
+    timeout-minutes: 10
+
+    # Shared env for all steps: safe-chain min-age exclusions and a dummy
+    # Anthropic key so CI tests that construct a client don't fail on a missing key.
+    env:
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
+      ANTHROPIC_API_KEY: "sk-ant-test-dummy-key-for-ci-tests-only"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Cache dependencies
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.cache/pip
+            .venv
+            .pytest_cache
+            .ruff_cache
+          key: ${{ runner.os }}-py3.13-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-py3.13-
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+
+      - name: Install project dependencies (hash-verified from uv.lock)
+        run: uv sync --frozen --extra dev --extra uipath --extra codex
+
+      # PHASE 1: Fast checks (fail early)
+      - name: Check code formatting (ruff format)
+        run: .venv/bin/ruff format --check src/ tests/
+
+      - name: Lint code (ruff check)
+        run: .venv/bin/ruff check src/ tests/
+
+      - name: Custom architectural lint (CE001+)
+        run: .venv/bin/pytest tests/test_custom_lint.py -v --tb=short --no-header -p no:warnings
+
+      # PHASE 2: Type checking
+      - name: Type check with pyright
+        run: .venv/bin/pyright
+
+      # PHASE 3: Security scanning
+      - name: Security - Dependency vulnerabilities (pip-audit)
+        run: .venv/bin/pip-audit --desc --skip-editable --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219 --ignore-vuln PYSEC-2025-183 # pygments 2.19.2 ReDoS + pip 26.0.1 tar/ZIP ambiguity + pyjwt 2.12.1 weak-encryption (disputed by supplier; key length is application-chosen); no fixes available on PyPI yet — revisit quarterly
+
+      - name: Security - OSV vulnerability scan (osv-scanner)
+        # Complements pip-audit: pip-audit queries the PyPI advisory DB;
+        # osv-scanner queries OSV.dev which aggregates GitHub Security
+        # Advisories and multiple ecosystems' DBs. Running both reduces the
+        # chance an advisory slips through.
+        #
+        # Scope: only coder_eval's own ``uv.lock`` — the same surface
+        # pip-audit covers. Sibling lockfiles in this repo
+        # (``evalboard/pnpm-lock.yaml``, template node_modules) are
+        # intentionally out of scope here; widen scope in a follow-up once
+        # those packages have a maintainer-owned bump cadence.
+        #
+        # Binary pinned by version + sha256 against the upstream release
+        # (https://github.com/google/osv-scanner/releases) so a registry
+        # compromise can't swap the binary under us.
+        env:
+          OSV_VERSION: "v2.3.8"
+          OSV_SHA256: "bc98e15319ed0d515e3f9235287ba53cdc5535d576d24fd573978ecfe9ab92dc"
+        run: |
+          set -euo pipefail
+          # RUNNER_TEMP is per-job-isolated on hosted runners and properly-configured
+          # self-hosted runners — avoids TOCTOU on shared /tmp between concurrent jobs.
+          OSV_BIN="${RUNNER_TEMP}/osv-scanner"
+          curl --fail --silent --show-error --location \
+            "https://github.com/google/osv-scanner/releases/download/${OSV_VERSION}/osv-scanner_linux_amd64" \
+            --output "${OSV_BIN}"
+          echo "${OSV_SHA256}  ${OSV_BIN}" | sha256sum -c -
+          chmod +x "${OSV_BIN}"
+          "${OSV_BIN}" --config=osv-scanner.toml --lockfile=uv.lock
+
+      - name: Security - Code analysis (bandit)
+        run: .venv/bin/bandit -r src/ -ll --format json -o bandit-report.json
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: security-reports
+          path: |
+            bandit-report.json
+          retention-days: 30
+
+      # PHASE 4: Test suite with coverage (hermetic; live tests run in the E2E job)
+      - name: Run test suite with coverage
+        run: |
+          .venv/bin/pytest tests/ -v \
+            -m "not live and not lint" \
+            --cov=coder_eval \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=80
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 30
+
+      # Summary
+      - name: Summary
+        if: always()
+        run: |
+          echo "✅ Quality gate complete!"
+          echo "📊 All checks passed: formatting, linting, types, security, tests"
+
+  no-uipath-extra:
+    # Proves that `pip install coder-eval` (without the optional `[uipath]`
+    # extra) yields a working framework: imports succeed, the criterion
+    # registry validates, and the uipath-specific code paths fail with a
+    # clear hint instead of an import error.
+    name: No-Extra Install (uipath optional)
+    runs-on: uipath-ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+
+      - name: Install project without [uipath] extra
+        run: |
+          uv venv .venv --clear
+          # Only the `dev` extra is requested — `[uipath]` is deliberately omitted.
+          uv pip install --python .venv/bin/python -e ".[dev]"
+
+      - name: Verify uipath SDK is NOT installed
+        run: |
+          set -e
+          ! .venv/bin/python -c "import uipath" 2>/dev/null
+          echo "✓ uipath absent as expected"
+
+      - name: Verify framework imports succeed without the extra
+        run: |
+          .venv/bin/python -c "
+          import coder_eval
+          import coder_eval.models
+          from coder_eval.criteria import init_criteria, CriterionRegistry
+          init_criteria(validate=True)
+          assert 'llm_judge' in CriterionRegistry.list_types()
+          assert 'uipath_eval' in CriterionRegistry.list_types()
+          print('✓ framework imports + criterion registry OK')
+          "
+
+      - name: Run optional-dependency test suite
+        run: .venv/bin/pytest tests/test_optional_dependencies.py -v --no-header
+
+  windows-smoke:
+    name: Windows Smoke Test
+    runs-on: windows-latest
+    # 15min headroom: the smoke task itself completes in ~7min, but the
+    # actions/cache post-step on Windows is slow when ``.venv`` is large.
+    # We also exclude ``.venv`` from the cached paths (uv re-creates it
+    # fast from the cached ``uv`` download dir), so 15min is comfortable
+    # with margin for transient network slowness on the dep install.
+    timeout-minutes: 15
+    # Skip on fork PRs where secrets aren't available (matches e2e-smoke).
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
+      # Job-level dummy key keeps the unit-test step deterministic and isolated
+      # from real-API leakage. The e2e step below overrides to Bedrock at step scope.
+      ANTHROPIC_API_KEY: "sk-ant-test-dummy-key-for-ci-tests-only"
+      # Bedrock secrets at job scope so the e2e step can engage BedrockRoute.
+      # See e2e-smoke for rationale on routing smoke through Bedrock.
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Cache dependencies
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          # ``.venv`` is deliberately excluded: tarring/untarring tens of
+          # thousands of small wheel files on Windows is what was tripping
+          # the 10-minute job timeout. Caching only the uv/pip download
+          # caches keeps ``uv sync --frozen`` fast (it hydrates ``.venv``
+          # from the wheel cache without re-downloading) at a fraction of
+          # the compress/decompress cost.
+          path: |
+            ~/AppData/Local/uv/cache
+            ~/AppData/Local/pip/Cache
+            .pytest_cache
+            .ruff_cache
+          key: ${{ runner.os }}-py3.13-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-py3.13-
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+
+      - name: Install project dependencies (hash-verified from uv.lock)
+        run: uv sync --frozen --extra dev --extra uipath --extra codex
+
+      - name: Check code formatting (ruff format)
+        run: .venv/Scripts/ruff format --check src/ tests/
+
+      - name: Lint code (ruff check)
+        run: .venv/Scripts/ruff check src/ tests/
+
+      - name: Type check with pyright
+        run: .venv/Scripts/pyright
+
+      - name: Run test suite
+        run: .venv/Scripts/pytest tests/ -v -m "not live and not lint"
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "20"
+
+      - name: Install Claude CLI (Windows)
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Verify Claude CLI on PATH (Windows)
+        # Fail-fast diagnostic: if `claude` isn't resolvable here, the next
+        # step's failure surfaces inside the SDK rather than at the CLI layer,
+        # which is harder to triage. Cheap insurance.
+        run: claude --version
+
+      - name: Run hello_date smoke task
+        env:
+          # Step-level override engages BedrockRoute; job-level dummy
+          # ANTHROPIC_API_KEY stays in scope for the unit-test step above.
+          API_BACKEND: "bedrock"
+        # No --model: under API_BACKEND=bedrock the agent layer would prepend
+        # eu.anthropic./us.anthropic. to a bare alias like
+        # claude-haiku-4-5-20251001 and produce an inference-profile id Bedrock
+        # rejects with 400. Falling back to BEDROCK_MODEL (which is already a
+        # valid Bedrock profile id) is the same pattern live-tests uses.
+        run: .venv/Scripts/coder-eval run tasks/hello_date.yaml --run-dir runs/win-smoke
+
+      - name: Verify hello_date result
+        shell: bash
+        run: |
+          F=runs/win-smoke/experiment.json
+          test -f "$F" || { echo "$F missing"; ls -la runs/ 2>/dev/null; exit 1; }
+          SUCCEEDED=$(jq '[.variant_aggregates[].tasks_succeeded] | add' "$F")
+          FAILED=$(jq '[.variant_aggregates[].tasks_failed] | add' "$F")
+          echo "windows hello_date: succeeded=$SUCCEEDED failed=$FAILED"
+          test "$SUCCEEDED" = "1" || { echo "Expected 1 success on Windows hello_date, got $SUCCEEDED"; exit 1; }
+          test "$FAILED" = "0" || { echo "Windows hello_date failed"; exit 1; }
+
+      - name: Upload Windows smoke artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: windows-smoke-runs
+          path: runs/win-smoke/
+          retention-days: 7
+
+  e2e-smoke:
+    name: E2E Smoke Tests (Real API)
+    runs-on: uipath-ubuntu-latest
+    timeout-minutes: 10
+    # Skip on fork PRs where secrets aren't available
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    env:
+      # Route smoke runs through Bedrock to keep Anthropic-credit spend off the
+      # critical path. ClaudeCodeAgent's BedrockRoute is exercised end-to-end
+      # by the live-tests BedrockRoute step, so the same path is used here.
+      # The DirectRoute path is still tested every PR by live-tests' DirectRoute
+      # step, so smoke coverage of the direct-API code path is not lost.
+      API_BACKEND: "bedrock"
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
+      # tasks_run for --tags smoke-pass. 6 task files (hello_date, dataset_example,
+      # smoke_llm_judge, smoke_agent_judge, byod_smoke_test, agentless_smoke_test);
+      # dataset_example fans out to 2 inline rows, so 7 sub-tasks. If you add/remove a
+      # smoke-pass task or change the dataset row count, bump these.
+      EXPECTED_SMOKE_PASS_RUN: "7"
+      EXPECTED_SMOKE_PASS_SUCCEEDED: "7"
+      # smoke-fail bucket: three tasks expected to fail.
+      #   1. smoke_negative_path: file_contains criterion is unsatisfiable
+      #      (sentinel-string regression detection for success-checker).
+      #   2. smoke_task_timeout: a `sleep 300` Bash call vs task_timeout: 30
+      #      (regression detection for the orchestrator's task_timeout watchdog).
+      #   3. smoke_budget_exceeded: max_input_tokens: 1 (unsatisfiable) — guards
+      #      run_limits enforcement (regression detection: a disabled budget gate
+      #      would let the task pass criteria and land in tasks_succeeded).
+      EXPECTED_SMOKE_FAIL_RUN: "3"
+      EXPECTED_SMOKE_FAIL_FAILED: "3"
+      # smoke-variants bucket: one task fanned out across 2 experiment variants
+      # (experiments/smoke_variants.yaml) → tasks_run = 1 * 2.
+      EXPECTED_SMOKE_VARIANTS_RUN: "2"
+      EXPECTED_SMOKE_VARIANTS_SUCCEEDED: "2"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "20"
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Cache dependencies
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.cache/pip
+            .venv
+          key: ${{ runner.os }}-py3.13-e2e-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-py3.13-e2e-
+            ${{ runner.os }}-py3.13-
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+
+      - name: Install project dependencies (hash-verified from uv.lock)
+        run: uv sync --frozen --extra dev --extra uipath --extra codex
+
+      - name: Build coder-eval-agent base Docker image
+        run: make docker-image
+
+      - name: Build BYOD template Docker image
+        run: docker build -t byod-custom-image:0.1.0 templates/byod_smoke_test/
+
+      # All three smoke steps below omit --model. Under API_BACKEND=bedrock,
+      # the agent layer prepends eu.anthropic./us.anthropic. to a bare alias
+      # like claude-haiku-4-5-20251001 and produces an inference-profile id
+      # that Bedrock rejects with 400 (no such cross-region profile). Falling
+      # back to BEDROCK_MODEL — a valid pre-formatted Bedrock profile id — is
+      # the same pattern live-tests uses (see test_claude_settings_enforcement_live._model_for_env).
+      - name: Run smoke-pass bucket (expect all to succeed)
+        run: |
+          .venv/bin/coder-eval run tasks/*.yaml \
+            --tags smoke-pass \
+            --run-dir runs/ci-smoke-pass
+
+      - name: Run smoke-fail bucket (expect failure detection)
+        run: |
+          # Inverted exit semantics: coder-eval exits 1 when a task fails. We *want* that.
+          if .venv/bin/coder-eval run tasks/*.yaml \
+              --tags smoke-fail \
+              --run-dir runs/ci-smoke-fail; then
+            echo "FATAL: smoke-fail task succeeded — failure detection appears broken."
+            exit 1
+          fi
+
+      - name: Run smoke-variants bucket (multi-variant resolver)
+        run: |
+          .venv/bin/coder-eval run tasks/*.yaml \
+            --tags smoke-variants \
+            --experiment experiments/smoke_variants.yaml \
+            --run-dir runs/ci-smoke-variants
+
+      - name: Verify smoke-pass bucket
+        run: |
+          F=runs/ci-smoke-pass/experiment.json
+          test -f "$F" || { echo "$F missing"; ls -la runs/; exit 1; }
+          RUN=$(jq '[.variant_aggregates[].tasks_run] | add' "$F")
+          SUCCEEDED=$(jq '[.variant_aggregates[].tasks_succeeded] | add' "$F")
+          FAILED=$(jq '[.variant_aggregates[].tasks_failed] | add' "$F")
+          ERRORED=$(jq '[.variant_aggregates[].tasks_error] | add' "$F")
+          echo "smoke-pass: run=$RUN succeeded=$SUCCEEDED failed=$FAILED errored=$ERRORED"
+          test "$RUN" = "$EXPECTED_SMOKE_PASS_RUN" || { echo "smoke-pass tasks_run drift: expected $EXPECTED_SMOKE_PASS_RUN, got $RUN"; exit 1; }
+          test "$SUCCEEDED" = "$EXPECTED_SMOKE_PASS_SUCCEEDED" || { echo "smoke-pass succeeded drift: expected $EXPECTED_SMOKE_PASS_SUCCEEDED, got $SUCCEEDED"; exit 1; }
+          test "$FAILED" = "0" || { echo "smoke-pass had unexpected failures"; exit 1; }
+          test "$ERRORED" = "0" || { echo "smoke-pass had errors"; exit 1; }
+
+      - name: Verify smoke-fail bucket
+        run: |
+          F=runs/ci-smoke-fail/experiment.json
+          test -f "$F" || { echo "$F missing"; ls -la runs/; exit 1; }
+          RUN=$(jq '[.variant_aggregates[].tasks_run] | add' "$F")
+          FAILED=$(jq '[.variant_aggregates[].tasks_failed] | add' "$F")
+          ERRORED=$(jq '[.variant_aggregates[].tasks_error] | add' "$F")
+          echo "smoke-fail: run=$RUN failed=$FAILED errored=$ERRORED"
+          test "$RUN" = "$EXPECTED_SMOKE_FAIL_RUN" || { echo "smoke-fail tasks_run drift: expected $EXPECTED_SMOKE_FAIL_RUN, got $RUN"; exit 1; }
+          test "$FAILED" = "$EXPECTED_SMOKE_FAIL_FAILED" || { echo "smoke-fail expected $EXPECTED_SMOKE_FAIL_FAILED failure(s), got $FAILED — failure detection may be broken"; exit 1; }
+          test "$ERRORED" = "0" || { echo "smoke-fail unexpectedly errored (not the same as failing)"; exit 1; }
+
+      - name: Verify smoke-variants bucket
+        run: |
+          F=runs/ci-smoke-variants/experiment.json
+          test -f "$F" || { echo "$F missing"; ls -la runs/; exit 1; }
+          RUN=$(jq '[.variant_aggregates[].tasks_run] | add' "$F")
+          SUCCEEDED=$(jq '[.variant_aggregates[].tasks_succeeded] | add' "$F")
+          ERRORED=$(jq '[.variant_aggregates[].tasks_error] | add' "$F")
+          VARIANTS=$(jq '.variant_aggregates | length' "$F")
+          echo "smoke-variants: variants=$VARIANTS run=$RUN succeeded=$SUCCEEDED errored=$ERRORED"
+          test "$VARIANTS" = "2" || { echo "smoke-variants expected 2 variants, got $VARIANTS — multi-variant fan-out may be broken"; exit 1; }
+          test "$RUN" = "$EXPECTED_SMOKE_VARIANTS_RUN" || { echo "smoke-variants tasks_run drift: expected $EXPECTED_SMOKE_VARIANTS_RUN, got $RUN"; exit 1; }
+          test "$SUCCEEDED" = "$EXPECTED_SMOKE_VARIANTS_SUCCEEDED" || { echo "smoke-variants succeeded drift: expected $EXPECTED_SMOKE_VARIANTS_SUCCEEDED, got $SUCCEEDED"; exit 1; }
+          test "$ERRORED" = "0" || { echo "smoke-variants had errors"; exit 1; }
+
+      - name: Re-evaluate hello_date via `coder-eval evaluate` (no agent)
+        # PR #220 fixed a regression in evaluate-only mode (reference loading).
+        # This step re-runs hello_date.yaml's criteria against the artifacts
+        # the smoke-pass run already produced — no new agent invocation, so
+        # zero extra LLM calls. A regression in the evaluate code path
+        # surfaces as a non-zero exit code from `coder-eval evaluate`.
+        run: |
+          WORK="runs/ci-smoke-pass/default/hello_date_smoke_test/00/artifacts/hello_date_smoke_test"
+          test -d "$WORK" || { echo "Expected artifacts dir not found: $WORK"; find runs/ci-smoke-pass -maxdepth 5 -type d 2>/dev/null; exit 1; }
+          .venv/bin/coder-eval evaluate tasks/hello_date.yaml "$WORK" \
+            --run-dir runs/ci-smoke-eval-only
+
+      - name: Debug SSH session on failure
+        if: failure()
+        uses: mxschmitt/action-tmate@35b54afac29c97fb54faba5b513f8fbd1882f113  # v3.x
+        with:
+          limit-access-to-actor: true
+
+      - name: Upload run artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: e2e-smoke-runs
+          path: |
+            runs/ci-smoke-pass/
+            runs/ci-smoke-fail/
+            runs/ci-smoke-variants/
+            runs/ci-smoke-eval-only/
+          retention-days: 7
+
+  live-tests:
+    name: Live Integration Tests (Settings Enforcement + Cost Budget)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Skip on fork PRs where secrets aren't available
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    env:
+      # Job-level env: default to DirectRoute (no API_BACKEND override). The
+      # settings-enforcement and cost-budget steps use this. The Bedrock
+      # settings-enforcement step adds API_BACKEND=bedrock at step scope only.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
+      # Bedrock backend for the third settings-enforcement run. Job-level so
+      # the preflight secrets check can validate them; the BedrockRoute is
+      # only engaged via API_BACKEND=bedrock at step scope.
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "20"
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      # No bubblewrap/AppArmor setup needed: neither live-test file engages
+      # AgentConfig.isolation=true, so the SDK doesn't shell out to bwrap.
+
+      - name: Cache dependencies
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.cache/pip
+            .venv
+          key: ${{ runner.os }}-py3.13-live-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-py3.13-live-
+            ${{ runner.os }}-py3.13-
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+
+      - name: Install project dependencies (hash-verified from uv.lock)
+        run: uv sync --frozen --extra dev --extra uipath --extra codex
+
+      - name: Verify required secrets are present
+        run: |
+          : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY missing}"
+          : "${AWS_BEARER_TOKEN_BEDROCK:?AWS_BEARER_TOKEN_BEDROCK missing}"
+          : "${AWS_REGION:?AWS_REGION missing}"
+          : "${BEDROCK_MODEL:?BEDROCK_MODEL missing}"
+          echo "All live-test secrets present."
+
+      - name: Run claude-settings enforcement live tests (DirectRoute)
+        # No API_BACKEND override — Settings() defaults to DIRECT and uses ANTHROPIC_API_KEY.
+        # `-ra` surfaces skipped tests in the summary so CI logs show what ran vs skipped.
+        # `--strict-markers` rejects unregistered @pytest.mark.* (cheap typo insurance).
+        # JUnit XML feeds the post-run "tests actually passed" assertion below.
+        run: |
+          mkdir -p tmp
+          .venv/bin/pytest tests/test_claude_settings_enforcement_live.py \
+            -m live -v --tb=short --strict-markers -ra -n auto \
+            --junit-xml=tmp/junit-settings.xml
+
+      - name: Run claude-settings enforcement live tests (BedrockRoute)
+        # Same test file, different backend. Settings-enforcement lives in the
+        # Claude Code CLI and is backend-agnostic (per the file's docstring),
+        # so this run is the only thing in CI that exercises BedrockRoute
+        # end-to-end with the real Anthropic-on-Bedrock model.
+        env:
+          API_BACKEND: "bedrock"
+        run: |
+          .venv/bin/pytest tests/test_claude_settings_enforcement_live.py \
+            -m live -v --tb=short --strict-markers -ra -n auto \
+            --junit-xml=tmp/junit-settings-bedrock.xml
+
+      - name: Assert live tests actually ran (not silently skipped)
+        # Parse JUnit XML for *passed* count, not collected count. Pytest collects
+        # @pytest.mark.skipif-marked tests even when the predicate is True, so a
+        # collect-only count would still report N>0 even if every test silently
+        # skipped — defeating the purpose of the assertion. Passed = tests - skipped
+        # - errors - failures correctly catches the silent-skip regression class.
+        run: |
+          python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          def passed(path: str) -> int:
+              # Aggregate across all <testsuite> elements: pytest 8.x normally
+              # emits a single suite, but xdist or plugin variations can produce
+              # multiple suites under a <testsuites> root. Counting only the
+              # first would silently undercount and falsely fail the assertion.
+              root = ET.parse(path).getroot()
+              suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+              if not suites:
+                  sys.exit(f"{path}: no <testsuite> element")
+              total = sum(int(ts.get("tests", 0)) for ts in suites)
+              skipped = sum(int(ts.get("skipped", 0)) for ts in suites)
+              errors = sum(int(ts.get("errors", 0)) for ts in suites)
+              failures = sum(int(ts.get("failures", 0)) for ts in suites)
+              return total - skipped - errors - failures
+          p_settings_direct = passed("tmp/junit-settings.xml")
+          p_settings_bedrock = passed("tmp/junit-settings-bedrock.xml")
+          print(f"Passed: settings(direct)={p_settings_direct}, settings(bedrock)={p_settings_bedrock}")
+          if p_settings_direct < 1:
+              sys.exit("test_claude_settings_enforcement_live.py (DirectRoute) reported zero PASSED tests")
+          if p_settings_bedrock < 1:
+              sys.exit("test_claude_settings_enforcement_live.py (BedrockRoute) reported zero PASSED tests")
+          PY
+
+      - name: Run cost-budget smoke (max_usd → COST_BUDGET_EXCEEDED via DirectRoute)
+        # Verifies the cost path end-to-end on DirectRoute (Anthropic reports
+        # per-turn cost). A regression that broke per-turn cost reporting would
+        # log "max_usd budget configured but no turn reported cost; skipping
+        # cost check" and the task would land in tasks_failed via the
+        # placeholder criterion instead of COST_BUDGET_EXCEEDED. The
+        # final_status assertion below catches that silently-broken case.
+        run: |
+          # Inverted exit semantics: coder-eval exits 1 when a task fails. We want that.
+          if .venv/bin/coder-eval run tasks/smoke_cost_budget_exceeded.yaml \
+              --model claude-haiku-4-5-20251001 \
+              --run-dir runs/ci-smoke-cost-budget; then
+            echo "FATAL: cost-budget smoke succeeded — cost enforcement appears broken."
+            exit 1
+          fi
+
+      - name: Verify cost-budget smoke (COST_BUDGET_EXCEEDED, not just failed)
+        run: |
+          F=runs/ci-smoke-cost-budget/experiment.json
+          test -f "$F" || { echo "$F missing"; ls -la runs/; exit 1; }
+          RUN=$(jq '[.variant_aggregates[].tasks_run] | add' "$F")
+          FAILED=$(jq '[.variant_aggregates[].tasks_failed] | add' "$F")
+          ERRORED=$(jq '[.variant_aggregates[].tasks_error] | add' "$F")
+          echo "smoke-cost-budget: run=$RUN failed=$FAILED errored=$ERRORED"
+          test "$RUN" = "1" || { echo "smoke-cost-budget tasks_run drift: expected 1, got $RUN"; exit 1; }
+          test "$FAILED" = "1" || { echo "smoke-cost-budget expected 1 failure, got $FAILED"; exit 1; }
+          test "$ERRORED" = "0" || { echo "smoke-cost-budget unexpectedly errored"; exit 1; }
+          # Specifically assert the budget gate fired — not just that the task failed.
+          # A regression in per-turn cost reporting would still produce failed=1 via the
+          # placeholder criterion, but final_status would be FAILURE, not COST_BUDGET_EXCEEDED.
+          TASK_JSON=runs/ci-smoke-cost-budget/default/smoke_cost_budget_exceeded/00/task.json
+          test -f "$TASK_JSON" || { echo "$TASK_JSON missing"; find runs/ci-smoke-cost-budget -maxdepth 5 -type f; exit 1; }
+          STATUS=$(jq -r '.final_status' "$TASK_JSON")
+          echo "final_status=$STATUS"
+          test "$STATUS" = "COST_BUDGET_EXCEEDED" || { echo "Expected final_status=COST_BUDGET_EXCEEDED, got $STATUS — cost gate may not have fired (cost telemetry regression?)"; exit 1; }
+
+      - name: Upload live-test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: live-tests-output
+          path: |
+            tmp/
+            runs/
+          retention-days: 7
+
+  codex-live-tests:
+    name: Live Integration Tests (Codex)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Skip on fork PRs where secrets aren't available.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    env:
+      # Codex SDK auth. CODEX_API_KEY is the key; CODEX_BASE_URL routes to a
+      # custom OpenAI-/responses-compatible endpoint and CODEX_MODEL pins the
+      # model/deployment that endpoint expects.
+      CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+      CODEX_BASE_URL: ${{ secrets.CODEX_BASE_URL }}
+      CODEX_MODEL: ${{ secrets.CODEX_MODEL }}
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+
+      - name: Install project dependencies (with codex extra)
+        run: uv sync --frozen --extra dev --extra uipath --extra codex
+
+      - name: Verify required secrets are present
+        run: |
+          if [ -z "$CODEX_API_KEY" ]; then
+            echo "CODEX_API_KEY is not set."
+            exit 1
+          fi
+          echo "CODEX_API_KEY present."
+
+      - name: Run Codex live tests
+        run: |
+          mkdir -p tmp
+          .venv/bin/pytest tests/test_codex_agent_live.py \
+            -m live -v --tb=short --strict-markers -ra \
+            --junit-xml=tmp/junit-codex-live.xml
+
+      - name: Assert Codex live tests actually ran (not silently skipped)
+        run: |
+          python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse("tmp/junit-codex-live.xml").getroot()
+          suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+          total = sum(int(s.get("tests", 0)) for s in suites)
+          skipped = sum(int(s.get("skipped", 0)) for s in suites)
+          errors = sum(int(s.get("errors", 0)) for s in suites)
+          failures = sum(int(s.get("failures", 0)) for s in suites)
+          passed = total - skipped - errors - failures
+          print(f"codex-live passed={passed} skipped={skipped} errors={errors} failures={failures}")
+          if passed < 1:
+              sys.exit("test_codex_agent_live.py reported zero PASSED tests (missing API key / silent skip?)")
+          PY
+
+      - name: Upload Codex live-test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: codex-live-output
+          path: tmp/
+          retention-days: 7
+
+  byoa-live-tests:
+    name: Live Integration Tests (BYOA Plugin)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Skip on fork PRs where secrets aren't available.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    env:
+      # DirectRoute: a plugin agent that subclasses ClaudeCodeAgent uses ANTHROPIC_API_KEY.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: ${{ secrets.SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "20"
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+
+      - name: Install project dependencies (hash-verified from uv.lock)
+        run: uv sync --frozen --extra dev --extra uipath
+
+      # Install the out-of-tree fixture plugin so coder-eval discovers 'byoa-demo'
+      # through the REAL coder_eval.plugins entry point (not a test monkeypatch).
+      - name: Install BYOA demo plugin (entry-point discovery)
+        run: uv pip install -e tests/fixtures/byoa_demo_plugin
+
+      - name: Verify required secrets are present
+        run: |
+          : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY missing}"
+          echo "ANTHROPIC_API_KEY present."
+
+      - name: Run BYOA plugin live test
+        run: |
+          mkdir -p tmp
+          .venv/bin/pytest tests/test_byoa_plugin_live.py \
+            -m live -v --tb=short --strict-markers -ra \
+            --junit-xml=tmp/junit-byoa-live.xml
+
+      - name: Assert BYOA live test actually ran (not silently skipped)
+        run: |
+          python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse("tmp/junit-byoa-live.xml").getroot()
+          suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+          total = sum(int(s.get("tests", 0)) for s in suites)
+          skipped = sum(int(s.get("skipped", 0)) for s in suites)
+          errors = sum(int(s.get("errors", 0)) for s in suites)
+          failures = sum(int(s.get("failures", 0)) for s in suites)
+          passed = total - skipped - errors - failures
+          print(f"byoa-live passed={passed} skipped={skipped} errors={errors} failures={failures}")
+          if passed < 1:
+              sys.exit("test_byoa_plugin_live.py reported zero PASSED tests (missing API key / silent skip?)")
+          PY
+
+      - name: Upload BYOA live-test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: byoa-live-output
+          path: tmp/
+          retention-days: 7

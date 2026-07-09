@@ -1,0 +1,33 @@
+task_id: "mock_path_dirs_smoke"
+description: "Verify SandboxConfig.mock_path_dirs: a sandbox-placed mock binary is invoked by name from PATH."
+tags: [mock]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Bash", "Write"]
+
+sandbox:
+  mock_path_dirs:
+    - "mocks"
+  template_sources:
+    - type: "starter_files"
+      files:
+        - path: "mocks/say_hello"
+          content: |
+            #!/bin/sh
+            echo "MOCK_PATH_OK from say_hello, args=$*"
+
+initial_prompt: |
+  Run the `say_hello` command (no arguments) using bash and capture its stdout into a file
+  named `out.txt` in the current directory. Do not write `out.txt` yourself -- it must be
+  produced by piping the command's output. After running, confirm `out.txt` exists.
+
+success_criteria:
+  - type: "file_exists"
+    path: "out.txt"
+    description: "out.txt must exist (produced by the mock binary's stdout redirect)."
+  - type: "file_contains"
+    path: "out.txt"
+    includes: ["MOCK_PATH_OK from say_hello"]
+    description: "out.txt must contain the mock binary's signature line."

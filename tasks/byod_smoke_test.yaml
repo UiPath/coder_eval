@@ -1,0 +1,38 @@
+task_id: byod_smoke_test
+description: |
+  Smoke test for Bring Your Own Docker (BYOD) feature.
+
+  Verifies that custom Docker images (built by extending coder-eval-agent)
+  can be used by setting sandbox.docker.image in task configuration.
+
+  To run this test:
+  1. Build the custom image: docker build -t byod-custom-image:0.1.0 templates/byod_smoke_test/
+  2. Run: coder-eval run --task tasks/byod_smoke_test.yaml
+
+  The custom image adds a marker file at build time; success criteria checks
+  for this file to confirm the custom image was actually used.
+
+tags: [smoke, smoke-pass, byod, docker]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash", "Read"]
+
+sandbox:
+  driver: docker
+  docker:
+    image: byod-custom-image:0.1.0
+    network: bridge
+    env_passthrough_extra:
+      - BEDROCK_MODEL
+  limits:
+    timeout: 60
+
+initial_prompt: |
+  Do nothing. The task will verify that the custom Docker image was used.
+
+success_criteria:
+  - type: file_exists
+    path: /opt/byod_marker
+    description: Marker file added by custom BYOD image (verifies custom image was used)

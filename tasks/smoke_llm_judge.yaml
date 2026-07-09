@@ -1,0 +1,49 @@
+task_id: "smoke_llm_judge"
+description: |
+  Smoke task that exercises the llm_judge criterion end-to-end. The agent writes
+  a short creative output (deterministic enough to grade); the judge reads it
+  and grades against a simple rubric. This catches regressions in the
+  llm_judge code path that file_contains / file_exists cannot — for example,
+  judge-prompt construction, route/model auto-translation, JSON-verdict parsing.
+initial_prompt: |
+  Use the Write tool to create poem.txt containing a 2-line poem about the
+  Python programming language. The poem must mention 'Python' explicitly and
+  must be exactly 2 lines (one newline between them, no trailing blank line).
+tags: [smoke, smoke-pass, judge]
+
+run_limits:
+  max_turns: 2
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Write"]
+
+success_criteria:
+  - type: "file_exists"
+    path: "poem.txt"
+    description: "Sanity check: agent must have written the file."
+
+  - type: "llm_judge"
+    files: ["poem.txt"]
+    # No model: override — falls back to DEFAULT_JUDGE_MODEL
+    # (anthropic.claude-sonnet-4-6). The judge routes through the run's backend
+    # (Bedrock / Anthropic-direct), and this vendor-prefixed id is
+    # auto-translated per backend — on Bedrock it's qualified to the region's
+    # cross-region inference profile (see LLMJudgeCriterion.model in
+    # models/criteria.py and evaluation/judge_models.py). Keep the canonical
+    # vendor-prefixed id here; do NOT pre-qualify it to a Bedrock-only inference
+    # profile (e.g. eu.anthropic.claude-sonnet-4-6) — that form isn't portable
+    # back to the direct backend.
+    max_tokens: 200
+    pass_threshold: 0.8
+    prompt: |
+      You are grading a 2-line poem about Python. The agent was instructed to
+      produce exactly 2 lines and explicitly mention 'Python'.
+
+      Score 1.0 if the file contains exactly 2 non-empty lines AND the word
+      'Python' (case-insensitive) appears at least once. Score 0.0 otherwise.
+      Do not penalize style, rhyme, or meter; this is a structural check.
+
+      Return JSON: {"score": <0.0|1.0>, "rationale": "<one sentence>"}
+    description: "LLM-graded structural check on the poem output."

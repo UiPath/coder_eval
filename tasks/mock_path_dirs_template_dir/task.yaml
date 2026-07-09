@@ -1,0 +1,47 @@
+task_id: "mock_path_dirs_template_dir"
+description: >
+  End-to-end smoke for SandboxConfig.mock_path_dirs using template_dir: a folder of
+  shell-script mocks is copied wholesale into the sandbox, marked +x, and prepended
+  to PATH. The agent invokes them by bare name and the mock implementations win.
+tags: [mock, template-dir]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Bash", "Write"]
+
+sandbox:
+  template_sources:
+    - type: "template_dir"
+      path: "./mock-cli-bins"
+  mock_path_dirs:
+    - "mocks"
+
+initial_prompt: |
+  Two mock CLI binaries (`say_hello`, `echo_args`) have been placed on the agent's
+  PATH via the sandbox's mock_path_dirs feature. Their sources live under `mocks/`
+  in the working directory.
+
+  Run, in this order, capturing stdout to the named files (do not write the files
+  yourself -- they must be produced by shell redirection from the command):
+
+    1. `say_hello world` -> `say_hello.out`
+    2. `echo_args one two three` -> `echo_args.out`
+
+  Confirm afterwards that both output files exist.
+
+success_criteria:
+  - type: "file_exists"
+    path: "say_hello.out"
+    description: "say_hello.out must be produced by the say_hello mock's stdout."
+  - type: "file_contains"
+    path: "say_hello.out"
+    includes: ["MOCK_PATH_OK from say_hello, args=world"]
+    description: "say_hello.out must contain the mock's signature line with the passed arg."
+  - type: "file_exists"
+    path: "echo_args.out"
+    description: "echo_args.out must be produced by the echo_args mock."
+  - type: "file_contains"
+    path: "echo_args.out"
+    includes: ["ECHO_ARGS_OK count=3", "arg: one", "arg: two", "arg: three"]
+    description: "echo_args.out must contain the mock's args breakdown."

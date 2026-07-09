@@ -1,0 +1,41 @@
+name: Bug Report
+description: Report a problem with coder_eval
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug! Please **do not** report security vulnerabilities here —
+        see [SECURITY.md](https://github.com/UiPath/coder_eval/blob/main/SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The command(s) run, the task YAML, and the observed vs. expected result.
+      placeholder: |
+        1. `coder-eval run tasks/...`
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Output of `coder-eval --version` (or the version), Python version, OS, and driver (local/docker).
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / output
+      description: Relevant task.log / traceback. Redact any secrets or credentials first.
+      render: shell
+    validations:
+      required: false

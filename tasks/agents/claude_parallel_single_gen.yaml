@@ -1,0 +1,49 @@
+task_id: claude_parallel_single_gen
+description: |
+  Claude counterpart to codex_parallel_single_gen: two independent, fast,
+  read-only commands with no data dependency, so the model should emit BOTH tool
+  calls in a single generation (one assistant message carrying two tool_use
+  blocks). Used to compare API-parallel tool-call behavior between Claude and
+  Codex on the same prompt.
+
+tags:
+  - claude
+  - streaming
+  - parallel-tools
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools:
+    - Bash
+    - Read
+    - Write
+  # Isolate the sandbox from the host project's CLAUDE.md / settings so the run
+  # is self-contained (no host context injected into every call).
+  setting_sources: []
+
+initial_prompt: |
+  Gather two completely independent pieces of system information at once. Issue
+  these as TWO separate tool calls in a SINGLE step (in parallel — they have no
+  dependency on each other, so do not wait for one before sending the other, and
+  do not combine them into one command):
+    - Tool call 1: `uname -a`
+    - Tool call 2: `python3 --version`
+  Then write the operating-system name (the first field of `uname`) to os.txt and
+  the python version string to py.txt, and stop.
+
+success_criteria:
+  - type: file_exists
+    path: os.txt
+    description: "os.txt must be written from the uname result."
+    weight: 0.5
+
+  - type: file_exists
+    path: py.txt
+    description: "py.txt must be written from the python version result."
+    weight: 0.5
+
+run_limits:
+  max_turns: 8
+  task_timeout: 180
+  turn_timeout: 90

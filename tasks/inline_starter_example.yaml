@@ -1,0 +1,49 @@
+task_id: date-formatter-inline
+description: "Create a date formatter script with inline starter files"
+tags: [basic, pure-python, template]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash"]
+
+sandbox:
+  driver: tempdir
+  python:
+    env_packages:
+      - python-dateutil>=2.8.0
+      - pytest>=8.0
+  template_sources:
+    - type: starter_files
+      files:
+        - path: "README.md"
+          content: |
+            # Date Formatter
+
+            Create a script that formats dates in various formats.
+
+            ## Requirements
+
+            - Function: `format_date(date_str: str, format: str) -> str`
+            - Supports formats: 'iso', 'us', 'eu'
+            - Example: format_date('2024-01-15', 'us') -> '01/15/2024'
+
+        - path: "requirements.txt"
+          content: |
+            python-dateutil>=2.8.0
+            pytest>=8.0
+
+initial_prompt: |
+  Create a date_formatter.py module with a format_date() function.
+  Read the requirements in README.md.
+  Write tests in test_date_formatter.py to verify all three formats work.
+
+success_criteria:
+  - type: file_exists
+    description: "date_formatter.py exists"
+    path: "date_formatter.py"
+
+  - type: run_command
+    description: "All tests pass"
+    command: "python -m pytest ."
+    timeout: 30

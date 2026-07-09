@@ -1,0 +1,3 @@
+{"id": "r1", "text": "This product is fantastic, I love it.", "expected": "positive"}
+{"id": "r2", "text": "Terrible service, would not recommend.", "expected": "negative"}
+{"id": "r3", "text": "Amazing quality and excellent value for money.", "expected": "negative"}

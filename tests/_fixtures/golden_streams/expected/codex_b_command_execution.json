@@ -1,0 +1,74 @@
+{
+  "agent_output": "{\n  \"completed_at\": null,\n  \"duration_ms\": 1500,\n  \"error\": null,\n  \"id\": \"turn_1\",\n  \"items\": [],\n  \"items_view\": \"TurnItemsView.full\",\n  \"started_at\": null,\n  \"status\": \"TurnStatus.completed\"\n}",
+  "assistant_turn_count": 1,
+  "commands": [
+    {
+      "assistant_turn_index": null,
+      "duration_ms": "<scrubbed>",
+      "error_message": null,
+      "execution_completed_at": null,
+      "execution_started_at": null,
+      "generation_completed_at": null,
+      "parameters": {
+        "command": "echo hi"
+      },
+      "result_data": null,
+      "result_status": "success",
+      "result_summary": "Exit code: 0 | Output: hi\n",
+      "result_tokens": 7,
+      "sequence_number": 0,
+      "timestamp": "<scrubbed>",
+      "tool_id": "cmd_b",
+      "tool_name": "Bash"
+    }
+  ],
+  "crash_reason": null,
+  "crashed": false,
+  "duration_seconds": "<scrubbed>",
+  "iteration": 1,
+  "max_turns_exhausted": false,
+  "messages": [
+    {
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "completed_at": "<scrubbed>",
+      "content_blocks": [
+        {
+          "block_type": "tool_use",
+          "is_error": false,
+          "sequence": 0,
+          "signature": null,
+          "text": null,
+          "thinking": null,
+          "tool_use_id": "cmd_b"
+        }
+      ],
+      "generation_duration_ms": "<scrubbed>",
+      "input_tokens": 120,
+      "message_id": "codex-1-msg-0",
+      "model": "gpt-5-codex",
+      "output_tokens": 30,
+      "parent_tool_use_id": null,
+      "reasoning_tokens": 0,
+      "role": "assistant",
+      "started_at": "<scrubbed>",
+      "stop_reason": null,
+      "tool_use_ids": [
+        "cmd_b"
+      ]
+    }
+  ],
+  "model_used": "gpt-5-codex",
+  "num_turns": 1,
+  "result_summary": null,
+  "timestamp": "<scrubbed>",
+  "token_usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 120,
+    "output_tokens": 30,
+    "total_cost_usd": "<scrubbed>",
+    "uncached_input_tokens": 120
+  },
+  "user_input": "do it"
+}

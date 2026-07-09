@@ -1,0 +1,2 @@
+# treat Markdown as text so GitHub renders it
+*.md text linguist-language=Markdown

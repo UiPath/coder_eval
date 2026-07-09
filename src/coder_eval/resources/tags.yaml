@@ -1,0 +1,55 @@
+# Suggested vocabulary of tags for post-run task reviews.
+#
+# This file is a *suggested* vocabulary, not a strict allowlist. The
+# /coder-eval-review skill prefers names from this list but emits whatever
+# fits. A periodic vocabulary lint reports tags appearing in review.json
+# files that aren't here, so drift is visible
+# without blocking new categories from emerging.
+#
+# Tags can describe failure modes, agent behaviors, or positive traits
+# (e.g. optimal-path, called-tools). To add a vocabulary entry, open a PR.
+#
+# Each entry:
+#   name        - kebab-case canonical slug (required)
+#   definition  - one short sentence describing what the tag means (required)
+#   examples    - optional list of short, illustrative snippets
+tags:
+  - name: validation-error
+    definition: Schema or CLI validation failed for a generated artifact (e.g. .flow, .xaml, JSON).
+    examples:
+      - "Schema validation failed: expected string, received undefined"
+      - "Invalid .flow: missing required field 'startNode'"
+  - name: sandbox-leak
+    definition: Agent read or wrote files outside its assigned task directory.
+    examples:
+      - "Read sibling runs/<other_run>/artifacts/..."
+  - name: agent-loop
+    definition: Agent retried the same failing action repeatedly without adapting.
+    examples:
+      - "Same Bash command failed 5 times in a row with identical error"
+  - name: tool-error
+    definition: Bash/Read/Edit/SDK tool failed for reasons unrelated to task logic.
+    examples:
+      - "Edit failed: file not found"
+      - "Bash: command not found"
+  - name: model-nondeterminism
+    definition: Same task flips pass/fail across replicates with no code change.
+  - name: judge-disagreement
+    definition: LLM-judge verdict inconsistent with artifacts produced.
+  - name: infra
+    definition: Sandbox, network, auth, or external-service failure unrelated to the agent.
+    examples:
+      - "Auth token expired mid-run"
+      - "Network timeout reaching external service"
+  - name: criteria-bug
+    definition: Agent produced correct output but criteria did not match (false negative).
+    examples:
+      - "command_executed expected 'uip run' but agent used 'uipath run'"
+  - name: turn-timeout-too-short
+    definition: Task hit its per-turn timeout; the limit is too tight for the work the task requires.
+    examples:
+      - "300s turn_timeout exceeded at 80 turns; analysis recommends 600s"
+  - name: max-turns-too-low
+    definition: Task ran out of turns before completing; max_turns budget is below what the task realistically needs.
+    examples:
+      - "MAX_TURNS_EXHAUSTED: max_turns=50 but 86 turns used"

@@ -1,0 +1,37 @@
+task_id: "smoke_cost_budget_exceeded"
+description: |
+  Smoke task exercising run_limits cost enforcement end-to-end. The agent is
+  given a trivial prompt with max_usd: 0.0001 (one one-hundredth of a cent),
+  which any real model call comfortably exceeds. The orchestrator must classify
+  the run as COST_BUDGET_EXCEEDED (which maps to tasks_failed via
+  FinalStatus.category).
+
+  REQUIRES: a backend that reports per-turn cost — Anthropic direct with a
+  priced model, or Bedrock. This task is the regression check that the run
+  still emits per-turn cost telemetry (TurnRecord.token_usage.total_cost_usd).
+  A regression that broke cost reporting would log "max_usd budget
+  configured but no turn reported cost; skipping cost check" and the
+  task would land in tasks_failed via the placeholder criterion below
+  rather than via COST_BUDGET_EXCEEDED — so the workflow step must
+  verify final_status, not just the failed count.
+initial_prompt: |
+  Print the word "ok".
+
+run_limits:
+  max_usd: 0.0001
+  max_turns: 2
+
+
+tags: [smoke-cost-budget]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Bash"]
+
+success_criteria:
+  # The single turn runs, criteria check returns FAIL, then the budget gate
+  # short-circuits the run to COST_BUDGET_EXCEEDED (a "failed"-category status).
+  - type: "file_exists"
+    path: "should_never_be_checked.txt"
+    description: "Placeholder; cost cap fires after the single turn."

@@ -1,0 +1,67 @@
+task_id: codex_string_utils
+description: |
+  Test the Codex agent's ability to write utility functions.
+  The agent must create a Python module with string manipulation functions
+  and ensure they pass basic test assertions.
+
+tags:
+  - codex
+  - streaming
+  - code-generation
+
+agent:
+  type: codex
+  model: gpt-5.5
+  permission_mode: acceptEdits
+  allowed_tools:
+    - Bash
+    - Read
+    - Write
+    - Grep
+
+initial_prompt: |
+  Create a Python module named `string_utils.py` with the following functions:
+
+  1. `reverse_string(s)` - Returns the string reversed
+  2. `capitalize_words(s)` - Capitalizes the first letter of each word
+  3. `remove_vowels(s)` - Returns the string with all vowels removed
+  4. `is_palindrome(s)` - Returns True if the string is a palindrome (ignoring case)
+
+  The module should handle edge cases (empty strings, None, special characters).
+  Write a test script that verifies all functions work correctly.
+
+success_criteria:
+  - type: file_exists
+    path: string_utils.py
+    description: "The file string_utils.py must be created."
+    weight: 0.2
+
+  - type: file_contains
+    path: string_utils.py
+    includes:
+      - "def reverse_string"
+      - "def capitalize_words"
+      - "def remove_vowels"
+      - "def is_palindrome"
+    description: "The module must contain all required function definitions."
+    weight: 0.3
+
+  - type: run_command
+    command: "python -c 'from string_utils import reverse_string; assert reverse_string(\"hello\") == \"olleh\"'"
+    description: "reverse_string() must work correctly."
+    weight: 0.15
+
+  - type: run_command
+    command: "python -c 'from string_utils import capitalize_words; assert capitalize_words(\"hello world\") == \"Hello World\"'"
+    description: "capitalize_words() must work correctly."
+    weight: 0.15
+
+  - type: run_command
+    command: "python -c 'from string_utils import is_palindrome; assert is_palindrome(\"racecar\") == True'"
+    description: "is_palindrome() must work correctly."
+    weight: 0.2
+
+run_limits:
+  max_turns: 8
+  task_timeout: 600
+  turn_timeout: 120

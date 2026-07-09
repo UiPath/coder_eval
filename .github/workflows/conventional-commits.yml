@@ -1,0 +1,73 @@
+name: Conventional Commits
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check-conventional-commits:
+    name: Check PR Title & Commit Messages
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          PATTERN='^(feat|fix|refactor|docs|style|test|chore|perf|ci|build|revert)(\([a-z0-9._/-]+\))?(!)?: .+'
+          if ! echo "$PR_TITLE" | grep -Eq "$PATTERN"; then
+            echo "ERROR: PR title does not follow Conventional Commits."
+            echo "  Got:      $PR_TITLE"
+            echo "  Expected: <type>[optional scope]: <description>"
+            echo "  Types:    feat | fix | refactor | docs | style | test | chore | perf | ci | build | revert"
+            echo "  Examples: feat(sandbox): add preservation mode"
+            echo "            fix: handle empty dataset gracefully"
+            exit 1
+          fi
+          echo "✓ PR title OK: $PR_TITLE"
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Check commit messages
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          PATTERN='^(feat|fix|refactor|docs|style|test|chore|perf|ci|build|revert)(\([a-z0-9._/-]+\))?(!)?: .+'
+          FAILED=0
+          while IFS= read -r msg; do
+            if echo "$msg" | grep -Eq '^Merge (pull request|branch|remote-tracking)'; then
+              echo "  (merge commit skipped)"
+              continue
+            fi
+            if ! echo "$msg" | grep -Eq "$PATTERN"; then
+              echo "✗ $msg"
+              FAILED=1
+            else
+              echo "✓ $msg"
+            fi
+          done < <(git log --format='%s' "${BASE_SHA}..${HEAD_SHA}")
+
+          if [ "$FAILED" = "1" ]; then
+            echo ""
+            echo "ERROR: One or more commits do not follow Conventional Commits."
+            echo "  Expected: <type>[optional scope]: <description>"
+            echo "  Types:    feat | fix | refactor | docs | style | test | chore | perf | ci | build | revert"
+            exit 1
+          fi
+          echo "✓ All commit messages OK"

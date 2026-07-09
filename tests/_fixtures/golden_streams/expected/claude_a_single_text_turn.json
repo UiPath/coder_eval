@@ -1,0 +1,57 @@
+{
+  "agent_output": "[AssistantMessage]\n[ResultMessage]",
+  "assistant_turn_count": 1,
+  "commands": [],
+  "crash_reason": null,
+  "crashed": false,
+  "duration_seconds": "<scrubbed>",
+  "iteration": 1,
+  "max_turns_exhausted": false,
+  "messages": [
+    {
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "completed_at": "<scrubbed>",
+      "content_blocks": [
+        {
+          "block_type": "text",
+          "is_error": false,
+          "sequence": 0,
+          "signature": null,
+          "text": "Hello, here is the answer.",
+          "thinking": null,
+          "tool_use_id": null
+        }
+      ],
+      "generation_duration_ms": "<scrubbed>",
+      "input_tokens": 50,
+      "message_id": "msg_a",
+      "model": "mock-model",
+      "output_tokens": 20,
+      "parent_tool_use_id": null,
+      "reasoning_tokens": 0,
+      "role": "assistant",
+      "started_at": "<scrubbed>",
+      "stop_reason": "end_turn",
+      "tool_use_ids": []
+    }
+  ],
+  "model_used": "mock-model",
+  "num_turns": 1,
+  "result_summary": {
+    "is_error": false,
+    "result": "done",
+    "stop_reason": "end_turn",
+    "subtype": "success"
+  },
+  "timestamp": "<scrubbed>",
+  "token_usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 50,
+    "output_tokens": 20,
+    "total_cost_usd": "<scrubbed>",
+    "uncached_input_tokens": 50
+  },
+  "user_input": "do the thing"
+}

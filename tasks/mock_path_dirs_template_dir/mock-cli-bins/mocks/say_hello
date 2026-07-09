@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "MOCK_PATH_OK from say_hello, args=$*"

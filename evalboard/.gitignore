@@ -1,0 +1,13 @@
+node_modules
+.next
+out
+*.tsbuildinfo
+.env*.local
+runs-remote/
+runs-local/
+coverage/
+
+# Parent .gitignore has broad rules ("lib/" for Python venvs, "runs/" for
+# eval outputs) that collide with Next.js convention. Re-include here.
+!lib/
+!app/runs/

@@ -1,0 +1,24 @@
+experiment_id: smoke-variants
+description: |
+  Smoke test for the 5-layer config-merge resolver: ensures multi-variant
+  fan-out + variant-level overrides flow correctly from the experiment YAML
+  through ResolvedTask. Two variants override `max_turns` to different values
+  so the resolver bug "variants share the task's max_turns" would surface as a
+  count drift or behavior drift in the run.
+
+defaults:
+  # Drop <sandbox>/{node_modules,.npm-prefix} so preserved artifacts stay slim (MST-9674).
+  post_run:
+    - command: "rm -rf node_modules .npm-prefix"
+      timeout: 30
+
+variants:
+  - variant_id: turns-low
+    description: "Variant overriding max_turns to a lower value."
+    run_limits:
+      max_turns: 1
+
+  - variant_id: turns-mid
+    description: "Variant overriding max_turns to a higher value."
+    run_limits:
+      max_turns: 2

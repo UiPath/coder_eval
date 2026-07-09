@@ -1,0 +1,67 @@
+task_id: working_dir_auto_example
+description: |
+  Exercises docker WORKDIR alignment with the AUTO sentinel
+  (sandbox.docker.working_dir: auto).
+
+  Identical to working_dir_concrete_example, except the WORKDIR is not named
+  explicitly: `auto` makes the host inspect the built image's declared
+  WORKDIR (`docker image inspect` -> Config.WorkingDir) and run the agent
+  there, falling back to /root if the image declares none. The task image
+  (environment/Dockerfile.workdir) declares `WORKDIR /app`, so `auto` should
+  resolve to /app — the agent runs in-place, sees the baked input.txt, and the
+  workspace is copied out to run_dir/artifacts/<task>.
+
+  Setup:
+    1. Build the framework base image once:   make docker-image
+    2. coder-eval run tasks/dockerfile_build_example/working_dir_auto_example.yaml
+
+  The criteria below prove auto-detection landed the agent at the image's
+  WORKDIR (it could read the baked input.txt) and its output was captured out.
+
+tags: [example, docker, working-dir]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash", "Read", "Write"]
+
+sandbox:
+  driver: docker
+  docker:
+    # Path is relative to this YAML and resolved at load time. Overrides `image`.
+    dockerfile_path: ./environment/Dockerfile.workdir
+    # Detect the image's declared WORKDIR at run time (here: /app), run the
+    # agent there, then copy it out to run_dir/artifacts/<task>. Docker driver only.
+    working_dir: auto
+  limits:
+    timeout: 120
+
+initial_prompt: |
+  Your current working directory contains a file named input.txt. Copy its
+  exact contents into a new file named result.txt in the same directory.
+
+run_limits:
+  max_turns: 3
+  task_timeout: 300
+  turn_timeout: 120
+
+success_criteria:
+  # The agent produced its output at the auto-detected WORKDIR and it was captured out.
+  - type: file_exists
+    path: result.txt
+    description: Agent created result.txt at the auto-detected working_dir (captured out)
+    weight: 1.0
+
+  # The agent read the Dockerfile-baked input at the auto-detected WORKDIR (/app),
+  # proving auto-detection ran the agent in-place where the baked input lives.
+  - type: file_contains
+    path: result.txt
+    includes: ["hello there!"]
+    description: "result.txt holds the baked input's contents (auto resolved to the image WORKDIR)"
+    weight: 1.0
+
+  # The baked WORKDIR input itself was captured out alongside the agent's output.
+  - type: file_exists
+    path: input.txt
+    description: "Dockerfile-baked input.txt was preserved and captured from the WORKDIR"
+    weight: 1.0

@@ -1,0 +1,84 @@
+task_id: python-echo-simulated-judged
+description: >
+  Minimal smoke test for simulation + llm_judge with include_dialog. The agent
+  is told only to ask the user what they want; the simulated user supplies an
+  exact string to echo. The judge — which sees the full dialog — verifies the
+  agent reproduced the string exactly without paraphrasing or inventing.
+tags: [python, simulation, llm-judge]
+run_limits:
+  max_turns: 4
+  task_timeout: 900
+  turn_timeout: 120
+
+initial_prompt: "Ask me what I would like to do. Do not assume anything about the task — ignore any project context you can see."
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash", "Read", "Write", "Edit"]
+  system_prompt: |
+    You are a literal-minded assistant. Follow the user's instructions exactly.
+    When the user asks you to echo or repeat a string, reply with that exact
+    string verbatim and nothing else — no preamble, no commentary, no formatting.
+    Ignore any project context (CLAUDE.md, surrounding files) — only follow what
+    the user says in this conversation.
+
+sandbox:
+  driver: tempdir
+  python: {}
+
+simulation:
+  enabled: true
+
+  persona: |
+    You are a user with one specific request. You give the request only when
+    asked, and then you wait for the agent to do it.
+
+  goal: |
+    When (and only when) the agent asks what you want, reply with exactly
+    this instruction, including the quotes:
+
+      Repeat this as-is without anything else: "hello, world -- uipath is the best company in the world."
+
+    Do not say anything else. Do not paraphrase. Do not add context.
+
+    When the agent has produced the echoed text, reply with exactly <<<END>>>
+    on its own line.
+
+  constraints:
+    - "Do not volunteer the request before being asked."
+    - "Do not modify the string in any way when you give it."
+
+  max_turns: 4
+  stop_token: "<<<END>>>"
+  stop_on_criteria_pass: false
+  check_criteria: end_of_dialog
+  n_trials: 1
+  parallel_trials: true
+
+success_criteria:
+  - type: llm_judge
+    description: "Agent echoed the user's string exactly, with no hallucination or paraphrase"
+    prompt: |
+      Look at the DIALOG block. The simulated user gave the agent an exact
+      string to echo (it appears between double quotes after "Echo this as-is:").
+
+      Grade the agent on whether it reproduced that exact string verbatim in
+      its reply — same words, same punctuation, same casing.
+
+      Rubric:
+      - 1.0: the agent's reply contains the exact string verbatim.
+      - 0.5: the string appears but with minor casing/punctuation drift.
+      - 0.0: the agent paraphrased, added words, dropped words, or invented
+             content that wasn't in the user's request (hallucination).
+
+      Important: the string to grade against is whatever the SIMULATED USER
+      actually said in the DIALOG — not what you might guess the task is
+      "supposed" to be. Read the dialog and grade against what's there.
+    include_dialog: true
+    include_agent_output: true
+    model: "anthropic.claude-sonnet-4-6"
+    temperature: 0.0
+    max_tokens: 400
+    weight: 1.0
+    pass_threshold: 0.9

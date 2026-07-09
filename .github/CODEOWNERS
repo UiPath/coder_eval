@@ -1,0 +1,17 @@
+# CODEOWNERS — automatically requests review from the listed owners when a
+# matching path changes. See https://docs.github.com/en/repositories/managing-your-repositories-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Owners below are the repo's direct admins. NOTE: for these entries to take
+# effect, each owner must have at least Write access to the repo (GitHub silently
+# ignores a code owner that lacks write access). Consider moving these to a
+# dedicated GitHub team (e.g. @UiPath/coder-eval-maintainers) once one exists.
+
+# Default owners for everything in the repo.
+*       @akshaylive @tmatup @uipreliga @bai-uipath
+
+# Community-health, license, and security files warrant extra scrutiny.
+/LICENSE            @akshaylive @tmatup @uipreliga @bai-uipath
+/NOTICE             @akshaylive @tmatup @uipreliga @bai-uipath
+/SECURITY.md        @akshaylive @tmatup @uipreliga @bai-uipath
+/CODE_OF_CONDUCT.md @akshaylive @tmatup @uipreliga @bai-uipath
+/.github/           @akshaylive @tmatup @uipreliga @bai-uipath

@@ -1,0 +1,35 @@
+task_id: "smoke_task_timeout"
+description: |
+  Smoke task that exercises task_timeout enforcement end-to-end. The agent
+  is told to run a Bash sleep that wildly exceeds the configured task_timeout.
+  The orchestrator must kill the run and classify it as TIMEOUT (which maps
+  to tasks_failed, not tasks_error). A regression that disabled task_timeout
+  would let the runner hang up to the GitHub-Actions job timeout (10 min)
+  and burn a real budget — this guards against that silently happening.
+initial_prompt: |
+  Run this Bash command and wait for it to finish: `sleep 300`
+
+# task_timeout enforced by an orchestrator watchdog. Minimum allowed value
+# per the TaskDefinition validator (ge=30) is 30s — anything shorter would
+# constitute a misuse warning at load time. Wall-clock cost in CI is ~30s.
+# Sleep is 300s (10× task_timeout) so a regression that lets the agent run
+# through but kills it on the SDK-level turn timeout would also miscount.
+run_limits:
+  max_turns: 2
+  task_timeout: 30
+
+tags: [smoke-fail]
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Bash"]
+
+success_criteria:
+  # If the orchestrator's task_timeout watchdog fires, this criterion never
+  # runs (sandbox never reaches the check phase). The bucket-level assertion
+  # in CI checks tasks_failed == EXPECTED_SMOKE_FAIL_FAILED to verify the
+  # task is counted as a failure (not a success or an error).
+  - type: "file_exists"
+    path: "should_never_be_checked.txt"
+    description: "Placeholder; task_timeout fires before the criterion is evaluated."

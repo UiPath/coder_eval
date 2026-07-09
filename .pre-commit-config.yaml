@@ -1,0 +1,43 @@
+# Vendored flow-v2 toolchain — never touched by hooks; refresh via
+# templates/flow-v2-shared/sync-tools.sh.
+exclude: ^templates/flow-v2-shared/tools/
+
+repos:
+  # Ruff for formatting and linting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.2
+    hooks:
+      # Run formatter first (auto-fixes)
+      - id: ruff-format
+        types_or: [python, pyi]
+
+      # Then run linter (auto-fixes when possible)
+      - id: ruff
+        types_or: [python, pyi]
+        args: [--fix, --exit-non-zero-on-fix]
+
+  # Pre-commit built-in hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        exclude: ^tasks/  # Allow YAML templates with variables
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+        exclude: ^docs/assets/hero\.gif$  # README hero media
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: check-case-conflict
+
+  # Type checking (slower, optional via --hook-stage manual)
+  - repo: local
+    hooks:
+      - id: pyright
+        name: pyright type checker
+        entry: uv run pyright
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [manual]  # Run only with: pre-commit run --hook-stage manual pyright

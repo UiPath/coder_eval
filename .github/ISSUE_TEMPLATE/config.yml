@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/UiPath/coder_eval/security/advisories/new
+    about: Please report security vulnerabilities privately — do not open a public issue.
+  - name: Questions & discussion
+    url: https://github.com/UiPath/coder_eval/discussions
+    about: For usage questions and open-ended discussion, use Discussions instead of an issue.

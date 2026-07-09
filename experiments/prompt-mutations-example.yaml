@@ -1,0 +1,41 @@
+# Example: Prompt Mutations
+#
+# Demonstrates how prompt mutations can modify a task's initial_prompt
+# per variant, enabling A/B testing of prompt phrasing.
+#
+# Usage:
+#   coder-eval run tasks/hello_date.yaml -e experiments/prompt-mutations-example.yaml
+
+experiment_id: prompt-mutations-example
+description: "Example of prompt mutations for A/B testing prompt phrasing"
+
+defaults:
+  agent:
+    type: claude-code
+    permission_mode: acceptEdits
+
+  # Drop <sandbox>/{node_modules,.npm-prefix} so preserved artifacts stay slim (MST-9674).
+  post_run:
+    - command: "rm -rf node_modules .npm-prefix"
+      timeout: 30
+
+variants:
+  - variant_id: baseline
+    # No mutations — uses the task's original prompt as-is
+
+  - variant_id: step-by-step
+    prompt_mutations:
+      - type: prefix
+        content: "Think step by step before writing any code."
+
+  - variant_id: concise
+    prompt_mutations:
+      - type: suffix
+        content: "Keep the implementation minimal and under 20 lines."
+
+  - variant_id: detailed
+    prompt_mutations:
+      - type: prefix
+        content: "Follow best practices for production code."
+      - type: suffix
+        content: "Include error handling, type hints, and docstrings."

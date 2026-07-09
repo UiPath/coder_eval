@@ -1,0 +1,38 @@
+version: 2
+
+updates:
+  # Python dependencies
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "monthly"  # Changed from weekly to monthly (longest interval)
+    open-pull-requests-limit: 1  # Only 1 PR at a time
+    labels:
+      - "dependencies"
+      - "python"
+    # `chore` keeps Dependabot's commit + PR title within the Conventional
+    # Commits allowed-type set enforced by conventional-commits.yml (a `deps`
+    # prefix would fail that required check and block the PR from merging).
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    # Only get security updates and major version updates
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 3  # Raised from 1: actions are SHA-pinned, so SHA bumps come as patch/minor PRs.
+    labels:
+      - "dependencies"
+      - "github-actions"
+    # Prefix the default `Bump ...` title with a Conventional Commits type so
+    # the required conventional-commits.yml check accepts it (see pip block).
+    commit-message:
+      prefix: "chore"
+    # No ignore block — keep SHA pins current for patch and minor releases too,
+    # otherwise SHA pinning fossilizes the actions in place.

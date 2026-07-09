@@ -1,0 +1,20 @@
+task_id: test_task
+description: Test task
+initial_prompt: Test
+# agent block required by TaskDefinition schema but unused in evaluate-only mode
+agent:
+  type: claude-code
+sandbox:
+  driver: tempdir
+success_criteria:
+  - type: file_exists
+    path: app.py
+    description: app.py must exist
+  - type: file_contains
+    path: app.py
+    includes: ["hello"]
+    description: app.py must contain hello
+  - type: run_command
+    command: python app.py
+    timeout: 5
+    description: app.py must run

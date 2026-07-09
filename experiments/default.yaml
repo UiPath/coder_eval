@@ -1,0 +1,85 @@
+# Default experiment — provides baseline agent configuration.
+#
+# Tasks that omit the `agent` field inherit these defaults via the
+# 4-layer merge chain: default.yaml → experiment defaults → task YAML → variant.
+# All agent properties are listed explicitly so users know the baseline.
+
+experiment_id: default
+description: "Default experiment - provides baseline agent configuration"
+
+defaults:
+  # Number of replicates for each task (repeats the same task N times per variant).
+  # Useful for quantifying variance in non-deterministic agent behavior.
+  # Overridable per-variant or via --repeats on the CLI.
+  # repeats: 1
+
+  # Run-time caps (turns, wall-clock, tokens, USD). Override per-variant or per-task via
+  # field-merge — a task or variant can set a single key without replacing the whole block.
+  # Per-row dataset multiplication: a 100-row task with max_usd: 0.10 permits up to
+  # $10 cumulative spend.
+  run_limits:
+    # Maximum agent inner-loop turns per iteration (null = SDK default).
+    # Typical range in tasks: 3-18 depending on complexity.
+    max_turns: 20
+    # Soft target: when cumulative SDK turns across all iterations of a task
+    # exceed this, the orchestrator logs a one-shot warning and the report
+    # surfaces a badge. Does NOT abort the run (max_turns is the hard cap).
+    # expected_turns: 15
+    # Maximum total seconds for the entire task evaluation (all iterations combined).
+    task_timeout: 600
+    # Maximum seconds per agent turn / communicate call (null = no limit).
+    turn_timeout: 300
+    # Optional token / cost caps (leave commented to disable).
+    # max_input_tokens: 100000
+    # max_output_tokens: 20000
+    # max_total_tokens: 120000
+    # max_usd: 0.50
+    # count_cached_input: false
+
+  agent:
+    # Agent type (currently only "claude-code" is supported)
+    type: claude-code
+
+    # Permission mode for agent actions:
+    #   default        - ask for confirmation on each action
+    #   acceptEdits    - auto-accept file edits, confirm other actions
+    #   plan           - read-only, no file modifications allowed
+    #   bypassPermissions - auto-accept all actions (use with caution)
+    permission_mode: acceptEdits
+
+    # Specific model to use (null = defer to Claude Code CLI default)
+    # Examples: claude-sonnet-4-6, claude-opus-4-6
+    model: claude-sonnet-4-6
+
+    # Allowed tools — restrict which tools the agent can use (null = all tools)
+    # Most tasks use ["Bash"] or ["Bash", "Read", "Write"]. This default
+    # provides the common set needed for general-purpose coding tasks.
+    allowed_tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"]
+
+    # Claude Code plugins to load (null = none)
+    # Example: [{"type": "local", "path": "/path/to/skills"}]
+    plugins: null
+
+    # Additional patterns to ignore during file change detection (beyond defaults)
+    # Example: ["*.log", "__pycache__"]
+    ignore_patterns: []
+
+    # Claude Code SDK pass-through options — anything coder_eval doesn't own
+    # directly (e.g. `effort`, `max_thinking_tokens`). Keys must be
+    # ClaudeAgentOptions fields and must not be framework-managed (model,
+    # allowed_tools, permission_mode, hooks, mcp_servers, ...). Deep-merged
+    # across experiment / task / variant / --sdk-option layers, so a higher
+    # layer adding one key doesn't wipe the rest.
+    # Example: sdk_options: {effort: high}
+    # sdk_options: {}
+
+  # Sandbox-internal cleanup appended after each task's own post_run (MST-9674).
+  # PR #250 sandbox-scopes Node/npm installs to <sandbox>/{node_modules,.npm-prefix};
+  # removing them keeps preserved-sandbox artifacts small and is a no-op in normal
+  # (non-preserved) runs where the tempdir is rmtree'd anyway.
+  post_run:
+    - command: "rm -rf node_modules .npm-prefix"
+      timeout: 30
+
+variants:
+  - variant_id: default

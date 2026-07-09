@@ -1,0 +1,75 @@
+task_id: dockerfile_build_example
+description: |
+  Demonstrates building the task container from a task-supplied Dockerfile
+  (sandbox.docker.dockerfile_path) with a customized `docker build` invocation
+  (sandbox.docker.build: args / secrets / extra_args).
+
+  Setup:
+    1. Build the framework base image once:   make docker-image
+    2. (optional) export DEMO_SECRET=... to exercise the BuildKit secret.
+    3. coder-eval run tasks/dockerfile_build_example/dockerfile_build_example.yaml
+
+  environment/Dockerfile bakes marker files from the build arg and the secret
+  mount; the success criteria below verify the build customization took effect.
+
+tags: [example, docker, dockerfile-build]
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools: ["Bash", "Read", "Write"]
+
+sandbox:
+  driver: docker
+  docker:
+    # Path is relative to this YAML and resolved at load time. Overrides `image`.
+    dockerfile_path: ./environment/Dockerfile
+    build:
+      args:
+        # -> docker build --build-arg GREETING="built with a custom --build-arg"
+        GREETING: "built with a custom --build-arg"
+        # Values are $VAR / ${VAR} expanded from the host env, e.g.:
+        # BUILD_VERSION: "${BUILD_VERSION}"
+      secrets:
+        # -> docker build --secret id=demo_secret,env=DEMO_SECRET
+        # Forwards the host's $DEMO_SECRET to the `--mount=type=secret,id=demo_secret`
+        # RUN step without baking it into any image layer. Use id=...,src=PATH for a file.
+        - id=demo_secret,env=DEMO_SECRET
+      extra_args:
+        # -> raw flags inserted before the build context (escape hatch).
+        # Here: stamp an image label (visible via `docker image inspect`).
+        - "--label"
+        - "com.coder-eval.demo=dockerfile-build"
+      buildkit: true
+  limits:
+    timeout: 120
+
+initial_prompt: |
+  Create a file `done.txt` containing the word DONE. That is the whole task —
+  this example primarily exercises the custom Docker build, not the agent.
+
+run_limits:
+  max_turns: 3
+  task_timeout: 300
+  turn_timeout: 120
+
+success_criteria:
+  # The agent's trivial output.
+  - type: file_exists
+    path: done.txt
+    description: Agent created done.txt
+    weight: 1.0
+
+  # build.args took effect (GREETING was baked at build time).
+  # weight 0 -> informational: verifies the build, doesn't score the agent.
+  - type: file_contains
+    path: /opt/greeting.txt
+    includes: ["built with a custom --build-arg"]
+    description: "build.args -> --build-arg GREETING reached the Dockerfile"
+    weight: 1.0
+
+  # build.secrets took effect (the --secret mount ran; value never leaked).
+  - type: file_exists
+    path: /opt/secret_check.txt
+    description: "build.secrets -> --secret mount ran during build"
+    weight: 1.0

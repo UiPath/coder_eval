@@ -1,0 +1,67 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+wheels/
+*.egg-info
+.installed.cfg
+*.egg
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+
+# Virtual environments
+.venv
+.venv-noextra
+venv/
+ENV/
+env/
+
+# Environment variables
+.env
+.uipath-auth.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.ruff_cache/
+bandit-report.json
+*.log
+
+# UiPath specific
+.uipath/
+uipath.json
+
+# Project-specific
+.claude/settings.local.json
+c/
+runs/
+reports/
+/runs/**/artifacts/
+.DS_Store
+tmp/
+refs/
+
+# SkillsBench tasks for testing
+/resources/

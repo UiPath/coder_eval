@@ -1,0 +1,44 @@
+task_id: claude_hello_world
+description: |
+  A simple hello world task for testing with Claude Code agent.
+
+tags:
+  - streaming
+  - agent-comparison
+  - basic
+
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  allowed_tools:
+    - Bash
+    - Read
+    - Write
+
+initial_prompt: |
+  Create a simple Python script called `hello.py` that prints "Hello, Claude!" when run.
+  The script should be executable and complete.
+
+success_criteria:
+  - type: file_exists
+    path: hello.py
+    description: "The file hello.py must be created."
+    weight: 0.3
+
+  - type: file_contains
+    path: hello.py
+    includes:
+      - "print"
+      - "Hello, Claude"
+    description: "The script must contain a print statement and the greeting."
+    weight: 0.4
+
+  - type: run_command
+    command: "python hello.py"
+    description: "The script must execute and output the greeting."
+    weight: 0.3
+
+run_limits:
+  max_turns: 5
+  task_timeout: 300
+  turn_timeout: 60

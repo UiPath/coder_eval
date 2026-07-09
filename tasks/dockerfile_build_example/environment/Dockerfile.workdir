@@ -1,0 +1,18 @@
+# Example task image for the docker WORKDIR-alignment feature
+# (sandbox.docker.working_dir).
+#
+# MUST extend the framework image so the container inherits the coder-eval
+# runtime + entrypoint (a bare `FROM ubuntu` fails at `docker run`). Build the
+# base first:  make docker-image
+FROM coder-eval-agent:latest
+
+# Declare a non-default WORKDIR and bake an input file there. The build context
+# for a `dockerfile_path` task is the Dockerfile's parent dir (environment/),
+# so this COPY picks up environment/input.txt.
+#
+# When the task sets sandbox.docker.working_dir to /app (or `auto`, which
+# inspects this declared WORKDIR), the agent runs in-place here — nothing is
+# bind-mounted over /app — so this baked input.txt stays visible to the agent,
+# and the whole WORKDIR is copied out to run_dir/artifacts/<task> afterward.
+WORKDIR /app
+COPY input.txt /app/input.txt
