@@ -1,49 +1,39 @@
 name: Release
 
-# Manually-triggered release: bump the version, tag, build, and publish to the
-# UiPath `coder_eval` Azure Artifacts feed (wheel) and GHCR (agent image).
-# Merges to main do NOT auto-release -- run this workflow from the Actions tab
-# when you want to cut a release.
+# Manually-triggered release: build the CURRENT version (from pyproject.toml)
+# and publish it to public PyPI + the UiPath `coder_eval` Azure Artifacts feed
+# (wheel) and GHCR (agent image), then push the `v<version>` git tag.
 #
-# The bump level is CHOSEN at dispatch, not derived from commit messages:
-# `patch` (default), `minor`, or `major`. A dispatch always cuts a release.
-# semantic-release only does the mechanics -- write the new version to
-# pyproject.toml + __init__.py, tag `v<version>`, regenerate the changelog from
-# the commits since the last tag (notes only -- they don't affect the version),
-# and push.
+# Version management: `main` is protected by a ruleset (changes via PR only),
+# so this workflow does NOT commit a version bump to main. Bump `version` in
+# pyproject.toml (+ src/coder_eval/__init__.py) through a normal PR; once that
+# merges, run this workflow to release whatever version main currently
+# declares. It refuses to run if the `v<version>` tag already exists (i.e. you
+# forgot to bump). Only the git TAG is pushed -- tags are outside the branch
+# ruleset -- never a commit to main.
 # (Continuous :latest / :sha- agent images still publish on every main push via
 # docker-publish.yml -- only the versioned release artifacts gate on this run.)
 
 on:
   workflow_dispatch:
-    inputs:
-      bump:
-        description: 'Version bump to release'
-        type: choice
-        default: patch
-        options:
-          - patch
-          - minor
-          - major
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-# `main` has no branch protection, so the version-bump commit + tag are
-# pushed directly with the built-in GITHUB_TOKEN (contents: write) -- no
-# GitHub App / ruleset bypass is required. If branch protection is added
-# later, either add a GITHUB_TOKEN bypass or restore an app-token step.
+# The release pushes only the `v<version>` git TAG (tags are not covered by
+# the branch ruleset protecting main), so the built-in GITHUB_TOKEN with
+# contents: write suffices -- no GitHub App / ruleset bypass required.
 permissions:
-  contents: write  # push the version-bump commit + tag to main
+  contents: write  # push the v<version> tag
   packages: write  # push the versioned agent image to ghcr.io on release
 
 jobs:
   release:
     name: Bump version and publish
     # GitHub-hosted so cutting a release does not depend on the self-hosted
-    # `uipath-ubuntu-latest` pool. semantic-release, uv, twine, and the docker
-    # buildx -> GHCR push all run fine here.
+    # `uipath-ubuntu-latest` pool. uv, twine, and the docker buildx -> GHCR
+    # push all run fine here.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -60,10 +50,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          fetch-depth: 0  # semantic-release needs full history for tags + changelog
-          # Default GITHUB_TOKEN is persisted in .git config so the bump
-          # commit + tag push to (unprotected) main is authenticated.
 
       - name: Set up Python 3.13
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
@@ -75,44 +61,21 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install build + release tools
-        run: uv tool install python-semantic-release && uv tool install twine
-
-      - name: Run semantic-release (bump + tag, no push yet)
+      - name: Resolve version + guard against re-release
         id: release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Passed via env (not interpolated into the script) per GitHub's
-          # injection guidance; it's a constrained choice input regardless.
-          BUMP: ${{ inputs.bump }}
         run: |
           set -euo pipefail
-          # The bump level comes from the dispatch input, not commit messages:
-          # force a patch/minor/major bump outright. `version` writes the new
-          # version to pyproject.toml + __init__.py, tags it, and regenerates the
-          # changelog, but does not push yet (--no-push) so we can regenerate
-          # uv.lock and amend before sending.
-          PSR="uv tool run --from python-semantic-release semantic-release"
-          $PSR version "--$BUMP" --no-vcs-release --no-push --changelog
-          # A dispatch always cuts a release; report the just-published version.
-          echo "version=$($PSR version --print)" >> "$GITHUB_OUTPUT"
-
-      - name: Regenerate uv.lock and amend release commit
-        if: steps.release.outputs.version != ''
-        run: |
-          uv lock
-          if ! git diff --quiet uv.lock; then
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git config user.name "github-actions[bot]"
-            git add uv.lock
-            git commit --amend --no-edit
-            # Amend replaced the commit the tag points at; re-point it before pushing.
-            git tag -f "v${{ steps.release.outputs.version }}"
+          # Version is whatever main currently declares. Bumps land via a PR
+          # (main is ruleset-protected); this workflow never rewrites it.
+          VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "Releasing coder-eval ${VERSION}"
+          # Refuse to re-release an existing version: a PyPI version is
+          # immutable, so this is almost always a forgotten version bump.
+          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+            echo "::error::Tag v${VERSION} already exists. Bump 'version' in pyproject.toml (+ src/coder_eval/__init__.py) via a PR before releasing."
+            exit 1
           fi
-
-      - name: Push release commit and tags
-        if: steps.release.outputs.version != ''
-        run: git push origin main "v${{ steps.release.outputs.version }}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Build wheel + sdist
         if: steps.release.outputs.version != ''
@@ -140,12 +103,10 @@ jobs:
           TWINE_REPOSITORY_URL: https://pkgs.dev.azure.com/uipath/ML%20Platform/_packaging/coder_eval/pypi/upload/
         run: uv tool run --from twine twine upload --non-interactive --verbose dist/*
 
-      # Build + push the agent image HERE, in the same job that cut the release,
-      # so the `:<version>` tag is built from the BUMPED pyproject (the version
-      # only exists after the semantic-release step above). docker-publish.yml
-      # runs on the triggering commit, BEFORE the bump, so it can never tag the
-      # release version -- this is the authoritative versioned image. It also
-      # repoints `:latest` to the exact release artifact.
+      # Build + push the agent image HERE, in the release job, tagged with the
+      # version main declares. docker-publish.yml only publishes :latest / :sha-
+      # on every main push, so this is the authoritative versioned image; it
+      # also repoints `:latest` to the exact release artifact.
       - name: Lowercase owner for GHCR
         if: steps.release.outputs.version != ''
         id: img
@@ -181,6 +142,18 @@ jobs:
           # Read the shared buildcache docker-publish.yml writes; don't write it
           # back from here, to avoid two concurrent writers racing the cache tag.
           cache-from: type=registry,ref=ghcr.io/${{ steps.img.outputs.owner_lc }}/coder-eval-agent:buildcache
+
+      # Tag LAST, once the artifacts are built + the feeds/image published, so a
+      # `v<version>` tag reliably marks a completed release. Only the tag is
+      # pushed -- never a commit to main (which the branch ruleset forbids).
+      - name: Push v<version> tag
+        if: steps.release.outputs.version != ''
+        run: |
+          set -euo pipefail
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git tag -a "v${{ steps.release.outputs.version }}" -m "Release v${{ steps.release.outputs.version }}"
+          git push origin "v${{ steps.release.outputs.version }}"
 
   # Publish the SAME wheel+sdist to public PyPI (pkgs live alongside the private
   # Azure Artifacts feed, which the release job above still populates). This runs
