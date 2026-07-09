@@ -249,6 +249,8 @@ def build_task_event(result: EvaluationResult, *, driver: str, variant_id: str) 
         "AgentType": result.agent_type or "",
         "Model": result.model_used or "",
         "Driver": driver,
+        "EarlyStopped": result.early_stop is not None,
+        "EarlyStopReason": (result.early_stop.reason.value if result.early_stop is not None else ""),
     }
     return "CoderEval.Task.End", props
 

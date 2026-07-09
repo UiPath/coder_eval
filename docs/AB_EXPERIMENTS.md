@@ -17,6 +17,7 @@ to the orchestrator are involved.
 - [Recipe: A/B a Skill](#recipe-ab-a-skill)
 - [Recipe: A/B a Model](#recipe-ab-a-model)
 - [Recipe: A/B a Prompt](#recipe-ab-a-prompt)
+- [Recipe: Smoke vs. e2e Flavors (Early Stop)](#recipe-smoke-vs-e2e-flavors-early-stop)
 - [Replicates (Statistical Power)](#replicates-statistical-power)
 - [Measuring the Difference](#measuring-the-difference)
 - [CLI Reference](#cli-reference)
@@ -221,6 +222,39 @@ variants:
 
 The full mutation catalog (prefix / suffix / replace / template / rephrase) is
 defined in `coder_eval/models/mutations.py`.
+
+## Recipe: Smoke vs. e2e Flavors (Early Stop)
+
+Run the **same** task file as both a fast `smoke` flavor and a full `e2e` flavor
+by flipping one boolean per variant — `run_limits.stop_early`. Arm the criteria
+that define "the interesting thing happened" with `stop_when` in the task file;
+the `smoke` variant cuts off as soon as they're decided, while `e2e` runs to
+completion. Because the field merge is per-key, the variant sets only
+`stop_early` without disturbing the task's `max_turns`.
+
+```yaml
+experiment_id: early-stop-ab
+description: "Smoke vs. e2e from one file via opt-in early stop"
+
+variants:
+  - variant_id: e2e
+    run_limits:
+      stop_early: false # full run to completion (the reference flavor)
+  - variant_id: smoke
+    run_limits:
+      stop_early: true # cut off once the armed criteria are decided
+```
+
+The task file supplies the arming (`stop_when` on the criteria that gate the
+flavor) and a `max_turns` generous enough for `e2e`; see
+[`stop_early`](TASK_DEFINITION_GUIDE.md#stop_early-opt-in-early-stop). This recipe
+ships as `experiments/early-stop-ab.yaml`.
+
+Expect **identical pass/fail verdicts** between the two variants — an
+early-stopped run is gated on the armed subset only, and the non-armed criteria
+become advisory (clearly marked in the report), so the `smoke` flavor can't
+"pass for free" — with the `smoke` variant significantly lower on turns,
+duration, and tokens.
 
 ## Replicates (Statistical Power)
 

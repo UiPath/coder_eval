@@ -44,6 +44,7 @@ from coder_eval.models import (
     FileExistsCriterion,
     FinalStatus,
     RunLimits,
+    RunSummary,
     SandboxConfig,
     SimulationConfig,
     SkillTriggeredCriterion,
@@ -52,7 +53,10 @@ from coder_eval.models import (
     parse_agent_config,
 )
 from coder_eval.orchestration.early_stop import EarlyStopConfigError, EarlyStopWatcher, validate_early_stop
-from coder_eval.orchestrator import Orchestrator
+from coder_eval.orchestrator import Orchestrator, build_task_event
+from coder_eval.reports import ReportGenerator
+from coder_eval.reports_experiment import eval_result_to_task_dict
+from coder_eval.reports_html import _render_criteria, _render_header
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
@@ -957,3 +961,87 @@ class TestOrchestratorEarlyStopWiring:
             )
         # Fail-open: no early_stop recorded, full gate applies.
         assert result.early_stop is None
+
+
+# --------------------------------------------------------------------------- #
+# Report / telemetry surfaces
+# --------------------------------------------------------------------------- #
+
+
+def _stopped_result(
+    *,
+    reason: EarlyStopReason = EarlyStopReason.CRITERION_PASSED,
+    turns_remaining: int | None = 14,
+    criteria_results: list[CriterionResult] | None = None,
+) -> EvaluationResult:
+    result = _result(criteria_results=criteria_results)
+    result.early_stop = _info(reason=reason, turns_remaining_at_stop=turns_remaining)
+    return result
+
+
+def _run_summary(task_dicts: list[dict[str, Any]]) -> RunSummary:
+    # framework_version is a required RunSummary field; the count invariant needs
+    # succeeded + failed + error == tasks_run.
+    return RunSummary(
+        run_id="r",
+        start_time=_TS,
+        end_time=_TS,
+        total_duration_seconds=0.0,
+        tasks_run=len(task_dicts),
+        tasks_succeeded=len(task_dicts),
+        tasks_failed=0,
+        tasks_error=0,
+        task_results=task_dicts,
+        framework_version="test",
+    )
+
+
+class TestEarlyStopReportSurfaces:
+    def test_task_dict_keys_present_when_early_stopped(self) -> None:
+        d = eval_result_to_task_dict(_stopped_result())
+        assert d["stopped_early"] is True
+        assert d["early_stop_reason"] == "criterion_passed"
+        assert d["turns_remaining_at_stop"] == 14
+
+    def test_task_dict_keys_defaulted_when_not_early_stopped(self) -> None:
+        d = eval_result_to_task_dict(_result())
+        assert d["stopped_early"] is False
+        assert d["early_stop_reason"] is None
+        assert d["turns_remaining_at_stop"] is None
+
+    def test_runtime_note_rendered_with_turns_avoided(self) -> None:
+        lines = ReportGenerator._runtime_notes_lines(_run_summary([eval_result_to_task_dict(_stopped_result())]))
+        blob = "\n".join(lines)
+        assert "stopped early (criterion_passed)" in blob
+        assert "<= 14 turn(s) avoided" in blob
+        assert "gated on armed criteria only; other criteria are advisory" in blob
+
+    def test_runtime_note_absent_for_unarmed_run(self) -> None:
+        lines = ReportGenerator._runtime_notes_lines(_run_summary([eval_result_to_task_dict(_result())]))
+        assert not any("stopped early" in line for line in lines)
+
+    def test_html_header_shows_early_stop_badge(self) -> None:
+        html = _render_header(_stopped_result())
+        assert "stopped early (criterion_passed)" in html
+        # No badge on a normal run.
+        assert "stopped early" not in _render_header(_result())
+
+    def test_html_criteria_marks_only_advisory_rows(self) -> None:
+        # Armed skill_triggered (matches _info.armed_criteria) + advisory file_exists.
+        armed = _crit_result("skill_triggered", 1.0)
+        armed.description = "skill activation"  # match the armed_criteria key format
+        advisory = _crit_result("file_exists", 0.0)
+        result = _stopped_result(criteria_results=[armed, advisory])
+        html = _render_criteria(result.success_criteria_results, result.early_stop)
+        assert html.count("advisory — not gated (run stopped early)") == 1
+        # A completed (non-early-stopped) run gets no advisory markers at all.
+        assert "advisory — not gated" not in _render_criteria([armed, advisory], None)
+
+    def test_telemetry_dims_reflect_early_stop(self) -> None:
+        _name, props = build_task_event(_stopped_result(), driver="tempdir", variant_id="v")
+        assert props["EarlyStopped"] is True
+        assert props["EarlyStopReason"] == "criterion_passed"
+        # Defaulted on a normal run.
+        _n2, props2 = build_task_event(_result(), driver="tempdir", variant_id="v")
+        assert props2["EarlyStopped"] is False
+        assert props2["EarlyStopReason"] == ""

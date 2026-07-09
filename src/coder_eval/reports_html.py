@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from coder_eval.models import (
         CommandTelemetry,
         CriterionResult,
+        EarlyStopInfo,
         EvaluationResult,
         ExperimentDefinition,
         ExperimentResult,
@@ -341,6 +342,12 @@ def _render_header(result: EvaluationResult) -> str:
     if overage is not None:
         actual, expected = overage
         expected_turns_badge = f'<span class="badge warning">expected_turns exceeded ({actual}/{expected})</span>'
+    early_stop_badge = ""
+    if result.early_stop is not None:
+        early_stop_badge = (
+            '<span class="badge warning" title="Gated on armed criteria only; '
+            + f'other criteria are advisory">stopped early ({_esc(result.early_stop.reason.value)})</span>'
+        )
     return f"""
 <div class="header-bar">
   <div class="title-group">
@@ -354,6 +361,7 @@ def _render_header(result: EvaluationResult) -> str:
     <span class="badge neutral">{_esc(duration)}</span>
     {cost_badge}
     {expected_turns_badge}
+    {early_stop_badge}
     <span class="nav-toggle" onclick="toggleTheme()">Toggle theme</span>
   </div>
 </div>
@@ -554,7 +562,7 @@ def _render_judge_transcript(transcript: Any) -> str:
     )
 
 
-def _render_criteria(results: list[CriterionResult]) -> str:
+def _render_criteria(results: list[CriterionResult], early_stop: EarlyStopInfo | None = None) -> str:
     if not results:
         return """
 <div class="card">
@@ -563,13 +571,17 @@ def _render_criteria(results: list[CriterionResult]) -> str:
   the checker ran).</p>
 </div>
 """
+    armed = set(early_stop.armed_criteria) if early_stop is not None else set()
     rows: list[str] = []
     for cr in results:
+        advisory = ""
+        if early_stop is not None and f"{cr.criterion_type}: {cr.description}" not in armed:
+            advisory = '<div class="dim" style="margin-top:4px">advisory — not gated (run stopped early)</div>'
         rows.append(
             f"""
 <tr class="criterion-row">
   <td>{_esc(cr.criterion_type)}</td>
-  <td>{_esc(cr.description)}</td>
+  <td>{_esc(cr.description)}{advisory}</td>
   <td style="text-align:center">{_score_pill(cr.score)}</td>
   <td>{_render_criteria_details(cr)}</td>
 </tr>
@@ -1443,7 +1455,7 @@ class HTMLReportGenerator:
         body = (
             _render_header(result)
             + _render_simulation(result)
-            + _render_criteria(result.success_criteria_results or [])
+            + _render_criteria(result.success_criteria_results or [], result.early_stop)
             + _render_judge_section(result.success_criteria_results or [])
             + _render_error_details(result)
             + f"<h2>Conversation Trace ({trace_count})</h2>"

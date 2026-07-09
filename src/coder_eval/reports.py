@@ -418,6 +418,14 @@ class ReportGenerator:
                 notes.append(
                     f"> **WARNING:** [{task_id}] expected_turns exceeded: {actual}/{expected} (cumulative SDK turns)"
                 )
+            if t.get("stopped_early"):
+                reason = t.get("early_stop_reason") or "unknown"
+                turns_remaining = t.get("turns_remaining_at_stop")
+                avoided = f" <= {turns_remaining} turn(s) avoided —" if isinstance(turns_remaining, int) else ""
+                notes.append(
+                    f"> **NOTE:** [{task_id}] stopped early ({reason});{avoided}"
+                    + " gated on armed criteria only; other criteria are advisory"
+                )
         if not notes:
             return []
         return ["## Run-time Notes", "", *notes]

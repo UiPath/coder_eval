@@ -192,6 +192,56 @@ budgets consistently across a suite — the headline % is only comparable when
 tasks are measured against realistic, like-for-like targets. Omit it (the
 default) to exclude a task from the metric entirely.
 
+### `stop_early` (opt-in early stop)
+
+`run_limits.stop_early` (default `false`) ends a single-shot run **early** once
+the run's **armed** criteria are decided — so you can raise `max_turns` for the
+full-run flavor without paying for turns the smoke flavor doesn't need. A
+criterion is *armed* by giving it a `stop_when` (see the criterion-fields table);
+`stop_early` is the master switch that turns arming on for the run.
+
+```yaml
+run_limits:
+  max_turns: 30
+  stop_early: true            # opt in; default false leaves behavior unchanged
+success_criteria:
+  - type: skill_triggered
+    skill_name: date-teller
+    expected_skill: date-teller
+    stop_when: decided        # arm on pass OR definitive fail
+  - type: file_exists         # not armed → advisory on an early-stopped run
+    path: report.md
+```
+
+Semantics:
+
+- **Opt-in, per run.** With `stop_early: false` (the default) the run behaves
+  exactly as before — `stop_when` is inert and every criterion gates normally.
+- **Polarity.** `stop_when: pass` stops the moment all armed criteria are decided
+  in the pass direction; `stop_when: fail` stops on a definitive wrong-signal
+  fail; `stop_when: decided` stops on either. Only criteria that can decide from a
+  partial trajectory (currently `skill_triggered`, `command_executed`) may be
+  armed — arming any other criterion is a hard error at resolution (plan *and*
+  run), never a silent no-op.
+- **Verdict.** An early-stopped run is gated on the **armed subset only**; the
+  non-armed criteria become **advisory** and are clearly marked (report badge +
+  per-criterion note + `stopped_early` row). A run that completes naturally is
+  gated on the **full** set, as always. This is what lets one file serve both a
+  `smoke` flavor (`stop_early: true`) and an `e2e` flavor (`stop_early: false`)
+  with identical verdicts — see [AB_EXPERIMENTS.md](AB_EXPERIMENTS.md).
+- **Fail-safe.** A live-verdict bug **fails open** to a full run (logged loudly) —
+  it can never silently disable a criterion or cause a false early stop.
+
+Observability (every early-stopped run is flagged everywhere so analysis never
+compares a truncated run against a full one):
+
+| Surface | Field / marker |
+|---------|----------------|
+| `run.json` row | `stopped_early`, `early_stop_reason`, `turns_remaining_at_stop` |
+| `run.md` | `> **NOTE:** […] stopped early (<reason>); <= N turn(s) avoided …` |
+| `task.html` | header badge `stopped early (<reason>)` + `advisory — not gated` markers |
+| Telemetry | `EarlyStopped` / `EarlyStopReason` dimensions on `CoderEval.Task.End` |
+
 ## Sandbox Configuration
 
 The `sandbox` block is optional. When omitted, it defaults to `driver: "tempdir"` with standard Python environment.
@@ -319,6 +369,7 @@ All criteria share these fields:
 | `description` | — | Human-readable description (required) |
 | `weight` | 1.0 | Relative importance for weighted score |
 | `pass_threshold` | 0.9 | Minimum score (0.0–1.0) to pass |
+| `stop_when` | `null` | Arms this criterion for early stop (`pass`/`fail`/`decided`); requires `run_limits.stop_early: true` and an observable criterion type (`skill_triggered`, `command_executed`). See [`stop_early`](#stop_early-opt-in-early-stop). |
 
 **Scoring types:**
 - **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`
