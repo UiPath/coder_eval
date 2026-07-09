@@ -30,7 +30,7 @@ env:
 jobs:
   quality-gate:
     name: Quality Gate (Format, Lint, Type, Test, Security)
-    runs-on: uipath-ubuntu-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 10
 
     # Shared env for all steps: safe-chain min-age exclusions and a dummy
@@ -163,7 +163,7 @@ jobs:
     # registry validates, and the uipath-specific code paths fail with a
     # clear hint instead of an import error.
     name: No-Extra Install (uipath optional)
-    runs-on: uipath-ubuntu-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout code
@@ -326,7 +326,7 @@ jobs:
 
   e2e-smoke:
     name: E2E Smoke Tests (Real API)
-    runs-on: uipath-ubuntu-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     # Skip on fork PRs where secrets aren't available
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository

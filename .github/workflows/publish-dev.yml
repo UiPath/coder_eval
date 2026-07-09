@@ -28,7 +28,7 @@ permissions:
 jobs:
   publish-dev:
     name: Publish dev wheel for PR
-    runs-on: uipath-ubuntu-latest
+    runs-on: ubuntu-latest
     if: contains(github.event.pull_request.labels.*.name, 'build:dev')
     timeout-minutes: 15
     env:
