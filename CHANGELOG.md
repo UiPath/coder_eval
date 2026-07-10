@@ -2,6 +2,42 @@
 
 <!-- version list -->
 
+## v0.8.3 (2026-07-09)
+
+### Bug Fixes
+
+- **evalboard**: Fall back to agent_config type when run_config omits harness
+  ([#10](https://github.com/UiPath/coder_eval/pull/10),
+  [`59a240c`](https://github.com/UiPath/coder_eval/commit/59a240c3d87d3ec4aa7f43a77673dd0561a0e006))
+
+### Continuous Integration
+
+- Remove Azure Artifacts publishing ([#11](https://github.com/UiPath/coder_eval/pull/11),
+  [`2a5124f`](https://github.com/UiPath/coder_eval/commit/2a5124f2c2c8b4151b83a2a9ff2c0bc464683a34))
+
+- Restore auto-bump release (semantic-release + app token)
+  ([#12](https://github.com/UiPath/coder_eval/pull/12),
+  [`0b9d378`](https://github.com/UiPath/coder_eval/commit/0b9d378e5a99a878a211046a9a9a9ab7f40faaa4))
+
+### Features
+
+- **evalboard**: Add a Harness (RunConfig) column to the runs tables
+  ([#10](https://github.com/UiPath/coder_eval/pull/10),
+  [`59a240c`](https://github.com/UiPath/coder_eval/commit/59a240c3d87d3ec4aa7f43a77673dd0561a0e006))
+
+- **evalboard**: Add Gemini rates to the frontend pricing table
+  ([#10](https://github.com/UiPath/coder_eval/pull/10),
+  [`59a240c`](https://github.com/UiPath/coder_eval/commit/59a240c3d87d3ec4aa7f43a77673dd0561a0e006))
+
+- **evalboard**: Show harness as a vendor logo (internal, main table only)
+  ([#10](https://github.com/UiPath/coder_eval/pull/10),
+  [`59a240c`](https://github.com/UiPath/coder_eval/commit/59a240c3d87d3ec4aa7f43a77673dd0561a0e006))
+
+- **evalboard**: Show the harness (RunConfig) column on the runs tables
+  ([#10](https://github.com/UiPath/coder_eval/pull/10),
+  [`59a240c`](https://github.com/UiPath/coder_eval/commit/59a240c3d87d3ec4aa7f43a77673dd0561a0e006))
+
+
 ## v0.8.2 (2026-07-07)
 
 ### Bug Fixes
