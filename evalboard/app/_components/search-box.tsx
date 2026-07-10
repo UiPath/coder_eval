@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const Q_DEBOUNCE_MS = 300;
 
@@ -18,18 +18,28 @@ export function SearchBox({
 
     const urlQ = searchParams.get("q") ?? "";
     const [q, setQ] = useState(urlQ);
+    // True while the user has typed ahead of the last URL write. Prevents the
+    // URL-sync effect from overwriting in-progress input when a navigation
+    // triggered by the debounce resolves asynchronously.
+    const typingAhead = useRef(false);
 
     // Sync local state when the URL changes externally (back/forward, link
-    // clicks). The debounced write below early-returns when state and URL
-    // agree, so this can't loop.
+    // clicks). Skipped while the user is ahead of the URL to avoid clobbering
+    // in-progress input with a stale value from a just-resolved navigation.
     useEffect(() => {
+        if (typingAhead.current) return;
         setQ((prev) => (prev.trim() === urlQ ? prev : urlQ));
     }, [urlQ]);
 
     useEffect(() => {
         const trimmed = q.trim();
-        if (trimmed === urlQ) return;
+        if (trimmed === urlQ) {
+            typingAhead.current = false;
+            return;
+        }
+        typingAhead.current = true;
         const timer = setTimeout(() => {
+            typingAhead.current = false;
             // Read the live URL at fire time so a concurrent write (e.g. a
             // tag click that landed during the debounce) isn't clobbered.
             const params = new URLSearchParams(window.location.search);
@@ -40,6 +50,8 @@ export function SearchBox({
                 scroll: false,
             });
         }, Q_DEBOUNCE_MS);
+        // Don't clear typingAhead in cleanup — the timer was cancelled because
+        // the user typed another character, so they're still ahead of the URL.
         return () => clearTimeout(timer);
     }, [q, urlQ, pathname, router]);
 
