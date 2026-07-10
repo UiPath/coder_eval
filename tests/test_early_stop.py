@@ -22,12 +22,15 @@ import asyncio
 import tempfile
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+import typer
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
+from coder_eval.cli.plan_command import plan_command
 from coder_eval.criteria import CriterionRegistry, init_criteria
 from coder_eval.criteria.base import BaseCriterion
 from coder_eval.criteria.command_executed import CommandExecutedChecker
@@ -41,6 +44,8 @@ from coder_eval.models import (
     EarlyStopInfo,
     EarlyStopReason,
     EvaluationResult,
+    ExperimentDefinition,
+    ExperimentVariant,
     FileExistsCriterion,
     FinalStatus,
     RunLimits,
@@ -52,7 +57,9 @@ from coder_eval.models import (
     TurnRecord,
     parse_agent_config,
 )
+from coder_eval.orchestration.config import BatchRunConfig
 from coder_eval.orchestration.early_stop import EarlyStopConfigError, EarlyStopWatcher, validate_early_stop
+from coder_eval.orchestration.experiment import resolve_all_tasks
 from coder_eval.orchestrator import Orchestrator, build_task_event
 from coder_eval.reports import ReportGenerator
 from coder_eval.reports_experiment import eval_result_to_task_dict
@@ -426,6 +433,126 @@ class TestValidateEarlyStop:
         ]
         task = _task(criteria=crits, stop_early=True)
         validate_early_stop(task)  # no raise
+
+
+# --------------------------------------------------------------------------- #
+# Guardrail integration: the plan and run resolution surfaces actually invoke
+# validate_early_stop (not just the helper in isolation). Real task YAMLs go
+# through the real load + 5-layer merge; a bad arming must surface as a clean
+# CLI-level error on BOTH surfaces, never a silent no-op.
+# --------------------------------------------------------------------------- #
+
+_ARMED_UNOBSERVABLE_CRITERION = """\
+  - type: file_exists
+    description: out exists
+    path: out.txt
+    stop_when: pass
+"""
+
+_ARMED_OBSERVABLE_CRITERION = """\
+  - type: skill_triggered
+    description: date-teller activation
+    skill_name: date-teller
+    expected_skill: date-teller
+    stop_when: decided
+"""
+
+
+def _write_task_yaml(tmp_path: Path, *, criterion_yaml: str, stop_early: bool) -> Path:
+    task_file = tmp_path / "es_task.yaml"
+    task_file.write_text(
+        "task_id: es-guardrail-task\n"
+        + "description: early-stop guardrail surface test\n"
+        + "initial_prompt: do the thing\n"
+        + "agent:\n"
+        + "  type: claude-code\n"
+        + "sandbox:\n"
+        + "  driver: tempdir\n"
+        + "run_limits:\n"
+        + "  max_turns: 20\n"
+        + f"  stop_early: {str(stop_early).lower()}\n"
+        + "success_criteria:\n"
+        + criterion_yaml
+    )
+    return task_file
+
+
+def _resolve_surface(task_file: Path, tmp_path: Path, *, overrides: dict[str, Any] | None = None):
+    """Drive the real run-surface resolution (load + 5-layer merge + guardrails)."""
+    single_variant = [ExperimentVariant(variant_id="default")]
+    return resolve_all_tasks(
+        task_files=[task_file],
+        experiment=ExperimentDefinition(experiment_id="exp", variants=single_variant),
+        default_experiment=ExperimentDefinition(experiment_id="default", variants=single_variant),
+        config=BatchRunConfig(run_dir=tmp_path / "runs", overrides=overrides or {}),
+    )
+
+
+class TestGuardrailResolutionSurfaces:
+    """A bad arming is rejected by the real plan/run wiring, not only the helper."""
+
+    def test_run_surface_rejects_bad_armed_task(self, tmp_path: Path) -> None:
+        # The armed unobservable criterion propagates out of resolve_all_tasks as
+        # EarlyStopConfigError (a ValueError, so the run CLI converts it to a
+        # clean BadParameter) instead of being demoted to a skipped task.
+        task_file = _write_task_yaml(tmp_path, criterion_yaml=_ARMED_UNOBSERVABLE_CRITERION, stop_early=True)
+        with pytest.raises(EarlyStopConfigError, match="observable"):
+            _resolve_surface(task_file, tmp_path)
+
+    def test_run_surface_accepts_valid_armed_task(self, tmp_path: Path) -> None:
+        task_file = _write_task_yaml(tmp_path, criterion_yaml=_ARMED_OBSERVABLE_CRITERION, stop_early=True)
+        resolved, skipped = _resolve_surface(task_file, tmp_path)
+        assert not skipped
+        assert len(resolved) == 1
+        limits = resolved[0].task.run_limits
+        assert limits is not None and limits.stop_early is True
+
+    def test_run_surface_validates_cli_override_arming(self, tmp_path: Path) -> None:
+        # The YAML alone is inert (stop_when set, stop_early false) and must be
+        # accepted; arming via the layer-5 -D override must then be validated,
+        # proving the guardrails run AFTER _apply_cli_overrides.
+        task_file = _write_task_yaml(tmp_path, criterion_yaml=_ARMED_UNOBSERVABLE_CRITERION, stop_early=False)
+        resolved, _ = _resolve_surface(task_file, tmp_path)
+        assert len(resolved) == 1  # inert without the override
+        with pytest.raises(EarlyStopConfigError, match="observable"):
+            _resolve_surface(task_file, tmp_path, overrides={"run_limits.stop_early": True})
+
+    def _run_plan(self, task_file: Path, exp_dir: Path) -> tuple[str, int]:
+        """Invoke the real plan_command against a minimal single-variant experiment.
+
+        Returns the concatenated console output and the exit code (0 when plan
+        returned normally).
+        """
+        exp_file = exp_dir / "es_experiment.yaml"
+        exp_file.write_text("experiment_id: es-guardrail\nvariants:\n  - variant_id: default\n")
+        exit_code = 0
+        with (
+            patch("coder_eval.cli.plan_command.check_tools"),
+            patch("coder_eval.cli.plan_command.check_api_keys"),
+            # Point the default-experiment lookup at a nonexistent file so plan
+            # falls back to the explicit experiment (hermetic vs. the repo tree).
+            patch("coder_eval.orchestration.experiment.DEFAULT_EXPERIMENT_PATH", exp_dir / "missing.yaml"),
+            patch("coder_eval.cli.plan_command.console") as mock_console,
+        ):
+            try:
+                plan_command(task_files=[task_file], experiment=exp_file)
+            except typer.Exit as exc:
+                exit_code = exc.exit_code
+        printed = " ".join(str(call) for call in mock_console.print.call_args_list)
+        return printed, exit_code
+
+    def test_plan_surface_flips_exit_code_on_bad_armed_task(self, tmp_path: Path) -> None:
+        task_file = _write_task_yaml(tmp_path, criterion_yaml=_ARMED_UNOBSERVABLE_CRITERION, stop_early=True)
+        printed, exit_code = self._run_plan(task_file, tmp_path)
+        assert exit_code == 1
+        assert "early-stop config error" in printed
+        assert "observable" in printed
+
+    def test_plan_surface_accepts_valid_armed_task(self, tmp_path: Path) -> None:
+        task_file = _write_task_yaml(tmp_path, criterion_yaml=_ARMED_OBSERVABLE_CRITERION, stop_early=True)
+        printed, exit_code = self._run_plan(task_file, tmp_path)
+        assert exit_code == 0
+        assert "All tasks are valid!" in printed
 
 
 # --------------------------------------------------------------------------- #
