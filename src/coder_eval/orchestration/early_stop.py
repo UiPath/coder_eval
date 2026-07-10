@@ -35,6 +35,12 @@ if TYPE_CHECKING:
     from coder_eval.criteria.base import BaseCriterion, LiveVerdict
     from coder_eval.models import BaseSuccessCriterion, TaskDefinition
 
+    # Armed pair the watcher holds: (criterion model, its checker). Lives in the
+    # TYPE_CHECKING block (only annotations reference it, and those are lazy under
+    # `from __future__ import annotations`), so the names are real references
+    # rather than quoted strings static analyzers cannot resolve.
+    _ArmedPair = tuple[BaseSuccessCriterion, BaseCriterion[Any]]
+
 
 logger = logging.getLogger(__name__)
 
@@ -129,10 +135,6 @@ def validate_early_stop(task: TaskDefinition) -> None:
                 f"criterion type {c.type!r} cannot decide polarity {missing} mid-run "
                 + f"(stop_when={polarity!r}); it supports {sorted(polarities)}."
             )
-
-
-# Type alias for the armed pairs the watcher holds: (criterion model, its checker).
-_ArmedPair = tuple["BaseSuccessCriterion", "BaseCriterion[Any]"]
 
 
 class EarlyStopWatcher:
