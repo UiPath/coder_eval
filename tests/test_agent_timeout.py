@@ -336,3 +336,64 @@ async def test_reap_after_result_kills_lingering_process():
     no_proc = MagicMock()
     no_proc._process = None
     await ClaudeCodeAgent._reap_transport_after_result(no_proc)
+
+
+@pytest.mark.asyncio
+async def test_subagent_progress_message_does_not_end_turn():
+    """A sub-agent TaskProgressMessage must NOT be mistaken for the terminal
+    ResultMessage.
+
+    TaskProgressMessage carries BOTH session_id and usage — the duck-typed
+    result check used to match it. That misread silently corrupted session-id
+    advance, and once the turn began ending on the terminal result it
+    truncated any turn that spawned a sub-agent: the agent was killed
+    mid-run ~20s in with zero authored output (observed live: 0-turn,
+    empty-sandbox failures on every sub-agent-spawning task).
+    """
+    from types import SimpleNamespace
+
+    from claude_agent_sdk.types import TaskProgressMessage
+
+    progress = TaskProgressMessage(
+        subtype="task_progress",
+        data={},
+        task_id="task-1",
+        description="sub-agent working",
+        usage={"total_tokens": 10, "tool_uses": 1, "duration_ms": 500},
+        uuid="uuid-1",
+        session_id="sess-sub",
+    )
+    # Classifier level: never a result, even though it has session_id + usage.
+    from coder_eval.agents.claude_code_agent import _is_sdk_result_message
+
+    assert _is_sdk_result_message(progress) is False
+
+    # End-to-end: a stream [assistant-ish, progress, terminal result] must
+    # deliver the REAL result — not end the turn at the progress message.
+    agent = _make_agent()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        terminal = _fake_result_message()
+
+        async def mock_query(prompt, options, transport=None):
+            yield SimpleNamespace(content=[], model="mock-model")  # assistant-ish
+            yield progress
+            yield terminal
+            await asyncio.sleep(30)  # linger; the terminal result ends the turn
+
+        fake_transport = MagicMock()
+        fake_transport._process.returncode = 0
+
+        with (
+            patch("coder_eval.agents.claude_code_agent.SubprocessCLITransport") as mock_transport_cls,
+            patch("coder_eval.agents.claude_code_agent.query", mock_query),
+        ):
+            mock_transport_cls.return_value = fake_transport
+            record = await agent.communicate("prompt", timeout=5.0)
+
+        assert record is not None
+        assert record.result_summary is not None
+        assert record.result_summary.subtype == "success"
+        # The assistant message BEFORE the progress tick must have been kept.
+        assert record.agent_output is not None
