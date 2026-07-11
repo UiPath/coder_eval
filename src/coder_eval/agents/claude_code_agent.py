@@ -907,30 +907,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 label=f"Turn timeout ({timeout:g}s)" if timeout else "turn_timeout",
             ):
                 async for message in query(**query_kwargs):
-                    # Wall-clock guard at the TOP of the loop: it breaks BEFORE
-                    # the message is dispatched (and appended), so the
-                    # over-deadline message is DISCARDED — no append, no events.
-                    # Do NOT relocate this to a post-loop check.
-                    if deadline is not None and time.monotonic() > deadline:
-                        state.timeout_hit = True
-                        self._log.warning("Turn timeout reached mid-stream; breaking out of message loop")
-                        break
-                    state.dispatch(message)
-                    # The SDK ResultMessage is the terminal message of a
-                    # one-shot query(): nothing follows it except process
-                    # exit. End the turn HERE, not at stream EOF — a CLI
-                    # process that lingers after emitting its result (stray
-                    # child holding stdio, slow shutdown flush) must not
-                    # keep the stream open until the watchdog converts a
-                    # finished, successful turn into a TurnTimeoutError.
-                    # Breaking alone is not enough to reap the subprocess
-                    # (generator finalization is GC-scheduled, and the SDK's
-                    # anyio scopes swallow cooperative cancellation), so give
-                    # the CLI a short grace to flush its session file and
-                    # exit, then hard-kill it.
-                    if state.sdk_result_summary is not None:
-                        self._log.debug("Terminal ResultMessage received; ending turn without waiting for process exit")
-                        await self._reap_transport_after_result(transport)
+                    if await self._pump_stream_message(state, message, transport):
                         break
 
             self._log.debug("Agent query stream ended")
@@ -1126,6 +1103,36 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         if timeout_hit:
             return True
         return deadline is not None and time.monotonic() > deadline
+
+    async def _pump_stream_message(
+        self, state: "_ClaudeTurnState", message: Message, transport: SubprocessCLITransport | None
+    ) -> bool:
+        """Dispatch one SDK stream message; return True when the loop must stop.
+
+        Wall-clock guard FIRST, before the message is dispatched (and appended),
+        so an over-deadline message is DISCARDED — no append, no events. Do NOT
+        relocate that check to a post-loop position.
+
+        After dispatch, the turn ends on the terminal ResultMessage of the
+        one-shot query(): nothing follows it except process exit. Ending HERE
+        rather than at stream EOF matters — a CLI process that lingers after
+        emitting its result (stray child holding stdio, slow shutdown flush)
+        must not keep the stream open until the watchdog converts a finished,
+        successful turn into a TurnTimeoutError. Breaking alone would not reap
+        the subprocess (generator finalization is GC-scheduled, and the SDK's
+        anyio scopes swallow cooperative cancellation), so the CLI gets a short
+        grace to flush its session file and exit, then a hard kill.
+        """
+        if state.deadline is not None and time.monotonic() > state.deadline:
+            state.timeout_hit = True
+            self._log.warning("Turn timeout reached mid-stream; breaking out of message loop")
+            return True
+        state.dispatch(message)
+        if state.sdk_result_summary is not None:
+            self._log.debug("Terminal ResultMessage received; ending turn without waiting for process exit")
+            await self._reap_transport_after_result(transport)
+            return True
+        return False
 
     @staticmethod
     async def _reap_transport_after_result(
