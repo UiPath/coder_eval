@@ -17,6 +17,8 @@ from claude_agent_sdk import (
     ClaudeSDKClient,
     Message,
     ProcessError,
+    ResultMessage,
+    SystemMessage,
     TaskNotificationMessage,
     query,
 )
@@ -169,9 +171,20 @@ def _is_task_notification(message: Any) -> bool:
 def _is_sdk_result_message(message: Any) -> bool:
     """Check if message is the SDK's final ResultMessage (with usage/cost data).
 
-    Distinct from ToolResultBlock which has tool_use_id, and from
-    TaskNotificationMessage which also carries session_id + usage (excluded).
+    Real SDK instances are identified positively by type. The duck-typed
+    fallback (session_id + usage) exists ONLY for test mocks, and it must
+    never match a SystemMessage subclass: the sub-agent lifecycle family
+    (TaskStartedMessage / TaskProgressMessage / TaskNotificationMessage) also
+    carries session_id — and TaskProgressMessage carries usage too, so a
+    sub-agent progress tick would otherwise be misread as the terminal
+    result. That misread silently corrupted session-id advance and token
+    backfill, and — once the turn started ENDING on the terminal result —
+    truncated any turn that spawned a sub-agent.
     """
+    if isinstance(message, ResultMessage):
+        return True
+    if isinstance(message, SystemMessage):
+        return False
     return hasattr(message, "session_id") and hasattr(message, "usage") and not _is_task_notification(message)
 
 
