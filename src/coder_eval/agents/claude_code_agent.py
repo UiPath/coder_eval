@@ -916,6 +916,22 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                         self._log.warning("Turn timeout reached mid-stream; breaking out of message loop")
                         break
                     state.dispatch(message)
+                    # The SDK ResultMessage is the terminal message of a
+                    # one-shot query(): nothing follows it except process
+                    # exit. End the turn HERE, not at stream EOF — a CLI
+                    # process that lingers after emitting its result (stray
+                    # child holding stdio, slow shutdown flush) must not
+                    # keep the stream open until the watchdog converts a
+                    # finished, successful turn into a TurnTimeoutError.
+                    # Breaking alone is not enough to reap the subprocess
+                    # (generator finalization is GC-scheduled, and the SDK's
+                    # anyio scopes swallow cooperative cancellation), so give
+                    # the CLI a short grace to flush its session file and
+                    # exit, then hard-kill it.
+                    if state.sdk_result_summary is not None:
+                        self._log.debug("Terminal ResultMessage received; ending turn without waiting for process exit")
+                        await self._reap_transport_after_result(transport)
+                        break
 
             self._log.debug("Agent query stream ended")
 
@@ -1110,6 +1126,37 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         if timeout_hit:
             return True
         return deadline is not None and time.monotonic() > deadline
+
+    @staticmethod
+    async def _reap_transport_after_result(
+        transport: SubprocessCLITransport | None, grace_seconds: float = 10.0
+    ) -> None:
+        """Bounded reap of the CLI subprocess once the terminal ResultMessage is in hand.
+
+        Give the CLI a short grace to exit on its own — it flushes its session
+        file during shutdown, and killing it instantly can lose the resume
+        transcript's tail (same reason the SDK transport ``close()`` waits
+        before signaling). If it is still alive after the grace, SIGKILL: the
+        turn's result is already captured, so nothing of value can be lost,
+        and a lingering process must not hold the turn (or leak into the next
+        one). No-op when the process already exited — the common case.
+        """
+        if transport is None:
+            return
+        proc = getattr(transport, "_process", None)
+        if proc is None:
+            return
+        reap_deadline = time.monotonic() + grace_seconds
+        while proc.returncode is None and time.monotonic() < reap_deadline:
+            await asyncio.sleep(0.1)
+        if proc.returncode is None:
+            logger.warning(
+                "Claude CLI subprocess (pid=%s) still alive %.0fs after its terminal ResultMessage; hard-killing",
+                getattr(proc, "pid", "?"),
+                grace_seconds,
+            )
+            with suppress(OSError):
+                proc.kill()
 
     @staticmethod
     def _kill_transport(transport: SubprocessCLITransport | None) -> None:

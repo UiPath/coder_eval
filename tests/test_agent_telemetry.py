@@ -661,7 +661,13 @@ class TestAssistantMessageTelemetry:
 
     @pytest.mark.asyncio
     async def test_multiple_assistant_turns(self, tmp_path):
-        """Verify multiple assistant turns are tracked separately."""
+        """Verify multiple assistant turns are tracked separately.
+
+        Stream shape mirrors the real one-shot CLI protocol: the ResultMessage
+        is TERMINAL (exactly one, at the end of the session). communicate()
+        ends the turn on it, so a mid-stream ResultMessage would truncate the
+        transcript — that shape does not occur in one-shot mode.
+        """
         tool_use_block_cls, assistant_message_cls, user_message_cls, text_block_cls, _, result_message_cls = (
             create_mock_sdk_messages()
         )
@@ -671,14 +677,13 @@ class TestAssistantMessageTelemetry:
         tool1 = tool_use_block_cls("toolu_turn1", "Read", {"file_path": "file1.txt"})
         msg1 = assistant_message_cls([text1, tool1])
         user_msg1 = user_message_cls("toolu_turn1", False, "content1")
-        result1 = result_message_cls(usage={"input_tokens": 50, "output_tokens": 30})
 
         # Second turn
         text2 = text_block_cls("Second response")
         tool2 = tool_use_block_cls("toolu_turn2", "Write", {"file_path": "file2.txt", "content": "new content"})
         msg2 = assistant_message_cls([text2, tool2])
         user_msg2 = user_message_cls("toolu_turn2", False, "ok")
-        result2 = result_message_cls(usage={"input_tokens": 60, "output_tokens": 40})
+        result_final = result_message_cls(usage={"input_tokens": 60, "output_tokens": 40})
 
         import coder_eval.agents.claude_code_agent as agent_module
 
@@ -688,10 +693,9 @@ class TestAssistantMessageTelemetry:
         async def mock_query(prompt, options):
             yield msg1
             yield user_msg1
-            yield result1
             yield msg2
             yield user_msg2
-            yield result2
+            yield result_final
 
         original_query = agent_module.query
         agent_module.query = mock_query
@@ -705,15 +709,18 @@ class TestAssistantMessageTelemetry:
             assistant_msgs = [m for m in turn.messages if isinstance(m, AssistantMessage)]
             assert len(assistant_msgs) == 2
 
-            # First turn
+            # First turn: id-less and not last, so the terminal ResultMessage's
+            # usage does NOT retro-populate it (only the LAST id-less assistant
+            # message is backfilled).
             aturn1 = assistant_msgs[0]
             assert isinstance(aturn1, AssistantMessage)
             assert aturn1.role == "assistant"
-            assert aturn1.input_tokens == 50
-            assert aturn1.output_tokens == 30
+            assert aturn1.input_tokens == 0
+            assert aturn1.output_tokens == 0
             assert len(aturn1.content_blocks) == 2
 
-            # Second turn
+            # Second turn: last id-less assistant message — backfilled from the
+            # terminal ResultMessage's usage.
             aturn2 = assistant_msgs[1]
             assert isinstance(aturn2, AssistantMessage)
             assert aturn2.role == "assistant"
