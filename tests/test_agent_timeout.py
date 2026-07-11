@@ -258,3 +258,81 @@ async def test_communicate_without_timeout_does_not_construct_transport():
         ):
             await agent.communicate("prompt")  # no timeout
             mock_transport_cls.assert_not_called()
+
+
+def _fake_result_message():
+    """Duck-typed SDK ResultMessage: session_id + usage (and no `content`,
+    so it can't false-match the assistant/user branches of dispatch)."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        session_id="sess-terminal",
+        usage={"input_tokens": 10, "output_tokens": 5},
+        model_usage=None,
+        total_cost_usd=0.01,
+        num_turns=3,
+        subtype="success",
+        stop_reason="end_turn",
+        result="all done",
+        is_error=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_communicate_ends_turn_on_result_message_when_cli_lingers():
+    """A CLI that emits its terminal ResultMessage but never exits must yield
+    a clean TurnRecord — NOT run to the watchdog and raise TurnTimeoutError.
+
+    Regression for the sweep-killing class: the agent finished (end_turn,
+    subtype=success), the CLI process lingered, the stream never hit EOF, and
+    the watchdog converted a successful run into a 0-score timeout ERROR.
+    """
+    agent = _make_agent()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        async def mock_query(prompt, options, transport=None):
+            yield _fake_result_message()
+            # Simulate the lingering CLI: the stream never ends. Without the
+            # break-on-result fix this sleeps until the watchdog fires.
+            await asyncio.sleep(30)
+
+        fake_transport = MagicMock()
+        fake_transport._process.returncode = 0  # CLI already exited cleanly
+
+        with (
+            patch("coder_eval.agents.claude_code_agent.SubprocessCLITransport") as mock_transport_cls,
+            patch("coder_eval.agents.claude_code_agent.query", mock_query),
+        ):
+            mock_transport_cls.return_value = fake_transport
+
+            # Watchdog at 5s: with the fix communicate() returns immediately
+            # after the ResultMessage; without it, TurnTimeoutError.
+            record = await agent.communicate("prompt", timeout=5.0)
+
+        assert record is not None
+        assert record.result_summary is not None
+        assert record.result_summary.subtype == "success"
+
+
+@pytest.mark.asyncio
+async def test_reap_after_result_kills_lingering_process():
+    """_reap_transport_after_result must SIGKILL a process that outlives its
+    grace period, and leave an already-exited process alone."""
+    lingering = MagicMock()
+    lingering._process.returncode = None
+    lingering._process.pid = 4242
+    await ClaudeCodeAgent._reap_transport_after_result(lingering, grace_seconds=0.3)
+    lingering._process.kill.assert_called_once()
+
+    exited = MagicMock()
+    exited._process.returncode = 0
+    await ClaudeCodeAgent._reap_transport_after_result(exited, grace_seconds=0.3)
+    exited._process.kill.assert_not_called()
+
+    # None transport / None process are no-ops
+    await ClaudeCodeAgent._reap_transport_after_result(None)
+    no_proc = MagicMock()
+    no_proc._process = None
+    await ClaudeCodeAgent._reap_transport_after_result(no_proc)
