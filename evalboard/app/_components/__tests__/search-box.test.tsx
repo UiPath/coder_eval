@@ -72,4 +72,49 @@ describe("SearchBox — typing-ahead race condition", () => {
 
         expect(input).toHaveValue("");
     });
+
+    test("clear button does not get repopulated when a stale navigation resolves", () => {
+        // The PR's named fix: user clicks × to clear a settled search, then a
+        // navigation that had already resolved with the old value re-renders the
+        // component — the input must stay empty, not snap back to the old value.
+        navState.q = "foo";
+        const { rerender } = render(<SearchBox />);
+        const input = screen.getByRole("textbox");
+        expect(input).toHaveValue("foo");
+
+        // User clicks ×.
+        fireEvent.click(screen.getByRole("button", { name: /clear search/i }));
+        expect(input).toHaveValue("");
+
+        // A stale navigation reports q="foo" — must NOT repopulate the input.
+        navState.q = "foo";
+        rerender(<SearchBox />);
+
+        expect(input).toHaveValue("");
+    });
+
+    test("typingAhead latch releases after the debounce fires so later external nav syncs", () => {
+        // Guards against a stuck-true latch: after the debounce settles (user
+        // stops typing, timer fires, typingAhead → false), a subsequent genuine
+        // external navigation must still update the input.
+        const { rerender } = render(<SearchBox />);
+        const input = screen.getByRole("textbox");
+
+        fireEvent.change(input, { target: { value: "foo" } });
+
+        // Let the debounce fire — typingAhead resets to false.
+        act(() => { vi.advanceTimersByTime(300); });
+
+        // Simulate the navigation resolving (URL catches up).
+        navState.q = "foo";
+        rerender(<SearchBox />);
+        expect(input).toHaveValue("foo");
+
+        // Now a genuine external navigation changes q (e.g. browser Back).
+        navState.q = "bar";
+        rerender(<SearchBox />);
+
+        // typingAhead is false, so the sync must apply.
+        expect(input).toHaveValue("bar");
+    });
 });
