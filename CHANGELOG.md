@@ -2,6 +2,65 @@
 
 <!-- version list -->
 
+## v0.8.4 (2026-07-13)
+
+### Bug Fixes
+
+- **deps**: Upgrade click to 8.4.2 to resolve PYSEC-2026-2132
+  ([#19](https://github.com/UiPath/coder_eval/pull/19),
+  [`a240d4e`](https://github.com/UiPath/coder_eval/commit/a240d4e2f8b970665743d0dc3d212c6c8e8a30ac))
+
+- **deps**: Upgrade click to 8.4.2 to resolve PYSEC-2026-2132
+  ([#20](https://github.com/UiPath/coder_eval/pull/20),
+  [`bba8645`](https://github.com/UiPath/coder_eval/commit/bba8645fc3f6c7b6e9784af496641ac0eaf8bede))
+
+- **evalboard**: Address search-box code review comments
+  ([#13](https://github.com/UiPath/coder_eval/pull/13),
+  [`382d80d`](https://github.com/UiPath/coder_eval/commit/382d80d4a84da39327b0196c97c01a367f094c0e))
+
+- **evalboard**: Fix search bar clear issue ([#13](https://github.com/UiPath/coder_eval/pull/13),
+  [`382d80d`](https://github.com/UiPath/coder_eval/commit/382d80d4a84da39327b0196c97c01a367f094c0e))
+
+- **evalboard**: Prevent search bar from resetting mid-type
+  ([#13](https://github.com/UiPath/coder_eval/pull/13),
+  [`382d80d`](https://github.com/UiPath/coder_eval/commit/382d80d4a84da39327b0196c97c01a367f094c0e))
+
+- **sandbox**: Exclude home-dir dotfiles from capture_to artifacts
+  ([#19](https://github.com/UiPath/coder_eval/pull/19),
+  [`a240d4e`](https://github.com/UiPath/coder_eval/commit/a240d4e2f8b970665743d0dc3d212c6c8e8a30ac))
+
+- **sandbox**: Extend capture_to denylist with credential stores
+  ([#19](https://github.com/UiPath/coder_eval/pull/19),
+  [`a240d4e`](https://github.com/UiPath/coder_eval/commit/a240d4e2f8b970665743d0dc3d212c6c8e8a30ac))
+
+### Code Style
+
+- Fix ruff formatting in _WORKSPACE_CAPTURE_IGNORE
+  ([#19](https://github.com/UiPath/coder_eval/pull/19),
+  [`a240d4e`](https://github.com/UiPath/coder_eval/commit/a240d4e2f8b970665743d0dc3d212c6c8e8a30ac))
+
+### Documentation
+
+- **readme**: Clarify framing before hero gif ([#16](https://github.com/UiPath/coder_eval/pull/16),
+  [`b7dee1c`](https://github.com/UiPath/coder_eval/commit/b7dee1c0616d9a98dc98432ca066c1a8c9264ef4))
+
+- **readme**: Reframe title toward agents & their skills
+  ([#16](https://github.com/UiPath/coder_eval/pull/16),
+  [`b7dee1c`](https://github.com/UiPath/coder_eval/commit/b7dee1c0616d9a98dc98432ca066c1a8c9264ef4))
+
+### Features
+
+- **early-stop**: Opt-in early stop once armed criteria are decided
+  ([#14](https://github.com/UiPath/coder_eval/pull/14),
+  [`b0c1ade`](https://github.com/UiPath/coder_eval/commit/b0c1ade364119573f172e4d64ee3fff0a387db32))
+
+### Testing
+
+- **sandbox**: Cover home-dir dotfile exclusion in capture_to
+  ([#19](https://github.com/UiPath/coder_eval/pull/19),
+  [`a240d4e`](https://github.com/UiPath/coder_eval/commit/a240d4e2f8b970665743d0dc3d212c6c8e8a30ac))
+
+
 ## v0.8.3 (2026-07-09)
 
 ### Bug Fixes
