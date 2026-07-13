@@ -22,12 +22,45 @@ from .resources import get_ignore_patterns, should_ignore_path
 logger = logging.getLogger(__name__)
 
 
-# Top-level entries excluded from Sandbox.capture_to (docker WORKDIR-alignment).
-# The WORKDIR can be HOME or overlap framework mounts, so skip credentials and
-# sandbox-created bulk. `.claude` is the RW lean copy of ~/.claude (carries
-# .credentials.json). The rest are sandbox infra the standard artifacts path
-# also drops. Matched by basename at every level (shutil.ignore_patterns).
-_WORKSPACE_CAPTURE_IGNORE = (".claude", ".venv", ".npm-prefix", "node_modules")
+# Entries excluded from Sandbox.capture_to (docker WORKDIR-alignment).
+# Two classes of exclusion:
+#
+#   1. SECURITY denylist: credential files/dirs that must never leak into
+#      captured artifacts (which get uploaded). Defense-in-depth -- the eval
+#      images don't bake credentials, but any future image that does should
+#      not silently expose them.
+#
+#   2. NOISE suppression: sandbox-created bulk and home-dir infrastructure
+#      written by tools (uv, pip, npm, shell) when WORKDIR overlaps HOME
+#      (e.g. /root). These are never task deliverables.
+#
+# Matched by basename at every level via shutil.ignore_patterns.
+_WORKSPACE_CAPTURE_IGNORE = (
+    # --- Security: credential stores ---
+    ".claude",  # RW lean copy of host ~/.claude (carries .credentials.json)
+    ".aws",  # AWS credentials / config
+    ".ssh",  # SSH keys
+    ".gnupg",  # GPG keys
+    ".docker",  # Docker auth (config.json)
+    ".azure",  # Azure CLI credentials
+    ".netrc",  # FTP/curl/git credentials
+    ".gitconfig",  # May embed PATs via credential.helper
+    # --- Noise: Python / JS build infra ---
+    ".venv",
+    ".npm-prefix",
+    "node_modules",
+    # --- Noise: home-dir caches & config (uv, pip, npm, etc.) ---
+    ".cache",
+    ".config",
+    ".npm",
+    ".local",
+    # --- Noise: shell dotfiles pre-baked into the image ---
+    ".bashrc",
+    ".bash_history",
+    ".bash_logout",
+    ".profile",
+    ".wget-hsts",
+)
 
 
 def _grant_read_traverse(root: Path) -> None:
@@ -1080,8 +1113,10 @@ class Sandbox:
         :data:`_WORKSPACE_CAPTURE_IGNORE` -- most importantly ``.claude`` (the
         RW lean copy of the host ``~/.claude`` carries ``.credentials.json``;
         without this a ``/root`` WORKDIR would leak it into artifacts), plus
-        ``.venv``/``node_modules``/``.npm-prefix`` (sandbox-created bulk, already
-        stripped by the standard artifacts path's post-run cleanup).
+        ``.venv``/``node_modules``/``.npm-prefix`` (sandbox-created bulk), and
+        Linux home-directory noise (``.cache``, ``.config``, ``.npm``,
+        ``.local``, shell dotfiles) written by tools like uv/pip/npm when
+        HOME == WORKDIR.
 
         Returns the destination path; unlike preserve_to it does NOT repoint
         ``self.sandbox_dir`` -- the workspace persists in-container and is reaped

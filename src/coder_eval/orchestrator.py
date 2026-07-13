@@ -50,11 +50,12 @@ from .models import (
     UserMessage,
     resolve_route,
 )
+from .orchestration.early_stop import EarlyStopWatcher, validate_early_stop
 from .orchestration.evaluation import load_reference
 from .path_utils import format_task_log_id, task_log_path
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
-from .streaming.callbacks import StreamCallback, TaskScopedCallback, safe_emit
+from .streaming.callbacks import CompositeStreamCallback, StreamCallback, TaskScopedCallback, safe_emit
 from .streaming.events import CriteriaCheckEvent, CriterionSummary
 from .telemetry import Scalar, hash_identifier
 from .utils import get_version_info, looks_like_version, runtime_uip_versions
@@ -248,6 +249,8 @@ def build_task_event(result: EvaluationResult, *, driver: str, variant_id: str) 
         "AgentType": result.agent_type or "",
         "Model": result.model_used or "",
         "Driver": driver,
+        "EarlyStopped": result.early_stop is not None,
+        "EarlyStopReason": (result.early_stop.reason.value if result.early_stop is not None else ""),
     }
     return "CoderEval.Task.End", props
 
@@ -364,6 +367,10 @@ class Orchestrator:
 
         # Reference solution cache (loaded on-demand)
         self._reference_code: str | None = None
+
+        # Early-stop watcher (created in _setup only when run_limits.stop_early is
+        # armed; None otherwise, so the default path is entirely unaffected).
+        self._early_stop_watcher: EarlyStopWatcher | None = None
 
         # One-shot flag: emit the "cost budget configured but no cost data" warning
         # exactly once per task even if _check_run_limits fires every turn.
@@ -845,6 +852,18 @@ class Orchestrator:
         Raises:
             RuntimeError: If setup fails
         """
+        # Defensive early-stop guardrails for the library-use and in-container
+        # paths (the CLI already validated during resolution). No-op unless
+        # run_limits.stop_early is armed.
+        validate_early_stop(self.task)
+
+        # Build the early-stop watcher once, up front, when armed. This sits BEFORE
+        # the evaluate-only early return below, so an armed evaluate-only re-grade
+        # builds an inert (never-fed) watcher — harmless, and keeps a single
+        # creation point.
+        if self.task.run_limits is not None and self.task.run_limits.stop_early:
+            self._early_stop_watcher = EarlyStopWatcher.for_task(self.task)
+
         if self.sandbox is not None:
             # evaluate-only mode: sandbox already set up, skip agent
             assert self.result is not None
@@ -1141,6 +1160,17 @@ class Orchestrator:
         if self.stream_callback is not None:
             agent_callback = TaskScopedCallback(self.stream_callback, self._log_task_id)
 
+        # Compose the early-stop watcher into the stream when armed. It is the
+        # sole callback when --stream is off, else it runs alongside the
+        # TaskScopedCallback. The same watcher instance persists across retry
+        # attempts (created once in _setup), so its turn/tool counters and
+        # wall-clock origin accumulate correctly. The closures below read `watcher`.
+        watcher = self._early_stop_watcher
+        if watcher is not None:
+            agent_callback = (
+                CompositeStreamCallback([watcher, agent_callback]) if agent_callback is not None else watcher
+            )
+
         def _drain_pending_turn(*, attempt: int) -> None:
             """Read agent.pending_turn and, if set, append it to result.iterations."""
             partial = agent.pending_turn
@@ -1184,6 +1214,7 @@ class Orchestrator:
                 stream_callback=agent_callback,
                 timeout=turn_timeout,
                 max_turns=max_turns,
+                should_stop=watcher.should_stop if watcher is not None else None,
             )
             if turn_timeout is None:
                 return await coro
@@ -1341,6 +1372,10 @@ class Orchestrator:
         self.result.iterations.append(turn_record)
         self._sync_sandbox_command_path_with_agent()
 
+        # Record early-stop info (if the watcher tripped) BEFORE check_all, so it
+        # survives even if a checker raises. None on a full run or when unarmed.
+        self.result.early_stop = self._early_stop_watcher.info if self._early_stop_watcher is not None else None
+
         logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
 
         # Check success criteria (pass reference code for reference_comparison criterion)
@@ -1365,7 +1400,19 @@ class Orchestrator:
         pairs = list(zip(criteria_results, self.task.success_criteria, strict=True))
         passed_count = sum(1 for r, c in pairs if r.score >= c.pass_threshold)
         total_count = len(pairs)
-        all_passed = self.result.all_criteria_passed(self.task.success_criteria)
+        if self.result.early_stop is not None:
+            # Early-stopped run: only the armed subset gates final_status; the rest
+            # are advisory (recorded, never decisive) so a smoke flavor is not
+            # dragged to FAILURE by criteria whose work it deliberately skipped.
+            all_passed = self.result.armed_criteria_passed(self.task.success_criteria)
+            armed_count = sum(1 for c in self.task.success_criteria if c.stop_when is not None)
+            logger.info(
+                "Early-stopped run: gating on %d armed criteria (%d advisory, not gated).",
+                armed_count,
+                total_count - armed_count,
+            )
+        else:
+            all_passed = self.result.all_criteria_passed(self.task.success_criteria)
 
         # Reuse the model method for weighted score (single source of truth)
         self.result.calculate_weighted_score(self.task.success_criteria)

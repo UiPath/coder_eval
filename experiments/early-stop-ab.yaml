@@ -1,0 +1,23 @@
+experiment_id: early-stop-ab
+description: |
+  Smoke vs. e2e flavors from ONE task file via opt-in early-stop. Both variants
+  share the same tasks, criteria, and max_turns; they differ only in the
+  run_limits.stop_early boolean (field-merged, so neither replaces the task's
+  run_limits block). The task's armed criteria (those carrying `stop_when`)
+  decide when the `smoke` variant cuts off — as soon as the designated criteria
+  are decided — while `e2e` runs every task to completion.
+
+  Expect identical pass/fail verdicts between the two variants (the armed subset
+  gates an early-stopped run; other criteria are advisory and clearly marked),
+  with the `smoke` variant significantly lower on turns, duration, and tokens.
+
+variants:
+  - variant_id: e2e
+    description: "Full run to completion — no early stop (the reference flavor)."
+    run_limits:
+      stop_early: false
+
+  - variant_id: smoke
+    description: "Opt-in early stop — cut off once the armed criteria are decided."
+    run_limits:
+      stop_early: true
