@@ -37,14 +37,14 @@ logger = logging.getLogger(__name__)
 # Matched by basename at every level via shutil.ignore_patterns.
 _WORKSPACE_CAPTURE_IGNORE = (
     # --- Security: credential stores ---
-    ".claude",       # RW lean copy of host ~/.claude (carries .credentials.json)
-    ".aws",          # AWS credentials / config
-    ".ssh",          # SSH keys
-    ".gnupg",        # GPG keys
-    ".docker",       # Docker auth (config.json)
-    ".azure",        # Azure CLI credentials
-    ".netrc",        # FTP/curl/git credentials
-    ".gitconfig",    # May embed PATs via credential.helper
+    ".claude",  # RW lean copy of host ~/.claude (carries .credentials.json)
+    ".aws",  # AWS credentials / config
+    ".ssh",  # SSH keys
+    ".gnupg",  # GPG keys
+    ".docker",  # Docker auth (config.json)
+    ".azure",  # Azure CLI credentials
+    ".netrc",  # FTP/curl/git credentials
+    ".gitconfig",  # May embed PATs via credential.helper
     # --- Noise: Python / JS build infra ---
     ".venv",
     ".npm-prefix",
