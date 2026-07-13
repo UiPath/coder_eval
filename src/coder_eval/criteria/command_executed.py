@@ -35,6 +35,37 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
     # (incl. the must-NOT-run 0/0 form) are both decidable before end-of-run.
     live_stop_polarities: ClassVar[frozenset[str]] = frozenset({"pass", "fail"})
 
+    @classmethod
+    def live_decidable_polarities(cls, criterion: CommandExecutedCriterion) -> frozenset[str]:
+        """Narrow the class capability to what THIS instance can decide mid-run.
+
+        The class advertises ``{"pass", "fail"}``, but ``live_verdict`` can only:
+
+        - ``pass`` when there is no upper bound and a positive floor
+          (``max_count is None and min_count > 0``) — with an upper bound a pass
+          is not final until end-of-run, so it never fires live; and
+        - ``fail`` when there IS an upper bound (``max_count is not None``), the
+          moment the count exceeds it (this includes the ``min_count: 0,
+          max_count: 0`` "must NOT run" form).
+
+        So these instance shapes are dead arms the class-level check misses:
+
+        - ``stop_when: pass`` with ``max_count`` set → pass can never fire;
+        - ``stop_when: fail`` with ``max_count: None`` → fail can never fire;
+        - ``min_count: 0, max_count: None`` → neither can ever fire.
+
+        Reporting the true per-instance set here lets ``validate_early_stop``
+        reject such arming at resolution instead of silently degrading to a full
+        run. Stays a subset of ``live_stop_polarities`` by construction.
+        """
+        decidable: set[str] = set()
+        if criterion.max_count is None:
+            if criterion.min_count > 0:
+                decidable.add("pass")
+        else:
+            decidable.add("fail")
+        return frozenset(decidable)
+
     @staticmethod
     def _matching_commands(
         criterion: CommandExecutedCriterion,

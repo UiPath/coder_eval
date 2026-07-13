@@ -69,6 +69,7 @@ from coder_eval.streaming.events import (
     AgentEndStatus,
     AgentStartEvent,
     ToolEndEvent,
+    ToolEndStatus,
     TurnEndStatus,
     TurnStartEvent,
 )
@@ -194,6 +195,11 @@ def _tool_end(cmd: CommandTelemetry) -> ToolEndEvent:
 def _skill_events(skill: str, *, tool_id: str = "sk-1") -> list[Any]:
     """AgentStart + TurnStart + a Skill ToolEnd engaging ``skill``."""
     return [_agent_start(), _turn_start(), _tool_end(_skill_cmd(skill, tool_id=tool_id))]
+
+
+def _unresolved_skill_end(skill: str, *, tool_id: str = "orphan-1") -> ToolEndEvent:
+    """An orphan-closing ToolEnd (status UNRESOLVED), as finalize() emits."""
+    return ToolEndEvent(task_id="t", tool=_skill_cmd(skill, tool_id=tool_id), status=ToolEndStatus.UNRESOLVED)
 
 
 # --------------------------------------------------------------------------- #
@@ -341,6 +347,29 @@ class TestCommandExecutedLiveVerdict:
     def test_polarities_declared(self) -> None:
         assert CommandExecutedChecker.live_stop_polarities == frozenset({"pass", "fail"})
 
+    def test_decidable_pass_only_when_no_upper_bound(self) -> None:
+        crit = _cmd_crit(min_count=1, max_count=None)
+        assert CommandExecutedChecker.live_decidable_polarities(crit) == frozenset({"pass"})
+
+    def test_decidable_fail_only_when_upper_bound_set(self) -> None:
+        crit = _cmd_crit(min_count=1, max_count=3)
+        assert CommandExecutedChecker.live_decidable_polarities(crit) == frozenset({"fail"})
+
+    def test_decidable_fail_for_must_not_run(self) -> None:
+        crit = _cmd_crit(min_count=0, max_count=0)
+        assert CommandExecutedChecker.live_decidable_polarities(crit) == frozenset({"fail"})
+
+    def test_decidable_empty_for_zero_min_no_max(self) -> None:
+        # min_count=0 + no upper bound: neither pass nor fail can ever fire.
+        crit = _cmd_crit(min_count=0, max_count=None)
+        assert CommandExecutedChecker.live_decidable_polarities(crit) == frozenset()
+
+    def test_decidable_is_subset_of_class_polarities(self) -> None:
+        # The instance set can never exceed the class capability.
+        for min_c, max_c in [(1, None), (1, 3), (0, 0), (0, None)]:
+            crit = _cmd_crit(min_count=min_c, max_count=max_c)
+            assert CommandExecutedChecker.live_decidable_polarities(crit) <= CommandExecutedChecker.live_stop_polarities
+
 
 # --------------------------------------------------------------------------- #
 # Base default: unobservable criteria
@@ -357,6 +386,12 @@ class TestBaseLiveVerdictDefault:
         assert checker.live_stop_polarities == frozenset()
         crit = FileExistsCriterion(type="file_exists", path="x.txt", description="x")
         assert checker.live_verdict(crit, [_turn()]) == "undecided"
+
+    def test_base_decidable_defaults_to_class_polarities(self) -> None:
+        # The base hook returns the ClassVar verbatim: skill_triggered does not
+        # narrow per-instance, so its decidable set equals its class capability.
+        crit = _skill_crit("s", "s")
+        assert SkillTriggeredChecker.live_decidable_polarities(crit) == SkillTriggeredChecker.live_stop_polarities
 
 
 # --------------------------------------------------------------------------- #
@@ -380,8 +415,38 @@ class TestValidateEarlyStop:
         validate_early_stop(task)  # no raise
 
     def test_armed_command_executed_accepts(self) -> None:
-        task = _task(criteria=[_cmd_crit(stop_when="fail")], stop_early=True)
+        # A decidable fail arm: must-NOT-run (max_count set) can live-fail.
+        task = _task(criteria=[_cmd_crit(stop_when="fail", min_count=0, max_count=0)], stop_early=True)
         validate_early_stop(task)  # no raise
+
+    def test_armed_command_executed_pass_accepts(self) -> None:
+        # A decidable pass arm: min_count>0 with no upper bound can live-pass.
+        task = _task(criteria=[_cmd_crit(stop_when="pass", min_count=1, max_count=None)], stop_early=True)
+        validate_early_stop(task)  # no raise
+
+    def test_dead_arm_pass_with_max_count_rejected(self) -> None:
+        # stop_when=pass but max_count is set → live pass can never fire.
+        task = _task(criteria=[_cmd_crit(stop_when="pass", min_count=1, max_count=3)], stop_early=True)
+        with pytest.raises(EarlyStopConfigError, match="cannot decide polarity"):
+            validate_early_stop(task)
+
+    def test_dead_arm_fail_without_max_count_rejected(self) -> None:
+        # stop_when=fail but max_count is None → live fail can never fire.
+        task = _task(criteria=[_cmd_crit(stop_when="fail", min_count=1, max_count=None)], stop_early=True)
+        with pytest.raises(EarlyStopConfigError, match="cannot decide polarity"):
+            validate_early_stop(task)
+
+    def test_dead_arm_zero_min_no_max_rejected(self) -> None:
+        # min_count=0, max_count=None → neither polarity can ever fire (empty set).
+        task = _task(criteria=[_cmd_crit(stop_when="decided", min_count=0, max_count=None)], stop_early=True)
+        with pytest.raises(EarlyStopConfigError, match="cannot decide polarity"):
+            validate_early_stop(task)
+
+    def test_dead_arm_decided_with_max_count_rejected(self) -> None:
+        # stop_when=decided needs BOTH polarities; max_count set gives only fail.
+        task = _task(criteria=[_cmd_crit(stop_when="decided", min_count=1, max_count=3)], stop_early=True)
+        with pytest.raises(EarlyStopConfigError, match="cannot decide polarity"):
+            validate_early_stop(task)
 
     def test_guardrail5_simulation_rejected(self) -> None:
         sim = SimulationConfig(enabled=True, persona="user", goal="get it done")
@@ -893,6 +958,28 @@ class TestEarlyStopWatcher:
         assert watcher.should_stop() is False
         assert watcher.info is None
 
+    def test_unresolved_tool_end_does_not_latch(self) -> None:
+        # finalize() force-closes orphaned tools as UNRESOLVED AFTER the message
+        # loop ends and the terminal status is chosen. Such an orphan Skill
+        # engagement must NOT trip a stop, else a naturally-completed (or
+        # timed-out / crashed) run gets recorded as early-stopped.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        _feed(watcher, [_agent_start(), _turn_start(), _unresolved_skill_end("date-teller")])
+        assert watcher.should_stop() is False
+        assert watcher.info is None
+        assert watcher._tool_call_index == 0  # the unresolved end is not even counted
+
+    def test_resolved_after_unresolved_still_decides(self) -> None:
+        # An UNRESOLVED end is dropped, but a later RESOLVED engagement still fires
+        # the stop (dropping orphans never suppresses a real, observed stop).
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        _feed(watcher, [_agent_start(), _turn_start(), _unresolved_skill_end("date-teller")])
+        assert watcher.info is None
+        _feed(watcher, [_tool_end(_skill_cmd("date-teller", tool_id="sk-real"))])
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
     def test_decision_latched_after_fire(self) -> None:
         watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
         _feed(watcher, _skill_events("date-teller"))
@@ -1075,6 +1162,23 @@ class TestOrchestratorEarlyStopWiring:
         )
         assert result.early_stop is None
         assert agent.delivered == 2  # full (short) stream consumed
+        assert result.all_criteria_passed(self._criteria()) is False
+
+    async def test_completed_run_with_orphan_tool_not_early_stopped(self, tmp_path) -> None:
+        # Regression: a run that completes naturally, whose finalize() force-closes
+        # an orphaned Skill call as UNRESOLVED, must NOT be recorded as
+        # early-stopped — the full gate applies and the advisory 0.0 drags to
+        # FAILURE (rather than a false "stopped early; N turns avoided").
+        events = [_agent_start(), _turn_start(), _unresolved_skill_end(self._SKILL)]
+        result, agent = await _run_wiring(
+            criteria=self._criteria(),
+            events=events,
+            scores=[1.0, 0.0],
+            stop_early=True,
+            tmp_path=tmp_path,
+        )
+        assert result.early_stop is None
+        assert agent.delivered == 3  # never stopped: the full stream was consumed
         assert result.all_criteria_passed(self._criteria()) is False
 
     async def test_fail_open_wiring_degrades_to_full_run(self, tmp_path) -> None:

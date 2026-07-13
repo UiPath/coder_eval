@@ -225,6 +225,30 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         """
         return "undecided"
 
+    @classmethod
+    def live_decidable_polarities(cls, criterion: C) -> frozenset[str]:
+        """Which polarities THIS criterion *instance* can actually decide mid-run.
+
+        ``live_stop_polarities`` is a class-level *capability* — the widest set
+        of polarities the checker's ``live_verdict`` could ever emit. But for
+        some criteria whether a given polarity can fire depends on the instance's
+        configuration, not just its type. ``command_executed`` is the canonical
+        case: it can live-``pass`` only with no upper bound, and live-``fail``
+        only with one, so a specific criterion may support strictly fewer
+        polarities than its class advertises (down to none — a "dead arm").
+
+        ``validate_early_stop`` gates the requested ``stop_when`` polarity on THIS
+        set, not the ClassVar, so an instance that can never decide its armed
+        polarity is rejected at resolution rather than silently degrading to a
+        full run (the "never a silent no-op" guarantee).
+
+        Default: the class-level ``live_stop_polarities`` — correct for every
+        criterion whose decidability is purely type-level (e.g. ``skill_triggered``).
+        Overrides MUST return a subset of ``live_stop_polarities`` (a criterion
+        cannot decide a polarity its ``live_verdict`` never emits).
+        """
+        return cls.live_stop_polarities
+
     def aggregate(
         self,
         criterion: C,

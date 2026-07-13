@@ -222,7 +222,12 @@ Semantics:
   fail; `stop_when: decided` stops on either. Only criteria that can decide from a
   partial trajectory (currently `skill_triggered`, `command_executed`) may be
   armed — arming any other criterion is a hard error at resolution (plan *and*
-  run), never a silent no-op.
+  run), never a silent no-op. Decidability can also depend on a criterion's own
+  fields: `command_executed` can live-**pass** only with `max_count` unset and
+  `min_count > 0`, and live-**fail** only with `max_count` set (which includes
+  the `min_count: 0, max_count: 0` "must-NOT-run" form). Arming a polarity the
+  configured criterion can never reach (e.g. `stop_when: pass` alongside a
+  `max_count`) is likewise a hard error at resolution, not a silent full run.
 - **Verdict.** An early-stopped run is gated on the **armed subset only**; the
   non-armed criteria become **advisory** and are clearly marked (report badge +
   per-criterion note + `stopped_early` row). A run that completes naturally is

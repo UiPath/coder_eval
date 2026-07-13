@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from coder_eval.models import EarlyStopInfo, EarlyStopReason
 from coder_eval.streaming.collector import EventCollector
-from coder_eval.streaming.events import AgentStartEvent, StreamEvent, ToolEndEvent, TurnStartEvent
+from coder_eval.streaming.events import AgentStartEvent, StreamEvent, ToolEndEvent, ToolEndStatus, TurnStartEvent
 
 
 if TYPE_CHECKING:
@@ -121,19 +121,30 @@ def validate_early_stop(task: TaskDefinition) -> None:
         polarity = c.stop_when
         assert polarity is not None
         checker_cls = CriterionRegistry.get_checker(c.type)
-        polarities = checker_cls.live_stop_polarities
-        if not polarities:
+        # (3) Class-level observability: an empty ``live_stop_polarities`` means
+        # the criterion TYPE can never decide mid-run, regardless of config.
+        if not checker_cls.live_stop_polarities:
             raise EarlyStopConfigError(
                 f"criterion type {c.type!r} is armed (stop_when={polarity!r}) but is not "
                 + "observable mid-run; early-stop supports only live-observable criteria "
                 + "(e.g. skill_triggered, command_executed)."
             )
+        # (4) Instance-level decidability: some criteria (e.g. command_executed)
+        # can decide fewer polarities than their type advertises depending on this
+        # instance's config, so gate on the per-instance set — otherwise a dead
+        # arm (a polarity this instance can never fire) would silently degrade to
+        # a full run instead of erroring here.
+        polarities = checker_cls.live_decidable_polarities(c)
         needed = {"pass", "fail"} if polarity == "decided" else {polarity}
         missing = sorted(needed - polarities)
         if missing:
+            supported = sorted(polarities) or "no polarities"
             raise EarlyStopConfigError(
                 f"criterion type {c.type!r} cannot decide polarity {missing} mid-run "
-                + f"(stop_when={polarity!r}); it supports {sorted(polarities)}."
+                + f"(stop_when={polarity!r}) for this configuration; it supports {supported}. "
+                + "Decidability can depend on the criterion's fields (e.g. command_executed "
+                + "can live-pass only with max_count unset + min_count>0, and live-fail only "
+                + "with max_count set)."
             )
 
 
@@ -206,6 +217,18 @@ class EarlyStopWatcher:
         1-based ``tool_call_index``, and stamps the wall-clock origin at the
         FIRST ``AgentStartEvent`` only (a retry's second AgentStart does not
         reset it).
+
+        UNRESOLVED tool ends are ignored entirely (not collected, counted, or
+        evaluated). ``_ClaudeTurnState.finalize`` force-closes orphaned tools as
+        UNRESOLVED *after* the message loop has ended and the terminal status is
+        already chosen (COMPLETED / TIMEOUT / crash) — those are not live tool
+        activity and must not trip the stop rule, or a run that ran to completion
+        (or timed out / crashed) would latch a false early stop (e.g. an
+        unresolved ``Skill`` call counts as engagement because ``skill_triggered``
+        ignores ``result_status``). A legitimate stop only ever fires on an
+        OBSERVED tool result during the loop, so dropping unresolved ends can
+        never suppress a real stop; it also keeps a crashed attempt's orphan tools
+        out of the retry-persistent partial trajectory.
         """
         if self._info is not None or self._disarmed:
             return
@@ -215,6 +238,8 @@ class EarlyStopWatcher:
         elif isinstance(event, TurnStartEvent):
             self._sdk_turn_index += 1
         elif isinstance(event, ToolEndEvent):
+            if event.status == ToolEndStatus.UNRESOLVED:
+                return
             self._tool_call_index += 1
         self._collector.on_event(event)
         if isinstance(event, ToolEndEvent):
