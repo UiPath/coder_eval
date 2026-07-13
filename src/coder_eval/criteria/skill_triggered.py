@@ -1,14 +1,23 @@
 """Skill-triggered criterion checker: did the agent engage the target skill?
 
-Agent-agnostic. Claude Code engages a skill via an explicit ``Skill`` tool call;
-Codex has no such tool — it auto-discovers skills under ``.agents/skills/`` and
-engages one by reading its ``SKILL.md`` / references off disk via shell. Both
-signals are detected here so the criterion scores identically across agents.
+Agent-agnostic and detected purely by matching the recorded command text against
+a skill-specific regex — never by inspecting the ``Skill`` tool identity, which
+some harnesses lack. Two textual signals count as engagement:
+
+* Claude Code engages a skill via a ``Skill`` tool call whose serialized argument
+  is ``"skill": "<skill_name>"`` (optionally plugin-namespaced).
+* Codex (and any harness without a ``Skill`` tool) auto-discovers skills under
+  ``.agents/skills/`` and engages one by reading its ``SKILL.md`` / references off
+  disk via shell — the command references ``skills/<skill_name>/``.
+
+Both are matched as text, so the criterion scores identically across agents.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from coder_eval.criteria._classification_aggregate import overlay_classification_metrics
@@ -33,24 +42,28 @@ _YES = "yes"
 _NO = "no"
 
 
-def _engaged_skill(cmd: CommandTelemetry, skill_name: str) -> bool:
-    """True when one command engaged ``skill_name`` — agent-agnostically.
+def _engagement_pattern(skill_name: str) -> re.Pattern[str]:
+    """Regex matching either textual signal that ``skill_name`` was engaged.
 
-    Claude: an explicit ``Skill`` tool call carries the skill in
-    ``parameters['skill']`` (optionally namespaced, e.g. ``plugin:uipath-agents``).
+    * ``skills/<skill_name>/`` — the skill's files read off disk via shell/Read.
+      Present in both the repo layout (``.../skills/<name>/...``) and the sandbox
+      symlink (``.agents/skills/<name>/...``). The trailing slash prevents prefix
+      collisions (``uipath-agents`` vs ``uipath-agents-foo``).
+    * ``"skill": "<skill_name>"`` — a ``Skill`` tool call's serialized argument,
+      optionally plugin-namespaced (e.g. ``"uipath:uipath-agents"``). The closing
+      quote anchors the name so a namespaced value still matches but a longer skill
+      id does not.
 
-    Codex (and any non-Claude agent): no ``Skill`` tool exists, so the skill is
-    engaged by reading its files off disk via shell. Both the repo layout
-    (``.../skills/<skill_name>/...``) and the sandbox symlink
-    (``.agents/skills/<skill_name>/...``) contain the substring
-    ``skills/<skill_name>/``, which appears in the recorded command string
-    (Bash ``parameters['command']``) or a file-path parameter. The trailing
-    slash prevents prefix collisions (``uipath-agents`` vs ``uipath-agents-foo``).
+    Both alternatives are matched as text over the serialized parameters, so no
+    ``Skill`` tool support is required.
     """
-    if cmd.tool_name == "Skill" and cmd.parameters.get("skill", "").split(":")[-1] == skill_name:
-        return True
-    needle = f"skills/{skill_name}/"
-    return any(isinstance(v, str) and needle in v for v in cmd.parameters.values())
+    esc = re.escape(skill_name)
+    return re.compile(rf'skills/{esc}/|"skill"\s*:\s*"(?:[^"]*:)?{esc}"')
+
+
+def _engaged_skill(cmd: CommandTelemetry, pattern: re.Pattern[str]) -> bool:
+    """True when ``cmd``'s serialized parameters match the engagement ``pattern``."""
+    return bool(pattern.search(json.dumps(cmd.parameters, default=str)))
 
 
 @register_criterion
@@ -81,9 +94,8 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
                 error="turn_records not provided to checker",
             )
 
-        triggered: bool = any(
-            _engaged_skill(cmd, criterion.skill_name) for turn in turn_records for cmd in turn.commands
-        )
+        pattern = _engagement_pattern(criterion.skill_name)
+        triggered: bool = any(_engaged_skill(cmd, pattern) for turn in turn_records for cmd in turn.commands)
         expected_yes: bool = criterion.expected_skill == criterion.skill_name
         score = 1.0 if triggered == expected_yes else 0.0
         observed = _YES if triggered else _NO

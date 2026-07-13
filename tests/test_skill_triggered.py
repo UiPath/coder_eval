@@ -169,6 +169,26 @@ class TestSkillTriggeredCodex:
         )
         assert result.observed_label == "yes" and result.score == 1.0
 
+    def test_read_tool_agents_symlink_skill_md_counts(self) -> None:
+        # A Read tool whose file_path ends in SKILL.md under the .agents/skills/
+        # symlink location (Codex/Antigravity discovery layout) counts as engagement.
+        result = _check(
+            expected_skill="uipath-agents",
+            skill_name="uipath-agents",
+            commands=[_cmd("Read", {"file_path": ".agents/skills/uipath-agents/SKILL.md"})],
+        )
+        assert result.observed_label == "yes" and result.score == 1.0
+
+    def test_read_tool_skill_md_outside_skill_dir_not_counted(self) -> None:
+        # A Read of a SKILL.md that is NOT under skills/<name>/ names no specific
+        # skill -> must not false-positive on skill_name.
+        result = _check(
+            expected_skill="",
+            skill_name="uipath-agents",
+            commands=[_cmd("Read", {"file_path": "/x/docs/SKILL.md"})],
+        )
+        assert result.observed_label == "no" and result.score == 1.0
+
 
 class TestSkillTriggeredCriterionValidation:
     def test_requires_expected_skill_and_skill_name(self) -> None:
