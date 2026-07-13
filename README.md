@@ -1,10 +1,15 @@
-# coder_eval — evaluate & benchmark AI coding agents
+# coder_eval — evaluate AI coding agents & their skills
 
 [![PyPI](https://img.shields.io/pypi/v/coder-eval.svg)](https://pypi.org/project/coder-eval/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
 [![CI](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml/badge.svg)](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml)
 [![Code style: Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+
+A framework for evaluating AI coding agents **and their skills** — built for CLI
+and skill builders — with sandboxing, reproducibility, and data-driven analysis.
+Not an "agentic coding" benchmark: it measures how effective your CLI and skills
+are when used by coding agents.
 
 <p align="center">
   <img src="docs/assets/hero.gif" alt="coder_eval running the hello_date task: a sandboxed agent writes and runs a script from a YAML task, then the scored result is browsed in evalboard" width="100%">
