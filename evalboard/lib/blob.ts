@@ -1,12 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import { DefaultAzureCredential } from "@azure/identity";
-import {
-    BlobServiceClient,
-    RestError,
-    type ContainerClient,
-} from "@azure/storage-blob";
+import type { ContainerClient } from "@azure/storage-blob";
 
 const ACCOUNT = "coderevaltests";
 const CONTAINER = "runs";
@@ -56,14 +51,28 @@ function assertValidTaskId(id: string, label: string): void {
     }
 }
 
+// Duck-typed 404 check. Avoids a runtime import of `RestError` from
+// @azure/storage-blob so local-mode readers never load the Azure SDK — the
+// blob client and its error type only arrive via the dynamic import in
+// getContainer(). Azure's RestError carries a numeric `statusCode`.
 function isNotFound(err: unknown): boolean {
-    return err instanceof RestError && err.statusCode === 404;
+    return (
+        typeof err === "object" &&
+        err !== null &&
+        "statusCode" in err &&
+        (err as { statusCode?: number }).statusCode === 404
+    );
 }
 
 let containerClient: ContainerClient | null = null;
 
-function getContainer(): ContainerClient {
+// The Azure SDK is loaded lazily (and lives under optionalDependencies) so
+// local-mode readers — and OSS users who `pnpm install --no-optional` — never
+// pull @azure/*. This only runs in remote mode, where every caller awaits it.
+async function getContainer(): Promise<ContainerClient> {
     if (containerClient) return containerClient;
+    const { BlobServiceClient } = await import("@azure/storage-blob");
+    const { DefaultAzureCredential } = await import("@azure/identity");
     const url = `https://${ACCOUNT}.blob.core.windows.net`;
     const svc = new BlobServiceClient(url, new DefaultAzureCredential());
     containerClient = svc.getContainerClient(CONTAINER);
@@ -72,7 +81,7 @@ function getContainer(): ContainerClient {
 
 export async function listRunIdsRemote(): Promise<string[]> {
     if (LOCAL_RUNS_DIR) return listRunIdsLocal(LOCAL_RUNS_DIR);
-    const c = getContainer();
+    const c = await getContainer();
     const ids: string[] = [];
     for await (const item of c.listBlobsByHierarchy("/")) {
         if (item.kind === "prefix") {
@@ -126,7 +135,8 @@ async function downloadBlob(
     // each other's temp file.
     const tmpPath = `${localPath}.${randomBytes(6).toString("hex")}.tmp`;
     try {
-        await getContainer().getBlobClient(blobName).downloadToFile(tmpPath);
+        const c = await getContainer();
+        await c.getBlobClient(blobName).downloadToFile(tmpPath);
         await fs.rename(tmpPath, localPath);
     } catch (err) {
         await fs.unlink(tmpPath).catch(() => {});
@@ -242,7 +252,7 @@ export async function ensureRunDir(
     assertValidId(runId, "runId");
     if (LOCAL_RUNS_DIR) return;
     return dedupe(`run:${runId}`, async () => {
-        const c = getContainer();
+        const c = await getContainer();
         const ops: Promise<void>[] = [];
         const prefix = `${runId}/`;
         for await (const blob of c.listBlobsFlat({ prefix })) {
@@ -271,7 +281,7 @@ export async function ensureTaskDir(
         const activation = taskId.startsWith("skill-activation/");
         if (activation) await ensureActivationSummary(runId, destRoot);
         else await ensureRunSummary(runId, destRoot);
-        const c = getContainer();
+        const c = await getContainer();
         const ops: Promise<void>[] = [];
         // `listBlobsFlat` recurses, so both the flat legacy layout
         // (`default/<task>/task.json`) and the nested replicate layout
