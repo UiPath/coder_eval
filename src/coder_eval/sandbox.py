@@ -22,24 +22,39 @@ from .resources import get_ignore_patterns, should_ignore_path
 logger = logging.getLogger(__name__)
 
 
-# Top-level entries excluded from Sandbox.capture_to (docker WORKDIR-alignment).
-# The WORKDIR can be HOME or overlap framework mounts, so skip credentials and
-# sandbox-created bulk. `.claude` is the RW lean copy of ~/.claude (carries
-# .credentials.json). The rest are sandbox infra the standard artifacts path
-# also drops. Matched by basename at every level (shutil.ignore_patterns).
+# Entries excluded from Sandbox.capture_to (docker WORKDIR-alignment).
+# Two classes of exclusion:
+#
+#   1. SECURITY denylist: credential files/dirs that must never leak into
+#      captured artifacts (which get uploaded). Defense-in-depth -- the eval
+#      images don't bake credentials, but any future image that does should
+#      not silently expose them.
+#
+#   2. NOISE suppression: sandbox-created bulk and home-dir infrastructure
+#      written by tools (uv, pip, npm, shell) when WORKDIR overlaps HOME
+#      (e.g. /root). These are never task deliverables.
+#
+# Matched by basename at every level via shutil.ignore_patterns.
 _WORKSPACE_CAPTURE_IGNORE = (
-    # Credentials / Claude infra
-    ".claude",
-    # Python / JS build infra
+    # --- Security: credential stores ---
+    ".claude",       # RW lean copy of host ~/.claude (carries .credentials.json)
+    ".aws",          # AWS credentials / config
+    ".ssh",          # SSH keys
+    ".gnupg",        # GPG keys
+    ".docker",       # Docker auth (config.json)
+    ".azure",        # Azure CLI credentials
+    ".netrc",        # FTP/curl/git credentials
+    ".gitconfig",    # May embed PATs via credential.helper
+    # --- Noise: Python / JS build infra ---
     ".venv",
     ".npm-prefix",
     "node_modules",
-    # Home-directory caches & config (created by uv, pip, npm, etc. when WORKDIR=HOME)
+    # --- Noise: home-dir caches & config (uv, pip, npm, etc.) ---
     ".cache",
     ".config",
     ".npm",
     ".local",
-    # Shell dotfiles pre-baked into the image
+    # --- Noise: shell dotfiles pre-baked into the image ---
     ".bashrc",
     ".bash_history",
     ".bash_logout",

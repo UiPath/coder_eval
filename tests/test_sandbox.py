@@ -1196,14 +1196,25 @@ def test_capture_to_copies_and_tolerates_dangling_symlink(tmp_path):
         (ws / "real.txt").write_text("hello", encoding="utf-8")
         # A dangling symlink is the exact failure the old `cp -a` bridge hit.
         (ws / "dangling").symlink_to(ws / "does_not_exist")
-        # Framework/sensitive entries that must NOT be captured (WORKDIR may be HOME).
+        # Security denylist: credential stores that must never leak into artifacts.
         (ws / ".claude").mkdir()
         (ws / ".claude" / ".credentials.json").write_text("SECRET", encoding="utf-8")
+        (ws / ".aws").mkdir()
+        (ws / ".aws" / "credentials").write_text("[default]\naws_access_key_id=FAKE", encoding="utf-8")
+        (ws / ".ssh").mkdir()
+        (ws / ".ssh" / "id_rsa").write_text("PRIVATE KEY", encoding="utf-8")
+        (ws / ".gnupg").mkdir()
+        (ws / ".docker").mkdir()
+        (ws / ".docker" / "config.json").write_text('{"auths":{}}', encoding="utf-8")
+        (ws / ".azure").mkdir()
+        (ws / ".netrc").write_text("machine github.com login user password TOKEN", encoding="utf-8")
+        (ws / ".gitconfig").write_text("[user]\n\tname = Test", encoding="utf-8")
+        # Noise: Python / JS build infra.
         (ws / ".venv").mkdir()
         (ws / ".venv" / "pyvenv.cfg").write_text("x", encoding="utf-8")
         (ws / "node_modules").mkdir()
         (ws / "node_modules" / "pkg.js").write_text("x", encoding="utf-8")
-        # Home-dir noise written by uv/pip/npm/shell when WORKDIR == HOME (/root).
+        # Noise: home-dir caches written by uv/pip/npm/shell when WORKDIR == HOME.
         (ws / ".cache").mkdir()
         (ws / ".cache" / "uv").mkdir()
         (ws / ".config").mkdir()
@@ -1223,11 +1234,19 @@ def test_capture_to_copies_and_tolerates_dangling_symlink(tmp_path):
         assert (dest / "real.txt").read_text(encoding="utf-8") == "hello"
         # Dangling symlink skipped (ignore_dangling_symlinks) -> did not raise.
         assert not (dest / "dangling").exists()
-        # Credentials / sandbox bulk excluded from the captured artifacts.
+        # Security denylist: no credential stores in artifacts.
         assert not (dest / ".claude").exists()
+        assert not (dest / ".aws").exists()
+        assert not (dest / ".ssh").exists()
+        assert not (dest / ".gnupg").exists()
+        assert not (dest / ".docker").exists()
+        assert not (dest / ".azure").exists()
+        assert not (dest / ".netrc").exists()
+        assert not (dest / ".gitconfig").exists()
+        # Noise: build infra excluded.
         assert not (dest / ".venv").exists()
         assert not (dest / "node_modules").exists()
-        # Home-dir noise excluded (written by tools when WORKDIR == HOME).
+        # Noise: home-dir bulk excluded.
         assert not (dest / ".cache").exists()
         assert not (dest / ".config").exists()
         assert not (dest / ".npm").exists()
