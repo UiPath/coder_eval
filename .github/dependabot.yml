@@ -36,3 +36,25 @@ updates:
       prefix: "chore"
     # No ignore block — keep SHA pins current for patch and minor releases too,
     # otherwise SHA pinning fossilizes the actions in place.
+
+  # evalboard frontend (npm). Without this block nothing routinely refreshes the
+  # Next.js app, so it drifts until a CVE fires and alerts pile up. Monthly,
+  # grouped bumps keep next/React/Azure ahead of most advisories.
+  - package-ecosystem: "npm"
+    directory: "/evalboard"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "javascript"
+    # `chore` keeps the commit + PR title within the Conventional Commits
+    # allowed-type set enforced by conventional-commits.yml (see pip block).
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    # One batched PR instead of N noisy ones, matching the low-noise style of
+    # the pip/actions blocks above.
+    groups:
+      npm-all:
+        patterns: ["*"]

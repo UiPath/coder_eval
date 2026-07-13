@@ -12,14 +12,16 @@
         "verify": "tsc --noEmit && vitest run && next build"
     },
     "dependencies": {
-        "@azure/identity": "^4.13.1",
-        "@azure/storage-blob": "^12.31.0",
-        "next": "^15.1.0",
+        "next": "^15.5.20",
         "react": "^19.0.0",
         "react-dom": "^19.0.0",
         "react-markdown": "^10.1.0",
         "recharts": "^2.15.0",
         "remark-gfm": "^4.0.1"
+    },
+    "optionalDependencies": {
+        "@azure/identity": "^4.13.1",
+        "@azure/storage-blob": ">=12.31.0 <12.33.0"
     },
     "devDependencies": {
         "@tailwindcss/typography": "^0.5.19",
@@ -36,5 +38,13 @@
         "tailwindcss": "^3.4.17",
         "typescript": "^5.6.3",
         "vitest": "^2.1.0"
+    },
+    "pnpm": {
+        "overrides": {
+            "postcss": "^8.5.10",
+            "fast-xml-builder": "^1.1.7",
+            "@babel/core": "^7.29.6",
+            "uuid": "^11.1.1"
+        }
     }
 }
