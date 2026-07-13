@@ -6,6 +6,11 @@
 [![CI](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml/badge.svg)](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml)
 [![Code style: Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
+A framework for evaluating AI coding agents **and their skills** — built for CLI
+and skill builders — with sandboxing, reproducibility, and data-driven analysis.
+Not an "agentic coding" benchmark: it measures how effective your CLI and skills
+are when used by coding agents.
+
 <p align="center">
   <img src="docs/assets/hero.gif" alt="coder_eval running the hello_date task: a sandboxed agent writes and runs a script from a YAML task, then the scored result is browsed in evalboard" width="100%">
 </p>
