@@ -1203,6 +1203,18 @@ def test_capture_to_copies_and_tolerates_dangling_symlink(tmp_path):
         (ws / ".venv" / "pyvenv.cfg").write_text("x", encoding="utf-8")
         (ws / "node_modules").mkdir()
         (ws / "node_modules" / "pkg.js").write_text("x", encoding="utf-8")
+        # Home-dir noise written by uv/pip/npm/shell when WORKDIR == HOME (/root).
+        (ws / ".cache").mkdir()
+        (ws / ".cache" / "uv").mkdir()
+        (ws / ".config").mkdir()
+        (ws / ".config" / "uv").mkdir()
+        (ws / ".npm").mkdir()
+        (ws / ".local").mkdir()
+        (ws / ".bashrc").write_text("# bash", encoding="utf-8")
+        (ws / ".bash_history").write_text("ls\n", encoding="utf-8")
+        (ws / ".bash_logout").write_text("# logout", encoding="utf-8")
+        (ws / ".profile").write_text("# profile", encoding="utf-8")
+        (ws / ".wget-hsts").write_text("", encoding="utf-8")
 
         artifacts = tmp_path / "artifacts"
         dest = sandbox.capture_to(artifacts)
@@ -1215,6 +1227,16 @@ def test_capture_to_copies_and_tolerates_dangling_symlink(tmp_path):
         assert not (dest / ".claude").exists()
         assert not (dest / ".venv").exists()
         assert not (dest / "node_modules").exists()
+        # Home-dir noise excluded (written by tools when WORKDIR == HOME).
+        assert not (dest / ".cache").exists()
+        assert not (dest / ".config").exists()
+        assert not (dest / ".npm").exists()
+        assert not (dest / ".local").exists()
+        assert not (dest / ".bashrc").exists()
+        assert not (dest / ".bash_history").exists()
+        assert not (dest / ".bash_logout").exists()
+        assert not (dest / ".profile").exists()
+        assert not (dest / ".wget-hsts").exists()
         # Source workspace is COPIED, not moved (originals untouched).
         assert (ws / "real.txt").exists()
         assert (ws / ".claude" / ".credentials.json").exists()
