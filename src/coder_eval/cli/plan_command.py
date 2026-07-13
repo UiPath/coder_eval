@@ -59,6 +59,7 @@ def plan_command(
     check_api_keys()
 
     # Lazy import to avoid circular dependency at module level
+    from ..orchestration.early_stop import EarlyStopConfigError, validate_early_stop
     from ..orchestration.experiment import DEFAULT_EXPERIMENT_PATH, load_experiment, resolve_task_for_variant
 
     # Always load experiment (defaults to experiments/default.yaml)
@@ -133,10 +134,17 @@ def plan_command(
             for variant in exp_def.variants:
                 try:
                     resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, exp_def, variant)
+                    # Early-stop guardrails (no-op unless run_limits.stop_early is armed).
+                    validate_early_stop(resolved)
                     agent_type = str(resolved.agent.type) if resolved.agent else "unknown"
                     agent_model = resolved.agent.model if resolved.agent else None
                     model_str = f" ({agent_model})" if agent_model else ""
                     console.print(f"    [dim]Variant '{variant.variant_id}': {agent_type}{model_str}[/dim]")
+                except EarlyStopConfigError as e:
+                    # A hard config error (unlike generic per-variant resolution
+                    # failures, which stay soft): flip the plan exit code.
+                    console.print(f"    [red]Variant '{variant.variant_id}': early-stop config error - {e}[/red]")
+                    all_valid = False
                 except Exception as e:
                     console.print(f"    [red]Variant '{variant.variant_id}': resolution failed - {e}[/red]")
 

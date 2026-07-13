@@ -3,14 +3,15 @@
 import json
 import logging
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
-from coder_eval.criteria.base import BaseCriterion, CheckContext, register_criterion
+from coder_eval.criteria.base import BaseCriterion, CheckContext, LiveVerdict, register_criterion
 from coder_eval.models import CommandExecutedCriterion, CriterionResult
 
 
 if TYPE_CHECKING:
     from coder_eval.models.results import TurnRecord
+    from coder_eval.models.telemetry import CommandTelemetry
     from coder_eval.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,129 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
     """
 
     criterion_type = "command_executed"
+
+    # Observable mid-run: command matches accumulate monotonically in the live
+    # stream, so a min_count pass (no upper bound) and a max_count exceedance
+    # (incl. the must-NOT-run 0/0 form) are both decidable before end-of-run.
+    live_stop_polarities: ClassVar[frozenset[str]] = frozenset({"pass", "fail"})
+
+    @classmethod
+    def live_decidable_polarities(cls, criterion: CommandExecutedCriterion) -> frozenset[str]:
+        """Narrow the class capability to what THIS instance can decide mid-run.
+
+        The class advertises ``{"pass", "fail"}``, but ``live_verdict`` can only:
+
+        - ``pass`` when there is no upper bound and a positive floor
+          (``max_count is None and min_count > 0``) — with an upper bound a pass
+          is not final until end-of-run, so it never fires live; and
+        - ``fail`` when there IS an upper bound (``max_count is not None``), the
+          moment the count exceeds it (this includes the ``min_count: 0,
+          max_count: 0`` "must NOT run" form).
+
+        So these instance shapes are dead arms the class-level check misses:
+
+        - ``stop_when: pass`` with ``max_count`` set → pass can never fire;
+        - ``stop_when: fail`` with ``max_count: None`` → fail can never fire;
+        - ``min_count: 0, max_count: None`` → neither can ever fire.
+
+        Reporting the true per-instance set here lets ``validate_early_stop``
+        reject such arming at resolution instead of silently degrading to a full
+        run. Stays a subset of ``live_stop_polarities`` by construction.
+        """
+        decidable: set[str] = set()
+        if criterion.max_count is None:
+            if criterion.min_count > 0:
+                decidable.add("pass")
+        else:
+            decidable.add("fail")
+        return frozenset(decidable)
+
+    @staticmethod
+    def _matching_commands(
+        criterion: CommandExecutedCriterion,
+        all_commands: list["CommandTelemetry"],
+        pattern: re.Pattern[str] | None,
+        exclude_re: re.Pattern[str] | None,
+    ) -> list[str]:
+        """Filter + label the commands matching this criterion.
+
+        Shared by ``_check_impl`` and ``live_verdict`` so a command can never
+        count for one and not the other (the live trigger and the authoritative
+        score always agree on WHICH commands match). Callers compile the
+        patterns and own error handling.
+        """
+        matching: list[str] = []
+        for cmd in all_commands:
+            # Filter by tool name
+            if criterion.tool_name is not None and cmd.tool_name != criterion.tool_name:
+                continue
+
+            # Filter by success status
+            if criterion.require_success and cmd.result_status != "success":
+                continue
+
+            # Extract text for pattern matching (Bash: command param; others: JSON-serialized params)
+            if cmd.tool_name == "Bash" and cmd.parameters.get("command"):
+                cmd_text = cmd.parameters["command"]
+            else:
+                cmd_text = json.dumps(cmd.parameters)
+
+            # Truncate to mitigate ReDoS on large command strings
+            if len(cmd_text) > _MAX_PATTERN_SEARCH_LEN:
+                cmd_text = cmd_text[:_MAX_PATTERN_SEARCH_LEN]
+
+            # Filter by command pattern
+            if pattern is not None and not pattern.search(cmd_text):
+                continue
+
+            # Apply exclusion pattern (skip commands matching the exclusion)
+            if exclude_re is not None and exclude_re.search(cmd_text):
+                continue
+
+            # Build a display label for the matched command
+            if cmd.tool_name == "Bash" and cmd.parameters.get("command"):
+                label = cmd.parameters["command"]
+            else:
+                label = f"{cmd.tool_name}({json.dumps(cmd.parameters)[:80]})"
+            matching.append(label)
+        return matching
+
+    def live_verdict(
+        self,
+        criterion: CommandExecutedCriterion,
+        turn_records: list["TurnRecord"],
+    ) -> LiveVerdict:
+        """Decide from the partial trajectory (early-stop trigger).
+
+        - ``fail`` the moment ``match_count`` exceeds ``max_count`` — monotone
+          (once over, always over). Covers the ``min_count: 0, max_count: 0``
+          "must NOT run" form: the first forbidden match is a definitive fail.
+        - ``pass`` the moment ``match_count`` reaches ``min_count`` when there is
+          no upper bound (``max_count is None`` and ``min_count > 0``). With an
+          upper bound the pass is only final at end-of-run, so it stays
+          ``undecided`` here.
+        - otherwise ``undecided``.
+
+        A malformed regex yields ``undecided`` (the final ``_check_impl`` surfaces
+        the config error as a scored failure).
+        """
+        all_commands = [cmd for turn in turn_records for cmd in turn.commands]
+        try:
+            pattern = (
+                re.compile(criterion.command_pattern, re.DOTALL) if criterion.command_pattern is not None else None
+            )
+            exclude_re = (
+                re.compile(criterion.exclude_pattern, re.DOTALL) if criterion.exclude_pattern is not None else None
+            )
+        except re.error:
+            return "undecided"
+
+        match_count = len(self._matching_commands(criterion, all_commands, pattern, exclude_re))
+        if criterion.max_count is not None and match_count > criterion.max_count:
+            return "fail"
+        if criterion.max_count is None and criterion.min_count > 0 and match_count >= criterion.min_count:
+            return "pass"
+        return "undecided"
 
     def _check_impl(
         self,
@@ -98,41 +222,9 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
                     error=f"Invalid regex: {e}",
                 )
 
-        # Filter and count matching commands
-        matching_commands: list[str] = []
-        for cmd in all_commands:
-            # Filter by tool name
-            if criterion.tool_name is not None and cmd.tool_name != criterion.tool_name:
-                continue
-
-            # Filter by success status
-            if criterion.require_success and cmd.result_status != "success":
-                continue
-
-            # Extract text for pattern matching (Bash: command param; others: JSON-serialized params)
-            if cmd.tool_name == "Bash" and cmd.parameters.get("command"):
-                cmd_text = cmd.parameters["command"]
-            else:
-                cmd_text = json.dumps(cmd.parameters)
-
-            # Truncate to mitigate ReDoS on large command strings
-            if len(cmd_text) > _MAX_PATTERN_SEARCH_LEN:
-                cmd_text = cmd_text[:_MAX_PATTERN_SEARCH_LEN]
-
-            # Filter by command pattern
-            if pattern is not None and not pattern.search(cmd_text):
-                continue
-
-            # Apply exclusion pattern (skip commands matching the exclusion)
-            if exclude_re is not None and exclude_re.search(cmd_text):
-                continue
-
-            # Build a display label for the matched command
-            if cmd.tool_name == "Bash" and cmd.parameters.get("command"):
-                label = cmd.parameters["command"]
-            else:
-                label = f"{cmd.tool_name}({json.dumps(cmd.parameters)[:80]})"
-            matching_commands.append(label)
+        # Filter and count matching commands (shared with live_verdict so the
+        # live trigger and the authoritative score never disagree on matches).
+        matching_commands = self._matching_commands(criterion, all_commands, pattern, exclude_re)
 
         match_count = len(matching_commands)
 

@@ -572,6 +572,8 @@ def resolve_all_tasks(
     Raises:
         ValueError: If duplicate task IDs are found after resolution.
     """
+    from .early_stop import validate_early_stop
+
     resolved: list[ResolvedTask] = []
     skipped: list[SkippedTask] = []
 
@@ -636,6 +638,12 @@ def resolve_all_tasks(
 
                 # Apply layer 5 (CLI overrides)
                 _apply_cli_overrides(resolved_task, config, lineage)
+
+                # Early-stop guardrails: run once the task is fully resolved (all 5
+                # layers merged, incl. -D run_limits.stop_early). No-op unless armed;
+                # a bad arming raises EarlyStopConfigError (a ValueError) which the
+                # run path converts to a clean CLI error.
+                validate_early_stop(resolved_task)
 
                 # Fan-out: simulation n_trials takes precedence over experiment repeats
                 # when simulation is active; otherwise use experiment-level repeats.

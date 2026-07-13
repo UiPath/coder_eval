@@ -87,3 +87,14 @@ class RunLimits(BaseModel):
             "existing behavior (Claude reports real cache-creation writes here)."
         ),
     )
+    stop_early: bool = Field(
+        default=False,
+        description=(
+            "Opt-in master switch for early-stop-on-criterion. When True, the run ends as "
+            "soon as the armed criteria (those with stop_when set) are decided mid-run - on "
+            "pass or on a definitive fail - so a raised max_turns is not wasted once the "
+            "measured signal has happened. Default False keeps behavior identical. Requires a "
+            "Claude single-shot task with at least one observable armed criterion; every "
+            "unsupported combination is rejected at resolution time."
+        ),
+    )

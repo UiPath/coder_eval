@@ -23,7 +23,7 @@ import contextlib
 import logging
 import os
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
@@ -409,8 +409,14 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
         max_turns: int | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> TurnRecord:
         """Send a message to the Antigravity agent and receive its response.
+
+        ``should_stop`` is accepted for ``Agent.communicate`` override
+        compatibility and ignored — Antigravity does not support cooperative
+        early-stop (``supports_cooperative_stop`` is False), so the orchestrator
+        never passes it.
 
         Drives one logical turn: ``conversation.send(prompt)`` then iterate
         ``receive_steps()`` until the turn goes idle, mapping the Gemini step

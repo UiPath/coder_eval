@@ -138,6 +138,14 @@ def eval_result_to_task_dict(
         "visible_turns": visible_turn_count(result),
         "expected_turns": expected_turns_value,
         "has_final_reply": has_reply,
+        # Early-stop surfaces (opt-in run_limits.stop_early). None/False on the
+        # default path so downstream analysis never confuses a truncated run
+        # with a full one.
+        "stopped_early": result.early_stop is not None,
+        "early_stop_reason": (result.early_stop.reason.value if result.early_stop is not None else None),
+        "turns_remaining_at_stop": (
+            result.early_stop.turns_remaining_at_stop if result.early_stop is not None else None
+        ),
     }
     d["variant_id"] = variant_id
     return d

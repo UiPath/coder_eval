@@ -36,7 +36,7 @@ coder_eval/
 │   ├── experiment.py              # ExperimentDefinition, ExperimentVariant, ResolvedTask, result models
 │   ├── judge_defaults.py          # DEFAULT_JUDGE_MODEL constant (cycle-free leaf)
 │   ├── mutations.py               # PromptMutation variants (prefix/suffix/replace/template/rephrase)
-│   ├── results.py                 # CriterionResult (+ ClassificationCriterionResult), TurnRecord, EvaluationResult, CriterionAggregate, ThresholdCheck, SuiteRollup
+│   ├── results.py                 # CriterionResult (+ ClassificationCriterionResult), TurnRecord, EvaluationResult, EarlyStopInfo/EarlyStopReason, CriterionAggregate, ThresholdCheck, SuiteRollup
 │   ├── routing.py                 # ApiRoute (DirectRoute/BedrockRoute)
 │   ├── sandbox.py                 # SandboxConfig, ResourceLimits
 │   ├── tasks.py                   # TaskDefinition, AgentConfig, Dataset (dataset fan-out + sample)
@@ -79,6 +79,7 @@ coder_eval/
 ├── orchestration/                 # Batch execution utilities
 │   ├── batch.py                   # Parallel task execution (run_batch + run_batch_resolved)
 │   ├── config.py                  # Batch run configuration
+│   ├── early_stop.py              # validate_early_stop guardrails + EarlyStopWatcher (armed live-verdict observer)
 │   ├── evaluation.py              # Evaluation helpers
 │   ├── experiment.py              # ExperimentRunner, resolve_task_for_variant, load_experiment
 │   └── task_loader.py             # YAML task loading
@@ -138,6 +139,7 @@ templates/                         # Sandbox template directories
 - **Reconciliation message (stream self-reconciles to the turn total)**: The per-message stream consistently under-reports the authoritative turn total — a fixed prompt slice (~512 input tokens on Claude) is billed on no SDK-emitted message, and sub-agent input/cache only partially bubbles up. So `EventCollector.build_turn_record` appends one synthetic `ReconciliationMessage` (`role="reconciliation"`, in the `TranscriptMessage` union) per turn, carrying the per-bucket residual = `token_usage` − Σ(assistant message buckets). The invariant: **summing the four token buckets across `TurnRecord.messages` (assistant + reconciliation) equals `token_usage` exactly**, for both Claude and Codex (Codex's stream is already complete after `_recover_subagent_tool_calls`, so its residual is usually 0 and no entry is emitted). This is what lets the evalboard SUM the message stream as the source of truth instead of reading a separate aggregate ("agent tokens"): `selectTokenTotals` returns the stream sum whenever a reconciliation entry is present, and the timeline renders it as its own row. It is agent-agnostic (booked at the single `EventCollector` seam), carries no cost (cost stays on `token_usage`), and is excluded from generation/turn counts and the cost simulator. The Python `token_usage`/`total_token_usage` aggregate is unchanged and still authoritative for budget/judges/reports.
 - **sandbox isolation**: Tasks that don't need MCP servers should set `setting_sources: []` in their `agent:` block to isolate the sandbox from the host project's CLAUDE.md and settings. Without this, the host project's CLAUDE.md (often 20 KB+) is injected into every API call, inflating cache-creation tokens and cost significantly.
 - **Run-time caps (non-criterion enforcement)**: `TaskDefinition.run_limits` (`RunLimits` model) is the single namespace for all run-time caps — `max_turns` / `task_timeout` / `turn_timeout` (structural) and `max_input_tokens` / `max_output_tokens` / `max_total_tokens` / `max_usd` (cumulative budget). Token/USD breaches abort with `FinalStatus.TOKEN_BUDGET_EXCEEDED` or `COST_BUDGET_EXCEEDED` (both `category == "failed"`). Structural caps are set from the CLI via `-D run_limits.max_turns=…` / `-D run_limits.task_timeout=…` / `-D run_limits.turn_timeout=…` (field-merged into `run_limits`); budget caps via `-D run_limits.max_usd=…` etc. or YAML. Layered config uses field-merge — a variant block overrides individual keys without replacing the task's block.
+- **Early stop on criterion (opt-in)**: `run_limits.stop_early` (default off) ends a single-shot Claude run early once the run's **armed** criteria are decided, so a raised `max_turns` isn't wasted on the smoke flavor. A criterion is armed by `stop_when: pass|fail|decided`; only criteria that can decide from a partial trajectory may arm (they declare a non-empty `live_stop_polarities` ClassVar and override `live_verdict` on `BaseCriterion` — currently `skill_triggered`, `command_executed`; CE025 enforces the two stay consistent). It uses a cooperative `should_stop` seam on the Claude agent's between-messages guard (tool-call granularity, no SIGKILL) driven by `orchestration/early_stop.py::EarlyStopWatcher` (own `EventCollector` + stop rule). Live verdicts only *trigger* the stop; the standard `check_all` on the frozen trajectory is authoritative. An early-stopped run gates on the **armed subset** (`EvaluationResult.armed_criteria_passed`); a completed run gates on the full set. Every unsupported use (non-observable criterion, non-Claude agent, wrong polarity, no armed criterion, simulation mode) is an error at resolution (plan *and* run), and a runtime verdict bug **fails open** to a full run. Surfaces: `EarlyStopInfo` (reason + deciding criterion + when), report notes/badges, `stopped_early` run.json rows, and `EarlyStopped`/`EarlyStopReason` telemetry dims. Defaults off ⇒ behavior byte-for-behavior unchanged.
 
 ## Success Criteria (14 types)
 
@@ -158,7 +160,7 @@ templates/                         # Sandbox template directories
 | `llm_judge` | Continuous | LLM grades artifacts + optional trajectory + optional reference; routes through the run's backend (Bedrock / Anthropic) |
 | `agent_judge` | Continuous | Spawns a Claude Code SDK agent in an isolated sandbox copy; judge uses tools (Bash/Read/Grep/…) to investigate and returns a JSON verdict. Expensive; runs with evaluator credentials — see SECURITY note in the criterion docstring. |
 
-All criteria support `weight` (default 1.0) and `pass_threshold` (default 0.9). On dataset-backed tasks, criteria may also set `suite_thresholds: {metric: min_value}` — the suite gate passes iff every listed metric (from the criterion's `aggregate()` output) meets its minimum.
+All criteria support `weight` (default 1.0) and `pass_threshold` (default 0.9), plus `stop_when` (`pass`/`fail`/`decided`, default `null`) which arms the criterion for early stop when `run_limits.stop_early` is set (observable criteria only). On dataset-backed tasks, criteria may also set `suite_thresholds: {metric: min_value}` — the suite gate passes iff every listed metric (from the criterion's `aggregate()` output) meets its minimum.
 
 ## Evaluation Flow
 
@@ -191,11 +193,11 @@ make format      # ruff format
 make check       # ruff check (lint)
 make typecheck   # pyright
 make test        # pytest
-make lint        # custom architectural lint rules (CE001–CE013)
+make lint        # custom architectural lint rules (CE001–CE025)
 make verify      # All of the above + coverage check (CI equivalent)
 ```
 
-When fixing a bug, ask: *could a custom lint rule have prevented this?* If the root cause is a mechanically detectable pattern (e.g., "always import from `coder_eval.models`", "never call blocking IO in async"), add a rule to `tests/lint/rules/` following the CE001–CE013 pattern and wire it up in `tests/lint/runner.py`. This turns a one-time fix into permanent enforcement. See `tests/test_custom_lint.py` for how rules are tested.
+When fixing a bug, ask: *could a custom lint rule have prevented this?* If the root cause is a mechanically detectable pattern (e.g., "always import from `coder_eval.models`", "never call blocking IO in async"), add a rule to `tests/lint/rules/` following the CE001–CE025 pattern and wire it up in `tests/lint/runner.py`. This turns a one-time fix into permanent enforcement. See `tests/test_custom_lint.py` for how rules are tested.
 
 ## Configuration
 

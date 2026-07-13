@@ -61,6 +61,7 @@ class TurnEndStatus(StrEnum):
     CRASHED = "crashed"
     TIMEOUT = "timeout"
     MAX_TURNS_EXHAUSTED = "max_turns_exhausted"
+    STOPPED_EARLY = "stopped_early"  # cooperative early-stop-on-criterion (clean, non-crash)
 
 
 class AgentEndStatus(StrEnum):
@@ -70,6 +71,7 @@ class AgentEndStatus(StrEnum):
     CRASHED = "crashed"
     TIMEOUT = "timeout"
     MAX_TURNS_EXHAUSTED = "max_turns_exhausted"
+    STOPPED_EARLY = "stopped_early"  # cooperative early-stop-on-criterion (clean, non-crash)
 
 
 # Reuse the canonical TranscriptMessage union (defined once in telemetry.py) so

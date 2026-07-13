@@ -5,7 +5,8 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, NoReturn, Protocol
+from collections.abc import Callable
+from typing import Any, ClassVar, NoReturn, Protocol
 
 from .errors import AgentCrashError, TurnTimeoutError
 from .errors.agent import format_timeout_reason, truncate_crash_message
@@ -70,6 +71,13 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
     _state: AgentState = AgentState.WORKING
     _iteration: int = 0
     _iteration_was_incremented: bool = False
+
+    # Capability flag: whether this agent honors the cooperative ``should_stop``
+    # interrupt threaded through ``communicate()`` (early-stop-on-criterion).
+    # Default False — arming early-stop on an agent that does not set this True
+    # is rejected at resolution time. Concrete agents that check ``should_stop``
+    # between messages override it to True.
+    supports_cooperative_stop: ClassVar[bool] = False
 
     def _begin_turn(self) -> None:
         """Mark the start of a ``communicate()`` turn: reset the pending slot and
@@ -183,6 +191,7 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
         max_turns: int | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> TurnRecord:
         """Send a message to the agent and receive its response.
 
@@ -198,6 +207,15 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
                 ``communicate()`` call. When the agent would exceed it, the
                 returned ``TurnRecord`` has ``max_turns_exhausted=True``.
                 None defers to the underlying SDK default.
+            should_stop: Cooperative early-stop poll for early-stop-on-criterion.
+                When provided, an implementation that supports cooperative
+                stopping (``supports_cooperative_stop=True``) should call it at
+                each safe message boundary and, when it returns True, stop
+                pulling further work and finalize the turn cleanly
+                (``crashed=False``, no raise). ``None`` (default) preserves the
+                pre-existing behavior exactly. Agents that do not support it
+                accept the argument and ignore it (the orchestrator only passes
+                it to a capable agent).
 
         Returns:
             TurnRecord containing the complete interaction
