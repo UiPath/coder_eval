@@ -1,4 +1,4 @@
-# coder_eval — evaluate & benchmark AI coding agents
+# coder_eval — evaluate AI coding agents & their skills
 
 [![PyPI](https://img.shields.io/pypi/v/coder-eval.svg)](https://pypi.org/project/coder-eval/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
