@@ -726,3 +726,106 @@ class TestDatasetRepeatsFanout:
 
         with pytest.raises(ValueError, match="Duplicate task IDs"):
             resolve_all_tasks([task_file, task_file2], experiment, experiment, config)
+
+    def test_config_resolution_failure_isolated_to_skipped(self, tmp_path: Path) -> None:
+        """A per-task layer-5 resolution failure skips just that task, not the suite.
+
+        `--type codex` (config.agent_type) rewrites a task whose YAML carries the
+        Claude-only `sdk_options` into a CodexAgentConfig, which forbids that field
+        (`extra="forbid"`). The incompatibility raises during layer-5 resolution;
+        the task must land in `skipped` while a sibling still resolves — rather than
+        aborting the whole coder-eval run (as it did before this isolation).
+        """
+        from coder_eval.orchestration.config import BatchRunConfig
+        from coder_eval.orchestration.experiment import resolve_all_tasks
+
+        good = {
+            "task_id": "plain-task",
+            "description": "d",
+            "initial_prompt": "p",
+            "sandbox": {"driver": "tempdir"},
+            "success_criteria": [{"type": "file_exists", "path": "f.py", "description": "d"}],
+        }
+        # Valid as claude-code (sdk_options is Claude-only); becomes invalid only
+        # once --type codex rewrites the agent kind at layer 5.
+        claude_only = {
+            **good,
+            "task_id": "claude-only-task",
+            "agent": {"type": "claude-code", "sdk_options": {"effort": "high"}},
+        }
+        good_file = tmp_path / "good.yaml"
+        good_file.write_text(yaml.dump(good))
+        bad_file = tmp_path / "claude_only.yaml"
+        bad_file.write_text(yaml.dump(claude_only))
+
+        experiment = ExperimentDefinition(
+            experiment_id="default",
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}),
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+        # --type codex applied to every task (layer 5, highest precedence).
+        config = BatchRunConfig(run_dir=tmp_path / "runs", agent_type="codex")
+
+        resolved, skipped = resolve_all_tasks([good_file, bad_file], experiment, experiment, config)
+
+        # Sibling resolved; the incompatible task is isolated (no raise).
+        assert [rt.task.task_id for rt in resolved] == ["plain-task"]
+        assert len(skipped) == 1
+        assert skipped[0].path == str(bad_file)
+        assert "sdk_options" in skipped[0].reason
+
+    def test_config_resolution_failure_skips_whole_file_no_partial_fanout(self, tmp_path: Path) -> None:
+        """A variant that fails resolution rolls back its whole file's fan-out.
+
+        `bad.yaml` carries Claude-only `sdk_options`: it resolves cleanly under
+        the claude-code variant but fails under the codex variant (which forbids
+        the field). Because a file's resolved tasks are buffered and committed as
+        a unit, the clean claude-code entry is rolled back with the failing codex
+        one — the file is skipped whole, never left as a lopsided partial fan-out
+        that would skew an A/B comparison. Sibling `good.yaml` (no sdk_options)
+        resolves under both variants, so the failure is isolated, not a global
+        abort.
+        """
+        from coder_eval.orchestration.config import BatchRunConfig
+        from coder_eval.orchestration.experiment import resolve_all_tasks
+
+        def _task(task_id: str, agent: dict[str, Any] | None = None) -> dict[str, Any]:
+            data: dict[str, Any] = {
+                "task_id": task_id,
+                "description": "d",
+                "initial_prompt": "p",
+                "sandbox": {"driver": "tempdir"},
+                "success_criteria": [{"type": "file_exists", "path": "f.py", "description": "d"}],
+            }
+            if agent is not None:
+                data["agent"] = agent
+            return data
+
+        good_file = tmp_path / "good.yaml"
+        good_file.write_text(yaml.dump(_task("good-task")))
+        bad_file = tmp_path / "bad.yaml"
+        # Claude-only sdk_options: valid under the claude-code variant, forbidden
+        # once the codex variant rewrites the agent kind.
+        bad_file.write_text(
+            yaml.dump(_task("bad-task", agent={"type": "claude-code", "sdk_options": {"effort": "high"}}))
+        )
+
+        experiment = ExperimentDefinition(
+            experiment_id="exp",
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}),
+            variants=[
+                ExperimentVariant(variant_id="as-claude"),
+                ExperimentVariant(variant_id="as-codex", agent={"type": "codex"}),
+            ],
+        )
+        config = BatchRunConfig(run_dir=tmp_path / "runs")
+
+        resolved, skipped = resolve_all_tasks([good_file, bad_file], experiment, experiment, config)
+
+        # good.yaml resolves for BOTH variants; bad.yaml is skipped whole — its
+        # clean claude-code entry is rolled back with the failing codex one.
+        assert {rt.task.task_id for rt in resolved} == {"good-task"}
+        assert sorted(rt.variant_id for rt in resolved) == ["as-claude", "as-codex"]
+        assert len(skipped) == 1
+        assert skipped[0].path == str(bad_file)
+        assert "sdk_options" in skipped[0].reason

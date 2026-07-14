@@ -552,10 +552,18 @@ def resolve_all_tasks(
     Also handles tag filtering and unique task ID validation.
 
     Task YAMLs that fail to load (YAML parse error, Pydantic validation,
-    dataset expansion error) are recorded in the returned ``skipped`` list
-    and excluded from the resolved set rather than aborting the suite. The
-    caller surfaces ``skipped`` in the run summary so the failure is loud
-    but recoverable.
+    dataset expansion error) are recorded in the returned ``skipped`` list and
+    excluded from the resolved set rather than aborting the suite.
+
+    Per-task config-resolution failures (a task whose own YAML is incompatible
+    with the resolved run — e.g. Claude-only ``sdk_options`` surviving a
+    ``--type codex`` override, which ``CodexAgentConfig`` forbids) are likewise
+    demoted to ``skipped`` — but only when other tasks resolve. If EVERY task
+    that reaches resolution fails, the cause is a global invocation error (a bad
+    ``--type`` / ``-D`` value, repeats over the cap) rather than a per-task
+    incompatibility, so it is re-raised and aborts the run. Early-stop arming
+    errors always propagate. The caller surfaces ``skipped`` in the run summary
+    so per-task failures are loud but recoverable.
 
     Args:
         task_files: Paths to task YAML files.
@@ -572,10 +580,18 @@ def resolve_all_tasks(
     Raises:
         ValueError: If duplicate task IDs are found after resolution.
     """
-    from .early_stop import validate_early_stop
+    from .early_stop import EarlyStopConfigError, validate_early_stop
 
     resolved: list[ResolvedTask] = []
     skipped: list[SkippedTask] = []
+    # Per-task config-resolution failures are collected here rather than raised
+    # inline. After the loop they are demoted to ``skipped`` — UNLESS every task
+    # that reached resolution failed, which signals a global invocation error
+    # (bad --type, an invalid -D value, repeats over the cap) that trips every
+    # task identically rather than a per-task incompatibility; that case is
+    # re-raised so the CLI aborts cleanly instead of producing an empty run.
+    resolution_errors: list[tuple[Path, Exception]] = []
+    attempted = 0
 
     # Resolve variant-level initial_prompt_file paths before the main loop
     exp_dir = experiment_file.parent if experiment_file is not None else None
@@ -623,50 +639,89 @@ def resolve_all_tasks(
             skipped.append(SkippedTask(path=str(task_file), reason=reason))
             continue
 
-        for expanded_task in expanded_tasks:
-            for variant in experiment.variants:
-                # Apply layers 1-4 (default → experiment-defaults → task → variant) + resolve repeats
-                resolved_task, lineage, effective_repeats = resolve_task_for_variant(
-                    default_experiment, expanded_task, experiment, variant, config
-                )
-
-                # Resolve file paths injected by variant overrides
-                resolve_task_files(resolved_task, task_file, experiment_file)
-
-                # Apply prompt mutations or overrides (between file resolution and CLI overrides)
-                _apply_prompt_overrides(resolved_task, experiment, variant, lineage)
-
-                # Apply layer 5 (CLI overrides)
-                _apply_cli_overrides(resolved_task, config, lineage)
-
-                # Early-stop guardrails: run once the task is fully resolved (all 5
-                # layers merged, incl. -D run_limits.stop_early). No-op unless armed;
-                # a bad arming raises EarlyStopConfigError (a ValueError) which the
-                # run path converts to a clean CLI error.
-                validate_early_stop(resolved_task)
-
-                # Fan-out: simulation n_trials takes precedence over experiment repeats
-                # when simulation is active; otherwise use experiment-level repeats.
-                sim = resolved_task.simulation
-                n_trials = sim.n_trials if (sim is not None and sim.enabled) else 1
-                fan_count = n_trials if n_trials > 1 else effective_repeats
-                for rep in range(fan_count):
-                    resolved.append(
-                        ResolvedTask(
-                            task=resolved_task,
-                            task_file=task_file,
-                            run_dir=build_task_run_dir(
-                                config.run_dir,
-                                variant.variant_id,
-                                resolved_task.task_id,
-                                replicate_index=rep,
-                            ),
-                            variant_id=variant.variant_id,
-                            replicate_index=rep,
-                            source_yaml=source_yaml,
-                            config_lineage=dict(lineage),
-                        )
+        # Isolate layer 1-5 config resolution per task file. A task whose own
+        # YAML config is incompatible with the resolved run — e.g. Claude-only
+        # agent fields (`sdk_options`) surviving a `--type codex` override, which
+        # `CodexAgentConfig` forbids (`extra="forbid"`) — raises here. Without
+        # isolation that single task aborts the entire coder-eval run. Buffer the
+        # file's resolved tasks and commit them only once the whole file
+        # resolves, so a mid-file failure discards this file's fan-out as a unit
+        # (mirroring the load/expand isolation above) rather than leaving a
+        # partial, lopsided fan-out behind.
+        attempted += 1
+        file_resolved: list[ResolvedTask] = []
+        try:
+            for expanded_task in expanded_tasks:
+                for variant in experiment.variants:
+                    # Apply layers 1-4 (default → experiment-defaults → task → variant) + resolve repeats
+                    resolved_task, lineage, effective_repeats = resolve_task_for_variant(
+                        default_experiment, expanded_task, experiment, variant, config
                     )
+
+                    # Resolve file paths injected by variant overrides
+                    resolve_task_files(resolved_task, task_file, experiment_file)
+
+                    # Apply prompt mutations or overrides (between file resolution and CLI overrides)
+                    _apply_prompt_overrides(resolved_task, experiment, variant, lineage)
+
+                    # Apply layer 5 (CLI overrides)
+                    _apply_cli_overrides(resolved_task, config, lineage)
+
+                    # Early-stop guardrails: run once the task is fully resolved (all 5
+                    # layers merged, incl. -D run_limits.stop_early). No-op unless armed;
+                    # a bad arming raises EarlyStopConfigError (a ValueError).
+                    validate_early_stop(resolved_task)
+
+                    # Fan-out: simulation n_trials takes precedence over experiment repeats
+                    # when simulation is active; otherwise use experiment-level repeats.
+                    sim = resolved_task.simulation
+                    n_trials = sim.n_trials if (sim is not None and sim.enabled) else 1
+                    fan_count = n_trials if n_trials > 1 else effective_repeats
+                    for rep in range(fan_count):
+                        file_resolved.append(
+                            ResolvedTask(
+                                task=resolved_task,
+                                task_file=task_file,
+                                run_dir=build_task_run_dir(
+                                    config.run_dir,
+                                    variant.variant_id,
+                                    resolved_task.task_id,
+                                    replicate_index=rep,
+                                ),
+                                variant_id=variant.variant_id,
+                                replicate_index=rep,
+                                source_yaml=source_yaml,
+                                config_lineage=dict(lineage),
+                            )
+                        )
+        # Early-stop arming errors are a deliberate hard stop: they always
+        # propagate (never demoted to skipped) so a misarmed run fails loudly.
+        except EarlyStopConfigError:
+            raise
+        # Narrow set, matching the load/expand block above: config-resolution
+        # and IO failures are collected (decided after the loop, below);
+        # AttributeError / TypeError / ImportError still crash loudly as
+        # regressions. Pydantic ValidationError is a ValueError subclass in v2,
+        # so it's covered.
+        except (FileNotFoundError, OSError, ValueError, yaml.YAMLError) as exc:
+            resolution_errors.append((task_file, exc))
+            continue
+
+        resolved.extend(file_resolved)
+
+    # Decide the fate of collected per-task resolution failures. If EVERY task
+    # that reached resolution failed, the cause is almost certainly a global
+    # invocation error (a bad --type / -D value, repeats over the cap) that
+    # trips every task identically — re-raise the first so the CLI aborts
+    # cleanly with its own message instead of silently producing an empty run.
+    # Otherwise the failures are per-task incompatibilities: demote them to
+    # ``skipped`` and run the tasks that did resolve.
+    if resolution_errors and len(resolution_errors) == attempted:
+        raise resolution_errors[0][1]
+    for err_file, exc in resolution_errors:
+        reason = f"{type(exc).__name__}: {exc}"[:500]
+        logger.warning("Skipping task file %s — config resolution failed: %s", err_file, reason)
+        skipped.append(SkippedTask(path=str(err_file), reason=reason))
 
     # Filter by tags
     if config.include_tags or config.exclude_tags:
