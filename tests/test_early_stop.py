@@ -242,6 +242,14 @@ class TestEngagedSkillNames:
         got = _engaged_skill_names(_cmd("Read", {"file_path": "/repo/skills/date-teller/SKILL.md"}))
         assert got == {"date-teller"}
 
+    def test_windows_file_read_path_segment(self) -> None:
+        got = _engaged_skill_names(_cmd("Read", {"file_path": r"C:\repo\skills\date-teller\SKILL.md"}))
+        assert got == {"date-teller"}
+
+    def test_json_escaped_windows_path_segment(self) -> None:
+        got = _engaged_skill_names(_cmd("Bash", {"command": r"type C:\\repo\\skills\\date-teller\\SKILL.md"}))
+        assert got == {"date-teller"}
+
     def test_bash_command_path_segment(self) -> None:
         assert _engaged_skill_names(_cmd("Bash", {"command": "cat skills/foo/refs.md"})) == {"foo"}
 

@@ -133,6 +133,22 @@ class TestSkillTriggeredCodex:
         )
         assert result.score == 1.0 and result.observed_label == "yes"
 
+    def test_codex_reads_skill_md_windows_path_tp(self) -> None:
+        result = _check(
+            expected_skill="uipath-agents",
+            skill_name="uipath-agents",
+            commands=[self._sed(r"C:\sandbox\.agents\skills\uipath-agents\SKILL.md")],
+        )
+        assert result.score == 1.0 and result.observed_label == "yes"
+
+    def test_codex_reads_skill_md_json_escaped_windows_command_tp(self) -> None:
+        result = _check(
+            expected_skill="uipath-agents",
+            skill_name="uipath-agents",
+            commands=[self._sed(r"C:\\sandbox\\.agents\\skills\\uipath-agents\\SKILL.md")],
+        )
+        assert result.score == 1.0 and result.observed_label == "yes"
+
     def test_codex_reads_wrong_skill_not_counted(self) -> None:
         # Read uipath-rpa's SKILL.md, but criterion filters on uipath-agents -> observed="no".
         result = _check(
