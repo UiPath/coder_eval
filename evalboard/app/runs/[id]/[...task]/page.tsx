@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import {
+    parseConversation,
+    readConversationLog,
     readLogTail,
     readTaskDetail,
     readTaskReplicates,
@@ -16,6 +18,7 @@ import { displayedTurns } from "@/lib/turns";
 import { ExpectedTurnsStat, TurnsStat } from "./turns-stat";
 import {
     ArtifactsSection,
+    ConversationSection,
     CostExplorerSection,
     CriteriaSection,
     FlowDebugSection,
@@ -59,6 +62,9 @@ export default async function TaskPage({
     );
 
     const log = await readLogTail(id, taskId, replicate);
+    const conversation = parseConversation(
+        await readConversationLog(id, taskId, replicate),
+    );
     const { flowDebug } = task;
 
     return (
@@ -284,6 +290,9 @@ export default async function TaskPage({
 
             {flowDebug && <FlowDebugSection flowDebug={flowDebug} />}
             <CriteriaSection criteria={task.criteria} />
+            {conversation.length > 0 && (
+                <ConversationSection turns={conversation} />
+            )}
             {task.messages.length > 0 && (
                 <CostExplorerSection
                     messages={task.messages}

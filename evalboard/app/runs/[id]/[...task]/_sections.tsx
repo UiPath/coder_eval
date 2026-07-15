@@ -3,6 +3,7 @@
 import { type ReactNode, useState } from "react";
 import type {
     ArtifactRef,
+    ConversationTurn,
     CriterionResult,
     FlowDebugResult,
     MessageEvent,
@@ -1371,6 +1372,41 @@ export function ArtifactsSection({
                     <ArtifactList runId={runId} items={rest} />
                 </Expandable>
             )}
+        </section>
+    );
+}
+
+export function ConversationSection({ turns }: { turns: ConversationTurn[] }) {
+    return (
+        <section className="space-y-2">
+            <h2 className="text-sm font-semibold text-gray-900">Conversation</h2>
+            <div className="space-y-3">
+                {turns.map((t, i) => {
+                    const isUser = t.role === "USER";
+                    return (
+                        <div
+                            key={i}
+                            className={`flex ${isUser ? "justify-end" : "justify-start"}`}
+                        >
+                            <div
+                                className={`max-w-[80%] rounded-lg border p-3 ${
+                                    isUser
+                                        ? "bg-gray-50 border-gray-200"
+                                        : "bg-studio-blue/5 border-studio-blue/20"
+                                }`}
+                            >
+                                <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">
+                                    {t.role} · turn {t.turn}
+                                    {t.metadata ? ` · ${t.metadata}` : ""}
+                                </div>
+                                <div className="whitespace-pre-wrap text-sm text-gray-800 leading-relaxed">
+                                    {t.text}
+                                </div>
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
         </section>
     );
 }
