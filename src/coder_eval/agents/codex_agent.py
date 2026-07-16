@@ -1098,16 +1098,25 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def _setup_login_shell_home(self) -> None:
         """Create a per-task HOME whose profiles restore the mock PATH prepend.
 
-        Codex issues every shell command as ``bash -lc``. A login shell
-        re-sources ``/etc/profile``, which unconditionally RESETS PATH —
-        silently dropping the mock-CLI prepend passed via the app-server
-        environment, so bare commands resolve to the REAL CLIs (real-tenant
-        contamination). ``~/.bash_profile`` is sourced AFTER ``/etc/profile``,
-        so a generated per-task HOME (wired up in ``_build_codex_env``; codex
-        state stays in CODEX_HOME) gets the last word and re-prepends the mock
-        dirs. Per-task rather than the user's real dotfiles so parallel tasks
-        with different mocks cannot collide. No-op without mock dirs or on
-        non-POSIX hosts (Windows codex does not shell through bash).
+        Codex issues every shell command as ``bash -lc`` (bash/sh only — if it
+        ever shells through zsh or fish, their profile files need the same
+        treatment here). A login shell re-sources ``/etc/profile``, which
+        unconditionally RESETS PATH — silently dropping the mock-CLI prepend
+        passed via the app-server environment, so bare commands resolve to the
+        REAL CLIs (real-tenant contamination). ``~/.bash_profile`` is sourced
+        AFTER ``/etc/profile``, so a generated per-task HOME (wired up in
+        ``_build_codex_env``; codex state stays in CODEX_HOME) gets the last
+        word and re-prepends the mock dirs. Per-task rather than the user's
+        real dotfiles so parallel tasks with different mocks cannot collide.
+        No-op without mock dirs or on non-POSIX hosts (Windows codex does not
+        shell through bash).
+
+        Bash uses the env HOME only to PICK the profile file; the generated
+        profile's first act is to export the ORIGINAL home back, so the
+        sourced user profile and the command body see the real ``$HOME``
+        (git config, tool caches, ``$HOME``-relative sourcing keep working).
+        Known residual gap: a NESTED login shell inside a command re-reads the
+        real profiles and loses the prepend again.
         """
         self._cleanup_login_shell_home()
         if not (self._env_path_prepend and self._login_shell_profiles_supported()):
@@ -1120,14 +1129,22 @@ class CodexAgent(Agent[CodexAgentConfig]):
         home = Path(tempfile.mkdtemp(prefix="coder-eval-codex-home-"))
         for name in _LOGIN_PROFILE_NAMES:
             content = self._login_profile_content(name, original_home, export_line)
-            (home / name).write_text(content, encoding="utf-8")
+            # newline="\n": the profile must stay LF-only no matter which host
+            # builds it, or bash sees literal \r at end of line.
+            (home / name).write_text(content, encoding="utf-8", newline="\n")
         self._login_shell_home = home
         self._log.debug(f"Login-shell mock-PATH home: {home}")
 
     @staticmethod
     def _login_profile_content(profile_name: str, original_home: str, export_line: str) -> str:
-        """One generated profile file: source the ORIGINAL home's profile (so
-        image/user setup isn't lost), then re-prepend the mock dirs.
+        """One generated profile file: restore the ORIGINAL ``$HOME``, source
+        that home's own profile (so image/user setup isn't lost), then
+        re-prepend the mock dirs.
+
+        The env HOME pointing at the generated dir exists ONLY so bash selects
+        this file; exporting the original home back on the first line keeps
+        every ``$HOME`` consumer (git, npm, the sourced profile's own
+        ``$HOME/.bashrc`` references) on the real home.
 
         ``.bash_profile`` mimics bash's first-found chain over the original
         home; the ``.profile`` twin (read by ``sh``/``dash`` login shells)
@@ -1140,6 +1157,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         ]
         if original_home:
             orig = shlex.quote(original_home)
+            lines.append(f"export HOME={orig}")
             if profile_name == ".bash_profile":
                 lines += [
                     f"if [ -r {orig}/.bash_profile ]; then . {orig}/.bash_profile",

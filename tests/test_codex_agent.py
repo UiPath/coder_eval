@@ -1644,6 +1644,53 @@ class TestLoginShellMockPathHome:
         finally:
             agent._cleanup_login_shell_home()
 
+    def test_profile_restores_original_home_before_sourcing(self, monkeypatch, tmp_path):
+        """The generated profile's FIRST act is exporting the original HOME
+        back — the temp HOME exists only so bash picks this file; everything
+        sourced after (and the command body) must see the real $HOME."""
+        import shlex
+
+        self._force_posix(monkeypatch)
+        orig = tmp_path / "orig-home"
+        monkeypatch.setenv("HOME", str(orig))
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+
+        agent._setup_login_shell_home()
+        try:
+            home = agent._login_shell_home
+            assert home is not None
+            for name in (".bash_profile", ".profile"):
+                content = (home / name).read_text(encoding="utf-8")
+                export_home = content.index(f"export HOME={shlex.quote(str(orig))}")
+                assert export_home < content.index(". ")  # before any sourcing
+                assert export_home < content.index("export PATH=")
+        finally:
+            agent._cleanup_login_shell_home()
+
+    def test_profile_without_original_home_only_prepends(self, monkeypatch):
+        """HOME unset in the harness env: no restore, no sourcing — just the
+        mock prepend."""
+        content = CodexAgent._login_profile_content(".bash_profile", "", 'export PATH=/m:"$PATH"')
+        assert "export HOME" not in content
+        assert ". " not in content
+        assert 'export PATH=/m:"$PATH"' in content
+
+    def test_generated_profiles_are_lf_only(self, monkeypatch, tmp_path):
+        """A profile built on ANY host must stay LF-only — bash chokes on \\r."""
+        self._force_posix(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+
+        agent._setup_login_shell_home()
+        try:
+            home = agent._login_shell_home
+            assert home is not None
+            for name in (".bash_profile", ".profile"):
+                raw = (home / name).read_bytes()
+                assert b"\r" not in raw
+        finally:
+            agent._cleanup_login_shell_home()
+
     def test_no_login_home_without_mock_dirs(self, monkeypatch):
         self._force_posix(monkeypatch)
         agent = self._agent_with_prepend([])
@@ -1717,11 +1764,26 @@ class TestLoginShellMockPathHome:
         reason="requires a POSIX bash to exercise a real login shell",
     )
     def test_login_shell_restores_mock_prepend_end_to_end(self, monkeypatch, tmp_path):
-        """Real ``bash -lc`` with the generated HOME: even after /etc/profile
-        resets PATH, the mock dir must come out FIRST."""
+        """Real ``bash -lc`` with the generated HOME, against a CONTROLLED
+        original home (hermetic — the developer/CI dotfiles play no part):
+
+        - the original .bash_profile resets PATH (worst case) and sources
+          ``$HOME/.bashrc`` — which must resolve to the ORIGINAL home;
+        - the mock dir still comes out FIRST on PATH;
+        - the command body sees the original ``$HOME``.
+        """
         import subprocess
 
         self._force_posix(monkeypatch)
+        orig = tmp_path / "orig-home"
+        orig.mkdir()
+        (orig / ".bash_profile").write_text(
+            'export PATH="/usr/local/bin:/usr/bin:/bin"\n[ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        (orig / ".bashrc").write_text("export BASHRC_SOURCED=1\n", encoding="utf-8", newline="\n")
+        monkeypatch.setenv("HOME", str(orig))
         agent = self._agent_with_prepend([str(tmp_path / "mocks")])
         (tmp_path / "mocks").mkdir()
 
@@ -1730,13 +1792,15 @@ class TestLoginShellMockPathHome:
             home = agent._login_shell_home
             assert home is not None
             result = subprocess.run(
-                ["bash", "-lc", "echo $PATH"],
+                ["bash", "-lc", 'echo "$PATH|$HOME|${BASHRC_SOURCED:-0}"'],
                 env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
                 capture_output=True,
                 text=True,
                 check=True,
             )
-            first = result.stdout.strip().split(":")[0]
-            assert first == str(tmp_path / "mocks")
+            path_value, home_value, bashrc_sourced = result.stdout.strip().split("|")
+            assert path_value.split(":")[0] == str(tmp_path / "mocks")
+            assert home_value == str(orig)
+            assert bashrc_sourced == "1"
         finally:
             agent._cleanup_login_shell_home()
