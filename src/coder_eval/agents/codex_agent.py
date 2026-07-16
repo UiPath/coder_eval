@@ -5,7 +5,9 @@ import contextlib
 import json
 import logging
 import os
+import shlex
 import shutil
+import tempfile
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -214,6 +216,11 @@ def _message_uncached_input(m: AssistantMessage) -> int:
 # supports the Responses API (it rejects `wire_api = "chat"` as "no longer
 # supported"), so this is a fixed constant, not an operator knob.
 _CODEX_WIRE_API = "responses"
+
+# Login-shell profile files generated into the per-task HOME (see
+# _setup_login_shell_home). ``.bash_profile`` is what ``bash -l`` reads;
+# ``.profile`` covers ``sh``/``dash`` login shells.
+_LOGIN_PROFILE_NAMES = (".bash_profile", ".profile")
 
 
 def _get_item_root(notification: Any) -> Any:
@@ -649,6 +656,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self.thread: Any = None
         self.working_directory: Path | None = None
         self._env_path_prepend: list[str] = []
+        self._login_shell_home: Path | None = None
         # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
         # bookkeeping lives on the Agent base class (shared defaults + helpers).
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
@@ -677,6 +685,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
+        self._setup_login_shell_home()
         self._state = AgentState.WORKING
 
         try:
@@ -872,6 +881,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._close_client()
         self.thread = None
         self._active_turn_handle = None
+        self._cleanup_login_shell_home()
         self._mark_stopped()
 
     async def kill(self) -> None:
@@ -1071,7 +1081,86 @@ class CodexAgent(Agent[CodexAgentConfig]):
             path_key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
             env[path_key] = os.pathsep.join([*self._env_path_prepend, os.environ.get(path_key, "")])
             self._log.debug(f"PATH prepend: {os.pathsep.join(self._env_path_prepend)}")
+        if self._login_shell_home is not None:
+            # Point login shells at the generated profile dir (see
+            # _setup_login_shell_home) while pinning codex state (auth, rollout
+            # sessions) to its real location — _codex_home() reads the same
+            # resolution for sub-agent rollout recovery, so both sides agree.
+            env["HOME"] = str(self._login_shell_home)
+            env["CODEX_HOME"] = str(self._codex_home())
         return env if env else None
+
+    @staticmethod
+    def _login_shell_profiles_supported() -> bool:
+        """Whether to generate login-shell profile shims (POSIX shells only)."""
+        return os.name == "posix"
+
+    def _setup_login_shell_home(self) -> None:
+        """Create a per-task HOME whose profiles restore the mock PATH prepend.
+
+        Codex issues every shell command as ``bash -lc``. A login shell
+        re-sources ``/etc/profile``, which unconditionally RESETS PATH —
+        silently dropping the mock-CLI prepend passed via the app-server
+        environment, so bare commands resolve to the REAL CLIs (real-tenant
+        contamination). ``~/.bash_profile`` is sourced AFTER ``/etc/profile``,
+        so a generated per-task HOME (wired up in ``_build_codex_env``; codex
+        state stays in CODEX_HOME) gets the last word and re-prepends the mock
+        dirs. Per-task rather than the user's real dotfiles so parallel tasks
+        with different mocks cannot collide. No-op without mock dirs or on
+        non-POSIX hosts (Windows codex does not shell through bash).
+        """
+        self._cleanup_login_shell_home()
+        if not (self._env_path_prepend and self._login_shell_profiles_supported()):
+            return
+        original_home = os.environ.get("HOME", "")
+        # The profile only ever executes under a POSIX shell, so the PATH
+        # separator is ':' regardless of the host building it.
+        quoted_prepend = shlex.quote(":".join(self._env_path_prepend))
+        export_line = f'export PATH={quoted_prepend}:"$PATH"'
+        home = Path(tempfile.mkdtemp(prefix="coder-eval-codex-home-"))
+        for name in _LOGIN_PROFILE_NAMES:
+            content = self._login_profile_content(name, original_home, export_line)
+            (home / name).write_text(content, encoding="utf-8")
+        self._login_shell_home = home
+        self._log.debug(f"Login-shell mock-PATH home: {home}")
+
+    @staticmethod
+    def _login_profile_content(profile_name: str, original_home: str, export_line: str) -> str:
+        """One generated profile file: source the ORIGINAL home's profile (so
+        image/user setup isn't lost), then re-prepend the mock dirs.
+
+        ``.bash_profile`` mimics bash's first-found chain over the original
+        home; the ``.profile`` twin (read by ``sh``/``dash`` login shells)
+        sources only ``.profile`` — the bash-specific files may contain
+        bashisms a POSIX shell would choke on.
+        """
+        lines = [
+            "# Generated by coder_eval (CodexAgent): /etc/profile resets PATH in",
+            "# login shells, dropping the mock-CLI prepend — this restores it.",
+        ]
+        if original_home:
+            orig = shlex.quote(original_home)
+            if profile_name == ".bash_profile":
+                lines += [
+                    f"if [ -r {orig}/.bash_profile ]; then . {orig}/.bash_profile",
+                    f"elif [ -r {orig}/.bash_login ]; then . {orig}/.bash_login",
+                    f"elif [ -r {orig}/.profile ]; then . {orig}/.profile",
+                    "fi",
+                ]
+            else:
+                lines += [
+                    f"if [ -r {orig}/.profile ]; then . {orig}/.profile",
+                    "fi",
+                ]
+        lines.append(export_line)
+        return "\n".join(lines) + "\n"
+
+    def _cleanup_login_shell_home(self) -> None:
+        """Remove the generated per-task HOME (best-effort, idempotent)."""
+        home, self._login_shell_home = self._login_shell_home, None
+        if home is None:
+            return
+        shutil.rmtree(home, ignore_errors=True)
 
     def _build_thread_options(self) -> dict[str, Any]:
         """Build thread_start options from agent config.

@@ -1563,3 +1563,180 @@ class TestOrchestratorDispatch:
         orch = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="t")
         agent = await orch._create_agent()
         assert isinstance(agent, CodexAgent)
+
+
+class TestLoginShellMockPathHome:
+    """Codex issues every shell command as ``bash -lc``. The login shell
+    re-sources ``/etc/profile``, which unconditionally RESETS PATH — silently
+    dropping the mock-CLI prepend passed via the app-server env, so bare
+    commands resolve to the REAL CLIs (real-tenant contamination). The agent
+    therefore generates a per-task HOME whose ``.bash_profile``/``.profile``
+    run AFTER /etc/profile and restore the prepend; ``_build_codex_env`` points
+    HOME at it and pins CODEX_HOME so codex state stays put."""
+
+    @staticmethod
+    def _force_posix(monkeypatch, supported: bool = True):
+        monkeypatch.setattr(CodexAgent, "_login_shell_profiles_supported", staticmethod(lambda: supported))
+
+    @staticmethod
+    def _agent_with_prepend(prepend):
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+        agent._env_path_prepend = list(prepend)
+        return agent
+
+    def test_setup_writes_profiles_with_mock_prepend(self, monkeypatch, tmp_path):
+        self._force_posix(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
+        agent = self._agent_with_prepend(["/sandbox/mocks", "/sandbox/bins"])
+
+        agent._setup_login_shell_home()
+        try:
+            home = agent._login_shell_home
+            assert home is not None and home.is_dir()
+            for name in (".bash_profile", ".profile"):
+                content = (home / name).read_text(encoding="utf-8")
+                # The export must prepend the mock dirs (POSIX ':' joined) ahead
+                # of whatever /etc/profile left in PATH.
+                assert 'export PATH=/sandbox/mocks:/sandbox/bins:"$PATH"' in content
+        finally:
+            agent._cleanup_login_shell_home()
+
+    def test_bash_profile_sources_original_home_first_found_chain(self, monkeypatch, tmp_path):
+        """The generated .bash_profile mimics bash's first-found chain over the
+        ORIGINAL home (so image/user setup isn't lost); the .profile twin (read
+        by sh/dash login shells) sources only .profile — the bash-specific
+        files may contain bashisms."""
+        self._force_posix(monkeypatch)
+        orig = tmp_path / "orig-home"
+        monkeypatch.setenv("HOME", str(orig))
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+
+        agent._setup_login_shell_home()
+        try:
+            import shlex
+
+            home = agent._login_shell_home
+            assert home is not None
+            qorig = shlex.quote(str(orig))
+            bash_profile = (home / ".bash_profile").read_text(encoding="utf-8")
+            for name in (".bash_profile", ".bash_login", ".profile"):
+                assert f". {qorig}/{name}" in bash_profile
+            profile = (home / ".profile").read_text(encoding="utf-8")
+            assert f". {qorig}/.profile" in profile
+            assert f". {qorig}/.bash_profile" not in profile
+        finally:
+            agent._cleanup_login_shell_home()
+
+    def test_mock_dirs_with_shell_metacharacters_are_quoted(self, monkeypatch, tmp_path):
+        import shlex
+
+        self._force_posix(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
+        weird = "/sandbox/mo cks/$(evil)"
+        agent = self._agent_with_prepend([weird])
+
+        agent._setup_login_shell_home()
+        try:
+            home = agent._login_shell_home
+            assert home is not None
+            content = (home / ".bash_profile").read_text(encoding="utf-8")
+            assert f'export PATH={shlex.quote(weird)}:"$PATH"' in content
+        finally:
+            agent._cleanup_login_shell_home()
+
+    def test_no_login_home_without_mock_dirs(self, monkeypatch):
+        self._force_posix(monkeypatch)
+        agent = self._agent_with_prepend([])
+        agent._setup_login_shell_home()
+        assert agent._login_shell_home is None
+
+    def test_no_login_home_on_unsupported_platform(self, monkeypatch):
+        self._force_posix(monkeypatch, supported=False)
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+        agent._setup_login_shell_home()
+        assert agent._login_shell_home is None
+
+    def test_build_codex_env_sets_home_and_pins_codex_home(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("CODEX_API_KEY", raising=False)
+        monkeypatch.setenv("PATH", "/parent/bin")
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+        agent._login_shell_home = tmp_path / "login-home"
+
+        env = agent._build_codex_env()
+        assert env is not None
+        assert env["HOME"] == str(tmp_path / "login-home")
+        # Codex state (auth, rollout sessions) must NOT move with HOME — the
+        # harness reads the same _codex_home() for sub-agent rollout recovery.
+        assert env["CODEX_HOME"] == str(agent._codex_home())
+
+    def test_build_codex_env_without_login_home_leaves_home_alone(self, monkeypatch):
+        monkeypatch.setenv("CODEX_API_KEY", "k")
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+        env = agent._build_codex_env()
+        assert env is not None
+        assert "HOME" not in env
+        assert "CODEX_HOME" not in env
+
+    def test_setup_is_rerunnable_and_cleanup_removes_dir(self, monkeypatch, tmp_path):
+        self._force_posix(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+
+        agent._setup_login_shell_home()
+        first = agent._login_shell_home
+        assert first is not None
+        agent._setup_login_shell_home()  # retried start() must not leak the old dir
+        second = agent._login_shell_home
+        assert second is not None
+        assert not first.exists()
+
+        agent._cleanup_login_shell_home()
+        assert agent._login_shell_home is None
+        assert not second.exists()
+
+    async def test_start_creates_and_stop_cleans_login_home(self, monkeypatch, tmp_path):
+        import openai_codex
+
+        self._force_posix(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
+        monkeypatch.delenv("CODEX_API_KEY", raising=False)
+        monkeypatch.setattr(openai_codex, "Codex", lambda **_kw: SimpleNamespace(close=lambda: None))
+
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+        await agent.start(str(tmp_path), env_path_prepend=["/sandbox/mocks"])
+
+        home = agent._login_shell_home
+        assert home is not None and (home / ".bash_profile").is_file()
+
+        await agent.stop()
+        assert agent._login_shell_home is None
+        assert not home.exists()
+
+    @pytest.mark.skipif(
+        __import__("os").name != "posix" or not __import__("shutil").which("bash"),
+        reason="requires a POSIX bash to exercise a real login shell",
+    )
+    def test_login_shell_restores_mock_prepend_end_to_end(self, monkeypatch, tmp_path):
+        """Real ``bash -lc`` with the generated HOME: even after /etc/profile
+        resets PATH, the mock dir must come out FIRST."""
+        import subprocess
+
+        self._force_posix(monkeypatch)
+        agent = self._agent_with_prepend([str(tmp_path / "mocks")])
+        (tmp_path / "mocks").mkdir()
+
+        agent._setup_login_shell_home()
+        try:
+            home = agent._login_shell_home
+            assert home is not None
+            result = subprocess.run(
+                ["bash", "-lc", "echo $PATH"],
+                env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            first = result.stdout.strip().split(":")[0]
+            assert first == str(tmp_path / "mocks")
+        finally:
+            agent._cleanup_login_shell_home()
