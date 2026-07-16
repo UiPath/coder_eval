@@ -583,9 +583,13 @@ async def _run_with_experiment(
         default_experiment = experiment  # fall back to custom as its own baseline
 
     # Resolve tasks through experiment layer (applies all 5 config layers).
-    # Layer-5 override failures (invalid -D value/path, sdk_options on a
-    # non-claude agent, the agent.type guard) and duplicate-task-id checks raise
-    # ValueError here; surface them as a clean CLI error instead of a traceback.
+    # Global failures raise ValueError here — duplicate task IDs, early-stop
+    # arming, or an invocation error that trips every task identically (bad
+    # --type / -D value, repeats over the cap) — and we surface them as a clean
+    # CLI error instead of a traceback. Per-task config-resolution failures
+    # (e.g. sdk_options on a non-claude agent) among otherwise-resolvable tasks
+    # are NOT raised: resolve_all_tasks isolates them into `skipped` so one
+    # incompatible task can't abort the whole suite.
     try:
         resolved, skipped = resolve_all_tasks(
             task_files=all_task_files,
