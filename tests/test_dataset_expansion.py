@@ -829,3 +829,70 @@ class TestDatasetRepeatsFanout:
         assert len(skipped) == 1
         assert skipped[0].path == str(bad_file)
         assert "sdk_options" in skipped[0].reason
+
+    def test_every_task_failing_resolution_aborts_as_value_error(self, tmp_path: Path) -> None:
+        """When EVERY attempted task fails resolution, abort rather than return empty.
+
+        Two task files that BOTH carry Claude-only `sdk_options` under `--type
+        codex`: with no sibling resolving, `len(resolution_errors) == attempted`,
+        so the suite must not silently produce an empty run. It raises a
+        ``ValueError`` (the caller's `except ValueError` contract → clean
+        typer.BadParameter) carrying the first underlying reason — regardless of
+        that reason's concrete exception type — never a stored non-ValueError
+        re-raised verbatim into a raw traceback.
+        """
+
+        def _claude_only(task_id: str) -> dict[str, Any]:
+            return {
+                "task_id": task_id,
+                "description": "d",
+                "initial_prompt": "p",
+                "sandbox": {"driver": "tempdir"},
+                "success_criteria": [{"type": "file_exists", "path": "f.py", "description": "d"}],
+                "agent": {"type": "claude-code", "sdk_options": {"effort": "high"}},
+            }
+
+        file_a = tmp_path / "a.yaml"
+        file_a.write_text(yaml.dump(_claude_only("task-a")))
+        file_b = tmp_path / "b.yaml"
+        file_b.write_text(yaml.dump(_claude_only("task-b")))
+
+        experiment = ExperimentDefinition(
+            experiment_id="default",
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}),
+            variants=[ExperimentVariant(variant_id="v1")],
+        )
+        config = BatchRunConfig(run_dir=tmp_path / "runs", agent_type="codex")
+
+        with pytest.raises(ValueError, match=r"All 2 task file\(s\) failed config resolution"):
+            resolve_all_tasks([file_a, file_b], experiment, experiment, config)
+
+    def test_single_file_non_value_error_surfaces_as_value_error(self, tmp_path: Path) -> None:
+        """The all-fail abort normalizes a non-ValueError reason to ValueError.
+
+        A lone task file whose variant injects a missing `system_prompt_file`
+        raises FileNotFoundError (an OSError, not a ValueError) during layer-5
+        resolution. With a single file, `len(resolution_errors) == attempted == 1`
+        fires the all-fail branch. It must re-raise as a ``ValueError`` so the
+        caller's `except ValueError` catches it (clean CLI error) instead of a
+        FileNotFoundError escaping as a raw traceback.
+        """
+        task = {
+            "task_id": "missing-prompt-task",
+            "description": "d",
+            "initial_prompt": "p",
+            "sandbox": {"driver": "tempdir"},
+            "success_criteria": [{"type": "file_exists", "path": "f.py", "description": "d"}],
+        }
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text(yaml.dump(task))
+
+        experiment = ExperimentDefinition(
+            experiment_id="exp",
+            defaults=ExperimentDefaults(agent={"type": "claude-code"}),
+            variants=[ExperimentVariant(variant_id="v1", agent={"system_prompt_file": "does-not-exist.txt"})],
+        )
+        config = BatchRunConfig(run_dir=tmp_path / "runs")
+
+        with pytest.raises(ValueError, match="failed config resolution"):
+            resolve_all_tasks([task_file], experiment, experiment, config, experiment_file=tmp_path / "exp.yaml")

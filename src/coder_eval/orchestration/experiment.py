@@ -710,14 +710,22 @@ def resolve_all_tasks(
         resolved.extend(file_resolved)
 
     # Decide the fate of collected per-task resolution failures. If EVERY task
-    # that reached resolution failed, the cause is almost certainly a global
-    # invocation error (a bad --type / -D value, repeats over the cap) that
-    # trips every task identically — re-raise the first so the CLI aborts
-    # cleanly with its own message instead of silently producing an empty run.
-    # Otherwise the failures are per-task incompatibilities: demote them to
-    # ``skipped`` and run the tasks that did resolve.
+    # that reached resolution failed, refusing to proceed (rather than producing
+    # an empty run) is the right call — but we can't actually tell a genuine
+    # global misconfig (a bad --type / -D value, repeats over the cap that trips
+    # every task identically) from N tasks each independently incompatible for
+    # the same per-task reason. So don't overclaim "global": raise a fresh
+    # ValueError that carries the first underlying reason, whatever its concrete
+    # type. This also keeps the abort within the caller's `except ValueError`
+    # contract (run_command surfaces it as a clean typer.BadParameter) — the
+    # collected exceptions can be FileNotFoundError/OSError/yaml.YAMLError, none
+    # of which the caller catches, so re-raising one verbatim would escape as a
+    # raw traceback.
     if resolution_errors and len(resolution_errors) == attempted:
-        raise resolution_errors[0][1]
+        first_file, first_exc = resolution_errors[0]
+        raise ValueError(
+            f"All {attempted} task file(s) failed config resolution; first error ({first_file}): {first_exc}"
+        ) from first_exc
     for err_file, exc in resolution_errors:
         reason = f"{type(exc).__name__}: {exc}"[:500]
         logger.warning("Skipping task file %s — config resolution failed: %s", err_file, reason)
