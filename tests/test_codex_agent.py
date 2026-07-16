@@ -498,7 +498,9 @@ def test_get_state_returns_current_state():
 # without a live SDK. These mirror the notification shapes the real stream emits.
 # ---------------------------------------------------------------------------
 
+import tempfile  # noqa: E402
 import time  # noqa: E402
+from pathlib import Path  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 from openai_codex.generated.v2_all import Turn, TurnCompletedNotification  # noqa: E402
@@ -1740,6 +1742,50 @@ class TestLoginShellMockPathHome:
         agent._cleanup_login_shell_home()
         assert agent._login_shell_home is None
         assert not second.exists()
+
+    def test_failed_profile_write_rolls_back_temp_home(self, monkeypatch, tmp_path):
+        """A write failure must not orphan the mkdtemp dir — it is tracked
+        before writing and removed on the way out."""
+        self._force_posix(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+
+        created: list = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def tracking_mkdtemp(*args, **kwargs):
+            d = real_mkdtemp(*args, **kwargs)
+            created.append(d)
+            return d
+
+        monkeypatch.setattr("coder_eval.agents.codex_agent.tempfile.mkdtemp", tracking_mkdtemp)
+        monkeypatch.setattr(
+            CodexAgent,
+            "_login_profile_content",
+            staticmethod(lambda *_a, **_kw: (_ for _ in ()).throw(OSError("disk full"))),
+        )
+
+        with pytest.raises(OSError, match="disk full"):
+            agent._setup_login_shell_home()
+
+        assert agent._login_shell_home is None
+        assert created and not Path(created[0]).exists()
+
+    def test_kill_sync_cleans_login_home(self, monkeypatch, tmp_path):
+        """The watchdog's terminal kill path must not leak the temp HOME."""
+        self._force_posix(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+        agent.codex_client = SimpleNamespace(close=lambda: None)
+
+        agent._setup_login_shell_home()
+        home = agent._login_shell_home
+        assert home is not None
+
+        agent.kill_sync()
+
+        assert agent._login_shell_home is None
+        assert not home.exists()
 
     async def test_start_creates_and_stop_cleans_login_home(self, monkeypatch, tmp_path):
         import openai_codex

@@ -897,6 +897,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """
         self._interrupt_active_turn()
         self._close_client()
+        self._cleanup_login_shell_home()
 
     def _interrupt_active_turn(self) -> None:
         """Interrupt the in-flight Codex turn, if any (best-effort, idempotent)."""
@@ -1126,13 +1127,19 @@ class CodexAgent(Agent[CodexAgentConfig]):
         # separator is ':' regardless of the host building it.
         quoted_prepend = shlex.quote(":".join(self._env_path_prepend))
         export_line = f'export PATH={quoted_prepend}:"$PATH"'
+        # Track the dir BEFORE writing so a failed write can't orphan it —
+        # the except below (and any later cleanup) always sees it.
         home = Path(tempfile.mkdtemp(prefix="coder-eval-codex-home-"))
-        for name in _LOGIN_PROFILE_NAMES:
-            content = self._login_profile_content(name, original_home, export_line)
-            # newline="\n": the profile must stay LF-only no matter which host
-            # builds it, or bash sees literal \r at end of line.
-            (home / name).write_text(content, encoding="utf-8", newline="\n")
         self._login_shell_home = home
+        try:
+            for name in _LOGIN_PROFILE_NAMES:
+                content = self._login_profile_content(name, original_home, export_line)
+                # newline="\n": the profile must stay LF-only no matter which host
+                # builds it, or bash sees literal \r at end of line.
+                (home / name).write_text(content, encoding="utf-8", newline="\n")
+        except Exception:
+            self._cleanup_login_shell_home()
+            raise
         self._log.debug(f"Login-shell mock-PATH home: {home}")
 
     @staticmethod
