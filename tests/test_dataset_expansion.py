@@ -835,11 +835,10 @@ class TestDatasetRepeatsFanout:
 
         Two task files that BOTH carry Claude-only `sdk_options` under `--type
         codex`: with no sibling resolving, `len(resolution_errors) == attempted`,
-        so the suite must not silently produce an empty run. It raises a
-        ``ValueError`` (the caller's `except ValueError` contract → clean
-        typer.BadParameter) carrying the first underlying reason — regardless of
-        that reason's concrete exception type — never a stored non-ValueError
-        re-raised verbatim into a raw traceback.
+        so the suite must not silently produce an empty run. It aborts with the
+        first task's own error (a Pydantic ValidationError — a ValueError — so it
+        surfaces verbatim through the caller's `except ValueError`), never a
+        silent empty resolved list.
         """
 
         def _claude_only(task_id: str) -> dict[str, Any]:
@@ -864,7 +863,7 @@ class TestDatasetRepeatsFanout:
         )
         config = BatchRunConfig(run_dir=tmp_path / "runs", agent_type="codex")
 
-        with pytest.raises(ValueError, match=r"All 2 task file\(s\) failed config resolution"):
+        with pytest.raises(ValueError, match="sdk_options"):
             resolve_all_tasks([file_a, file_b], experiment, experiment, config)
 
     def test_single_file_non_value_error_surfaces_as_value_error(self, tmp_path: Path) -> None:
@@ -875,7 +874,8 @@ class TestDatasetRepeatsFanout:
         resolution. With a single file, `len(resolution_errors) == attempted == 1`
         fires the all-fail branch. It must re-raise as a ``ValueError`` so the
         caller's `except ValueError` catches it (clean CLI error) instead of a
-        FileNotFoundError escaping as a raw traceback.
+        FileNotFoundError escaping as a raw traceback — while preserving the
+        original message ("system_prompt_file not found").
         """
         task = {
             "task_id": "missing-prompt-task",
@@ -894,5 +894,5 @@ class TestDatasetRepeatsFanout:
         )
         config = BatchRunConfig(run_dir=tmp_path / "runs")
 
-        with pytest.raises(ValueError, match="failed config resolution"):
+        with pytest.raises(ValueError, match="system_prompt_file not found"):
             resolve_all_tasks([task_file], experiment, experiment, config, experiment_file=tmp_path / "exp.yaml")

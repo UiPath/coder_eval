@@ -711,21 +711,21 @@ def resolve_all_tasks(
 
     # Decide the fate of collected per-task resolution failures. If EVERY task
     # that reached resolution failed, refusing to proceed (rather than producing
-    # an empty run) is the right call — but we can't actually tell a genuine
-    # global misconfig (a bad --type / -D value, repeats over the cap that trips
-    # every task identically) from N tasks each independently incompatible for
-    # the same per-task reason. So don't overclaim "global": raise a fresh
-    # ValueError that carries the first underlying reason, whatever its concrete
-    # type. This also keeps the abort within the caller's `except ValueError`
-    # contract (run_command surfaces it as a clean typer.BadParameter) — the
-    # collected exceptions can be FileNotFoundError/OSError/yaml.YAMLError, none
-    # of which the caller catches, so re-raising one verbatim would escape as a
-    # raw traceback.
+    # an empty run) is the right call. We surface the first task's own error —
+    # not a synthesized "global misconfig" message — because we can't actually
+    # tell a genuine global cause (a bad --type / -D value that trips every task
+    # identically) from N tasks each independently incompatible for the same
+    # per-task reason. A ValueError (incl. Pydantic ValidationError and the "no
+    # agent registered" guard) is re-raised verbatim so its message stays clean;
+    # only a non-ValueError (FileNotFoundError/OSError/yaml.YAMLError — e.g. a
+    # missing system_prompt_file) is normalized to ValueError so it still lands
+    # in the caller's `except ValueError` (clean typer.BadParameter) instead of
+    # escaping as a raw traceback.
     if resolution_errors and len(resolution_errors) == attempted:
-        first_file, first_exc = resolution_errors[0]
-        raise ValueError(
-            f"All {attempted} task file(s) failed config resolution; first error ({first_file}): {first_exc}"
-        ) from first_exc
+        first_exc = resolution_errors[0][1]
+        if isinstance(first_exc, ValueError):
+            raise first_exc
+        raise ValueError(str(first_exc)) from first_exc
     for err_file, exc in resolution_errors:
         reason = f"{type(exc).__name__}: {exc}"[:500]
         logger.warning("Skipping task file %s — config resolution failed: %s", err_file, reason)
