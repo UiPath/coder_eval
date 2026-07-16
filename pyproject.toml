@@ -63,7 +63,7 @@ dev = [
     "pytest-mock>=3.15.1",
     "pytest-cov>=7.1.0",
     "pytest-xdist[psutil]>=3.0.0",
-    "mcp>=1.26.0",
+    "mcp>=1.28.1",  # >=1.28.1 clears CVE-2026-52869/52870 (1.27.2) + CVE-2026-59950 (1.28.1)
     "ruff>=0.15.7",
     "pyright>=1.1.408",
     "pip-audit>=2.10.0",
