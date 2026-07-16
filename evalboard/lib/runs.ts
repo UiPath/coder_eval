@@ -2047,6 +2047,62 @@ export async function readLogTail(
     return `… (truncated, showing last ${maxBytes} bytes)\n\n${raw.slice(-maxBytes)}`;
 }
 
+// One user↔agent exchange parsed from conversation.log (simulation runs only).
+export interface ConversationTurn {
+    role: "USER" | "AGENT";
+    turn: number;
+    metadata: string | null;
+    text: string;
+}
+
+// Reads the clean simulation transcript. Returns "" for non-simulation tasks
+// (single-shot runs never write conversation.log) — mirrors readLogTail.
+export async function readConversationLog(
+    runId: string,
+    taskId: string,
+    replicate = 0,
+    maxBytes = 200_000,
+): Promise<string> {
+    await ensureTaskDir(runId, taskId, RUNS_DIR);
+    const taskDir = taskContentBase(runId, taskId);
+    const contentDir = await resolveTaskContentDir(taskDir, replicate);
+    const logPath = path.join(contentDir, "conversation.log");
+    const raw = await fs.readFile(logPath, "utf-8").catch(() => "");
+    if (raw.length <= maxBytes) return raw;
+    return `… (truncated, showing last ${maxBytes} bytes)\n\n${raw.slice(-maxBytes)}`;
+}
+
+// Splits conversation.log into ordered turns. The header line is:
+//   === ROLE (turn N)[ — metadata] ===
+// Everything up to the next header (or EOF) is that turn's body.
+export function parseConversation(raw: string): ConversationTurn[] {
+    const header = /^=== (USER|AGENT) \(turn (\d+)\)(?: — (.*?))? ===$/;
+    const turns: ConversationTurn[] = [];
+    let current: ConversationTurn | null = null;
+    const body: string[] = [];
+    const flush = () => {
+        if (current) current.text = body.join("\n").trim();
+        body.length = 0;
+    };
+    for (const line of raw.split("\n")) {
+        const m = header.exec(line);
+        if (m) {
+            flush();
+            current = {
+                role: m[1] as "USER" | "AGENT",
+                turn: Number(m[2]),
+                metadata: m[3] ?? null,
+                text: "",
+            };
+            turns.push(current);
+        } else if (current) {
+            body.push(line);
+        }
+    }
+    flush();
+    return turns;
+}
+
 // Collect every file under a task's folder (`default/<taskId>/`) for the
 // download-as-zip button on the task page. Reuses walkArtifacts so the same
 // noise filter (`.venv`, `node_modules`, `*.pyc`, lockfiles, secrets) and
