@@ -498,6 +498,10 @@ def test_get_state_returns_current_state():
 # without a live SDK. These mirror the notification shapes the real stream emits.
 # ---------------------------------------------------------------------------
 
+import os  # noqa: E402
+import shlex  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -1615,8 +1619,6 @@ class TestLoginShellMockPathHome:
 
         agent._setup_login_shell_home()
         try:
-            import shlex
-
             home = agent._login_shell_home
             assert home is not None
             qorig = shlex.quote(str(orig))
@@ -1630,8 +1632,6 @@ class TestLoginShellMockPathHome:
             agent._cleanup_login_shell_home()
 
     def test_mock_dirs_with_shell_metacharacters_are_quoted(self, monkeypatch, tmp_path):
-        import shlex
-
         self._force_posix(monkeypatch)
         monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
         weird = "/sandbox/mo cks/$(evil)"
@@ -1650,8 +1650,6 @@ class TestLoginShellMockPathHome:
         """The generated profile's FIRST act is exporting the original HOME
         back — the temp HOME exists only so bash picks this file; everything
         sourced after (and the command body) must see the real $HOME."""
-        import shlex
-
         self._force_posix(monkeypatch)
         orig = tmp_path / "orig-home"
         monkeypatch.setenv("HOME", str(orig))
@@ -1788,25 +1786,40 @@ class TestLoginShellMockPathHome:
         assert not home.exists()
 
     async def test_start_creates_and_stop_cleans_login_home(self, monkeypatch, tmp_path):
+        """start() must compose the pieces: generated HOME + pinned CODEX_HOME
+        + mock-first PATH must all land in the CodexConfig env handed to the
+        SDK (not just exist on the agent), and stop() must clean up."""
         import openai_codex
 
         self._force_posix(monkeypatch)
         monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
         monkeypatch.delenv("CODEX_API_KEY", raising=False)
-        monkeypatch.setattr(openai_codex, "Codex", lambda **_kw: SimpleNamespace(close=lambda: None))
+        captured: dict = {}
+
+        def fake_codex(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(close=lambda: None)
+
+        monkeypatch.setattr(openai_codex, "Codex", fake_codex)
 
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         await agent.start(str(tmp_path), env_path_prepend=["/sandbox/mocks"])
 
         home = agent._login_shell_home
         assert home is not None and (home / ".bash_profile").is_file()
+        config = captured.get("config")
+        assert config is not None and config.env is not None
+        assert config.env["HOME"] == str(home)
+        assert config.env["CODEX_HOME"] == str(agent._codex_home())
+        path_key = next(k for k in config.env if k.upper() == "PATH")
+        assert config.env[path_key].startswith("/sandbox/mocks")
 
         await agent.stop()
         assert agent._login_shell_home is None
         assert not home.exists()
 
     @pytest.mark.skipif(
-        __import__("os").name != "posix" or not __import__("shutil").which("bash"),
+        os.name != "posix" or not shutil.which("bash"),
         reason="requires a POSIX bash to exercise a real login shell",
     )
     def test_login_shell_restores_mock_prepend_end_to_end(self, monkeypatch, tmp_path):
@@ -1818,8 +1831,6 @@ class TestLoginShellMockPathHome:
         - the mock dir still comes out FIRST on PATH;
         - the command body sees the original ``$HOME``.
         """
-        import subprocess
-
         self._force_posix(monkeypatch)
         orig = tmp_path / "orig-home"
         orig.mkdir()
