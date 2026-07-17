@@ -560,14 +560,12 @@ class Orchestrator:
                 # Teardown must be interrupt-proof: the task-timeout watchdog can
                 # fire while post-run commands are awaiting and deliver its
                 # CancelledError right here in the finally block, which used to
-                # abort it wholesale — skipping _cleanup() (tempdir leaked; a
-                # DIRECT_WRITE workspace kept agent-created .venv/node_modules
-                # whose dangling symlinks later broke artifact publishing) AND
-                # _finalize_result() (task.json lost). Catch the interrupt,
-                # finish the full teardown, then re-raise it at the end so
-                # callers observe the same exception as before. The watchdog
-                # cancels exactly once, so the teardown awaits below run
-                # normally after the CancelledError is caught.
+                # abort it wholesale — skipping _cleanup() (tempdir leaked) AND
+                # _finalize_result() (task.json lost, so the task silently drops
+                # out of the run). Catch the interrupt, finish the full teardown,
+                # then re-raise it at the end so callers observe the same exception
+                # as before. The watchdog cancels exactly once, so the teardown
+                # awaits below run normally after the CancelledError is caught.
                 teardown_interrupt: BaseException | None = None
                 try:
                     # BEFORE post-run/cleanup: needs the live sandbox to resolve
