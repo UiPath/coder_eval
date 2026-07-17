@@ -2116,16 +2116,11 @@ class Orchestrator:
                     logger.info(f"Sandbox preserved to: {preserved_path}")
                 elif self.preservation_mode == PreservationMode.DIRECT_WRITE and self.result:
                     # Sandbox already lives in run_dir/artifacts — nothing to move.
-                    # Set sandbox_path first, then prune capture-ignored entries
-                    # (MOVE_ON_WRITE gets this inside preserve_to; DIRECT_WRITE
-                    # never copies, so the raw workspace — agent-created
-                    # .venv/node_modules with sandbox-only symlinks, credential
-                    # stores — would otherwise persist in run_dir/artifacts and
-                    # break artifact publishing), then grant a+rX (a fallible
-                    # chmod) so artifacts written by a root-owned docker container
-                    # stay traversable across the host uid boundary.
+                    # Set sandbox_path first, then grant a+rX (a fallible chmod) so
+                    # artifacts written by a root-owned docker container stay
+                    # traversable across the host uid boundary (MOVE_ON_WRITE gets
+                    # this via preserve_to; DIRECT_WRITE skips it, so apply it here).
                     self.result.sandbox_path = str(self.sandbox.sandbox_dir)
-                    await asyncio.to_thread(self.sandbox.prune_preserved)
                     await asyncio.to_thread(self.sandbox.grant_read_access)
                     logger.info(f"Sandbox preserved (in-place): {self.sandbox.sandbox_dir}")
                 elif self.preservation_mode == PreservationMode.NONE and self.result:
