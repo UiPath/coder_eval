@@ -63,6 +63,55 @@ _WORKSPACE_CAPTURE_IGNORE = (
 )
 
 
+def _prune_capture_ignored(root: Path) -> list[str]:
+    """Remove :data:`_WORKSPACE_CAPTURE_IGNORE` entries from a preserved tree.
+
+    ``capture_to`` filters these at copy time (``shutil.ignore_patterns`` applies
+    at every directory level), but the other two preservation paths kept the raw
+    workspace: ``preserve_to`` is a ``shutil.move`` and DIRECT_WRITE never copies
+    at all. That leaks the same two classes the ignore tuple exists for — the
+    credential-store names, and agent-created ``.venv``/``node_modules`` bulk
+    whose ``bin/`` symlinks point at sandbox-only interpreter paths (dangling on
+    the host, they break artifact publishing: Azure DevOps'
+    PublishPipelineArtifact refuses ANY symlink). Walk the preserved tree with
+    the same matcher and drop every hit, so preserved workspaces look the same
+    regardless of which preservation path produced them.
+
+    Per-entry deletion failures are warning-logged and skipped — pruning is
+    hygiene and must never fail a preservation that already succeeded. Returns
+    the pruned paths relative to ``root`` (for the caller's log line).
+    """
+    if not root.is_dir():
+        return []
+    matcher = shutil.ignore_patterns(*_WORKSPACE_CAPTURE_IGNORE)
+    pruned: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+        base = Path(dirpath)
+        for name in sorted(matcher(dirpath, dirnames + filenames)):
+            target = base / name
+            try:
+                # is_dir() follows symlinks: unlink a symlinked dir rather than
+                # rmtree THROUGH it into content outside the preserved tree.
+                if target.is_dir() and not target.is_symlink():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Failed to prune %s from preserved workspace: %s", target, exc)
+                continue
+            pruned.append(str(target.relative_to(root)))
+            if name in dirnames:
+                dirnames.remove(name)  # deleted — don't descend into it
+    if pruned:
+        logger.info(
+            "Pruned %d capture-ignored entrie(s) from preserved workspace %s: %s",
+            len(pruned),
+            root,
+            ", ".join(pruned),
+        )
+    return pruned
+
+
 def _grant_read_traverse(root: Path) -> None:
     """Recursively apply ``chmod a+rX`` semantics under ``root``.
 
@@ -1037,6 +1086,21 @@ class Sandbox:
         if self.sandbox_dir is not None and self.sandbox_dir.exists():
             _grant_read_traverse(self.sandbox_dir)
 
+    def prune_preserved(self) -> list[str]:
+        """Drop capture-ignored entries from the (preserved) sandbox tree, in place.
+
+        For DIRECT_WRITE preservation the sandbox already lives in the artifacts
+        dir, so neither ``capture_to``'s copy-time filter nor ``preserve_to``'s
+        post-move prune ever runs — agent-created ``.venv``/``node_modules``
+        (symlink-bearing bulk) and any credential-store names would persist in
+        ``run_dir/artifacts`` verbatim. Called by the orchestrator's DIRECT_WRITE
+        cleanup arm so all three preservation paths agree on what a preserved
+        workspace contains. Returns the pruned paths (relative), for callers/tests.
+        """
+        if self.sandbox_dir is None or not self.sandbox_dir.exists():
+            return []
+        return _prune_capture_ignored(self.sandbox_dir)
+
     def preserve_to(self, artifact_dir: Path) -> Path:
         """Preserve sandbox contents to an artifact directory.
 
@@ -1069,6 +1133,12 @@ class Sandbox:
 
         old_sandbox_dir = self.sandbox_dir
         shutil.move(str(old_sandbox_dir), str(preserve_path))
+
+        # Match capture_to's filtering: the move carried the raw workspace,
+        # including capture-ignored entries (credential stores; .venv/node_modules
+        # bulk whose symlinks break artifact publishing). Prune them from the
+        # preserved copy — before the a+rX grant, so we don't chmod doomed files.
+        _prune_capture_ignored(preserve_path)
 
         # mkdtemp creates the sandbox root at 0700. Under driver:docker the
         # container runs as root, so the preserved tree lands on the host
