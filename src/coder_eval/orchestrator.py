@@ -557,10 +557,28 @@ class Orchestrator:
                 logger.error(f"Evaluation failed: {e}", exc_info=True)
 
             finally:
-                # BEFORE post-run/cleanup: needs the live sandbox to resolve
-                # the agent-aligned `uip`, and post-task tool state on disk.
-                self._refresh_runtime_tool_versions()
-                await self._run_post_run_commands()
+                # Teardown must be interrupt-proof: the task-timeout watchdog can
+                # fire while post-run commands are awaiting and deliver its
+                # CancelledError right here in the finally block, which used to
+                # abort it wholesale — skipping _cleanup() (tempdir leaked) AND
+                # _finalize_result() (task.json lost, so the task silently drops
+                # out of the run). Catch the interrupt, finish the full teardown,
+                # then re-raise it at the end so callers observe the same exception
+                # as before. The watchdog cancels exactly once, so the teardown
+                # awaits below run normally after the CancelledError is caught.
+                teardown_interrupt: BaseException | None = None
+                try:
+                    # BEFORE post-run/cleanup: needs the live sandbox to resolve
+                    # the agent-aligned `uip`, and post-task tool state on disk.
+                    self._refresh_runtime_tool_versions()
+                    await self._run_post_run_commands()
+                except (Exception, asyncio.CancelledError) as e:
+                    teardown_interrupt = e
+                    logger.warning(
+                        "Teardown interrupted during post-run (%s: %s); completing cleanup before re-raising",
+                        type(e).__name__,
+                        e,
+                    )
                 await self._cleanup()
                 # Capture the sanitised log tail AFTER teardown so any errors
                 # logged during post-run / cleanup also land in the report,
@@ -576,6 +594,8 @@ class Orchestrator:
                 }:
                     self.result.error_log_tail = log_tail.get_text() or None
                 self._finalize_result(start_time)
+                if teardown_interrupt is not None:
+                    raise teardown_interrupt
 
         return self.result
 
