@@ -28,6 +28,8 @@ _PRICING: dict[str, ModelPricing] = {
     "claude-opus-4-6-20250514": ModelPricing(15.0, 75.0, 18.75, 1.50),
     "claude-opus-4-5-20251101": ModelPricing(15.0, 75.0, 18.75, 1.50),
     "claude-opus-4-20250514": ModelPricing(15.0, 75.0, 18.75, 1.50),
+    # Claude 5 Sonnet (2026-06-30 on Bedrock): standard $3/$15 (promo $2/$10 thru 2026-08-31).
+    "claude-sonnet-5": ModelPricing(3.0, 15.0, 3.75, 0.30),
     # Claude 4.6 / 4.5 / 4 Sonnet
     "claude-sonnet-4-6": ModelPricing(3.0, 15.0, 3.75, 0.30),
     "claude-sonnet-4-6-20250514": ModelPricing(3.0, 15.0, 3.75, 0.30),
@@ -62,6 +64,18 @@ _PRICING: dict[str, ModelPricing] = {
     # for very-large-context runs reads low. Fine for typical eval tasks; revisit
     # if benchmarking large-context Codex runs.
     "gpt-5.5": ModelPricing(5.0, 30.0, 5.0, 0.50),
+    # gpt-5.5-pro / gpt-5.4-pro: $30/M in, $180/M out; pro tiers offer NO prompt
+    # caching (cache_read nominal, never billed since pro doesn't cache).
+    "gpt-5.5-pro": ModelPricing(30.0, 180.0, 30.0, 3.0),
+    "gpt-5.4-pro": ModelPricing(30.0, 180.0, 30.0, 3.0),
+    # gpt-5.4 economy tiers: mini $0.75/$4.50, nano $0.20/$1.25.
+    "gpt-5.4-mini": ModelPricing(0.75, 4.5, 0.75, 0.075),
+    "gpt-5.4-nano": ModelPricing(0.20, 1.25, 0.20, 0.02),
+    # GPT-5.6 family (2026-07-09): sol flagship / terra balanced (Codex default) / luna
+    # economy. Terra matches gpt-5.4's rate; sol matches gpt-5.5.
+    "gpt-5.6-sol": ModelPricing(5.0, 30.0, 6.25, 0.50),
+    "gpt-5.6-terra": ModelPricing(2.5, 15.0, 3.125, 0.25),
+    "gpt-5.6-luna": ModelPricing(1.0, 6.0, 1.25, 0.10),
     # Google Gemini (AntigravityAgent, via the Gemini Developer API). Per-MTok
     # rates from ai.google.dev/gemini-api/docs/pricing (2026). Gemini bills no
     # separate cache-WRITE fee, so cache_write == input (the agent maps
