@@ -93,10 +93,10 @@ def _harness_spawn_lock() -> asyncio.Lock:
 
 
 # Recommended Gemini coding model when a task pins no ``agent.model`` and neither
-# ``--model`` nor ``ANTIGRAVITY_MODEL`` is set. Gemini 3.1 Pro is the current
-# flagship agentic-coding model (the earlier ``gemini-3-pro-preview`` is retired);
-# ``medium`` thinking is its recommended daily-driver default.
-_DEFAULT_MODEL = "gemini-3.1-pro-preview"
+# ``--model`` nor ``ANTIGRAVITY_MODEL`` is set. Gemini 3.5 Flash is Antigravity 2.0's
+# default coding model (2026-05) — it outperforms the older Gemini 3.1 Pro on coding /
+# agentic benchmarks while running faster; ``medium`` thinking is its daily-driver default.
+_DEFAULT_MODEL = "gemini-3.5-flash"
 
 # Antigravity builtin tool name -> canonical Claude-ish tool name, so cross-agent
 # success criteria (command_executed / commands_efficiency / skill_triggered) and
