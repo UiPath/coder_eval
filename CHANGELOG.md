@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.8.6 (2026-07-20)
+
+### Features
+
+- Add Sonnet 5 + GPT-5.6 pricing; default antigravity to gemini-3.5-flash
+  ([#31](https://github.com/UiPath/coder_eval/pull/31),
+  [`4c40acd`](https://github.com/UiPath/coder_eval/commit/4c40acd64482e9ffcec66b61ac2aab57b5c89f6f))
+
+
 ## v0.8.5 (2026-07-20)
 
 ### Bug Fixes
