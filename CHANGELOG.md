@@ -2,6 +2,62 @@
 
 <!-- version list -->
 
+## v0.8.5 (2026-07-20)
+
+### Bug Fixes
+
+- **deps**: Bump mcp to >=1.28.1 for CVE-2026-52869/52870/59950
+  ([#25](https://github.com/UiPath/coder_eval/pull/25),
+  [`fb1ad4c`](https://github.com/UiPath/coder_eval/commit/fb1ad4cba2973414a6a883468f62c908deee532b))
+
+- **orchestration**: Isolate per-task config-resolution failures from the suite
+  ([#25](https://github.com/UiPath/coder_eval/pull/25),
+  [`fb1ad4c`](https://github.com/UiPath/coder_eval/commit/fb1ad4cba2973414a6a883468f62c908deee532b))
+
+- **orchestration**: Normalize the all-fail config-resolution abort to ValueError
+  ([#25](https://github.com/UiPath/coder_eval/pull/25),
+  [`fb1ad4c`](https://github.com/UiPath/coder_eval/commit/fb1ad4cba2973414a6a883468f62c908deee532b))
+
+- **orchestration**: Re-raise ValueError verbatim in the all-fail abort
+  ([#25](https://github.com/UiPath/coder_eval/pull/25),
+  [`fb1ad4c`](https://github.com/UiPath/coder_eval/commit/fb1ad4cba2973414a6a883468f62c908deee532b))
+
+- **orchestrator**: Interrupt-proof teardown so a timeout can't drop task.json
+  ([#29](https://github.com/UiPath/coder_eval/pull/29),
+  [`89ec0d0`](https://github.com/UiPath/coder_eval/commit/89ec0d0eda74616d21a87302680e3099473119bc))
+
+- **sandbox**: Prune capture-ignored entries on every preservation path; interrupt-proof teardown
+  ([#29](https://github.com/UiPath/coder_eval/pull/29),
+  [`89ec0d0`](https://github.com/UiPath/coder_eval/commit/89ec0d0eda74616d21a87302680e3099473119bc))
+
+### Chores
+
+- **evalboard**: Address npm Dependabot alerts ([#18](https://github.com/UiPath/coder_eval/pull/18),
+  [`3d5e7b7`](https://github.com/UiPath/coder_eval/commit/3d5e7b7d2358e10d95d59487c54596df7da1bef2))
+
+- **evalboard**: Batch github-actions bumps into one grouped PR
+  ([#18](https://github.com/UiPath/coder_eval/pull/18),
+  [`3d5e7b7`](https://github.com/UiPath/coder_eval/commit/3d5e7b7d2358e10d95d59487c54596df7da1bef2))
+
+### Documentation
+
+- **orchestrator**: Correct teardown comment to scope of the fix
+  ([#29](https://github.com/UiPath/coder_eval/pull/29),
+  [`89ec0d0`](https://github.com/UiPath/coder_eval/commit/89ec0d0eda74616d21a87302680e3099473119bc))
+
+### Features
+
+- **evalboard**: Show conversation transcript for simulation tasks
+  ([#23](https://github.com/UiPath/coder_eval/pull/23),
+  [`252722a`](https://github.com/UiPath/coder_eval/commit/252722ab17edf3dbc1b68a7ca3a357b2dd3cb0d3))
+
+### Refactoring
+
+- **orchestrator**: Trim to interrupt-proof teardown; drop preservation-prune
+  ([#29](https://github.com/UiPath/coder_eval/pull/29),
+  [`89ec0d0`](https://github.com/UiPath/coder_eval/commit/89ec0d0eda74616d21a87302680e3099473119bc))
+
+
 ## v0.8.4 (2026-07-13)
 
 ### Bug Fixes
