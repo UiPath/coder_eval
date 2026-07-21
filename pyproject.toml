@@ -92,12 +92,17 @@ codex = [
 #     (drives the bundled `localharness` binary, authenticated via GEMINI_API_KEY).
 # Pinned exactly: the harness binary is a dominant non-model driver of eval results,
 # so it travels with the coder_eval release tag and is bumped deliberately (mirrors
-# the claude-code CLI / codex cli-bin pins). The wheel ships platform-specific
-# (manylinux x86_64 + aarch64, macOS, Windows), so CI/Linux/Docker installs work.
+# the claude-code CLI / codex cli-bin pins).
+# glibc note — verify before bumping: the wheel's manylinux_2_17 tag is NOT a
+# reliable floor; the bundled `localharness` ELF can require a newer glibc than the
+# tag advertises. Eval agents run on Ubuntu 22.04 (glibc 2.35), so the pinned build
+# must load there. 0.1.7 links without DT_RELR (max required symbol GLIBC_2.26) and
+# loads on 2.35+; confirm any future pin does too (readelf -d | grep RELR must be
+# empty / max GLIBC symbol <= the oldest target's glibc).
 # Without this extra the framework still installs and runs; Antigravity-dependent
 # code paths fail at start() with a clear hint pointing back here.
 antigravity = [
-    "google-antigravity==0.1.5",
+    "google-antigravity==0.1.7",
 ]
 
 [project.scripts]
