@@ -45,6 +45,7 @@ from coder_eval.models import (
     CommandTelemetry,
     ContentBlock,
     DirectRoute,
+    LiteLLMRoute,
     ResultSummary,
     TokenUsage,
     TranscriptMessage,
@@ -763,6 +764,26 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             case DirectRoute():
                 return base_env, None
 
+            case LiteLLMRoute() as cr:
+                # Point the SDK at the custom Anthropic-compatible endpoint (e.g.
+                # a LiteLLM gateway). These override any inherited value: the SDK
+                # merges {**os.environ, ..., **options.env} at spawn, so setting
+                # them here wins over the parent environment.
+                env = {
+                    "ANTHROPIC_BASE_URL": cr.base_url,
+                    "ANTHROPIC_AUTH_TOKEN": cr.auth_token,
+                    # Neutralize any inherited ANTHROPIC_API_KEY: auth on this
+                    # route is the bearer ANTHROPIC_AUTH_TOKEN, and a stray
+                    # x-api-key (e.g. a real Anthropic key exported from .env)
+                    # would conflict with the gateway's key auth.
+                    "ANTHROPIC_API_KEY": "",
+                }
+                if cr.model:
+                    env["ANTHROPIC_MODEL"] = cr.model
+                if cr.small_model:
+                    env["ANTHROPIC_SMALL_FAST_MODEL"] = cr.small_model
+                return {**base_env, **env}, cr.model
+
         raise AssertionError(f"Unhandled route type: {type(route).__name__}")
 
     def _resolve_effective_model(
@@ -780,6 +801,13 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         if isinstance(self.route, BedrockRoute):
             if config_model is not None:
                 config_model = to_bedrock_inference_profile(config_model, self.route.region)
+            effective = config_model or route_model
+            if effective:
+                env["ANTHROPIC_MODEL"] = effective
+            return effective
+        if isinstance(self.route, LiteLLMRoute):
+            # Same env-sync as Bedrock, but pass the id verbatim (no
+            # inference-profile qualification — the gateway maps it).
             effective = config_model or route_model
             if effective:
                 env["ANTHROPIC_MODEL"] = effective

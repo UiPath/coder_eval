@@ -101,24 +101,42 @@ class BedrockRoute:
     disable_attribution_header: bool = True
 
 
-ApiRoute = DirectRoute | BedrockRoute
+@dataclass(frozen=True)
+class LiteLLMRoute:
+    """Route through a custom Anthropic-compatible endpoint (e.g. a LiteLLM
+    gateway fronting Bedrock open-weight models).
+
+    The Claude Code SDK is pointed at ``base_url`` via ``ANTHROPIC_BASE_URL`` and
+    authenticates with ``auth_token`` via ``ANTHROPIC_AUTH_TOKEN`` (bearer). The
+    ``model``/``small_model`` ids are passed **verbatim** (no Bedrock
+    inference-profile qualification) — the gateway maps them to its backend.
+    """
+
+    base_url: str
+    auth_token: str
+    model: str | None = None
+    small_model: str | None = None
+
+
+ApiRoute = DirectRoute | BedrockRoute | LiteLLMRoute
 
 
 # Stable string names for environment_info recording (decoupled from class names)
 ROUTE_NAMES: dict[type, str] = {
     DirectRoute: "anthropic_direct",
     BedrockRoute: "aws_bedrock",
+    LiteLLMRoute: "litellm",
 }
 
 
 def resolve_route(settings: Settings) -> ApiRoute:
     """Resolve an ``ApiRoute`` from static settings.
 
-    Handles the two supported backends (``DIRECT`` and ``BEDROCK``), whose
-    route is fully determined by ``Settings``.
+    Handles the three supported backends (``DIRECT``, ``BEDROCK``, ``LITELLM``),
+    whose route is fully determined by ``Settings``.
 
     Called after ``validate_api_keys()`` has verified credentials. Uses
-    ``assert`` for type narrowing (not ``ValueError``) since the Bedrock
+    ``assert`` for type narrowing (not ``ValueError``) since the Bedrock/custom
     credential checks are an internal contract.
     """
     match settings.api_backend:
@@ -145,6 +163,19 @@ def resolve_route(settings: Settings) -> ApiRoute:
             )
         case ApiBackend.DIRECT:
             return DirectRoute(judge_transport=_resolve_direct_judge_transport(settings))
+        case ApiBackend.LITELLM:
+            # base_url/auth_token are guaranteed by validate_api_keys (run first);
+            # asserts narrow the Optional types, mirroring the Bedrock arm.
+            assert settings.litellm_base_url is not None, "LiteLLM backend requires litellm_base_url"
+            assert settings.litellm_auth_token is not None, "LiteLLM backend requires litellm_auth_token"
+            # No inference-profile qualification: the id is passed verbatim to the gateway.
+            small_model = settings.litellm_small_model or settings.litellm_model
+            return LiteLLMRoute(
+                base_url=settings.litellm_base_url,
+                auth_token=settings.litellm_auth_token,
+                model=settings.litellm_model,
+                small_model=small_model,
+            )
 
 
 def _resolve_direct_judge_transport(settings: Settings) -> JudgeTransport | None:

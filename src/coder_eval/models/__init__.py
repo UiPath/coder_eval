@@ -136,6 +136,7 @@ from coder_eval.models.routing import (
     BedrockRoute,
     DirectRoute,
     JudgeTransport,
+    LiteLLMRoute,
     resolve_route,
     to_bedrock_inference_profile,
 )
@@ -229,6 +230,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "ApiRoute",
     "DirectRoute",
     "BedrockRoute",
+    "LiteLLMRoute",
     "JudgeTransport",
     "resolve_route",
     "to_bedrock_inference_profile",
