@@ -15,7 +15,6 @@ pytest.importorskip("openai_codex")
 from coder_eval.agent import AgentState
 from coder_eval.agents.codex_agent import (
     _CODEX_APPROVAL_MODE,
-    _PERMISSION_MODE_TO_SANDBOX,
     CodexAgent,
 )
 from coder_eval.models import AgentConfig, AgentKind, parse_agent_config
@@ -78,34 +77,14 @@ class TestCodexAgentInitialization:
 # optional `openai_codex` extra. Keep new pure-logic tests there, not here.
 
 
-class TestPermissionModeMapping:
-    """Test permission_mode to sandbox/approval_mode mapping."""
-
-    def test_accept_edits_sandbox_mode(self):
-        """acceptEdits maps to workspace-write."""
-        assert _PERMISSION_MODE_TO_SANDBOX["acceptEdits"] == "workspace-write"
-
-    def test_plan_sandbox_mode(self):
-        """plan maps to read-only."""
-        assert _PERMISSION_MODE_TO_SANDBOX["plan"] == "read-only"
-
-    def test_bypass_permissions_sandbox_mode(self):
-        """bypassPermissions maps to full-access."""
-        assert _PERMISSION_MODE_TO_SANDBOX["bypassPermissions"] == "full-access"
-
-    def test_default_sandbox_mode(self):
-        """default maps to workspace-write."""
-        assert _PERMISSION_MODE_TO_SANDBOX["default"] == "workspace-write"
-
-    def test_all_modes_have_sandbox_mapping(self):
-        """All permission modes have sandbox_mode mapping."""
-        modes = {"default", "acceptEdits", "plan", "bypassPermissions"}
-        assert set(_PERMISSION_MODE_TO_SANDBOX.keys()) == modes
+class TestApprovalMode:
+    """Approval is a single constant (deny_all) for every permission mode — the
+    sandbox (always full-access; see TestSandboxAlwaysFullAccess) is the trust
+    boundary, not a per-command reviewer."""
 
     def test_approval_mode_constant_is_deny_all(self):
-        """Approval is a single constant (deny_all) — no per-mode mapping; the
-        sandbox is the trust boundary. Per-mode ApprovalMode.deny_all resolution
-        is covered behaviorally in TestBuildThreadOptions."""
+        """Approval is a single constant (deny_all) — no per-mode mapping. Per-mode
+        ApprovalMode.deny_all resolution is covered behaviorally below."""
         assert _CODEX_APPROVAL_MODE == "deny_all"
 
     def test_every_permission_mode_resolves_to_deny_all(self):
@@ -117,84 +96,29 @@ class TestPermissionModeMapping:
             assert agent._build_thread_options()["approval_mode"] == ApprovalMode.deny_all
 
 
-class TestInContainerSandboxFallback:
-    """Under the docker driver (``CODER_EVAL_IN_CONTAINER`` set), Codex's
-    Landlock-backed read-only / workspace-write sandboxes can't initialize, so
-    ``_build_thread_options`` falls back to full-access — the container is the
-    trust boundary. No-op on the host (marker unset), where Landlock works."""
+class TestSandboxAlwaysFullAccess:
+    """coder_eval always owns the isolation boundary (a docker container or an
+    ephemeral per-task tempdir), so Codex always runs full-access: for every
+    permission mode, with or without the container marker, and on both Unix and
+    Windows (where Codex has no OS sandbox at all). Its own in-process OS sandbox
+    is redundant and, on constrained CI hosts / Windows, actively breaks — silently
+    scoring 0. Hard isolation of untrusted actions is the docker driver's job."""
 
-    def test_workspace_write_upgraded_to_full_access_in_container(self, monkeypatch):
+    @pytest.mark.parametrize("mode", ["default", "acceptEdits", "plan", "bypassPermissions"])
+    @pytest.mark.parametrize("in_container", [True, False])
+    @pytest.mark.parametrize("os_name", ["posix", "nt"])
+    def test_sandbox_is_full_access(self, monkeypatch, mode, in_container, os_name):
+        import os as _os
+
         from openai_codex.api import Sandbox  # pyright: ignore[reportPrivateImportUsage]
 
-        monkeypatch.setenv("CODER_EVAL_IN_CONTAINER", "1")
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode="acceptEdits"))
+        if in_container:
+            monkeypatch.setenv("CODER_EVAL_IN_CONTAINER", "1")
+        else:
+            monkeypatch.delenv("CODER_EVAL_IN_CONTAINER", raising=False)
+        monkeypatch.setattr(_os, "name", os_name)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode=mode))
         assert agent._build_thread_options()["sandbox"] == Sandbox("full-access")
-
-    def test_read_only_upgraded_to_full_access_in_container(self, monkeypatch):
-        from openai_codex.api import Sandbox  # pyright: ignore[reportPrivateImportUsage]
-
-        monkeypatch.setenv("CODER_EVAL_IN_CONTAINER", "1")
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode="plan"))
-        assert agent._build_thread_options()["sandbox"] == Sandbox("full-access")
-
-    def test_no_marker_keeps_landlock_sandbox(self, monkeypatch):
-        from openai_codex.api import Sandbox  # pyright: ignore[reportPrivateImportUsage]
-
-        monkeypatch.delenv("CODER_EVAL_IN_CONTAINER", raising=False)
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode="acceptEdits"))
-        assert agent._build_thread_options()["sandbox"] == Sandbox("workspace-write")
-
-    def test_full_access_unchanged_in_container(self, monkeypatch):
-        from openai_codex.api import Sandbox  # pyright: ignore[reportPrivateImportUsage]
-
-        monkeypatch.setenv("CODER_EVAL_IN_CONTAINER", "1")
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode="bypassPermissions"))
-        assert agent._build_thread_options()["sandbox"] == Sandbox("full-access")
-
-
-class TestSandboxManagedHostFallback:
-    """On the tempdir driver coder_eval owns the isolation boundary (the ephemeral
-    per-task tempdir), so ``start(sandbox_managed=True)`` makes ``_build_thread_options``
-    drop Codex's redundant in-process OS sandbox to full-access — WITHOUT the docker
-    container marker. This is the host/CI path where the sandbox's bwrap re-exec is
-    denied; the fallback is what keeps those tasks from silently producing no artifacts."""
-
-    def test_workspace_write_upgraded_to_full_access_when_managed(self, monkeypatch):
-        from openai_codex.api import Sandbox  # pyright: ignore[reportPrivateImportUsage]
-
-        monkeypatch.delenv("CODER_EVAL_IN_CONTAINER", raising=False)
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode="acceptEdits"))
-        agent._sandbox_managed = True
-        assert agent._build_thread_options()["sandbox"] == Sandbox("full-access")
-
-    def test_read_only_upgraded_to_full_access_when_managed(self, monkeypatch):
-        from openai_codex.api import Sandbox  # pyright: ignore[reportPrivateImportUsage]
-
-        monkeypatch.delenv("CODER_EVAL_IN_CONTAINER", raising=False)
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode="plan"))
-        agent._sandbox_managed = True
-        assert agent._build_thread_options()["sandbox"] == Sandbox("full-access")
-
-    def test_not_managed_and_no_container_keeps_landlock_sandbox(self, monkeypatch):
-        from openai_codex.api import Sandbox  # pyright: ignore[reportPrivateImportUsage]
-
-        monkeypatch.delenv("CODER_EVAL_IN_CONTAINER", raising=False)
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode="acceptEdits"))
-        assert agent._sandbox_managed is False  # default off
-        assert agent._build_thread_options()["sandbox"] == Sandbox("workspace-write")
-
-    def test_full_access_unchanged_when_managed(self, monkeypatch):
-        from openai_codex.api import Sandbox  # pyright: ignore[reportPrivateImportUsage]
-
-        monkeypatch.delenv("CODER_EVAL_IN_CONTAINER", raising=False)
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode="bypassPermissions"))
-        agent._sandbox_managed = True
-        assert agent._build_thread_options()["sandbox"] == Sandbox("full-access")
-
-    def test_default_sandbox_managed_is_false(self):
-        """Fresh agent defaults to not-managed; start() opts in per the driver."""
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode="acceptEdits"))
-        assert agent._sandbox_managed is False
 
 
 class TestCodexEnvironmentConfiguration:
@@ -425,11 +349,11 @@ class TestThreadOptions:
         options = agent._build_thread_options()
 
         assert options is not None
-        assert options["sandbox"] == Sandbox.workspace_write
+        assert options["sandbox"] == Sandbox.full_access
         assert options["approval_mode"] == ApprovalMode.deny_all
 
     def test_build_thread_options_with_plan(self):
-        """_build_thread_options builds correct options for plan."""
+        """_build_thread_options builds correct options for plan (sandbox still full-access)."""
         from openai_codex.api import ApprovalMode, Sandbox  # pyright: ignore[reportPrivateImportUsage]
 
         config = parse_agent_config(
@@ -441,7 +365,7 @@ class TestThreadOptions:
         options = agent._build_thread_options()
 
         assert options is not None
-        assert options["sandbox"] == Sandbox.read_only
+        assert options["sandbox"] == Sandbox.full_access
         assert options["approval_mode"] == ApprovalMode.deny_all
 
     def test_build_thread_options_with_allowed_tools(self):
@@ -473,7 +397,7 @@ class TestThreadOptions:
         assert options["config"]["disabled_tools"] == ["apply_patch", "apply_patch", "shell"]
 
     def test_build_thread_options_with_no_permission_mode(self):
-        """_build_thread_options defaults to workspace_write/deny_all when no permission_mode set."""
+        """_build_thread_options is full-access/deny_all even without a permission_mode."""
         from openai_codex.api import ApprovalMode, Sandbox  # pyright: ignore[reportPrivateImportUsage]
 
         config = parse_agent_config(type=AgentKind.CODEX)
@@ -482,7 +406,7 @@ class TestThreadOptions:
         options = agent._build_thread_options()
 
         # Should have defaults even without explicit permission_mode
-        assert options["sandbox"] == Sandbox.workspace_write
+        assert options["sandbox"] == Sandbox.full_access
         assert options["approval_mode"] == ApprovalMode.deny_all
 
     def test_build_thread_options_with_permission_and_tools(self):
@@ -499,7 +423,7 @@ class TestThreadOptions:
         options = agent._build_thread_options()
 
         assert options is not None
-        assert options["sandbox"] == Sandbox.read_only
+        assert options["sandbox"] == Sandbox.full_access
         assert options["approval_mode"] == ApprovalMode.deny_all
         assert options["config"]["enabled_tools"] == ["shell", "shell"]
 

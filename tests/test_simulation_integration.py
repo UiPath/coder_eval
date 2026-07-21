@@ -115,7 +115,6 @@ class _ExplodingAgent(Agent):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
-        sandbox_managed: bool = False,
     ) -> None:
         pass
 

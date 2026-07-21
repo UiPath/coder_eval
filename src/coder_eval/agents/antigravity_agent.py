@@ -290,13 +290,8 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
-        sandbox_managed: bool = False,
     ) -> None:
         """Initialize and start the Antigravity agent's local harness session.
-
-        (``sandbox_managed`` is accepted for interface parity with the base
-        ``Agent.start`` and ignored: the Antigravity harness has no in-process
-        OS sandbox to drop.)
 
         Args:
             working_directory: Path to the sandbox working directory. The primary

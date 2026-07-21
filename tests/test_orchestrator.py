@@ -561,7 +561,6 @@ async def test_orchestrator_setup_move_on_write_uses_ephemeral_runtime_dir(tmp_p
             *,
             env_path_prepend: list[str] | None = None,
             plugin_tools_dir: str | None = None,
-            sandbox_managed: bool = False,
         ) -> None:
             self.working_directory = working_directory
 
@@ -626,9 +625,7 @@ async def test_direct_write_warns_on_non_empty_target(tmp_path, monkeypatch, cap
     from coder_eval.sandbox import Sandbox
 
     class DummyAgent:
-        async def start(
-            self, working_directory, *, env_path_prepend=None, plugin_tools_dir=None, sandbox_managed=False
-        ):
+        async def start(self, working_directory, *, env_path_prepend=None, plugin_tools_dir=None):
             self.working_directory = working_directory
 
         def get_sdk_options(self):

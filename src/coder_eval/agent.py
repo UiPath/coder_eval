@@ -167,7 +167,6 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
-        sandbox_managed: bool = False,
     ) -> None:
         """Initialize and start the agent.
 
@@ -181,10 +180,6 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
                 instead of walking up from CWD. An external ``PLUGIN_TOOLS_DIR`` in
                 the process environment still wins. Implementations that don't shell
                 out may ignore this argument.
-            sandbox_managed: True when coder_eval itself provides this run's isolation
-                boundary (the ephemeral host tempdir it created for the task). Agents
-                that run their own in-process OS sandbox may use this to skip it as
-                redundant; agents without one may ignore this argument.
         """
         pass
 

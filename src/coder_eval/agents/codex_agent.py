@@ -67,14 +67,6 @@ _CLAUDE_TO_CODEX_TOOL_MAP: dict[str, str] = {
     "Glob": "shell",
 }
 
-# Permission mode → sandbox mode mapping
-_PERMISSION_MODE_TO_SANDBOX: dict[str, str] = {
-    "bypassPermissions": "full-access",
-    "acceptEdits": "workspace-write",
-    "default": "workspace-write",
-    "plan": "read-only",
-}
-
 # Approval mode — the SAME for every permission mode (no per-mode mapping).
 #
 # The Codex SDK exposes exactly two approval modes:
@@ -90,9 +82,9 @@ _PERMISSION_MODE_TO_SANDBOX: dict[str, str] = {
 #     escalations BEYOND the sandbox are refused.
 #
 # An eval harness never wants a reviewer that can flake, so EVERY permission mode
-# uses deny_all. The trust boundary is the sandbox (_PERMISSION_MODE_TO_SANDBOX),
-# which DOES vary by mode: `plan` stays read-only, `bypassPermissions` is
-# full-access (intended for isolated Docker runs).
+# uses deny_all. The trust boundary is coder_eval's per-run sandbox — a docker
+# container or an ephemeral tempdir — NOT Codex's in-process OS sandbox, which
+# _build_thread_options always drops to full-access (rationale there).
 _CODEX_APPROVAL_MODE = "deny_all"
 
 # Provider id registered in thread config when CODEX_BASE_URL routes to a
@@ -663,11 +655,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self.working_directory: Path | None = None
         self._env_path_prepend: list[str] = []
         self._login_shell_home: Path | None = None
-        # True when coder_eval itself owns the isolation boundary for this run
-        # (the ephemeral host tempdir it created). Set by start(); combined with
-        # the docker-path CODER_EVAL_IN_CONTAINER marker in _build_thread_options
-        # to drop Codex's redundant in-process OS sandbox (rationale there).
-        self._sandbox_managed: bool = False
         # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
         # bookkeeping lives on the Agent base class (shared defaults + helpers).
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
@@ -683,7 +670,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
-        sandbox_managed: bool = False,
     ) -> None:
         """Initialize and start the Codex agent.
 
@@ -694,14 +680,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 ``SandboxConfig.mock_path_dirs``), so mock CLIs shadow the
                 real ones — same semantics as the Claude agent.
             plugin_tools_dir: Optional plugin tools directory (for skills setup)
-            sandbox_managed: True when coder_eval itself provides the isolation
-                boundary for this run (the ephemeral host tempdir it created).
-                Lets ``_build_thread_options`` drop Codex's redundant in-process
-                OS sandbox, which also can't initialize on some managed CI hosts.
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
-        self._sandbox_managed = sandbox_managed
         self._setup_login_shell_home()
         self._state = AgentState.WORKING
 
@@ -1269,31 +1250,22 @@ class CodexAgent(Agent[CodexAgentConfig]):
             options["model"] = effective_model
             self._log.debug(f"Codex model pinned to {effective_model}")
 
-        # Map permission_mode to sandbox and approval_mode
         permission_mode = self.config.permission_mode.value
-        sandbox_mode_str = _PERMISSION_MODE_TO_SANDBOX.get(permission_mode, "workspace-write")
         approval_mode_str = _CODEX_APPROVAL_MODE
 
-        # Codex's read-only / workspace-write sandboxes are enforced by an OS-level
-        # helper (Landlock, or a bubblewrap re-exec where Landlock is unavailable).
-        # That helper can outright fail to start on managed hosts — inside the eval
-        # container (Landlock unavailable) and on constrained CI agents where the
-        # bwrap re-exec is denied ("bwrap: execvp .../codex: Permission denied" when
-        # unprivileged user namespaces or exec mounts are restricted). When it fails,
-        # writes/execs fail silently and the agent produces no artifacts (FAILURE,
-        # score 0, no loud error). Whenever coder_eval already owns the isolation
-        # boundary — a docker container (CODER_EVAL_IN_CONTAINER) OR the ephemeral
-        # host tempdir it created (sandbox_managed) — this in-process sandbox is
-        # redundant, so fall back to full-access. This also matches every other
-        # harness (e.g. Claude Code), which runs the tempdir path with no in-agent
-        # OS sandbox; hard isolation of untrusted actions is the docker driver's job.
-        if sandbox_mode_str != "full-access" and (os.getenv("CODER_EVAL_IN_CONTAINER") or self._sandbox_managed):
-            boundary = "eval container" if os.getenv("CODER_EVAL_IN_CONTAINER") else "coder_eval-managed host tempdir"
-            self._log.debug(
-                f"Codex sandbox '{sandbox_mode_str}' → 'full-access': the {boundary} is the isolation "
-                + "boundary (the in-process OS sandbox is redundant here and can fail to init on CI hosts)."
-            )
-            sandbox_mode_str = "full-access"
+        # Codex always runs full-access. coder_eval owns this run's isolation
+        # boundary either way — a docker container (docker driver) or an ephemeral
+        # per-task tempdir it creates and discards (tempdir driver); those are the
+        # only two drivers — so Codex's own in-process OS sandbox (Landlock/seatbelt)
+        # is always redundant. Worse, it actively breaks on the paths we rely on:
+        # inside the container Landlock is unavailable, on constrained CI agents the
+        # bwrap re-exec is denied ("bwrap: execvp .../codex: Permission denied"), and
+        # on Windows there is no OS sandbox at all — in each case a read-only /
+        # workspace-write run fails its writes/execs silently and scores 0 with no
+        # loud error. Dropping to full-access matches Claude Code and Antigravity,
+        # which run with no in-agent OS sandbox; hard isolation of untrusted actions
+        # is the docker driver's job, and approval_mode stays deny_all regardless.
+        sandbox_mode_str = "full-access"
 
         # Convert to Codex SDK enum values
         # Sandbox enum values use hyphens, ApprovalMode uses underscores
