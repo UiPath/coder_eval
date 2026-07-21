@@ -13,6 +13,13 @@ name: Release
 # and push.
 # (Continuous :latest / :sha- agent images still publish on every main push via
 # docker-publish.yml -- only the versioned release artifacts gate on this run.)
+#
+# PRERELEASE mode (dispatched from a NON-main branch): instead of bumping and
+# pushing main, stamp a throwaway `<next-patch>rc<run#>` version, then build and
+# publish the wheel to public PyPI + a `:<version>` GHCR image. It does NOT move
+# `:latest`, tag, commit, or push to main. This lets a branch be dry-run on the
+# ADO nightly infra before merge (pinned via the pipeline's `coderEvalVersion`).
+# The `bump` input is ignored off main. On `main` the behavior is unchanged.
 
 on:
   workflow_dispatch:
@@ -47,9 +54,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
-      # Exposed so the downstream publish-pypi job can gate on a real release
-      # having been cut (empty => no version bumped => skip PyPI publish).
-      version: ${{ steps.release.outputs.version }}
+      # Exposed so the downstream publish-pypi job gates on a version having been
+      # produced (real release on main, or a stamped prerelease on a branch).
+      version: ${{ steps.ver.outputs.version }}
     env:
       # The self-hosted `uipath-ubuntu-latest` runners enforce a minimum
       # package-age safe-chain check on uv installs; on GitHub-hosted runners
@@ -58,8 +65,13 @@ jobs:
       SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS: "openai-codex-cli-bin,openai-codex"
 
     steps:
+      # Only a real release (main) needs the app token: semantic-release pushes the
+      # bump commit + tag to the ruleset-protected main branch, and only this app
+      # has the bypass. A prerelease from a branch never commits or pushes, so it
+      # skips the token and checks out with the default GITHUB_TOKEN.
       - name: Mint release app token
         id: app-token
+        if: github.ref == 'refs/heads/main'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
@@ -70,8 +82,9 @@ jobs:
         with:
           fetch-depth: 0  # semantic-release needs full history for tags + changelog
           # Persisted in .git config so semantic-release's push to main is
-          # authenticated as the app (which bypasses the branch ruleset).
-          token: ${{ steps.app-token.outputs.token }}
+          # authenticated as the app (which bypasses the branch ruleset). Falls back
+          # to the default token for a prerelease (no push, read-only checkout).
+          token: ${{ steps.app-token.outputs.token || github.token }}
 
       - name: Set up Python 3.13
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
@@ -83,11 +96,38 @@ jobs:
         with:
           enable-cache: true
 
+      # Release mode is chosen by the dispatched ref: main => real release (the
+      # semantic-release path below); any other branch => prerelease (stamp a
+      # throwaway rc version, publish, never touch main). Keying off the ref (not a
+      # new input) keeps this dispatchable from a branch — a new input would have to
+      # exist on the default branch first to be accepted.
+      - name: Determine release mode
+        id: mode
+        env:
+          REF: ${{ github.ref }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          if [ "$REF" = "refs/heads/main" ]; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "Mode: RELEASE (main)"
+          else
+            # Next patch of the current version, suffixed with the run number so
+            # repeated dispatches never collide on PyPI. An exact `==` pin installs
+            # it even though pip/uv skip prereleases by default.
+            NEXT=$(python3 -c 'import re,tomllib; v=tomllib.load(open("pyproject.toml","rb"))["project"]["version"]; m=re.match(r"(\d+)\.(\d+)\.(\d+)",v); print("{}.{}.{}".format(int(m[1]),int(m[2]),int(m[3])+1))')
+            PRE="${NEXT}rc${RUN_NUMBER}"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "version=${PRE}" >> "$GITHUB_OUTPUT"
+            echo "Mode: PRERELEASE ${PRE}"
+          fi
+
       - name: Install build + release tools
         run: uv tool install python-semantic-release && uv tool install twine
 
       - name: Run semantic-release (bump + tag, no push yet)
         id: release
+        if: steps.mode.outputs.prerelease != 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           # Passed via env (not interpolated into the script) per GitHub's
@@ -105,8 +145,45 @@ jobs:
           # A dispatch always cuts a release; report the just-published version.
           echo "version=$($PSR version --print)" >> "$GITHUB_OUTPUT"
 
+      # PRERELEASE: stamp the rc version into the two canonical spots (mirrors
+      # publish-testpypi.yml), then refresh uv.lock so the Dockerfile's
+      # `uv export --frozen` accepts the bumped project version. No commit is made —
+      # the working tree is what `uv build` and the image build below consume.
+      - name: Stamp prerelease version
+        if: steps.mode.outputs.prerelease == 'true'
+        env:
+          PRE_VERSION: ${{ steps.mode.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, pathlib
+          version = os.environ["PRE_VERSION"]
+          for path, key in (("pyproject.toml", "version"), ("src/coder_eval/__init__.py", "__version__")):
+              p = pathlib.Path(path)
+              new, n = re.subn(rf'(?m)^{key}\s*=\s*".+?"$', f'{key} = "{version}"', p.read_text(), count=1)
+              if n != 1:
+                  raise SystemExit(f"version pattern did not match {path} (matched {n})")
+              p.write_text(new)
+          print(f"Stamped prerelease version: {version}")
+          PY
+          uv lock
+
+      # Single source of truth for the steps below: the real release version (main)
+      # or the stamped prerelease version (branch).
+      - name: Resolve published version
+        id: ver
+        env:
+          REL: ${{ steps.release.outputs.version }}
+          PRE: ${{ steps.mode.outputs.version }}
+        run: |
+          set -euo pipefail
+          V="${REL:-$PRE}"
+          if [ -z "$V" ]; then echo "no version resolved" >&2; exit 1; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: $V"
+
       - name: Regenerate uv.lock and amend release commit
-        if: steps.release.outputs.version != ''
+        if: steps.mode.outputs.prerelease != 'true' && steps.release.outputs.version != ''
         run: |
           uv lock
           if ! git diff --quiet uv.lock; then
@@ -119,43 +196,64 @@ jobs:
           fi
 
       - name: Push release commit and tags
-        if: steps.release.outputs.version != ''
+        if: steps.mode.outputs.prerelease != 'true' && steps.release.outputs.version != ''
         run: git push origin main "v${{ steps.release.outputs.version }}"
 
       - name: Build wheel + sdist
-        if: steps.release.outputs.version != ''
+        if: steps.ver.outputs.version != ''
         run: uv build
 
       # Hand the exact built artifacts to the publish-pypi job. Publishing to
       # public PyPI runs in its own environment-gated job (OIDC), so it must
       # consume these files rather than rebuild them.
       - name: Upload dist for PyPI publish
-        if: steps.release.outputs.version != ''
+        if: steps.ver.outputs.version != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: release-dist
           path: dist/
           if-no-files-found: error
 
-      # Build + push the agent image HERE, in the same job that cut the release,
-      # so the `:<version>` tag is built from the BUMPED pyproject (the version
-      # only exists after the semantic-release step above). docker-publish.yml
-      # runs on the triggering commit, BEFORE the bump, so it can never tag the
-      # release version -- this is the authoritative versioned image. It also
-      # repoints `:latest` to the exact release artifact.
+      # Build + push the agent image HERE, in the same job that produced the
+      # version, so the `:<version>` tag is built from the correct pyproject (bumped
+      # by semantic-release on main, or the stamped rc on a prerelease).
+      # docker-publish.yml runs on the triggering commit, BEFORE a main bump, so it
+      # can never tag the release version -- this is the authoritative versioned
+      # image. A real release also repoints `:latest`; a prerelease publishes only
+      # its `:<version>` tag (see Compute image tags).
       - name: Lowercase owner for GHCR
-        if: steps.release.outputs.version != ''
+        if: steps.ver.outputs.version != ''
         id: img
         run: echo "owner_lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
+      # `:<version>` always; `:latest` only for a real release. A prerelease must
+      # not move `:latest`, which the nightly treats as tip-of-main.
+      - name: Compute image tags
+        if: steps.ver.outputs.version != ''
+        id: tags
+        env:
+          OWNER: ${{ steps.img.outputs.owner_lc }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          IS_PRERELEASE: ${{ steps.mode.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          {
+            echo "tags<<EOF"
+            echo "ghcr.io/${OWNER}/coder-eval-agent:${VERSION}"
+            if [ "$IS_PRERELEASE" != "true" ]; then
+              echo "ghcr.io/${OWNER}/coder-eval-agent:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         continue-on-error: true  # GHCR image is internal/best-effort; don't block PyPI
-        if: steps.release.outputs.version != ''
+        if: steps.ver.outputs.version != ''
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
 
       - name: Log in to GHCR
         continue-on-error: true  # GHCR image is internal/best-effort; don't block PyPI
-        if: steps.release.outputs.version != ''
+        if: steps.ver.outputs.version != ''
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3.7.0
         with:
           registry: ghcr.io
@@ -164,17 +262,15 @@ jobs:
 
       - name: Build and push versioned agent image
         continue-on-error: true  # GHCR image is internal/best-effort; don't block PyPI
-        if: steps.release.outputs.version != ''
+        if: steps.ver.outputs.version != ''
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6.19.2
         with:
           context: .
           file: docker/Dockerfile
           push: true
-          tags: |
-            ghcr.io/${{ steps.img.outputs.owner_lc }}/coder-eval-agent:${{ steps.release.outputs.version }}
-            ghcr.io/${{ steps.img.outputs.owner_lc }}/coder-eval-agent:latest
+          tags: ${{ steps.tags.outputs.tags }}
           build-args: |
-            CODER_EVAL_VERSION=${{ steps.release.outputs.version }}
+            CODER_EVAL_VERSION=${{ steps.ver.outputs.version }}
           secrets: |
             "uv_index_username=${{ secrets.UV_INDEX_UIPATH_USERNAME }}"
             "uv_index_password=${{ secrets.UV_INDEX_UIPATH_PASSWORD }}"
