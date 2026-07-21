@@ -10,8 +10,9 @@ keywords = [
     "ai", "llm", "agent", "coding-agent", "evaluation", "eval", "evals",
     "benchmark", "swe-bench", "claude", "claude-code", "codex", "anthropic",
     "gemini", "antigravity", "sandbox", "code-generation", "agent-evaluation",
-    "llm-evaluation", "skills-evaluation", "claude-skills", "agent-skills",
-    "skillsbench",
+    "llm-evaluation", "llm-eval", "ai-evaluation", "skills-evaluation",
+    "claude-skills", "claude-code-skills", "agent-skills", "skillsbench",
+    "agent-testing", "llmops",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -52,7 +53,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/UiPath/coder_eval"
 Repository = "https://github.com/UiPath/coder_eval"
-Documentation = "https://github.com/UiPath/coder_eval/tree/main/docs"
+Documentation = "https://uipath.github.io/coder_eval/"
 Issues = "https://github.com/UiPath/coder_eval/issues"
 Changelog = "https://github.com/UiPath/coder_eval/blob/main/CHANGELOG.md"
 

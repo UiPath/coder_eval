@@ -1,3 +1,10 @@
+---
+description: >-
+  Complete coder_eval reference — every CLI command and flag, configuration
+  layers and -D overrides, environment variables, run outputs, and reports for
+  evaluating AI coding agents.
+---
+
 # coder_eval User Guide
 
 The full command, configuration, and output reference. For a gentle introduction
@@ -80,6 +87,8 @@ in `.claude/commands/`, available when using Claude Code in this repository:
 | --- | --- |
 | `/coder-eval-run-analysis <path>` | Analyze evaluation runs and suggest improvements to tasks, config, and prompts. Works at task, variant, or run scope. |
 | `/coder-eval-task-create` | Create evaluation task YAML files from a natural language description. |
+
+<a id="api-routing--benchmarking"></a>
 
 ## API Routing & Benchmarking
 

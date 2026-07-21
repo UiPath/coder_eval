@@ -1,3 +1,10 @@
+---
+description: >-
+  Full schema reference for coder_eval task YAML — agent config, sandboxes, run
+  limits, dataset fan-out, and all 14 success criterion types with weighted
+  0.0–1.0 scoring.
+---
+
 # Task Definition Guide
 
 Complete reference for defining evaluation tasks in coder_eval.
@@ -128,6 +135,8 @@ an error.
 - `codex` — OpenAI Codex agent (requires `[codex]` extra; set `CODEX_API_KEY` and optional `CODEX_BASE_URL` environment variables).
 - `none` — No-op agent: no coding agent runs and no model API call is made. See [No-op / System Tasks](#no-op--system-tasks-type-none) below.
 
+<a id="no-op--system-tasks-type-none"></a>
+
 ### No-op / System Tasks (`type: none`)
 
 Set `agent: {type: none}` to run a task with **no coding agent** — "coder-eval
@@ -159,7 +168,7 @@ Contract (enforced at load): a `type: none` task must declare no `initial_prompt
 every criterion must be agent-independent — criteria that inspect the agent
 trajectory (`command_executed`, `skill_triggered`, `reference_comparison`,
 `commands_efficiency`) are rejected. A worked example lives at
-[`tasks/agentless_smoke_test.yaml`](../tasks/agentless_smoke_test.yaml).
+[`tasks/agentless_smoke_test.yaml`](https://github.com/UiPath/coder_eval/blob/main/tasks/agentless_smoke_test.yaml).
 
 ### `max_turns`, `task_timeout`, `turn_timeout` location
 
@@ -590,7 +599,7 @@ Checks whether the agent executed specific tools/commands during evaluation. Ins
 
 Evaluates a UiPath agent against a named evaluation set. **Fractional scoring:** metrics passed / total metrics.
 
-> The `uipath` CLI must be available **inside the sandbox** (typically declared in the task's own Python deps). This is independent of the host's optional `coder-eval[uipath]` extra — see the install matrix in [README.md](../README.md#installation).
+> The `uipath` CLI must be available **inside the sandbox** (typically declared in the task's own Python deps). This is independent of the host's optional `coder-eval[uipath]` extra — see the install matrix in [README.md](https://github.com/UiPath/coder_eval/blob/main/README.md#quick-start).
 
 ```yaml
 - type: "uipath_eval"

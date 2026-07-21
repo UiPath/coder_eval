@@ -1,24 +1,32 @@
-# coder_eval — evaluate AI coding agents & their skills
+# coder_eval — evaluate & benchmark AI coding agents and Claude Code skills
 
 [![PyPI](https://img.shields.io/pypi/v/coder-eval.svg)](https://pypi.org/project/coder-eval/)
+[![Docs](https://img.shields.io/badge/docs-uipath.github.io%2Fcoder__eval-1f6feb.svg)](https://uipath.github.io/coder_eval/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
 [![CI](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml/badge.svg)](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml)
 [![Code style: Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-A framework for evaluating AI coding agents **and their skills** — built for CLI
+**coder_eval** (`pip install coder-eval`) is an open-source framework for
+**evaluating and benchmarking AI coding agents and their skills** — built for CLI
 and skill builders — with sandboxing, reproducibility, and data-driven analysis.
-Not an "agentic coding" benchmark: it measures how effective your CLI and skills
-are when used by coding agents.
+It runs a real agent (**Claude Code**, **Codex**, or **Google Antigravity /
+Gemini**) in a sandbox against declarative YAML tasks, then scores the files and
+commands it actually produced. Not an "agentic coding" benchmark: it measures how
+effective your CLI and skills are when used by coding agents.
+
+Reach for it when you want to **test whether a Claude Code skill triggers**,
+**A/B-test Claude Code vs. Codex vs. Gemini** (or model vs. model, prompt vs.
+prompt), or **gate CI on coding-agent quality**. Unlike fixed datasets (SWE-bench,
+SkillsBench) that rank models on a shared leaderboard, coder_eval evaluates the
+tasks, skills, and workflows *you* ship — with weighted 0.0–1.0 criteria, a
+`skill_triggered` activation check, an A/B experiment layer, and per-tool cost
+telemetry. See [How it compares](https://uipath.github.io/coder_eval/comparison/).
+📚 **Full docs:** **[uipath.github.io/coder_eval](https://uipath.github.io/coder_eval/)**.
 
 <p align="center">
   <img src="docs/assets/hero.gif" alt="coder_eval running the hello_date task: a sandboxed agent writes and runs a script from a YAML task, then the scored result is browsed in evalboard" width="100%">
 </p>
-
-> **The Coding Agents Gym.** A sandboxed, reproducible framework to evaluate,
-> benchmark, and A/B-test AI coding agents — Claude Code, Codex, and Google
-> Antigravity (Gemini) today, any agent via a plugin SPI — with declarative
-> YAML tasks and weighted scoring.
 
 - **Declarative YAML tasks** with pinned dependencies and clear success criteria
 - **Sandboxed execution** in isolated environments with resource limits
@@ -30,7 +38,7 @@ are when used by coding agents.
 
 ## What you can do with it
 
-- **Benchmark coding agents** — score an agent across a suite of tasks with weighted, pass/fail thresholds
+- **Benchmark coding agents** — score an agent across a suite of tasks with weighted scoring and pass/fail thresholds
 - **Compare models & configs** — A/B-test Claude vs. Codex vs. Gemini, model vs. model, tool-on vs. tool-off, prompt vs. prompt
 - **Evaluate skills** — verify an agent actually engages a target skill (`skill_triggered`) and score skill-driven suites (SkillsBench-style)
 - **Keep skills up to date in CI** — re-validate your skills on every change or on a schedule; catch silent regressions when models, prompts, or the skills themselves drift
@@ -53,7 +61,9 @@ git clone https://github.com/UiPath/coder_eval.git
 cd coder_eval
 
 uv sync --extra dev          # install core + dev tools
-cp .env.example .env         # then set ANTHROPIC_API_KEY
+cp .env.example .env         # then set ANTHROPIC_API_KEY — or skip that: an
+                             # existing Claude Code login (`claude login`) is
+                             # picked up automatically
 
 uv run coder-eval plan tasks/hello_date.yaml   # validate (no tokens spent)
 uv run coder-eval run  tasks/hello_date.yaml   # run your first evaluation
@@ -67,11 +77,23 @@ The optional `[uipath]` extra (`uv sync --extra dev --extra uipath`) adds the in
 required). Without it the framework runs end-to-end; uipath-dependent features fail
 at dispatch with a clear hint.
 
-> **Using coder_eval in CI or another project?** Install the published package:
-> `pip install coder-eval` (or `uv add coder-eval`; extras install the same way —
-> `pip install "coder-eval[codex,antigravity]"`). In a real CI gate, pin to a
-> specific released version so a harness upgrade can't silently move your results.
-> See [Tutorial 02 — Running coder_eval in CI](docs/tutorials/02-ci-pipeline.md) for the full setup.
+**Using coder_eval in CI or another project?** Install the published package
+instead of cloning:
+
+```bash
+uv tool install coder-eval    # puts the `coder-eval` CLI on your PATH,
+                              # in its own isolated environment
+
+uv tool install "coder-eval[codex,antigravity]"   # same, with agent extras
+coder-eval --version                              # verify the install
+```
+
+To add it as a project dependency instead: `uv add coder-eval` or
+`pip install coder-eval`. In a real CI gate, pin to a specific released version
+so a harness upgrade can't silently move your results. (The example `tasks/`
+live in this repo — clone it or point the CLI at your own task files.) See
+[Tutorial 02 — Running coder_eval in CI](docs/tutorials/02-ci-pipeline.md) for
+the full setup.
 
 ## Telemetry
 
@@ -99,16 +121,17 @@ at dispatch with a clear hint.
 
 ## How it compares
 
-- **vs. SWE-bench and fixed benchmarks** — SWE-bench is a fixed dataset of GitHub
-  issues; coder_eval is a *framework* for authoring your own tasks in declarative
-  YAML, so you evaluate the skills and workflows you care about (and can still wrap
-  a fixed dataset via [Bring Your Own Dataset](docs/BYOD.md)).
-- **vs. LLM-output eval harnesses (e.g. OpenAI Evals)** — those grade a model's text;
-  coder_eval runs a full **agent** in a **sandbox** with real tool use and multi-turn
-  dialog, then scores the files and commands it actually produced (continuous
-  0.0–1.0) — not just a judge over a string.
+- **vs. fixed benchmarks (SWE-bench, SkillsBench)** — they score a canonical dataset;
+  coder_eval scores *your* tasks with continuous 0.0–1.0 weighted criteria (and can
+  still wrap a fixed dataset via [Bring Your Own Dataset](docs/BYOD.md)).
+- **vs. large-scale / RL harnesses (Harbor)** — Harbor targets scale and RL rollouts;
+  coder_eval targets weighted, skill-aware suites gated in CI.
+- **vs. model-output eval tools (OpenAI Evals)** — they grade model text; coder_eval
+  runs a full agent in a sandbox and scores the files and commands it produced.
 - **vs. hand-rolled scripts** — reproducible sandboxes, weighted criteria,
   cost/token telemetry, A/B experiments, and CI-ready pass/fail gates out of the box.
+
+See the full [comparison — with sources](https://uipath.github.io/coder_eval/comparison/).
 
 ## Task Definition
 

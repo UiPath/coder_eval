@@ -1,3 +1,10 @@
+---
+description: >-
+  Step-by-step coder_eval tutorials — run your first AI coding-agent evaluation,
+  wire it into CI, browse results, write tasks, compare models, and isolate runs
+  in Docker.
+---
+
 # Tutorials
 
 Step-by-step, task-oriented walkthroughs. Start here if you're new; for the

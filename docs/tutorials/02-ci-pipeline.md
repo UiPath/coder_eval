@@ -1,3 +1,10 @@
+---
+description: >-
+  Run coder_eval in GitHub Actions — install the CLI, execute your coding-agent
+  evaluation suite on demand or on a schedule, and gate merges on a pass/fail
+  verdict.
+---
+
 # Tutorial 02 — Running coder_eval in CI
 
 Run your evaluation suite automatically in GitHub Actions: on demand, on a

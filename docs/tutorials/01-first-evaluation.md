@@ -1,3 +1,10 @@
+---
+description: >-
+  Install coder-eval, point it at an API key or your Claude Code login, run a
+  built-in task in a sandbox, and read your first scored coding-agent result —
+  in about 5 minutes.
+---
+
 # Tutorial 01 — Your First Evaluation
 
 By the end you'll have installed `coder-eval`, pointed it at an API key, run a

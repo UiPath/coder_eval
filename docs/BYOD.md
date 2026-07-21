@@ -1,3 +1,10 @@
+---
+description: >-
+  Use a custom Docker image with coder_eval — extend the base coder-eval-agent
+  image with your own dependencies and tools, then point task configuration at
+  it.
+---
+
 # Bring Your Own Docker (BYOD)
 
 The BYOD feature allows customers to use custom Docker images that extend the base `coder-eval-agent` image, enabling them to add custom dependencies and tools while maintaining the latest coder-eval codebase.

@@ -1,3 +1,10 @@
+---
+description: >-
+  Write a coder_eval task YAML from scratch — prompt, isolated sandbox, turn
+  budget, and three success criteria — validate it without spending tokens, then
+  run and score it.
+---
+
 # Tutorial 04 — Writing a Task
 
 By the end you'll have authored a task YAML from scratch — a prompt, an isolated
