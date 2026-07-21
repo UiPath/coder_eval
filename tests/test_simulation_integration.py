@@ -110,7 +110,12 @@ class _ExplodingAgent(Agent):
         self._state = AgentState.WORKING
 
     async def start(
-        self, working_directory: str, *, env_path_prepend: list[str] | None = None, plugin_tools_dir: str | None = None
+        self,
+        working_directory: str,
+        *,
+        env_path_prepend: list[str] | None = None,
+        plugin_tools_dir: str | None = None,
+        sandbox_managed: bool = False,
     ) -> None:
         pass
 

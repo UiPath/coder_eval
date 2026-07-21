@@ -267,6 +267,7 @@ class TestLifecycle:
                 *,
                 env_path_prepend: list[str] | None = None,
                 plugin_tools_dir: str | None = None,
+                sandbox_managed: bool = False,
             ) -> None:
                 self.captured_dir = Path(working_directory)
                 raise RuntimeError("boom")
@@ -303,6 +304,7 @@ class TestLifecycle:
                 *,
                 env_path_prepend: list[str] | None = None,
                 plugin_tools_dir: str | None = None,
+                sandbox_managed: bool = False,
             ) -> None:
                 self.captured_dir = Path(working_directory)
                 raise asyncio.CancelledError()
