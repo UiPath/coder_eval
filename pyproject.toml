@@ -34,7 +34,7 @@ dependencies = [
     "rich>=14.3.3",
     "python-dotenv>=1.2.2",
     "anthropic>=0.86.0",
-    "claude-agent-sdk>=0.2.82",
+    "claude-agent-sdk>=0.2.124",
     "anyio>=4.13.0",
     "radon>=6.0.1",
     "tqdm>=4.67.3",
@@ -85,7 +85,7 @@ uipath = [
 # Without this extra, the framework still installs and runs; Codex-dependent
 # code paths fail at dispatch with a clear hint pointing back here.
 codex = [
-    "openai-codex>=0.1.0b3",
+    "openai-codex>=0.144.4",
 ]
 # Optional extra that enables Antigravity agent support:
 #   - AntigravityAgent implementation using Google's official google-antigravity SDK
@@ -134,12 +134,14 @@ packages = ["src/coder_eval"]
 allow-direct-references = true
 
 [tool.uv]
-# openai-codex 0.1.0b3 hardpins `openai-codex-cli-bin==0.137.0a4`, a
-# PRE-RELEASE. Because that pin is transitive (not referenced directly by us),
-# uv won't select it without an explicit opt-in. Naming it here as an override
-# both enables the pre-release and documents the pinned cli-bin build; 0.137.0a4
-# publishes manylinux wheels (x86_64 + aarch64), so CI/Linux installs work.
-override-dependencies = ["openai-codex-cli-bin==0.137.0a4"]
+# openai-codex 0.144.4 hardpins `openai-codex-cli-bin==0.144.4` (a stable
+# release; the SDK version now tracks the codex CLI version line). Naming it
+# here documents and holds the pinned cli-bin build — the harness binary is a
+# dominant non-model driver of eval results, so it travels with the coder_eval
+# release tag and is bumped deliberately (mirrors the antigravity localharness
+# and claude-code CLI pins). 0.144.4 publishes manylinux wheels (x86_64 +
+# aarch64), so CI/Linux installs work.
+override-dependencies = ["openai-codex-cli-bin==0.144.4"]
 
 constraint-dependencies = [
     # Fix known CVEs in transitive dependencies
