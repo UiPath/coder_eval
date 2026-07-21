@@ -1,4 +1,11 @@
-# Tutorial 04 — Running Tasks in Docker Isolation
+---
+description: >-
+  Switch a coder_eval task from the temp-dir sandbox to a fresh Docker container
+  per task — strong host isolation, a pinned toolchain, and task-specific
+  dependencies.
+---
+
+# Tutorial 06 — Running Tasks in Docker Isolation
 
 By default a task runs in a temp-dir sandbox on your host. This tutorial switches
 that to a fresh **Docker container per task** — strong host isolation and a
@@ -190,7 +197,7 @@ COPY input/ /root/input/            # build context = this Dockerfile's parent d
 > tagged by `make docker-image`, so either works in the `FROM`.) Tasks whose
 > Dockerfile brings its own base — e.g. Fedora/`dnf` — use
 > inject-mode instead; see
-> [Docker Isolation](../DOCKER_ISOLATION.md#tasks-that-bring-their-own-base-the-runtime-kit-coder-eval-runtime).
+> [Docker Isolation](../DOCKER_ISOLATION.md#tasks-that-bring-their-own-base-image-the-runtime-kit-coder-eval-runtime).
 
 ## Next steps
 

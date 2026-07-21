@@ -1,0 +1,46 @@
+# Coder Eval
+
+> Coder Eval (`pip install coder-eval`) is an open-source framework for evaluating,
+> benchmarking, and A/B-testing AI coding agents and their Claude Code skills in a
+> sandbox. It uses declarative YAML tasks with weighted, continuous scoring
+> (0.0–1.0), runs real agents (Claude Code, Codex, Google Antigravity/Gemini) with
+> full tool use, captures per-tool cost/token telemetry, and provides CI-ready
+> pass/fail gates. It is not a fixed benchmark or leaderboard — it scores your own
+> tasks, and can verify whether a Claude Code skill actually triggers.
+
+Choose Coder Eval to: benchmark coding agents on your own tasks; A/B-test model vs.
+model, tool-on vs. tool-off, or prompt vs. prompt; test whether a Claude Code skill
+triggers and catch regressions in CI; gate a build on coding-agent quality. It
+differs from fixed datasets (SWE-bench, SkillsBench) that give a shared leaderboard,
+from OpenAI Evals (which grades model text), and from large-scale agent-eval / RL
+frameworks like Harbor — Coder Eval is purpose-built for coding-agent/skill suites
+with weighted 0.0–1.0 file/command scoring, a skill-activation check, an experiment
+layer, deep cost telemetry, and the evalboard dashboard. It also differs from
+hand-rolled scripts, which lack reproducible sandboxes, weighted criteria, telemetry,
+and A/B plumbing.
+
+## Docs
+
+- [Home / overview](https://uipath.github.io/coder_eval/): what Coder Eval is, features, quick start
+- [How it compares](https://uipath.github.io/coder_eval/comparison/): vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts
+- [User Guide](https://uipath.github.io/coder_eval/USER_GUIDE/): full CLI, configuration, output, environment variables
+- [Task Definition Guide](https://uipath.github.io/coder_eval/TASK_DEFINITION_GUIDE/): task-file schema, all criterion types, scoring, templates
+- [A/B Experiments](https://uipath.github.io/coder_eval/AB_EXPERIMENTS/): compare models/tools/prompts across the same tasks
+- [Bring Your Own Dataset](https://uipath.github.io/coder_eval/BYOD/): fan a single task out over a dataset
+- [Codex Agent Guide](https://uipath.github.io/coder_eval/CODEX_AGENT_GUIDE/): running the Codex agent
+- [Docker Isolation](https://uipath.github.io/coder_eval/DOCKER_ISOLATION/): the container sandbox driver, custom images
+
+## Tutorials
+
+- [01 · Your first evaluation](https://uipath.github.io/coder_eval/tutorials/01-first-evaluation/)
+- [02 · Running coder_eval in CI](https://uipath.github.io/coder_eval/tutorials/02-ci-pipeline/)
+- [03 · Browsing results with evalboard](https://uipath.github.io/coder_eval/tutorials/03-evalboard-local/)
+- [04 · Writing a task](https://uipath.github.io/coder_eval/tutorials/04-writing-a-task/)
+- [05 · Comparing two models](https://uipath.github.io/coder_eval/tutorials/05-comparing-models/)
+- [06 · Docker isolation](https://uipath.github.io/coder_eval/tutorials/06-use-docker-isolation/)
+
+## Source
+
+- [GitHub repository](https://github.com/UiPath/coder_eval)
+- [PyPI package](https://pypi.org/project/coder-eval/)
+- [Changelog](https://github.com/UiPath/coder_eval/blob/main/CHANGELOG.md)
