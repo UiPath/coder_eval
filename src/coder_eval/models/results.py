@@ -593,20 +593,30 @@ class EvaluationResult(BaseModel):
         self.weighted_score = total_weighted_score / total_weight if total_weight > 0 else 0.0
 
     def all_criteria_passed(self, criteria: list[SuccessCriterion]) -> bool:
-        """True iff every criterion result meets its pass_threshold.
+        """True iff every GATING criterion result meets its pass_threshold.
 
-        Single source of truth for the success gate. A results/criteria length
-        mismatch raises ``ValueError`` rather than silently truncating — the
-        ``len()`` pre-check is required because ``all()`` short-circuits on the
-        first failing pair, so ``zip(strict=True)`` alone would not reliably
-        reach the length check.
+        Single source of truth for the success gate. ``weight: 0`` criteria are
+        informational (``BaseSuccessCriterion.is_gating`` is False): they are
+        excluded from the weighted score, so they are excluded from the gate
+        too — otherwise a criterion that contributes nothing to the score could
+        still single-handedly flip the task to FAILURE. A task whose criteria
+        are ALL weight-0 has an empty gate and therefore passes.
+
+        A results/criteria length mismatch raises ``ValueError`` rather than
+        silently truncating — the ``len()`` pre-check is required because
+        ``all()`` short-circuits on the first failing pair, so
+        ``zip(strict=True)`` alone would not reliably reach the length check.
         """
         if len(self.success_criteria_results) != len(criteria):
             raise ValueError(
                 f"Results/criteria length mismatch for task {self.task_id}: "
                 + f"{len(self.success_criteria_results)} results vs {len(criteria)} criteria."
             )
-        return all(r.score >= c.pass_threshold for r, c in zip(self.success_criteria_results, criteria, strict=True))
+        return all(
+            r.score >= c.pass_threshold
+            for r, c in zip(self.success_criteria_results, criteria, strict=True)
+            if c.is_gating
+        )
 
     def armed_criteria_passed(self, criteria: list[SuccessCriterion]) -> bool:
         """True iff every ARMED criterion (``stop_when`` set) meets its pass_threshold.
@@ -618,7 +628,9 @@ class EvaluationResult(BaseModel):
         pre-check as ``all_criteria_passed`` so the gate logic stays
         single-sourced. Raises ``ValueError`` on an empty armed set — unreachable
         when a stop actually fired (a stop requires an armed criterion), so this
-        is a defensive guard against misuse.
+        is a defensive guard against misuse. No ``is_gating`` filter is needed
+        here: ``BaseSuccessCriterion`` rejects ``weight: 0`` together with
+        ``stop_when``, so every armed criterion is gating by construction.
         """
         if len(self.success_criteria_results) != len(criteria):
             raise ValueError(

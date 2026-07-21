@@ -815,7 +815,7 @@ def _compute_suite_rollup(
             break
         reasons: list[str] = []
         for cr in row.result.success_criteria_results:
-            if cr.error is not None or cr.score < 1.0:
+            if cr.error is not None or cr.score < cr.pass_threshold:
                 reason = cr.error or cr.details or f"{cr.criterion_type}: score={cr.score:.2f}"
                 reasons.append(reason[:_FAILURE_REASON_MAX_LEN])
             if len(reasons) >= _FAILURE_REASONS_PER_ROW:

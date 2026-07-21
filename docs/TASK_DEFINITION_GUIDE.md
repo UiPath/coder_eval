@@ -275,10 +275,16 @@ sandbox:
     - "!node_modules"
     - "*.bak"                         #   bare entry adds an extra pattern
   limits:                             # Optional: resource limits
-    timeout: 300                       # Enforced via subprocess timeout
-    max_memory_mb: 512                 # NOT enforced (reserved for future use)
-    max_disk_mb: 1024                  # NOT enforced (reserved for future use)
+    timeout: 300                       # Enforced via subprocess timeout (both drivers)
+    max_memory_mb: 512                 # driver:docker -> `--memory`; ignored under tempdir
+    max_cpus: 2                        # driver:docker -> `--cpus`; ignored under tempdir
+    max_pids: 512                      # driver:docker -> `--pids-limit`; ignored under tempdir
+    max_disk_mb: 1024                  # NOT enforced (reserved: no portable docker knob)
 ```
+
+Under `driver: tempdir` only `timeout` is enforced — the agent can consume
+arbitrary host memory, CPU, and PIDs. Use `driver: docker` when you need the
+container limits above to actually bind.
 
 ## Template Sources
 
@@ -383,7 +389,7 @@ All criteria share these fields:
 | Field | Default | Description |
 |-------|---------|-------------|
 | `description` | — | Human-readable description (required) |
-| `weight` | 1.0 | Relative importance for weighted score |
+| `weight` | 1.0 | Relative importance for weighted score. `0` = **informational**: excluded from both the score and the pass/fail gate |
 | `pass_threshold` | 0.9 | Minimum score (0.0–1.0) to pass |
 | `stop_when` | `null` | Arms this criterion for early stop (`pass`/`fail`/`decided`); requires `run_limits.stop_early: true` and an observable criterion type (`skill_triggered`, `command_executed`). See [`stop_early`](#stop_early-opt-in-early-stop). |
 
@@ -392,7 +398,12 @@ All criteria share these fields:
 - **Fractional** (0.0–1.0): `file_contains`, `file_check`, `json_check`, `command_executed`, `uipath_eval`
 - **Continuous** (0.0–1.0): `reference_comparison`, `llm_judge`, `agent_judge`
 
-**Task success:** ALL criteria must score >= their `pass_threshold`.
+**Task success:** all *gating* criteria must score >= their `pass_threshold`. A
+criterion with `weight: 0` is informational — it is still checked, stored, and
+rendered in reports, but it neither contributes to the score nor fails the task.
+(A `weight: 0` criterion may not set `stop_when` or `suite_thresholds`: arming a
+non-gating criterion for the early-stop or suite gate would let an
+"informational" check flip a run to failure.)
 
 **Weighted score:** `weighted_score = sum(score * weight) / sum(weight)` — calculated regardless for quality assessment.
 

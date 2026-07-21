@@ -9,8 +9,10 @@ the ``all(...)`` / weighted-average formula inline.
 from datetime import datetime
 
 import pytest
+from pydantic import ValidationError
 
 from coder_eval.models import (
+    CommandExecutedCriterion,
     CriterionResult,
     EvaluationResult,
     FileExistsCriterion,
@@ -102,6 +104,55 @@ class TestThresholdEnforcement:
 
         with pytest.raises(ValueError, match="length mismatch"):
             result.all_criteria_passed(criteria)
+
+    def test_zero_weight_criterion_is_informational_and_does_not_gate(self):
+        """weight=0 excludes a criterion from the score AND from the pass/fail gate."""
+        criteria = [
+            FileExistsCriterion(path="f1.txt", description="crit-0", weight=1.0, pass_threshold=0.9),
+            FileExistsCriterion(path="f2.txt", description="crit-1", weight=0.0, pass_threshold=0.9),
+        ]
+        result = _make_result([1.0, 0.0])  # the informational criterion scores zero
+
+        result.calculate_weighted_score(criteria)
+        assert result.weighted_score == 1.0  # weight-0 contributes to neither term
+        assert result.all_criteria_passed(criteria)  # ...and cannot flip the task to FAILURE
+
+    def test_zero_weight_does_not_rescue_a_failing_gating_criterion(self):
+        """Only the weight-0 criterion is exempt; real criteria still gate."""
+        criteria = [
+            FileExistsCriterion(path="f1.txt", description="crit-0", weight=1.0, pass_threshold=0.9),
+            FileExistsCriterion(path="f2.txt", description="crit-1", weight=0.0, pass_threshold=0.9),
+        ]
+        assert not _make_result([0.5, 1.0]).all_criteria_passed(criteria)
+
+    def test_all_zero_weight_criteria_leave_an_empty_gate(self):
+        """A task of purely informational criteria has nothing to fail on."""
+        criteria = [
+            FileExistsCriterion(path="f1.txt", description="crit-0", weight=0.0, pass_threshold=0.9),
+            FileExistsCriterion(path="f2.txt", description="crit-1", weight=0.0, pass_threshold=0.9),
+        ]
+        assert _make_result([0.0, 0.0]).all_criteria_passed(criteria)
+
+    def test_zero_weight_cannot_be_armed_for_early_stop(self):
+        """weight=0 + stop_when is incoherent: it would leave the early-stop gate empty."""
+        with pytest.raises(ValidationError, match="weight=0"):
+            CommandExecutedCriterion(
+                description="informational + armed",
+                weight=0.0,
+                stop_when="pass",
+                tool_name="Bash",
+                command_pattern="pytest",
+            )
+
+    def test_zero_weight_cannot_declare_suite_thresholds(self):
+        """weight=0 + suite_thresholds is incoherent: the suite gate drives the run exit code."""
+        with pytest.raises(ValidationError, match="weight=0"):
+            FileExistsCriterion(
+                path="f1.txt",
+                description="informational + suite-gated",
+                weight=0.0,
+                suite_thresholds={"mean": 0.8},
+            )
 
     def test_empty_inputs_score_zero_without_raising(self):
         """Empty results/criteria still yield 0.0 (not a raise) and an empty gate passes."""
