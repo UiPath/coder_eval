@@ -692,6 +692,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        sandbox_managed: bool = False,
     ) -> None:
         """Initialize and start the Claude Code agent.
 
@@ -701,6 +702,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 subprocess (typically the resolved ``SandboxConfig.mock_path_dirs``).
             plugin_tools_dir: Canonical ``node_modules/@uipath`` to export as
                 ``PLUGIN_TOOLS_DIR``. An external env-var pin still wins.
+            sandbox_managed: Accepted for interface parity with the base
+                ``Agent.start`` and ignored — Claude Code runs the tempdir path
+                with no in-agent OS sandbox to drop.
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])

@@ -152,6 +152,51 @@ class TestInContainerSandboxFallback:
         assert agent._build_thread_options()["sandbox"] == Sandbox("full-access")
 
 
+class TestSandboxManagedHostFallback:
+    """On the tempdir driver coder_eval owns the isolation boundary (the ephemeral
+    per-task tempdir), so ``start(sandbox_managed=True)`` makes ``_build_thread_options``
+    drop Codex's redundant in-process OS sandbox to full-access — WITHOUT the docker
+    container marker. This is the host/CI path where the sandbox's bwrap re-exec is
+    denied; the fallback is what keeps those tasks from silently producing no artifacts."""
+
+    def test_workspace_write_upgraded_to_full_access_when_managed(self, monkeypatch):
+        from openai_codex.api import Sandbox  # pyright: ignore[reportPrivateImportUsage]
+
+        monkeypatch.delenv("CODER_EVAL_IN_CONTAINER", raising=False)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode="acceptEdits"))
+        agent._sandbox_managed = True
+        assert agent._build_thread_options()["sandbox"] == Sandbox("full-access")
+
+    def test_read_only_upgraded_to_full_access_when_managed(self, monkeypatch):
+        from openai_codex.api import Sandbox  # pyright: ignore[reportPrivateImportUsage]
+
+        monkeypatch.delenv("CODER_EVAL_IN_CONTAINER", raising=False)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode="plan"))
+        agent._sandbox_managed = True
+        assert agent._build_thread_options()["sandbox"] == Sandbox("full-access")
+
+    def test_not_managed_and_no_container_keeps_landlock_sandbox(self, monkeypatch):
+        from openai_codex.api import Sandbox  # pyright: ignore[reportPrivateImportUsage]
+
+        monkeypatch.delenv("CODER_EVAL_IN_CONTAINER", raising=False)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode="acceptEdits"))
+        assert agent._sandbox_managed is False  # default off
+        assert agent._build_thread_options()["sandbox"] == Sandbox("workspace-write")
+
+    def test_full_access_unchanged_when_managed(self, monkeypatch):
+        from openai_codex.api import Sandbox  # pyright: ignore[reportPrivateImportUsage]
+
+        monkeypatch.delenv("CODER_EVAL_IN_CONTAINER", raising=False)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode="bypassPermissions"))
+        agent._sandbox_managed = True
+        assert agent._build_thread_options()["sandbox"] == Sandbox("full-access")
+
+    def test_default_sandbox_managed_is_false(self):
+        """Fresh agent defaults to not-managed; start() opts in per the driver."""
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, permission_mode="acceptEdits"))
+        assert agent._sandbox_managed is False
+
+
 class TestCodexEnvironmentConfiguration:
     """Test _build_codex_env: only CODEX_API_KEY travels via env."""
 

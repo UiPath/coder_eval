@@ -54,6 +54,7 @@ class NoOpAgent(Agent[NoneAgentConfig]):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        sandbox_managed: bool = False,
     ) -> None:
         """No-op: there is no agent process to launch."""
         self._state = AgentState.WORKING

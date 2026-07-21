@@ -970,12 +970,21 @@ class Orchestrator:
         env_path_prepend = [str(p) for p in self.sandbox.resolved_mock_path_dirs]
         plugin_tools_dir = self.sandbox.plugin_tools_dir
 
+        # On the tempdir driver coder_eval itself owns the isolation boundary (the
+        # ephemeral per-task tempdir), so an agent's own in-process OS sandbox is
+        # redundant — and on constrained CI hosts it can fail to initialize. Tell
+        # the agent so it can skip it. The docker driver signals the equivalent
+        # from inside the container via CODER_EVAL_IN_CONTAINER.
+        driver = self.task.sandbox.driver if self.task.sandbox else "tempdir"
+        sandbox_managed = driver == "tempdir"
+
         async def _start_agent() -> None:
             assert self.agent is not None
             await self.agent.start(
                 str(sandbox_dir),
                 env_path_prepend=env_path_prepend,
                 plugin_tools_dir=plugin_tools_dir,
+                sandbox_managed=sandbox_managed,
             )
 
         await execute_with_retry(
