@@ -1,15 +1,15 @@
 ---
-title: "Evaluate AI coding agents & Claude Code skills — coder_eval"
+title: "Evaluate AI coding agents & Claude Code skills — Coder Eval"
 description: >-
-  coder_eval is an open-source framework to evaluate, benchmark, and A/B-test AI
+  Coder Eval is an open-source framework to evaluate, benchmark, and A/B-test AI
   coding agents and Claude Code skills in a sandbox — declarative YAML tasks,
   weighted scoring, cost/token telemetry, and CI gates for Claude Code, Codex,
   and Gemini.
 ---
 
-# Evaluate AI coding agents & Claude Code skills — coder_eval
+# Evaluate AI coding agents & Claude Code skills — Coder Eval
 
-**coder_eval** (`pip install coder-eval`) is an open-source framework for
+**Coder Eval** (`pip install coder-eval`) is an open-source framework for
 **evaluating AI coding agents and their skills** — built for CLI and skill
 builders — with sandboxing, reproducibility, and data-driven analysis. It is not
 an "agentic coding" benchmark: it measures how effective *your* CLI and skills
@@ -21,10 +21,10 @@ triggers?"*, *"how do I benchmark Claude Code vs. Codex on my own tasks?"*, or
 *"how do I gate CI on coding-agent quality?"* — this is the framework for that.
 
 <p align="center">
-  <img src="assets/hero.gif" alt="coder_eval running a sandboxed coding-agent evaluation from a YAML task and browsing the scored result in evalboard" width="100%">
+  <img src="assets/hero.gif" alt="Coder Eval running a sandboxed coding-agent evaluation from a YAML task and browsing the scored result in evalboard" width="100%">
 </p>
 
-## What coder_eval does
+## What Coder Eval does
 
 - **Declarative YAML tasks** with pinned dependencies and clear success criteria
 - **Sandboxed execution** in isolated environments with resource limits
@@ -64,8 +64,8 @@ coder-eval run  tasks/hello_date.yaml   # run your first evaluation
 coder-eval report runs/latest           # view the result
 ```
 
-Prefer coder_eval as a project dependency instead of a CLI tool? `uv add
-coder-eval` or `pip install coder-eval`. Hacking on coder_eval itself? Clone,
+Prefer Coder Eval as a project dependency instead of a CLI tool? `uv add
+coder-eval` or `pip install coder-eval`. Hacking on Coder Eval itself? Clone,
 `uv sync --extra dev`, and prefix commands with `uv run`.
 
 New here? Start with **[Tutorial 01 — Your First Evaluation](tutorials/01-first-evaluation.md)**.
@@ -81,17 +81,17 @@ New here? Start with **[Tutorial 01 — Your First Evaluation](tutorials/01-firs
 | [Bring Your Own Dataset](BYOD.md) | Fan a single task out over a dataset |
 | [Codex Agent Guide](CODEX_AGENT_GUIDE.md) | Running the Codex agent |
 | [Docker Isolation](DOCKER_ISOLATION.md) | The container sandbox driver |
-| [How it compares](comparison.md) | coder_eval vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, and hand-rolled harnesses |
+| [How it compares](comparison.md) | Coder Eval vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, and hand-rolled harnesses |
 
-## How coder_eval compares
+## How Coder Eval compares
 
-- **vs. SWE-bench and fixed benchmarks** — SWE-bench is a fixed dataset; coder_eval
+- **vs. SWE-bench and fixed benchmarks** — SWE-bench is a fixed dataset; Coder Eval
   is a *framework* for authoring your own tasks in YAML, so you evaluate the skills
   and workflows you care about (and can still wrap a fixed dataset via
   [Bring Your Own Dataset](BYOD.md)).
 - **vs. other agent-eval frameworks (e.g. Harbor) and LLM-eval tools (OpenAI Evals)** —
   OpenAI Evals grades model text; Harbor targets large-scale agent eval and RL
-  optimization. coder_eval is purpose-built for coding-agent/skill suites — weighted
+  optimization. Coder Eval is purpose-built for coding-agent/skill suites — weighted
   0.0–1.0 file/command scoring, a `skill_triggered` activation check, an experiment
   layer for A/Bs, and evalboard. See the full comparison.
 - **vs. hand-rolled scripts** — reproducible sandboxes, weighted criteria,

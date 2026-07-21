@@ -1,4 +1,4 @@
-site_name: coder_eval
+site_name: Coder Eval
 site_description: >-
   Evaluate & benchmark AI coding agents and Claude Code skills — a sandboxed,
   reproducible framework with declarative YAML eval suites for Claude Code,

@@ -1,4 +1,4 @@
-# coder_eval — evaluate & benchmark AI coding agents and Claude Code skills
+# Coder Eval — evaluate & benchmark AI coding agents and Claude Code skills
 
 [![PyPI](https://img.shields.io/pypi/v/coder-eval.svg)](https://pypi.org/project/coder-eval/)
 [![Docs](https://img.shields.io/badge/docs-uipath.github.io%2Fcoder__eval-1f6feb.svg)](https://uipath.github.io/coder_eval/)
@@ -7,7 +7,7 @@
 [![CI](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml/badge.svg)](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml)
 [![Code style: Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-**coder_eval** (`pip install coder-eval`) is an open-source framework for
+**Coder Eval** (`pip install coder-eval` / `uv tool install coder-eval`) is an open-source framework for
 **evaluating and benchmarking AI coding agents and their skills** — built for CLI
 and skill builders — with sandboxing, reproducibility, and data-driven analysis.
 It runs a real agent (**Claude Code**, **Codex**, or **Google Antigravity /
@@ -18,14 +18,14 @@ effective your CLI and skills are when used by coding agents.
 Reach for it when you want to **test whether a Claude Code skill triggers**,
 **A/B-test Claude Code vs. Codex vs. Gemini** (or model vs. model, prompt vs.
 prompt), or **gate CI on coding-agent quality**. Unlike fixed datasets (SWE-bench,
-SkillsBench) that rank models on a shared leaderboard, coder_eval evaluates the
+SkillsBench) that rank models on a shared leaderboard, Coder Eval evaluates the
 tasks, skills, and workflows *you* ship — with weighted 0.0–1.0 criteria, a
 `skill_triggered` activation check, an A/B experiment layer, and per-tool cost
 telemetry. See [How it compares](https://uipath.github.io/coder_eval/comparison/).
 📚 **Full docs:** **[uipath.github.io/coder_eval](https://uipath.github.io/coder_eval/)**.
 
 <p align="center">
-  <img src="docs/assets/hero.gif" alt="coder_eval running the hello_date task: a sandboxed agent writes and runs a script from a YAML task, then the scored result is browsed in evalboard" width="100%">
+  <img src="docs/assets/hero.gif" alt="Coder Eval running the hello_date task: a sandboxed agent writes and runs a script from a YAML task, then the scored result is browsed in evalboard" width="100%">
 </p>
 
 - **Declarative YAML tasks** with pinned dependencies and clear success criteria
@@ -45,7 +45,7 @@ telemetry. See [How it compares](https://uipath.github.io/coder_eval/comparison/
 - **Gate CI on agent quality** — run the suite in GitHub Actions and fail the build on regressions
 - **Bring your own dataset** — fan one task out over many rows for larger benchmark suites
 
-> **Keeping skills fresh?** Run coder_eval as a scheduled GitHub Actions job so your
+> **Keeping skills fresh?** Run Coder Eval as a scheduled GitHub Actions job so your
 > skills are continuously re-evaluated against the latest model — a skill that quietly
 > stops triggering surfaces as a failing criterion before your users hit it. See
 > **[Tutorial 02 — Running coder_eval in CI](docs/tutorials/02-ci-pipeline.md)**.
@@ -77,7 +77,7 @@ The optional `[uipath]` extra (`uv sync --extra dev --extra uipath`) adds the in
 required). Without it the framework runs end-to-end; uipath-dependent features fail
 at dispatch with a clear hint.
 
-**Using coder_eval in CI or another project?** Install the published package
+**Using Coder Eval in CI or another project?** Install the published package
 instead of cloning:
 
 ```bash
@@ -122,11 +122,11 @@ the full setup.
 ## How it compares
 
 - **vs. fixed benchmarks (SWE-bench, SkillsBench)** — they score a canonical dataset;
-  coder_eval scores *your* tasks with continuous 0.0–1.0 weighted criteria (and can
+  Coder Eval scores *your* tasks with continuous 0.0–1.0 weighted criteria (and can
   still wrap a fixed dataset via [Bring Your Own Dataset](docs/BYOD.md)).
 - **vs. large-scale / RL harnesses (Harbor)** — Harbor targets scale and RL rollouts;
-  coder_eval targets weighted, skill-aware suites gated in CI.
-- **vs. model-output eval tools (OpenAI Evals)** — they grade model text; coder_eval
+  Coder Eval targets weighted, skill-aware suites gated in CI.
+- **vs. model-output eval tools (OpenAI Evals)** — they grade model text; Coder Eval
   runs a full agent in a sandbox and scores the files and commands it produced.
 - **vs. hand-rolled scripts** — reproducible sandboxes, weighted criteria,
   cost/token telemetry, A/B experiments, and CI-ready pass/fail gates out of the box.
@@ -182,12 +182,12 @@ extension points (new criteria, new agents).
 
 ## Known limits & non-goals
 
-- **Not a fixed benchmark or leaderboard** — coder_eval scores *your* tasks and ships
+- **Not a fixed benchmark or leaderboard** — Coder Eval scores *your* tasks and ships
   example tasks, not a canonical scored dataset.
 - **Tasks execute real code** — run untrusted tasks only under the container driver
   (see [Docker Isolation](docs/DOCKER_ISOLATION.md)); the `tempdir` driver is not a
   security boundary.
-- **Bring your own model credentials** — Anthropic, Bedrock, or Gemini keys; coder_eval
+- **Bring your own model credentials** — Anthropic, Bedrock, or Gemini keys; Coder Eval
   does not proxy or supply model access.
 - **Python 3.13+ only.**
 

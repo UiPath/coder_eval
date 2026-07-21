@@ -1,14 +1,14 @@
 ---
-title: "coder_eval vs. SWE-bench, SkillsBench, Harbor & OpenAI Evals — how it compares"
+title: "Coder Eval vs. SWE-bench, SkillsBench, Harbor & OpenAI Evals — how it compares"
 description: >-
-  How coder_eval compares to SWE-bench, SkillsBench, Harbor, and OpenAI Evals for
+  How Coder Eval compares to SWE-bench, SkillsBench, Harbor, and OpenAI Evals for
   evaluating AI coding agents and Claude Code skills — with when to choose each.
   Grounded in each project's own docs.
 ---
 
-# How coder_eval compares
+# How Coder Eval compares
 
-**coder_eval** is a framework for evaluating AI coding agents and their skills. It
+**Coder Eval** is a framework for evaluating AI coding agents and their skills. It
 runs an agent (Claude Code, Codex, Gemini) in a sandbox against declarative YAML
 tasks and scores the files and commands it produces on a weighted 0.0–1.0 scale,
 with cost/token telemetry, an A/B experiment layer, skill-activation checks, and CI
@@ -20,18 +20,18 @@ in its own documentation; see [Sources](#sources).
 
 ## At a glance
 
-| | coder_eval | SWE-bench | SkillsBench | Harbor | OpenAI Evals | Hand-rolled |
+| | Coder Eval | SWE-bench | SkillsBench | Harbor | OpenAI Evals | Hand-rolled |
 | --- | --- | --- | --- | --- | --- | --- |
 | **What it grades** | Files + commands the agent produced | Whether a patch passes the repo's tests | Skill value on a fixed task set | Agent task success in sandboxes | Model text output | Whatever you wire up |
 | **Task source** | Your own (YAML) | Fixed benchmark (+ collection script) | Fixed (87 tasks / 8 domains) | Your own (framework) + Terminal-Bench 2.0 | Your own (YAML/JSON) + registry | Manual |
-| **Runs a real agent + tools** | ✅ Claude Code, Codex, Gemini | Runs your patch/scaffold | ✅ multi-harness | ✅ Claude Code, OpenHands, Codex | ❌ grades model output | ⚠️ DIY |
-| **Sandboxed & reproducible** | ✅ tempdir / Docker | ✅ Docker | ✅ deterministic verifiers | ✅ Docker + cloud (Daytona/Modal) | ⚠️ N/A (text) | ⚠️ DIY |
-| **Scoring** | Weighted 0.0–1.0 + thresholds | Pass/fail (tests) | Pass/fail (verifiers) | Task-level | Match / model-graded | ⚠️ DIY |
-| **A/B experiments (model / tool / prompt)** | ✅ built-in | ❌ | Skills on/off only | — | Compare model versions | ⚠️ DIY |
-| **Cost / token telemetry** | ✅ per tool call | ❌ | ❌ | — | ⚠️ limited | ⚠️ DIY |
-| **Skill-activation testing** | ✅ `skill_triggered` | ❌ | Measures effect, not trigger | ❌ | ❌ | ⚠️ DIY |
-| **CI pass/fail gate** | ✅ built-in | ⚠️ DIY | ⚠️ DIY | ⚠️ DIY | ⚠️ DIY | ⚠️ DIY |
-| **Results dashboard** | ✅ evalboard | ❌ | ❌ | ❌ | ❌ | ⚠️ DIY |
+| **Runs a real agent + tools** | ✅ Claude Code, Codex, Gemini | Runs your patch/scaffold | ✅ multi-harness | ✅ Claude Code, OpenHands, Codex | ❌ grades model output | x |
+| **Sandboxed & reproducible** | ✅ tempdir / Docker | ✅ Docker | ✅ deterministic verifiers | ✅ Docker + cloud (Daytona/Modal) | n/a (text) | x |
+| **Scoring** | Weighted 0.0–1.0 + thresholds | Pass/fail (tests) | Pass/fail (verifiers) | Task-level | Match / model-graded | x |
+| **A/B experiments (model / tool / prompt)** | ✅ built-in | ❌ | Skills on/off only | — | Compare model versions | x |
+| **Cost / token telemetry** | ✅ per tool call | ❌ | ❌ | — | limited | x |
+| **Skill-activation testing** | ✅ `skill_triggered` | ❌ | Measures effect, not trigger | ❌ | ❌ | x |
+| **CI pass/fail gate** | ✅ built-in | x | x | x | x | x |
+| **Results dashboard** | ✅ evalboard | ❌ | ❌ | ❌ | ❌ | x |
 | **Primary interface** | Python + YAML | Python harness + HF dataset | Research benchmark | Python CLI | Python + YAML/JSON | Your choice |
 
 ## vs. SWE-bench and fixed benchmarks
@@ -43,12 +43,12 @@ are additional variants (Lite, Multimodal, Multilingual). It includes a
 data-collection procedure for building tasks from other repositories, but its
 primary use is a shared leaderboard on a canonical dataset.
 
-coder_eval is a framework for authoring tasks in YAML, with continuous 0.0–1.0
+Coder Eval is a framework for authoring tasks in YAML, with continuous 0.0–1.0
 scoring and cost telemetry rather than a single pass/fail. A fixed dataset can be
 wrapped as tasks via [Bring Your Own Dataset](BYOD.md).
 
 **Choose SWE-bench** for a standardized model leaderboard on patch-and-test tasks.
-**Choose coder_eval** to evaluate your own tasks, agents, and skills and to gate CI
+**Choose Coder Eval** to evaluate your own tasks, agents, and skills and to gate CI
 on them.
 
 ## vs. SkillsBench and skill benchmarks
@@ -59,9 +59,9 @@ deterministic verifiers. It compares agents with and without the curated skills
 across 18 model-harness configurations and reports a 33.9% → 50.5% average
 pass-rate change. It measures whether skills improve performance on that task set.
 
-coder_eval addresses a related but distinct question about a specific set of skills:
+Coder Eval addresses a related but distinct question about a specific set of skills:
 
-- **Activation vs. effectiveness.** coder_eval's `skill_triggered` criterion checks
+- **Activation vs. effectiveness.** Coder Eval's `skill_triggered` criterion checks
   whether the agent engaged the skill (Claude's `Skill` tool call, or Codex reading
   the skill's files). SkillsBench measures the downstream effect on task success.
   The two are different signals: a skill that does not activate cannot contribute.
@@ -70,7 +70,7 @@ coder_eval addresses a related but distinct question about a specific set of ski
   detect regressions over time.
 
 **Choose SkillsBench** for a standardized measure of skill value across domains.
-**Choose coder_eval** to author, activation-test, and regression-check your own
+**Choose Coder Eval** to author, activation-test, and regression-check your own
 skills.
 
 ## vs. Harbor
@@ -82,7 +82,7 @@ providers (Daytona, Modal, LangSmith), is the official harness for Terminal-Benc
 2.0, can run across large numbers of environments in parallel, and can generate
 rollouts for RL optimization. Its emphasis is scale and optimization.
 
-coder_eval focuses on scoring and workflow for coding-agent and skill suites:
+Coder Eval focuses on scoring and workflow for coding-agent and skill suites:
 
 - 14 weighted criterion types (file/regex/JSON checks, `run_command`, AST/token
   similarity, LLM- and agent-judges) on a 0.0–1.0 scale with per-criterion
@@ -92,7 +92,7 @@ coder_eval focuses on scoring and workflow for coding-agent and skill suites:
   gates, and the evalboard dashboard.
 
 **Choose Harbor** for large-scale agent evaluation and RL-optimization rollouts,
-particularly around Terminal-Bench. **Choose coder_eval** for weighted, skill-aware
+particularly around Terminal-Bench. **Choose Coder Eval** for weighted, skill-aware
 task suites gated in CI.
 
 ## vs. OpenAI Evals
@@ -104,21 +104,21 @@ output rather than running an autonomous coding agent with tool use in a sandbox
 and contributions of custom-code evals are restricted (model-graded YAML evals are
 the accepted path).
 
-coder_eval runs the full agent and scores the files and commands it produces, with
+Coder Eval runs the full agent and scores the files and commands it produces, with
 per-tool cost/token telemetry and skill-activation checks.
 
 **Choose OpenAI Evals** to grade model output and compare model versions. **Choose
-coder_eval** to evaluate agent behavior — the tools it calls, the files it writes,
+Coder Eval** to evaluate agent behavior — the tools it calls, the files it writes,
 the commands it runs, and the skills it triggers.
 
 ## vs. hand-rolled scripts
 
 A `claude -p` loop is quick to start, but a durable harness requires implementing
 sandboxing, weighted criteria, retries, cost/token accounting, A/B configuration, a
-results view, and CI reporting. coder_eval provides these components, so work can
+results view, and CI reporting. Coder Eval provides these components, so work can
 focus on tasks and criteria rather than harness infrastructure.
 
-## When to choose coder_eval
+## When to choose Coder Eval
 
 - Evaluating how well agents use a CLI or Claude Code skills.
 - A/B-testing models, tools, or prompts on the same tasks (Claude Code vs. Codex vs. Gemini).

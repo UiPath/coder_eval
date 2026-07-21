@@ -1,7 +1,14 @@
 name: Docs
 
-# Build the MkDocs Material site and deploy it to GitHub Pages.
-# One-time setup: in repo Settings → Pages, set "Source" to "GitHub Actions".
+# Build the MkDocs Material site and publish it to the `gh-pages` branch via
+# `mkdocs gh-deploy` — the same mechanism UiPath/uipath-python uses. This workflow
+# only pushes a branch (needs `contents: write`); it never calls the Pages API, so
+# it succeeds even before Pages is switched on.
+#
+# One-time setup (org owner): the UiPath org blocks Pages *creation*, so enable
+# Pages for this repo once — Settings → Pages → Build and deployment →
+# Source: "Deploy from a branch" → branch `gh-pages` / `/ (root)`. That's the same
+# (legacy, branch-based) configuration uipath-python already runs on.
 on:
   push:
     branches: [main]
@@ -11,16 +18,15 @@ on:
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
-# Least-privilege; the deploy job needs pages + id-token.
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: pages
+  group: docs-gh-pages
   cancel-in-progress: true
 
 jobs:
-  build:
+  publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,21 +40,7 @@ jobs:
             libcairo2 libfreetype6 libjpeg-turbo8 libpng16-16 pngquant
       - name: Install MkDocs Material
         run: pip install "mkdocs-material[imaging]>=9.5,<10"
-      - name: Build site
+      - name: Build strictly (catch broken links)
         run: mkdocs build --strict
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Publish to gh-pages
+        run: mkdocs gh-deploy --force
