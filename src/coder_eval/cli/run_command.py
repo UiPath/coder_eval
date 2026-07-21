@@ -220,7 +220,7 @@ def run_command(
         None,
         "--backend",
         "-b",
-        click_type=click.Choice(["direct", "bedrock"], case_sensitive=False),
+        click_type=click.Choice(["direct", "bedrock", "litellm"], case_sensitive=False),
         help="API backend (default: from API_BACKEND env var)",
     ),
     experiment: Path | None = typer.Option(  # noqa: B008

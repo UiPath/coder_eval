@@ -11,6 +11,7 @@ from datetime import datetime
 from inspect import isawaitable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .agent import Agent
 from .agents.watchdog import ThreadedWatchdog
@@ -37,6 +38,7 @@ from .models import (
     EvaluationResult,
     FinalStatus,
     JudgeCriterionResult,
+    LiteLLMRoute,
     PostRunCommand,
     PostRunResult,
     PreRunCommand,
@@ -125,6 +127,8 @@ def _format_routing(route: ApiRoute) -> str:
     name = ROUTE_NAMES[type(route)]
     if isinstance(route, DirectRoute):
         return f"{name} (judge transport: {route.judge_transport or 'none'})"
+    if isinstance(route, LiteLLMRoute):
+        return f"{name} (model: {route.model or 'default'})"
     return name
 
 
@@ -1082,6 +1086,12 @@ class Orchestrator:
             # Record which transport llm_judge will use under DirectRoute so the
             # choice is visible in run artifacts (and not just the startup log).
             self.result.environment_info["judge_transport"] = self.route.judge_transport or "none"
+        elif isinstance(self.route, LiteLLMRoute):
+            # Host only (never the base_url or auth token) — mirrors the Codex
+            # agent's host-only recording so secrets stay out of run artifacts.
+            self.result.environment_info["litellm_base_url_host"] = urlparse(self.route.base_url).hostname or ""
+            if self.route.model:
+                self.result.environment_info["litellm_model"] = self.route.model
         # Agent-specific routing (e.g. Codex custom-endpoint / Azure). No-op for
         # the evaluate-only path (no agent) and for agents that add nothing.
         if self.agent is not None:

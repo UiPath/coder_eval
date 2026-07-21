@@ -602,6 +602,12 @@ class _ClaudeTurnState:
             )
             or TokenUsage()
         )
+        # The SDK's cost estimate assumes Claude pricing; it is wrong for an
+        # open-weight model behind LiteLLM. Reprice the top-line from the token
+        # buckets at the model's real rate (buckets untouched → reconciliation
+        # invariant holds).
+        if isinstance(self._agent.route, LiteLLMRoute):
+            self._agent._reprice_for_litellm(usage, self.effective_model)
 
         try:
             agent_output = self._agent._format_messages(self.messages)
@@ -1426,6 +1432,31 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             # pre-#386 symptom). Surface it so a stale pricing table is visible
             # rather than silently reproducing "Cost = —" for new models.
             logger.warning("No pricing for model %r; timeout/kill turn cost left unset", model)
+        return usage
+
+    @staticmethod
+    def _reprice_for_litellm(usage: TokenUsage, model: str | None) -> TokenUsage:
+        """Recompute the top-line cost for the LiteLLM backend.
+
+        The Claude Agent SDK's ``costUSD``/``total_cost_usd`` is a client-side
+        estimate that assumes Claude/Anthropic pricing, so it is wrong for an
+        open-weight model driven through LiteLLM. Reprice from the (already
+        authoritative) token buckets at the model's real rate. The token buckets
+        are left untouched, so the per-message stream / reconciliation invariant
+        is unaffected — only the cost scalar changes. An unknown/unpriced model
+        yields ``None`` (an honest "N/A") rather than the misleading SDK figure.
+        """
+        usage.total_cost_usd = (
+            calculate_cost(
+                model,
+                uncached_input_tokens=usage.uncached_input_tokens,
+                output_tokens=usage.output_tokens,
+                cache_creation_tokens=usage.cache_creation_input_tokens,
+                cache_read_tokens=usage.cache_read_input_tokens,
+            )
+            if model
+            else None
+        )
         return usage
 
     def get_sdk_options(self) -> dict[str, Any] | None:

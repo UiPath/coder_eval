@@ -1,8 +1,8 @@
-"""Tests for the custom Anthropic-compatible backend (LiteLLMRoute).
+"""Tests for the LiteLLM (Anthropic-compatible) open-weight backend (LiteLLMRoute).
 
-Covers Phase 1 (route resolution + config validation) and Phase 2 (SDK env
-building + effective-model sync) of the open-weight support plan. Mirrors the
-Bedrock equivalents in ``tests/test_routing.py``.
+Covers route resolution, config validation, SDK env building, effective-model
+sync, pricing, and cost repricing. Mirrors the Bedrock equivalents in
+``tests/test_routing.py``.
 """
 
 from __future__ import annotations
@@ -14,10 +14,12 @@ from coder_eval.config import Settings
 from coder_eval.models import (
     AgentKind,
     LiteLLMRoute,
+    TokenUsage,
     parse_agent_config,
 )
 from coder_eval.models.enums import ApiBackend
 from coder_eval.models.routing import ROUTE_NAMES, resolve_route
+from coder_eval.pricing import _normalize_model, calculate_cost
 
 
 def _make_agent(route, *, config_model: str | None = None) -> ClaudeCodeAgent:
@@ -122,7 +124,7 @@ class TestValidateApiKeysCustom:
 
 
 class TestBuildSdkEnvCustom:
-    """Phase 2: _build_sdk_env() for the custom route."""
+    """_build_sdk_env() for the LiteLLM route."""
 
     def test_custom_route_env_has_anthropic_vars_only(self):
         route = LiteLLMRoute(
@@ -171,7 +173,7 @@ class TestBuildSdkEnvCustom:
 
 
 class TestResolveEffectiveModelCustom:
-    """Phase 2: _resolve_effective_model() on the custom route — no prefixing."""
+    """_resolve_effective_model() on the LiteLLM route — no prefixing."""
 
     def test_config_model_synced_verbatim(self):
         route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1", model="deepseek.v3.2")
@@ -195,3 +197,51 @@ class TestResolveEffectiveModelCustom:
         effective = agent._resolve_effective_model(None, env, route_model)
         assert effective is None
         assert "ANTHROPIC_MODEL" not in env
+
+
+class TestOpenWeightPricing:
+    """Pricing for the open-weight models + LiteLLM/Bedrock prefix normalization."""
+
+    def test_glm5_rate(self):
+        # 1M input + 1M output → input_per_mtok + output_per_mtok.
+        assert calculate_cost("zai.glm-5", 1_000_000, 1_000_000) == pytest.approx(1.55 + 4.96)
+
+    def test_deepseek_rate(self):
+        assert calculate_cost("deepseek.v3.2", 1_000_000, 1_000_000) == pytest.approx(0.74 + 2.22)
+
+    def test_normalize_strips_converse_prefix(self):
+        assert _normalize_model("converse/zai.glm-5") == "zai.glm-5"
+        assert _normalize_model("bedrock/converse/deepseek.v3.2") == "deepseek.v3.2"
+
+    def test_normalize_identity_on_bare_ids(self):
+        assert _normalize_model("zai.glm-5") == "zai.glm-5"
+        assert _normalize_model("deepseek.v3.2") == "deepseek.v3.2"
+
+    def test_converse_prefixed_id_prices_same(self):
+        """The SDK reports model_used as e.g. 'converse/zai.glm-5' — must still price."""
+        assert calculate_cost("converse/zai.glm-5", 1_000_000, 1_000_000) == pytest.approx(1.55 + 4.96)
+
+
+class TestRepriceForLitellm:
+    """The litellm backend recomputes cost from tokens, overriding the SDK estimate."""
+
+    def test_overrides_wrong_sdk_cost_with_real_rate(self):
+        u = TokenUsage(uncached_input_tokens=1_000_000, output_tokens=1_000_000, total_cost_usd=3.68)
+        ClaudeCodeAgent._reprice_for_litellm(u, "zai.glm-5")
+        assert u.total_cost_usd == pytest.approx(1.55 + 4.96)
+
+    def test_converse_prefixed_model_reprices(self):
+        u = TokenUsage(uncached_input_tokens=1_000_000, output_tokens=1_000_000, total_cost_usd=99.0)
+        ClaudeCodeAgent._reprice_for_litellm(u, "converse/zai.glm-5")
+        assert u.total_cost_usd == pytest.approx(1.55 + 4.96)
+
+    def test_unpriced_model_yields_none_not_sdk_figure(self):
+        """An unknown model must show N/A (None), never the misleading SDK cost."""
+        u = TokenUsage(uncached_input_tokens=100, output_tokens=100, total_cost_usd=9.99)
+        ClaudeCodeAgent._reprice_for_litellm(u, "some-unknown-model")
+        assert u.total_cost_usd is None
+
+    def test_none_model_yields_none(self):
+        u = TokenUsage(uncached_input_tokens=100, output_tokens=100, total_cost_usd=9.99)
+        ClaudeCodeAgent._reprice_for_litellm(u, None)
+        assert u.total_cost_usd is None

@@ -1,31 +1,31 @@
-# LiteLLM proxy config for the coder_eval `custom` (open-weight) backend.
+# LiteLLM proxy config for the coder_eval `litellm` (open-weight) backend.
 #
 # Translates Anthropic Messages (what the Claude Code SDK speaks) <-> Bedrock
 # Converse (what the non-Claude open-weight models speak), so the native `Skill`
 # tool and UiPath skills fire unchanged. Verified 2026-07-21: HTTP 200 on both
 # models via POST /v1/messages, and tool_use blocks survive the translation.
 #
-# Shared by both proxy modes:
-#   - Phase 1  — operator starts the proxy manually and points coder_eval at it
-#                via LITELLM_BASE_URL (no coder_eval-owned lifecycle).
-#   - Phase 1.5 — coder_eval autostarts the proxy against this same file, or an
-#                 always-on docker sidecar mounts it.
+# Two ways to run the proxy:
+#   - Manual: the operator starts the proxy and points coder_eval at it via
+#     LITELLM_BASE_URL (coder_eval owns no proxy lifecycle).
+#   - Autostart: coder_eval spawns the proxy against this same file, or an
+#     always-on docker sidecar mounts it.
 #
 # Required env in the proxy's environment (NOT committed):
 #   AWS_BEARER_TOKEN_BEDROCK  — Bedrock bearer token (LiteLLM forwards it).
 #   AWS_REGION=eu-north-1      — EU residency (Stockholm).
 #   LITELLM_MASTER_KEY         — the virtual key clients present as LITELLM_AUTH_TOKEN.
 #
-# Run manually (Phase 1):
+# Run manually:
 #   uvx --from 'litellm[proxy]' litellm --config docker/litellm-config.yaml --port 4000
 
 model_list:
-  # DeepSeek V3.2 — Phase-1 cost lead ($0.74 / $2.22 per Mtok).
+  # DeepSeek V3.2 — cost lead ($0.74 / $2.22 per Mtok).
   - model_name: deepseek.v3.2
     litellm_params:
       model: bedrock/converse/deepseek.v3.2
       aws_region_name: eu-north-1
-  # GLM 5 — Phase-1 quality lead ($1.55 / $4.96 per Mtok).
+  # GLM 5 — quality lead ($1.55 / $4.96 per Mtok).
   - model_name: zai.glm-5
     litellm_params:
       model: bedrock/converse/zai.glm-5

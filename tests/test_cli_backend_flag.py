@@ -29,7 +29,7 @@ async def _noop_run_all_tasks(*args: object, **kwargs: object) -> None:
     return None
 
 
-@pytest.mark.parametrize("backend", ["bedrock", "direct"])
+@pytest.mark.parametrize("backend", ["bedrock", "direct", "litellm"])
 def test_backend_flag_syncs_api_backend_env(monkeypatch, backend) -> None:
     # delenv snapshots the key so monkeypatch's teardown restores it even though
     # the command mutates os.environ directly (no test pollution across params).
