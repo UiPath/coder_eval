@@ -40,7 +40,9 @@ jobs:
             libcairo2 libfreetype6 libjpeg-turbo8 libpng16-16 pngquant
       - name: Install MkDocs Material
         run: pip install "mkdocs-material[imaging]>=9.5,<10"
-      - name: Build strictly (catch broken links)
-        run: mkdocs build --strict
-      - name: Publish to gh-pages
-        run: mkdocs gh-deploy --force
+      - name: Configure git identity for gh-pages commits
+        run: |
+          git config user.name "coder-eval"
+          git config user.email "coder-eval@uipath.com"
+      - name: Build strictly and publish to gh-pages
+        run: mkdocs gh-deploy --force --strict

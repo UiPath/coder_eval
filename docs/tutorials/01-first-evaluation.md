@@ -25,6 +25,11 @@ cd coder_eval
 uv sync --extra dev
 ```
 
+> **Just want the CLI?** `uv tool install coder-eval` installs the released
+> `coder-eval` command on your PATH in its own isolated environment — then run
+> every command below without the `uv run` prefix. Keep the clone anyway: the
+> example `tasks/` used in this tutorial live in the repo.
+
 `uv sync` creates a `.venv/`. **Activate it** to run `coder-eval` directly and
 drop the `uv run` prefix used throughout this tutorial:
 

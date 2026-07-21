@@ -24,14 +24,14 @@ in its own documentation; see [Sources](#sources).
 | --- | --- | --- | --- | --- | --- | --- |
 | **What it grades** | Files + commands the agent produced | Whether a patch passes the repo's tests | Skill value on a fixed task set | Agent task success in sandboxes | Model text output | Whatever you wire up |
 | **Task source** | Your own (YAML) | Fixed benchmark (+ collection script) | Fixed (87 tasks / 8 domains) | Your own (framework) + Terminal-Bench 2.0 | Your own (YAML/JSON) + registry | Manual |
-| **Runs a real agent + tools** | ✅ Claude Code, Codex, Gemini | Runs your patch/scaffold | ✅ multi-harness | ✅ Claude Code, OpenHands, Codex | ❌ grades model output | x |
-| **Sandboxed & reproducible** | ✅ tempdir / Docker | ✅ Docker | ✅ deterministic verifiers | ✅ Docker + cloud (Daytona/Modal) | n/a (text) | x |
-| **Scoring** | Weighted 0.0–1.0 + thresholds | Pass/fail (tests) | Pass/fail (verifiers) | Task-level | Match / model-graded | x |
-| **A/B experiments (model / tool / prompt)** | ✅ built-in | ❌ | Skills on/off only | — | Compare model versions | x |
-| **Cost / token telemetry** | ✅ per tool call | ❌ | ❌ | — | limited | x |
-| **Skill-activation testing** | ✅ `skill_triggered` | ❌ | Measures effect, not trigger | ❌ | ❌ | x |
-| **CI pass/fail gate** | ✅ built-in | x | x | x | x | x |
-| **Results dashboard** | ✅ evalboard | ❌ | ❌ | ❌ | ❌ | x |
+| **Runs a real agent + tools** | ✅ Claude Code, Codex, Gemini | Runs your patch/scaffold | ✅ multi-harness | ✅ Claude Code, OpenHands, Codex | ❌ grades model output | ❌ |
+| **Sandboxed & reproducible** | ✅ tempdir / Docker | ✅ Docker | ✅ deterministic verifiers | ✅ Docker + cloud (Daytona/Modal) | — (grades text) | ❌ |
+| **Scoring** | Weighted 0.0–1.0 + thresholds | Pass/fail (tests) | Pass/fail (verifiers) | Task-level | Match / model-graded | ❌ |
+| **A/B experiments (model / tool / prompt)** | ✅ built-in | ❌ | Skills on/off only | — | Compare model versions | ❌ |
+| **Cost / token telemetry** | ✅ per tool call | ❌ | ❌ | — | limited | ❌ |
+| **Skill-activation testing** | ✅ `skill_triggered` | ❌ | Measures effect, not trigger | ❌ | ❌ | ❌ |
+| **CI pass/fail gate** | ✅ built-in | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Results dashboard** | ✅ evalboard | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Primary interface** | Python + YAML | Python harness + HF dataset | Research benchmark | Python CLI | Python + YAML/JSON | Your choice |
 
 ## vs. SWE-bench and fixed benchmarks

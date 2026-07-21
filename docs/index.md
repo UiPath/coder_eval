@@ -9,7 +9,7 @@ description: >-
 
 # Evaluate AI coding agents & Claude Code skills — Coder Eval
 
-**Coder Eval** (`pip install coder-eval`) is an open-source framework for
+**Coder Eval** (`pip install coder-eval` / `uv tool install coder-eval`) is an open-source framework for
 **evaluating AI coding agents and their skills** — built for CLI and skill
 builders — with sandboxing, reproducibility, and data-driven analysis. It is not
 an "agentic coding" benchmark: it measures how effective *your* CLI and skills
