@@ -498,7 +498,13 @@ def test_get_state_returns_current_state():
 # without a live SDK. These mirror the notification shapes the real stream emits.
 # ---------------------------------------------------------------------------
 
+import os  # noqa: E402
+import shlex  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+import tempfile  # noqa: E402
 import time  # noqa: E402
+from pathlib import Path  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 from openai_codex.generated.v2_all import Turn, TurnCompletedNotification  # noqa: E402
@@ -1563,3 +1569,419 @@ class TestOrchestratorDispatch:
         orch = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="t")
         agent = await orch._create_agent()
         assert isinstance(agent, CodexAgent)
+
+
+class TestLoginShellMockPathHome:
+    """Codex issues every shell command through the default shell as a login
+    shell (``bash -lc`` on Linux, ``zsh -lc`` on macOS). The login shell
+    re-sources the system profile chain (``/etc/profile``, macOS
+    ``/etc/zprofile``'s path_helper), which unconditionally RESETS PATH —
+    silently dropping the mock-CLI prepend passed via the app-server env, so
+    bare commands resolve to the REAL CLIs (real-tenant contamination). The
+    agent therefore generates a per-task HOME whose ``.bash_profile``/
+    ``.profile`` (bash/sh) and ``.zshenv``/``.zprofile``/``.zshrc`` (zsh) run
+    AFTER that chain and restore the prepend; ``_build_codex_env`` points HOME
+    and ZDOTDIR at it and pins CODEX_HOME so codex state stays put."""
+
+    ALL_PROFILE_NAMES = (".bash_profile", ".profile", ".zshenv", ".zprofile", ".zshrc")
+    ZSH_PROFILE_NAMES = (".zshenv", ".zprofile", ".zshrc")
+
+    @staticmethod
+    def _force_posix(monkeypatch, supported: bool = True):
+        monkeypatch.setattr(CodexAgent, "_login_shell_profiles_supported", staticmethod(lambda: supported))
+
+    @staticmethod
+    def _agent_with_prepend(prepend):
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+        agent._env_path_prepend = list(prepend)
+        return agent
+
+    def test_setup_writes_profiles_with_mock_prepend(self, monkeypatch, tmp_path):
+        self._force_posix(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
+        agent = self._agent_with_prepend(["/sandbox/mocks", "/sandbox/bins"])
+
+        agent._setup_login_shell_home()
+        try:
+            home = agent._login_shell_home
+            assert home is not None and home.is_dir()
+            for name in self.ALL_PROFILE_NAMES:
+                content = (home / name).read_text(encoding="utf-8")
+                # The export must prepend the mock dirs (POSIX ':' joined) ahead
+                # of whatever the system profile chain left in PATH.
+                assert 'export PATH=/sandbox/mocks:/sandbox/bins:"$PATH"' in content
+        finally:
+            agent._cleanup_login_shell_home()
+
+    def test_bash_profile_sources_original_home_first_found_chain(self, monkeypatch, tmp_path):
+        """The generated .bash_profile mimics bash's first-found chain over the
+        ORIGINAL home (so image/user setup isn't lost); the .profile twin (read
+        by sh/dash login shells) sources only .profile — the bash-specific
+        files may contain bashisms."""
+        self._force_posix(monkeypatch)
+        orig = tmp_path / "orig-home"
+        monkeypatch.setenv("HOME", str(orig))
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+
+        agent._setup_login_shell_home()
+        try:
+            home = agent._login_shell_home
+            assert home is not None
+            qorig = shlex.quote(str(orig))
+            bash_profile = (home / ".bash_profile").read_text(encoding="utf-8")
+            for name in (".bash_profile", ".bash_login", ".profile"):
+                assert f". {qorig}/{name}" in bash_profile
+            profile = (home / ".profile").read_text(encoding="utf-8")
+            assert f". {qorig}/.profile" in profile
+            assert f". {qorig}/.bash_profile" not in profile
+        finally:
+            agent._cleanup_login_shell_home()
+
+    def test_zsh_profiles_source_exact_counterparts_and_pin_zdotdir(self, monkeypatch, tmp_path):
+        """Each generated zsh file sources its EXACT counterpart from the
+        original home (zsh reads ALL of its startup files — no first-found
+        chain), and .zshenv re-pins ZDOTDIR to the generated home AFTER
+        sourcing, so a user .zshenv that redefines ZDOTDIR cannot steer the
+        rest of the startup chain away from the generated files."""
+        self._force_posix(monkeypatch)
+        orig = tmp_path / "orig-home"
+        monkeypatch.setenv("HOME", str(orig))
+        monkeypatch.delenv("ZDOTDIR", raising=False)
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+
+        agent._setup_login_shell_home()
+        try:
+            home = agent._login_shell_home
+            assert home is not None
+            qorig = shlex.quote(str(orig))
+            for name in self.ZSH_PROFILE_NAMES:
+                content = (home / name).read_text(encoding="utf-8")
+                assert f". {qorig}/{name}" in content
+                # No cross-file sourcing and no bash chain.
+                for other in self.ALL_PROFILE_NAMES:
+                    if other != name:
+                        assert f". {qorig}/{other}" not in content
+            zshenv = (home / ".zshenv").read_text(encoding="utf-8")
+            pin = zshenv.index(f"export ZDOTDIR={shlex.quote(str(home))}")
+            assert pin > zshenv.index(f". {qorig}/.zshenv")  # re-pin AFTER sourcing
+            assert pin < zshenv.index("export PATH=")
+            for name in (".zprofile", ".zshrc"):
+                assert "export ZDOTDIR" not in (home / name).read_text(encoding="utf-8")
+        finally:
+            agent._cleanup_login_shell_home()
+
+    def test_zsh_profiles_source_from_original_zdotdir_when_set(self, monkeypatch, tmp_path):
+        """A user with their own ZDOTDIR keeps their real zsh dotfiles there —
+        the generated files must source from IT, not from the home."""
+        self._force_posix(monkeypatch)
+        orig = tmp_path / "orig-home"
+        zdot = tmp_path / "orig-zdot"
+        monkeypatch.setenv("HOME", str(orig))
+        monkeypatch.setenv("ZDOTDIR", str(zdot))
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+
+        agent._setup_login_shell_home()
+        try:
+            home = agent._login_shell_home
+            assert home is not None
+            qzdot = shlex.quote(str(zdot))
+            for name in self.ZSH_PROFILE_NAMES:
+                content = (home / name).read_text(encoding="utf-8")
+                assert f". {qzdot}/{name}" in content
+            # The bash files are untouched by ZDOTDIR.
+            bash_profile = (home / ".bash_profile").read_text(encoding="utf-8")
+            assert str(zdot) not in bash_profile
+        finally:
+            agent._cleanup_login_shell_home()
+
+    def test_mock_dirs_with_shell_metacharacters_are_quoted(self, monkeypatch, tmp_path):
+        self._force_posix(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
+        weird = "/sandbox/mo cks/$(evil)"
+        agent = self._agent_with_prepend([weird])
+
+        agent._setup_login_shell_home()
+        try:
+            home = agent._login_shell_home
+            assert home is not None
+            content = (home / ".bash_profile").read_text(encoding="utf-8")
+            assert f'export PATH={shlex.quote(weird)}:"$PATH"' in content
+        finally:
+            agent._cleanup_login_shell_home()
+
+    def test_profile_restores_original_home_before_sourcing(self, monkeypatch, tmp_path):
+        """The generated profile's FIRST act is exporting the original HOME
+        back — the temp HOME exists only so bash picks this file; everything
+        sourced after (and the command body) must see the real $HOME."""
+        self._force_posix(monkeypatch)
+        orig = tmp_path / "orig-home"
+        monkeypatch.setenv("HOME", str(orig))
+        monkeypatch.delenv("ZDOTDIR", raising=False)
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+
+        agent._setup_login_shell_home()
+        try:
+            home = agent._login_shell_home
+            assert home is not None
+            for name in self.ALL_PROFILE_NAMES:
+                content = (home / name).read_text(encoding="utf-8")
+                export_home = content.index(f"export HOME={shlex.quote(str(orig))}")
+                assert export_home < content.index(". ")  # before any sourcing
+                assert export_home < content.index("export PATH=")
+        finally:
+            agent._cleanup_login_shell_home()
+
+    def test_profile_without_original_home_only_prepends(self, monkeypatch):
+        """HOME unset in the harness env: no restore, no sourcing — just the
+        mock prepend."""
+        content = CodexAgent._login_profile_content(".bash_profile", "", 'export PATH=/m:"$PATH"')
+        assert "export HOME" not in content
+        assert ". " not in content
+        assert 'export PATH=/m:"$PATH"' in content
+
+    def test_generated_profiles_are_lf_only(self, monkeypatch, tmp_path):
+        """A profile built on ANY host must stay LF-only — bash chokes on \\r."""
+        self._force_posix(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+
+        agent._setup_login_shell_home()
+        try:
+            home = agent._login_shell_home
+            assert home is not None
+            for name in self.ALL_PROFILE_NAMES:
+                raw = (home / name).read_bytes()
+                assert b"\r" not in raw
+        finally:
+            agent._cleanup_login_shell_home()
+
+    def test_no_login_home_without_mock_dirs(self, monkeypatch):
+        self._force_posix(monkeypatch)
+        agent = self._agent_with_prepend([])
+        agent._setup_login_shell_home()
+        assert agent._login_shell_home is None
+
+    def test_no_login_home_on_unsupported_platform(self, monkeypatch):
+        self._force_posix(monkeypatch, supported=False)
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+        agent._setup_login_shell_home()
+        assert agent._login_shell_home is None
+
+    def test_build_codex_env_sets_home_and_pins_codex_home(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("CODEX_API_KEY", raising=False)
+        monkeypatch.setenv("PATH", "/parent/bin")
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+        agent._login_shell_home = tmp_path / "login-home"
+
+        env = agent._build_codex_env()
+        assert env is not None
+        assert env["HOME"] == str(tmp_path / "login-home")
+        # zsh (macOS default shell) picks its dotfiles via ZDOTDIR, not HOME.
+        assert env["ZDOTDIR"] == str(tmp_path / "login-home")
+        # Codex state (auth, rollout sessions) must NOT move with HOME — the
+        # harness reads the same _codex_home() for sub-agent rollout recovery.
+        assert env["CODEX_HOME"] == str(agent._codex_home())
+
+    def test_build_codex_env_without_login_home_leaves_home_alone(self, monkeypatch):
+        monkeypatch.setenv("CODEX_API_KEY", "k")
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+        env = agent._build_codex_env()
+        assert env is not None
+        assert "HOME" not in env
+        assert "ZDOTDIR" not in env
+        assert "CODEX_HOME" not in env
+
+    def test_setup_is_rerunnable_and_cleanup_removes_dir(self, monkeypatch, tmp_path):
+        self._force_posix(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+
+        agent._setup_login_shell_home()
+        first = agent._login_shell_home
+        assert first is not None
+        agent._setup_login_shell_home()  # retried start() must not leak the old dir
+        second = agent._login_shell_home
+        assert second is not None
+        assert not first.exists()
+
+        agent._cleanup_login_shell_home()
+        assert agent._login_shell_home is None
+        assert not second.exists()
+
+    def test_failed_profile_write_rolls_back_temp_home(self, monkeypatch, tmp_path):
+        """A write failure must not orphan the mkdtemp dir — it is tracked
+        before writing and removed on the way out."""
+        self._force_posix(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+
+        created: list = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def tracking_mkdtemp(*args, **kwargs):
+            d = real_mkdtemp(*args, **kwargs)
+            created.append(d)
+            return d
+
+        monkeypatch.setattr("coder_eval.agents.codex_agent.tempfile.mkdtemp", tracking_mkdtemp)
+        monkeypatch.setattr(
+            CodexAgent,
+            "_login_profile_content",
+            staticmethod(lambda *_a, **_kw: (_ for _ in ()).throw(OSError("disk full"))),
+        )
+
+        with pytest.raises(OSError, match="disk full"):
+            agent._setup_login_shell_home()
+
+        assert agent._login_shell_home is None
+        assert created and not Path(created[0]).exists()
+
+    def test_kill_sync_cleans_login_home(self, monkeypatch, tmp_path):
+        """The watchdog's terminal kill path must not leak the temp HOME."""
+        self._force_posix(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+        agent.codex_client = SimpleNamespace(close=lambda: None)
+
+        agent._setup_login_shell_home()
+        home = agent._login_shell_home
+        assert home is not None
+
+        agent.kill_sync()
+
+        assert agent._login_shell_home is None
+        assert not home.exists()
+
+    async def test_start_creates_and_stop_cleans_login_home(self, monkeypatch, tmp_path):
+        """start() must compose the pieces: generated HOME + pinned CODEX_HOME
+        + mock-first PATH must all land in the CodexConfig env handed to the
+        SDK (not just exist on the agent), and stop() must clean up."""
+        import openai_codex
+
+        self._force_posix(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path / "orig-home"))
+        monkeypatch.delenv("CODEX_API_KEY", raising=False)
+        captured: dict = {}
+
+        def fake_codex(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(close=lambda: None)
+
+        monkeypatch.setattr(openai_codex, "Codex", fake_codex)
+
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+        await agent.start(str(tmp_path), env_path_prepend=["/sandbox/mocks"])
+
+        home = agent._login_shell_home
+        assert home is not None and (home / ".bash_profile").is_file()
+        config = captured.get("config")
+        assert config is not None and config.env is not None
+        assert config.env["HOME"] == str(home)
+        assert config.env["ZDOTDIR"] == str(home)
+        assert config.env["CODEX_HOME"] == str(agent._codex_home())
+        path_key = next(k for k in config.env if k.upper() == "PATH")
+        assert config.env[path_key].startswith("/sandbox/mocks")
+
+        await agent.stop()
+        assert agent._login_shell_home is None
+        assert not home.exists()
+
+    @pytest.mark.skipif(
+        os.name != "posix" or not shutil.which("bash"),
+        reason="requires a POSIX bash to exercise a real login shell",
+    )
+    def test_login_shell_restores_mock_prepend_end_to_end(self, monkeypatch, tmp_path):
+        """Real ``bash -lc`` with the generated HOME, against a CONTROLLED
+        original home (hermetic — the developer/CI dotfiles play no part):
+
+        - the original .bash_profile resets PATH (worst case) and sources
+          ``$HOME/.bashrc`` — which must resolve to the ORIGINAL home;
+        - the mock dir still comes out FIRST on PATH;
+        - the command body sees the original ``$HOME``.
+        """
+        self._force_posix(monkeypatch)
+        orig = tmp_path / "orig-home"
+        orig.mkdir()
+        (orig / ".bash_profile").write_text(
+            'export PATH="/usr/local/bin:/usr/bin:/bin"\n[ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        (orig / ".bashrc").write_text("export BASHRC_SOURCED=1\n", encoding="utf-8", newline="\n")
+        monkeypatch.setenv("HOME", str(orig))
+        agent = self._agent_with_prepend([str(tmp_path / "mocks")])
+        (tmp_path / "mocks").mkdir()
+
+        agent._setup_login_shell_home()
+        try:
+            home = agent._login_shell_home
+            assert home is not None
+            result = subprocess.run(
+                ["bash", "-lc", 'echo "$PATH|$HOME|${BASHRC_SOURCED:-0}"'],
+                env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            path_value, home_value, bashrc_sourced = result.stdout.strip().split("|")
+            assert path_value.split(":")[0] == str(tmp_path / "mocks")
+            assert home_value == str(orig)
+            assert bashrc_sourced == "1"
+        finally:
+            agent._cleanup_login_shell_home()
+
+    @pytest.mark.skipif(
+        os.name != "posix" or not shutil.which("zsh"),
+        reason="requires zsh to exercise a real zsh login shell (macOS default)",
+    )
+    def test_zsh_login_shell_restores_mock_prepend_end_to_end(self, monkeypatch, tmp_path):
+        """Real zsh with the generated home as ZDOTDIR, against a CONTROLLED
+        original home whose .zshenv/.zprofile/.zshrc all RESET PATH (worst
+        case). Three invocations mirror codex's real shapes:
+
+        - ``zsh -lc`` — how codex runs each command on macOS;
+        - ``zsh -lic`` — the shell-snapshot capture, which also reads .zshrc;
+        - nested ``zsh -lc`` inside the command — must KEEP the prepend
+          (ZDOTDIR stays exported), unlike the documented bash nested gap.
+
+        In every shape the mock dir must come out FIRST on PATH, the command
+        body must see the original ``$HOME``, and the original dotfiles must
+        have been sourced.
+        """
+        self._force_posix(monkeypatch)
+        orig = tmp_path / "orig-home"
+        orig.mkdir()
+        reset = 'export PATH="/usr/local/bin:/usr/bin:/bin"\n'
+        (orig / ".zshenv").write_text(reset + "export ZSHENV_SOURCED=1\n", encoding="utf-8", newline="\n")
+        (orig / ".zprofile").write_text(reset + "export ZPROFILE_SOURCED=1\n", encoding="utf-8", newline="\n")
+        (orig / ".zshrc").write_text(reset + "export ZSHRC_SOURCED=1\n", encoding="utf-8", newline="\n")
+        monkeypatch.setenv("HOME", str(orig))
+        monkeypatch.delenv("ZDOTDIR", raising=False)
+        agent = self._agent_with_prepend([str(tmp_path / "mocks")])
+        (tmp_path / "mocks").mkdir()
+
+        agent._setup_login_shell_home()
+        try:
+            home = agent._login_shell_home
+            assert home is not None
+            env = {"HOME": str(home), "ZDOTDIR": str(home), "PATH": "/usr/bin:/bin"}
+            probe = 'echo "$PATH|$HOME|${ZSHENV_SOURCED:-0}${ZPROFILE_SOURCED:-0}${ZSHRC_SOURCED:-0}"'
+
+            for args, sourced in ((["zsh", "-lc", probe], "110"), (["zsh", "-lic", probe], "111")):
+                result = subprocess.run(args, env=env, capture_output=True, text=True, check=True)
+                path_value, home_value, markers = result.stdout.strip().split("|")
+                assert path_value.split(":")[0] == str(tmp_path / "mocks"), args
+                assert home_value == str(orig), args
+                assert markers == sourced, args
+
+            nested = subprocess.run(
+                ["zsh", "-lc", f"zsh -lc '{probe}'"],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            path_value = nested.stdout.strip().split("|")[0]
+            assert path_value.split(":")[0] == str(tmp_path / "mocks")
+        finally:
+            agent._cleanup_login_shell_home()
