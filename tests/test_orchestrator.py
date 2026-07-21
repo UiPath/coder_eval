@@ -54,6 +54,16 @@ def test_format_routing_litellm_shows_model():
     assert "zai.glm-5" in out
 
 
+def test_format_routing_litellm_effective_model_wins_over_route_default():
+    """The --model override (effective_model) must be logged, not the route's LITELLM_MODEL default."""
+    out = _format_routing(
+        LiteLLMRoute(base_url="http://localhost:4000", auth_token="k", model="zai.glm-5"),
+        effective_model="deepseek.v3.2",
+    )
+    assert "deepseek.v3.2" in out
+    assert "zai.glm-5" not in out
+
+
 def _make_orchestrator_with_route(tmp_path: Path, route) -> Orchestrator:
     """Build a minimal Orchestrator pre-populated with a route + EvaluationResult.
 

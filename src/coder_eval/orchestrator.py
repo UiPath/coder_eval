@@ -117,18 +117,21 @@ async def _pump_stream(
 _UTTERANCE_TAG_RE = re.compile(r"^\[(ASSISTANT|RESULT - SUCCESS|RESULT - ERROR|TOOL USE)\](?: (.*))?$")
 
 
-def _format_routing(route: ApiRoute) -> str:
+def _format_routing(route: ApiRoute, effective_model: str | None = None) -> str:
     """Format the route name for the ``API routing:`` log line.
 
     For ``DirectRoute`` the resolved judge transport is appended so the choice
     (anthropic / none) is visible on every run, not only in the persisted
-    ``environment_info`` record.
+    ``environment_info`` record. For ``LiteLLMRoute`` the model is shown — the
+    ``effective_model`` (the resolved ``agent.model``, e.g. from ``--model``)
+    when supplied, else the route's own default — so the line reflects what the
+    agent will actually send rather than the route-level fallback.
     """
     name = ROUTE_NAMES[type(route)]
     if isinstance(route, DirectRoute):
         return f"{name} (judge transport: {route.judge_transport or 'none'})"
     if isinstance(route, LiteLLMRoute):
-        return f"{name} (model: {route.model or 'default'})"
+        return f"{name} (model: {effective_model or route.model or 'default'})"
     return name
 
 
@@ -894,7 +897,9 @@ class Orchestrator:
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
 
             self.route = resolve_route(settings)
-            logger.info("API routing: %s", _format_routing(self.route))
+            logger.info(
+            "API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None)
+        )
             self.success_checker = SuccessChecker(self.sandbox, route=self.route)
             self._record_route_environment_info()
             return
@@ -961,7 +966,9 @@ class Orchestrator:
 
         # Determine API routing from settings.api_backend enum
         self.route = resolve_route(settings)
-        logger.info("API routing: %s", _format_routing(self.route))
+        logger.info(
+            "API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None)
+        )
         self.success_checker = SuccessChecker(self.sandbox, route=self.route)
 
         # Create and start the agent. For a no-op (type: none) task this dispatches

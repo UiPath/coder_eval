@@ -279,12 +279,13 @@ def test_cli_override_applies_with_lineage_detail():
 
 
 def test_api_backend_enum_values():
-    """Verify ApiBackend has exactly 2 values with expected string representations."""
+    """Verify ApiBackend has exactly 3 values with expected string representations."""
     from coder_eval.models.enums import ApiBackend
 
-    assert set(ApiBackend) == {ApiBackend.DIRECT, ApiBackend.BEDROCK}
+    assert set(ApiBackend) == {ApiBackend.DIRECT, ApiBackend.BEDROCK, ApiBackend.LITELLM}
     assert str(ApiBackend.DIRECT) == "direct"
     assert str(ApiBackend.BEDROCK) == "bedrock"
+    assert str(ApiBackend.LITELLM) == "litellm"
 
 
 def test_settings_api_backend_default():
