@@ -34,8 +34,11 @@ _YES = "yes"
 _NO = "no"
 
 # Extracts the skill name between ``skills/<name>/`` path segments (the Codex
-# file-read signal). The leading class keeps a bare ``skills//`` from matching.
-_SKILL_PATH_RE = re.compile(r"skills/([A-Za-z0-9][A-Za-z0-9_-]*)/")
+# file-read signal). Accept both POSIX and Windows separators because telemetry
+# records the command exactly as the agent emitted it. One-or-more separators
+# also handles JSON-escaped commands that retain doubled backslashes. The
+# lookahead permits overlapping matches such as ``.../skills/skills/<name>/...``.
+_SKILL_PATH_RE = re.compile(r"(?=skills[\\/]+([A-Za-z0-9][A-Za-z0-9_-]*)[\\/]+)")
 
 
 def _engaged_skill_names(cmd: CommandTelemetry) -> set[str]:
@@ -46,9 +49,9 @@ def _engaged_skill_names(cmd: CommandTelemetry) -> set[str]:
 
     - the Claude ``Skill`` tool call's ``skill`` parameter, namespace-stripped
       via ``.split(":")[-1]`` (the SDK reports ``plugin:skill-name``); and
-    - every ``skills/<name>/`` path segment appearing in any string parameter
-      (the Codex / file-read signal — repo layout or the ``.agents/skills``
-      sandbox symlink).
+    - every ``skills/<name>/`` or ``skills\\<name>\\`` path segment appearing
+      in any string parameter (the Codex / file-read signal — repo layout or
+      the ``.agents/skills`` sandbox symlink).
 
     Returns the (possibly empty) set of engaged skill names for this command.
     """
@@ -77,10 +80,7 @@ def _engaged_skill(cmd: CommandTelemetry, skill_name: str) -> bool:
     (Bash ``parameters['command']``) or a file-path parameter. The trailing
     slash prevents prefix collisions (``uipath-agents`` vs ``uipath-agents-foo``).
     """
-    if cmd.tool_name == "Skill" and cmd.parameters.get("skill", "").split(":")[-1] == skill_name:
-        return True
-    needle = f"skills/{skill_name}/"
-    return any(isinstance(v, str) and needle in v for v in cmd.parameters.values())
+    return skill_name in _engaged_skill_names(cmd)
 
 
 @register_criterion
