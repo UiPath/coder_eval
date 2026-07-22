@@ -51,7 +51,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/UiPath/coder_eval"
+Homepage = "https://coder-eval.com"
 Repository = "https://github.com/UiPath/coder_eval"
 Documentation = "https://github.com/UiPath/coder_eval/tree/main/docs"
 Issues = "https://github.com/UiPath/coder_eval/issues"
