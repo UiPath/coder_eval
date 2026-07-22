@@ -12,8 +12,9 @@ import math
 import random
 import statistics as _stats
 from pathlib import Path
+from typing import NamedTuple
 
-from coder_eval.models import EvaluationResult, ExperimentVariant, TaskExperimentSummary
+from coder_eval.models import EvaluationResult, ExperimentResult, ExperimentVariant, TaskExperimentSummary
 
 
 logger = logging.getLogger(__name__)
@@ -76,7 +77,15 @@ def _betacf(a: float, b: float, x: float) -> float:
 
 
 def regularized_incomplete_beta(a: float, b: float, x: float) -> float:
-    """Regularized incomplete beta function I_x(a, b), for a, b > 0 and x in [0, 1]."""
+    """Regularized incomplete beta function I_x(a, b), for a, b > 0 and x in [0, 1].
+
+    Raises ValueError outside that domain — returning NaN would let a bad input
+    render as a real-looking statistic downstream.
+    """
+    if not (math.isfinite(a) and math.isfinite(b) and math.isfinite(x)):
+        raise ValueError(f"a, b and x must be finite, got a={a!r}, b={b!r}, x={x!r}")
+    if a <= 0.0 or b <= 0.0:
+        raise ValueError(f"a and b must be positive, got a={a!r}, b={b!r}")
     if x <= 0.0:
         return 0.0
     if x >= 1.0:
@@ -203,23 +212,6 @@ def wilson_interval(successes: int, n: int, confidence: float = 0.95) -> tuple[f
     return (max(0.0, center - half), min(1.0, center + half))
 
 
-def paired_bootstrap_diff_ci(
-    a: list[float],
-    b: list[float],
-    n_resamples: int = 1000,
-    confidence: float = 0.95,
-    seed: int = 0,
-) -> tuple[float, float, float] | None:
-    """Paired bootstrap of mean(a_i - b_i).
-
-    Returns (mean_diff, ci_low, ci_high) or None if lengths differ or < 2.
-    """
-    if len(a) != len(b) or len(a) < 2:
-        return None
-    diffs = [ai - bi for ai, bi in zip(a, b, strict=True)]
-    return bootstrap_mean_ci(diffs, n_resamples=n_resamples, confidence=confidence, seed=seed)
-
-
 def cohens_d(a: list[float], b: list[float]) -> float | None:
     """Paired Cohen's d = mean(a_i - b_i) / stddev(a_i - b_i)."""
     if len(a) != len(b) or len(a) < 2:
@@ -227,6 +219,53 @@ def cohens_d(a: list[float], b: list[float]) -> float | None:
     diffs = [ai - bi for ai, bi in zip(a, b, strict=True)]
     s = stddev(diffs)
     return (sum(diffs) / len(diffs)) / s if s > 0 else None
+
+
+def student_t_critical(confidence: float, df: float) -> float:
+    """Two-tailed critical value t* with P(|T| >= t*) = 1 - confidence.
+
+    Inverts :func:`student_t_two_tailed_p` by bisection — that p is continuous and
+    strictly decreasing in |t|, so a plain bracket-and-halve is exact to ~1e-12 and
+    needs no separate quantile expansion.
+    """
+    if not 0.0 < confidence < 1.0:
+        raise ValueError(f"confidence must be in (0, 1), got {confidence!r}")
+    if df <= 0 or not math.isfinite(df):
+        return math.inf
+    alpha = 1.0 - confidence
+    lo, hi = 0.0, 1.0
+    while student_t_two_tailed_p(hi, df) > alpha:
+        lo = hi
+        hi *= 2.0
+        if hi > 1e12:
+            return hi
+    for _ in range(200):
+        mid = (lo + hi) / 2.0
+        if mid in (lo, hi):
+            break
+        if student_t_two_tailed_p(mid, df) > alpha:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0
+
+
+def paired_t_ci(a: list[float], b: list[float], confidence: float = 0.95) -> tuple[float, float, float] | None:
+    """Student-t confidence interval for mean(a_i - b_i): mean ± t* · sd/√n.
+
+    Returns (mean_diff, ci_low, ci_high), or None if lengths differ, n < 2, or any
+    value is non-finite. Shares its distribution with :func:`paired_t_test`, so the
+    interval and the p-value always agree about whether 0 is excluded.
+    """
+    if len(a) != len(b) or len(a) < 2:
+        return None
+    if not all(math.isfinite(v) for v in (*a, *b)):
+        return None
+    diffs = [ai - bi for ai, bi in zip(a, b, strict=True)]
+    n = len(diffs)
+    mean_diff = sum(diffs) / n
+    half_width = student_t_critical(confidence, n - 1) * stddev(diffs) / math.sqrt(n)
+    return (mean_diff, mean_diff - half_width, mean_diff + half_width)
 
 
 def paired_t_test(a: list[float], b: list[float]) -> float | None:
@@ -247,6 +286,102 @@ def paired_t_test(a: list[float], b: list[float]) -> float | None:
         return 1.0 if mean_diff == 0 else 0.0
     t_stat = abs(mean_diff) / (sd / math.sqrt(len(diffs)))
     return student_t_two_tailed_p(t_stat, len(diffs) - 1)
+
+
+# ---------------------------------------------------------------------------
+# Aggregate-metric series
+# ---------------------------------------------------------------------------
+
+
+class VariantSeries(NamedTuple):
+    """One variant's numeric series across all tasks — the raw inputs to the
+    Aggregate Metrics rows and their p-values."""
+
+    scores: list[float]
+    durations: list[float]
+    tokens: list[float]
+    asst_turns: list[float]
+
+
+def collect_variant_series(result: ExperimentResult) -> dict[str, VariantSeries]:
+    """Per-variant (scores, durations, tokens, assistant-turns) series, keyed by variant id.
+
+    Shared by the markdown and HTML reporters so both render the same numbers.
+    ``VariantResult.duration_seconds`` is *summed* across replicates, so it is
+    divided by ``replicate_count`` to give a per-run duration comparable across
+    variants that ran different replicate counts.
+    """
+    series = {vid: VariantSeries([], [], [], []) for vid in result.variant_ids}
+    for ts in result.task_summaries:
+        for vr in ts.variant_results:
+            s = series.get(vr.variant_id)
+            if s is None:  # a task result for a variant not in variant_ids
+                continue
+            s.scores.append(vr.weighted_score)
+            s.durations.append(vr.duration_seconds / vr.replicate_count)
+            if vr.total_tokens is not None:
+                s.tokens.append(float(vr.total_tokens))
+            if vr.total_assistant_turns is not None:
+                s.asst_turns.append(float(vr.total_assistant_turns))
+    return series
+
+
+class PairedComparison(NamedTuple):
+    """A 2-variant paired comparison over per-task mean scores.
+
+    ``task_count`` is the number of tasks both variants scored. When it is < 2
+    the statistics are all ``None`` — there is nothing to compare, and the
+    reporters say so rather than rendering an empty section.
+    """
+
+    vid_a: str
+    vid_b: str
+    task_count: int
+    mean_diff: float | None
+    ci_low: float | None
+    ci_high: float | None
+    effect_size: float | None
+    p_value: float | None
+
+
+def paired_comparison(result: ExperimentResult, confidence: float = 0.95) -> PairedComparison | None:
+    """Pair the two variants' per-task mean scores. Returns None unless the
+    experiment has exactly 2 variants with at least one commonly-scored task.
+
+    The task is the unit of analysis: replicate slots within a task share the task
+    effect and are not independent, so pairing them individually would understate
+    the standard error. Replicate counts need not match — a task's mean score is a
+    well-defined pair member either way.
+    """
+    if len(result.variant_ids) != 2:
+        return None
+    vid_a, vid_b = result.variant_ids[0], result.variant_ids[1]
+    per_rep_a = result.per_replicate_scores.get(vid_a, {})
+    per_rep_b = result.per_replicate_scores.get(vid_b, {})
+    common_tasks = sorted(t for t in set(per_rep_a) & set(per_rep_b) if per_rep_a[t] and per_rep_b[t])
+    if not common_tasks:
+        # No shared task, or per_replicate_scores absent (results from before it existed).
+        return None
+
+    if len(common_tasks) < 2:
+        return PairedComparison(vid_a, vid_b, len(common_tasks), None, None, None, None, None)
+
+    a_scores = [mean(per_rep_a[task_id]) for task_id in common_tasks]
+    b_scores = [mean(per_rep_b[task_id]) for task_id in common_tasks]
+    ci = paired_t_ci(a_scores, b_scores, confidence=confidence)
+    if ci is None:  # non-finite scores
+        return PairedComparison(vid_a, vid_b, len(common_tasks), None, None, None, None, None)
+    mean_diff, ci_low, ci_high = ci
+    return PairedComparison(
+        vid_a,
+        vid_b,
+        len(common_tasks),
+        mean_diff,
+        ci_low,
+        ci_high,
+        cohens_d(a_scores, b_scores),
+        paired_t_test(a_scores, b_scores),
+    )
 
 
 # ---------------------------------------------------------------------------

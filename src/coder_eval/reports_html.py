@@ -1236,28 +1236,50 @@ def _experiment_prompt_config(experiment: ExperimentDefinition | None, variant_i
 """
 
 
-def _collect_variant_series(result: ExperimentResult) -> dict[str, dict[str, list[float]]]:
-    """Group per-variant numeric series (scores, durations, etc.)."""
-    series: dict[str, dict[str, list[float]]] = {
-        vid: {"scores": [], "durations": [], "asst_turns": [], "tokens": []} for vid in result.variant_ids
-    }
-    for ts in result.task_summaries:
-        for vr in ts.variant_results:
-            s = series.get(vr.variant_id)
-            if s is None:
-                continue
-            s["scores"].append(vr.weighted_score)
-            s["durations"].append(vr.duration_seconds)
-            if vr.total_tokens is not None:
-                s["tokens"].append(float(vr.total_tokens))
-            if vr.total_assistant_turns is not None:
-                s["asst_turns"].append(float(vr.total_assistant_turns))
-    return series
+def _experiment_paired_comparison(result: ExperimentResult) -> str:
+    """Render the Paired Comparison section — the HTML twin of the markdown one.
+
+    Both render the same ``reports_stats.paired_comparison`` result, so the two
+    reports can never disagree about the paired numbers.
+    """
+    from .reports_stats import fmt_p, paired_comparison
+
+    pc = paired_comparison(result)
+    if pc is None:
+        return ""
+
+    if pc.mean_diff is None or pc.ci_low is None or pc.ci_high is None:
+        body = _esc(
+            f"A paired comparison needs at least 2 tasks common to {pc.vid_a} and {pc.vid_b}; found {pc.task_count}."
+        )
+        return f"""
+<h2>Paired Comparison</h2>
+<div class="card">
+  <p class="muted">{body}</p>
+</div>
+"""
+
+    d_str = f"{pc.effect_size:.2f}" if pc.effect_size is not None else "n/a"
+    note = _esc(
+        f"Paired over the per-task mean score of {pc.task_count} task(s) common to both variants"
+        + " — pairing cancels between-task difficulty, which the pooled Welch test above cannot."
+    )
+    headline = _esc(
+        f"Paired mean diff ({pc.vid_a} - {pc.vid_b}): {pc.mean_diff:+.3f}"
+        + f" [95% CI {pc.ci_low:+.3f}, {pc.ci_high:+.3f}], Cohen's d = {d_str}, p = {fmt_p(pc.p_value)}"
+    )
+    return f"""
+<h2>Paired Comparison</h2>
+<div class="card">
+  <p class="muted">{note}</p>
+  <p><strong>{headline}</strong></p>
+</div>
+"""
 
 
 def _experiment_aggregate_metrics(result: ExperimentResult) -> str:
     """Render the Aggregate Metrics table (with p-values when exactly 2 variants)."""
-    from .reports_stats import fmt_mean_sd, fmt_p, welch_t_test
+    from .reports_stats import collect_variant_series, fmt_mean_sd, fmt_p, welch_t_test
 
     show_p = len(result.variant_ids) == 2
     vid_a, vid_b = (result.variant_ids[0], result.variant_ids[1]) if show_p else ("", "")
@@ -1267,7 +1289,7 @@ def _experiment_aggregate_metrics(result: ExperimentResult) -> str:
         header_cells.append("<th>p-value</th>")
     header_html = "<tr>" + "".join(header_cells) + "</tr>"
 
-    series = _collect_variant_series(result)
+    series = collect_variant_series(result)
 
     def _row(label: str, values: list[str], p: str | None) -> str:
         cells = [f"<td>{_esc(label)}</td>"] + [f"<td>{_esc(v)}</td>" for v in values]
@@ -1298,31 +1320,31 @@ def _experiment_aggregate_metrics(result: ExperimentResult) -> str:
     rows.append(
         _row(
             "Score",
-            [fmt_mean_sd(series[vid]["scores"]) for vid in result.variant_ids],
-            fmt_p(welch_t_test(series[vid_a]["scores"], series[vid_b]["scores"])) if show_p else None,
+            [fmt_mean_sd(series[vid].scores) for vid in result.variant_ids],
+            fmt_p(welch_t_test(series[vid_a].scores, series[vid_b].scores)) if show_p else None,
         )
     )
     rows.append(
         _row(
             "Duration (s)",
-            [fmt_mean_sd(series[vid]["durations"], ".1f") for vid in result.variant_ids],
-            fmt_p(welch_t_test(series[vid_a]["durations"], series[vid_b]["durations"])) if show_p else None,
+            [fmt_mean_sd(series[vid].durations, ".1f") for vid in result.variant_ids],
+            fmt_p(welch_t_test(series[vid_a].durations, series[vid_b].durations)) if show_p else None,
         )
     )
-    if any(series[vid]["asst_turns"] for vid in result.variant_ids):
+    if any(series[vid].asst_turns for vid in result.variant_ids):
         rows.append(
             _row(
                 "Assistant Turns",
-                [fmt_mean_sd(series[vid]["asst_turns"], ".1f") for vid in result.variant_ids],
-                fmt_p(welch_t_test(series[vid_a]["asst_turns"], series[vid_b]["asst_turns"])) if show_p else None,
+                [fmt_mean_sd(series[vid].asst_turns, ".1f") for vid in result.variant_ids],
+                fmt_p(welch_t_test(series[vid_a].asst_turns, series[vid_b].asst_turns)) if show_p else None,
             )
         )
-    if any(series[vid]["tokens"] for vid in result.variant_ids):
+    if any(series[vid].tokens for vid in result.variant_ids):
         rows.append(
             _row(
                 "Tokens",
-                [fmt_mean_sd(series[vid]["tokens"], ",.0f") for vid in result.variant_ids],
-                fmt_p(welch_t_test(series[vid_a]["tokens"], series[vid_b]["tokens"])) if show_p else None,
+                [fmt_mean_sd(series[vid].tokens, ",.0f") for vid in result.variant_ids],
+                fmt_p(welch_t_test(series[vid_a].tokens, series[vid_b].tokens)) if show_p else None,
             )
         )
 
@@ -1598,6 +1620,7 @@ class HTMLReportGenerator:
 """
             + _experiment_prompt_config(experiment, result.variant_ids)
             + _experiment_aggregate_metrics(result)
+            + _experiment_paired_comparison(result)
             + _experiment_win_rates(result)
             + _experiment_per_task_comparison(result)
             + _experiment_most_divergent(result)

@@ -15,15 +15,14 @@ from coder_eval.models import (
 from coder_eval.path_utils import replicate_subdir_name
 from coder_eval.reports import resolve_agent_settings
 from coder_eval.reports_stats import (
+    VariantSeries,
     bootstrap_mean_ci,
-    cohens_d,
+    collect_variant_series,
     describe_prompt_config,
     fmt_mean_sd,
     fmt_p,
     load_variant_eval_results,
-    mean,
-    paired_bootstrap_diff_ci,
-    paired_t_test,
+    paired_comparison,
     stddev,
     welch_t_test,
     wilson_interval,
@@ -219,27 +218,6 @@ class ExperimentReportGenerator:
         return lines
 
     @staticmethod
-    def _collect_variant_series(
-        result: ExperimentResult,
-    ) -> tuple[dict[str, list[float]], dict[str, list[float]], dict[str, list[float]], dict[str, list[float]]]:
-        """Per-variant (scores, durations, tokens, assistant-turns) series collected
-        across all task summaries — the raw inputs to the Aggregate Metrics stat rows."""
-        variant_scores: dict[str, list[float]] = {vid: [] for vid in result.variant_ids}
-        variant_durations: dict[str, list[float]] = {vid: [] for vid in result.variant_ids}
-        variant_tokens: dict[str, list[float]] = {vid: [] for vid in result.variant_ids}
-        variant_asst_turns: dict[str, list[float]] = {vid: [] for vid in result.variant_ids}
-
-        for ts in result.task_summaries:
-            for vr in ts.variant_results:
-                variant_scores[vr.variant_id].append(vr.weighted_score)
-                variant_durations[vr.variant_id].append(vr.duration_seconds / vr.replicate_count)
-                if vr.total_tokens is not None:
-                    variant_tokens[vr.variant_id].append(float(vr.total_tokens))
-                if vr.total_assistant_turns is not None:
-                    variant_asst_turns[vr.variant_id].append(float(vr.total_assistant_turns))
-        return variant_scores, variant_durations, variant_tokens, variant_asst_turns
-
-    @staticmethod
     def _aggregate_count_rows(result: ExperimentResult, show_p_values: bool) -> list[str]:
         """The integer-aggregate rows of the Aggregate Metrics table: Tasks Run,
         Succeeded, Failed, the optional budget sub-rows, Errors, and Success Rate.
@@ -314,10 +292,7 @@ class ExperimentReportGenerator:
     @staticmethod
     def _aggregate_stat_rows(
         result: ExperimentResult,
-        variant_scores: dict[str, list[float]],
-        variant_durations: dict[str, list[float]],
-        variant_tokens: dict[str, list[float]],
-        variant_asst_turns: dict[str, list[float]],
+        series: dict[str, VariantSeries],
         show_p_values: bool,
         vid_a: str,
         vid_b: str,
@@ -330,38 +305,38 @@ class ExperimentReportGenerator:
         # Row: Score (mean ± stddev, p-value)
         row = "| Score"
         for vid in result.variant_ids:
-            row += f" | {fmt_mean_sd(variant_scores[vid])}"
+            row += f" | {fmt_mean_sd(series[vid].scores)}"
         if show_p_values:
-            p = welch_t_test(variant_scores[vid_a], variant_scores[vid_b])
+            p = welch_t_test(series[vid_a].scores, series[vid_b].scores)
             row += f" | {fmt_p(p)}"
         lines.append(row + " |")
 
         # Row: Duration
         row = "| Avg Duration (s)"
         for vid in result.variant_ids:
-            row += f" | {fmt_mean_sd(variant_durations[vid], '.1f')}"
+            row += f" | {fmt_mean_sd(series[vid].durations, '.1f')}"
         if show_p_values:
-            p = welch_t_test(variant_durations[vid_a], variant_durations[vid_b])
+            p = welch_t_test(series[vid_a].durations, series[vid_b].durations)
             row += f" | {fmt_p(p)}"
         lines.append(row + " |")
 
         # Row: Assistant Turns (if data available)
-        if any(variant_asst_turns[vid] for vid in result.variant_ids):
+        if any(series[vid].asst_turns for vid in result.variant_ids):
             row = "| Assistant Turns"
             for vid in result.variant_ids:
-                row += f" | {fmt_mean_sd(variant_asst_turns[vid], '.1f')}"
+                row += f" | {fmt_mean_sd(series[vid].asst_turns, '.1f')}"
             if show_p_values:
-                p = welch_t_test(variant_asst_turns[vid_a], variant_asst_turns[vid_b])
+                p = welch_t_test(series[vid_a].asst_turns, series[vid_b].asst_turns)
                 row += f" | {fmt_p(p)}"
             lines.append(row + " |")
 
         # Row: Tokens (if data available)
-        if any(variant_tokens[vid] for vid in result.variant_ids):
+        if any(series[vid].tokens for vid in result.variant_ids):
             row = "| Tokens"
             for vid in result.variant_ids:
-                row += f" | {fmt_mean_sd(variant_tokens[vid], ',.0f')}"
+                row += f" | {fmt_mean_sd(series[vid].tokens, ',.0f')}"
             if show_p_values:
-                p = welch_t_test(variant_tokens[vid_a], variant_tokens[vid_b])
+                p = welch_t_test(series[vid_a].tokens, series[vid_b].tokens)
                 row += f" | {fmt_p(p)}"
             lines.append(row + " |")
 
@@ -373,9 +348,7 @@ class ExperimentReportGenerator:
         columns). The p-value column + Welch t-tests appear only for exactly 2 variants;
         ``vid_a``/``vid_b`` stay local so the 3+-variant path never indexes them."""
         # ── Aggregate Metrics (vertical: metrics as rows, variants as columns) ──
-        variant_scores, variant_durations, variant_tokens, variant_asst_turns = (
-            ExperimentReportGenerator._collect_variant_series(result)
-        )
+        series = collect_variant_series(result)
 
         show_p_values = len(result.variant_ids) == 2
         vid_a, vid_b = (result.variant_ids[0], result.variant_ids[1]) if show_p_values else ("", "")
@@ -391,9 +364,7 @@ class ExperimentReportGenerator:
 
         lines = ["", "## Aggregate Metrics", "", header, sep]
         lines += ExperimentReportGenerator._aggregate_count_rows(result, show_p_values)
-        lines += ExperimentReportGenerator._aggregate_stat_rows(
-            result, variant_scores, variant_durations, variant_tokens, variant_asst_turns, show_p_values, vid_a, vid_b
-        )
+        lines += ExperimentReportGenerator._aggregate_stat_rows(result, series, show_p_values, vid_a, vid_b)
 
         # Row: Replicates/task (if any variant ran >1 replicate)
         if any(result.variant_aggregates[vid].replicate_count > 1 for vid in result.variant_ids):
@@ -495,51 +466,31 @@ class ExperimentReportGenerator:
     def _paired_comparison_lines(result: ExperimentResult) -> list[str]:
         """The ``## Paired Comparison`` block for 2-variant experiments.
 
-        Pairs the two variants' *per-task mean* scores. The task is the unit of
-        analysis: replicate slots within a task share the task effect and are not
-        independent, so pairing them individually would understate the standard
-        error. Unlike ``## Replicate Statistics`` there is no replicate gate —
-        single-replicate experiments pair task-by-task. Returns ``[]`` only when
-        the two variants have no scored task in common; when they have exactly
-        one, the section explains why no paired result is shown.
+        Renders :func:`coder_eval.reports_stats.paired_comparison`, which the HTML
+        reporter renders too. Returns ``[]`` only when the two variants have no
+        scored task in common; when they have exactly one, the section explains why
+        no paired result is shown.
         """
-        if len(result.variant_ids) != 2:
-            return []
-        vid_a, vid_b = result.variant_ids[0], result.variant_ids[1]
-        per_rep_a = result.per_replicate_scores.get(vid_a, {})
-        per_rep_b = result.per_replicate_scores.get(vid_b, {})
-        # Replicate counts need not match: a task's mean score is a well-defined
-        # pair member either way, so no task is excluded for having fewer runs.
-        common_tasks = sorted(t for t in set(per_rep_a) & set(per_rep_b) if per_rep_a[t] and per_rep_b[t])
-        if not common_tasks:
-            # Nothing to pair: no shared task, or per_replicate_scores absent (old results).
+        pc = paired_comparison(result)
+        if pc is None:
             return []
 
         header = ["", "## Paired Comparison", ""]
-        if len(common_tasks) < 2:
+        if pc.mean_diff is None or pc.ci_low is None or pc.ci_high is None:
             return [
                 *header,
-                f"*A paired comparison needs at least 2 tasks common to {vid_a} and {vid_b}; found 1.*",
+                f"*A paired comparison needs at least 2 tasks common to {pc.vid_a} and {pc.vid_b};"
+                + f" found {pc.task_count}.*",
             ]
 
-        a_scores = [mean(per_rep_a[task_id]) for task_id in common_tasks]
-        b_scores = [mean(per_rep_b[task_id]) for task_id in common_tasks]
-        # The interval is a percentile bootstrap while the p-value is an exact paired
-        # t — separate inference models, so they can disagree at small task counts.
-        # Equal lengths and >=2 pairs are guaranteed above, so this never returns None.
-        diff = paired_bootstrap_diff_ci(a_scores, b_scores)
-        if diff is None:  # pragma: no cover - defensive
-            return []
-        mean_diff, ci_lo, ci_hi = diff
-        d_val = cohens_d(a_scores, b_scores)
-        d_str = f"{d_val:.2f}" if d_val is not None else "n/a"
+        d_str = f"{pc.effect_size:.2f}" if pc.effect_size is not None else "n/a"
         return [
             *header,
-            f"*Paired over the per-task mean score of {len(common_tasks)} task(s) common to both variants"
+            f"*Paired over the per-task mean score of {pc.task_count} task(s) common to both variants"
             + " — pairing cancels between-task difficulty, which the pooled Welch test above cannot.*",
-            f"**Paired mean diff ({vid_a} - {vid_b})**: {mean_diff:+.3f}"
-            + f" [95% CI {ci_lo:+.3f}, {ci_hi:+.3f}], Cohen's d = {d_str}"
-            + f", p = {fmt_p(paired_t_test(a_scores, b_scores))}",
+            f"**Paired mean diff ({pc.vid_a} - {pc.vid_b})**: {pc.mean_diff:+.3f}"
+            + f" [95% CI {pc.ci_low:+.3f}, {pc.ci_high:+.3f}], Cohen's d = {d_str}"
+            + f", p = {fmt_p(pc.p_value)}",
         ]
 
     @staticmethod

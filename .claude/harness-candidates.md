@@ -37,12 +37,3 @@ Deferred lint/test guardrails surfaced during reviews. Promote to a `CExxx` rule
   caught them. The cleanup plan explicitly deferred this as YAGNI for the
   one-time purge, but any future doc rename/deletion re-opens the same blind
   spot — caught in the 2026-07-03 open-source-docs-cleanup implementation run.
-
-- [ ] Non-finite (NaN/inf) guards on numeric report helpers — `reports_stats.py`'s
-  t-test entry points now guard with `math.isfinite`, but nothing mechanically
-  enforces it for the next statistical helper added to that module. Review
-  criterion 15 states the rule; a CExxx rule would need to recognise "function
-  that feeds a value into `math.log`/`lgamma`/a division without a finiteness
-  check", which is a dataflow question rather than the syntactic pattern the
-  existing CE001–CE025 rules match — caught in the 2026-07-21 welch-t-test-exact
-  implementation run.

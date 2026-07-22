@@ -45,4 +45,4 @@
 ## Paired Comparison
 
 *Paired over the per-task mean score of 2 task(s) common to both variants — pairing cancels between-task difficulty, which the pooled Welch test above cannot.*
-**Paired mean diff (baseline - mutated)**: -0.125 [95% CI -0.450, +0.200], Cohen's d = -0.27, p = 0.766
+**Paired mean diff (baseline - mutated)**: -0.125 [95% CI -4.255, +4.005], Cohen's d = -0.27, p = 0.766

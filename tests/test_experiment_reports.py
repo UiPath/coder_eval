@@ -1215,6 +1215,84 @@ class TestReplicateStatistics:
         assert "Score 95% CI" not in md
 
 
+class TestCollectVariantSeries:
+    """The one series collector both reporters share."""
+
+    @staticmethod
+    def _result_with_replicates() -> ExperimentResult:
+        """One task per variant, 3 replicates, 90s summed ⇒ 30s per run."""
+        return ExperimentResult(
+            experiment_id="exp",
+            description="d",
+            variant_ids=["a"],
+            task_summaries=[
+                TaskExperimentSummary(
+                    task_id="t1",
+                    variant_results=[
+                        VariantResult(
+                            variant_id="a",
+                            task_id="t1",
+                            weighted_score=0.8,
+                            final_status="SUCCESS",
+                            duration_seconds=90.0,
+                            replicate_count=3,
+                        )
+                    ],
+                    best_variant="a",
+                    score_spread=0.0,
+                )
+            ],
+            variant_aggregates={
+                "a": VariantAggregate(
+                    variant_id="a",
+                    tasks_run=1,
+                    tasks_succeeded=1,
+                    tasks_failed=0,
+                    tasks_error=0,
+                    average_score=0.8,
+                    average_duration=30.0,
+                    replicate_count=3,
+                )
+            },
+            total_duration_seconds=90.0,
+        )
+
+    def test_duration_is_per_run_not_replicate_inflated(self):
+        """duration_seconds is summed across replicates, so it must be divided out."""
+        from coder_eval.reports_stats import collect_variant_series
+
+        series = collect_variant_series(self._result_with_replicates())
+        assert series["a"].durations == [30.0]
+
+    def test_html_and_markdown_report_the_same_duration(self):
+        """Regression: the HTML copy of this collector used the raw summed duration."""
+        from coder_eval.reports_html import _experiment_aggregate_metrics
+
+        result = self._result_with_replicates()
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        html = _experiment_aggregate_metrics(result)
+        assert "| Avg Duration (s) | 30.0 |" in md
+        assert "<td>30.0</td>" in html
+        assert "90.0" not in html
+
+    def test_result_for_unknown_variant_is_ignored(self):
+        """A task result naming a variant outside variant_ids must not raise."""
+        from coder_eval.reports_stats import collect_variant_series
+
+        result = self._result_with_replicates()
+        result.task_summaries[0].variant_results.append(
+            VariantResult(
+                variant_id="ghost",
+                task_id="t1",
+                weighted_score=0.1,
+                final_status="SUCCESS",
+                duration_seconds=1.0,
+            )
+        )
+        series = collect_variant_series(result)
+        assert set(series) == {"a"}
+
+
 class TestPairedComparisonSection:
     """Tests for the ``## Paired Comparison`` markdown section."""
 
@@ -1347,6 +1425,45 @@ class TestPairedComparisonSection:
         # Task means: a = [0.6, 0.4, 0.8], b = [0.5, 0.45, 0.7] ⇒ diffs [+0.1, -0.05, +0.1].
         assert "**Paired mean diff (a - b)**: +0.050" in md
 
+    def test_html_renders_the_same_paired_numbers_as_markdown(self):
+        """Both reporters render one shared computation, so they cannot disagree."""
+        from coder_eval.reports_html import _experiment_paired_comparison
+
+        result = self._make_result(
+            ["a", "b"],
+            {"a": {"t1": [0.9], "t2": [0.5], "t3": [0.8]}, "b": {"t1": [0.7], "t2": [0.55], "t3": [0.6]}},
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        html = _experiment_paired_comparison(result)
+        assert "<h2>Paired Comparison</h2>" in html
+        # Cohen's apostrophe is HTML-escaped, so match the numbers either side of it.
+        for fragment in ("Paired mean diff (a - b): +0.117", "d = 0.81", "p = 0.296"):
+            assert fragment in html
+        assert "**Paired mean diff (a - b)**: +0.117 [95% CI -0.242, +0.475], Cohen's d = 0.81, p = 0.296" in md
+
+    def test_html_paired_section_absent_for_three_variants(self):
+        from coder_eval.reports_html import _experiment_paired_comparison
+
+        result = self._make_result(
+            ["a", "b", "c"],
+            {"a": {"t1": [0.9]}, "b": {"t1": [0.7]}, "c": {"t1": [0.6]}},
+        )
+        assert _experiment_paired_comparison(result) == ""
+
+    def test_paired_ci_agrees_with_p_value(self):
+        """The interval and the p-value share a distribution, so they agree about 0."""
+        result = self._make_result(
+            ["a", "b"],
+            {
+                "a": {"t1": [0.9], "t2": [0.85], "t3": [0.95], "t4": [0.9]},
+                "b": {"t1": [0.2], "t2": [0.25], "t3": [0.15], "t4": [0.3]},
+            },
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        # A large, consistent gap ⇒ p well below 0.05 and a CI clear of zero.
+        assert "p = <0.001" in md
+        assert "[95% CI +0." in md
+
     def test_paired_comparison_ignores_tasks_with_no_scores(self):
         """A task with an empty replicate list on either side is not a pair."""
         result = self._make_result(
@@ -1359,9 +1476,9 @@ class TestPairedComparisonSection:
 
 class TestExperimentReportSnapshots:
     """Byte-identical characterization snapshots for generate_experiment_report — the
-    safety net for its decomposition. Output is deterministic: bootstrap_mean_ci /
-    paired_bootstrap_diff_ci in reports_stats use a fixed default seed, so no scrubbing
-    is needed (do not pass a varying seed)."""
+    safety net for its decomposition. Output is deterministic: bootstrap_mean_ci in
+    reports_stats uses a fixed default seed, so no scrubbing is needed (do not pass a
+    varying seed); the paired section is closed-form Student-t with no randomness."""
 
     def test_experiment_report_snapshot_2variant(self):
         """2 variants → p-value column shown; plus prompt config, budget sub-rows,
