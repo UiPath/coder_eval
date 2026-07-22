@@ -106,7 +106,7 @@ the job summary, and fails the step on any task/gate failure:
 - uses: UiPath/coder_eval@v0    # becomes @v1 once 1.0.0 ships; @vX.Y.Z pins exactly
   with:
     tasks: tests/tasks/**/*.yaml
-    model: claude-haiku-4-5-20251001
+    model: claude-sonnet-5
     anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 

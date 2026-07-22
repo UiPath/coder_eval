@@ -303,9 +303,12 @@ def test_skipped_tasks_suite(write_run_json: Callable[..., Path], tmp_path: Path
     assert ts is not None
     skipped_cases = ts.findall("testcase")
     assert len(skipped_cases) == 2
-    # Suffix-stripped full path (not just the stem) so same-basename tasks stay distinct.
+    # Suffix-stripped full path (not just the stem) so same-basename tasks stay
+    # distinct. Always '/'-separated: the same logical run must yield the same
+    # testcase identity on Windows and Linux, or CI history splits in two.
     names = {c.get("name") for c in skipped_cases}
     assert names == {"tasks/broken", "tasks/opt"}
+    assert not any("\\" in n for n in names)
     assert all(c.find("skipped") is not None for c in skipped_cases)
 
 
@@ -581,3 +584,13 @@ def test_skipped_names_unique_for_same_stem(write_run_json: Callable[..., Path],
     ts = _find_testsuite(root, "skipped")
     names = {c.get("name") for c in ts.findall("testcase")}
     assert len(names) == 2, f"skipped testcase names collided: {names}"
+
+
+def test_skipped_name_is_platform_independent(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """A Windows-style path recorded in run.json must still emit a '/'-separated
+    name, so a report generated on Windows matches one generated on Linux."""
+    run_dir = tmp_path / "run"
+    write_run_json(run_dir, [], skipped=[(r"tasks\win\task.yaml", "skip: true")])
+    root = fromstring(generate_junit_xml(run_dir))
+    name = _find_testsuite(root, "skipped").find("testcase").get("name")
+    assert name == "tasks/win/task"

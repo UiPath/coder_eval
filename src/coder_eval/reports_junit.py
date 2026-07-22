@@ -24,7 +24,7 @@ import logging
 import math
 import re
 import xml.etree.ElementTree as ET
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from .evaluation.judge_context import truncate
@@ -235,6 +235,21 @@ def _task_case(row: dict[str, Any], run_dir: Path) -> ET.Element:
     return case
 
 
+def _skipped_name(path: str) -> str:
+    """Stable testcase name for a skipped task: suffix-stripped, ``/``-separated.
+
+    Uses the whole path rather than just the stem, because two skipped tasks
+    sharing a basename (``suiteA/task.yaml``, ``suiteB/task.yaml``) would
+    otherwise collapse into one identity that some JUnit ingesters merge.
+
+    Separators are normalized to ``/`` and the path is parsed with
+    ``PurePosixPath`` so the emitted name does not depend on the OS that
+    generated the report — the same logical run must produce the same testcase
+    identity on Windows and Linux, or CI history/flake tracking splits in two.
+    """
+    return str(PurePosixPath(path.replace("\\", "/")).with_suffix(""))
+
+
 def _skipped_suite(summary: RunSummary) -> ET.Element | None:
     """Build the synthetic ``skipped`` testsuite from ``RunSummary.skipped_tasks``."""
     if not summary.skipped_tasks:
@@ -242,13 +257,10 @@ def _skipped_suite(summary: RunSummary) -> ET.Element | None:
     suite = ET.Element("testsuite", {"name": "skipped"})
     cases: list[ET.Element] = []
     for entry in summary.skipped_tasks:
-        # Use the suffix-stripped PATH, not just the stem: two skipped tasks
-        # sharing a basename (suiteA/task.yaml, suiteB/task.yaml) would otherwise
-        # collapse into one identity that some JUnit ingesters merge.
         case = ET.SubElement(
             suite,
             "testcase",
-            {"name": _xml_safe(str(Path(entry.path).with_suffix(""))), "classname": "skipped"},
+            {"name": _xml_safe(_skipped_name(entry.path)), "classname": "skipped"},
         )
         ET.SubElement(case, "skipped", {"message": _xml_safe(entry.reason)})
         cases.append(case)

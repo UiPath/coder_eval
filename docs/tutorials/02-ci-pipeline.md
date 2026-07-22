@@ -172,7 +172,7 @@ job-summary + fail-on-failure into one step:
       - uses: UiPath/coder_eval@v0       # …then run the gate (pin @vX.Y.Z in production)
         with:
           tasks: tests/tasks/**/*.yaml
-          model: claude-haiku-4-5-20251001
+          model: claude-sonnet-5
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
