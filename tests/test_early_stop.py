@@ -70,6 +70,7 @@ from coder_eval.streaming.events import (
     AgentStartEvent,
     ToolEndEvent,
     ToolEndStatus,
+    ToolStartEvent,
     TurnEndStatus,
     TurnStartEvent,
 )
@@ -190,6 +191,18 @@ def _skill_cmd(skill: str, *, tool_id: str) -> CommandTelemetry:
 
 def _tool_end(cmd: CommandTelemetry) -> ToolEndEvent:
     return ToolEndEvent(task_id="t", tool=cmd)
+
+
+def _skill_start(skill: str, *, tool_id: str = "sk-1", sequence_number: int = 0) -> ToolStartEvent:
+    """A Skill ToolStart (the tool CALL) engaging ``skill`` — no result yet."""
+    cmd = CommandTelemetry(
+        tool_name="Skill",
+        tool_id=tool_id,
+        timestamp=_TS,
+        parameters={"skill": skill},
+        sequence_number=sequence_number,
+    )
+    return ToolStartEvent(task_id="t", tool=cmd)
 
 
 def _skill_events(skill: str, *, tool_id: str = "sk-1") -> list[Any]:
@@ -998,6 +1011,47 @@ class TestEarlyStopWatcher:
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
 
+    def test_tool_call_fires_before_result(self) -> None:
+        # The decision latches on the tool CALL (ToolStartEvent): a Skill call
+        # whose result never arrives (a cut-short turn would strip it) still stops.
+        # No ToolEndEvent is ever fed.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        _feed(watcher, [_agent_start(), _turn_start(), _skill_start("date-teller")])
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        # The in-flight call reports as the 1st tool call even without a ToolEnd.
+        assert watcher.info.tool_call_index == 1
+
+    def test_tool_call_wrong_skill_fail_fires(self) -> None:
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        _feed(watcher, [_agent_start(), _turn_start(), _skill_start("weather-teller")])
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+
+    def test_tool_call_latches_before_unresolved_end(self) -> None:
+        # The call fires the stop in-loop; a later finalize() UNRESOLVED end for
+        # the SAME call is short-circuited (decision already latched) — no relabel,
+        # no double count.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        _feed(watcher, [_agent_start(), _turn_start(), _skill_start("date-teller", tool_id="sk-1")])
+        fired = watcher.info
+        _feed(watcher, [_unresolved_skill_end("date-teller", tool_id="sk-1")])
+        assert watcher.info is fired
+        assert watcher.info is not None
+        assert watcher.info.tool_call_index == 1
+
+    def test_tool_call_index_counts_prior_resolved_calls(self) -> None:
+        # A prior resolved, non-deciding tool is counted at its ToolEnd; the
+        # deciding in-flight call is then reported as the next (2nd) call.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        prior = _cmd("Bash", {"command": "ls"})  # not a skill engagement
+        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(prior)])
+        assert watcher.info is None
+        _feed(watcher, [_skill_start("date-teller", tool_id="sk-1", sequence_number=1)])
+        assert watcher.info is not None
+        assert watcher.info.tool_call_index == 2
+
 
 # --------------------------------------------------------------------------- #
 # Phase 3: Orchestrator wiring
@@ -1188,6 +1242,23 @@ class TestOrchestratorEarlyStopWiring:
         assert result.early_stop is None
         assert agent.delivered == 3  # never stopped: the full stream was consumed
         assert result.all_criteria_passed(self._criteria()) is False
+
+    async def test_tool_call_cut_without_tool_end(self, tmp_path) -> None:
+        # End-to-end: the deciding Skill CALL (a ToolStart with no ToolEnd) cuts
+        # the stream and records an early stop — the case that would otherwise run
+        # to the turn cap when a cut-short turn strips the result.
+        events = [_agent_start(), _turn_start(), _skill_start(self._SKILL), _turn_start()]
+        result, agent = await _run_wiring(
+            criteria=self._criteria(),
+            events=events,
+            scores=[1.0, 0.0],
+            stop_early=True,
+            tmp_path=tmp_path,
+        )
+        assert result.early_stop is not None
+        assert result.early_stop.reason == EarlyStopReason.CRITERION_PASSED
+        # Cut at the ToolStart: the trailing turn_start is never delivered.
+        assert agent.delivered == 3
 
     async def test_fail_open_wiring_degrades_to_full_run(self, tmp_path) -> None:
         with patch.object(SkillTriggeredChecker, "live_verdict", side_effect=RuntimeError("boom")):

@@ -9,12 +9,20 @@ pass or on a definitive fail. This module owns the whole feature:
   never a silent no-op.
 * ``EarlyStopWatcher`` — the runtime observer. A ``StreamCallback`` composed
   into the agent's event stream that maintains its own ``EventCollector``,
-  evaluates every armed criterion's ``live_verdict`` on each tool completion,
-  applies the stop rule, and exposes ``should_stop()`` (the cooperative
-  interrupt the agent polls) plus ``info`` (the ``EarlyStopInfo`` the
+  evaluates every armed criterion's ``live_verdict`` on each tool *call* (and on
+  its result), applies the stop rule, and exposes ``should_stop()`` (the
+  cooperative interrupt the agent polls) plus ``info`` (the ``EarlyStopInfo`` the
   orchestrator records). Fail-open: a raising ``live_verdict`` disarms the
   watcher and degrades to a full run — a verdict bug can never cause a *false*
   early stop.
+
+Deciding on the tool *call* (``ToolStartEvent``), not the result, is what makes
+the stop robust: for an observable criterion the verdict is fully determined by
+the call's inputs (which skill / which command), so the watcher can latch the
+instant the call is dispatched — before a cut-short turn (e.g. a timeout) can
+strip the result and leave the call unresolved. The agent polls ``should_stop``
+immediately after dispatching each message, so a latch on the call breaks the
+loop before the result message is ever pulled.
 
 Live verdicts only *trigger* the stop; the authoritative scores always come
 from the standard ``check_all`` on the frozen trajectory after the cut.
@@ -28,12 +36,19 @@ from typing import TYPE_CHECKING, Any
 
 from coder_eval.models import EarlyStopInfo, EarlyStopReason
 from coder_eval.streaming.collector import EventCollector
-from coder_eval.streaming.events import AgentStartEvent, StreamEvent, ToolEndEvent, ToolEndStatus, TurnStartEvent
+from coder_eval.streaming.events import (
+    AgentStartEvent,
+    StreamEvent,
+    ToolEndEvent,
+    ToolEndStatus,
+    ToolStartEvent,
+    TurnStartEvent,
+)
 
 
 if TYPE_CHECKING:
     from coder_eval.criteria.base import BaseCriterion, LiveVerdict
-    from coder_eval.models import BaseSuccessCriterion, TaskDefinition
+    from coder_eval.models import BaseSuccessCriterion, CommandTelemetry, TaskDefinition
 
     # Armed pair the watcher holds: (criterion model, its checker). Lives in the
     # TYPE_CHECKING block (only annotations reference it, and those are lazy under
@@ -210,25 +225,35 @@ class EarlyStopWatcher:
     # --- StreamCallback -------------------------------------------------- #
 
     def on_event(self, event: StreamEvent) -> None:
-        """Forward the event to the internal collector; evaluate on tool completions.
+        """Forward the event to the internal collector; evaluate on each tool call.
 
         Short-circuits once the decision is latched (fired or disarmed). Counts
-        ``TurnStartEvent`` for ``sdk_turn_index`` and ``ToolEndEvent`` for the
-        1-based ``tool_call_index``, and stamps the wall-clock origin at the
-        FIRST ``AgentStartEvent`` only (a retry's second AgentStart does not
+        ``TurnStartEvent`` for ``sdk_turn_index`` and each dispatched tool call
+        for the 1-based ``tool_call_index``, and stamps the wall-clock origin at
+        the FIRST ``AgentStartEvent`` only (a retry's second AgentStart does not
         reset it).
 
-        UNRESOLVED tool ends are ignored entirely (not collected, counted, or
-        evaluated). ``_ClaudeTurnState.finalize`` force-closes orphaned tools as
-        UNRESOLVED *after* the message loop has ended and the terminal status is
-        already chosen (COMPLETED / TIMEOUT / crash) — those are not live tool
-        activity and must not trip the stop rule, or a run that ran to completion
-        (or timed out / crashed) would latch a false early stop (e.g. an
-        unresolved ``Skill`` call counts as engagement because ``skill_triggered``
-        ignores ``result_status``). A legitimate stop only ever fires on an
-        OBSERVED tool result during the loop, so dropping unresolved ends can
-        never suppress a real stop; it also keeps a crashed attempt's orphan tools
-        out of the retry-persistent partial trajectory.
+        The decision is evaluated on the tool *call* (``ToolStartEvent``): for an
+        observable criterion the verdict is fully determined by the call's inputs,
+        so latching here lets the agent's post-dispatch ``should_stop`` poll break
+        the loop before a cut-short turn can strip the result. The call is not in
+        the collector yet (it reduces commands from ``ToolEndEvent``), so it is
+        passed to ``_evaluate`` as the in-flight command, reported at
+        ``tool_call_index + 1`` (it has no ``ToolEndEvent`` to count yet). The
+        matching ``ToolEndEvent`` still evaluates, which covers a verdict that only
+        becomes decidable once the result is known and is a no-op once a call has
+        already latched the stop. ``tool_call_index`` is incremented on the
+        resolved ``ToolEndEvent`` so it stays a count of completed tool calls.
+
+        UNRESOLVED tool ends are ignored entirely (not counted or evaluated).
+        ``_ClaudeTurnState.finalize`` force-closes orphaned tools as UNRESOLVED
+        *after* the message loop has ended and the terminal status is already
+        chosen (COMPLETED / TIMEOUT / crash) — those are not live tool activity
+        and must not trip the stop rule, or a run that ran to completion (or timed
+        out / crashed) without a real, in-loop decision would latch a false early
+        stop. A legitimate stop always fires on the in-loop call, so dropping
+        unresolved ends can never suppress a real stop; it also keeps a crashed
+        attempt's orphan tools out of the retry-persistent partial trajectory.
         """
         if self._info is not None or self._disarmed:
             return
@@ -237,13 +262,19 @@ class EarlyStopWatcher:
                 self._started_monotonic = time.monotonic()
         elif isinstance(event, TurnStartEvent):
             self._sdk_turn_index += 1
+        elif isinstance(event, ToolStartEvent):
+            # Decide on the call, evaluating with it appended as the in-flight
+            # command (it has no ToolEnd to count yet, so report it as +1).
+            self._evaluate(in_flight=event.tool)
+            return
         elif isinstance(event, ToolEndEvent):
             if event.status == ToolEndStatus.UNRESOLVED:
                 return
             self._tool_call_index += 1
-        self._collector.on_event(event)
-        if isinstance(event, ToolEndEvent):
+            self._collector.on_event(event)
             self._evaluate()
+            return
+        self._collector.on_event(event)
 
     def should_stop(self) -> bool:
         """The cooperative interrupt the agent polls after each dispatched message."""
@@ -261,8 +292,17 @@ class EarlyStopWatcher:
 
     # --- Stop rule -------------------------------------------------- #
 
-    def _evaluate(self) -> None:
-        records = [self._collector.build_turn_record()]
+    def _evaluate(self, in_flight: CommandTelemetry | None = None) -> None:
+        record = self._collector.build_turn_record()
+        if in_flight is not None:
+            # The in-flight call has no ToolEnd yet, so the collector (which
+            # reduces commands from ToolEnd) has not captured it. Append it and
+            # re-sort by sequence so the verdict sees it in first-engagement order.
+            record.commands = sorted([*record.commands, in_flight], key=lambda c: c.sequence_number)
+        records = [record]
+        # An in-flight call has not been counted by a ToolEnd yet, so report it as
+        # the next (1-based) tool call.
+        tool_call_index = self._tool_call_index + (1 if in_flight is not None else 0)
         verdicts: list[LiveVerdict] = []
         for criterion, checker in self._armed:
             try:
@@ -283,7 +323,7 @@ class EarlyStopWatcher:
         # whose stop_when permits fail decides the run.
         for (criterion, _checker), verdict in zip(self._armed, verdicts, strict=True):
             if verdict == "fail" and criterion.stop_when in ("fail", "decided"):
-                self._fire(EarlyStopReason.CRITERION_FAILED, criterion)
+                self._fire(EarlyStopReason.CRITERION_FAILED, criterion, tool_call_index=tool_call_index)
                 return
 
         # Pass-stop: EVERY armed criterion live-passes AND each permits pass.
@@ -296,13 +336,13 @@ class EarlyStopWatcher:
             for (criterion, _checker), verdict, prev in zip(self._armed, verdicts, self._prev_verdicts, strict=True):
                 if verdict != prev:
                     deciding = criterion
-            self._fire(EarlyStopReason.CRITERION_PASSED, deciding)
+            self._fire(EarlyStopReason.CRITERION_PASSED, deciding, tool_call_index=tool_call_index)
             return
 
         # No stop this round — record the verdicts so the next round can detect flips.
         self._prev_verdicts = verdicts
 
-    def _fire(self, reason: EarlyStopReason, criterion: BaseSuccessCriterion) -> None:
+    def _fire(self, reason: EarlyStopReason, criterion: BaseSuccessCriterion, *, tool_call_index: int) -> None:
         elapsed = 0.0
         if self._started_monotonic is not None:
             elapsed = max(time.monotonic() - self._started_monotonic, 0.0)
@@ -313,7 +353,7 @@ class EarlyStopWatcher:
             deciding_criterion_description=criterion.description,
             armed_criteria=[f"{c.type}: {c.description}" for c, _ in self._armed],
             sdk_turn_index=self._sdk_turn_index,
-            tool_call_index=self._tool_call_index,
+            tool_call_index=tool_call_index,
             elapsed_seconds=elapsed,
             turns_remaining_at_stop=turns_remaining,
         )
@@ -323,6 +363,6 @@ class EarlyStopWatcher:
             reason.value,
             criterion.type,
             self._sdk_turn_index,
-            self._tool_call_index,
+            tool_call_index,
             elapsed,
         )

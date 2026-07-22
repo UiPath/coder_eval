@@ -44,16 +44,22 @@ _SKILL_PATH_RE = re.compile(r"(?=skills[\\/]+([A-Za-z0-9][A-Za-z0-9_-]*)[\\/]+)"
 def _engaged_skill_names(cmd: CommandTelemetry) -> set[str]:
     """All skill names engaged by ONE command, agent-agnostically (any-skill).
 
-    Generalizes ``_engaged_skill`` (which asks about one named skill) so a
-    live verdict can detect a *competing* skill engagement. Collects:
+    Detects both engagement signals so the criterion scores identically across
+    agents, and returns the (possibly empty) set of engaged skill names:
 
-    - the Claude ``Skill`` tool call's ``skill`` parameter, namespace-stripped
-      via ``.split(":")[-1]`` (the SDK reports ``plugin:skill-name``); and
-    - every ``skills/<name>/`` or ``skills\\<name>\\`` path segment appearing
-      in any string parameter (the Codex / file-read signal — repo layout or
-      the ``.agents/skills`` sandbox symlink).
+    - Claude: an explicit ``Skill`` tool call carries the skill in
+      ``parameters['skill']``, optionally namespaced (e.g.
+      ``plugin:uipath-agents``); the namespace is stripped via ``.split(":")[-1]``.
+    - Codex (and any non-Claude agent): no ``Skill`` tool exists, so a skill is
+      engaged by reading its files off disk via shell. Both the repo layout
+      (``.../skills/<name>/...``) and the sandbox symlink
+      (``.agents/skills/<name>/...``) contain the substring ``skills/<name>/``,
+      matched here in any string parameter (Bash ``parameters['command']`` or a
+      file-path parameter). The trailing separator required by ``_SKILL_PATH_RE``
+      prevents prefix collisions (``uipath-agents`` vs ``uipath-agents-foo``).
 
-    Returns the (possibly empty) set of engaged skill names for this command.
+    Returning the full set (rather than a single-skill yes/no) lets callers detect
+    a *competing* skill engagement.
     """
     names: set[str] = set()
     if cmd.tool_name == "Skill":
@@ -66,21 +72,22 @@ def _engaged_skill_names(cmd: CommandTelemetry) -> set[str]:
     return names
 
 
-def _engaged_skill(cmd: CommandTelemetry, skill_name: str) -> bool:
-    """True when one command engaged ``skill_name`` — agent-agnostically.
+def _first_engaged_skill_names(turn_records: list[TurnRecord]) -> set[str]:
+    """Skills engaged by the FIRST command that engages any skill (else empty).
 
-    Claude: an explicit ``Skill`` tool call carries the skill in
-    ``parameters['skill']`` (optionally namespaced, e.g. ``plugin:uipath-agents``).
-
-    Codex (and any non-Claude agent): no ``Skill`` tool exists, so the skill is
-    engaged by reading its files off disk via shell. Both the repo layout
-    (``.../skills/<skill_name>/...``) and the sandbox symlink
-    (``.agents/skills/<skill_name>/...``) contain the substring
-    ``skills/<skill_name>/``, which appears in the recorded command string
-    (Bash ``parameters['command']``) or a file-path parameter. The trailing
-    slash prevents prefix collisions (``uipath-agents`` vs ``uipath-agents-foo``).
+    Activation measures which skill the agent selects *first*, so scoring keys off
+    the first engaging command rather than "any command anywhere in the run". This
+    keeps the final check and the live verdict consistent and prevents a later,
+    incidental engagement (or a second skill invoked alongside the first) from
+    being counted as a competing activation and mis-scored as a false positive.
+    Commands are scanned in ``sequence_number`` order (turn records preserve it).
     """
-    return skill_name in _engaged_skill_names(cmd)
+    for turn in turn_records:
+        for cmd in turn.commands:
+            engaged = _engaged_skill_names(cmd)
+            if engaged:
+                return engaged
+    return set()
 
 
 @register_criterion
@@ -116,9 +123,10 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
                 error="turn_records not provided to checker",
             )
 
-        triggered: bool = any(
-            _engaged_skill(cmd, criterion.skill_name) for turn in turn_records for cmd in turn.commands
-        )
+        # First-engagement policy (mirrors ``live_verdict``): the run is scored on
+        # the FIRST skill the agent engages, so a second skill invoked alongside or
+        # after it is not counted as a competing activation.
+        triggered: bool = criterion.skill_name in _first_engaged_skill_names(turn_records)
         expected_yes: bool = criterion.expected_skill == criterion.skill_name
         score = 1.0 if triggered == expected_yes else 0.0
         observed = _YES if triggered else _NO
@@ -152,18 +160,16 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
 
         This covers the "wrong skill loads" case (a positive wrong signal) and
         negative rows (``expected_skill == ""`` -> any engagement of the target
-        fails that criterion). It is a *policy* made consistent by stopping: the
-        trajectory is frozen at the deciding event, so the standard checker on the
-        truncated trajectory agrees with this verdict by construction.
+        fails that criterion). ``_check_impl`` applies the SAME first-engagement
+        policy on the full trajectory, so the live verdict and the authoritative
+        score agree by construction — whether or not the run stopped early.
         """
+        engaged = _first_engaged_skill_names(turn_records)
+        if not engaged:
+            return "undecided"
         expected_yes = criterion.expected_skill == criterion.skill_name
-        for turn in turn_records:
-            for cmd in turn.commands:
-                engaged = _engaged_skill_names(cmd)
-                if engaged:
-                    observed_yes = criterion.skill_name in engaged
-                    return "pass" if observed_yes == expected_yes else "fail"
-        return "undecided"
+        observed_yes = criterion.skill_name in engaged
+        return "pass" if observed_yes == expected_yes else "fail"
 
     def aggregate(
         self,
