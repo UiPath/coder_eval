@@ -70,7 +70,8 @@ def _betacf(a: float, b: float, x: float) -> float:
         delta = d * c
         h *= delta
         if abs(delta - 1.0) < eps:
-            break
+            return h
+    logger.warning("Incomplete beta continued fraction did not converge for a=%r, b=%r, x=%r", a, b, x)
     return h
 
 
@@ -89,8 +90,11 @@ def regularized_incomplete_beta(a: float, b: float, x: float) -> float:
 
 
 def student_t_two_tailed_p(t_stat: float, df: float) -> float:
-    """Exact two-tailed p-value for Student's t: P(|T| >= |t|) = I_x(df/2, 1/2), x = df/(df + t^2)."""
-    if df <= 0:
+    """Exact two-tailed p-value for Student's t: P(|T| >= |t|) = I_x(df/2, 1/2), x = df/(df + t^2).
+
+    Non-finite inputs fail closed to 1.0 — garbage must never read as significant.
+    """
+    if not math.isfinite(t_stat) or not math.isfinite(df) or df <= 0:
         return 1.0
     x = df / (df + t_stat * t_stat)
     return regularized_incomplete_beta(df / 2.0, 0.5, x)
@@ -101,10 +105,13 @@ def welch_t_test(a: list[float], b: list[float]) -> float | None:
 
     Degrees of freedom via Welch-Satterthwaite; the t CDF is evaluated exactly
     through the regularized incomplete beta (stdlib only, no scipy). Returns
-    None if either group has fewer than 2 observations.
+    None if either group has fewer than 2 observations, or holds a non-finite
+    value (rendered as "—" rather than a fabricated p-value).
     """
     n_a, n_b = len(a), len(b)
     if n_a < 2 or n_b < 2:
+        return None
+    if not all(math.isfinite(v) for v in (*a, *b)):
         return None
 
     mean_a, mean_b = _stats.mean(a), _stats.mean(b)
@@ -218,9 +225,11 @@ def paired_t_test(a: list[float], b: list[float]) -> float | None:
     """Two-tailed p-value from a paired t-test on (a_i - b_i), exact t distribution.
 
     Equivalent to a one-sample t-test of the differences against 0, df = n - 1.
-    Returns None if lengths differ or n < 2.
+    Returns None if lengths differ, n < 2, or any value is non-finite.
     """
     if len(a) != len(b) or len(a) < 2:
+        return None
+    if not all(math.isfinite(v) for v in (*a, *b)):
         return None
     diffs = [ai - bi for ai, bi in zip(a, b, strict=True)]
     sd = stddev(diffs)

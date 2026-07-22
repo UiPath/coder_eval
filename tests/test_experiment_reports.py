@@ -780,6 +780,8 @@ class TestStatisticalHelpers:
         assert abs(student_t_two_tailed_p(2.776, 4.0) - 0.05) < 1e-3
         assert abs(student_t_two_tailed_p(2.228, 10.0) - 0.05) < 1e-3
         assert abs(student_t_two_tailed_p(0.0, 7.0) - 1.0) < 1e-12
+        # Degenerate df is not reachable through the t-tests, but the helper stays total.
+        assert student_t_two_tailed_p(1.0, 0.0) == 1.0
 
     def test_student_t_two_tailed_p_large_df_matches_normal(self):
         """At huge df the t distribution converges to the normal."""
@@ -809,7 +811,8 @@ class TestStatisticalHelpers:
         p_paired = paired_t_test(a, b)
         assert p_paired is not None
         assert abs(p_paired - 0.15273) < 5e-4
-        # Pairing removes between-task variance, so it is strictly more powerful.
+        # On positively correlated pairs like these, pairing is the sharper test —
+        # but that is a property of this data, not a guarantee (it loses df).
         p_welch = welch_t_test(a, b)
         assert p_welch is not None
         assert p_paired < p_welch
@@ -827,6 +830,19 @@ class TestStatisticalHelpers:
 
         assert paired_t_test([1.0, 2.0], [1.0]) is None
         assert paired_t_test([1.0], [2.0]) is None
+
+    def test_non_finite_inputs_never_report_significance(self):
+        """NaN/inf must not produce a fabricated p-value — fail closed, never significant."""
+        from coder_eval.reports_stats import fmt_p, paired_t_test, student_t_two_tailed_p, welch_t_test
+
+        nan, inf = float("nan"), float("inf")
+        assert student_t_two_tailed_p(nan, 4.0) == 1.0
+        assert student_t_two_tailed_p(2.5, nan) == 1.0
+        assert student_t_two_tailed_p(inf, 4.0) == 1.0
+        # The list-taking helpers can say "no result", which renders as an em dash.
+        assert welch_t_test([1.0, nan], [2.0, 3.0]) is None
+        assert paired_t_test([1.0, nan], [2.0, 3.0]) is None
+        assert fmt_p(welch_t_test([1.0, inf], [2.0, 3.0])) == "—"
 
     def test_mean_and_stddev(self):
         """Basic mean and stddev calculations."""
@@ -1157,16 +1173,17 @@ class TestReplicateStatistics:
         assert "Paired mean diff" in md
         assert "Cohen's d" in md
 
-    def test_paired_diff_skipped_when_unequal_counts_across_tasks(self):
-        # Variant a has 3 replicates for task-1, variant b has 5 → paired skipped
+    def test_paired_diff_needs_two_common_tasks(self):
+        # Unequal replicate counts no longer exclude a task, but one task is still
+        # a single pair — too few for a paired comparison.
         per_rep = {
             "a": {"task-1": [0.9, 0.85, 0.95]},
             "b": {"task-1": [0.6, 0.65, 0.7, 0.75, 0.8]},
         }
         result = self._make_result(replicate_count=3, per_replicate_scores=per_rep)
         md = ExperimentReportGenerator.generate_experiment_report(result)
-        assert "Paired statistics skipped" in md
-        assert "unequal replicate counts" in md
+        assert "needs at least 2 tasks" in md
+        assert "Paired mean diff" not in md
 
     def test_no_paired_diff_for_single_variant(self):
         per_rep = {"only": {"task-1": [0.7, 0.8, 0.9]}}
@@ -1218,7 +1235,7 @@ class TestPairedComparisonSection:
                         VariantResult(
                             variant_id=vid,
                             task_id=task_id,
-                            weighted_score=per_replicate_scores.get(vid, {}).get(task_id, [0.0])[0],
+                            weighted_score=next(iter(per_replicate_scores.get(vid, {}).get(task_id, [])), 0.0),
                             final_status="SUCCESS",
                             duration_seconds=1.0,
                         )
@@ -1305,37 +1322,39 @@ class TestPairedComparisonSection:
         assert "**Paired mean diff (a - b)**: +0.250" in md
 
     def test_paired_comparison_single_common_task(self):
-        """One common task ⇒ a single pair ⇒ no section (a paired test needs n >= 2 tasks)."""
+        """One common task ⇒ the section explains why there is no paired result."""
         result = self._make_result(
             ["a", "b"],
             {"a": {"t1": [0.9, 0.85, 0.95]}, "b": {"t1": [0.6, 0.65, 0.7]}},
         )
-        assert "## Paired Comparison" not in ExperimentReportGenerator.generate_experiment_report(result)
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "## Paired Comparison" in md
+        assert "*A paired comparison needs at least 2 tasks common to a and b; found 1.*" in md
+        assert "Paired mean diff" not in md
 
-    def test_paired_comparison_partial_skip(self):
-        """Some tasks skipped for unequal replicate counts, >=2 pairs left ⇒ suffix + reduced count."""
+    def test_paired_comparison_keeps_tasks_with_unequal_replicate_counts(self):
+        """Pairing per-task means needs no equal replicate counts — no task is dropped."""
         result = self._make_result(
             ["a", "b"],
             {
-                "a": {"t1": [0.5, 0.6], "t2": [0.4], "t3": [0.8]},
+                "a": {"t1": [0.5, 0.7], "t2": [0.4], "t3": [0.8]},
                 "b": {"t1": [0.5], "t2": [0.45], "t3": [0.7]},
             },
         )
         md = ExperimentReportGenerator.generate_experiment_report(result)
-        assert "## Paired Comparison" in md
-        assert "per-task mean score of 2 task(s) common to both variants" in md
-        assert "(1 task(s) excluded: unequal replicate counts)" in md
+        assert "per-task mean score of 3 task(s) common to both variants" in md
+        assert "excluded" not in md
+        # Task means: a = [0.6, 0.4, 0.8], b = [0.5, 0.45, 0.7] ⇒ diffs [+0.1, -0.05, +0.1].
+        assert "**Paired mean diff (a - b)**: +0.050" in md
 
-    def test_paired_comparison_all_tasks_skipped(self):
-        """Every common task has unequal replicate counts ⇒ section renders the skip message only."""
+    def test_paired_comparison_ignores_tasks_with_no_scores(self):
+        """A task with an empty replicate list on either side is not a pair."""
         result = self._make_result(
             ["a", "b"],
-            {"a": {"t1": [0.5, 0.6]}, "b": {"t1": [0.5]}},
+            {"a": {"t1": [0.9], "t2": [0.5], "t3": []}, "b": {"t1": [0.7], "t2": [0.6], "t3": [0.4]}},
         )
         md = ExperimentReportGenerator.generate_experiment_report(result)
-        assert "## Paired Comparison" in md
-        assert "*Paired statistics skipped — unequal replicate counts between a and b.*" in md
-        assert "Paired mean diff" not in md
+        assert "per-task mean score of 2 task(s) common to both variants" in md
 
 
 class TestExperimentReportSnapshots:

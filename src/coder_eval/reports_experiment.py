@@ -495,60 +495,51 @@ class ExperimentReportGenerator:
     def _paired_comparison_lines(result: ExperimentResult) -> list[str]:
         """The ``## Paired Comparison`` block for 2-variant experiments.
 
-        Pairs the two variants' *per-task mean* scores, which removes between-task
-        difficulty variance and is therefore more powerful than the pooled Welch
-        test in ``## Aggregate Metrics``. The task is the unit of analysis: replicate
-        slots within a task share the task effect and are not independent, so
-        pairing them individually would understate the standard error. Unlike
-        ``## Replicate Statistics`` this has no replicate gate — single-replicate
-        experiments pair task-by-task. Returns ``[]`` when there is nothing to pair.
+        Pairs the two variants' *per-task mean* scores. The task is the unit of
+        analysis: replicate slots within a task share the task effect and are not
+        independent, so pairing them individually would understate the standard
+        error. Unlike ``## Replicate Statistics`` there is no replicate gate —
+        single-replicate experiments pair task-by-task. Returns ``[]`` only when
+        the two variants have no scored task in common; when they have exactly
+        one, the section explains why no paired result is shown.
         """
         if len(result.variant_ids) != 2:
             return []
         vid_a, vid_b = result.variant_ids[0], result.variant_ids[1]
         per_rep_a = result.per_replicate_scores.get(vid_a, {})
         per_rep_b = result.per_replicate_scores.get(vid_b, {})
-        common_tasks = sorted(set(per_rep_a) & set(per_rep_b))
-        a_scores: list[float] = []
-        b_scores: list[float] = []
-        skipped_tasks: list[str] = []
-        for task_id in common_tasks:
-            rep_a = per_rep_a[task_id]
-            rep_b = per_rep_b[task_id]
-            if len(rep_a) == len(rep_b):
-                a_scores.append(mean(rep_a))
-                b_scores.append(mean(rep_b))
-            else:
-                skipped_tasks.append(task_id)
-
-        if len(a_scores) < 2:
-            if skipped_tasks:
-                return [
-                    "",
-                    "## Paired Comparison",
-                    "",
-                    f"*Paired statistics skipped — unequal replicate counts between {vid_a} and {vid_b}.*",
-                ]
-            # Nothing to pair: 0/1 common tasks, or per_replicate_scores absent (old results).
+        # Replicate counts need not match: a task's mean score is a well-defined
+        # pair member either way, so no task is excluded for having fewer runs.
+        common_tasks = sorted(t for t in set(per_rep_a) & set(per_rep_b) if per_rep_a[t] and per_rep_b[t])
+        if not common_tasks:
+            # Nothing to pair: no shared task, or per_replicate_scores absent (old results).
             return []
 
+        header = ["", "## Paired Comparison", ""]
+        if len(common_tasks) < 2:
+            return [
+                *header,
+                f"*A paired comparison needs at least 2 tasks common to {vid_a} and {vid_b}; found 1.*",
+            ]
+
+        a_scores = [mean(per_rep_a[task_id]) for task_id in common_tasks]
+        b_scores = [mean(per_rep_b[task_id]) for task_id in common_tasks]
+        # The interval is a percentile bootstrap while the p-value is an exact paired
+        # t — separate inference models, so they can disagree at small task counts.
         # Equal lengths and >=2 pairs are guaranteed above, so this never returns None.
         diff = paired_bootstrap_diff_ci(a_scores, b_scores)
         if diff is None:  # pragma: no cover - defensive
             return []
-        mean_diff, d_lo, d_hi = diff
+        mean_diff, ci_lo, ci_hi = diff
         d_val = cohens_d(a_scores, b_scores)
         d_str = f"{d_val:.2f}" if d_val is not None else "n/a"
-        suffix = f" ({len(skipped_tasks)} task(s) excluded: unequal replicate counts)" if skipped_tasks else ""
         return [
-            "",
-            "## Paired Comparison",
-            "",
-            f"*Paired over the per-task mean score of {len(a_scores)} task(s) common to both variants"
-            + " — removes between-task variance; more powerful than the pooled Welch test above.*",
+            *header,
+            f"*Paired over the per-task mean score of {len(common_tasks)} task(s) common to both variants"
+            + " — pairing cancels between-task difficulty, which the pooled Welch test above cannot.*",
             f"**Paired mean diff ({vid_a} - {vid_b})**: {mean_diff:+.3f}"
-            + f" [95% CI {d_lo:+.3f}, {d_hi:+.3f}], Cohen's d = {d_str}"
-            + f", p = {fmt_p(paired_t_test(a_scores, b_scores))}{suffix}",
+            + f" [95% CI {ci_lo:+.3f}, {ci_hi:+.3f}], Cohen's d = {d_str}"
+            + f", p = {fmt_p(paired_t_test(a_scores, b_scores))}",
         ]
 
     @staticmethod
