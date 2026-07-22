@@ -15,7 +15,7 @@ import { listRunIdsInWindow, readRunReviewIndex, parseRunIdDate } from "./review
 import { withinTurnBudget } from "./turns";
 import { humanizeTaskId } from "./format";
 import { mapWithConcurrency } from "./concurrency";
-import { KNOWN_HARNESSES, normalizeHarness } from "./harness";
+import { DEFAULT_HARNESS, KNOWN_HARNESSES, normalizeHarness } from "./harness";
 import type { Window } from "./reviews-types";
 
 export interface RunPoint {
@@ -302,7 +302,7 @@ async function listRecentHarnessesInner(): Promise<string[]> {
         .sort();
     const ordered = [...known, ...extras];
     // Never hand back an empty list — the default must always be selectable.
-    return ordered.length > 0 ? ordered : [...KNOWN_HARNESSES.slice(0, 1)];
+    return ordered.length > 0 ? ordered : [DEFAULT_HARNESS];
 }
 
 // The harnesses present in recent runs, ordered for the switcher. Cached (and

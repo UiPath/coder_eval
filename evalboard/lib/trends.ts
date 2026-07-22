@@ -10,6 +10,7 @@ import {
     type PerRun,
     type TagCount,
 } from "./overview";
+import { DEFAULT_HARNESS } from "./harness";
 import type { ComponentSha } from "./runs";
 
 export const TRENDS_RECENT_RUN_COUNT = 10;
@@ -245,7 +246,7 @@ const cachedAggregate = unstable_cache(
 
 export function aggregateTaskTrends(
     limit: number = TRENDS_RECENT_RUN_COUNT,
-    harness: string = "claude-code",
+    harness: string = DEFAULT_HARNESS,
 ): Promise<TrendsPageData> {
     return cachedAggregate(limit, harness);
 }
@@ -262,7 +263,7 @@ export function trendMatchesTag(trend: TaskTrend, tag: string): boolean {
 export async function historyForTaskInner(
     taskId: string,
     limit: number,
-    harness: string = "claude-code",
+    harness: string = DEFAULT_HARNESS,
 ): Promise<TaskHistoryEntry[]> {
     const perRun = await loadRecentRuns(limit, harness);
     const out: TaskHistoryEntry[] = [];
@@ -300,7 +301,7 @@ const cachedHistory = unstable_cache(
 export function historyForTask(
     taskId: string,
     limit: number = TRENDS_RECENT_RUN_COUNT,
-    harness: string = "claude-code",
+    harness: string = DEFAULT_HARNESS,
 ): Promise<TaskHistoryEntry[]> {
     return cachedHistory(taskId, limit, harness);
 }

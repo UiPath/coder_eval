@@ -626,8 +626,8 @@ export function TrendsView({
                 </div>
                 {provenance && (
                     <p className="text-xs text-gray-500 mt-0.5 font-mono">
-                        Last {provenance.count} {activeHarness} runs ·{" "}
-                        {provenance.oldest} → {provenance.newest}
+                        Last {provenance.count} {harnessShortLabel(activeHarness)}{" "}
+                        runs · {provenance.oldest} → {provenance.newest}
                     </p>
                 )}
                 {maturity.matureTasks > 0 && (
@@ -670,7 +670,7 @@ export function TrendsView({
                     {filterActive ? (
                         <>No tasks match the current filter.</>
                     ) : (
-                        <>No recent {activeHarness} runs.</>
+                        <>No recent {harnessShortLabel(activeHarness)} runs.</>
                     )}
                 </div>
             ) : (

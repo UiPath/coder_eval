@@ -24,7 +24,7 @@ export function HarnessSelector({
     };
     // Always show the active harness, even if it has aged out of the recent
     // window (so a deep-linked `?h=` still reads as selected rather than absent).
-    const opts = (harnesses as readonly string[]).includes(current)
+    const opts = harnesses.includes(current)
         ? harnesses
         : [current, ...harnesses];
     return (
