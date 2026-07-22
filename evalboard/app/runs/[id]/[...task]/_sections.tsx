@@ -108,16 +108,27 @@ export function CriteriaSection({ criteria }: { criteria: CriterionResult[] }) {
         <section className="space-y-2">
             <h2 className="text-sm font-semibold text-gray-900">
                 Success criteria ({criteria.length})
+                {criteria.some((c) => !c.gating) && (
+                    <span className="ml-2 font-normal text-gray-500">
+                        {criteria.filter((c) => !c.gating).length}{" "}
+                        informational
+                    </span>
+                )}
             </h2>
             <div className="space-y-2">
                 {criteria.map((c, i) => {
-                    const passed = c.score === 1;
+                    // Compare against the criterion's own threshold, not === 1:
+                    // fractional criteria pass below 1.0 (default threshold 0.9).
+                    const passed = (c.score ?? 0) >= c.passThreshold;
                     return (
                         <Expandable
                             key={i}
                             header={
                                 <div className="flex items-center gap-3">
-                                    <ResultPill passed={passed} />
+                                    <ResultPill
+                                        passed={passed}
+                                        gating={c.gating}
+                                    />
                                     <span className="text-sm text-gray-900">
                                         {c.description ??
                                             c.criterionType ??

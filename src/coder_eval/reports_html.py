@@ -575,7 +575,11 @@ def _render_criteria(results: list[CriterionResult], early_stop: EarlyStopInfo |
     rows: list[str] = []
     for cr in results:
         advisory = ""
-        if early_stop is not None and f"{cr.criterion_type}: {cr.description}" not in armed:
+        if not cr.gating:
+            # weight: 0 — measured but excluded from the gate. Saying so here keeps
+            # the row from reading as a failure that the header/status contradicts.
+            advisory = '<div class="dim" style="margin-top:4px">informational — not gated (weight: 0)</div>'
+        elif early_stop is not None and f"{cr.criterion_type}: {cr.description}" not in armed:
             advisory = '<div class="dim" style="margin-top:4px">advisory — not gated (run stopped early)</div>'
         rows.append(
             f"""
@@ -587,10 +591,15 @@ def _render_criteria(results: list[CriterionResult], early_stop: EarlyStopInfo |
 </tr>
 """
         )
-    passed = sum(1 for r in results if r.score >= r.pass_threshold)
-    total = len(results)
+    # Count over gating criteria only, so this header agrees with final_status
+    # and the CLI exit code (both of which ignore weight: 0 criteria).
+    gating_results = [r for r in results if r.gating]
+    passed = sum(1 for r in gating_results if r.score >= r.pass_threshold)
+    total = len(gating_results)
+    informational = len(results) - total
+    info_note = f' <span class="dim">+ {informational} informational</span>' if informational else ""
     return f"""
-<h2>Success Criteria <span class="muted" style="font-weight:400">({passed}/{total} passed)</span></h2>
+<h2>Success Criteria <span class="muted" style="font-weight:400">({passed}/{total} passed{info_note})</span></h2>
 <div class="card" style="padding:0">
 <table>
   <thead>

@@ -160,3 +160,54 @@ class TestThresholdEnforcement:
         result.calculate_weighted_score([])
         assert result.weighted_score == 0.0
         assert result.all_criteria_passed([])  # all([]) is True
+
+
+class TestInformationalDisplayParity:
+    """A weight-0 criterion must render as informational everywhere, not as failed.
+
+    ``final_status`` and both exit codes already ignore weight-0 criteria. These
+    pin the *display* surfaces to the same story, so a report header can't
+    contradict its own row list.
+    """
+
+    def test_checker_stamps_gating_from_the_criterion(self, tmp_path):
+        """The result mirrors ``is_gating`` so downstream renderers need no criterion."""
+        from coder_eval.evaluation.checker import SuccessChecker
+        from coder_eval.models import SandboxConfig
+        from coder_eval.sandbox import Sandbox
+
+        sandbox = Sandbox(SandboxConfig(driver="tempdir"), task_id="gating-display-test")
+        sandbox.sandbox_dir = tmp_path
+        checker = SuccessChecker(sandbox)
+
+        gating = checker.check(FileExistsCriterion(path="missing.txt", description="gating", weight=1.0))
+        informational = checker.check(FileExistsCriterion(path="missing.txt", description="informational", weight=0.0))
+
+        assert gating.gating is True
+        assert informational.gating is False
+        # Both genuinely scored zero — un-gating changes the label, never the measurement.
+        assert gating.score == 0.0
+        assert informational.score == 0.0
+
+    def test_criterion_result_defaults_to_gating(self):
+        """Results persisted before the field existed must read back as gating."""
+        assert CriterionResult(criterion_type="file_exists", description="d", score=0.0).gating is True
+        restored = CriterionResult.model_validate_json(
+            '{"criterion_type": "file_exists", "description": "d", "score": 0.0}'
+        )
+        assert restored.gating is True
+
+    def test_html_report_labels_informational_and_excludes_it_from_the_count(self):
+        """The HTML header counts gating criteria only, and the row says why."""
+        from coder_eval.reports_html import _render_criteria
+
+        html = _render_criteria(
+            [
+                CriterionResult(criterion_type="file_exists", description="real", score=1.0, gating=True),
+                CriterionResult(criterion_type="file_exists", description="info", score=0.0, gating=False),
+            ]
+        )
+
+        assert "(1/1 passed" in html  # NOT 1/2 — the informational miss isn't a failure
+        assert "informational — not gated (weight: 0)" in html
+        assert "1 informational" in html

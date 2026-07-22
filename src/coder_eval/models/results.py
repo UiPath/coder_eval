@@ -76,6 +76,17 @@ class CriterionResult(BaseModel):
         le=1.0,
         description="Score required to pass this criterion (mirrors BaseSuccessCriterion.pass_threshold).",
     )
+    gating: bool = Field(
+        default=True,
+        description=(
+            "Whether a below-threshold score here fails the task (mirrors "
+            "BaseSuccessCriterion.is_gating, i.e. weight > 0). False marks an informational "
+            "criterion: it is measured and reported but excluded from the score and the "
+            "pass/fail gate, so every display surface must render it as informational rather "
+            "than failed. Defaults True so results persisted before this field existed — and "
+            "any result built without a source criterion — read back as gating."
+        ),
+    )
 
 
 class ClassificationCriterionResult(CriterionResult):

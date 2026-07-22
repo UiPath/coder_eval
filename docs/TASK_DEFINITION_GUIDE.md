@@ -405,6 +405,14 @@ rendered in reports, but it neither contributes to the score nor fails the task.
 non-gating criterion for the early-stop or suite gate would let an
 "informational" check flip a run to failure.)
 
+Every surface labels it as such rather than as a failure: the terminal shows `○`
+instead of `✓`/`✗`, the HTML report tags the row "informational — not gated" and
+excludes it from the *n*/*m* passed header, the evalboard renders an `INFO` pill,
+and a below-threshold informational criterion is never sampled as the reason a
+suite row failed. The persisted `CriterionResult.gating` field carries this to
+every consumer, so no reader needs the original criterion to know whether a low
+score mattered.
+
 **Weighted score:** `weighted_score = sum(score * weight) / sum(weight)` — calculated regardless for quality assessment.
 
 ### `file_exists`

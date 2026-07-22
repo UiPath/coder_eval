@@ -815,6 +815,10 @@ def _compute_suite_rollup(
             break
         reasons: list[str] = []
         for cr in row.result.success_criteria_results:
+            # Informational (weight: 0) criteria cannot fail a row, so they must
+            # not supply the reason the row is reported as failed.
+            if not cr.gating:
+                continue
             if cr.error is not None or cr.score < cr.pass_threshold:
                 reason = cr.error or cr.details or f"{cr.criterion_type}: score={cr.score:.2f}"
                 reasons.append(reason[:_FAILURE_REASON_MAX_LEN])
