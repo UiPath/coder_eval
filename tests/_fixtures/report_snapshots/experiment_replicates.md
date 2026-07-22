@@ -40,4 +40,6 @@
 | a | 3 | 0.900 | [0.850, 0.933] | 2/3 [0.21, 0.94] |
 | b | 3 | 0.650 | [0.600, 0.683] | 0/3 [0.00, 0.56] |
 
-**Paired mean diff (a - b)**: +0.250 [95% CI +0.200, +0.300], Cohen's d = 5.00
+## Paired Comparison
+
+*A paired comparison needs at least 2 tasks common to a and b; found 1.*
