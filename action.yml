@@ -1,0 +1,110 @@
+name: coder-eval
+description: Run coder-eval evaluation tasks as a CI gate, with JUnit XML output and a job-summary report.
+branding:
+  icon: check-circle
+  color: orange
+
+# This action installs and runs the `coder-eval` CLI. It is agent-agnostic: it
+# does NOT install any coding-agent runtime. Tasks that use the default
+# `claude-code` agent need the `claude` CLI on PATH (Node + the
+# `@anthropic-ai/claude-code` npm package) provided by the calling job before
+# this action runs. See the README "Use as a GitHub Action" section.
+#
+# SECURITY: evaluated tasks execute agent-generated code. Do NOT run this action
+# under `pull_request_target` with secrets exposed to untrusted fork PRs.
+
+inputs:
+  tasks:
+    description: Task YAML path(s)/glob passed to `coder-eval run` (empty = all tasks/ recursively)
+    required: false
+    default: ""
+  tags:
+    description: Only run tasks matching any of these comma-separated tags (--tags)
+    required: false
+    default: ""
+  model:
+    description: Override agent model for all tasks (--model)
+    required: false
+    default: ""
+  extra-args:
+    description: Extra arguments appended verbatim to `coder-eval run` (trusted caller input; covers --experiment, -D overrides, --tags exclusions, etc.)
+    required: false
+    default: ""
+  version:
+    description: coder-eval version to install from PyPI, or "local" to install from the action checkout
+    required: false
+    default: "0.8.6"   # <-- kept in sync with releases by release.yml
+  run-dir:
+    description: Run directory (--run-dir)
+    required: false
+    default: "runs/ci"
+  junit-path:
+    description: Where to write the JUnit XML report
+    required: false
+    default: "coder-eval-junit.xml"
+  step-summary:
+    description: Append run.md to the GitHub job summary ("true"/"false")
+    required: false
+    default: "true"
+  anthropic-api-key:
+    description: Anthropic API key (exported as ANTHROPIC_API_KEY for the run step)
+    required: false
+    default: ""
+
+outputs:
+  run-dir:
+    description: The run directory containing run.json/run.md
+    value: ${{ steps.run.outputs.run-dir }}
+  junit-path:
+    description: Path to the written JUnit XML report
+    value: ${{ steps.run.outputs.junit-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4.2.0
+    - name: Install coder-eval
+      shell: bash
+      env:
+        CE_VERSION: ${{ inputs.version }}
+        CE_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        if [ "$CE_VERSION" = "local" ]; then
+          uv tool install "$CE_ACTION_PATH"
+        else
+          uv tool install "coder-eval==$CE_VERSION"
+        fi
+    - name: Run coder-eval
+      id: run
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        CE_TASKS: ${{ inputs.tasks }}
+        CE_TAGS: ${{ inputs.tags }}
+        CE_MODEL: ${{ inputs.model }}
+        CE_EXTRA_ARGS: ${{ inputs.extra-args }}
+        CE_RUN_DIR: ${{ inputs.run-dir }}
+        CE_JUNIT: ${{ inputs.junit-path }}
+        CE_SUMMARY: ${{ inputs.step-summary }}
+      run: |
+        set -uo pipefail
+        args=(run --run-dir "$CE_RUN_DIR" --junit-xml "$CE_JUNIT")
+        [ -n "$CE_TAGS" ] && args+=(--tags "$CE_TAGS")
+        [ -n "$CE_MODEL" ] && args+=(--model "$CE_MODEL")
+        # extra-args is a trusted caller input, split on whitespace intentionally
+        # shellcheck disable=SC2206
+        [ -n "$CE_EXTRA_ARGS" ] && args+=($CE_EXTRA_ARGS)
+        # shellcheck disable=SC2206
+        [ -n "$CE_TASKS" ] && args+=($CE_TASKS)
+        set +e
+        coder-eval "${args[@]}"
+        CODE=$?
+        set -e
+        echo "run-dir=$CE_RUN_DIR" >> "$GITHUB_OUTPUT"
+        echo "junit-path=$CE_JUNIT" >> "$GITHUB_OUTPUT"
+        if [ "$CE_SUMMARY" = "true" ] && [ -f "$CE_RUN_DIR/run.md" ]; then
+          head -c 1000000 "$CE_RUN_DIR/run.md" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        exit $CODE

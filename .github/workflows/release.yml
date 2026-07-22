@@ -182,22 +182,49 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Publishing version: $V"
 
-      - name: Regenerate uv.lock and amend release commit
+      - name: Regenerate uv.lock, bump action.yml pin, and amend release commit
         if: steps.mode.outputs.prerelease != 'true' && steps.release.outputs.version != ''
+        env:
+          # Passed via env (not interpolated into the script) per GitHub's
+          # injection guidance.
+          VERSION: ${{ steps.release.outputs.version }}
         run: |
+          set -euo pipefail
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          # Bump the composite action's default `version:` pin to the just-released
+          # version so `UiPath/coder_eval@vX.Y.Z` installs `coder-eval==X.Y.Z`. The
+          # anchor is indentation-tolerant and keyed on the unique trailing
+          # "# <-- kept in sync" comment; the grep guard fails the release loudly
+          # if a reformat ever detaches it (rather than shipping a stale pin).
+          sed -i -E 's/^([[:space:]]*default: ")[0-9]+\.[0-9]+\.[0-9]+("   # <-- kept in sync)/\1'"${VERSION}"'\2/' action.yml
+          grep -q "default: \"${VERSION}\"" action.yml || { echo "action.yml version bump failed"; exit 1; }
+          git add action.yml
+          # Regenerate the lock too; stage it (a no-op if unchanged).
           uv lock
-          if ! git diff --quiet uv.lock; then
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git config user.name "github-actions[bot]"
-            git add uv.lock
+          git add uv.lock
+          # Amend only if action.yml/uv.lock actually changed the tree.
+          if ! git diff --cached --quiet; then
             git commit --amend --no-edit
             # Amend replaced the commit the tag points at; re-point it before pushing.
-            git tag -f "v${{ steps.release.outputs.version }}"
+            git tag -f "v${VERSION}"
           fi
 
       - name: Push release commit and tags
         if: steps.mode.outputs.prerelease != 'true' && steps.release.outputs.version != ''
         run: git push origin main "v${{ steps.release.outputs.version }}"
+
+      - name: Move major action tag (vN -> this release)
+        if: steps.release.outputs.version != ''
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Consumers pin `UiPath/coder_eval@v0` (becomes `@v1` at 1.0.0). Force-move
+          # the moving major tag to this release. Force on a missing tag creates it.
+          MAJOR="v${VERSION%%.*}"
+          git tag -f "$MAJOR" "v${VERSION}"
+          git push -f origin "$MAJOR"
 
       - name: Build wheel + sdist
         if: steps.ver.outputs.version != ''

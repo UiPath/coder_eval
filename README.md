@@ -96,6 +96,53 @@ live in this repo — clone it or point the CLI at your own task files.) See
 [Tutorial 02 — Running coder_eval in CI](docs/tutorials/02-ci-pipeline.md) for
 the full setup.
 
+## Use as a GitHub Action
+
+A composite action at the repo root runs `coder-eval` as a CI gate — it installs
+the pinned CLI, runs your tasks, writes a JUnit XML report, appends `run.md` to
+the job summary, and fails the step on any task/gate failure:
+
+```yaml
+- uses: UiPath/coder_eval@v0    # becomes @v1 once 1.0.0 ships; @vX.Y.Z pins exactly
+  with:
+    tasks: tests/tasks/**/*.yaml
+    model: claude-haiku-4-5-20251001
+    anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+| Input | Default | Purpose |
+| --- | --- | --- |
+| `tasks` | *(all `tasks/`)* | Task YAML path(s)/glob |
+| `tags` | — | `--tags` filter |
+| `model` | — | `--model` override |
+| `extra-args` | — | Verbatim extra args (`--experiment`, `-D …`, …) |
+| `version` | pinned release | PyPI version, or `local` to install from the checkout |
+| `run-dir` | `runs/ci` | Run directory |
+| `junit-path` | `coder-eval-junit.xml` | Where to write the JUnit report |
+| `step-summary` | `true` | Append `run.md` to the job summary |
+| `anthropic-api-key` | — | Exported as `ANTHROPIC_API_KEY` for the run |
+
+Outputs: `run-dir` and `junit-path`. Feed the JUnit file to your platform's
+test-report renderer — e.g. on GitHub Actions with
+[`mikepenz/action-junit-report`](https://github.com/mikepenz/action-junit-report):
+
+```yaml
+- uses: mikepenz/action-junit-report@v5
+  if: always()
+  with:
+    report_paths: coder-eval-junit.xml
+```
+
+> **Agent runtime is the caller's responsibility.** The action is agent-agnostic —
+> it installs `coder-eval` but no coding-agent runtime. Tasks using the default
+> `claude-code` agent need the `claude` CLI on `PATH` (`actions/setup-node` +
+> `npm install -g @anthropic-ai/claude-code`) in the job before the action runs.
+
+> **Security.** Evaluated tasks execute agent-generated code. Do **not** run this
+> action under `pull_request_target` with secrets exposed to untrusted fork PRs —
+> use `pull_request` and gate on the same-repo condition, as this repo's own
+> dogfood job does.
+
 ## Telemetry
 
 > 📊 **Usage telemetry is on by default.** `coder-eval` sends **anonymous** usage

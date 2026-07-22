@@ -158,6 +158,31 @@ jobs:
 - **`if: always()`** on the verdict and upload steps means you still get results
   even when a task fails.
 
+## Shortcut: the packaged action
+
+The five steps above spell out the mechanics, but coder_eval also ships a
+composite action at the repo root that bundles install + run + JUnit report +
+job-summary + fail-on-failure into one step:
+
+```yaml
+      - uses: actions/setup-node@v4      # the claude-code agent needs the Claude CLI…
+        with: { node-version: '20' }
+      - run: npm install -g @anthropic-ai/claude-code
+
+      - uses: UiPath/coder_eval@v0       # …then run the gate (pin @vX.Y.Z in production)
+        with:
+          tasks: tests/tasks/**/*.yaml
+          model: claude-haiku-4-5-20251001
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+The action is agent-agnostic — it installs `coder-eval` but not the agent
+runtime, so provide the `claude` CLI (or your agent's runtime) in the job first.
+See the [README "Use as a GitHub Action"](../../README.md#use-as-a-github-action)
+section for the full inputs table and the fork/`pull_request_target` security
+caveat. The rest of this tutorial's hand-rolled workflow is still useful when you
+need finer control than the action's inputs expose.
+
 ## Publishing test results (JUnit)
 
 The verdict step above parses `task.json` by hand. If your CI already ingests

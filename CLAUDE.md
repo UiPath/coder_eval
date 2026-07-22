@@ -121,6 +121,7 @@ tasks/                             # Task definition YAML files
 tests/                             # Test suite
 docs/                              # Documentation
 templates/                         # Sandbox template directories
+action.yml                         # Published composite GitHub Action (coder-eval as a CI gate). release.yml maintains its `version:` default + the moving `v<major>` tag.
 ```
 
 ## Key Architectural Patterns
