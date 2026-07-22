@@ -12,7 +12,14 @@ from coder_eval.errors import AgentConfigError, AgentCrashError, BudgetExceededE
 from coder_eval.errors.categories import ERROR_TIPS, RETRY_CONFIG, ErrorCategory, RetryConfig
 from coder_eval.errors.categorization import categorize_error
 from coder_eval.errors.executor import execute_with_retry
-from coder_eval.errors.retry import create_error_context, should_retry, truncate_log
+from coder_eval.errors.retry import (
+    create_error_context,
+    get_retry_delay,
+    resolve_retry_config,
+    should_retry,
+    truncate_log,
+)
+from coder_eval.models import RetryPolicy
 
 
 class TestErrorCategory:
@@ -572,6 +579,88 @@ class TestExecuteWithRetry:
             # Should sleep for initial_delay ± jitter (5.0 ± 25% for AGENT_API_ERROR)
             sleep_duration = mock_sleep.call_args[0][0]
             assert 3.75 <= sleep_duration <= 6.25
+
+
+class TestRetryPolicyOverrides:
+    """The top-level `retry:` block overrides the built-in per-category policy."""
+
+    def test_no_policy_keeps_builtin_config(self):
+        assert resolve_retry_config(ErrorCategory.AGENT_API_ERROR) == RETRY_CONFIG[ErrorCategory.AGENT_API_ERROR]
+
+    def test_policy_overrides_only_the_fields_it_sets(self):
+        resolved = resolve_retry_config(ErrorCategory.AGENT_API_ERROR, RetryPolicy(max_retries=7))
+        builtin = RETRY_CONFIG[ErrorCategory.AGENT_API_ERROR]
+
+        assert resolved.max_retries == 7
+        assert resolved.initial_delay == builtin.initial_delay
+        assert resolved.backoff_multiplier == builtin.backoff_multiplier
+
+    def test_policy_cannot_make_a_non_retryable_category_retryable(self):
+        """Retryability is a property of the error class, not a per-run knob."""
+        resolved = resolve_retry_config(ErrorCategory.AGENT_AUTH_ERROR, RetryPolicy(max_retries=9))
+        assert resolved.max_retries == 0
+
+    def test_should_retry_and_delay_honor_the_policy(self):
+        policy = RetryPolicy(max_retries=1, initial_delay=1.0)
+
+        assert should_retry(ErrorCategory.AGENT_API_ERROR, 0, policy)
+        assert not should_retry(ErrorCategory.AGENT_API_ERROR, 1, policy)  # built-in would allow (3 retries)
+        assert 1.0 <= get_retry_delay(ErrorCategory.AGENT_API_ERROR, 0, policy) <= 1.25
+
+    @pytest.mark.asyncio
+    async def test_max_retries_zero_fails_fast_on_a_retryable_error(self):
+        """The debug-loop case: `-D retry.max_retries=0` disables retries."""
+        mock_operation = AsyncMock(side_effect=Exception("503 Service Unavailable"))
+
+        with (
+            patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            pytest.raises(Exception, match="503 Service Unavailable"),
+        ):
+            await execute_with_retry(
+                operation=mock_operation,
+                operation_name="Test operation",
+                context={"component": "agent"},
+                retry_policy=RetryPolicy(max_retries=0),
+            )
+
+        assert mock_operation.call_count == 1
+        assert mock_sleep.call_count == 0
+
+    def test_error_context_reflects_the_run_policy(self):
+        """Persisted error_details must not contradict the executor's actual retry decision."""
+        error = Exception("network connection error")
+
+        default_ctx = create_error_context(error=error, task_id="t", attempt=1, component="agent")
+        assert default_ctx["is_retryable"] is True
+        assert default_ctx["retry_delay_seconds"] > 0
+
+        # Same error under a fail-fast run: the executor would NOT retry, so
+        # task.json must say so too.
+        no_retry_ctx = create_error_context(
+            error=error,
+            task_id="t",
+            attempt=1,
+            component="agent",
+            retry_policy=RetryPolicy(max_retries=0),
+        )
+        assert no_retry_ctx["is_retryable"] is False
+        assert no_retry_ctx["retry_delay_seconds"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_policy_raises_the_attempt_ceiling(self):
+        """A policy above the built-in 3 retries keeps trying (and eventually succeeds)."""
+        mock_operation = AsyncMock(side_effect=[Exception("503 Service Unavailable")] * 4 + ["success"])
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await execute_with_retry(
+                operation=mock_operation,
+                operation_name="Test operation",
+                context={"component": "agent"},
+                retry_policy=RetryPolicy(max_retries=5),
+            )
+
+        assert result == "success"
+        assert mock_operation.call_count == 5
 
 
 class TestCreateErrorContext:

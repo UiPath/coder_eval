@@ -4,7 +4,7 @@ The thin layer-5 wrapper over the generic resolver (:mod:`config_merge`). It
 
   1. parses a scalar value (YAML-safe, with the YAML-1.1 truthy-alias guard),
   2. groups dotted ``path=value`` overrides into one nested ``-D`` patch per
-     root (``agent`` / ``run_limits`` / ``sandbox``),
+     root (``agent`` / ``run_limits`` / ``retry`` / ``sandbox``),
   3. calls :func:`config_merge.resolve_root` with a lineage-silent value seed
      (the already-resolved model) + the ``-D`` patch layer, so a field merges
      under exactly the same strategy at layer 5 as at the variant layer.
@@ -114,8 +114,9 @@ def apply_overrides(
     """
     agent_patch: dict[str, Any] = {}
     rl_patch: dict[str, Any] = {}
+    retry_patch: dict[str, Any] = {}
     sandbox_patch: dict[str, Any] = {}
-    by_root = {"agent": agent_patch, "run_limits": rl_patch, "sandbox": sandbox_patch}
+    by_root = {"agent": agent_patch, "run_limits": rl_patch, "retry": retry_patch, "sandbox": sandbox_patch}
 
     for path, value in overrides.items():
         root, _, rest = path.partition(".")
@@ -152,6 +153,10 @@ def apply_overrides(
     if rl_patch:
         seed = task.run_limits.model_dump(exclude_unset=True) if task.run_limits else {}
         task.run_limits = _resolve("run_limits", seed, rl_patch, detail=None, lineage=lineage)
+
+    if retry_patch:
+        seed = task.retry.model_dump(exclude_unset=True) if task.retry else {}
+        task.retry = _resolve("retry", seed, retry_patch, detail=None, lineage=lineage)
 
     if sandbox_patch:
         # Full dump: the resolved sandbox already folded layers 1-4 (incl. the

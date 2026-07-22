@@ -3,7 +3,7 @@
 Two gates:
 
 1. **Unification invariant** — for a representative patch P, the resolved
-   ``agent``/``run_limits``/``sandbox`` is identical whether P arrives as a
+   ``agent``/``run_limits``/``retry``/``sandbox`` is identical whether P arrives as a
    higher config layer (layers 1-4) or as a ``-D`` override (layer 5). If this
    fails, the two paths are not one engine.
 2. **Lineage parity** — applying a ``-D`` touching one field leaves every other
@@ -20,6 +20,7 @@ from coder_eval.models import (
     ExperimentDefinition,
     ExperimentVariant,
     ResourceLimits,
+    RetryPolicy,
     RunLimits,
     SandboxConfig,
     TaskDefinition,
@@ -86,6 +87,23 @@ class TestUnificationInvariant:
         b, _ = _resolve(_task())
         apply_overrides(b, {"run_limits.max_turns": 5})
         assert a.run_limits.model_dump() == b.run_limits.model_dump()
+
+    def test_retry_max_retries(self):
+        a, _ = _resolve(_task(), variant=ExperimentVariant(variant_id="v", retry=RetryPolicy(max_retries=0)))
+        b, _ = _resolve(_task())
+        apply_overrides(b, {"retry.max_retries": 0})
+        assert a.retry is not None and b.retry is not None
+        assert a.retry.model_dump() == b.retry.model_dump()
+        assert a.retry.max_retries == 0
+
+    def test_retry_field_merge_keeps_lower_layer_keys(self):
+        """A variant setting one retry key must not replace the task's whole block."""
+        task = _task(retry=RetryPolicy(initial_delay=9.0))
+        a, _ = _resolve(task, variant=ExperimentVariant(variant_id="v", retry=RetryPolicy(max_retries=1)))
+        b, _ = _resolve(_task(retry=RetryPolicy(initial_delay=9.0)))
+        apply_overrides(b, {"retry.max_retries": 1})
+        assert a.retry.model_dump() == b.retry.model_dump()
+        assert (a.retry.max_retries, a.retry.initial_delay) == (1, 9.0)
 
     def test_sandbox_driver(self):
         a, _ = _resolve(_task(), variant=ExperimentVariant(variant_id="v", driver="docker"))

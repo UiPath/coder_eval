@@ -35,7 +35,7 @@ coder-eval run tasks/hello_date.yaml --stream full  # live LLM output
 | `--max-parallel, -j` | Concurrent tasks (default: 1) |
 | `--preservation-mode` | Sandbox persistence: `NONE` / `MOVE_ON_WRITE` / `DIRECT_WRITE`. Default is driver-derived (docker → `DIRECT_WRITE`, else `MOVE_ON_WRITE`); explicit value always wins. |
 | `--run-dir` | Custom run directory (default: timestamped in `runs/`) |
-| `-D path=value` / `--set` | Override any resolved task-config field (`agent`/`run_limits`/`sandbox` roots), e.g. `-D run_limits.max_turns=30 -D agent.permission_mode=plan -D agent.sdk_options.effort=high`. Repeatable; schema-validated. This is the way to set permission mode, turn/timeout limits, tools, plugins, and SDK options. |
+| `-D path=value` / `--set` | Override any resolved task-config field (`agent`/`run_limits`/`retry`/`sandbox` roots), e.g. `-D run_limits.max_turns=30 -D agent.permission_mode=plan -D agent.sdk_options.effort=high`. Repeatable; schema-validated. This is the way to set permission mode, turn/timeout limits, tools, plugins, and SDK options. |
 | `--model, -m` | Shorthand alias for `-D agent.model=…` (e.g., `claude-sonnet-4-20250514`) |
 | `--driver` | Shorthand alias for `-D sandbox.driver=…` (`tempdir` or `docker`) |
 | `--exclude-tags` | Skip tasks matching any of these tags (comma-separated) |

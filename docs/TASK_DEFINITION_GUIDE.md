@@ -103,6 +103,12 @@ run_limits:
   turn_timeout: 300                   # Optional: per-communicate() timeout in seconds
   task_timeout: 600                   # Optional: wall-clock cap across all iterations
 
+# Retry policy is NOT a cap — it lives at the task's top level, not under run_limits
+retry:                                # Optional: override the built-in retry policy
+  max_retries: 2                      #   attempts per retryable error category (0 = fail fast)
+  initial_delay: 5.0                  #   seconds before the first retry
+  backoff_multiplier: 2.0             #   exponential backoff factor
+
 agent:
   type: "claude-code"                 # Agent type — optional if supplied via experiment / --type
   permission_mode: "acceptEdits"      # Permission mode (see below)
@@ -183,6 +189,42 @@ model, etc.) is conceptually separate.
 > the agent model's `extra="forbid"` raises a clear validation error.
 > They must live under `run_limits:`. (A deprecation shim hoisted them
 > automatically until it was removed on 2026-06-01.)
+
+### `retry` (transient-error policy)
+
+`retry:` is a **top-level** task block, deliberately not under `run_limits:` —
+`run_limits` holds caps that *abort* a run, while `retry` is how hard the run
+tries to survive a transient error (an API 5xx, a rate limit, a sandbox setup
+hiccup).
+
+```yaml
+retry:
+  max_retries: 0        # fail fast — no retries on any category
+```
+
+```bash
+coder-eval run tasks/my_task.yaml -D retry.max_retries=0    # same, from the CLI
+```
+
+The baseline is a per-error-category table in `errors/categories.py::RETRY_CONFIG`.
+Every field here is optional and applies uniformly to the categories that are
+*already* retryable; omitting a field keeps the built-in value. Which categories
+are retryable at all is a property of the error, not the run: a non-retryable
+category (auth, billing) is **never** made retryable by an override.
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `max_retries` | per-category | Attempts after the first failure. `0` disables retries entirely. |
+| `initial_delay` | per-category | Seconds before the first retry (exponential from there, plus jitter). |
+| `backoff_multiplier` | per-category | Exponential backoff factor between attempts. |
+
+**Retries resume in place.** A retried `communicate()` re-sends the prompt into
+the *same* sandbox and the *same* agent session — the working directory is not
+reset, so files the failed attempt already wrote survive into the retry. The
+crashed attempt's partial turn is also preserved on the result (for crash
+forensics), which means trajectory-observing criteria (`command_executed`,
+`commands_efficiency`, `skill_triggered`) see **both** attempts. Set
+`max_retries: 0` when you need a clean single-attempt trajectory.
 
 ### `expected_turns` (soft efficiency budget)
 

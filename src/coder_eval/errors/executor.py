@@ -5,9 +5,10 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .categories import RETRY_CONFIG, RetryConfig
+from coder_eval.models import RetryPolicy
+
 from .categorization import categorize_error
-from .retry import get_error_tip, get_retry_delay, should_retry
+from .retry import get_error_tip, get_retry_delay, resolve_retry_config, should_retry
 
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ async def execute_with_retry(
     context: dict[str, Any],
     max_attempts: int | None = None,
     on_attempt_error: Callable[[Exception, int], Awaitable[None]] | None = None,
+    retry_policy: RetryPolicy | None = None,
 ) -> Any:
     """Execute an operation with automatic retry on transient errors.
 
@@ -41,6 +43,8 @@ async def execute_with_retry(
             invoked after every failed attempt (including the final non-retryable one),
             for draining ``agent.pending_turn`` and calling ``agent.discard_pending_turn()``.
             Callback exceptions are logged and swallowed so they cannot mask the original.
+        retry_policy: Per-run overrides for the built-in per-category retry policy
+            (``retry``). None = built-in defaults.
 
     Returns:
         Result from operation
@@ -92,10 +96,10 @@ async def execute_with_retry(
 
             # Categorize error
             category = categorize_error(e, context)
-            config = RETRY_CONFIG.get(category, RetryConfig())
+            config = resolve_retry_config(category, retry_policy)
 
             # Check if we should retry (handles both non-retryable categories and exhausted attempts)
-            if not should_retry(category, attempt):
+            if not should_retry(category, attempt, retry_policy):
                 if config.max_retries == 0:
                     logger.error(f"[{task_id}] {operation_name} failed (non-retryable): {category.value} - {e}")
                 else:
@@ -105,7 +109,7 @@ async def execute_with_retry(
                 raise
 
             # Calculate backoff with jitter
-            delay = get_retry_delay(category, attempt)
+            delay = get_retry_delay(category, attempt, retry_policy)
 
             # Enhanced warning with actionable tip
             tip = get_error_tip(category)

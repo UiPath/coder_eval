@@ -12,6 +12,7 @@ from coder_eval.models.enums import FinalStatus
 from coder_eval.models.limits import RunLimits
 from coder_eval.models.mutations import PromptMutation
 from coder_eval.models.results import ConfigLineageEntry, EvaluationResult
+from coder_eval.models.retry import RetryPolicy
 from coder_eval.models.sandbox import SandboxConfig
 from coder_eval.models.tasks import PostRunCommand, PreRunCommand, TaskDefinition
 from coder_eval.models.templates import TemplateSource
@@ -61,6 +62,13 @@ class ExperimentVariant(BaseModel):
             "Per-variant overrides for the task's run_limits block. Field-merge — "
             "per-key precedence inside the block; keys absent here leave the task-level "
             "value intact."
+        ),
+    )
+    retry: RetryPolicy | None = Field(
+        default=None,
+        description=(
+            "Per-variant overrides for the task's retry block. Field-merge — keys absent "
+            "here leave the task-level value intact."
         ),
     )
     driver: Literal["tempdir", "docker"] | None = Field(
@@ -123,6 +131,13 @@ class ExperimentDefaults(BaseModel):
         default=None,
         description=(
             "Default run-time caps (turns, wall-clock, tokens, USD). "
+            "Field-merge — task and variant layers override individual keys without replacing the block."
+        ),
+    )
+    retry: RetryPolicy | None = Field(
+        default=None,
+        description=(
+            "Default retry policy overrides applied to all tasks under this experiment. "
             "Field-merge — task and variant layers override individual keys without replacing the block."
         ),
     )

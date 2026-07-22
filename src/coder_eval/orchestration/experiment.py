@@ -25,6 +25,7 @@ from ..models import (
     ExperimentVariant,
     FinalStatus,
     ResolvedTask,
+    RetryPolicy,
     RunLimits,
     SimulationConfig,
     SkippedTask,
@@ -366,7 +367,7 @@ def resolve_task_for_variant(
     variant_agent_clean = variant.agent
     task_agent = task.agent.model_dump(exclude_unset=True) if task.agent else None
 
-    # Resolve all three `-D`-reachable roots through the SAME generic resolver
+    # Resolve all four `-D`-reachable roots through the SAME generic resolver
     # the CLI layer uses (config_merge.resolve_root) — one merge implementation,
     # one set of per-field strategies, lineage emitted as a side effect into the
     # shared `lineage` dict. Type is enforced after CLI overrides (layer 5) so
@@ -412,6 +413,24 @@ def resolve_task_for_variant(
     _add_rl(variant.run_limits, "variant")
     resolved_run_limits = resolve_root("run_limits", rl_layers, lineage=lineage)
 
+    # --- retry: same 4 layers, its own top-level root (a retry policy is not a cap). ---
+    retry_layers: list[Layer] = []
+
+    def _add_retry(policy: RetryPolicy | None, source: ConfigSource) -> None:
+        if policy is None:
+            return
+        patch = policy.model_dump(exclude_unset=True)
+        if patch:
+            retry_layers.append(Layer(source=source, patch=patch))
+
+    if default_experiment.defaults:
+        _add_retry(default_experiment.defaults.retry, "default")
+    if experiment.defaults:
+        _add_retry(experiment.defaults.retry, "experiment-defaults")
+    _add_retry(task.retry, "task")
+    _add_retry(variant.retry, "variant")
+    resolved_retry = resolve_root("retry", retry_layers, lineage=lineage)
+
     # --- sandbox: synthetic-layer construction (driver precedence + task-first
     # template_sources ordering) lives in _build_sandbox_layers. ---
     sandbox_layers = _build_sandbox_layers(default_experiment, experiment, task, variant)
@@ -452,6 +471,7 @@ def resolve_task_for_variant(
         update={
             "agent": resolved_agent,
             "run_limits": resolved_run_limits,
+            "retry": resolved_retry,
             "sandbox": resolved_sandbox,
             "post_run": resolved_post_run,
             "pre_run": resolved_pre_run,

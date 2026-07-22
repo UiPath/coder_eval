@@ -10,6 +10,8 @@ import traceback
 from datetime import datetime
 from typing import Any
 
+from coder_eval.models import RetryPolicy
+
 from .categories import ERROR_TIPS, RETRY_CONFIG, ErrorCategory, ErrorContext, RetryConfig
 from .categorization import categorize_error
 
@@ -17,18 +19,35 @@ from .categorization import categorize_error
 logger = logging.getLogger(__name__)
 
 
-def should_retry(category: ErrorCategory, attempt: int) -> bool:
+def resolve_retry_config(category: ErrorCategory, policy: RetryPolicy | None = None) -> RetryConfig:
+    """Look up the effective retry config for ``category``.
+
+    Single seam between the built-in per-category table (``RETRY_CONFIG``) and
+    the run's optional ``retry`` overrides — every retry decision
+    (should we? how long?) resolves through here so the two can't disagree.
+
+    A non-retryable category (``max_retries == 0``) is returned untouched:
+    whether an error class is worth retrying is a property of the error, not a
+    per-run knob (see ``RetryPolicy``).
+    """
+    config = RETRY_CONFIG.get(category, RetryConfig())
+    if policy is None or config.max_retries == 0:
+        return config
+    return config.model_copy(update=policy.overrides())
+
+
+def should_retry(category: ErrorCategory, attempt: int, policy: RetryPolicy | None = None) -> bool:
     """Determine if an error should be retried.
 
     Args:
         category: Error category
         attempt: Current attempt number (0-indexed)
+        policy: Optional per-run overrides (the task's `retry` block)
 
     Returns:
         True if retry should be attempted
     """
-    config = RETRY_CONFIG.get(category, RetryConfig())
-    return attempt < config.max_retries
+    return attempt < resolve_retry_config(category, policy).max_retries
 
 
 def compute_backoff(config: RetryConfig, attempt: int) -> float:
@@ -52,15 +71,16 @@ def compute_backoff(config: RetryConfig, attempt: int) -> float:
     return base_delay + jitter
 
 
-def get_retry_delay(category: ErrorCategory, attempt: int) -> float:
+def get_retry_delay(category: ErrorCategory, attempt: int, policy: RetryPolicy | None = None) -> float:
     """Calculate delay before retry with exponential backoff and jitter.
 
-    Convenience wrapper around ``compute_backoff`` that looks up the
+    Convenience wrapper around ``compute_backoff`` that resolves the effective
     ``RetryConfig`` for the given error category.
 
     Args:
         category: Error category
         attempt: Current attempt number (0-indexed)
+        policy: Optional per-run overrides (the task's `retry` block)
 
     Returns:
         Delay in seconds
@@ -71,8 +91,7 @@ def get_retry_delay(category: ErrorCategory, attempt: int) -> float:
         >>> get_retry_delay(ErrorCategory.AGENT_API_ERROR, 1)  # doctest: +SKIP
         10.8  # 10.0 base + 0.8 jitter
     """
-    config = RETRY_CONFIG.get(category, RetryConfig())
-    return compute_backoff(config, attempt)
+    return compute_backoff(resolve_retry_config(category, policy), attempt)
 
 
 def get_error_tip(category: ErrorCategory) -> str:
@@ -140,6 +159,7 @@ def create_error_context(
     attempt: int,
     component: str | None = None,
     agent_name: str | None = None,
+    retry_policy: RetryPolicy | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Create comprehensive error context for reporting.
@@ -153,6 +173,9 @@ def create_error_context(
         attempt: Attempt number (1-indexed)
         component: Component that failed (agent/sandbox/evaluator)
         agent_name: Agent name (optional)
+        retry_policy: Per-run overrides (the task's `retry` block). Must be the SAME policy the
+            executor ran under, so the persisted is_retryable / retry_delay_seconds
+            cannot contradict the retry decision that was actually taken.
         **kwargs: Additional context fields:
             - disk_usage_gb: Disk usage in GB
             - memory_usage_gb: Memory usage in GB
@@ -198,8 +221,12 @@ def create_error_context(
         component=component,
         agent_name=agent_name,
         attempt_number=attempt,
-        is_retryable=should_retry(category, attempt_index),
-        retry_delay_seconds=get_retry_delay(category, attempt_index) if should_retry(category, attempt_index) else 0.0,
+        is_retryable=should_retry(category, attempt_index, retry_policy),
+        retry_delay_seconds=(
+            get_retry_delay(category, attempt_index, retry_policy)
+            if should_retry(category, attempt_index, retry_policy)
+            else 0.0
+        ),
         disk_usage_gb=kwargs.get("disk_usage_gb"),
         memory_usage_gb=kwargs.get("memory_usage_gb"),
         agent_stdout=agent_stdout,

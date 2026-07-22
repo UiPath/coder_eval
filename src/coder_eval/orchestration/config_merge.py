@@ -1,7 +1,7 @@
 """The single generic config-merge resolver.
 
-One implementation that merges any of the three ``-D``-reachable root models
-(``agent`` / ``run_limits`` / ``sandbox``) across an ordered list of partial-dict
+One implementation that merges any of the four ``-D``-reachable root models
+(``agent`` / ``run_limits`` / ``retry`` / ``sandbox``) across an ordered list of partial-dict
 :class:`Layer` records, applying each field's declared merge strategy
 (:func:`coder_eval.models.merge_strategy.merge_strategy_of`) uniformly at every
 layer. Both the layers-1-4 path (``resolve_task_for_variant``) and the layer-5
@@ -32,6 +32,7 @@ from ..models import (
     ClaudeCodeAgentConfig,
     CodexAgentConfig,
     ConfigLineageEntry,
+    RetryPolicy,
     RunLimits,
     SandboxConfig,
     TaskDefinition,
@@ -51,9 +52,9 @@ ConfigSource = Literal[
     "cli",
 ]
 
-ALLOWED_OVERRIDE_ROOTS: tuple[str, ...] = ("agent", "run_limits", "sandbox")
+ALLOWED_OVERRIDE_ROOTS: tuple[str, ...] = ("agent", "run_limits", "retry", "sandbox")
 
-RootName = Literal["agent", "run_limits", "sandbox"]
+RootName = Literal["agent", "run_limits", "retry", "sandbox"]
 
 
 class MergeError(ValueError):
@@ -101,7 +102,8 @@ def _root_model_types(root: str) -> tuple[type[BaseModel], ...]:
     plugin) plus ``BaseAgentConfig`` (so subclass-only fields like ``sdk_options``
     and plugin fields are recognized for ``-D`` validation / did-you-mean) — read
     from the registry after plugin load, not a static annotation. ``run_limits`` /
-    ``sandbox`` derive from ``TaskDefinition`` via :func:`classify_annotation`.
+    ``retry`` / ``sandbox`` derive from ``TaskDefinition`` via
+    :func:`classify_annotation`.
     Raises :class:`MergeError` for an unknown root.
     """
     if root not in ALLOWED_OVERRIDE_ROOTS:
@@ -359,6 +361,13 @@ def resolve_root(
 
 @overload
 def resolve_root(
+    root: Literal["retry"], layers: Sequence[Layer], *, lineage: dict[str, ConfigLineageEntry] | None = ...
+) -> RetryPolicy | None:
+    """Resolve the ``retry`` root (None when no layer set anything)."""
+
+
+@overload
+def resolve_root(
     root: Literal["sandbox"], layers: Sequence[Layer], *, lineage: dict[str, ConfigLineageEntry] | None = ...
 ) -> SandboxConfig | None:
     """Resolve the ``sandbox`` root (None when no layer set anything)."""
@@ -375,13 +384,16 @@ def resolve_root(
     The single merge-and-build entry point both resolution paths call. Value
     validation (``extra="forbid"``, field validators, SandboxConfig's
     template-sources model_validator) happens in the constructor. Returns None
-    when no layer set anything for ``run_limits`` (an empty block is dropped)."""
+    when no layer set anything for ``run_limits`` / ``retry`` (an empty block is
+    dropped)."""
     model_types = _root_model_types(root)  # raises MergeError for an unknown root
     merged = merge_layers(model_types, layers, lineage_root=root, lineage=lineage)
     if root == "agent":
         return parse_agent_config(**merged)
     if root == "run_limits":
         return RunLimits(**merged) if merged else None
+    if root == "retry":
+        return RetryPolicy(**merged) if merged else None
     # root == "sandbox" — the only remaining RootName member.
     return SandboxConfig(**merged) if merged else None
 

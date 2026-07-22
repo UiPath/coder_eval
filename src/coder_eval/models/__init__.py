@@ -129,6 +129,9 @@ from coder_eval.models.results import (
     TurnRecord,
 )
 
+# Retry
+from coder_eval.models.retry import RetryPolicy
+
 # Routing
 from coder_eval.models.routing import (
     ROUTE_NAMES,
@@ -293,6 +296,8 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "JudgeVerdict",
     # Limits
     "RunLimits",
+    # Retry
+    "RetryPolicy",
     # Merge strategy
     "MERGE_STRATEGY_KEY",
     "APPEND_ORDER_KEY",

@@ -17,6 +17,7 @@ from coder_eval.models import (
     ConfigLineageEntry,
     DockerDriverConfig,
     FileExistsCriterion,
+    RetryPolicy,
     RunLimits,
     SandboxConfig,
     TaskDefinition,
@@ -33,6 +34,7 @@ from coder_eval.orchestration.overrides import (
 def _make_task(
     agent: object | None = None,
     run_limits: RunLimits | None = None,
+    retry: RetryPolicy | None = None,
     sandbox: SandboxConfig | None = None,
 ) -> TaskDefinition:
     return TaskDefinition(
@@ -43,6 +45,7 @@ def _make_task(
         sandbox=sandbox if sandbox is not None else SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(description="x", path="f.txt")],
         run_limits=run_limits,
+        retry=retry,
     )
 
 
@@ -151,6 +154,24 @@ class TestApplyOverrides:
         task = _make_task(agent=parse_agent_config(type="claude-code"))
         with pytest.raises(OverrideError, match="only supported for claude-code"):
             apply_overrides(task, {"agent.sdk_options.effort": "high"}, agent_type="codex")
+
+    def test_retry_root_override(self):
+        """`-D retry.max_retries=0` — the fail-fast debug knob, on its own root."""
+        task = _make_task()
+        assert task.retry is None
+        apply_overrides(task, {"retry.max_retries": 0})
+        assert task.retry is not None
+        assert task.retry.max_retries == 0
+
+    def test_retry_root_field_merge_preserves_seed(self):
+        task = _make_task(retry=RetryPolicy(initial_delay=7.5))
+        apply_overrides(task, {"retry.max_retries": 2})
+        assert (task.retry.max_retries, task.retry.initial_delay) == (2, 7.5)
+
+    def test_retry_unknown_key_raises(self):
+        task = _make_task()
+        with pytest.raises(OverrideError, match="did you mean 'max_retries'"):
+            apply_overrides(task, {"retry.max_retry": 1})
 
     def test_unknown_root_raises(self):
         task = _make_task()

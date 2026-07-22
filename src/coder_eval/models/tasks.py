@@ -13,6 +13,7 @@ from coder_eval.models.criteria import SuccessCriterion
 from coder_eval.models.enums import AgentKind
 from coder_eval.models.limits import RunLimits
 from coder_eval.models.merge_strategy import MergeField
+from coder_eval.models.retry import RetryPolicy
 from coder_eval.models.sandbox import SandboxConfig
 
 
@@ -368,6 +369,14 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         default=None,
         description=(
             "Run-time caps (turns, wall-clock, tokens, USD) that abort the task when exceeded. See RunLimits."
+        ),
+    )
+    retry: RetryPolicy | None = Field(
+        default=None,
+        description=(
+            "Per-run overrides for the built-in retry policy (attempts / backoff on transient "
+            "agent + sandbox errors). None = built-in per-category defaults. Set "
+            "`-D retry.max_retries=0` to fail fast while debugging. See RetryPolicy."
         ),
     )
     reference: ReferenceSource | None = Field(

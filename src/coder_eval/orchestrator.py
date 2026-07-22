@@ -41,6 +41,7 @@ from .models import (
     PostRunResult,
     PreRunCommand,
     PreservationMode,
+    RetryPolicy,
     SimulationConfig,
     SimulationTelemetry,
     TaskConfigRecord,
@@ -513,6 +514,7 @@ class Orchestrator:
                     attempt=max(self.result.iteration_count, 1),
                     component="orchestrator.task_timeout",
                     agent_name=self._agent_name,
+                    retry_policy=self._retry_policy,
                 )
 
                 logger.error(f"Task timed out: {e}")
@@ -532,6 +534,7 @@ class Orchestrator:
                     attempt=max(self.result.iteration_count, 1),
                     component=component,
                     agent_name=self._agent_name,
+                    retry_policy=self._retry_policy,
                 )
                 logger.warning(f"Run limit exceeded: {e}")
             except Exception as e:
@@ -552,6 +555,7 @@ class Orchestrator:
                     attempt=max(self.result.iteration_count, 1),  # Actual iteration attempt (1-indexed)
                     component=failed_component,
                     agent_name=self._agent_name,
+                    retry_policy=self._retry_policy,
                 )
 
                 logger.error(f"Evaluation failed: {e}", exc_info=True)
@@ -632,6 +636,7 @@ class Orchestrator:
                 attempt=max(self.result.iteration_count, 1),
                 component="orchestrator.finalize.weighted_score",
                 agent_name=self._agent_name,
+                retry_policy=self._retry_policy,
             )
 
         # Command statistics
@@ -866,6 +871,11 @@ class Orchestrator:
                     total_cost_usd=sum(costs) if costs else None,
                 )
 
+    @property
+    def _retry_policy(self) -> RetryPolicy | None:
+        """The task's retry overrides (top-level ``retry:``), or None for built-in defaults."""
+        return self.task.retry
+
     async def _setup(self) -> None:
         """Set up all components for evaluation.
 
@@ -949,6 +959,7 @@ class Orchestrator:
             operation=_setup_sandbox,
             operation_name="Sandbox setup",
             context={"task_id": self.task.task_id, "component": "sandbox"},
+            retry_policy=self._retry_policy,
         )
 
         # Assert result is initialized (set in run())
@@ -982,6 +993,7 @@ class Orchestrator:
             operation=_start_agent,
             operation_name="Agent start",
             context={"task_id": self.task.task_id, "component": "agent", "agent_name": self._agent_name},
+            retry_policy=self._retry_policy,
         )
 
         # Save agent config on result (copy to prevent mutation of shared reference)
@@ -1269,6 +1281,7 @@ class Orchestrator:
                 "agent_name": self._agent_name,
             },
             on_attempt_error=_on_attempt_failure,
+            retry_policy=self._retry_policy,
         )
         assert turn_record is not None  # execute_with_retry returns the turn or raises
         return turn_record
