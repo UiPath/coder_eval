@@ -173,7 +173,8 @@ job-summary + fail-on-failure into one step:
         with:
           tasks: tests/tasks/**/*.yaml
           model: claude-sonnet-5
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          env: |
+            ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
 The action is agent-agnostic — it installs `coder-eval` but not the agent

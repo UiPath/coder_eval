@@ -860,7 +860,15 @@ jobs:
           model: claude-haiku-4-5-20251001
           run-dir: runs/ci-action-dogfood
           junit-path: runs/ci-action-dogfood/junit.xml
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Credentials go through the generic env passthrough (the only channel);
+          # ANTHROPIC_API_KEY reaching the run is proven by the API-backed task
+          # succeeding. A floor of 0.0 passes for any produced score (exercises
+          # the gate path green in CI without flakiness); the second line
+          # exercises multi-line env parsing.
+          minimum-task-score: "0.0"
+          env: |
+            ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+            CE_DOGFOOD_MARKER=1
 
       - name: Verify outputs and JUnit file
         env:

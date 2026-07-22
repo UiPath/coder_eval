@@ -107,7 +107,8 @@ the job summary, and fails the step on any task/gate failure:
   with:
     tasks: tests/tasks/**/*.yaml
     model: claude-sonnet-5
-    anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+    env: |
+      ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
 | Input | Default | Purpose |
@@ -120,7 +121,8 @@ the job summary, and fails the step on any task/gate failure:
 | `run-dir` | `runs/ci` | Run directory |
 | `junit-path` | `coder-eval-junit.xml` | Where to write the JUnit report |
 | `step-summary` | `true` | Append `run.md` to the job summary |
-| `anthropic-api-key` | — | Exported as `ANTHROPIC_API_KEY` for the run |
+| `env` | — | Credentials/backend passthrough: newline-separated `NAME=VALUE` pairs, exported for the run step only |
+| `minimum-task-score` | *(off)* | Strict floor (0.0–1.0): fail the step if any task's `weighted_score` is below it |
 
 Outputs: `run-dir` and `junit-path`. Feed the JUnit file to your platform's
 test-report renderer — e.g. on GitHub Actions with
@@ -132,6 +134,25 @@ test-report renderer — e.g. on GitHub Actions with
   with:
     report_paths: coder-eval-junit.xml
 ```
+
+**Credentials and backend config** are the sole responsibility of `env` — a
+passthrough exported for the run step only (never written to `$GITHUB_ENV`, so
+it can't leak into later steps). Set whatever the run needs, Anthropic or not:
+
+```yaml
+- uses: UiPath/coder_eval@v0
+  with:
+    tasks: tests/tasks/**/*.yaml
+    minimum-task-score: "0.8"   # fail the build if any task scores below 0.8
+    env: |
+      CODER_EVAL_API_BACKEND=bedrock
+      AWS_BEARER_TOKEN_BEDROCK=${{ secrets.BEDROCK_TOKEN }}
+```
+
+`minimum-task-score` is a strict floor **on top of** coder-eval's own exit
+code: the step fails if *either* coder-eval exits non-zero *or* any task's
+`weighted_score` falls below the floor. Leave it unset to gate on the exit code
+alone.
 
 > **Agent runtime is the caller's responsibility.** The action is agent-agnostic —
 > it installs `coder-eval` but no coding-agent runtime. Tasks using the default
