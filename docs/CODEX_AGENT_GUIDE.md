@@ -1,8 +1,15 @@
-# Codex Agent Implementation
+---
+description: >-
+  Run OpenAI Codex as the agent under evaluation in coder_eval — installation,
+  authentication, task configuration, and how Codex telemetry maps to sandboxed,
+  weighted scoring.
+---
+
+# Running OpenAI Codex in coder_eval
 
 ## Overview
 
-A new `CodexAgent` has been added to coder_eval that integrates OpenAI's Codex SDK. The implementation mirrors the structure of `ClaudeCodeAgent` and provides seamless integration with the evaluation framework.
+coder_eval can run OpenAI's Codex as the agent under evaluation, via the official Codex SDK. The `CodexAgent` mirrors the structure of `ClaudeCodeAgent` and plugs into the same sandbox, scoring, and telemetry pipeline — set `agent.type: codex` in a task and the rest of the framework works unchanged.
 
 ## Setup
 

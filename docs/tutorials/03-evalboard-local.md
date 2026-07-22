@@ -1,3 +1,10 @@
+---
+description: >-
+  Browse coder_eval runs in evalboard, a local web UI — pass rates, per-task
+  detail, tool and message timelines, token costs, and artifact downloads,
+  straight from your filesystem.
+---
+
 # Tutorial 03 — Browsing Results Locally with evalboard
 
 `coder-eval` writes results as JSON, markdown, and logs under `runs/`. **evalboard**

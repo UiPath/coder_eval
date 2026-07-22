@@ -1,3 +1,10 @@
+---
+description: >-
+  A/B-test AI coding agents with coder_eval's experiment layer — Claude Code vs.
+  Codex vs. Gemini, model vs. model, skill on vs. off, prompt vs. prompt — on
+  identical tasks.
+---
+
 # A/B Experiment Guide
 
 How to run the same tasks across multiple configuration variants ("arms") and

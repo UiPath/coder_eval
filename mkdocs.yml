@@ -1,0 +1,94 @@
+site_name: Coder Eval
+site_description: >-
+  Evaluate & benchmark AI coding agents and Claude Code skills — a sandboxed,
+  reproducible framework with declarative YAML eval suites for Claude Code,
+  Codex & Gemini, A/B experiments, weighted scoring, and CI gates.
+site_url: https://uipath.github.io/coder_eval/
+repo_url: https://github.com/UiPath/coder_eval
+repo_name: UiPath/coder_eval
+edit_uri: edit/main/docs/
+copyright: © 2026 UiPath — Apache License 2.0
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep orange
+      accent: deep orange
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep orange
+      accent: deep orange
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+# IDEAS.md is internal engineering backlog (links to source files) — not for the
+# public docs site.
+exclude_docs: |
+  IDEAS.md
+
+# The social plugin generates per-page Open Graph / Twitter card images (and
+# the matching og:/twitter: meta tags) so shared links unfurl properly. It
+# needs Cairo system libraries, so it is enabled only in CI (the Docs workflow
+# installs the deps); local builds skip it.
+plugins:
+  - search
+  - social:
+      enabled: !ENV [CI, false]
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/UiPath/coder_eval
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/coder-eval/
+
+nav:
+  - Home: index.md
+  - Tutorials:
+      - Overview: tutorials/README.md
+      - 01 · Your first evaluation: tutorials/01-first-evaluation.md
+      - 02 · Running coder_eval in CI: tutorials/02-ci-pipeline.md
+      - 03 · Browsing results with evalboard: tutorials/03-evalboard-local.md
+      - 04 · Writing a task: tutorials/04-writing-a-task.md
+      - 05 · Comparing two models: tutorials/05-comparing-models.md
+      - 06 · Docker isolation: tutorials/06-use-docker-isolation.md
+  - Guides:
+      - User Guide: USER_GUIDE.md
+      - Task Definition Guide: TASK_DEFINITION_GUIDE.md
+      - A/B Experiments: AB_EXPERIMENTS.md
+      - Bring Your Own Dataset: BYOD.md
+      - Codex Agent Guide: CODEX_AGENT_GUIDE.md
+      - Docker Isolation: DOCKER_ISOLATION.md
+  - How it compares: comparison.md

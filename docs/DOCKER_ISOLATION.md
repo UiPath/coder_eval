@@ -1,8 +1,13 @@
+---
+description: >-
+  Run each coder_eval task in its own fresh Docker container — strong host
+  isolation, a pinned reproducible agent runtime, and custom images for
+  task-specific dependencies.
+---
+
 # Docker Isolation
 
 Run each evaluation task inside its own fresh container. Strong host isolation and a pinned, reproducible agent runtime.
-
-> Supersedes the agent-side FS perimeter flag from #199 (reverted in 9fe4320). The container boundary subsumes what that flag tried to do at the agent level.
 
 ## When to use
 
