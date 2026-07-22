@@ -35,7 +35,7 @@ coder_eval/
 │   ├── criteria.py                # 14 success criterion types + base + union
 │   ├── experiment.py              # ExperimentDefinition, ExperimentVariant, ResolvedTask, result models
 │   ├── judge_defaults.py          # DEFAULT_JUDGE_MODEL constant (cycle-free leaf)
-│   ├── mutations.py               # PromptMutation variants (prefix/suffix/replace/template/rephrase)
+│   ├── mutations.py               # PromptMutation variants (prefix/suffix/replace/template)
 │   ├── results.py                 # CriterionResult (+ ClassificationCriterionResult), TurnRecord, EvaluationResult, EarlyStopInfo/EarlyStopReason, CriterionAggregate, ThresholdCheck, SuiteRollup
 │   ├── routing.py                 # ApiRoute (DirectRoute/BedrockRoute)
 │   ├── sandbox.py                 # SandboxConfig, ResourceLimits
@@ -294,7 +294,7 @@ Tasks are YAML files. See [docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_G
 
 **Runtime (always)**: pydantic, pydantic-settings, pyyaml, typer, rich, python-dotenv, anthropic, claude-agent-sdk, anyio, radon, tqdm, jmespath, jsonschema
 
-**Runtime (optional, `[uipath]` extra)**: uipath — the in-host `uipath` SDK (handy for local sandbox parity with tasks that invoke `uv run uipath eval ...`). Base installs without this extra still run end-to-end; UiPath-dependent paths fail at dispatch with a clear `pip install 'coder-eval[uipath]'` hint. The LLM judge and the `rephrase` mutation no longer use the LLM Gateway client — they route through the run's backend (Bedrock / Anthropic), so `uipath-llmgw-client` is no longer a dependency.
+**Runtime (optional, `[uipath]` extra)**: uipath — the in-host `uipath` SDK (handy for local sandbox parity with tasks that invoke `uv run uipath eval ...`). Base installs without this extra still run end-to-end; UiPath-dependent paths fail at dispatch with a clear `pip install 'coder-eval[uipath]'` hint. The LLM judge no longer uses the LLM Gateway client — it routes through the run's backend (Bedrock / Anthropic), so `uipath-llmgw-client` is no longer a dependency.
 
 **Dev**: pytest, pytest-asyncio, pytest-mock, pytest-cov, ruff, pyright, pip-audit, bandit, pre-commit, mcp
 

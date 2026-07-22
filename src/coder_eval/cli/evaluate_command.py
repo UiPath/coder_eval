@@ -130,7 +130,12 @@ def evaluate_command(
         raise typer.Exit(1)
 
     for criterion, cr in zip(task.success_criteria, criteria_results, strict=True):
-        status = "[green]✓[/green]" if cr.score >= criterion.pass_threshold else "[red]✗[/red]"
+        if not criterion.is_gating:
+            # weight=0 is informational: it cannot pass/fail the task, so don't
+            # render it as ✓/✗ (that would contradict the gate and the exit code).
+            status = "[dim]○[/dim]"
+        else:
+            status = "[green]✓[/green]" if cr.score >= criterion.pass_threshold else "[red]✗[/red]"
         console.print(f"{status} {cr.criterion_type}")
         console.print(f"  [dim]{cr.description}[/dim]")
         console.print(f"  [dim]Score: {cr.score:.2f}[/dim]")
@@ -140,15 +145,19 @@ def evaluate_command(
             console.print(f"  [red]Error: {cr.error}[/red]")
         console.print()
 
-    passed = sum(
-        1 for cr, c in zip(criteria_results, task.success_criteria, strict=True) if cr.score >= c.pass_threshold
-    )
-    total = len(task.success_criteria)
+    # Gate over gating criteria only (weight=0 is informational and cannot fail
+    # the task) so this summary + the exit code below match final_status.
+    gating = [(cr, c) for cr, c in zip(criteria_results, task.success_criteria, strict=True) if c.is_gating]
+    passed = sum(1 for cr, c in gating if cr.score >= c.pass_threshold)
+    total = len(gating)
     failed = total - passed
+    informational = len(task.success_criteria) - total
 
     console.print("[bold]Summary:[/bold]")
     console.print(f"  Passed: {passed}/{total}")
     console.print(f"  Failed: {failed}/{total}")
+    if informational:
+        console.print(f"  [dim]Informational (weight=0, not gated): {informational}[/dim]")
     console.print(f"\n[dim]Run directory: {prepared_run_dir}[/dim]")
     if result.sandbox_path:
         console.print(f"[dim]Artifacts: {result.sandbox_path}[/dim]")

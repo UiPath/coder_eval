@@ -1,0 +1,84 @@
+name: Adopter — we're using coder_eval
+description: Tell us your team uses coder_eval so we can add you to ADOPTERS.md
+title: "[adopter] <organization>"
+labels: ["adopter"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for using coder_eval! Adopter entries help other teams see the project is
+        real and in production, and they tell us which use cases to keep supporting.
+
+        Everything below is optional except the organization and how you use it. We only
+        publish what you explicitly allow here.
+  - type: input
+    id: organization
+    attributes:
+      label: Organization
+      description: The name you'd like listed.
+      placeholder: Acme Corp
+    validations:
+      required: true
+  - type: input
+    id: website
+    attributes:
+      label: Website
+      placeholder: https://example.com
+    validations:
+      required: false
+  - type: textarea
+    id: usage
+    attributes:
+      label: How do you use coder_eval?
+      description: |
+        A sentence or two. What do you evaluate — Claude Code skills, agent A/B tests,
+        CI quality gates, your own repos — and roughly at what scale?
+      placeholder: |
+        We gate CI on a suite of ~40 YAML tasks that check our internal Claude Code
+        skills still trigger, and A/B Claude Code against Codex each release.
+    validations:
+      required: true
+  - type: dropdown
+    id: listing
+    attributes:
+      label: How may we list you?
+      description: |
+        Pick the most you're comfortable with. **Logo use needs someone who can approve
+        trademark use for your organization** — if that isn't you, choose a name-only or
+        private option and we'll follow up.
+      options:
+        - Name only, in ADOPTERS.md
+        - Name in ADOPTERS.md and on the project website
+        - Name and logo in ADOPTERS.md and on the project website
+        - Please don't list us publicly — this is just for the maintainers
+      default: 0
+    validations:
+      required: true
+  - type: checkboxes
+    id: logo-permission
+    attributes:
+      label: Trademark permission
+      description: Only required if you selected a logo option above.
+      options:
+        - label: >-
+            I am authorized to grant this permission on behalf of my organization, and I
+            grant the coder_eval maintainers a non-exclusive, revocable license to display
+            our name and logo as an adopter in ADOPTERS.md and on the project website. We
+            can withdraw it at any time by commenting on this issue.
+          required: false
+  - type: input
+    id: contact
+    attributes:
+      label: Contact
+      description: GitHub handle or email, so we can reach you before publishing anything.
+    validations:
+      required: false
+  - type: checkboxes
+    id: case-study
+    attributes:
+      label: Anything else?
+      options:
+        - label: We'd be open to a short case study or a talk about our setup.
+          required: false
+        - label: We'd like to hear about breaking changes before they ship.
+          required: false

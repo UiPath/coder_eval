@@ -214,12 +214,16 @@ class SuccessChecker:
                 context=context,
             )
             result.pass_threshold = criterion.pass_threshold
+            result.gating = criterion.is_gating
 
             logger.debug(f"Criterion '{criterion_type}' score: {result.score:.2f}")
             if result.score < criterion.pass_threshold:
+                # An informational (weight: 0) criterion cannot fail the task, so
+                # logging it as FAILED contradicts the final status. Say what it is.
                 logger.info(
-                    "Criterion '%s' FAILED (score=%.2f, threshold=%.2f): %s",
+                    "Criterion '%s' %s (score=%.2f, threshold=%.2f): %s",
                     criterion_type,
+                    "FAILED" if criterion.is_gating else "below threshold (informational)",
                     result.score,
                     criterion.pass_threshold,
                     _short_failure_reason(result),
@@ -237,6 +241,7 @@ class SuccessChecker:
                 details=f"No checker registered for criterion type '{criterion_type}'",
                 error=f"Unsupported criterion type: '{criterion_type}'",
                 pass_threshold=criterion.pass_threshold,
+                gating=criterion.is_gating,
             )
         except JudgeInfrastructureError:
             raise  # judge infra failure escalates to FinalStatus.ERROR; do not score it
@@ -250,10 +255,12 @@ class SuccessChecker:
                 details="Error running checker",
                 error=str(e),
                 pass_threshold=criterion.pass_threshold,
+                gating=criterion.is_gating,
             )
             logger.info(
-                "Criterion '%s' FAILED (score=0.00, threshold=%.2f): %s",
+                "Criterion '%s' %s (score=0.00, threshold=%.2f): %s",
                 criterion_type,
+                "FAILED" if criterion.is_gating else "errored (informational)",
                 criterion.pass_threshold,
                 _short_failure_reason(failed),
             )
