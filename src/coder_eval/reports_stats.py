@@ -33,12 +33,75 @@ def stddev(values: list[float]) -> float:
     return _stats.stdev(values) if len(values) >= 2 else 0.0
 
 
-def welch_t_test(a: list[float], b: list[float]) -> float | None:
-    """Two-tailed p-value using Welch's t-test via stdlib NormalDist approximation.
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued fraction for the regularized incomplete beta (Lentz's method)."""
+    max_iterations = 200
+    eps = 3e-12
+    fpmin = 1e-300
 
-    Uses the normal approximation for the t-distribution when df is large (>30),
-    and falls back to exact Welch-Satterthwaite otherwise. Returns None if either
-    group has fewer than 2 observations.
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < fpmin:
+        d = fpmin
+    d = 1.0 / d
+    h = d
+    for m in range(1, max_iterations + 1):
+        m2 = 2 * m
+        # Even step of the recurrence.
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < fpmin:
+            d = fpmin
+        c = 1.0 + aa / c
+        if abs(c) < fpmin:
+            c = fpmin
+        d = 1.0 / d
+        h *= d * c
+        # Odd step.
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < fpmin:
+            d = fpmin
+        c = 1.0 + aa / c
+        if abs(c) < fpmin:
+            c = fpmin
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < eps:
+            break
+    return h
+
+
+def regularized_incomplete_beta(a: float, b: float, x: float) -> float:
+    """Regularized incomplete beta function I_x(a, b), for a, b > 0 and x in [0, 1]."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    ln_front = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log1p(-x)
+    front = math.exp(ln_front)
+    # Use the continued fraction directly where it converges fast, else via symmetry.
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1.0 - x) / b
+
+
+def student_t_two_tailed_p(t_stat: float, df: float) -> float:
+    """Exact two-tailed p-value for Student's t: P(|T| >= |t|) = I_x(df/2, 1/2), x = df/(df + t^2)."""
+    if df <= 0:
+        return 1.0
+    x = df / (df + t_stat * t_stat)
+    return regularized_incomplete_beta(df / 2.0, 0.5, x)
+
+
+def welch_t_test(a: list[float], b: list[float]) -> float | None:
+    """Two-tailed p-value from Welch's unequal-variances t-test (exact t distribution).
+
+    Degrees of freedom via Welch-Satterthwaite; the t CDF is evaluated exactly
+    through the regularized incomplete beta (stdlib only, no scipy). Returns
+    None if either group has fewer than 2 observations.
     """
     n_a, n_b = len(a), len(b)
     if n_a < 2 or n_b < 2:
@@ -50,14 +113,13 @@ def welch_t_test(a: list[float], b: list[float]) -> float | None:
 
     se_sq = var_a / n_a + var_b / n_b
     if se_sq == 0:
-        return 1.0
+        # Zero variance in both groups: identical constants (p=1) or a
+        # deterministic difference (p=0).
+        return 1.0 if mean_a == mean_b else 0.0
 
     t_stat = abs(mean_a - mean_b) / math.sqrt(se_sq)
-
-    # Conservative normal approximation: treat t as z-score.
-    # Overestimates p slightly for small df (heavier tails), but correct in
-    # direction and sufficient for display purposes (no incomplete-beta needed).
-    return 2.0 * _stats.NormalDist().cdf(-t_stat)
+    df = se_sq**2 / ((var_a / n_a) ** 2 / (n_a - 1) + (var_b / n_b) ** 2 / (n_b - 1))
+    return student_t_two_tailed_p(t_stat, df)
 
 
 def fmt_mean_sd(values: list[float], fmt: str = ".3f") -> str:

@@ -748,6 +748,58 @@ class TestStatisticalHelpers:
 
         assert welch_t_test([1.0], [2.0]) is None
 
+    def test_welch_t_test_exact_reference_value(self):
+        """Exact Student-t p-value, cross-checked against scipy ttest_ind(equal_var=False)."""
+        from coder_eval.reports_stats import welch_t_test
+
+        # Equal variances 2.5, n=5 each ⇒ t=1.0, Welch-Satterthwaite df=8.
+        p = welch_t_test([1.0, 2.0, 3.0, 4.0, 5.0], [2.0, 3.0, 4.0, 5.0, 6.0])
+        assert p is not None
+        assert abs(p - 0.34659) < 5e-4
+
+    def test_welch_t_test_zero_variance_different_means(self):
+        """Zero variance in both groups: deterministic difference ⇒ 0.0, identical ⇒ 1.0."""
+        from coder_eval.reports_stats import welch_t_test
+
+        assert welch_t_test([1.0, 1.0], [2.0, 2.0]) == 0.0
+        assert welch_t_test([1.0, 1.0], [1.0, 1.0]) == 1.0
+
+    def test_student_t_two_tailed_p_small_df_not_normal(self):
+        """Small df must use t tails, not normal ones — the regression sensor for the old bug."""
+        from coder_eval.reports_stats import student_t_two_tailed_p
+
+        p = student_t_two_tailed_p(2.5, 4.0)
+        assert abs(p - 0.06677) < 5e-4
+        # The old normal approximation reported 0.0124 here — falsely significant.
+        assert p > 0.05
+
+    def test_student_t_two_tailed_p_critical_values(self):
+        """Round-trip the standard t-table critical values."""
+        from coder_eval.reports_stats import student_t_two_tailed_p
+
+        assert abs(student_t_two_tailed_p(2.776, 4.0) - 0.05) < 1e-3
+        assert abs(student_t_two_tailed_p(2.228, 10.0) - 0.05) < 1e-3
+        assert abs(student_t_two_tailed_p(0.0, 7.0) - 1.0) < 1e-12
+
+    def test_student_t_two_tailed_p_large_df_matches_normal(self):
+        """At huge df the t distribution converges to the normal."""
+        import statistics
+
+        from coder_eval.reports_stats import student_t_two_tailed_p
+
+        normal_p = 2.0 * statistics.NormalDist().cdf(-1.96)
+        assert abs(student_t_two_tailed_p(1.96, 1e6) - normal_p) < 1e-5
+
+    def test_regularized_incomplete_beta_closed_forms(self):
+        """I_x(a,b) against the closed forms it has for b=1, a=1, and the symmetric point."""
+        from coder_eval.reports_stats import regularized_incomplete_beta
+
+        assert abs(regularized_incomplete_beta(2.0, 1.0, 0.3) - 0.3**2) < 1e-10
+        assert abs(regularized_incomplete_beta(1.0, 3.0, 0.4) - (1.0 - 0.6**3)) < 1e-10
+        assert abs(regularized_incomplete_beta(5.0, 5.0, 0.5) - 0.5) < 1e-10
+        assert regularized_incomplete_beta(2.0, 3.0, 0.0) == 0.0
+        assert regularized_incomplete_beta(2.0, 3.0, 1.0) == 1.0
+
     def test_mean_and_stddev(self):
         """Basic mean and stddev calculations."""
         from coder_eval.reports_stats import mean, stddev
