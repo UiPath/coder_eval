@@ -38,13 +38,18 @@ class MockAgent(Agent):
         self._iteration = 0  # Track iteration count for TurnRecord
 
     async def start(
-        self, working_directory: str, *, env_path_prepend: list[str] | None = None, plugin_tools_dir: str | None = None
+        self,
+        working_directory: str,
+        *,
+        env_path_prepend: list[str] | None = None,
+        plugin_tools_dir: str | None = None,
     ) -> None:
         """Initialize mock agent with working directory.
 
         Args:
             working_directory: Path to the sandbox working directory
             env_path_prepend: Ignored. Accepted only to match the Agent ABC signature.
+            plugin_tools_dir: Ignored. Accepted only to match the Agent ABC signature.
         """
         self.working_directory = Path(working_directory)
         self.state = AgentState.WORKING
