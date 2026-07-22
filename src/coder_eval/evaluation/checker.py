@@ -12,7 +12,14 @@ from typing import TYPE_CHECKING, Any
 from ..criteria import BaseCriterion, CriterionRegistry, init_criteria
 from ..criteria.base import CheckContext
 from ..errors import JudgeInfrastructureError
-from ..models import CriteriaResults, CriterionResult, SuccessCriteria, SuccessCriterion, TurnRecords
+from ..models import (
+    CriteriaResults,
+    CriterionResult,
+    EvaluationResult,
+    SuccessCriteria,
+    SuccessCriterion,
+    TurnRecords,
+)
 from ..sandbox import Sandbox
 
 
@@ -93,6 +100,10 @@ class SuccessChecker:
         self._reference_dir: Path | None = None
         # Cached turn records - set by check()/check_all() when provided
         self._turn_records: TurnRecords | None = None
+        # Cached in-flight EvaluationResult - set by check()/check_all() when provided.
+        # Forwarded to run_command's pass_context=true so a scoring script can read the
+        # trajectory + resolved config; ignored by every other criterion.
+        self._run_result: EvaluationResult | None = None
         self.route = route
 
         # V3: Lazy initialization - registry loaded here, not at import
@@ -105,6 +116,7 @@ class SuccessChecker:
         reference_code: str | None = None,
         turn_records: TurnRecords | None = None,
         reference_dir: Path | None = None,
+        run_result: EvaluationResult | None = None,
     ) -> CriterionResult:
         """Check a single criterion (backward compatibility wrapper).
 
@@ -116,6 +128,9 @@ class SuccessChecker:
             reference_dir: Optional resolved path to a reference directory
                 (from ``task.reference.directory``). Only consumed by
                 ``agent_judge``; non-judge criteria ignore it.
+            run_result: Optional in-flight :class:`EvaluationResult`. Only
+                consumed by ``run_command`` with ``pass_context=true``; other
+                criteria ignore it.
 
         Returns:
             CriterionResult with score
@@ -127,10 +142,13 @@ class SuccessChecker:
             self._reference_dir = reference_dir
         if turn_records is not None:
             self._turn_records = turn_records
+        if run_result is not None:
+            self._run_result = run_result
         ref_code = reference_code if reference_code is not None else self._reference_code
         ref_dir = reference_dir if reference_dir is not None else self._reference_dir
         records = turn_records if turn_records is not None else self._turn_records
-        return self._check_single(criterion, ref_code, records, ref_dir)
+        result = run_result if run_result is not None else self._run_result
+        return self._check_single(criterion, ref_code, records, ref_dir, result)
 
     def check_all(
         self,
@@ -138,6 +156,7 @@ class SuccessChecker:
         reference_code: str | None = None,
         turn_records: TurnRecords | None = None,
         reference_dir: Path | None = None,
+        run_result: EvaluationResult | None = None,
     ) -> CriteriaResults:
         """Check all success criteria.
 
@@ -147,6 +166,9 @@ class SuccessChecker:
             turn_records: Optional turn records for command inspection
             reference_dir: Optional resolved path to a reference directory.
                 Only consumed by ``agent_judge``; non-judge criteria ignore it.
+            run_result: Optional in-flight :class:`EvaluationResult`. Only
+                consumed by ``run_command`` with ``pass_context=true``; other
+                criteria ignore it.
 
         Returns:
             List of criterion results with scores
@@ -158,13 +180,16 @@ class SuccessChecker:
             self._reference_dir = reference_dir
         if turn_records is not None:
             self._turn_records = turn_records
+        if run_result is not None:
+            self._run_result = run_result
         ref_code = reference_code if reference_code is not None else self._reference_code
         ref_dir = reference_dir if reference_dir is not None else self._reference_dir
         records = turn_records if turn_records is not None else self._turn_records
+        result = run_result if run_result is not None else self._run_result
         results = []
         for criterion in criteria:
-            result = self._check_single(criterion, ref_code, records, ref_dir)
-            results.append(result)
+            r = self._check_single(criterion, ref_code, records, ref_dir, result)
+            results.append(r)
         return results
 
     def _get_checker_instance(self, criterion_type: str) -> BaseCriterion[Any]:
@@ -187,6 +212,7 @@ class SuccessChecker:
         reference_code: str | None,
         turn_records: TurnRecords | None = None,
         reference_dir: Path | None = None,
+        run_result: EvaluationResult | None = None,
     ) -> CriterionResult:
         """Check a single criterion using registered checker.
 
@@ -195,6 +221,8 @@ class SuccessChecker:
             reference_code: Optional reference code (string form)
             turn_records: Optional turn records for command inspection
             reference_dir: Optional resolved path to a reference directory.
+            run_result: Optional in-flight EvaluationResult (run_command's
+                pass_context=true consumes it; other criteria ignore it).
 
         Returns:
             CriterionResult with score
@@ -205,7 +233,7 @@ class SuccessChecker:
         try:
             # Get cached instance
             checker = self._get_checker_instance(criterion_type)
-            context = CheckContext(route=self.route, reference_dir=reference_dir)
+            context = CheckContext(route=self.route, reference_dir=reference_dir, run_result=run_result)
             result = checker.check(
                 criterion,
                 self.sandbox,

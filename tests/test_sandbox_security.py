@@ -4,6 +4,7 @@ Tests prevent malicious task definitions from escaping the sandbox.
 """
 
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,53 @@ import pytest
 from coder_eval.models.sandbox import SandboxConfig
 from coder_eval.models.templates import StarterFile, StarterFilesSource
 from coder_eval.sandbox import Sandbox
+
+
+def _write_executable(path: Path, body: str) -> None:
+    """Write an executable shim (POSIX; chmod is a no-op on Windows)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shim semantics; PATH shadowing differs on Windows")
+def test_node_modules_bin_python_shim_does_not_hijack_interpreter():
+    """An agent-planted node_modules/.bin/python must NOT shadow the real interpreter.
+
+    Regression for the prepend->append fix: node_modules/.bin is agent-writable,
+    so a shim named `python` there must lose the PATH lookup to the host/venv
+    python (it is now appended, not prepended).
+
+    Uses the default (venv) config so a real `python` is guaranteed in the
+    prepended venv scripts dir on any host — the test does not depend on the
+    host exposing a bare ``python``.
+    """
+    config = SandboxConfig(driver="tempdir")
+    sandbox = Sandbox(config, task_id="test_shim_hijack")
+    try:
+        sandbox_dir = sandbox.setup()
+        _write_executable(sandbox_dir / "node_modules" / ".bin" / "python", "#!/bin/sh\necho HIJACKED\n")
+        exit_code, stdout, _stderr = sandbox.run_command("python -c \"print('real')\"")
+        assert exit_code == 0
+        assert "HIJACKED" not in stdout
+        assert "real" in stdout
+    finally:
+        sandbox.cleanup()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shim semantics")
+def test_node_modules_bin_noncolliding_cli_still_resolvable():
+    """A package-local CLI with no host collision stays reachable after the append."""
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_compat_cli")
+    try:
+        sandbox_dir = sandbox.setup()
+        _write_executable(sandbox_dir / "node_modules" / ".bin" / "mytool_uniqxyz", "#!/bin/sh\necho TOOL_RAN\n")
+        exit_code, stdout, _stderr = sandbox.run_command("mytool_uniqxyz")
+        assert exit_code == 0
+        assert "TOOL_RAN" in stdout
+    finally:
+        sandbox.cleanup()
 
 
 def test_starter_files_rejects_path_traversal(tmp_path):

@@ -539,6 +539,13 @@ Runs a command and checks the exit code, with optional stdout matching. **Binary
   expected_stdout: "Hello, World!"    # Optional: check stdout content
   stdout_match: "exact"               # "exact" (default), "contains", or "regex"
   description: "Script must output the correct text"
+
+# Give the scoring script the agent trajectory + resolved config
+- type: "run_command"
+  command: "python score.py"          # reads json.load(open(os.environ["CODER_EVAL_CONTEXT"]))
+  score_from_stdout: true
+  pass_context: true                  # expose the in-flight record at $CODER_EVAL_CONTEXT
+  description: "Score derived from the trajectory"
 ```
 
 | Field | Default | Description |
@@ -548,6 +555,45 @@ Runs a command and checks the exit code, with optional stdout matching. **Binary
 | `expected_exit_code` | 0 | Expected exit code |
 | `expected_stdout` | `null` | When set, stdout is also checked |
 | `stdout_match` | `"exact"` | Match mode: `exact` (stripped), `contains` (substring), `regex` (pattern) |
+| `pass_context` | `false` | Expose the in-flight evaluation record as JSON at `$CODER_EVAL_CONTEXT` (see below) |
+
+#### `pass_context` — the evaluation record as `$CODER_EVAL_CONTEXT`
+
+With `pass_context: true`, the command runs with an env var `CODER_EVAL_CONTEXT`
+pointing at a JSON file. Its schema is **exactly** `task.json` (an
+`EvaluationResult`): `iterations` (the full agent trajectory, including
+`commands` and `messages`), `task_config` (the resolved `TaskDefinition` plus
+per-key merge lineage), `command_stats`, `total_token_usage`, `agent_config`,
+`environment_info`, and `early_stop`. This lets a scoring script see the
+trajectory and resolved config, not just the filesystem.
+
+```python
+# score.py
+import json, os
+
+ctx = json.load(open(os.environ["CODER_EVAL_CONTEXT"]))
+print(min(1.0, len(ctx["iterations"]) / 3))   # first line = the score
+```
+
+Because the payload is the `task.json` format, you can **develop the script
+offline** against a real `task.json` from a previous run — zero agent runs, zero
+API cost — then wire the same script in unchanged.
+
+Two rules to respect:
+
+- **`success_criteria_results` is always `[]`** in this payload. Criteria are
+  checked in list order, so exposing already-computed verdicts would make a
+  script silently depend on its position in the YAML. Do not read it.
+- Fields finalized only *after* the criteria phase are provisional: don't read
+  them. `weighted_score`, `completed_at`, and `duration_seconds` are `null`, and
+  `final_status` is still a placeholder (typically `"FAILURE"`), not the real
+  outcome. Everything else is fully populated. On the evaluate-only path (no
+  agent), `iterations` is `[]` but `task_config` is present, so tolerate an
+  empty `iterations`.
+
+The file is written to a private temp dir (never inside the sandbox work dir, so
+it is not archived with preserved sandboxes) and deleted immediately after the
+command completes.
 
 ### `file_matches_regex`
 

@@ -198,6 +198,13 @@ class RunCommandCriterion(BaseSuccessCriterion):
             command: "python score.py"
             score_from_stdout: true
             description: "Similarity score from scoring script"
+
+          # Expose the in-flight evaluation record to the scoring script
+          - type: "run_command"
+            command: "python score.py"  # reads json.load(open(os.environ["CODER_EVAL_CONTEXT"]))
+            score_from_stdout: true
+            pass_context: true
+            description: "Score derived from the agent trajectory + resolved config"
     """
 
     type: Literal["run_command"] = "run_command"
@@ -217,6 +224,17 @@ class RunCommandCriterion(BaseSuccessCriterion):
             "When true, read a float score (0.0-1.0) from the first line of stdout. "
             "Remaining lines are captured as details. Non-zero exit code or parse failure -> score 0.0. "
             "Mutually exclusive with expected_stdout."
+        ),
+    )
+    pass_context: bool = Field(
+        default=False,
+        description=(
+            "Expose the in-flight evaluation record to the command as a JSON file at "
+            "$CODER_EVAL_CONTEXT. Same schema as task.json (EvaluationResult), so a scoring "
+            "script can be developed offline against a task.json from a previous run. "
+            "success_criteria_results is always empty; weighted_score / completed_at / "
+            "duration_seconds are null and final_status is still a placeholder (e.g. FAILURE) "
+            "because these are only finalized after the criteria phase — do not read them."
         ),
     )
 

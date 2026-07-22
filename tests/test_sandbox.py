@@ -157,6 +157,108 @@ def test_sandbox_run_command_task_dir_absent():
         sandbox.cleanup()
 
 
+def test_run_command_extra_env_none_leaves_env_unchanged():
+    """extra_env=None is the no-op default: the env matches _build_run_command_env."""
+    config = SandboxConfig(driver="tempdir")
+    sandbox = Sandbox(config, task_id="test_extra_env_none", task_dir=Path("/some/task/dir"))
+    try:
+        sandbox.setup()
+        baseline = sandbox._build_run_command_env()
+        # TASK_DIR is present in the baseline; extra_env=None must not disturb it.
+        assert "TASK_DIR" in baseline
+        exit_code, stdout, _stderr = sandbox.run_command(
+            "python -c \"import os; print(os.environ.get('TASK_DIR', 'NOT_SET'))\"",
+            extra_env=None,
+        )
+        assert exit_code == 0
+        assert stdout.strip() == str(Path("/some/task/dir"))
+    finally:
+        sandbox.cleanup()
+
+
+def test_run_command_extra_env_visible_to_command():
+    """A variable passed via extra_env is readable by the spawned command."""
+    config = SandboxConfig(driver="tempdir")
+    sandbox = Sandbox(config, task_id="test_extra_env_visible")
+    try:
+        sandbox.setup()
+        exit_code, stdout, _stderr = sandbox.run_command(
+            "python -c \"import os; print(os.environ['FOO'])\"",
+            extra_env={"FOO": "bar"},
+        )
+        assert exit_code == 0
+        assert stdout.strip() == "bar"
+    finally:
+        sandbox.cleanup()
+
+
+def test_run_command_extra_env_does_not_clobber_standard_vars():
+    """extra_env layers on top: unrelated standard vars (TASK_DIR) survive."""
+    config = SandboxConfig(driver="tempdir")
+    sandbox = Sandbox(config, task_id="test_extra_env_keeps_task_dir", task_dir=Path("/some/task/dir"))
+    try:
+        sandbox.setup()
+        exit_code, stdout, _stderr = sandbox.run_command(
+            "python -c \"import os; print(os.environ['FOO'], os.environ['TASK_DIR'])\"",
+            extra_env={"FOO": "bar"},
+        )
+        assert exit_code == 0
+        assert stdout.strip() == f"bar {Path('/some/task/dir')}"
+    finally:
+        sandbox.cleanup()
+
+
+@pytest.mark.parametrize("key", ["PATH", "VIRTUAL_ENV", "NODE_PATH", "NPM_CONFIG_PREFIX"])
+def test_run_command_extra_env_rejects_protected_keys(key):
+    """extra_env must not silently clobber the sandbox-isolation floor."""
+    config = SandboxConfig(driver="tempdir", python=None)
+    sandbox = Sandbox(config, task_id="test_extra_env_protected")
+    try:
+        sandbox.setup()
+        with pytest.raises(ValueError, match="sandbox-isolation"):
+            sandbox.run_command("python -c \"print('x')\"", extra_env={key: "/attacker/controlled"})
+    finally:
+        sandbox.cleanup()
+
+
+def test_node_modules_bin_appended_after_venv_and_host_path():
+    """node_modules/.bin must be LAST on PATH (appended), after venv + host.
+
+    Platform-independent: asserts on the string built by _build_run_command_env
+    rather than executing anything.
+    """
+    config = SandboxConfig(driver="tempdir")
+    sandbox = Sandbox(config, task_id="test_path_order")
+    try:
+        sandbox_dir = sandbox.setup()
+        (sandbox_dir / "node_modules" / ".bin").mkdir(parents=True, exist_ok=True)
+        env = sandbox._build_run_command_env()
+        parts = env["PATH"].split(os.pathsep)
+        node_bin = str(sandbox_dir / "node_modules" / ".bin")
+        assert node_bin in parts
+        # Appended => it is the final PATH entry, so venv scripts and host PATH win.
+        assert parts.index(node_bin) == len(parts) - 1
+        assert parts.index(str(sandbox._venv_scripts_dir)) < parts.index(node_bin)
+    finally:
+        sandbox.cleanup()
+
+
+def test_run_command_extra_env_empty_dict_behaves_as_none():
+    """extra_env={} is falsy, so the update is skipped — same as None."""
+    config = SandboxConfig(driver="tempdir")
+    sandbox = Sandbox(config, task_id="test_extra_env_empty", task_dir=Path("/some/task/dir"))
+    try:
+        sandbox.setup()
+        exit_code, stdout, _stderr = sandbox.run_command(
+            "python -c \"import os; print(os.environ.get('TASK_DIR', 'NOT_SET'))\"",
+            extra_env={},
+        )
+        assert exit_code == 0
+        assert stdout.strip() == str(Path("/some/task/dir"))
+    finally:
+        sandbox.cleanup()
+
+
 def test_sandbox_run_command_uses_agent_command_base_path(monkeypatch, tmp_path):
     """Criteria commands can be pinned to the PATH seen by the agent."""
     from tests._path_helpers import write_uip_shim

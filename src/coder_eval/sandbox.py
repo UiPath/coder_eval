@@ -62,6 +62,14 @@ _WORKSPACE_CAPTURE_IGNORE = (
     ".wget-hsts",
 )
 
+# Env vars that constitute the sandbox-isolation floor built by
+# ``_build_run_command_env``: the PATH ordering (agent-writable node_modules/.bin
+# is deliberately appended, not prepended, so a planted interpreter shim cannot
+# hijack a scoring command) and the Node resolution isolation (MST-9674).
+# ``run_command``'s ``extra_env`` must NOT silently clobber these — an unconditional
+# floor, mirroring the plan's JUDGE_SECURITY_IGNORE_FLOOR principle.
+_PROTECTED_RUN_COMMAND_ENV_KEYS = frozenset({"PATH", "VIRTUAL_ENV", "NODE_PATH", "NPM_CONFIG_PREFIX"})
+
 
 def _grant_read_traverse(root: Path) -> None:
     """Recursively apply ``chmod a+rX`` semantics under ``root``.
@@ -809,7 +817,13 @@ class Sandbox:
            prepend duplicates the entry. Harmless on every OS we target;
            left explicit so the order stays independent of what the agent
            SDK happens to inject.
-        4. Prepend ``<sandbox>/node_modules/.bin`` to PATH (if present).
+        4. **Append** ``<sandbox>/node_modules/.bin`` to PATH (if present).
+           Appended, not prepended: that directory is agent-writable, so a
+           shim planted there (``python``/``node``/``sh``/``uv``) must not win a
+           name collision against the venv/host interpreter (shim hijack).
+           Package-local CLIs (``eslint``/``tsc``/…) have no host/venv collision,
+           so appending still resolves them; only a collision — which is exactly
+           the attack — flips to the trusted binary.
         5. (MST-9674) Pin ``NODE_PATH=""`` so Node's fallback search paths
            cannot pick up contaminated parent-dir installs. Note: this
            does NOT disable parent-walking from cwd — that is hard-wired
@@ -830,7 +844,11 @@ class Sandbox:
             env["PATH"] = f"{self._venv_scripts_dir}{os.pathsep}{env['PATH']}"
         node_bin = self.sandbox_dir / "node_modules" / ".bin"
         if node_bin.exists():
-            env["PATH"] = f"{node_bin}{os.pathsep}{env['PATH']}"
+            # Append (not prepend): node_modules/.bin is agent-writable, so it must
+            # not win a name collision against the venv/host python|node|sh (shim
+            # hijack). Package-local CLIs (eslint, tsc, …) have no host collision, so
+            # appending still resolves them.
+            env["PATH"] = f"{env['PATH']}{os.pathsep}{node_bin}"
         # MST-9674: keep Node and npm resolution sandbox-local so concurrent
         # tasks cannot poison each other through shared parent-dir node_modules.
         env["NODE_PATH"] = ""
@@ -901,19 +919,34 @@ class Sandbox:
             )
         return offenders
 
-    def run_command(self, command: str, timeout: float | int | None = None) -> tuple[int, str, str]:
+    def run_command(
+        self,
+        command: str,
+        timeout: float | int | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> tuple[int, str, str]:
         """Run a command in the sandbox environment.
 
         Args:
             command: Command to execute
             timeout: Timeout in seconds (uses config default if not specified)
+            extra_env: Additional environment variables layered on top of the
+                standard run_command environment (last-wins). Used by criteria
+                that expose framework-owned paths to the command. Keys in
+                ``_PROTECTED_RUN_COMMAND_ENV_KEYS`` (PATH / VIRTUAL_ENV /
+                NODE_PATH / NPM_CONFIG_PREFIX) are the sandbox-isolation floor
+                and are rejected — ``extra_env`` cannot silently clobber them.
 
         Returns:
             Tuple of (exit_code, stdout, stderr)
 
+        Note:
+            On timeout the method does NOT raise — it returns ``(-1, "", msg)``
+            so callers can score a timeout as a normal failure.
+
         Raises:
             RuntimeError: If sandbox is not set up
-            subprocess.TimeoutExpired: If command times out
+            ValueError: If ``extra_env`` tries to override a sandbox-isolation key
         """
         if not self.sandbox_dir:
             raise RuntimeError("Sandbox not set up. Call setup() first.")
@@ -923,6 +956,15 @@ class Sandbox:
             timeout = self.config.limits.timeout
 
         env = self._build_run_command_env()
+        if extra_env:
+            protected = _PROTECTED_RUN_COMMAND_ENV_KEYS.intersection(extra_env)
+            if protected:
+                raise ValueError(
+                    f"extra_env may not override sandbox-isolation env vars {sorted(protected)}: "
+                    + "these are framework-owned floors (PATH ordering / Node resolution isolation) "
+                    + "that a criterion must not silently clobber."
+                )
+            env.update(extra_env)
 
         try:
             # Shell execution is intentional for sandbox - allows pipes, redirects, and complex commands.

@@ -1352,6 +1352,7 @@ class Orchestrator:
                 reference_code=reference_code,
                 reference_dir=reference_dir,
                 turn_records=self.result.iterations,
+                run_result=self.result,
             )
             self.result.success_criteria_results = criteria_results
             return self.result.all_criteria_passed(self.task.success_criteria)
@@ -1411,6 +1412,7 @@ class Orchestrator:
             reference_code=reference_code,
             reference_dir=reference_dir,
             turn_records=self.result.iterations,
+            run_result=self.result,
         )
         self.result.success_criteria_results = criteria_results
 
@@ -1504,6 +1506,7 @@ class Orchestrator:
             reference_code=reference_code,
             reference_dir=reference_dir,
             turn_records=self.result.iterations,
+            run_result=self.result,
         )
         self._accumulate_judge_usage(criteria_results, judge_usage_accum)
         self.result.success_criteria_results = criteria_results

@@ -149,7 +149,7 @@ templates/                         # Sandbox template directories
 | `file_contains` | Fractional | String presence/absence |
 | `file_check` | Fractional | Unified file existence + content + regex check |
 | `json_check` | Fractional | JSON validation + JSON Schema + JMESPath assertions |
-| `run_command` | Binary / Continuous | Command exit code + optional stdout matching or float scoring |
+| `run_command` | Binary / Continuous | Command exit code + optional stdout matching or float scoring; opt-in `pass_context: true` exposes the in-flight `EvaluationResult` (task.json schema) at `$CODER_EVAL_CONTEXT` for the scoring script |
 | `file_matches_regex` | Binary | Regex match on file |
 | `reference_comparison` | Continuous | AST/token/complexity similarity |
 | `command_executed` | Fractional | Agent tool usage verification |

@@ -3,6 +3,8 @@
 import logging
 import math
 import re
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from coder_eval.criteria.base import BaseCriterion, CheckContext, register_criterion
@@ -10,10 +12,27 @@ from coder_eval.models import CriterionResult, RunCommandCriterion
 
 
 if TYPE_CHECKING:
-    from coder_eval.models.results import TurnRecord
+    from coder_eval.models.results import EvaluationResult, TurnRecord
     from coder_eval.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
+
+# Env var name pointing the scoring command at the serialized context file.
+# Mirrors the framework-owned TASK_DIR convention (sandbox._build_run_command_env).
+_CONTEXT_ENV_VAR = "CODER_EVAL_CONTEXT"
+
+
+def _serialize_context(run_result: "EvaluationResult") -> str:
+    """Render the in-flight evaluation record as task.json-shaped JSON.
+
+    ``success_criteria_results`` is force-cleared: criteria are checked in list
+    order, so leaking already-computed verdicts would make scripts silently
+    depend on their position in the task YAML — and in simulation every_turn
+    mode the field still holds the *previous* turn's results. ``model_copy`` is a
+    shallow copy, so the large ``iterations`` list is shared, not duplicated, and
+    the caller's ``run_result`` is never mutated.
+    """
+    return run_result.model_copy(update={"success_criteria_results": []}).model_dump_json()
 
 
 # Per-stream output budget included in criterion details. Large enough for
@@ -65,7 +84,29 @@ class RunCommandChecker(BaseCriterion[RunCommandCriterion]):
     ) -> CriterionResult:
         """Execute command and dispatch to the appropriate scoring method."""
         logger.debug(f"Running command for criterion '{criterion.description}': {criterion.command}")
-        exit_code, stdout, stderr = sandbox.run_command(criterion.command, timeout=criterion.timeout)
+
+        if not criterion.pass_context:
+            exit_code, stdout, stderr = sandbox.run_command(criterion.command, timeout=criterion.timeout)
+        else:
+            run_result = context.run_result if context is not None else None
+            if run_result is None:
+                raise ValueError(
+                    "pass_context=true requires the in-flight EvaluationResult, but none was "
+                    + "supplied. It is threaded from the Orchestrator via CheckContext.run_result; "
+                    + "a SuccessChecker constructed outside a run must pass run_result= explicitly."
+                )
+            # tempfile (not the sandbox work dir): preserved sandboxes are archived
+            # to blob storage, and a context file dropped in the work dir would ride
+            # along. The with-block deletes the dir on every exit path, including the
+            # timeout return (run_command returns (-1, "", msg), it does not raise).
+            with tempfile.TemporaryDirectory(prefix="coder-eval-ctx-") as tmpdir:
+                context_path = Path(tmpdir) / "context.json"
+                context_path.write_text(_serialize_context(run_result), encoding="utf-8")
+                exit_code, stdout, stderr = sandbox.run_command(
+                    criterion.command,
+                    timeout=criterion.timeout,
+                    extra_env={_CONTEXT_ENV_VAR: str(context_path)},
+                )
 
         if criterion.score_from_stdout:
             return self._score_from_stdout(criterion, exit_code, stdout, stderr)

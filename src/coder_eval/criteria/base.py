@@ -17,7 +17,7 @@ from coder_eval.models import BaseSuccessCriterion, CriterionAggregate, Criterio
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from coder_eval.models.results import TurnRecord
+    from coder_eval.models.results import EvaluationResult, TurnRecord
     from coder_eval.models.routing import ApiRoute
     from coder_eval.sandbox import Sandbox
 
@@ -39,10 +39,19 @@ class CheckContext:
 
     Non-judge checkers receive it too (uniform ``_check_impl`` signature) and
     ignore it.
+
+    ``run_result`` carries the *in-flight* :class:`EvaluationResult` — the same
+    object the orchestrator is populating for the current attempt, not a finished
+    record. It is present for the criteria phase (its ``iterations`` /
+    ``task_config`` are set), but fields computed after checking
+    (``weighted_score`` / ``final_status`` / ``completed_at``) are still
+    provisional. ``run_command`` with ``pass_context=true`` serializes it for the
+    scoring script; other checkers ignore it.
     """
 
     route: "ApiRoute | None" = None
     reference_dir: "Path | None" = None
+    run_result: "EvaluationResult | None" = None
 
 
 def handle_criterion_errors(func: Callable[..., CriterionResult]) -> Callable[..., CriterionResult]:
