@@ -7,9 +7,14 @@ sync, pricing, and cost repricing. Mirrors the Bedrock equivalents in
 
 from __future__ import annotations
 
+import urllib.error
+import urllib.request
+from unittest.mock import MagicMock
+
 import pytest
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
+from coder_eval.cli.run_command import _litellm_preflight_error
 from coder_eval.config import Settings
 from coder_eval.models import (
     AgentKind,
@@ -251,3 +256,34 @@ class TestRepriceForLitellm:
         u = TokenUsage(uncached_input_tokens=100, output_tokens=100, total_cost_usd=9.99)
         ClaudeCodeAgent._reprice_for_litellm(u, None)
         assert u.total_cost_usd is None
+
+
+class TestLitellmPreflight:
+    """External-proxy reachability preflight — fail fast instead of hanging on a dead proxy."""
+
+    def test_none_for_non_litellm_backend(self):
+        s = Settings(api_backend=ApiBackend.BEDROCK, litellm_base_url="http://x:4000")
+        assert _litellm_preflight_error(s) is None
+
+    def test_none_when_no_base_url(self):
+        s = Settings(api_backend=ApiBackend.LITELLM, litellm_base_url=None, litellm_model="m")
+        assert _litellm_preflight_error(s) is None
+
+    def test_error_when_proxy_down(self, monkeypatch):
+        monkeypatch.setattr(urllib.request, "urlopen", MagicMock(side_effect=urllib.error.URLError("refused")))
+        s = Settings(api_backend=ApiBackend.LITELLM, litellm_base_url="http://127.0.0.1:9", litellm_model="m")
+        err = _litellm_preflight_error(s)
+        assert err is not None
+        assert "not reachable" in err and "http://127.0.0.1:9" in err
+
+    def test_none_when_reachable(self, monkeypatch):
+        monkeypatch.setattr(urllib.request, "urlopen", MagicMock(return_value=MagicMock()))
+        s = Settings(api_backend=ApiBackend.LITELLM, litellm_base_url="http://127.0.0.1:4000", litellm_model="m")
+        assert _litellm_preflight_error(s) is None
+
+    def test_none_on_http_error_means_server_up(self, monkeypatch):
+        monkeypatch.setattr(
+            urllib.request, "urlopen", MagicMock(side_effect=urllib.error.HTTPError("u", 404, "nf", {}, None))
+        )
+        s = Settings(api_backend=ApiBackend.LITELLM, litellm_base_url="http://127.0.0.1:4000", litellm_model="m")
+        assert _litellm_preflight_error(s) is None

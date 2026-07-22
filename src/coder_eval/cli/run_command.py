@@ -4,6 +4,8 @@ import asyncio
 import logging
 import os
 import sys
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -12,7 +14,7 @@ import click
 import typer
 from tqdm import tqdm
 
-from ..config import settings
+from ..config import Settings, settings
 from ..logging_config import setup_logging
 from ..models import PreservationMode, ResolvedTask, RunSummary, TaskResult
 from ..orchestration.config import BatchRunConfig
@@ -64,6 +66,33 @@ def _resolve_experiment_path(experiment: Path | None) -> Path | None:
         available = sorted(p.stem for p in experiments_dir.glob("*.yaml") if p.stem != "default")
     hint = f" Available: {', '.join(available)}" if available else ""
     raise typer.BadParameter(f"Experiment not found: {experiment}.{hint}")
+
+
+def _litellm_preflight_error(current_settings: Settings) -> str | None:
+    """Return an error message if the ``litellm`` backend's external proxy is
+    unreachable, else ``None``.
+
+    Only applies when ``api_backend=litellm`` with an explicit ``LITELLM_BASE_URL``
+    (the manual proxy / always-on-sidecar path). Without this check a dead proxy
+    makes the Claude SDK hang on the endpoint instead of failing fast. Any HTTP
+    response (even non-200) counts as reachable — only a connection/timeout error
+    is treated as "proxy down".
+    """
+    from ..models import ApiBackend
+
+    if current_settings.api_backend != ApiBackend.LITELLM or not current_settings.litellm_base_url:
+        return None
+    url = f"{current_settings.litellm_base_url.rstrip('/')}/health/liveliness"
+    try:
+        urllib.request.urlopen(url, timeout=5).close()
+    except urllib.error.HTTPError:
+        return None  # server responded (up), just not 200 on this path
+    except (urllib.error.URLError, OSError) as exc:
+        return (
+            f"LiteLLM proxy not reachable at {current_settings.litellm_base_url} (tried {url}): {exc}. "
+            "Start it (e.g. docker/start-litellm.sh) or unset LITELLM_BASE_URL."
+        )
+    return None
 
 
 def _build_overrides(
@@ -450,6 +479,13 @@ async def _run_all_tasks(
             "ExperimentProvided": experiment_path is not None,
         },
     )
+
+    # Fail fast if the litellm backend points at an unreachable external proxy —
+    # otherwise the agent hangs on the dead endpoint instead of erroring.
+    preflight_error = await asyncio.to_thread(_litellm_preflight_error, settings)
+    if preflight_error:
+        console.print(f"[red]{preflight_error}[/red]")
+        raise typer.Exit(1)
 
     try:
         # Always run through experiment layer (defaults to experiments/default.yaml)
