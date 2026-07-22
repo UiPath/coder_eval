@@ -41,3 +41,8 @@
 
 - **task-b**: spread=0.450, best=mutated
 - **task-a**: spread=0.200, best=baseline
+
+## Paired Comparison
+
+*Paired over the per-task mean score of 2 task(s) common to both variants — removes between-task variance; more powerful than the pooled Welch test above.*
+**Paired mean diff (baseline - mutated)**: -0.125 [95% CI -0.450, +0.200], Cohen's d = -0.27, p = 0.766

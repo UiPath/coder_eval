@@ -214,6 +214,24 @@ def cohens_d(a: list[float], b: list[float]) -> float | None:
     return (sum(diffs) / len(diffs)) / s if s > 0 else None
 
 
+def paired_t_test(a: list[float], b: list[float]) -> float | None:
+    """Two-tailed p-value from a paired t-test on (a_i - b_i), exact t distribution.
+
+    Equivalent to a one-sample t-test of the differences against 0, df = n - 1.
+    Returns None if lengths differ or n < 2.
+    """
+    if len(a) != len(b) or len(a) < 2:
+        return None
+    diffs = [ai - bi for ai, bi in zip(a, b, strict=True)]
+    sd = stddev(diffs)
+    mean_diff = sum(diffs) / len(diffs)
+    if sd == 0:
+        # All diffs identical: no difference (p=1) or a deterministic shift (p=0).
+        return 1.0 if mean_diff == 0 else 0.0
+    t_stat = abs(mean_diff) / (sd / math.sqrt(len(diffs)))
+    return student_t_two_tailed_p(t_stat, len(diffs) - 1)
+
+
 # ---------------------------------------------------------------------------
 # Prompt config + variant-result loaders
 # ---------------------------------------------------------------------------

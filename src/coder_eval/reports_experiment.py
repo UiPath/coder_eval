@@ -21,7 +21,9 @@ from coder_eval.reports_stats import (
     fmt_mean_sd,
     fmt_p,
     load_variant_eval_results,
+    mean,
     paired_bootstrap_diff_ci,
+    paired_t_test,
     stddev,
     welch_t_test,
     wilson_interval,
@@ -465,8 +467,7 @@ class ExperimentReportGenerator:
     @staticmethod
     def _replicate_stats_lines(result: ExperimentResult) -> list[str]:
         """The ``## Replicate Statistics`` block: per-variant bootstrap-CI / Wilson
-        pass-rate table + the 2-variant paired-bootstrap comparison. Returns ``[]``
-        when no variant ran more than one replicate."""
+        pass-rate table. Returns ``[]`` when no variant ran more than one replicate."""
         # ── Replicate Statistics (only when any variant ran >1 replicate) ──
         if not any(ts.replicate_count > 1 for ts in result.task_summaries):
             return []
@@ -488,44 +489,67 @@ class ExperimentReportGenerator:
                 + f" | {passes}/{len(all_scores)} [{wlo:.2f}, {whi:.2f}] |"
             )
 
-        # Paired comparison for 2-variant experiments
-        if len(result.variant_ids) == 2:
-            vid_a, vid_b = result.variant_ids[0], result.variant_ids[1]
-            per_rep_a = result.per_replicate_scores.get(vid_a, {})
-            per_rep_b = result.per_replicate_scores.get(vid_b, {})
-            common_tasks = sorted(set(per_rep_a) & set(per_rep_b))
-            a_scores: list[float] = []
-            b_scores: list[float] = []
-            skipped_tasks: list[str] = []
-            for task_id in common_tasks:
-                rep_a = per_rep_a[task_id]
-                rep_b = per_rep_b[task_id]
-                if len(rep_a) == len(rep_b):
-                    a_scores.extend(rep_a)
-                    b_scores.extend(rep_b)
-                else:
-                    skipped_tasks.append(task_id)
-            diff = paired_bootstrap_diff_ci(a_scores, b_scores)
-            if diff is not None:
-                mean_diff, d_lo, d_hi = diff
-                d_val = cohens_d(a_scores, b_scores)
-                d_str = f"{d_val:.2f}" if d_val is not None else "n/a"
-                suffix = f" ({len(skipped_tasks)} task(s) excluded: unequal replicate counts)" if skipped_tasks else ""
-                lines.extend(
-                    [
-                        "",
-                        f"**Paired mean diff ({vid_a} - {vid_b})**: {mean_diff:+.3f}"
-                        + f" [95% CI {d_lo:+.3f}, {d_hi:+.3f}], Cohen's d = {d_str}{suffix}",
-                    ]
-                )
-            else:
-                lines.extend(
-                    [
-                        "",
-                        f"*Paired statistics skipped — unequal replicate counts between {vid_a} and {vid_b}.*",
-                    ]
-                )
         return lines
+
+    @staticmethod
+    def _paired_comparison_lines(result: ExperimentResult) -> list[str]:
+        """The ``## Paired Comparison`` block for 2-variant experiments.
+
+        Pairs the two variants' *per-task mean* scores, which removes between-task
+        difficulty variance and is therefore more powerful than the pooled Welch
+        test in ``## Aggregate Metrics``. The task is the unit of analysis: replicate
+        slots within a task share the task effect and are not independent, so
+        pairing them individually would understate the standard error. Unlike
+        ``## Replicate Statistics`` this has no replicate gate — single-replicate
+        experiments pair task-by-task. Returns ``[]`` when there is nothing to pair.
+        """
+        if len(result.variant_ids) != 2:
+            return []
+        vid_a, vid_b = result.variant_ids[0], result.variant_ids[1]
+        per_rep_a = result.per_replicate_scores.get(vid_a, {})
+        per_rep_b = result.per_replicate_scores.get(vid_b, {})
+        common_tasks = sorted(set(per_rep_a) & set(per_rep_b))
+        a_scores: list[float] = []
+        b_scores: list[float] = []
+        skipped_tasks: list[str] = []
+        for task_id in common_tasks:
+            rep_a = per_rep_a[task_id]
+            rep_b = per_rep_b[task_id]
+            if len(rep_a) == len(rep_b):
+                a_scores.append(mean(rep_a))
+                b_scores.append(mean(rep_b))
+            else:
+                skipped_tasks.append(task_id)
+
+        if len(a_scores) < 2:
+            if skipped_tasks:
+                return [
+                    "",
+                    "## Paired Comparison",
+                    "",
+                    f"*Paired statistics skipped — unequal replicate counts between {vid_a} and {vid_b}.*",
+                ]
+            # Nothing to pair: 0/1 common tasks, or per_replicate_scores absent (old results).
+            return []
+
+        # Equal lengths and >=2 pairs are guaranteed above, so this never returns None.
+        diff = paired_bootstrap_diff_ci(a_scores, b_scores)
+        if diff is None:  # pragma: no cover - defensive
+            return []
+        mean_diff, d_lo, d_hi = diff
+        d_val = cohens_d(a_scores, b_scores)
+        d_str = f"{d_val:.2f}" if d_val is not None else "n/a"
+        suffix = f" ({len(skipped_tasks)} task(s) excluded: unequal replicate counts)" if skipped_tasks else ""
+        return [
+            "",
+            "## Paired Comparison",
+            "",
+            f"*Paired over the per-task mean score of {len(a_scores)} task(s) common to both variants"
+            + " — removes between-task variance; more powerful than the pooled Welch test above.*",
+            f"**Paired mean diff ({vid_a} - {vid_b})**: {mean_diff:+.3f}"
+            + f" [95% CI {d_lo:+.3f}, {d_hi:+.3f}], Cohen's d = {d_str}"
+            + f", p = {fmt_p(paired_t_test(a_scores, b_scores))}{suffix}",
+        ]
 
     @staticmethod
     def generate_experiment_report(
@@ -549,6 +573,7 @@ class ExperimentReportGenerator:
         lines += ExperimentReportGenerator._aggregate_metrics_lines(result)
         lines += ExperimentReportGenerator._win_loss_lines(result)
         lines += ExperimentReportGenerator._replicate_stats_lines(result)
+        lines += ExperimentReportGenerator._paired_comparison_lines(result)
         return "\n".join(lines)
 
     @staticmethod

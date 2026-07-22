@@ -800,6 +800,34 @@ class TestStatisticalHelpers:
         assert regularized_incomplete_beta(2.0, 3.0, 0.0) == 0.0
         assert regularized_incomplete_beta(2.0, 3.0, 1.0) == 1.0
 
+    def test_paired_t_test_exact_reference_value(self):
+        """Exact paired-t p-value, cross-checked against scipy ttest_rel."""
+        from coder_eval.reports_stats import paired_t_test, welch_t_test
+
+        a = [0.9, 0.5, 0.8, 0.7, 0.95]
+        b = [0.7, 0.55, 0.6, 0.72, 0.8]
+        p_paired = paired_t_test(a, b)
+        assert p_paired is not None
+        assert abs(p_paired - 0.15273) < 5e-4
+        # Pairing removes between-task variance, so it is strictly more powerful.
+        p_welch = welch_t_test(a, b)
+        assert p_welch is not None
+        assert p_paired < p_welch
+
+    def test_paired_t_test_constant_shift_and_identical(self):
+        """Zero-sd differences: deterministic shift ⇒ 0.0, identical lists ⇒ 1.0."""
+        from coder_eval.reports_stats import paired_t_test
+
+        assert paired_t_test([1.0, 2.0, 3.0, 4.0, 5.0], [2.0, 3.0, 4.0, 5.0, 6.0]) == 0.0
+        assert paired_t_test([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]) == 1.0
+
+    def test_paired_t_test_invalid_input(self):
+        """Length mismatch or fewer than 2 pairs returns None."""
+        from coder_eval.reports_stats import paired_t_test
+
+        assert paired_t_test([1.0, 2.0], [1.0]) is None
+        assert paired_t_test([1.0], [2.0]) is None
+
     def test_mean_and_stddev(self):
         """Basic mean and stddev calculations."""
         from coder_eval.reports_stats import mean, stddev
@@ -1119,9 +1147,10 @@ class TestReplicateStatistics:
         assert "Pass-rate" in md
 
     def test_paired_diff_line_for_two_variants_equal_counts(self):
+        # Two tasks: the paired section pairs their per-task means (n = 2 tasks).
         per_rep = {
-            "a": {"task-1": [0.9, 0.85, 0.95]},
-            "b": {"task-1": [0.6, 0.65, 0.7]},
+            "a": {"task-1": [0.9, 0.85, 0.95], "task-2": [0.7, 0.75, 0.8]},
+            "b": {"task-1": [0.6, 0.65, 0.7], "task-2": [0.5, 0.55, 0.6]},
         }
         result = self._make_result(replicate_count=3, per_replicate_scores=per_rep)
         md = ExperimentReportGenerator.generate_experiment_report(result)
@@ -1167,6 +1196,146 @@ class TestReplicateStatistics:
         result = self._make_result(replicate_count=1, variant_ids=["a"])
         md = ExperimentReportGenerator.generate_variant_report("a", result)
         assert "Score 95% CI" not in md
+
+
+class TestPairedComparisonSection:
+    """Tests for the ``## Paired Comparison`` markdown section."""
+
+    @staticmethod
+    def _make_result(
+        variant_ids: list[str],
+        per_replicate_scores: dict[str, dict[str, list[float]]],
+    ) -> ExperimentResult:
+        task_ids = sorted({tid for per_task in per_replicate_scores.values() for tid in per_task})
+        return ExperimentResult(
+            experiment_id="exp",
+            description="d",
+            variant_ids=variant_ids,
+            task_summaries=[
+                TaskExperimentSummary(
+                    task_id=task_id,
+                    variant_results=[
+                        VariantResult(
+                            variant_id=vid,
+                            task_id=task_id,
+                            weighted_score=per_replicate_scores.get(vid, {}).get(task_id, [0.0])[0],
+                            final_status="SUCCESS",
+                            duration_seconds=1.0,
+                        )
+                        for vid in variant_ids
+                    ],
+                    best_variant=variant_ids[0],
+                    score_spread=0.1,
+                )
+                for task_id in task_ids
+            ],
+            variant_aggregates={
+                vid: VariantAggregate(
+                    variant_id=vid,
+                    tasks_run=len(task_ids),
+                    tasks_succeeded=len(task_ids),
+                    tasks_failed=0,
+                    tasks_error=0,
+                    average_score=0.5,
+                    average_duration=1.0,
+                )
+                for vid in variant_ids
+            },
+            total_duration_seconds=10.0,
+            per_replicate_scores=per_replicate_scores,
+        )
+
+    def test_paired_comparison_section_two_variants_single_replicate(self):
+        """A single-replicate 2-variant experiment gets the paired section (no replicate gate)."""
+        result = self._make_result(
+            ["a", "b"],
+            {
+                "a": {"t1": [0.9], "t2": [0.5], "t3": [0.8]},
+                "b": {"t1": [0.7], "t2": [0.55], "t3": [0.6]},
+            },
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "## Paired Comparison" in md
+        assert "**Paired mean diff (a - b)**" in md
+        assert ", p = " in md
+        assert "Cohen's d" in md
+        # Single replicate ⇒ no Replicate Statistics section, but paired still renders.
+        assert "## Replicate Statistics" not in md
+
+    def test_paired_comparison_section_absent(self):
+        """3 variants, or an empty per_replicate_scores, render no paired section."""
+        three = self._make_result(
+            ["a", "b", "c"],
+            {"a": {"t1": [0.9]}, "b": {"t1": [0.7]}, "c": {"t1": [0.6]}},
+        )
+        assert "## Paired Comparison" not in ExperimentReportGenerator.generate_experiment_report(three)
+
+        empty = self._make_result(["a", "b"], {})
+        empty.task_summaries = [
+            TaskExperimentSummary(
+                task_id="t1",
+                variant_results=[
+                    VariantResult(
+                        variant_id=vid,
+                        task_id="t1",
+                        weighted_score=0.5,
+                        final_status="SUCCESS",
+                        duration_seconds=1.0,
+                    )
+                    for vid in ("a", "b")
+                ],
+                best_variant="a",
+                score_spread=0.0,
+            )
+        ]
+        assert "## Paired Comparison" not in ExperimentReportGenerator.generate_experiment_report(empty)
+
+    def test_paired_comparison_averages_replicates_per_task(self):
+        """Replicates are averaged per task, so n is the task count — not the slot count."""
+        result = self._make_result(
+            ["a", "b"],
+            {
+                "a": {"t1": [0.8, 1.0], "t2": [0.4, 0.6]},
+                "b": {"t1": [0.5, 0.7], "t2": [0.2, 0.4]},
+            },
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "per-task mean score of 2 task(s) common to both variants" in md
+        # Task means: a = [0.9, 0.5], b = [0.6, 0.3] ⇒ diffs [+0.3, +0.2], mean +0.250.
+        assert "**Paired mean diff (a - b)**: +0.250" in md
+
+    def test_paired_comparison_single_common_task(self):
+        """One common task ⇒ a single pair ⇒ no section (a paired test needs n >= 2 tasks)."""
+        result = self._make_result(
+            ["a", "b"],
+            {"a": {"t1": [0.9, 0.85, 0.95]}, "b": {"t1": [0.6, 0.65, 0.7]}},
+        )
+        assert "## Paired Comparison" not in ExperimentReportGenerator.generate_experiment_report(result)
+
+    def test_paired_comparison_partial_skip(self):
+        """Some tasks skipped for unequal replicate counts, >=2 pairs left ⇒ suffix + reduced count."""
+        result = self._make_result(
+            ["a", "b"],
+            {
+                "a": {"t1": [0.5, 0.6], "t2": [0.4], "t3": [0.8]},
+                "b": {"t1": [0.5], "t2": [0.45], "t3": [0.7]},
+            },
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "## Paired Comparison" in md
+        assert "per-task mean score of 2 task(s) common to both variants" in md
+        assert "(1 task(s) excluded: unequal replicate counts)" in md
+
+    def test_paired_comparison_all_tasks_skipped(self):
+        """Every common task has unequal replicate counts ⇒ section renders the skip message only."""
+        result = self._make_result(
+            ["a", "b"],
+            {"a": {"t1": [0.5, 0.6]}, "b": {"t1": [0.5]}},
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "## Paired Comparison" in md
+        assert "*Paired statistics skipped — unequal replicate counts between a and b.*" in md
+        assert "Paired mean diff" not in md
 
 
 class TestExperimentReportSnapshots:
@@ -1269,6 +1438,10 @@ class TestExperimentReportSnapshots:
                 ),
             },
             total_duration_seconds=180.0,
+            per_replicate_scores={
+                "baseline": {"task-a": [0.9], "task-b": [0.5]},
+                "mutated": {"task-a": [0.7], "task-b": [0.95]},
+            },
         )
         md = ExperimentReportGenerator.generate_experiment_report(result, experiment=experiment)
         assert_matches_snapshot(md, "experiment_2variant.md")
