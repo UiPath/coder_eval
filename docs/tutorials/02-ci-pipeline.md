@@ -158,6 +158,52 @@ jobs:
 - **`if: always()`** on the verdict and upload steps means you still get results
   even when a task fails.
 
+## Publishing test results (JUnit)
+
+The verdict step above parses `task.json` by hand. If your CI already ingests
+JUnit XML — for the per-test annotations, history, and flake tracking most CI
+systems render from it — let `coder-eval` emit it directly instead. Add
+`--junit-xml` to the run:
+
+```yaml
+      - name: Run evaluations
+        run: coder-eval run $TASK_GLOBS -j 4 --junit-xml coder-eval-junit.xml
+```
+
+The file is written **before** the exit-code decision, so a failing run still
+produces a report. You can also regenerate it from any existing run directory
+without re-running the suite:
+
+```bash
+coder-eval report runs/latest -f junit            # writes runs/latest/junit.xml
+coder-eval report runs/latest -f junit -o out.xml # custom path
+```
+
+The mapping: one `<testcase>` per task row (grouped into a `<testsuite>` per
+variant), failed/errored rows carry a `<failure>`/`<error>` with the per-criterion
+breakdown, skipped tasks and failing suite gates get their own synthetic suites.
+
+Feed the file to whatever your platform uses to render test results. On GitHub
+Actions, [`mikepenz/action-junit-report`](https://github.com/mikepenz/action-junit-report):
+
+```yaml
+      - name: Publish test report
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: coder-eval-junit.xml
+```
+
+On Azure DevOps, `PublishTestResults@2`:
+
+```yaml
+      - task: PublishTestResults@2
+        condition: always()
+        inputs:
+          testResultsFormat: 'JUnit'
+          testResultsFiles: 'coder-eval-junit.xml'
+```
+
 ## Secrets
 
 Add these under **Settings → Secrets and variables → Actions**:

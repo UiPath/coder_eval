@@ -20,6 +20,7 @@ coder_eval/
 ├── orchestrator.py                # Main evaluation loop
 ├── reports.py                     # Markdown/JSON report generation (run-level + per-suite rollup via write_suite_rollups)
 ├── reports_experiment.py          # Experiment/cross-variant report generation
+├── reports_junit.py               # JUnit XML report from a finalized run dir (run.json spine; for CI test-report ingestion)
 ├── analysis.py                    # Command statistics aggregation
 ├── logging_config.py              # Structured logging setup
 ├── path_utils.py                  # Run ID generation, path utilities

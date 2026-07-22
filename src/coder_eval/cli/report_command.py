@@ -27,7 +27,10 @@ def report_command(
         "md",
         "--format",
         "-f",
-        help="Output format: 'md' (default markdown), 'html' (render task.json files as HTML).",
+        help=(
+            "Output format: 'md' (default markdown), 'html' (render task.json files as HTML), "
+            "'junit' (JUnit XML from run.json)."
+        ),
     ),
 ) -> None:
     """Display or export a run report.
@@ -44,14 +47,29 @@ def report_command(
 
         # Re-generate HTML reports for every task.json under a run dir
         coder-eval report runs/latest --format html
+
+        # Write a JUnit XML report (defaults to <run-dir>/junit.xml)
+        coder-eval report runs/latest --format junit
     """
     fmt = report_format.lower()
-    if fmt not in ("md", "html"):
-        console.print(f"[red]Error: unknown --format '{report_format}' (expected 'md' or 'html')[/red]")
+    if fmt not in ("md", "html", "junit"):
+        console.print(f"[red]Error: unknown --format '{report_format}' (expected 'md', 'html', or 'junit')[/red]")
         raise typer.Exit(1)
 
     if fmt == "html":
         _regenerate_html_reports(run_dir, output_file)
+        return
+
+    if fmt == "junit":
+        from ..reports_junit import write_junit_xml
+
+        target = output_file if output_file is not None else run_dir / "junit.xml"
+        try:
+            written = write_junit_xml(run_dir, target)
+        except FileNotFoundError as e:
+            console.print(f"[red]Error: {e}[/red]")
+            raise typer.Exit(1) from e
+        console.print(f"[green][OK]JUnit report written to {written}[/green]")
         return
 
     try:
