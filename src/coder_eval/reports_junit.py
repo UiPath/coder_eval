@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -41,6 +42,11 @@ _ILLEGAL_XML = re.compile("[^\\x09\\x0A\\x0D\\x20-\\uD7FF\\uE000-\\uFFFD\\U00010
 
 # Per-testcase failure/error body cap (chars). Agent detail dumps can be huge.
 _BODY_LIMIT = 10_000
+
+# Serialized status values we recognize, for distinguishing a known status from a
+# schema-skewed one when labelling a failure/error (classification itself goes
+# through FinalStatus.category — see _category_of).
+_KNOWN_STATUSES = frozenset(s.value for s in FinalStatus)
 
 
 def _xml_safe(text: str) -> str:
@@ -74,24 +80,65 @@ def _set_counts(elem: ET.Element, cases: list[ET.Element]) -> None:
     elem.set("skipped", str(sum(1 for c in cases if c.find("skipped") is not None)))
 
 
+def _variant_of(row: dict[str, Any]) -> str:
+    """Variant bucket for a row — ``str``-coerced, ``None``/empty → ``"default"``.
+
+    Rows are untyped dicts, so a non-string ``variant_id`` must not reach a dict
+    key or an XML attribute as a non-``str``.
+    """
+    return str(row.get("variant_id") or "default")
+
+
+def _status_of(row: dict[str, Any]) -> str:
+    """Row status as a string; an absent key reads as ``"<missing>"``, not ``"None"``."""
+    raw = row.get("status")
+    return str(raw) if raw is not None else "<missing>"
+
+
+def _is_safe_component(value: str) -> bool:
+    """True when ``value`` is usable as a single, contained path segment.
+
+    ``run.json`` rows are untyped and may be blob-pulled from elsewhere, so a
+    crafted ``variant_id``/``task_id`` must not steer the lookup outside the run
+    directory (an absolute value would discard ``run_dir`` entirely, and ``..``
+    would walk up).
+    """
+    return bool(value) and value not in {".", ".."} and "/" not in value and "\\" not in value
+
+
 def _load_task_json(run_dir: Path, row: dict[str, Any], variant: str) -> dict[str, Any] | None:
     """Best-effort load of a failed row's ``task.json`` as a plain dict.
 
     Plain-dict access (not ``EvaluationResult.model_validate``) keeps the writer
     tolerant of schema skew in blob-pulled/older runs and avoids materializing
-    the large ``turns`` array. Any error (missing dir/file, bad JSON) → ``None``.
+    the large ``turns`` array. Any problem — unsafe path component, missing
+    dir/file, undecodable bytes, bad JSON, or an ambiguous replicate — yields
+    ``None`` so the caller falls back to a status-only body.
     """
     task_id = str(row.get("task_id", "<unknown>"))
+    if not _is_safe_component(variant) or not _is_safe_component(task_id):
+        return None
+
     replicate_index = row.get("replicate_index")
     task_dir = run_dir / variant / task_id
-    if isinstance(replicate_index, int):
+    if isinstance(replicate_index, int) and not isinstance(replicate_index, bool):
         candidate = task_dir / f"{replicate_index:02d}" / "task.json"
     else:
         matches = sorted(task_dir.glob("*/task.json"))
+        # With no replicate index, picking one of several would misattribute
+        # another replicate's failure detail to this row — degrade instead.
+        if len(matches) > 1:
+            return None
         candidate = matches[0] if matches else task_dir / "task.json"
+
     try:
+        # Belt-and-braces containment check (catches symlink escapes too).
+        if not candidate.resolve().is_relative_to(run_dir.resolve()):
+            return None
+        # ValueError covers both json.JSONDecodeError and UnicodeDecodeError
+        # (undecodable bytes) — neither may abort report generation.
         return json.loads(candidate.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
 
 
@@ -102,7 +149,7 @@ def _criteria_body(row: dict[str, Any], run_dir: Path, variant: str) -> str:
     status + weighted-score line when task.json is missing/corrupt. Capped via
     the shared ``truncate``.
     """
-    status = str(row.get("status"))
+    status = _status_of(row)
     data = _load_task_json(run_dir, row, variant)
     criteria = data.get("success_criteria_results") if isinstance(data, dict) else None
 
@@ -135,16 +182,27 @@ def _criteria_body(row: dict[str, Any], run_dir: Path, variant: str) -> str:
 
 def _task_case(row: dict[str, Any], run_dir: Path) -> ET.Element:
     """Build one ``<testcase>`` for a task row."""
-    variant = row.get("variant_id") or "default"
+    variant = _variant_of(row)
     task_id = str(row.get("task_id", "<unknown>"))
+
+    # `bool` is an int subclass — exclude it so True never renders as "[01]".
     replicate_index = row.get("replicate_index")
-    name = f"{task_id}[{replicate_index:02d}]" if isinstance(replicate_index, int) else task_id
+    has_replicate = isinstance(replicate_index, int) and not isinstance(replicate_index, bool)
+    name = f"{task_id}[{replicate_index:02d}]" if has_replicate else task_id
 
     task_path = row.get("task_path")
-    classname = Path(task_path).stem if task_path else variant
+    classname = (Path(task_path).stem or variant) if isinstance(task_path, str) and task_path else variant
 
+    # time must be a finite, non-negative float: NaN/inf would serialize as
+    # "nan"/"inf" and make the report invalid for JUnit ingesters.
     duration = row.get("duration")
-    time_str = f"{duration:.3f}" if isinstance(duration, int | float) else "0.000"
+    valid_duration = (
+        isinstance(duration, int | float)
+        and not isinstance(duration, bool)
+        and math.isfinite(duration)
+        and duration >= 0
+    )
+    time_str = f"{duration:.3f}" if valid_duration else "0.000"
 
     case = ET.Element(
         "testcase",
@@ -165,16 +223,12 @@ def _task_case(row: dict[str, Any], run_dir: Path) -> ET.Element:
         for key, value in props:
             ET.SubElement(properties, "property", {"name": key, "value": _xml_safe(str(value))})
 
-    category = _category_of(str(row.get("status")))
+    status = _status_of(row)
+    category = _category_of(status)
     if category == "succeeded":
         return case
 
-    status = str(row.get("status"))
-    try:
-        FinalStatus(status)
-        message = status
-    except ValueError:
-        message = f"unknown status: {status}"
+    message = status if status in _KNOWN_STATUSES else f"unknown status: {status}"
     tag = "failure" if category == "failed" else "error"
     child = ET.SubElement(case, tag, {"message": _xml_safe(message)})
     child.text = _criteria_body(row, run_dir, variant)
@@ -188,10 +242,13 @@ def _skipped_suite(summary: RunSummary) -> ET.Element | None:
     suite = ET.Element("testsuite", {"name": "skipped"})
     cases: list[ET.Element] = []
     for entry in summary.skipped_tasks:
+        # Use the suffix-stripped PATH, not just the stem: two skipped tasks
+        # sharing a basename (suiteA/task.yaml, suiteB/task.yaml) would otherwise
+        # collapse into one identity that some JUnit ingesters merge.
         case = ET.SubElement(
             suite,
             "testcase",
-            {"name": _xml_safe(Path(entry.path).stem), "classname": "skipped"},
+            {"name": _xml_safe(str(Path(entry.path).with_suffix(""))), "classname": "skipped"},
         )
         ET.SubElement(case, "skipped", {"message": _xml_safe(entry.reason)})
         cases.append(case)
@@ -268,8 +325,7 @@ def generate_junit_xml(run_dir: Path) -> str:
     # Group task rows by variant, preserving first-seen order.
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in summary.task_results:
-        variant = row.get("variant_id") or "default"
-        grouped.setdefault(variant, []).append(row)
+        grouped.setdefault(_variant_of(row), []).append(row)
 
     all_cases: list[ET.Element] = []
     for variant, rows in grouped.items():

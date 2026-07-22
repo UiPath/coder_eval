@@ -8,6 +8,7 @@ defense-in-depth even though the parsed strings are self-generated.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -302,8 +303,9 @@ def test_skipped_tasks_suite(write_run_json: Callable[..., Path], tmp_path: Path
     assert ts is not None
     skipped_cases = ts.findall("testcase")
     assert len(skipped_cases) == 2
+    # Suffix-stripped full path (not just the stem) so same-basename tasks stay distinct.
     names = {c.get("name") for c in skipped_cases}
-    assert names == {"broken", "opt"}
+    assert names == {"tasks/broken", "tasks/opt"}
     assert all(c.find("skipped") is not None for c in skipped_cases)
 
 
@@ -456,3 +458,126 @@ def test_write_junit_xml_creates_parents_and_returns_path(write_run_json: Callab
     assert written == out
     assert out.is_file()
     fromstring(out.read_text(encoding="utf-8"))  # parses
+
+
+# --------------------------------------------------------------------------
+# Robustness against schema-skewed / crafted run.json rows (final-review findings)
+# --------------------------------------------------------------------------
+
+
+def test_malformed_row_types_degrade_gracefully(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """Loose `task_results` dicts are untyped; a skewed row must not abort the report.
+
+    Covers: bool replicate_index (bool is an int subclass), non-finite duration
+    (would emit an invalid time="nan"), non-str variant_id / task_path, and a
+    row with no `status` key at all.
+    """
+    run_dir = tmp_path / "run"
+    rows: list[dict[str, Any]] = [
+        {"task_id": "t_bool", "status": "SUCCESS", "replicate_index": True, "duration": 1.0},
+        {"task_id": "t_nan", "status": "SUCCESS", "duration": float("nan")},
+        {"task_id": "t_inf", "status": "SUCCESS", "duration": float("inf")},
+        {"task_id": "t_neg", "status": "SUCCESS", "duration": -5.0},
+        {"task_id": "t_variant", "status": "SUCCESS", "variant_id": 17},
+        {"task_id": "t_path", "status": "SUCCESS", "task_path": 42},
+        {"task_id": "t_nostatus"},
+    ]
+    write_run_json(run_dir, rows)
+
+    xml = generate_junit_xml(run_dir)
+    root = fromstring(xml)  # must still be well-formed
+
+    cases = [c for ts in root.findall("testsuite") for c in ts.findall("testcase")]
+    assert len(cases) == len(rows)
+    # Every time attribute must be a finite, non-negative float (JUnit requirement).
+    for case in cases:
+        t = float(case.get("time"))
+        assert math.isfinite(t) and t >= 0.0  # finite (not NaN/inf), non-negative
+    # A bool replicate_index must NOT be formatted as a [NN] replicate suffix.
+    names = {c.get("name") for c in cases}
+    assert "t_bool" in names
+    # The missing-status row lands in the error bucket, not silently as a pass.
+    assert int(root.get("errors")) == 1
+
+
+def test_task_json_invalid_utf8_falls_back(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """A task.json with undecodable bytes must degrade, not raise (UnicodeDecodeError
+    is a ValueError but NOT a json.JSONDecodeError)."""
+    run_dir = tmp_path / "run"
+    write_run_json(run_dir, [_row("t_fail", "FAILURE", variant_id="v1", replicate_index=0)])
+    task_dir = run_dir / "v1" / "t_fail" / "00"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "task.json").write_bytes(b"\xff\xfe\x00 not utf-8")
+
+    root = fromstring(generate_junit_xml(run_dir))
+    body = _find_testsuite(root, "v1").find("testcase").find("failure").text or ""
+    assert "FAILURE" in body  # status-only fallback body
+
+
+def test_task_json_lookup_cannot_escape_run_dir(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """A crafted variant_id/task_id must not make the writer read outside run_dir."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "task.json").write_text(
+        json.dumps(
+            {
+                "success_criteria_results": [
+                    {
+                        "criterion_type": "leaked",
+                        "description": "SECRET",
+                        "score": 0.0,
+                        "pass_threshold": 0.9,
+                        "details": "LEAKED_SECRET_DETAIL",
+                        "error": None,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "run"
+    write_run_json(run_dir, [{"task_id": "..", "status": "FAILURE", "variant_id": "../outside"}])
+
+    root = fromstring(generate_junit_xml(run_dir))
+    xml_text = generate_junit_xml(run_dir)
+    assert "LEAKED_SECRET_DETAIL" not in xml_text
+    body = root.find("testsuite").find("testcase").find("failure").text or ""
+    assert "FAILURE" in body  # fell back, did not read the outside file
+
+
+def test_ambiguous_replicate_does_not_misattribute(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """replicate_index=None with MULTIPLE replicate dirs must fall back rather than
+    attribute replicate 00's failure detail to the row."""
+    run_dir = tmp_path / "run"
+    write_run_json(run_dir, [_row("task", "FAILURE", variant_id="v1", replicate_index=None)])
+    for idx, marker in ((0, "REP0ONLY"), (1, "REP1ONLY")):
+        _write_task_json(
+            run_dir,
+            "v1",
+            "task",
+            idx,
+            [
+                {
+                    "criterion_type": "c",
+                    "description": "d",
+                    "score": 0.0,
+                    "pass_threshold": 0.9,
+                    "details": marker,
+                    "error": None,
+                }
+            ],
+        )
+    root = fromstring(generate_junit_xml(run_dir))
+    body = _find_testsuite(root, "v1").find("testcase").find("failure").text or ""
+    assert "REP0ONLY" not in body and "REP1ONLY" not in body
+    assert "FAILURE" in body
+
+
+def test_skipped_names_unique_for_same_stem(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """Two skipped tasks sharing a basename must get distinct testcase identities."""
+    run_dir = tmp_path / "run"
+    write_run_json(run_dir, [], skipped=[("suiteA/task.yaml", "skip: true"), ("suiteB/task.yaml", "skip: true")])
+    root = fromstring(generate_junit_xml(run_dir))
+    ts = _find_testsuite(root, "skipped")
+    names = {c.get("name") for c in ts.findall("testcase")}
+    assert len(names) == 2, f"skipped testcase names collided: {names}"

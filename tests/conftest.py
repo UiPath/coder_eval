@@ -84,7 +84,7 @@ def write_run_json() -> Callable[..., Path]:
         counts = {"succeeded": 0, "failed": 0, "error": 0}
         for row in rows:
             try:
-                category = FinalStatus(row["status"]).category
+                category = FinalStatus(row.get("status")).category
             except ValueError:
                 category = "error"  # unknown status → error bucket (mirrors the writer)
             counts[category] += 1
