@@ -1755,6 +1755,20 @@ class TestLoginShellMockPathHome:
         # harness reads the same _codex_home() for sub-agent rollout recovery.
         assert env["CODEX_HOME"] == str(agent._codex_home())
 
+    def test_build_codex_env_creates_missing_codex_home(self, monkeypatch, tmp_path):
+        """The codex binary hard-errors on an explicitly set CODEX_HOME that
+        does not exist (unset, it materializes the ~/.codex default itself).
+        Runners that auth via CODEX_API_KEY never ran ``codex login``, so the
+        dir may not exist — pinning it must create it first."""
+        monkeypatch.delenv("CODEX_API_KEY", raising=False)
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "state" / ".codex"))
+        agent = self._agent_with_prepend(["/sandbox/mocks"])
+        agent._login_shell_home = tmp_path / "login-home"
+
+        env = agent._build_codex_env()
+        assert env is not None
+        assert Path(env["CODEX_HOME"]).is_dir()
+
     def test_build_codex_env_without_login_home_leaves_home_alone(self, monkeypatch):
         monkeypatch.setenv("CODEX_API_KEY", "k")
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))

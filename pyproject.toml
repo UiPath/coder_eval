@@ -1,6 +1,6 @@
 [project]
 name = "coder-eval"
-version = "0.8.7"
+version = "0.8.8"
 description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity) with sandboxed, reproducible YAML task suites."
 readme = "README.md"
 license = "Apache-2.0"
@@ -51,7 +51,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/UiPath/coder_eval"
+Homepage = "https://coder-eval.com"
 Repository = "https://github.com/UiPath/coder_eval"
 Documentation = "https://github.com/UiPath/coder_eval/tree/main/docs"
 Issues = "https://github.com/UiPath/coder_eval/issues"
