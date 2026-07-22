@@ -238,6 +238,13 @@ def student_t_critical(confidence: float, df: float) -> float:
         lo = hi
         hi *= 2.0
         if hi > 1e12:
+            # Only reachable for a confidence so close to 1 that t* overflows the
+            # bracket. Warn rather than return a silently wrong-width interval.
+            logger.warning(
+                "student_t_critical failed to bracket t* for confidence=%r, df=%r; returning a degraded upper bound",
+                confidence,
+                df,
+            )
             return hi
     for _ in range(200):
         mid = (lo + hi) / 2.0
@@ -331,12 +338,16 @@ class PairedComparison(NamedTuple):
 
     ``task_count`` is the number of tasks both variants scored. When it is < 2
     the statistics are all ``None`` — there is nothing to compare, and the
-    reporters say so rather than rendering an empty section.
+    reporters say so rather than rendering an empty section. ``excluded_count``
+    is the number of tasks that appeared for at least one variant but could not
+    be paired (missing or empty on the other side); the reporters surface it so
+    a silently narrowed sample is visible.
     """
 
     vid_a: str
     vid_b: str
     task_count: int
+    excluded_count: int
     mean_diff: float | None
     ci_low: float | None
     ci_high: float | None
@@ -363,19 +374,24 @@ def paired_comparison(result: ExperimentResult, confidence: float = 0.95) -> Pai
         # No shared task, or per_replicate_scores absent (results from before it existed).
         return None
 
+    # Tasks seen for at least one variant but not paired (missing or empty on the
+    # other side) — surfaced so a silently narrowed sample doesn't go unnoticed.
+    excluded_count = len(set(per_rep_a) | set(per_rep_b)) - len(common_tasks)
+
     if len(common_tasks) < 2:
-        return PairedComparison(vid_a, vid_b, len(common_tasks), None, None, None, None, None)
+        return PairedComparison(vid_a, vid_b, len(common_tasks), excluded_count, None, None, None, None, None)
 
     a_scores = [mean(per_rep_a[task_id]) for task_id in common_tasks]
     b_scores = [mean(per_rep_b[task_id]) for task_id in common_tasks]
     ci = paired_t_ci(a_scores, b_scores, confidence=confidence)
     if ci is None:  # non-finite scores
-        return PairedComparison(vid_a, vid_b, len(common_tasks), None, None, None, None, None)
+        return PairedComparison(vid_a, vid_b, len(common_tasks), excluded_count, None, None, None, None, None)
     mean_diff, ci_low, ci_high = ci
     return PairedComparison(
         vid_a,
         vid_b,
         len(common_tasks),
+        excluded_count,
         mean_diff,
         ci_low,
         ci_high,

@@ -1260,8 +1260,10 @@ def _experiment_paired_comparison(result: ExperimentResult) -> str:
 """
 
     d_str = f"{pc.effect_size:.2f}" if pc.effect_size is not None else "n/a"
+    excluded = f" ({pc.excluded_count} task(s) excluded — not scored by both variants)" if pc.excluded_count else ""
     note = _esc(
         f"Paired over the per-task mean score of {pc.task_count} task(s) common to both variants"
+        + excluded
         + " — pairing cancels between-task difficulty, which the pooled Welch test above cannot."
     )
     headline = _esc(

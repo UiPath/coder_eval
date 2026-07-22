@@ -1465,13 +1465,15 @@ class TestPairedComparisonSection:
         assert "[95% CI +0." in md
 
     def test_paired_comparison_ignores_tasks_with_no_scores(self):
-        """A task with an empty replicate list on either side is not a pair."""
+        """A task with an empty replicate list on either side is not a pair, and the
+        exclusion is surfaced in the rendered note."""
         result = self._make_result(
             ["a", "b"],
             {"a": {"t1": [0.9], "t2": [0.5], "t3": []}, "b": {"t1": [0.7], "t2": [0.6], "t3": [0.4]}},
         )
         md = ExperimentReportGenerator.generate_experiment_report(result)
         assert "per-task mean score of 2 task(s) common to both variants" in md
+        assert "(1 task(s) excluded — not scored by both variants)" in md
 
 
 class TestExperimentReportSnapshots:

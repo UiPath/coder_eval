@@ -484,9 +484,11 @@ class ExperimentReportGenerator:
             ]
 
         d_str = f"{pc.effect_size:.2f}" if pc.effect_size is not None else "n/a"
+        excluded = f" ({pc.excluded_count} task(s) excluded — not scored by both variants)" if pc.excluded_count else ""
         return [
             *header,
             f"*Paired over the per-task mean score of {pc.task_count} task(s) common to both variants"
+            + excluded
             + " — pairing cancels between-task difficulty, which the pooled Welch test above cannot.*",
             f"**Paired mean diff ({pc.vid_a} - {pc.vid_b})**: {pc.mean_diff:+.3f}"
             + f" [95% CI {pc.ci_low:+.3f}, {pc.ci_high:+.3f}], Cohen's d = {d_str}"
