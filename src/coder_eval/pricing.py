@@ -93,7 +93,8 @@ _PRICING: dict[str, ModelPricing] = {
     # is priced at the input rate and cache-read at 0 (conservative — see the
     # per-provider cost-accounting caveat; revisit against the AWS model cards).
     "deepseek.v3.2": ModelPricing(0.74, 2.22, 0.74, 0.0),
-    "zai.glm-5": ModelPricing(1.55, 4.96, 1.55, 0.0),
+    "zai.glm-5": ModelPricing(1.2, 3.84, 1.2, 0.0),
+    "moonshotai.kimi-k2.5": ModelPricing(0.72, 3.6, 0.72, 0.0),
 }
 
 

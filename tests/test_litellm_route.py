@@ -204,10 +204,16 @@ class TestOpenWeightPricing:
 
     def test_glm5_rate(self):
         # 1M input + 1M output → input_per_mtok + output_per_mtok.
-        assert calculate_cost("zai.glm-5", 1_000_000, 1_000_000) == pytest.approx(1.55 + 4.96)
+        assert calculate_cost("zai.glm-5", 1_000_000, 1_000_000) == pytest.approx(1.2 + 3.84)
 
     def test_deepseek_rate(self):
         assert calculate_cost("deepseek.v3.2", 1_000_000, 1_000_000) == pytest.approx(0.74 + 2.22)
+
+    def test_kimi_rate(self):
+        assert calculate_cost("moonshotai.kimi-k2.5", 1_000_000, 1_000_000) == pytest.approx(0.72 + 3.6)
+
+    def test_kimi_converse_prefixed_prices_same(self):
+        assert calculate_cost("converse/moonshotai.kimi-k2.5", 1_000_000, 1_000_000) == pytest.approx(0.72 + 3.6)
 
     def test_normalize_strips_converse_prefix(self):
         assert _normalize_model("converse/zai.glm-5") == "zai.glm-5"
@@ -219,7 +225,7 @@ class TestOpenWeightPricing:
 
     def test_converse_prefixed_id_prices_same(self):
         """The SDK reports model_used as e.g. 'converse/zai.glm-5' — must still price."""
-        assert calculate_cost("converse/zai.glm-5", 1_000_000, 1_000_000) == pytest.approx(1.55 + 4.96)
+        assert calculate_cost("converse/zai.glm-5", 1_000_000, 1_000_000) == pytest.approx(1.2 + 3.84)
 
 
 class TestRepriceForLitellm:
@@ -228,12 +234,12 @@ class TestRepriceForLitellm:
     def test_overrides_wrong_sdk_cost_with_real_rate(self):
         u = TokenUsage(uncached_input_tokens=1_000_000, output_tokens=1_000_000, total_cost_usd=3.68)
         ClaudeCodeAgent._reprice_for_litellm(u, "zai.glm-5")
-        assert u.total_cost_usd == pytest.approx(1.55 + 4.96)
+        assert u.total_cost_usd == pytest.approx(1.2 + 3.84)
 
     def test_converse_prefixed_model_reprices(self):
         u = TokenUsage(uncached_input_tokens=1_000_000, output_tokens=1_000_000, total_cost_usd=99.0)
         ClaudeCodeAgent._reprice_for_litellm(u, "converse/zai.glm-5")
-        assert u.total_cost_usd == pytest.approx(1.55 + 4.96)
+        assert u.total_cost_usd == pytest.approx(1.2 + 3.84)
 
     def test_unpriced_model_yields_none_not_sdk_figure(self):
         """An unknown model must show N/A (None), never the misleading SDK cost."""

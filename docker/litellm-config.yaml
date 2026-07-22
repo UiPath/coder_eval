@@ -25,10 +25,15 @@ model_list:
     litellm_params:
       model: bedrock/converse/deepseek.v3.2
       aws_region_name: eu-north-1
-  # GLM 5 — quality lead ($1.55 / $4.96 per Mtok).
+  # GLM 5 — quality lead ($1.20 / $3.84 per Mtok, eu-north-1).
   - model_name: zai.glm-5
     litellm_params:
       model: bedrock/converse/zai.glm-5
+      aws_region_name: eu-north-1
+  # Kimi K2.5 (Moonshot AI) — Bedrock eu-north-1 (bare id, Converse).
+  - model_name: moonshotai.kimi-k2.5
+    litellm_params:
+      model: bedrock/converse/moonshotai.kimi-k2.5
       aws_region_name: eu-north-1
 
 litellm_settings:
