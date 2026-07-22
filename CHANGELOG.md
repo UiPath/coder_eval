@@ -2,6 +2,100 @@
 
 <!-- version list -->
 
+## v0.8.7 (2026-07-22)
+
+### Bug Fixes
+
+- Detect Windows skill paths in telemetry ([#24](https://github.com/UiPath/coder_eval/pull/24),
+  [`c57a6b0`](https://github.com/UiPath/coder_eval/commit/c57a6b0408ef116177b15bc9b09a768096aaa33f))
+
+- **agents**: Run codex + antigravity harnesses on the tempdir/host path
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+- **antigravity**: Pin google-antigravity 0.1.7 to load on glibc 2.35
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+- **codex**: Always run full-access; drop the in-process OS sandbox
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+- **codex**: Cover zsh login shells (macOS default) in the mock-PATH home shim
+  ([#26](https://github.com/UiPath/coder_eval/pull/26),
+  [`73f0db2`](https://github.com/UiPath/coder_eval/commit/73f0db24df0b67f82d46e3bf15c85a21837237ef))
+
+- **codex**: Keep mock CLIs shadowed in bash login shells
+  ([#26](https://github.com/UiPath/coder_eval/pull/26),
+  [`73f0db2`](https://github.com/UiPath/coder_eval/commit/73f0db24df0b67f82d46e3bf15c85a21837237ef))
+
+- **codex**: Make login-shell temp-home lifecycle exception-safe incl. kill_sync
+  ([#26](https://github.com/UiPath/coder_eval/pull/26),
+  [`73f0db2`](https://github.com/UiPath/coder_eval/commit/73f0db24df0b67f82d46e3bf15c85a21837237ef))
+
+- **codex**: Restore mock-CLI PATH prepend in login shells via per-task HOME profile
+  ([#26](https://github.com/UiPath/coder_eval/pull/26),
+  [`73f0db2`](https://github.com/UiPath/coder_eval/commit/73f0db24df0b67f82d46e3bf15c85a21837237ef))
+
+- **codex**: Restore original HOME inside generated login-shell profile
+  ([#26](https://github.com/UiPath/coder_eval/pull/26),
+  [`73f0db2`](https://github.com/UiPath/coder_eval/commit/73f0db24df0b67f82d46e3bf15c85a21837237ef))
+
+- **codex**: Use full-access sandbox on coder_eval-managed tempdir path
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+- **deps**: Bump pyasn1 to 0.6.4 for GHSA-8ppf-4f7h-5ppj / GHSA-hm4w-wwcw-mr6r
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+### Chores
+
+- **deps**: Bump pyasn1 0.6.3 -> 0.6.4 (GHSA-8ppf-4f7h-5ppj, GHSA-hm4w-wwcw-mr6r)
+  ([#32](https://github.com/UiPath/coder_eval/pull/32),
+  [`f1f4f9f`](https://github.com/UiPath/coder_eval/commit/f1f4f9fba2bd034a271e50fc1a95bcc74c2ac19b))
+
+- **deps**: Upgrade agent SDKs to latest (claude 0.2.124, codex 0.144.4)
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+### Continuous Integration
+
+- **release**: Publish a prerelease from a non-main branch
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+### Documentation
+
+- Add MkDocs docs site, comparison page, and SEO metadata
+  ([#32](https://github.com/UiPath/coder_eval/pull/32),
+  [`f1f4f9f`](https://github.com/UiPath/coder_eval/commit/f1f4f9fba2bd034a271e50fc1a95bcc74c2ac19b))
+
+- Address PR review — Coder Eval naming, cleaner table, gh-deploy workflow
+  ([#32](https://github.com/UiPath/coder_eval/pull/32),
+  [`f1f4f9f`](https://github.com/UiPath/coder_eval/commit/f1f4f9fba2bd034a271e50fc1a95bcc74c2ac19b))
+
+- Address review — git identity for gh-pages, single strict deploy, table glyphs, uv tool install in
+  Tutorial 01 ([#32](https://github.com/UiPath/coder_eval/pull/32),
+  [`f1f4f9f`](https://github.com/UiPath/coder_eval/commit/f1f4f9fba2bd034a271e50fc1a95bcc74c2ac19b))
+
+### Refactoring
+
+- **codex**: Drop dead sandbox branch + honest full-access messaging
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+### Testing
+
+- Accept sandbox_managed kwarg in agent test doubles
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+- **codex**: Pin start-to-CodexConfig env composition and tidy test imports
+  ([#26](https://github.com/UiPath/coder_eval/pull/26),
+  [`73f0db2`](https://github.com/UiPath/coder_eval/commit/73f0db24df0b67f82d46e3bf15c85a21837237ef))
+
+
 ## v0.8.6 (2026-07-20)
 
 ### Features
