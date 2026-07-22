@@ -26,15 +26,25 @@ export function Expandable({
     );
 }
 
-export function ResultPill({ passed }: { passed: boolean }) {
-    const cls = passed
-        ? "bg-green-50 text-green-700 border-green-200"
-        : "bg-red-50 text-red-700 border-red-200";
+// `gating: false` (weight: 0) criteria are informational — they cannot fail the
+// task, so rendering PASS/FAIL for them would contradict the task's own status.
+export function ResultPill({
+    passed,
+    gating = true,
+}: {
+    passed: boolean;
+    gating?: boolean;
+}) {
+    const cls = !gating
+        ? "bg-gray-50 text-gray-600 border-gray-200"
+        : passed
+          ? "bg-green-50 text-green-700 border-green-200"
+          : "bg-red-50 text-red-700 border-red-200";
     return (
         <span
             className={`inline-block px-2 py-0.5 text-xs rounded-full border font-medium ${cls}`}
         >
-            {passed ? "PASS" : "FAIL"}
+            {!gating ? "INFO" : passed ? "PASS" : "FAIL"}
         </span>
     );
 }

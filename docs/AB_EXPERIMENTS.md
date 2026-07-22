@@ -227,8 +227,8 @@ variants:
         text: "\n\nThink step by step and validate your work before finishing."
 ```
 
-The full mutation catalog (prefix / suffix / replace / template / rephrase) is
-defined in `coder_eval/models/mutations.py`.
+The full mutation catalog (prefix / suffix / replace / template) is defined in
+`coder_eval/models/mutations.py`.
 
 ## Recipe: Smoke vs. e2e Flavors (Early Stop)
 
