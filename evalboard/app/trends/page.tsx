@@ -3,8 +3,8 @@ import {
     trendMatchesTag,
     TRENDS_RECENT_RUN_COUNT,
 } from "@/lib/trends";
-import { aggregateTaskTagCounts, loadRecentRuns } from "@/lib/overview";
 import { fmtRunTime, humanizeTaskId } from "@/lib/format";
+import { KNOWN_HARNESSES } from "@/app/_components/harness-badge";
 import { TrendsView } from "./trends-view";
 
 export const dynamic = "force-dynamic";
@@ -25,26 +25,40 @@ function parseTag(raw: string | string[] | undefined): string | null {
     return trimmed.slice(0, 100);
 }
 
+// The harness whose trend to show. The nightly rotates claude-code / codex /
+// antigravity as separate runs; a trend is only meaningful within one harness,
+// so the page scopes to one (default claude-code, the daily primary) and offers
+// a switcher. An unknown/absent value falls back to the default.
+function parseHarness(raw: string | string[] | undefined): string {
+    const v = Array.isArray(raw) ? raw[0] : raw;
+    return v && (KNOWN_HARNESSES as readonly string[]).includes(v)
+        ? v
+        : "claude-code";
+}
+
 export default async function TrendsPage({
     searchParams,
 }: {
-    searchParams: Promise<{ q?: string; tag?: string }>;
+    searchParams: Promise<{ q?: string; tag?: string; h?: string }>;
 }) {
     const params = await searchParams;
     const q = parseQ(params.q);
     const activeTag = parseTag(params.tag);
+    const harness = parseHarness(params.h);
 
-    const [{ runIds, trends: allTrends }, perRun] = await Promise.all([
-        aggregateTaskTrends(TRENDS_RECENT_RUN_COUNT),
-        loadRecentRuns(TRENDS_RECENT_RUN_COUNT),
-    ]);
-    const tagCounts = aggregateTaskTagCounts(perRun);
+    // One cached load, scoped to the selected harness — yields the trends, the
+    // run axis, AND the tag-rail counts (all from the same window).
+    const {
+        runIds,
+        trends: allTrends,
+        tagCounts,
+    } = await aggregateTaskTrends(TRENDS_RECENT_RUN_COUNT, harness);
 
-    // Provenance: surface the actual run count + date span. Mixing runs across
-    // model/agent regimes into a single pass rate is otherwise invisible —
-    // showing the window at least makes the user aware of what's collapsed.
-    // Derived from the same cached aggregate as the table (runIds is
-    // newest-first), so the label and the strips can't skew apart.
+    // Provenance: surface the actual run count + date span. Even scoped to one
+    // harness, the window can straddle model/prompt regimes, so showing the
+    // span keeps the user aware of what's collapsed. Derived from the same
+    // cached aggregate as the table (runIds is newest-first), so the label and
+    // the strips can't skew apart.
     const provenance =
         runIds.length === 0
             ? null
@@ -75,10 +89,15 @@ export default async function TrendsPage({
 
     return (
         <TrendsView
+            // Remount on harness switch so open-row/history state (which is
+            // harness-specific) resets cleanly.
+            key={harness}
             tasks={tasks}
             runIds={runIds}
             q={q}
             activeTag={activeTag}
+            activeHarness={harness}
+            harnesses={KNOWN_HARNESSES}
             skills={tagCounts.skills}
             taskTags={tagCounts.taskTags}
             reviewTags={tagCounts.reviewTags}

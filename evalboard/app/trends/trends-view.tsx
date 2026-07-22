@@ -21,6 +21,8 @@ import { ChipButton } from "@/app/runs/[id]/chips";
 import { TableScroll } from "@/app/_components/scroll-table";
 import { CollapsibleRail } from "@/app/_components/collapsible-rail";
 import { VersionChip } from "@/app/_components/version-list";
+import { HarnessSelector } from "@/app/_components/harness-selector";
+import { harnessShortLabel } from "@/app/_components/harness-badge";
 import { fetchTaskHistoryAction } from "./actions";
 
 function fmtUsd(c: number | null): string {
@@ -534,6 +536,8 @@ export function TrendsView({
     runIds,
     q,
     activeTag,
+    activeHarness,
+    harnesses,
     skills,
     taskTags,
     reviewTags,
@@ -544,6 +548,9 @@ export function TrendsView({
     runIds: string[];
     q: string | null;
     activeTag: string | null;
+    // The harness this trend is scoped to, and the switchable set.
+    activeHarness: string;
+    harnesses: readonly string[];
     skills: TagCount[];
     taskTags: TagCount[];
     reviewTags: TagCount[];
@@ -589,7 +596,7 @@ export function TrendsView({
         setOpenTaskId((cur) => (cur === taskId ? null : taskId));
         if (history[taskId] != null) return;
         startTransition(async () => {
-            const entries = await fetchTaskHistoryAction(taskId);
+            const entries = await fetchTaskHistoryAction(taskId, activeHarness);
             setHistory((prev) => ({ ...prev, [taskId]: entries }));
         });
     }
@@ -599,17 +606,28 @@ export function TrendsView({
     return (
         <div className="space-y-5">
             <div>
-                <h1 className="text-xl font-semibold text-gray-900">
-                    Task trends
-                </h1>
-                <p className="text-xs text-gray-500 mt-0.5">
-                    Per-task pass rate and averages across recent runs.
-                    Averages cover successful runs only.
-                </p>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                        <h1 className="text-xl font-semibold text-gray-900">
+                            Task trends
+                        </h1>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                            Per-task pass rate and averages across recent{" "}
+                            {harnessShortLabel(activeHarness)} runs. Averages
+                            cover successful runs only.
+                        </p>
+                    </div>
+                    {/* Scope the whole page to one harness — mixing harnesses
+                        blends incomparable pass rates and cost profiles. */}
+                    <HarnessSelector
+                        current={activeHarness}
+                        harnesses={harnesses}
+                    />
+                </div>
                 {provenance && (
                     <p className="text-xs text-gray-500 mt-0.5 font-mono">
-                        Last {provenance.count} runs · {provenance.oldest} →{" "}
-                        {provenance.newest}
+                        Last {provenance.count} {activeHarness} runs ·{" "}
+                        {provenance.oldest} → {provenance.newest}
                     </p>
                 )}
                 {maturity.matureTasks > 0 && (
@@ -651,7 +669,7 @@ export function TrendsView({
                     {filterActive ? (
                         <>No tasks match the current filter.</>
                     ) : (
-                        <>No recent runs.</>
+                        <>No recent {activeHarness} runs.</>
                     )}
                 </div>
             ) : (

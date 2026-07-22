@@ -254,19 +254,40 @@ async function loadWindowDataInner(window: Window): Promise<PerRun[]> {
     return mapWithConcurrency(ids, FETCH_CONCURRENCY, cachedLoadPerRun);
 }
 
-// Fetch the N most recent runs in PerRun shape. Recency-based (fixed count)
-// rather than date-bounded — used by the trends page.
-export function loadRecentRuns(limit: number): Promise<PerRun[]> {
-    return loadRecentRunsInner(limit);
+// The harness a run is attributed to. A run whose RunConfig carried no harness
+// predates the stamp, and every such run was claude-code (the only nightly
+// harness before codex/antigravity were added), so null folds to claude-code.
+// Mirrors HarnessBadge's `harness ?? "claude-code"` default.
+export const DEFAULT_HARNESS = "claude-code";
+export function normalizeHarness(harness: string | null | undefined): string {
+    return harness ?? DEFAULT_HARNESS;
 }
 
-async function loadRecentRunsInner(limit: number): Promise<PerRun[]> {
+// Fetch the N most recent runs in PerRun shape. Recency-based (fixed count)
+// rather than date-bounded — used by the trends page. When `harness` is set,
+// only runs of that harness count toward N (the nightly now rotates
+// claude-code / codex / antigravity, and a trend is only meaningful within one
+// harness — mixing them blends incomparable pass rates and cost profiles).
+export function loadRecentRuns(
+    limit: number,
+    harness?: string,
+): Promise<PerRun[]> {
+    return loadRecentRunsInner(limit, harness);
+}
+
+async function loadRecentRunsInner(
+    limit: number,
+    harness?: string,
+): Promise<PerRun[]> {
     // Trends is the daily-cadence view: only pipeline runs belong here. Prune
     // to date-shaped ids BEFORE slicing (cheap, no IO) so ad-hoc runs — whose
     // ids sort lexically above every `2026-…` daily id and would otherwise
     // crowd out the real "recent N" — never occupy a slot.
     const ids = (await listRunIds()).filter((id) => parseRunIdDate(id) != null);
-    return collectPipelineRuns(ids, limit, cachedLoadPerRun);
+    const matchesHarness = harness
+        ? (r: PerRun) => normalizeHarness(r.overview?.harness) === harness
+        : undefined;
+    return collectPipelineRuns(ids, limit, cachedLoadPerRun, matchesHarness);
 }
 
 // A loaded run occupies a window slot only when it's usable downstream:
@@ -287,6 +308,11 @@ function isUsablePipelineRun(r: PerRun): boolean {
 // deficit-sized rounds from degenerating into one-id-per-round serial loads
 // when a single slot stays unfilled.
 const RECENT_SCAN_FACTOR = 3;
+// When filtering to a single harness, that harness holds only a fraction of the
+// recent runs (codex/antigravity run a few times a week vs. claude-code daily),
+// so the scan has to reach further back to gather `limit` of them. A larger cap
+// keeps a rarer harness from coming up short while still bounding the probe.
+const HARNESS_SCAN_FACTOR = 8;
 const MIN_PROBE_BATCH = 5;
 
 // Load runs newest-first until `limit` usable pipeline runs are in hand, the
@@ -305,8 +331,15 @@ export async function collectPipelineRuns(
     ids: string[],
     limit: number,
     load: (id: string) => Promise<PerRun>,
+    // Optional extra predicate (AND-ed with usability) — e.g. a harness filter.
+    // When set, the scan reaches further back since matches are sparser.
+    isMatch?: (r: PerRun) => boolean,
 ): Promise<PerRun[]> {
-    const maxScan = Math.min(ids.length, limit * RECENT_SCAN_FACTOR);
+    const scanFactor = isMatch ? HARNESS_SCAN_FACTOR : RECENT_SCAN_FACTOR;
+    const maxScan = Math.min(ids.length, limit * scanFactor);
+    const usable = isMatch
+        ? (r: PerRun) => isUsablePipelineRun(r) && isMatch(r)
+        : isUsablePipelineRun;
     const out: PerRun[] = [];
     let cursor = 0;
     while (out.length < limit && cursor < maxScan) {
@@ -318,7 +351,7 @@ export async function collectPipelineRuns(
         const batch = ids.slice(cursor, Math.min(cursor + batchSize, maxScan));
         cursor += batch.length;
         const loaded = await mapWithConcurrency(batch, FETCH_CONCURRENCY, load);
-        out.push(...loaded.filter(isUsablePipelineRun));
+        out.push(...loaded.filter(usable));
     }
     if (out.length < limit && cursor >= maxScan && cursor < ids.length) {
         console.warn(
