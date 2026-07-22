@@ -4,6 +4,7 @@ import { TRENDS_RECENT_RUN_COUNT } from "@/lib/trends";
 import { buildWatchlist } from "@/lib/watchlist";
 import { KNOWN_HARNESSES, parseHarnessParam } from "@/lib/harness";
 import { HarnessSelector } from "@/app/_components/harness-selector";
+import { harnessShortLabel } from "@/app/_components/harness-badge";
 import { WatchlistView } from "./watchlist-view";
 
 export const dynamic = "force-dynamic";
@@ -50,11 +51,20 @@ function WatchlistSkeleton({ activeHarness }: { activeHarness: string }) {
                 <h1 className="text-[22px] font-bold text-gray-900 border-l-[3px] border-uipath-orange pl-2.5">
                     Watchlist
                 </h1>
-                <div className="ml-auto">
+                {/* Mirror WatchlistView's header exactly — selector + the
+                    "last N … runs" pill — so nothing shifts horizontally when
+                    the real content streams in and the pill appears. Only the
+                    run count is unknown at skeleton time, so it pulses. */}
+                <div className="ml-auto flex items-center gap-3">
                     <HarnessSelector
                         current={activeHarness}
                         harnesses={KNOWN_HARNESSES}
                     />
+                    <span className="text-[11px] text-gray-600 bg-gray-100 px-3 py-1 rounded-full font-semibold whitespace-nowrap">
+                        last{" "}
+                        <span className="inline-block w-4 h-3 rounded bg-gray-200 animate-pulse align-middle" />{" "}
+                        {harnessShortLabel(activeHarness)} runs
+                    </span>
                 </div>
             </div>
             <p className="text-gray-500 text-[13px] mt-1.5 mb-6">
