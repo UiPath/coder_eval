@@ -227,6 +227,15 @@ class DockerDriverConfig(BaseModel):
             # through Bedrock instead of falling back to ~/.claude OAuth.
             "CLAUDE_CODE_USE_BEDROCK",
             "ANTHROPIC_MODEL",
+            # LiteLLM (Anthropic-compatible) open-weight backend. The proxy runs on
+            # the HOST, so LITELLM_BASE_URL is rewritten to host.docker.internal at
+            # the container boundary (see docker_runner); the rest forward verbatim.
+            # Without these the in-container Settings sees API_BACKEND=litellm with no
+            # creds and _validate_litellm_settings raises a hard ValueError.
+            "LITELLM_BASE_URL",
+            "LITELLM_AUTH_TOKEN",
+            "LITELLM_MODEL",
+            "LITELLM_SMALL_MODEL",
             # Codex agent auth/routing — without these the in-container codex
             # binary falls back to a ChatGPT login that doesn't exist in the
             # container and auth fails. CODEX_API_KEY drives login_api_key;
