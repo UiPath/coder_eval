@@ -1,10 +1,14 @@
+import { Suspense } from "react";
 import {
     aggregateTaskTrends,
     trendMatchesTag,
     TRENDS_RECENT_RUN_COUNT,
 } from "@/lib/trends";
+import { listRecentHarnesses } from "@/lib/overview";
+import { KNOWN_HARNESSES, parseHarnessParam } from "@/lib/harness";
 import { fmtRunTime, humanizeTaskId } from "@/lib/format";
-import { KNOWN_HARNESSES } from "@/app/_components/harness-badge";
+import { harnessShortLabel } from "@/app/_components/harness-badge";
+import { HarnessSelector } from "@/app/_components/harness-selector";
 import { TrendsView } from "./trends-view";
 
 export const dynamic = "force-dynamic";
@@ -25,17 +29,10 @@ function parseTag(raw: string | string[] | undefined): string | null {
     return trimmed.slice(0, 100);
 }
 
-// The harness whose trend to show. The nightly rotates claude-code / codex /
-// antigravity as separate runs; a trend is only meaningful within one harness,
-// so the page scopes to one (default claude-code, the daily primary) and offers
-// a switcher. An unknown/absent value falls back to the default.
-function parseHarness(raw: string | string[] | undefined): string {
-    const v = Array.isArray(raw) ? raw[0] : raw;
-    return v && (KNOWN_HARNESSES as readonly string[]).includes(v)
-        ? v
-        : "claude-code";
-}
-
+// The page shell only needs the URL params (cheap), so it returns immediately
+// and streams the data-backed table in behind a Suspense boundary — the ~20 MB
+// cold aggregate load no longer blocks the whole response. The header +
+// harness selector paint instantly (and stay usable) via the fallback.
 export default async function TrendsPage({
     searchParams,
 }: {
@@ -44,15 +41,35 @@ export default async function TrendsPage({
     const params = await searchParams;
     const q = parseQ(params.q);
     const activeTag = parseTag(params.tag);
-    const harness = parseHarness(params.h);
+    const harness = parseHarnessParam(params.h);
 
+    return (
+        // Key on harness so a switch (a fresh, heavy load) shows the skeleton;
+        // q/tag changes keep the boundary and re-filter the cached aggregate in
+        // a transition without flashing the fallback.
+        <Suspense key={harness} fallback={<TrendsSkeleton activeHarness={harness} />}>
+            <TrendsContent q={q} activeTag={activeTag} harness={harness} />
+        </Suspense>
+    );
+}
+
+async function TrendsContent({
+    q,
+    activeTag,
+    harness,
+}: {
+    q: string | null;
+    activeTag: string | null;
+    harness: string;
+}) {
     // One cached load, scoped to the selected harness — yields the trends, the
-    // run axis, AND the tag-rail counts (all from the same window).
-    const {
-        runIds,
-        trends: allTrends,
-        tagCounts,
-    } = await aggregateTaskTrends(TRENDS_RECENT_RUN_COUNT, harness);
+    // run axis, AND the tag-rail counts (all from the same window). The harness
+    // list (for the switcher) is a separate small cached discovery load.
+    const [{ runIds, trends: allTrends, tagCounts }, harnesses] =
+        await Promise.all([
+            aggregateTaskTrends(TRENDS_RECENT_RUN_COUNT, harness),
+            listRecentHarnesses(),
+        ]);
 
     // Provenance: surface the actual run count + date span. Even scoped to one
     // harness, the window can straddle model/prompt regimes, so showing the
@@ -89,19 +106,58 @@ export default async function TrendsPage({
 
     return (
         <TrendsView
-            // Remount on harness switch so open-row/history state (which is
-            // harness-specific) resets cleanly.
-            key={harness}
             tasks={tasks}
             runIds={runIds}
             q={q}
             activeTag={activeTag}
             activeHarness={harness}
-            harnesses={KNOWN_HARNESSES}
+            harnesses={harnesses}
             skills={tagCounts.skills}
             taskTags={tagCounts.taskTags}
             reviewTags={tagCounts.reviewTags}
             provenance={provenance}
         />
+    );
+}
+
+// Streamed while the aggregate loads. Mirrors TrendsView's header (so it
+// doesn't jump on swap) and keeps the harness selector live so the user can
+// re-scope without waiting, then shims the table with pulsing rows.
+function TrendsSkeleton({ activeHarness }: { activeHarness: string }) {
+    return (
+        <div className="space-y-5">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                    <h1 className="text-xl font-semibold text-gray-900">
+                        Task trends
+                    </h1>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                        Per-task pass rate and averages across recent{" "}
+                        {harnessShortLabel(activeHarness)} runs. Averages cover
+                        successful runs only.
+                    </p>
+                </div>
+                <HarnessSelector
+                    current={activeHarness}
+                    harnesses={KNOWN_HARNESSES}
+                />
+            </div>
+            <div className="border border-gray-200 rounded-lg bg-white p-4">
+                <div className="h-4 w-40 bg-gray-100 rounded animate-pulse" />
+            </div>
+            <div
+                className="border border-gray-200 rounded-lg overflow-hidden"
+                aria-hidden
+            >
+                {Array.from({ length: 8 }).map((_, i) => (
+                    <div
+                        key={i}
+                        className="h-11 border-b border-gray-100 last:border-0 bg-white flex items-center px-4"
+                    >
+                        <div className="h-3 w-72 max-w-full bg-gray-100 rounded animate-pulse" />
+                    </div>
+                ))}
+            </div>
+        </div>
     );
 }

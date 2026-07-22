@@ -6,6 +6,8 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { humanizeTaskId } from "@/lib/format";
+import { HarnessSelector } from "@/app/_components/harness-selector";
+import { harnessShortLabel } from "@/app/_components/harness-badge";
 import {
     FAIL_WEIGHT,
     REG_WEIGHT,
@@ -275,24 +277,39 @@ function HeroHeader() {
     );
 }
 
-export function WatchlistView({ data }: { data: WatchlistData }) {
+export function WatchlistView({
+    data,
+    activeHarness,
+    harnesses,
+}: {
+    data: WatchlistData;
+    activeHarness: string;
+    harnesses: readonly string[];
+}) {
     // Bars are scaled to the worst offender (full track) so score differences
     // within the list are legible — not to the theoretical max of 100, which
     // renders every realistic score as a near-identical sliver.
     const max = Math.max(1, ...data.topAttention.map((r) => r.score));
     return (
         <div>
-            <div className="flex items-baseline gap-3">
+            <div className="flex items-center gap-3 flex-wrap">
                 <h1 className="text-[22px] font-bold text-gray-900 border-l-[3px] border-uipath-orange pl-2.5">
                     Watchlist
                 </h1>
-                <span className="ml-auto text-[11px] text-gray-600 bg-gray-100 px-3 py-1 rounded-full font-semibold">
-                    last {data.windowSize} runs
-                </span>
+                <div className="ml-auto flex items-center gap-3">
+                    <HarnessSelector
+                        current={activeHarness}
+                        harnesses={harnesses}
+                    />
+                    <span className="text-[11px] text-gray-600 bg-gray-100 px-3 py-1 rounded-full font-semibold whitespace-nowrap">
+                        last {data.windowSize}{" "}
+                        {harnessShortLabel(activeHarness)} runs
+                    </span>
+                </div>
             </div>
             <p className="text-gray-500 text-[13px] mt-1.5 mb-6">
                 What leadership should be watching — ranked by where the signal
-                says to look first.
+                says to look first, for the selected harness.
             </p>
 
             {/* HERO */}

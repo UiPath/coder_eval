@@ -1,11 +1,9 @@
 import Image from "next/image";
 
-// The harnesses (coder-eval AgentKinds) the nightly rotates through, in display
-// order. A run whose RunConfig carries no harness is a legacy claude-code run
-// (see normalizeHarness in lib/overview.ts), so claude-code leads the list and
-// is the default everywhere a harness must be assumed.
-export const KNOWN_HARNESSES = ["claude-code", "codex", "antigravity"] as const;
-export type KnownHarness = (typeof KNOWN_HARNESSES)[number];
+// Canonical harness constants live in the leaf lib/harness module (shared by
+// the server data layer); re-exported here so existing badge importers are
+// unaffected.
+export { KNOWN_HARNESSES, type KnownHarness } from "@/lib/harness";
 
 // Vendor logo + labels for a run's harness (RunConfig). Renders the recognizable
 // vendor mark instead of raw "claude-code"/"codex"/"antigravity" text,

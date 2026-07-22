@@ -3,8 +3,10 @@ import {
     getAdhocRunListing,
     getOverview,
     getRunListing,
+    listRecentHarnesses,
     type TagCount,
 } from "@/lib/overview";
+import { parseHarnessParam, DEFAULT_HARNESS } from "@/lib/harness";
 import { fmtDuration, fmtRunTime, fmtTimestamp, passClass } from "@/lib/format";
 import { WindowSelector } from "./_components/window-selector";
 import { WINDOWS, type Window } from "@/lib/reviews-types";
@@ -15,7 +17,8 @@ import { ChipLegend, MergedTagRail } from "./_overview/tag-rail";
 import { TableScroll } from "./_components/scroll-table";
 import { CollapsibleRail } from "./_components/collapsible-rail";
 import { isInternal } from "@/lib/edition";
-import { HarnessBadge } from "@/app/_components/harness-badge";
+import { HarnessBadge, harnessShortLabel } from "@/app/_components/harness-badge";
+import { HarnessSelector } from "@/app/_components/harness-selector";
 
 export const dynamic = "force-dynamic";
 
@@ -98,6 +101,7 @@ export default async function Page({
         window?: string;
         tag?: string;
         q?: string;
+        h?: string;
         limit?: string;
         alimit?: string;
     }>;
@@ -106,14 +110,20 @@ export default async function Page({
     const window = parseWindow(params.window);
     const activeTag = parseTag(params.tag);
     const q = parseQ(params.q);
+    const harness = parseHarnessParam(params.h);
     const limit = parseLimit(params.limit);
     const adhocLimit = parseAdhocLimit(params.alimit);
     const isFiltered = activeTag != null || q != null;
 
-    const [overview, listing, adhoc] = await Promise.all([
-        getOverview(window, activeTag, q),
+    // The analytics block (chart + rails) is scoped to one harness so the
+    // success line stops zigzagging across incomparable harnesses. The run
+    // LIST stays all-harness — seeing every recent run is the page's job, and
+    // the Harness column already disambiguates each row.
+    const [overview, listing, adhoc, harnesses] = await Promise.all([
+        getOverview(window, activeTag, q, harness),
         getRunListing(window, activeTag, q, limit),
         getAdhocRunListing(adhocLimit),
+        listRecentHarnesses(),
     ]);
 
     const skills = filterTagsByQuery(overview.skills, q);
@@ -133,10 +143,14 @@ export default async function Page({
     const rawAlimit = Array.isArray(params.alimit)
         ? params.alimit[0]
         : params.alimit;
+    // Omit the default harness from URLs to keep them clean; carry a non-default
+    // scope through every self-link so it isn't reset by pagination/clear.
+    const hParam = harness === DEFAULT_HARNESS ? undefined : harness;
     const base = {
         window,
         tag: activeTag,
         q,
+        h: hParam,
         limit: rawLimit,
         alimit: rawAlimit,
     };
@@ -146,7 +160,7 @@ export default async function Page({
         limit: Math.min(tableTotalLabel, shownCount + DEFAULT_LIMIT),
     });
     const showAllHref = buildHref({ ...base, limit: "all" });
-    const clearAllHref = buildHref({ window });
+    const clearAllHref = buildHref({ window, h: hParam });
 
     // Ad-hoc section disclosure: rows are filtered (by `q`) then capped to
     // adhocLimit; offer "Show all" while more match than are shown, and a
@@ -212,7 +226,7 @@ export default async function Page({
                                     {overview.runs.length === 1 ? "" : "s"}
                                     {" · "}
                                     <Link
-                                        href={buildHref({ window })}
+                                        href={buildHref({ window, h: hParam })}
                                         scroll={false}
                                         className="text-studio-blue hover:underline"
                                     >
@@ -221,14 +235,21 @@ export default async function Page({
                                 </>
                             ) : (
                                 <>
-                                    Success rate per run across the last{" "}
-                                    {window} · {overview.runs.length} run
+                                    Success rate per{" "}
+                                    {harnessShortLabel(harness)} run across the
+                                    last {window} · {overview.runs.length} run
                                     {overview.runs.length === 1 ? "" : "s"}
                                 </>
                             )}
                         </p>
                     </div>
-                    <WindowSelector current={window} />
+                    <div className="flex items-center gap-3">
+                        <HarnessSelector
+                            current={harness}
+                            harnesses={harnesses}
+                        />
+                        <WindowSelector current={window} />
+                    </div>
                 </div>
                 <DailySuccessChart
                     data={overview.runs}
@@ -261,6 +282,7 @@ export default async function Page({
                             activeTag={activeTag}
                             window={window}
                             q={q}
+                            harness={harness}
                             limit={24}
                         />
                     </CollapsibleRail>

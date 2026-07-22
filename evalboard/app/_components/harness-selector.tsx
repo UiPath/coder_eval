@@ -22,9 +22,14 @@ export function HarnessSelector({
         p.set("h", h);
         router.replace(`${pathname}?${p.toString()}`, { scroll: false });
     };
+    // Always show the active harness, even if it has aged out of the recent
+    // window (so a deep-linked `?h=` still reads as selected rather than absent).
+    const opts = (harnesses as readonly string[]).includes(current)
+        ? harnesses
+        : [current, ...harnesses];
     return (
         <div className="inline-flex border border-gray-200 rounded-md overflow-hidden text-sm">
-            {harnesses.map((h) => {
+            {opts.map((h) => {
                 const active = h === current;
                 return (
                     <button

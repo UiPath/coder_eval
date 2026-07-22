@@ -2,12 +2,12 @@ import { describe, expect, test, vi } from "vitest";
 import {
     buildAdhocRows,
     collectPipelineRuns,
-    normalizeHarness,
     summarizeListing,
     turnBudgetRateForTasks,
     type PerRun,
     type RunListingRow,
 } from "../overview";
+import { normalizeHarness } from "../harness";
 import type { RunOverviewTask } from "../runs";
 
 function task(overrides: Partial<RunOverviewTask>): RunOverviewTask {

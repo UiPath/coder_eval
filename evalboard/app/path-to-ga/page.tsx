@@ -1,7 +1,14 @@
 import Link from "next/link";
-import { getOverview, getTagTaskBreakdown } from "@/lib/overview";
+import {
+    getOverview,
+    getTagTaskBreakdown,
+    listRecentHarnesses,
+} from "@/lib/overview";
+import { parseHarnessParam } from "@/lib/harness";
 import { humanizeTaskId } from "@/lib/format";
 import { WindowSelector } from "../_components/window-selector";
+import { HarnessSelector } from "../_components/harness-selector";
+import { harnessShortLabel } from "../_components/harness-badge";
 import { WINDOWS, type Window } from "@/lib/reviews-types";
 import { DailySuccessChart } from "../_overview/daily-chart";
 import { TableScroll } from "../_components/scroll-table";
@@ -26,14 +33,18 @@ function passClass(pct: number | null): string {
 export default async function PathToGaPage({
     searchParams,
 }: {
-    searchParams: Promise<{ window?: string }>;
+    searchParams: Promise<{ window?: string; h?: string }>;
 }) {
     const params = await searchParams;
     const window = parseWindow(params.window);
+    const harness = parseHarnessParam(params.h);
 
-    const [overview, taskRows] = await Promise.all([
-        getOverview(window, TAG, null),
-        getTagTaskBreakdown(window, TAG),
+    // Scope to one harness — readiness of a task is per-harness, and a blended
+    // chart/pass-rate mixes incomparable regimes.
+    const [overview, taskRows, harnesses] = await Promise.all([
+        getOverview(window, TAG, null, harness),
+        getTagTaskBreakdown(window, TAG, harness),
+        listRecentHarnesses(),
     ]);
 
     const runsInWindow = overview.runs.length;
@@ -52,10 +63,14 @@ export default async function PathToGaPage({
                     </h1>
                     <p className="text-sm text-gray-500">
                         Score for every task tagged{" "}
-                        <span className="font-mono text-gray-700">{TAG}</span>.
+                        <span className="font-mono text-gray-700">{TAG}</span> on{" "}
+                        {harnessShortLabel(harness)}.
                     </p>
                 </div>
-                <WindowSelector current={window} />
+                <div className="flex items-center gap-3">
+                    <HarnessSelector current={harness} harnesses={harnesses} />
+                    <WindowSelector current={window} />
+                </div>
             </div>
 
             <section className="border border-gray-200 rounded-lg bg-white p-4 space-y-4">

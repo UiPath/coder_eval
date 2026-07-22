@@ -15,6 +15,7 @@ import { listRunIdsInWindow, readRunReviewIndex, parseRunIdDate } from "./review
 import { withinTurnBudget } from "./turns";
 import { humanizeTaskId } from "./format";
 import { mapWithConcurrency } from "./concurrency";
+import { KNOWN_HARNESSES, normalizeHarness } from "./harness";
 import type { Window } from "./reviews-types";
 
 export interface RunPoint {
@@ -254,15 +255,6 @@ async function loadWindowDataInner(window: Window): Promise<PerRun[]> {
     return mapWithConcurrency(ids, FETCH_CONCURRENCY, cachedLoadPerRun);
 }
 
-// The harness a run is attributed to. A run whose RunConfig carried no harness
-// predates the stamp, and every such run was claude-code (the only nightly
-// harness before codex/antigravity were added), so null folds to claude-code.
-// Mirrors HarnessBadge's `harness ?? "claude-code"` default.
-export const DEFAULT_HARNESS = "claude-code";
-export function normalizeHarness(harness: string | null | undefined): string {
-    return harness ?? DEFAULT_HARNESS;
-}
-
 // Fetch the N most recent runs in PerRun shape. Recency-based (fixed count)
 // rather than date-bounded — used by the trends page. When `harness` is set,
 // only runs of that harness count toward N (the nightly now rotates
@@ -289,6 +281,37 @@ async function loadRecentRunsInner(
         : undefined;
     return collectPipelineRuns(ids, limit, cachedLoadPerRun, matchesHarness);
 }
+
+// How many recent runs to scan when discovering which harnesses are active.
+// All harnesses that run at least weekly appear within a window this size, so
+// the switcher lists them without a hardcoded set (a new harness like
+// "delegate" shows up on its own).
+const HARNESS_DISCOVERY_COUNT = 12;
+
+async function listRecentHarnessesInner(): Promise<string[]> {
+    const perRun = await loadRecentRuns(HARNESS_DISCOVERY_COUNT);
+    const seen = new Set<string>();
+    for (const r of perRun) {
+        if (r.overview) seen.add(normalizeHarness(r.overview.harness));
+    }
+    // Known harnesses first (stable display order), then any newcomers
+    // (alphabetical) so the list is deterministic but self-extending.
+    const known = KNOWN_HARNESSES.filter((h) => seen.has(h));
+    const extras = [...seen]
+        .filter((h) => !(KNOWN_HARNESSES as readonly string[]).includes(h))
+        .sort();
+    const ordered = [...known, ...extras];
+    // Never hand back an empty list — the default must always be selectable.
+    return ordered.length > 0 ? ordered : [...KNOWN_HARNESSES.slice(0, 1)];
+}
+
+// The harnesses present in recent runs, ordered for the switcher. Cached (and
+// shares the per-run cache with the aggregates), revalidated every 5 min.
+export const listRecentHarnesses = unstable_cache(
+    listRecentHarnessesInner,
+    ["recent-harnesses-v1"],
+    { revalidate: 300 },
+);
 
 // A loaded run occupies a window slot only when it's usable downstream:
 // pipeline (non-adhoc) AND has a readable overview with at least one task.
@@ -510,11 +533,20 @@ export async function getOverview(
     window: Window,
     tag: string | null = null,
     q: string | null = null,
+    // When set, scope the chart + rails to one harness. The nightly rotates
+    // harnesses as separate runs, so an unscoped chart interleaves incomparable
+    // pass rates into one zigzag line. null = all harnesses (legacy behavior).
+    harness: string | null = null,
 ): Promise<OverviewData> {
     // Ad-hoc runs never feed the daily chart or the tag rails — they're not
     // pipeline cadence. (Non-date-named ones are already pruned upstream by
     // listRunIdsInWindow; this also drops date-named runs flagged adhoc.)
-    const perRun = (await loadWindowData(window)).filter((r) => !r.adhoc);
+    const perRun = (await loadWindowData(window)).filter(
+        (r) =>
+            !r.adhoc &&
+            (harness == null ||
+                normalizeHarness(r.overview?.harness) === harness),
+    );
     const needle = q?.trim().toLowerCase() || null;
 
     // ---- Per-run chart points ----
@@ -592,8 +624,14 @@ export interface TagTaskRow {
 export async function getTagTaskBreakdown(
     window: Window,
     tag: string,
+    harness: string | null = null,
 ): Promise<TagTaskRow[]> {
-    const perRun = (await loadWindowData(window)).filter((r) => !r.adhoc);
+    const perRun = (await loadWindowData(window)).filter(
+        (r) =>
+            !r.adhoc &&
+            (harness == null ||
+                normalizeHarness(r.overview?.harness) === harness),
+    );
     const sorted = [...perRun].sort((a, b) => b.id.localeCompare(a.id));
 
     interface Acc {

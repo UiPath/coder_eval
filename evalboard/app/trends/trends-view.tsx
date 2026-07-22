@@ -650,6 +650,7 @@ export function TrendsView({
                         activeTag={activeTag}
                         basePath="/trends"
                         q={q}
+                        harness={activeHarness}
                         limit={24}
                     />
                 </CollapsibleRail>
