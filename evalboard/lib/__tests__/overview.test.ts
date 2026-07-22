@@ -7,6 +7,7 @@ import {
     type PerRun,
     type RunListingRow,
 } from "../overview";
+import { normalizeHarness } from "../harness";
 import type { RunOverviewTask } from "../runs";
 
 function task(overrides: Partial<RunOverviewTask>): RunOverviewTask {
@@ -301,6 +302,62 @@ describe("collectPipelineRuns", () => {
         expect(await collectPipelineRuns(["r1"], 0, load)).toEqual([]);
         expect(await collectPipelineRuns([], 5, load)).toEqual([]);
         expect(load).not.toHaveBeenCalled();
+    });
+
+    // A usable run tagged with a specific harness.
+    function runH(id: string, harness: string): PerRun {
+        const r = run(id);
+        return { ...r, overview: { ...r.overview!, harness } };
+    }
+
+    test("isMatch filters to the matching harness and backfills the rest", async () => {
+        // Interleaved harnesses; scoping to claude-code must skip the codex
+        // runs and reach further back to fill the window rather than returning
+        // short.
+        const harnesses: Record<string, string> = {
+            r6: "claude-code",
+            r5: "codex",
+            r4: "claude-code",
+            r3: "codex",
+            r2: "claude-code",
+            r1: "codex",
+        };
+        const load = vi.fn(async (id: string) => runH(id, harnesses[id]));
+        const out = await collectPipelineRuns(
+            ["r6", "r5", "r4", "r3", "r2", "r1"],
+            3,
+            load,
+            (r) => r.overview?.harness === "claude-code",
+        );
+        expect(out.map((r) => r.id)).toEqual(["r6", "r4", "r2"]);
+    });
+
+    test("harness scan reaches past RECENT_SCAN_FACTOR to gather a rare harness", async () => {
+        // limit 1; the only antigravity run sits at index 5 — beyond the
+        // unfiltered cap (1 × RECENT_SCAN_FACTOR = 3). The wider harness cap
+        // (1 × HARNESS_SCAN_FACTOR = 8) must reach it.
+        const ids = ["r6", "r5", "r4", "r3", "r2", "r1"];
+        const load = vi.fn(async (id: string) =>
+            runH(id, id === "r1" ? "antigravity" : "claude-code"),
+        );
+        const out = await collectPipelineRuns(
+            ids,
+            1,
+            load,
+            (r) => r.overview?.harness === "antigravity",
+        );
+        expect(out.map((r) => r.id)).toEqual(["r1"]);
+    });
+});
+
+describe("normalizeHarness", () => {
+    test("null/undefined fold to claude-code (legacy pre-stamp runs)", () => {
+        expect(normalizeHarness(null)).toBe("claude-code");
+        expect(normalizeHarness(undefined)).toBe("claude-code");
+    });
+    test("an explicit harness passes through unchanged", () => {
+        expect(normalizeHarness("codex")).toBe("codex");
+        expect(normalizeHarness("antigravity")).toBe("antigravity");
     });
 });
 

@@ -4,7 +4,13 @@
 // means "last 10 runs" is a more useful unit than "last 7 days".
 
 import { unstable_cache } from "next/cache";
-import { loadRecentRuns, type PerRun } from "./overview";
+import {
+    aggregateTaskTagCounts,
+    loadRecentRuns,
+    type PerRun,
+    type TagCount,
+} from "./overview";
+import { DEFAULT_HARNESS } from "./harness";
 import type { ComponentSha } from "./runs";
 
 export const TRENDS_RECENT_RUN_COUNT = 10;
@@ -208,22 +214,41 @@ export function aggregate(perRun: PerRun[]): TrendsData {
     return { runIds, trends };
 }
 
-async function aggregateTaskTrendsInner(limit: number): Promise<TrendsData> {
-    return aggregate(await loadRecentRuns(limit));
+// TrendsData plus the tag-rail counts, both derived from the SAME loaded
+// window. Folding the counts in here means the trends page loads the recent-run
+// window once (via this cached aggregate) instead of a second uncached
+// loadRecentRuns call just for the rail.
+export interface TrendsPageData extends TrendsData {
+    tagCounts: {
+        skills: TagCount[];
+        taskTags: TagCount[];
+        reviewTags: TagCount[];
+    };
+}
+
+async function aggregateTaskTrendsInner(
+    limit: number,
+    harness: string,
+): Promise<TrendsPageData> {
+    const perRun = await loadRecentRuns(limit, harness);
+    return { ...aggregate(perRun), tagCounts: aggregateTaskTagCounts(perRun) };
 }
 
 const cachedAggregate = unstable_cache(
     aggregateTaskTrendsInner,
-    // v2: the cached shape changed from TaskTrend[] to TrendsData — the key
-    // bump keeps a stale pre-deploy array from being served into new code.
-    ["aggregate-task-trends-v2"],
+    // v3: the cached shape gained tagCounts and the args gained `harness` — the
+    // key bump keeps a stale pre-deploy payload from being served into new code.
+    // (harness is part of the auto-generated key too, so each harness caches
+    // independently.)
+    ["aggregate-task-trends-v3"],
     { revalidate: 300 },
 );
 
 export function aggregateTaskTrends(
     limit: number = TRENDS_RECENT_RUN_COUNT,
-): Promise<TrendsData> {
-    return cachedAggregate(limit);
+    harness: string = DEFAULT_HARNESS,
+): Promise<TrendsPageData> {
+    return cachedAggregate(limit, harness);
 }
 
 // Predicate matching getOverview's tag scoping logic, but operating on the
@@ -238,8 +263,9 @@ export function trendMatchesTag(trend: TaskTrend, tag: string): boolean {
 export async function historyForTaskInner(
     taskId: string,
     limit: number,
+    harness: string = DEFAULT_HARNESS,
 ): Promise<TaskHistoryEntry[]> {
-    const perRun = await loadRecentRuns(limit);
+    const perRun = await loadRecentRuns(limit, harness);
     const out: TaskHistoryEntry[] = [];
     for (const { id, overview, reviewTagsByTask } of perRun) {
         if (!overview) continue;
@@ -266,13 +292,16 @@ export async function historyForTaskInner(
 
 const cachedHistory = unstable_cache(
     historyForTaskInner,
-    ["history-for-task"],
+    // v2: gained the `harness` arg (auto-keyed), so a task's history caches
+    // per harness rather than serving one harness's rows under another.
+    ["history-for-task-v2"],
     { revalidate: 300 },
 );
 
 export function historyForTask(
     taskId: string,
     limit: number = TRENDS_RECENT_RUN_COUNT,
+    harness: string = DEFAULT_HARNESS,
 ): Promise<TaskHistoryEntry[]> {
-    return cachedHistory(taskId, limit);
+    return cachedHistory(taskId, limit, harness);
 }
