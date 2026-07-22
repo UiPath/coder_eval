@@ -1089,7 +1089,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
             # shell), which ignores HOME for dotfile selection when it is set.
             env["HOME"] = str(self._login_shell_home)
             env["ZDOTDIR"] = str(self._login_shell_home)
-            env["CODEX_HOME"] = str(self._codex_home())
+            # The binary hard-errors on an explicitly set CODEX_HOME that does
+            # not exist (unset, it materializes the ~/.codex default itself) —
+            # hosts that auth via CODEX_API_KEY never ran `codex login`, so
+            # the dir may not exist yet. Create it before pinning.
+            codex_home = self._codex_home()
+            codex_home.mkdir(parents=True, exist_ok=True)
+            env["CODEX_HOME"] = str(codex_home)
         return env if env else None
 
     @staticmethod
