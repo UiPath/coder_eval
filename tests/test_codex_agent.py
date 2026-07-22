@@ -104,6 +104,10 @@ class TestSandboxAlwaysFullAccess:
     is redundant and, on constrained CI hosts / Windows, actively breaks — silently
     scoring 0. Hard isolation of untrusted actions is the docker driver's job."""
 
+    # The in_container / os_name dimensions are invariance-by-construction guards:
+    # _build_thread_options reads neither CODER_EVAL_IN_CONTAINER nor os.name after
+    # the always-full-access change, so these axes assert that a future edit can't
+    # reintroduce an env/OS-conditional sandbox branch without turning a case red.
     @pytest.mark.parametrize("mode", ["default", "acceptEdits", "plan", "bypassPermissions"])
     @pytest.mark.parametrize("in_container", [True, False])
     @pytest.mark.parametrize("os_name", ["posix", "nt"])

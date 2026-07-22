@@ -1265,11 +1265,15 @@ class CodexAgent(Agent[CodexAgentConfig]):
         # loud error. Dropping to full-access matches Claude Code and Antigravity,
         # which run with no in-agent OS sandbox; hard isolation of untrusted actions
         # is the docker driver's job, and approval_mode stays deny_all regardless.
-        sandbox_mode_str = "full-access"
-
-        # Convert to Codex SDK enum values
-        # Sandbox enum values use hyphens, ApprovalMode uses underscores
-        options["sandbox"] = Sandbox(sandbox_mode_str)
+        #
+        # Consequence: permission_mode does NOT confine Codex — every mode resolves
+        # to full-access. The docker driver is the only OS-level write boundary here;
+        # the tempdir/host driver is a working directory, not a confinement boundary
+        # (same as Claude Code / Antigravity already run there), so adversarial or
+        # untrusted evals belong on the docker driver. _log_config_enforcement
+        # surfaces this. full-access (danger-full-access) also keeps network on, so
+        # tool installs (the UiPath CLI, npm/pip) work without extra sandbox config.
+        options["sandbox"] = Sandbox.full_access
         options["approval_mode"] = ApprovalMode(approval_mode_str)
 
         # For logging, use the enum names (which use underscores)
@@ -1280,14 +1284,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         # Build config dict for tool enforcement
         tool_config: dict[str, Any] = {}
-
-        # Codex's workspace-write sandbox disables network by default, so any
-        # tool the agent needs to install (npm/pip/etc.) fails with
-        # "fetch failed". Always open network in workspace-write — every task
-        # we exercise needs the UiPath CLI / package installs. Read-only and
-        # danger-full-access keep their built-in network defaults.
-        if sandbox_mode_str == "workspace-write":
-            tool_config["sandbox_workspace_write"] = {"network_access": True}
 
         if self.config.allowed_tools:
             enabled_tools = [_CLAUDE_TO_CODEX_TOOL_MAP.get(tool, tool) for tool in self.config.allowed_tools]
@@ -1352,11 +1348,17 @@ class CodexAgent(Agent[CodexAgentConfig]):
             self._log.debug(f"Disallowed tools: {', '.join(self.config.disallowed_tools)}")
 
         self._log.debug(f"Permission mode: {self.config.permission_mode.value}")
-        if self.config.permission_mode.value == "bypassPermissions":
-            self._log.warning(
-                "[SECURITY] bypassPermissions grants unrestricted sandbox access (full-access). "
-                + "Only use in fully isolated environments with untrusted code execution disabled."
-            )
+        # Codex always runs full-access regardless of permission_mode (see
+        # _build_thread_options — its in-process OS sandbox is redundant given
+        # coder_eval's docker/tempdir boundary and unusable on our CI hosts). The
+        # notice fires for EVERY mode, not just bypassPermissions, so operators are
+        # not misled that plan/acceptEdits/default confine Codex — none of them do.
+        self._log.warning(
+            "[SECURITY] Codex runs full-access on every permission_mode "
+            + f"(configured: {self.config.permission_mode.value}); permission_mode does not confine it. "
+            + "OS-level isolation of untrusted code is the docker driver's job — use it for "
+            + "adversarial or untrusted evals; the tempdir/host driver is not a confinement boundary."
+        )
 
     def _format_turn_result(self, turn_result: Any) -> str:
         """Format a Codex Turn to a readable string — fallback when no text streamed.

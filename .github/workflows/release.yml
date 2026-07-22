@@ -25,7 +25,7 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: 'Version bump to release'
+        description: 'Version bump to release (ignored on non-main / prerelease dispatch, which always stamps a next-patch rc)'
         type: choice
         default: patch
         options:
