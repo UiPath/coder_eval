@@ -1,6 +1,10 @@
 """Pytest configuration and shared fixtures."""
 
 import logging
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -54,3 +58,51 @@ def reset_logging_after_test():
 
     # Reset to default level
     app_logger.setLevel(logging.NOTSET)
+
+
+@pytest.fixture
+def write_run_json() -> Callable[..., Path]:
+    """Factory that writes a valid ``run.json`` (a real ``RunSummary``) into a run dir.
+
+    Shared by the JUnit writer tests (Phase 1) and the CLI report/run tests
+    (Phase 2) so both track the ``RunSummary`` model instead of hand-typed JSON.
+    Task-status counts (``tasks_succeeded``/``failed``/``error``) are computed
+    from each row's ``status`` via ``FinalStatus.category`` so the model's
+    task-count invariant always holds. Callers pass row dicts shaped like
+    ``eval_result_to_task_dict`` output; only ``task_id`` and ``status`` are
+    required per row.
+    """
+    from coder_eval.models import FinalStatus, RunSummary, SkippedTask
+
+    def _build(
+        run_dir: Path,
+        rows: list[dict[str, Any]],
+        *,
+        skipped: list[tuple[str, str]] | None = None,
+        run_id: str = "2026-07-21_12-00-00",
+    ) -> Path:
+        counts = {"succeeded": 0, "failed": 0, "error": 0}
+        for row in rows:
+            try:
+                category = FinalStatus(row["status"]).category
+            except ValueError:
+                category = "error"  # unknown status → error bucket (mirrors the writer)
+            counts[category] += 1
+        summary = RunSummary(
+            run_id=run_id,
+            start_time=datetime(2026, 7, 21, 12, 0, 0),
+            end_time=datetime(2026, 7, 21, 12, 5, 0),
+            total_duration_seconds=300.0,
+            tasks_run=len(rows),
+            tasks_succeeded=counts["succeeded"],
+            tasks_failed=counts["failed"],
+            tasks_error=counts["error"],
+            skipped_tasks=[SkippedTask(path=p, reason=r) for p, r in (skipped or [])],
+            task_results=rows,
+            framework_version="test",
+        )
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "run.json").write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+        return run_dir / "run.json"
+
+    return _build
