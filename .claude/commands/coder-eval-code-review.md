@@ -12,7 +12,7 @@ description: Run a multi-model code review on uncommitted changes or a described
 
 Run a thorough code review using multiple AI models in parallel, then fix all high-confidence medium-severity and above findings.
 
-**Cost note**: This command runs `make verify` + a multi-model review (`gemini-3` + `codex` via MCP, plus an Opus sub-agent) + automatic fixes. Expensive in time and tokens. Use this for changes you're about to ship; for broad codebase audits use `/coder-eval-code-review-full`; for quick local checks, run targeted tools (`ruff`, `pyright`, `pytest`) directly.
+**Cost note**: This command runs `make verify` + a multi-model review (`gemini-3` + `gpt-5` via MCP, plus an Opus sub-agent) + automatic fixes. Expensive in time and tokens. Use this for changes you're about to ship; for broad codebase audits use `/coder-eval-code-review-full`; for quick local checks, run targeted tools (`ruff`, `pyright`, `pytest`) directly.
 
 Input: $ARGUMENTS
 
@@ -65,7 +65,7 @@ If it fails, report what's failing and stop — code review on broken code is pr
 
 Launch two reviews **in parallel**:
 
-**Review A — Multi-model (via `mcp__multi__codereview`)**: run it per the shared procedure in `.claude/shared/multi-model-review.md` — `models: ["gemini-3", "codex"]`, `relevant_files` = absolute paths of all changed files, `content` = a review request citing the Severity Standard, Review Principles, and Checklist. **Heed the multi-step protocol described there** (the step-1 response is usually an `in_progress` checklist, not findings — you must make the `step_number: 2` follow-up call with the same `thread_id`). Falls back to two Opus sub-agents if the tool is unavailable.
+**Review A — Multi-model (via `mcp__multi__codereview`)**: run it per the shared procedure in `.claude/shared/multi-model-review.md` — `models: ["gemini-3", "gpt-5"]`, `relevant_files` = absolute paths of all changed files, `content` = a review request citing the Severity Standard, Review Principles, and Checklist. **Heed the multi-step protocol described there** (the step-1 response is usually an `in_progress` checklist, not findings — you must make the `step_number: 2` follow-up call with the same `thread_id`). Falls back to two Opus sub-agents if the tool is unavailable.
 
 **Review B — Opus sub-agent**: Use the `Agent` tool with `model: "opus"`. Give it the list of changed files and the following specialized tasks to run in parallel internally:
 
@@ -120,7 +120,7 @@ across sessions and provides forensic context if a fix later proves wrong:
 - Git SHA: <`git rev-parse HEAD`>
 - Branch: <`git rev-parse --abbrev-ref HEAD`>
 - Scope: <uncommitted | described "<input>" | last commit>
-- Reviewers: <e.g. gemini-3, codex, opus-fallback-1, opus-fallback-2 — list actual reviewers used>
+- Reviewers: <e.g. gemini-3, gpt-5, opus-fallback-1, opus-fallback-2 — list actual reviewers used>
 
 ### Scope
 - Files reviewed: (list)
