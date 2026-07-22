@@ -1,5 +1,7 @@
 """Unit tests for replicate statistics helpers in reports_stats."""
 
+import pytest
+
 from coder_eval.reports_stats import (
     bootstrap_mean_ci,
     cohens_d,
@@ -14,6 +16,16 @@ class TestBootstrapMeanCi:
 
     def test_single_value_returns_triple(self):
         assert bootstrap_mean_ci([0.7]) == (0.7, 0.7, 0.7)
+
+    @pytest.mark.parametrize("confidence", [-1.0, 0.0, 1.0, 1.1])
+    def test_confidence_outside_unit_interval_raises(self, confidence):
+        """Out-of-domain confidence must refuse, not return a wrong-width interval."""
+        with pytest.raises(ValueError, match="confidence must be in"):
+            bootstrap_mean_ci([0.1, 0.5, 0.9], confidence=confidence)
+
+    def test_non_positive_n_resamples_raises(self):
+        with pytest.raises(ValueError, match="n_resamples must be"):
+            bootstrap_mean_ci([0.1, 0.5, 0.9], n_resamples=0)
 
     def test_mean_is_correct(self):
         m, _lo, _hi = bootstrap_mean_ci([0.0, 1.0])

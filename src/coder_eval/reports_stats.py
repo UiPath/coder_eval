@@ -165,7 +165,15 @@ def bootstrap_mean_ci(
     Returns (mean, ci_low, ci_high). When ``len(values) < 2``, returns
     (values[0], values[0], values[0]) or (0, 0, 0) for empty input.
     Uses ``random.Random(seed)`` for determinism.
+
+    Raises ValueError for a ``confidence`` outside (0, 1) or a non-positive
+    ``n_resamples`` — clamping those would quietly return an interval of the
+    wrong width, which is worse than refusing.
     """
+    if not 0.0 < confidence < 1.0:
+        raise ValueError(f"confidence must be in (0, 1), got {confidence!r}")
+    if n_resamples < 1:
+        raise ValueError(f"n_resamples must be >= 1, got {n_resamples!r}")
     if not values:
         return (0.0, 0.0, 0.0)
     m = sum(values) / len(values)
