@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.8.8 (2026-07-22)
+
+### Bug Fixes
+
+- **codex**: Create CODEX_HOME before pinning it in the app-server env
+  ([#39](https://github.com/UiPath/coder_eval/pull/39),
+  [`8d98b91`](https://github.com/UiPath/coder_eval/commit/8d98b912ae4767904c7d1c395913c3d0aaec6c66))
+
+### Documentation
+
+- Add Website badge and point PyPI Homepage at coder-eval.com
+  ([#41](https://github.com/UiPath/coder_eval/pull/41),
+  [`0551534`](https://github.com/UiPath/coder_eval/commit/055153409d86b8d537bba73ef7ed58dfd17fee26))
+
+
 ## v0.8.7 (2026-07-22)
 
 ### Bug Fixes
