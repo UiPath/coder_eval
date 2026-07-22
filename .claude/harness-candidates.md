@@ -37,3 +37,19 @@ Deferred lint/test guardrails surfaced during reviews. Promote to a `CExxx` rule
   caught them. The cleanup plan explicitly deferred this as YAGNI for the
   one-time purge, but any future doc rename/deletion re-opens the same blind
   spot — caught in the 2026-07-03 open-source-docs-cleanup implementation run.
+
+- [ ] Non-finite (NaN/inf) guards on numeric report helpers — `reports_stats.py`'s
+  t-test entry points now guard with `math.isfinite`, but nothing mechanically
+  enforces it for the next statistical helper added to that module. Review
+  criterion 15 states the rule; a CExxx rule would need to recognise "function
+  that feeds a value into `math.log`/`lgamma`/a division without a finiteness
+  check", which is a dataflow question rather than the syntactic pattern the
+  existing CE001–CE025 rules match — caught in the 2026-07-21 welch-t-test-exact
+  implementation run.
+- [ ] Percentile indices in `bootstrap_mean_ci` (`reports_stats.py`) are unguarded
+  against `confidence` outside (0,1) or tiny `n_resamples`, so an out-of-range
+  `confidence` would raise `IndexError` mid-report. Unreachable today — no caller
+  passes a non-default `confidence`/`n_resamples` — so it is latent rather than
+  live, and it is pre-existing code untouched by this change. Guard it (or drop
+  the unused parameters) if a caller ever starts passing them — flagged by an
+  external reviewer during the 2026-07-21 welch-t-test-exact final review.
