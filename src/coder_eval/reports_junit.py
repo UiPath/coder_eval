@@ -24,7 +24,7 @@ import logging
 import math
 import re
 import xml.etree.ElementTree as ET
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
 from .evaluation.judge_context import truncate
@@ -99,11 +99,58 @@ def _is_safe_component(value: str) -> bool:
     """True when ``value`` is usable as a single, contained path segment.
 
     ``run.json`` rows are untyped and may be blob-pulled from elsewhere, so a
-    crafted ``variant_id``/``task_id`` must not steer the lookup outside the run
-    directory (an absolute value would discard ``run_dir`` entirely, and ``..``
-    would walk up).
+    crafted ``variant_id`` must not steer the lookup outside the run directory
+    (an absolute value would discard ``run_dir`` entirely, and ``..`` would walk
+    up).
     """
     return bool(value) and value not in {".", ".."} and "/" not in value and "\\" not in value
+
+
+def _is_safe_relpath(value: str) -> bool:
+    """True when ``value`` is a contained relative path — possibly *nested*.
+
+    Unlike :func:`_is_safe_component`, an internal ``/`` is allowed: dataset
+    expansion rewrites a row's ``task_id`` to ``"<suite>/<row_id>"``
+    (``task_loader.expand_dataset``) and the on-disk layout is correspondingly
+    nested (``run_dir/<variant>/<suite>/<row_id>/<NN>/task.json``, see
+    ``path_utils.build_task_run_dir``). Rejecting the ``/`` would degrade every
+    dataset-derived row (e.g. the activation suite) to a status-only body.
+
+    Only an absolute path, a Windows drive/UNC prefix, or a ``.``/``..``
+    component could escape ``run_dir``; all are rejected here, and the
+    ``resolve()``-containment check in :func:`_load_task_json` is the
+    belt-and-braces backstop (symlinks included).
+    """
+    # A Windows drive-qualified value (``C:/x``) reads as a plain relative path
+    # on POSIX but is absolute on Windows, so reject it explicitly rather than
+    # leaning on the resolve-containment backstop alone.
+    if not value or value.startswith("/") or "\\" in value or PureWindowsPath(value).drive:
+        return False
+    parts = PurePosixPath(value).parts
+    return bool(parts) and all(p not in {".", ".."} for p in parts)
+
+
+def _time_attr(value: Any) -> str:
+    """Serialize a duration as a JUnit ``time`` attribute string.
+
+    The value must be a finite, non-negative number; NaN/inf/negative/non-numeric
+    all fall back to ``"0.000"``. NaN/inf would otherwise serialize as
+    ``"nan"``/``"inf"`` and make the document invalid for JUnit ingesters. Shared
+    by the per-testcase time and the root ``<testsuites>`` time so both are
+    guarded identically.
+
+    Rows are untyped, so ``value`` may be a pathologically large JSON integer
+    (hundreds of digits) that overflows on the ``float()`` conversion / ``.3f``
+    format — the ``OverflowError`` is caught and degraded rather than aborting
+    the whole report, matching this module's degrade-don't-crash contract.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+        return "0.000"
+    try:
+        as_float = float(value)
+    except (OverflowError, ValueError):
+        return "0.000"
+    return f"{as_float:.3f}" if math.isfinite(as_float) else "0.000"
 
 
 def _load_task_json(run_dir: Path, row: dict[str, Any], variant: str) -> dict[str, Any] | None:
@@ -116,7 +163,7 @@ def _load_task_json(run_dir: Path, row: dict[str, Any], variant: str) -> dict[st
     ``None`` so the caller falls back to a status-only body.
     """
     task_id = str(row.get("task_id", "<unknown>"))
-    if not _is_safe_component(variant) or not _is_safe_component(task_id):
+    if not _is_safe_component(variant) or not _is_safe_relpath(task_id):
         return None
 
     replicate_index = row.get("replicate_index")
@@ -162,11 +209,23 @@ def _criteria_body(row: dict[str, Any], run_dir: Path, variant: str) -> str:
             description = str(crit.get("description", ""))
             score = crit.get("score")
             threshold = crit.get("pass_threshold")
+            # Only an explicit JSON ``false`` marks an informational criterion; a
+            # missing key or a schema-skewed value (null / non-bool) fails safe
+            # to gating — matching CriterionResult.gating's default and this
+            # module's isinstance-guarded, degrade-don't-crash reads of untyped
+            # rows. Informational criteria are excluded from the score/gate, so
+            # they are labelled [INFO] regardless of pass/fail and never rendered
+            # as the failure cause (mirrors reports.py `_compute_suite_rollup`'s
+            # `if not cr.gating: continue`).
+            informational = crit.get("gating", True) is False
+            score_str = f"{score:.2f}" if isinstance(score, int | float) else str(score)
+            if informational:
+                lines.append(f"[INFO] {ctype}: score {score_str} — {description}")
+                continue
             passed = isinstance(score, int | float) and isinstance(threshold, int | float) and score >= threshold
             if passed:
                 lines.append(f"[PASS] {ctype}: {description}")
                 continue
-            score_str = f"{score:.2f}" if isinstance(score, int | float) else str(score)
             thr_str = f"{threshold:.2f}" if isinstance(threshold, int | float) else str(threshold)
             lines.append(f"[FAIL] {ctype}: score {score_str} < threshold {thr_str} — {description}")
             detail = crit.get("details") or crit.get("error")
@@ -193,16 +252,7 @@ def _task_case(row: dict[str, Any], run_dir: Path) -> ET.Element:
     task_path = row.get("task_path")
     classname = (Path(task_path).stem or variant) if isinstance(task_path, str) and task_path else variant
 
-    # time must be a finite, non-negative float: NaN/inf would serialize as
-    # "nan"/"inf" and make the report invalid for JUnit ingesters.
-    duration = row.get("duration")
-    valid_duration = (
-        isinstance(duration, int | float)
-        and not isinstance(duration, bool)
-        and math.isfinite(duration)
-        and duration >= 0
-    )
-    time_str = f"{duration:.3f}" if valid_duration else "0.000"
+    time_str = _time_attr(row.get("duration"))
 
     case = ET.Element(
         "testcase",
@@ -332,7 +382,10 @@ def generate_junit_xml(run_dir: Path) -> str:
     summary = RunSummary.model_validate_json(run_json.read_text(encoding="utf-8"))
 
     root = ET.Element("testsuites", {"name": _xml_safe(summary.run_id)})
-    root.set("time", f"{summary.total_duration_seconds:.3f}")
+    # Guard the root time identically to per-testcase time: a corrupt/blob-pulled
+    # run.json can carry a NaN/inf total_duration_seconds (RunSummary has no
+    # finite validator), which would emit an invalid time="nan".
+    root.set("time", _time_attr(summary.total_duration_seconds))
 
     # Group task rows by variant, preserving first-seen order.
     grouped: dict[str, list[dict[str, Any]]] = {}

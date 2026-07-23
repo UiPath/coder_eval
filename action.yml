@@ -52,7 +52,7 @@ inputs:
       the coder-eval process only (scoped to the run step; NOT written to
       $GITHUB_ENV, so nothing leaks into later job steps). This is the sole
       channel for credentials and backend config: set ANTHROPIC_API_KEY,
-      CODER_EVAL_API_BACKEND, model vars, EVALBOARD_*, plugin paths, etc. Names
+      API_BACKEND, model vars, EVALBOARD_*, plugin paths, etc. Names
       must match ^[A-Za-z_][A-Za-z0-9_]*$; blank lines and `#` comments are
       ignored. Wire values from repository secrets (secrets.MY_KEY) — never
       inline a secret literal.

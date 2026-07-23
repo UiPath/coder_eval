@@ -145,7 +145,7 @@ it can't leak into later steps). Set whatever the run needs, Anthropic or not:
     tasks: tests/tasks/**/*.yaml
     minimum-task-score: "0.8"   # fail the build if any task scores below 0.8
     env: |
-      CODER_EVAL_API_BACKEND=bedrock
+      API_BACKEND=bedrock
       AWS_BEARER_TOKEN_BEDROCK=${{ secrets.BEDROCK_TOKEN }}
 ```
 

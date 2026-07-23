@@ -630,3 +630,80 @@ class TestCE009YamlModelsForbidExtras:
     def test_exempt_modules_not_scoped(self):
         for path in ("src/coder_eval/models/results.py", "src/coder_eval/models/telemetry.py"):
             assert not self._run(self._VIOLATING, path)
+
+
+@pytest.mark.lint
+class TestCE027DocEnvVarParity:
+    """CE027 — documented framework env-var assignments must be backed by a
+    real consumer (a Settings field/alias or an os.getenv read in src/).
+
+    `Settings` sets no `env_prefix` and uses `extra="ignore"`, so a documented
+    `NAME=value` whose name matches no field is silently dropped at runtime — the
+    `CODER_EVAL_API_BACKEND` (real field: `API_BACKEND`) doc bug. Scans real
+    Markdown/YAML surfaces, so it lives here rather than in the AST-only runner.
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+
+    def test_repo_docs_have_no_unbacked_env_vars(self):
+        from tests.lint.doc_env_parity import default_doc_paths, find_unbacked_env_vars
+
+        findings = find_unbacked_env_vars(default_doc_paths(self.REPO_ROOT), self.REPO_ROOT / "src")
+        assert not findings, (
+            "\nDocumented framework env-var assignment(s) that no Settings field/alias or "
+            "src/ reference backs — they are silently dropped at runtime (Settings uses "
+            'extra="ignore"). Fix the spelling to a real env name, or add the consumer:\n\n'
+            + "\n".join(f"  {path}: {', '.join(names)}" for path, names in sorted(findings.items()))
+        )
+
+    def test_catches_the_coder_eval_api_backend_shadow(self):
+        # The exact regression: a CODER_EVAL_-prefixed spelling of a real field.
+        from tests.lint.doc_env_parity import scan_doc_env_assignments, settings_env_names, src_env_literals
+
+        valid = settings_env_names() | src_env_literals(self.REPO_ROOT / "src")
+        found = scan_doc_env_assignments("      CODER_EVAL_API_BACKEND=bedrock\n")
+        assert "CODER_EVAL_API_BACKEND" in found
+        assert "CODER_EVAL_API_BACKEND" not in valid  # would be flagged
+
+    def test_real_backend_field_is_backed(self):
+        from tests.lint.doc_env_parity import settings_env_names
+
+        assert "API_BACKEND" in settings_env_names()
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "AWS_BEARER_TOKEN_BEDROCK=${{ secrets.BEDROCK_TOKEN }}",  # secret RHS, not an assignment of BEDROCK_TOKEN
+            "[Codex Agent Guide](docs/CODEX_AGENT_GUIDE.md)",  # markdown link, not an assignment
+            'pattern: "^API_KEY = \\"\\\\w+\\""',  # regex example with a space before '='
+            "the CODEX_MODEL setting selects the model",  # bare prose mention, not an assignment
+            "X-API_KEY=v",  # hyphenated token — prefix embedded, not a standalone name
+            "dir/API_THING=v",  # path segment — prefix embedded
+            "http://API_HOST=1",  # URL segment — prefix embedded
+        ],
+    )
+    def test_non_assignment_shapes_are_not_flagged(self, line: str):
+        from tests.lint.doc_env_parity import scan_doc_env_assignments, settings_env_names, src_env_literals
+
+        valid = settings_env_names() | src_env_literals(self.REPO_ROOT / "src")
+        unbacked = [t for t in scan_doc_env_assignments(line) if t not in valid]
+        assert unbacked == [], f"false positive on non-assignment shape: {unbacked}"
+
+    def test_name_side_of_env_value_literal_counts_as_backed(self):
+        # `--env CODER_EVAL_IN_CONTAINER=1` in src makes the doc assignment backed.
+        from tests.lint.doc_env_parity import src_env_literals
+
+        names = src_env_literals(self.REPO_ROOT / "src")
+        assert "CODER_EVAL_IN_CONTAINER" in names
+
+    def test_src_scan_requires_a_real_consumer_not_any_literal(self, tmp_path: Path):
+        # A bare uppercase constant that no code reads must NOT count as "backed",
+        # or it could silently mask a documented-but-unconsumed assignment.
+        from tests.lint.doc_env_parity import src_env_literals
+
+        (tmp_path / "m.py").write_text(
+            'CONST = "CODER_EVAL_BOGUS"\nx = os.getenv("CODER_EVAL_REAL")\n', encoding="utf-8"
+        )
+        names = src_env_literals(tmp_path)
+        assert "CODER_EVAL_REAL" in names  # a genuine os.getenv read is backed
+        assert "CODER_EVAL_BOGUS" not in names  # a bare constant is not

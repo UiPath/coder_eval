@@ -20,6 +20,12 @@ from coder_eval.models import SuiteRollup, ThresholdCheck
 from coder_eval.reports_junit import generate_junit_xml, write_junit_xml
 
 
+def _props(case: Any) -> dict[str, str]:
+    """Map of a testcase's <property name=value> children."""
+    properties = case.find("properties")
+    return {p.get("name"): p.get("value") for p in properties.findall("property")} if properties is not None else {}
+
+
 def _write_task_json(
     run_dir: Path,
     variant: str,
@@ -594,3 +600,264 @@ def test_skipped_name_is_platform_independent(write_run_json: Callable[..., Path
     root = fromstring(generate_junit_xml(run_dir))
     name = _find_testsuite(root, "skipped").find("testcase").get("name")
     assert name == "tasks/win/task"
+
+
+def test_dataset_nested_task_id_loads_task_json(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """A dataset-derived task_id ('<suite>/<row_id>') maps to a real nested dir,
+    so task.json must still load and per-criterion detail must be emitted rather
+    than degrading to the status-only fallback body."""
+    run_dir = tmp_path / "run"
+    rows = [_row("activation/row_0", "FAILURE", variant_id="v1", replicate_index=0)]
+    write_run_json(run_dir, rows)
+    _write_task_json(
+        run_dir,
+        "v1",
+        "activation/row_0",
+        0,
+        [
+            {
+                "criterion_type": "skill_triggered",
+                "description": "must engage the target skill",
+                "score": 0.0,
+                "pass_threshold": 0.9,
+                "details": "NESTED_DETAIL_LOADED",
+                "error": None,
+            }
+        ],
+    )
+    root = fromstring(generate_junit_xml(run_dir))
+    body = _find_testsuite(root, "v1").find("testcase").find("failure").text or ""
+    assert "skill_triggered" in body
+    assert "NESTED_DETAIL_LOADED" in body  # nested task.json was read, not skipped
+
+
+def test_nested_task_id_with_dotdot_still_cannot_escape(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """Allowing an internal '/' must not open a '..' traversal: a nested task_id
+    containing a '..' component is rejected before any read."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "task.json").write_text(
+        json.dumps(
+            {
+                "success_criteria_results": [
+                    {
+                        "criterion_type": "leaked",
+                        "description": "SECRET",
+                        "score": 0.0,
+                        "pass_threshold": 0.9,
+                        "details": "LEAKED_VIA_NESTED_DOTDOT",
+                        "error": None,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "run"
+    write_run_json(
+        run_dir,
+        [{"task_id": "a/../../outside", "status": "FAILURE", "variant_id": "v1", "replicate_index": 0}],
+    )
+    xml_text = generate_junit_xml(run_dir)
+    assert "LEAKED_VIA_NESTED_DOTDOT" not in xml_text
+    root = fromstring(xml_text)
+    body = _find_testsuite(root, "v1").find("testcase").find("failure").text or ""
+    assert "FAILURE" in body  # fell back to status-only body
+
+
+def test_informational_criterion_not_rendered_as_failure(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """A non-gating (informational) criterion below its threshold must render as
+    [INFO], never [FAIL] — it is excluded from the score/gate, so it cannot be
+    the failure cause (mirrors reports.py's `if not cr.gating`)."""
+    run_dir = tmp_path / "run"
+    rows = [_row("t_fail", "FAILURE", variant_id="v1", replicate_index=0)]
+    write_run_json(run_dir, rows)
+    _write_task_json(
+        run_dir,
+        "v1",
+        "t_fail",
+        0,
+        [
+            {
+                "criterion_type": "commands_efficiency",
+                "description": "informational efficiency metric",
+                "score": 0.1,
+                "pass_threshold": 0.9,
+                "gating": False,
+                "details": None,
+                "error": None,
+            }
+        ],
+    )
+    body = _find_testsuite(fromstring(generate_junit_xml(run_dir)), "v1").find("testcase").find("failure").text or ""
+    assert "[INFO]" in body
+    assert "[FAIL]" not in body  # informational criterion is not the failure cause
+    assert "commands_efficiency" in body
+
+
+def test_root_time_finite_for_nonfinite_total_duration(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """A corrupt/blob-pulled run.json with a NaN total_duration_seconds must not
+    emit an invalid root time='nan' — the root time is guarded like per-testcase
+    time and falls back to '0.000'.
+
+    RunSummary has no finite validator and pydantic's JSON parser accepts a bare
+    ``NaN`` literal, so a foreign run.json can carry one; we inject it directly
+    since ``model_dump_json`` would coerce a NaN float to ``null``.
+    """
+    run_dir = tmp_path / "run"
+    run_json = write_run_json(run_dir, [_row("t", "SUCCESS")])
+    text = run_json.read_text(encoding="utf-8")
+    assert '"total_duration_seconds": 300.0' in text
+    run_json.write_text(text.replace('"total_duration_seconds": 300.0', '"total_duration_seconds": NaN'), "utf-8")
+
+    root = fromstring(generate_junit_xml(run_dir))
+    assert math.isfinite(float(root.get("time")))
+    assert root.get("time") == "0.000"
+
+
+def test_parity_real_producer_output_through_writer(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """Feed REAL ``eval_result_to_task_dict`` output through ``generate_junit_xml``.
+
+    Every other test builds rows via the synthetic ``_row`` helper, which
+    hand-copies the keys the writer reads. This one runs the actual producer
+    (``reports_experiment.eval_result_to_task_dict``, the batch.py path) so a
+    producer-side rename of ``status`` / ``task_path`` / ``total_cost_usd`` /
+    ``model_used`` / ``total_tokens`` / ``visible_turns`` / ``weighted_score``
+    (RunSummary.task_results is an untyped ``list[dict[str, Any]]``) can no longer
+    silently drop a property/classname or mis-bucket a row with zero failing
+    assertions.
+    """
+    from datetime import datetime
+
+    from coder_eval.models import AgentKind, EvaluationResult, FinalStatus, TokenUsage
+    from coder_eval.reports_experiment import eval_result_to_task_dict
+
+    result = EvaluationResult(
+        task_id="mytask",
+        task_description="d",
+        variant_id="v1",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime(2026, 7, 21, 12, 0, 0),
+        final_status=FinalStatus.FAILURE,
+        iteration_count=1,
+        model_used="claude-haiku-4-5-20251001",
+        weighted_score=0.375,
+        duration_seconds=2.5,
+        total_token_usage=TokenUsage(uncached_input_tokens=100, output_tokens=50, total_cost_usd=0.02),
+    )
+    row = eval_result_to_task_dict(
+        result,
+        variant_id="v1",
+        task_path="tasks/suiteA/mytask.yaml",
+        replicate_index=0,
+    )
+
+    run_dir = tmp_path / "run"
+    write_run_json(run_dir, [row])
+    root = fromstring(generate_junit_xml(run_dir))
+
+    # Grouped under the producer's variant_id, not "default".
+    ts = _find_testsuite(root, "v1")
+    assert ts is not None
+    case = ts.find("testcase")
+
+    # classname derives from the producer's task_path stem.
+    assert case.get("classname") == "mytask"
+    # name carries the producer's replicate_index.
+    assert case.get("name") == "mytask[00]"
+    # time is the producer's duration, formatted.
+    assert case.get("time") == "2.500"
+
+    # FAILURE (a "failed"-category status) becomes a <failure>, not <error>/pass.
+    assert case.find("failure") is not None
+
+    # Properties mirror the producer's values exactly (assert against the real
+    # dict, not hand-copied literals — this is the key-coupling contract).
+    props = _props(case)
+    assert props["model_used"] == str(row["model_used"])
+    assert props["weighted_score"] == str(row["weighted_score"])
+    assert props["total_cost_usd"] == str(row["total_cost_usd"])
+    assert props["total_tokens"] == str(row["total_tokens"])
+    assert props["visible_turns"] == str(row["visible_turns"])
+
+
+def test_huge_int_duration_degrades_not_crashes(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """An untyped row whose ``duration`` is a pathologically large JSON integer
+    must degrade to time="0.000", not crash report generation.
+
+    ``math.isfinite(10**400)`` and ``f"{10**400:.3f}"`` both raise OverflowError;
+    a 400-digit integer survives JSON parsing into ``task_results`` (untyped
+    ``list[dict[str, Any]]``), so the writer must guard the conversion.
+    """
+    run_dir = tmp_path / "run"
+    write_run_json(run_dir, [{"task_id": "t", "status": "SUCCESS", "duration": 10**400}])
+    root = fromstring(generate_junit_xml(run_dir))  # must not raise
+    case = root.find("testsuite").find("testcase")
+    assert case.get("time") == "0.000"
+
+
+def test_null_gating_fails_safe_as_gating(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """A schema-skewed ``"gating": null`` must be treated as gating ([FAIL]),
+    not silently rendered informational — only an explicit ``false`` is INFO."""
+    run_dir = tmp_path / "run"
+    rows = [_row("t_fail", "FAILURE", variant_id="v1", replicate_index=0)]
+    write_run_json(run_dir, rows)
+    _write_task_json(
+        run_dir,
+        "v1",
+        "t_fail",
+        0,
+        [
+            {
+                "criterion_type": "file_exists",
+                "description": "must exist",
+                "score": 0.0,
+                "pass_threshold": 0.9,
+                "gating": None,  # schema skew — must NOT read as informational
+                "details": None,
+                "error": None,
+            }
+        ],
+    )
+    body = _find_testsuite(fromstring(generate_junit_xml(run_dir)), "v1").find("testcase").find("failure").text or ""
+    assert "[FAIL]" in body
+    assert "[INFO]" not in body
+
+
+def test_passing_informational_criterion_is_info_not_pass(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """An informational criterion that meets its threshold is still labelled
+    [INFO] (its nature), never [PASS] (which implies it participated in the
+    gate) — the label reflects gating, not the score."""
+    run_dir = tmp_path / "run"
+    rows = [_row("t_fail", "FAILURE", variant_id="v1", replicate_index=0)]
+    write_run_json(run_dir, rows)
+    _write_task_json(
+        run_dir,
+        "v1",
+        "t_fail",
+        0,
+        [
+            {
+                "criterion_type": "commands_efficiency",
+                "description": "informational, passing",
+                "score": 1.0,
+                "pass_threshold": 0.9,
+                "gating": False,
+                "details": None,
+                "error": None,
+            }
+        ],
+    )
+    body = _find_testsuite(fromstring(generate_junit_xml(run_dir)), "v1").find("testcase").find("failure").text or ""
+    assert "[INFO]" in body
+    assert "[PASS]" not in body
+
+
+def test_windows_drive_task_id_degrades_to_status_body(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
+    """A Windows drive-qualified task_id (``C:/x``) passes the nested-relpath shape
+    on POSIX but is rejected by the drive guard, so it degrades to a status body
+    instead of being resolved."""
+    run_dir = tmp_path / "run"
+    write_run_json(run_dir, [{"task_id": "C:/evil", "status": "FAILURE", "variant_id": "v1", "replicate_index": 0}])
+    body = _find_testsuite(fromstring(generate_junit_xml(run_dir)), "v1").find("testcase").find("failure").text or ""
+    assert "FAILURE" in body  # status-only fallback, no crash
