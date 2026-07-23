@@ -90,6 +90,7 @@ nav:
       - A/B Experiments: AB_EXPERIMENTS.md
       - Bring Your Own Dataset: BYOD.md
       - Docker Isolation: DOCKER_ISOLATION.md
+      - CI Gate & GitHub Action: CI_GATE.md
   - Extending:
       - Extending Coder Eval: EXTENDING.md
   - Reference:

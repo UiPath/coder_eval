@@ -184,6 +184,7 @@ alone.
 | [Bring Your Own Dataset](docs/BYOD.md) | Fan a single task out over a dataset |
 | [Agent Guides](docs/agents/) | Running each agent — [Claude Code](docs/agents/CLAUDE_CODE.md), [Codex](docs/agents/CODEX.md), [Antigravity/Gemini](docs/agents/ANTIGRAVITY.md) |
 | [Docker Isolation](docs/DOCKER_ISOLATION.md) | The container sandbox driver |
+| [CI Gate: GitHub Action & JUnit](docs/CI_GATE.md) | Run coder_eval as a CI gate — the packaged Action, JUnit output, score floor |
 | [Extending Coder Eval](docs/EXTENDING.md) | Author a custom agent, criterion, or model pricing via the plugin SPI |
 | [Report Schema](docs/REPORT_SCHEMA.md) | Field-level reference for `run.json` / `variant.json` / `task.json` |
 | [CLAUDE.md](CLAUDE.md) | Architecture, key patterns, and extension points |
