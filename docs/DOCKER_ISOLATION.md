@@ -1,6 +1,6 @@
 ---
 description: >-
-  Run each coder_eval task in its own fresh Docker container — strong host
+  Run each Coder Eval task in its own fresh Docker container — strong host
   isolation, a pinned reproducible agent runtime, and custom images for
   task-specific dependencies.
 ---

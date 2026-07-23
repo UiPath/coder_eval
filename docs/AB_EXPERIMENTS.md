@@ -1,6 +1,6 @@
 ---
 description: >-
-  A/B-test AI coding agents with coder_eval's experiment layer — Claude Code vs.
+  A/B-test AI coding agents with Coder Eval's experiment layer — Claude Code vs.
   Codex vs. Gemini, model vs. model, skill on vs. off, prompt vs. prompt — on
   identical tasks.
 ---

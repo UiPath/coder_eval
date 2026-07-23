@@ -48,7 +48,7 @@ telemetry. See [How it compares](https://coder-eval.com/docs/comparison).
 > **Keeping skills fresh?** Run Coder Eval as a scheduled GitHub Actions job so your
 > skills are continuously re-evaluated against the latest model — a skill that quietly
 > stops triggering surfaces as a failing criterion before your users hit it. See
-> **[Tutorial 02 — Running coder_eval in CI](docs/tutorials/02-ci-pipeline.md)**.
+> **[Tutorial 02 — Running Coder Eval in CI](docs/tutorials/02-ci-pipeline.md)**.
 
 ## Quick Start
 
@@ -92,7 +92,7 @@ To add it as a project dependency instead: `uv add coder-eval` or
 `pip install coder-eval`. In a real CI gate, pin to a specific released version
 so a harness upgrade can't silently move your results. (The example `tasks/`
 live in this repo — clone it or point the CLI at your own task files.) See
-[Tutorial 02 — Running coder_eval in CI](docs/tutorials/02-ci-pipeline.md) for
+[Tutorial 02 — Running Coder Eval in CI](docs/tutorials/02-ci-pipeline.md) for
 the full setup.
 
 ## Use as a GitHub Action
@@ -184,7 +184,7 @@ alone.
 | [Bring Your Own Dataset](docs/BYOD.md) | Fan a single task out over a dataset |
 | [Agent Guides](docs/agents/) | Running each agent — [Claude Code](docs/agents/CLAUDE_CODE.md), [Codex](docs/agents/CODEX.md), [Antigravity/Gemini](docs/agents/ANTIGRAVITY.md) |
 | [Docker Isolation](docs/DOCKER_ISOLATION.md) | The container sandbox driver |
-| [CI Gate: GitHub Action & JUnit](docs/CI_GATE.md) | Run coder_eval as a CI gate — the packaged Action, JUnit output, score floor |
+| [CI Gate: GitHub Action & JUnit](docs/CI_GATE.md) | Run Coder Eval as a CI gate — the packaged Action, JUnit output, score floor |
 | [Extending Coder Eval](docs/EXTENDING.md) | Author a custom agent, criterion, or model pricing via the plugin SPI |
 | [Report Schema](docs/REPORT_SCHEMA.md) | Field-level reference for `run.json` / `variant.json` / `task.json` |
 | [CLAUDE.md](CLAUDE.md) | Architecture, key patterns, and extension points |

@@ -1,6 +1,6 @@
 ---
 description: >-
-  Use a custom Docker image with coder_eval — extend the base coder-eval-agent
+  Use a custom Docker image with Coder Eval — extend the base coder-eval-agent
   image with your own dependencies and tools, then point task configuration at
   it.
 ---

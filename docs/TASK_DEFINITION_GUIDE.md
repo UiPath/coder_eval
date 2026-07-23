@@ -1,13 +1,13 @@
 ---
 description: >-
-  Full schema reference for coder_eval task YAML — agent config, sandboxes, run
+  Full schema reference for Coder Eval task YAML — agent config, sandboxes, run
   limits, dataset fan-out, and all 14 success criterion types with weighted
   0.0–1.0 scoring.
 ---
 
 # Task Definition Guide
 
-Complete reference for defining evaluation tasks in coder_eval.
+Complete reference for defining evaluation tasks in Coder Eval.
 
 ## Table of Contents
 
@@ -116,7 +116,7 @@ agent:
 ```
 
 **`sdk_options`** is a typed pass-through dict for Claude Code SDK
-`ClaudeAgentOptions` fields that coder_eval doesn't own directly. Keys are
+`ClaudeAgentOptions` fields that Coder Eval doesn't own directly. Keys are
 validated against the SDK's dataclass at YAML load; framework-managed keys
 (`model`, `allowed_tools`, `permission_mode`, `hooks`, `mcp_servers`, …)
 are rejected. Deep-merged across the 5-layer config chain. Override via
@@ -130,7 +130,7 @@ an error.
 - `plan` — Agent proposes changes, waits for approval
 - `bypassPermissions` — No permission checks (use with caution)
 
-> **Codex note:** `permission_mode` confines the **`claude-code`** agent only. The **`codex`** agent always runs full-access regardless of the mode — its in-process OS sandbox is redundant given coder_eval's docker/tempdir isolation and unusable on our CI hosts (and on Windows). Run adversarial or untrusted Codex evals under the **docker driver**, which is the OS-level write boundary; the tempdir/host driver is a working directory, not a confinement boundary.
+> **Codex note:** `permission_mode` confines the **`claude-code`** agent only. The **`codex`** agent always runs full-access regardless of the mode — its in-process OS sandbox is redundant given Coder Eval's docker/tempdir isolation and unusable on our CI hosts (and on Windows). Run adversarial or untrusted Codex evals under the **docker driver**, which is the OS-level write boundary; the tempdir/host driver is a working directory, not a confinement boundary.
 
 **Agent Types:**
 - `claude-code` (default) — Claude Code SDK agent. Supports `sdk_options`, `claude_settings`, and all permission modes.

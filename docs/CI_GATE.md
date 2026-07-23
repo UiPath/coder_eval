@@ -1,17 +1,17 @@
 ---
 description: >-
-  Run coder_eval as a CI gate — the packaged composite GitHub Action, JUnit XML
+  Run Coder Eval as a CI gate — the packaged composite GitHub Action, JUnit XML
   output for test-report ingestion, and an optional per-task score floor.
 ---
 
 # CI Gate: GitHub Action & JUnit reports
 
-coder_eval ships a **packaged CI gate**: a composite GitHub Action that installs
+Coder Eval ships a **packaged CI gate**: a composite GitHub Action that installs
 the CLI, runs your tasks, emits a JUnit XML report, appends the run summary to the
 job summary, and fails the build on any task/gate failure. This page is the
 reference for the Action and the JUnit output. For a step-by-step walkthrough
 (including a hand-rolled workflow), see
-[Tutorial 02 — Running coder_eval in CI](tutorials/02-ci-pipeline.md).
+[Tutorial 02 — Running Coder Eval in CI](tutorials/02-ci-pipeline.md).
 
 ## The GitHub Action
 
@@ -142,6 +142,6 @@ failures/errors carry a (capped) detail body, and statuses map through
 
 ## See also
 
-- [Tutorial 02 — Running coder_eval in CI](tutorials/02-ci-pipeline.md) — the walkthrough
+- [Tutorial 02 — Running Coder Eval in CI](tutorials/02-ci-pipeline.md) — the walkthrough
 - [Report Schema](REPORT_SCHEMA.md) — the JSON the JUnit report is built from
 - [User Guide](USER_GUIDE.md) — the `run` / `report` commands and environment variables

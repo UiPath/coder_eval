@@ -1,11 +1,11 @@
 ---
 description: >-
-  Complete coder_eval reference — every CLI command and flag, configuration
+  Complete Coder Eval reference — every CLI command and flag, configuration
   layers and -D overrides, environment variables, run outputs, and reports for
   evaluating AI coding agents.
 ---
 
-# coder_eval User Guide
+# Coder Eval User Guide
 
 The full command, configuration, and output reference. For a gentle introduction
 start with the [tutorials](tutorials/README.md); for the task-file schema see the

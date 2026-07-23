@@ -1,15 +1,15 @@
 ---
 description: >-
-  Run Google Antigravity (Gemini) as the agent under evaluation in coder_eval —
+  Run Google Antigravity (Gemini) as the agent under evaluation in Coder Eval —
   installation, authentication, model and skill configuration, and how its
   telemetry maps to sandboxed, weighted scoring.
 ---
 
-# Running Google Antigravity (Gemini) in coder_eval
+# Running Google Antigravity (Gemini) in Coder Eval
 
 ## Overview
 
-coder_eval can run Google's **Antigravity** agent — powered by **Gemini** — as the
+Coder Eval can run Google's **Antigravity** agent — powered by **Gemini** — as the
 agent under evaluation. Set `agent.type: antigravity` in a task and the rest of the
 framework (sandbox, scoring, telemetry, reports) works unchanged.
 
@@ -154,7 +154,7 @@ as every other agent.
   `start_subagent` → `Task`, `search_web` → `WebSearch`. Argument keys are also
   normalized (e.g. `command_line` → `command`) so `command_executed` criteria key on
   the same params across agents.
-- **Tokens.** Gemini usage maps to coder_eval's four buckets: uncached input, cache
+- **Tokens.** Gemini usage maps to Coder Eval's four buckets: uncached input, cache
   read (`cached_content_token_count`), output, and **`cache_creation` is always 0**
   (Gemini bills no separate cache-write). Thinking tokens are folded into **output**.
   Per-generation usage is cut into `AssistantMessage`s that sum exactly to the turn

@@ -1,13 +1,13 @@
 ---
 description: >-
-  Extend coder_eval with a custom agent, a custom success criterion, or model
+  Extend Coder Eval with a custom agent, a custom success criterion, or model
   pricing — the plugin SPI (coder_eval.plugins entry-point group), the Agent ABC
   checklist, the @register_criterion decorator, and register_pricing.
 ---
 
 # Extending Coder Eval
 
-coder_eval is extensible along three seams, all designed so a third party can add
+Coder Eval is extensible along three seams, all designed so a third party can add
 capability **without editing the base package**:
 
 1. **Agents** — register a new `agent.type` via the plugin SPI.
