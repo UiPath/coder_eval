@@ -783,6 +783,10 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                     # x-api-key (e.g. a real Anthropic key exported from .env)
                     # would conflict with the gateway's key auth.
                     "ANTHROPIC_API_KEY": "",
+                    # Claude Code attaches usage-attribution metadata (metadata.user_id)
+                    # that Bedrock's requestMetadata regex rejects (HTTP 400) once LiteLLM
+                    # forwards it to Bedrock. Disable it, mirroring the BedrockRoute case above.
+                    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
                 }
                 if cr.model:
                     env["ANTHROPIC_MODEL"] = cr.model
