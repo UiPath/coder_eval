@@ -2,11 +2,10 @@
 
 [![PyPI](https://img.shields.io/pypi/v/coder-eval.svg)](https://pypi.org/project/coder-eval/)
 [![Website](https://img.shields.io/badge/website-coder--eval.com-1f6feb.svg)](https://coder-eval.com)
-[![Docs](https://img.shields.io/badge/docs-uipath.github.io%2Fcoder__eval-1f6feb.svg)](https://uipath.github.io/coder_eval/)
+[![Docs](https://img.shields.io/badge/docs-coder--eval.com%2Fdocs-1f6feb.svg)](https://coder-eval.com/docs)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
 [![CI](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml/badge.svg)](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml)
-[![Code style: Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 **Coder Eval** (`pip install coder-eval` / `uv tool install coder-eval`) is an open-source framework for
 **evaluating and benchmarking AI coding agents and their skills** — built for CLI
@@ -22,8 +21,8 @@ prompt), or **gate CI on coding-agent quality**. Unlike fixed datasets (SWE-benc
 SkillsBench) that rank models on a shared leaderboard, Coder Eval evaluates the
 tasks, skills, and workflows *you* ship — with weighted 0.0–1.0 criteria, a
 `skill_triggered` activation check, an A/B experiment layer, and per-tool cost
-telemetry. See [How it compares](https://uipath.github.io/coder_eval/comparison/).
-📚 **Full docs:** **[uipath.github.io/coder_eval](https://uipath.github.io/coder_eval/)**.
+telemetry. See [How it compares](https://coder-eval.com/docs/comparison).
+📚 **Full docs:** **[coder-eval.com/docs](https://coder-eval.com/docs)**.
 
 <p align="center">
   <img src="docs/assets/hero.gif" alt="Coder Eval running the hello_date task: a sandboxed agent writes and runs a script from a YAML task, then the scored result is browsed in evalboard" width="100%">
@@ -202,7 +201,7 @@ alone.
 - **vs. hand-rolled scripts** — reproducible sandboxes, weighted criteria,
   cost/token telemetry, A/B experiments, and CI-ready pass/fail gates out of the box.
 
-See the full [comparison — with sources](https://uipath.github.io/coder_eval/comparison/).
+See the full [comparison — with sources](https://coder-eval.com/docs/comparison).
 
 ## Task Definition
 
