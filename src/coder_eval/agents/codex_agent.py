@@ -65,6 +65,8 @@ _CLAUDE_TO_CODEX_TOOL_MAP: dict[str, str] = {
     "Read": "shell",
     "Grep": "shell",
     "Glob": "shell",
+    "WebFetch": "web_search",
+    "WebSearch": "web_search",
 }
 
 # Approval mode — the SAME for every permission mode (no per-mode mapping).
@@ -169,6 +171,7 @@ _ROLLOUT_TOOL_OUTPUT_TYPES = frozenset({"function_call_output", "custom_tool_cal
 # ("StopIteration interacts badly with generators…") that escapes ``except
 # StopIteration`` — masking the real turn-failure reason on the stream-end path.
 _STREAM_DONE = object()
+_WEB_FETCH_ACTION_TYPES = frozenset({"openpage", "findinpage", "open_page", "find_in_page"})
 
 
 def _ms_to_dt(ms: int | None) -> datetime:
@@ -182,6 +185,34 @@ def _status_value(status: Any) -> str:
     """Normalize a Codex status (enum or str) to its lowercase string value."""
     value = getattr(status, "value", status)
     return str(value).lower() if value is not None else ""
+
+
+def _web_search_action(root: Any) -> Any:
+    """Return a web-search item's concrete action, unwrapping the SDK RootModel."""
+    action = getattr(root, "action", None)
+    return getattr(action, "root", action)
+
+
+def _web_search_tool_name(root: Any) -> str:
+    """Classify page navigation as WebFetch while retaining searches as WebSearch."""
+    action_type = _status_value(getattr(_web_search_action(root), "type", None))
+    return "WebFetch" if action_type in _WEB_FETCH_ACTION_TYPES else "WebSearch"
+
+
+def _web_search_parameters(root: Any) -> dict[str, Any]:
+    """Extract useful search/page-action inputs from a Codex webSearch item."""
+    action = _web_search_action(root)
+    parameters: dict[str, Any] = {}
+    if action is not None:
+        for key in ("url", "pattern", "query", "queries"):
+            value = getattr(action, key, None)
+            if value not in (None, "", []):
+                parameters[key] = value
+    if "query" not in parameters and "queries" not in parameters:
+        query = getattr(root, "query", None)
+        if query not in (None, ""):
+            parameters["query"] = query
+    return parameters
 
 
 def _fresh_input_tokens(raw_input: int, cached: int) -> int:
@@ -445,7 +476,7 @@ class _CodexTurnState:
             tool_id = item_id or f"{root_type}_{self.next_sequence}"
             self.seq_by_id[tool_id] = self.next_sequence
             start_tel = CommandTelemetry(
-                tool_name=self._agent._tool_name(root_type),
+                tool_name=self._agent._tool_name(root_type, root),
                 tool_id=tool_id,
                 timestamp=datetime.now(),
                 parameters=self._agent._tool_parameters(root, root_type),
@@ -471,9 +502,16 @@ class _CodexTurnState:
             tool_id = getattr(root, "id", None) or f"{root_type}_{self.next_sequence}"
             seq = self.seq_by_id.get(tool_id, self.next_sequence)
             # This tool is now resolved — drop it from the orphan set.
-            self.open_tools.pop(tool_id, None)
+            provisional = self.open_tools.pop(tool_id, None)
 
             telemetry, is_error = self._agent._telemetry_for_item(root, root_type, tool_id, seq)
+            # Some Codex items (notably webSearch) acquire their concrete action
+            # only at item/completed. Upgrade the ToolStart telemetry object in
+            # place so callbacks retaining that reference see the final canonical
+            # name/parameters too.
+            if provisional is not None and telemetry is not None:
+                provisional.tool_name = telemetry.tool_name
+                provisional.parameters.update(telemetry.parameters)
             if telemetry:
                 self.commands.append(telemetry)
             self.emit.on_event(
@@ -482,7 +520,7 @@ class _CodexTurnState:
                     turn_id=self.turn_id,
                     tool=telemetry
                     or CommandTelemetry(
-                        tool_name=self._agent._tool_name(root_type),
+                        tool_name=self._agent._tool_name(root_type, root),
                         tool_id=tool_id,
                         timestamp=datetime.now(),
                         sequence_number=seq,
@@ -1506,8 +1544,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
         return rebuilt
 
     @staticmethod
-    def _tool_name(root_type: str | None) -> str:
+    def _tool_name(root_type: str | None, root: Any = None) -> str:
         """Friendly tool label for a Codex item type (falls back to the raw type)."""
+        if root_type == "webSearch":
+            return _web_search_tool_name(root)
         return _TOOL_ITEM_NAMES.get(root_type or "", root_type or "Tool")
 
     def _tool_parameters(self, root: Any, root_type: str | None) -> dict[str, Any]:
@@ -1538,7 +1578,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 params["arguments"] = args
             return params
         if root_type == "webSearch":
-            return {"query": getattr(root, "query", "")}
+            return _web_search_parameters(root)
         if root_type == "imageView":
             return {"path": str(getattr(root, "path", ""))}
         if root_type == "imageGeneration":
@@ -1580,7 +1620,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             duration_ms = getattr(root, "duration_ms", None)
             return (
                 CommandTelemetry(
-                    tool_name=self._tool_name(root_type),
+                    tool_name=self._tool_name(root_type, root),
                     tool_id=tool_id,
                     timestamp=datetime.now(),
                     duration_ms=float(duration_ms) if duration_ms is not None else None,
@@ -1605,7 +1645,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
             messages = [s.message for s in states.values() if getattr(s, "message", None)]
             return f"collab {op}: {'; '.join(messages)[:200]}" if messages else f"collab {op}"
         if root_type == "webSearch":
-            return f"query: {getattr(root, 'query', '')}"
+            parameters = _web_search_parameters(root)
+            return "; ".join(f"{key}: {value}" for key, value in parameters.items())
         if root_type in ("mcpToolCall", "dynamicToolCall"):
             return f"{getattr(root, 'server', '') or getattr(root, 'namespace', '')}:{getattr(root, 'tool', '')}".strip(
                 ":"

@@ -1350,6 +1350,40 @@ class TestCodexGenericToolCapture:
         mcp_tel = next(c for c in record.commands if c.tool_name == "Mcp")
         assert "read_file" in (mcp_tel.result_summary or "")
 
+    @pytest.mark.parametrize(
+        ("action", "expected_parameters"),
+        [
+            (
+                SimpleNamespace(type="openPage", url="https://example.com/docs"),
+                {"url": "https://example.com/docs"},
+            ),
+            (
+                SimpleNamespace(type="findInPage", url="https://example.com/docs", pattern="guardrails"),
+                {"url": "https://example.com/docs", "pattern": "guardrails"},
+            ),
+        ],
+    )
+    async def test_web_page_actions_become_webfetch(self, action, expected_parameters):
+        web = SimpleNamespace(
+            type="webSearch",
+            id="ws_fetch",
+            query="",
+            action=SimpleNamespace(root=action),
+        )
+        notifications = [
+            _item_notification("item/started", web),
+            _item_notification("item/completed", web),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+
+        record = await agent.communicate("open the documentation")
+
+        assert len(record.commands) == 1
+        telemetry = record.commands[0]
+        assert telemetry.tool_name == "WebFetch"
+        assert telemetry.parameters == expected_parameters
+
     async def test_failed_mcp_call_records_error(self):
         mcp = SimpleNamespace(
             type="mcpToolCall",
