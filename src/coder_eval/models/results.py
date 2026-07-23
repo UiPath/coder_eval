@@ -420,7 +420,12 @@ class EarlyStopInfo(BaseModel):
         description="SDK inner-turn count at the stop (watcher counts TurnStartEvents). NOT the "
         + "orchestrator iteration, which is always 1 in single-shot."
     )
-    tool_call_index: int = Field(description="1-based index of the tool call that decided the stop.")
+    tool_call_index: int = Field(
+        description="1-based index of the tool call that decided the stop. NOTE: because the "
+        + "stop latches on the tool CALL (ToolStartEvent), this is the index of the deciding "
+        + "call INCLUDING that in-flight call — i.e. completed_tool_ends + 1 for a call-latched "
+        + "stop. Read it as 'which call decided', not as a count of fully-completed tool calls."
+    )
     elapsed_seconds: float = Field(description="Wall-clock seconds from the first agent-start event to the stop.")
     turns_remaining_at_stop: int | None = Field(
         default=None,

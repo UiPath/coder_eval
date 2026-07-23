@@ -1131,6 +1131,23 @@ class TestEarlyStopWatcher:
         assert watcher.info is not None
         assert watcher.info.tool_call_index == 2
 
+    def test_second_agent_start_does_not_reset_origin(self) -> None:
+        # The wall-clock origin is stamped at the FIRST AgentStartEvent only; a
+        # retry's second AgentStart must NOT reset it (the documented no-op branch
+        # in on_event). Exercised deterministically via _started_monotonic rather
+        # than the time-based elapsed_seconds field.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
+        _feed(watcher, [_agent_start()])
+        origin = watcher._started_monotonic
+        assert origin is not None
+        # A second AgentStart (as on a retry) must leave the origin untouched.
+        _feed(watcher, [_agent_start(), _turn_start()])
+        assert watcher._started_monotonic == origin
+        # The stop that follows anchors elapsed_seconds to that first origin.
+        _feed(watcher, [_skill_start("date-teller")])
+        assert watcher.info is not None
+        assert watcher.info.elapsed_seconds >= 0.0
+
 
 # --------------------------------------------------------------------------- #
 # Phase 3: Orchestrator wiring

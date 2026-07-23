@@ -158,6 +158,155 @@ class TestSkillTriggeredAnyEngagement:
         assert precision.observed_label == "yes" and precision.score == 0.0  # precision: off-target engaged
 
 
+def _check_multi(
+    *, expected_skill: str, skill_name: str, turns: list[list[CommandTelemetry]]
+) -> ClassificationCriterionResult:
+    criterion = SkillTriggeredCriterion(
+        description="did agent invoke a skill?",
+        expected_skill=expected_skill,
+        skill_name=skill_name,
+    )
+    checker = SkillTriggeredChecker()
+    turn_records = [_turn(cmds) for cmds in turns]
+    result = checker.check(criterion, sandbox=None, turn_records=turn_records)  # type: ignore[arg-type]
+    assert isinstance(result, ClassificationCriterionResult)
+    return result
+
+
+class TestSkillTriggeredGoldenCorpus:
+    """Regression lock: pins observed_label AND score for the canonical
+    multi-skill trajectories through ``_check_impl``. Any future change to the
+    engagement policy (any- vs first-engagement) breaks these, forcing an
+    explicit acknowledgement of the methodology break — and a re-score/backfill
+    of historical activation P/R/F1 — before merge.
+    """
+
+    @pytest.mark.parametrize(
+        ("case", "expected_skill", "skill_name", "commands", "exp_observed", "exp_score"),
+        [
+            (
+                "single-target-recall",
+                "uipath-admin",
+                "uipath-admin",
+                [_cmd("Skill", {"skill": "uipath-admin"}, tool_id="s1")],
+                "yes",
+                1.0,
+            ),
+            (
+                "target-first-then-competitor-recall",
+                "uipath-admin",
+                "uipath-admin",
+                [
+                    _cmd("Skill", {"skill": "uipath-admin"}, tool_id="s1"),
+                    _cmd("Skill", {"skill": "uipath-platform"}, tool_id="s2"),
+                ],
+                "yes",
+                1.0,
+            ),
+            (
+                "target-first-then-competitor-precision",
+                "uipath-admin",
+                "uipath-platform",
+                [
+                    _cmd("Skill", {"skill": "uipath-admin"}, tool_id="s1"),
+                    _cmd("Skill", {"skill": "uipath-platform"}, tool_id="s2"),
+                ],
+                "yes",
+                0.0,
+            ),
+            (
+                "wrong-first-then-target-recall",
+                "uipath-admin",
+                "uipath-admin",
+                [
+                    _cmd("Skill", {"skill": "uipath-platform"}, tool_id="s1"),
+                    _cmd("Skill", {"skill": "uipath-admin"}, tool_id="s2"),
+                ],
+                "yes",
+                1.0,
+            ),
+            (
+                "negative-target-engaged-false-positive",
+                "",
+                "uipath-admin",
+                [_cmd("Skill", {"skill": "uipath-admin"}, tool_id="s1")],
+                "yes",
+                0.0,
+            ),
+            (
+                "negative-no-engagement-true-negative",
+                "",
+                "uipath-admin",
+                [_cmd("Read", {"file_path": "notes.txt"})],
+                "no",
+                1.0,
+            ),
+            (
+                "file-read-target-recall",
+                "uipath-admin",
+                "uipath-admin",
+                [_cmd("Read", {"file_path": "skills/uipath-admin/SKILL.md"})],
+                "yes",
+                1.0,
+            ),
+        ],
+    )
+    def test_golden_corpus_scores_are_pinned(
+        self,
+        case: str,
+        expected_skill: str,
+        skill_name: str,
+        commands: list[CommandTelemetry],
+        exp_observed: str,
+        exp_score: float,
+    ) -> None:
+        result = _check(expected_skill=expected_skill, skill_name=skill_name, commands=commands)
+        assert result.observed_label == exp_observed, case
+        assert result.score == exp_score, case
+
+
+class TestSkillTriggeredMultiTurnParity:
+    """Any-engagement holds across TurnRecords and for the file-read signal, so
+    the agent-agnostic parity CLAUDE.md stresses is asserted for the new branch.
+    """
+
+    def test_expected_skill_in_later_turn_still_recalls(self) -> None:
+        # Distractor engaged in turn 1, expected skill in turn 2. Recall must
+        # credit the GT criterion regardless of which turn the engagement lives in.
+        result = _check_multi(
+            expected_skill="uipath-admin",
+            skill_name="uipath-admin",
+            turns=[
+                [_cmd("Skill", {"skill": "uipath-platform"}, tool_id="s1")],
+                [_cmd("Skill", {"skill": "uipath-admin"}, tool_id="s2")],
+            ],
+        )
+        assert result.observed_label == "yes" and result.score == 1.0
+
+    def test_off_target_in_earlier_turn_is_precision_miss(self) -> None:
+        # The competitor engaged in an EARLIER turn than the GT skill still lands
+        # as a precision miss on its own criterion (no turn-order dependence).
+        turns = [
+            [_cmd("Skill", {"skill": "uipath-platform"}, tool_id="s1")],
+            [_cmd("Skill", {"skill": "uipath-admin"}, tool_id="s2")],
+        ]
+        precision = _check_multi(expected_skill="uipath-admin", skill_name="uipath-platform", turns=turns)
+        assert precision.observed_label == "yes" and precision.score == 0.0
+
+    def test_file_read_parity_across_turns(self) -> None:
+        # Off-Claude parity: the agent READS skill files across turns (platform's
+        # in turn 1, admin's in turn 2). Recall/precision score identically to the
+        # Skill-tool path, order- and turn-independent.
+        turns = [
+            [_cmd("Read", {"file_path": "skills/uipath-platform/SKILL.md"})],
+            [_cmd("Read", {"file_path": "skills/uipath-admin/reference.md"})],
+        ]
+        recall = _check_multi(expected_skill="uipath-admin", skill_name="uipath-admin", turns=turns)
+        precision = _check_multi(expected_skill="uipath-admin", skill_name="uipath-platform", turns=turns)
+        assert recall.observed_label == "yes" and recall.score == 1.0
+        assert precision.observed_label == "yes" and precision.score == 0.0
+
+
 class TestSkillTriggeredCodex:
     """Codex has no ``Skill`` tool — it engages a skill by reading its files via shell.
 
