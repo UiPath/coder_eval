@@ -3,7 +3,7 @@ site_description: >-
   Evaluate & benchmark AI coding agents and Claude Code skills — a sandboxed,
   reproducible framework with declarative YAML eval suites for Claude Code,
   Codex & Gemini, A/B experiments, weighted scoring, and CI gates.
-site_url: https://uipath.github.io/coder_eval/
+site_url: https://coder-eval.com/docs/
 repo_url: https://github.com/UiPath/coder_eval
 repo_name: UiPath/coder_eval
 edit_uri: edit/main/docs/
