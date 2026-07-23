@@ -75,7 +75,7 @@ coder-eval run tasks/agents/codex_hello_world.yaml --type codex
 Or override agent type for all tasks in an experiment:
 
 ```bash
-coder-eval run experiments/example.yaml --type codex
+coder-eval run experiments/model-comparison.yaml --type codex
 ```
 
 ### Task Definition (YAML)
