@@ -480,6 +480,7 @@ codex = [
 ]
 dev = [
     { name = "bandit" },
+    { name = "defusedxml" },
     { name = "mcp" },
     { name = "pip-audit" },
     { name = "pre-commit" },
@@ -503,6 +504,7 @@ requires-dist = [
     { name = "bandit", extras = ["toml"], marker = "extra == 'dev'", specifier = ">=1.9.4" },
     { name = "claude-agent-sdk", specifier = ">=0.2.124" },
     { name = "click", specifier = ">=8.3.3" },
+    { name = "defusedxml", marker = "extra == 'dev'", specifier = ">=0.7.1" },
     { name = "google-antigravity", marker = "extra == 'antigravity'", specifier = "==0.1.7" },
     { name = "jmespath", specifier = ">=1.1.0" },
     { name = "jsonschema", specifier = ">=4.26.0" },

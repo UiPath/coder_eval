@@ -70,6 +70,7 @@ dev = [
     "pip-audit>=2.10.0",
     "bandit[toml]>=1.9.4",
     "pre-commit>=4.5.1",
+    "defusedxml>=0.7.1",  # test-side JUnit XML round-trip parsing (defense-in-depth; production code never parses XML)
 ]
 # Optional extra that enables UiPath-specific features:
 #   - the `uipath` Python SDK on the host (handy for local sandbox parity with
