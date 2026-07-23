@@ -1,11 +1,24 @@
 """Path utilities for run directory management."""
 
+import os
 import platform
 from datetime import datetime
 from pathlib import Path
 
 
 TASK_LOG_FILENAME = "task.log"
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically (tmp sibling + ``os.replace``).
+
+    A SIGKILL mid-write would otherwise leave a truncated file that readers
+    parse as malformed rather than as "absent" — the same discipline the
+    orchestrator applies to task.json.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def task_log_path(run_dir: Path) -> Path:

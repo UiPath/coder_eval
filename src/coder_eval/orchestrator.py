@@ -349,6 +349,8 @@ class Orchestrator:
         # Derived paths
         self.report_path = self.run_dir / "task.json"
         self.html_report_path = self.run_dir / "task.html"
+        # ATIF (Harbor-interop) trajectory emitted alongside task.json.
+        self.trajectory_path = self.run_dir / "trajectory.json"
         # Clean user<->agent transcript for simulation runs. Written alongside
         # task.log so a human can follow the conversation without the
         # orchestrator noise in between.
@@ -717,6 +719,8 @@ class Orchestrator:
         # docker-driver host-heartbeat watchdog firing) would otherwise leave
         # a truncated task.json that the host parses as malformed-JSON rather
         # than as "no result", conflating two distinct failure modes.
+        # TODO: migrate to path_utils.atomic_write_text (kept inline for now to
+        # avoid touching the interrupt-proof teardown path in the same change).
         import os as _os
 
         report_tmp = self.report_path.with_suffix(self.report_path.suffix + ".tmp")
@@ -732,6 +736,21 @@ class Orchestrator:
             encoding="utf-8",
         )
         _os.replace(report_tmp, self.report_path)
+
+        # Also emit the ATIF trajectory alongside task.json — AFTER the
+        # task.json replace: task.json is the contract and must land first, and
+        # a trajectory failure must never mask the run outcome
+        # (write_trajectory_json logs and returns None on failure; zero-step
+        # results, e.g. evaluate-only runs, write nothing). The guard covers
+        # even a contract-violating writer AND the import itself — finalize
+        # runs inside run()'s interrupt-proof finally, so an escaping error
+        # here would swallow a captured teardown interrupt (see 89ec0d0).
+        try:
+            from .harbor import write_trajectory_json
+
+            write_trajectory_json(self.result, self.trajectory_path)
+        except Exception:
+            logger.warning("trajectory.json emission failed for %s", self.task.task_id, exc_info=True)
 
         # Also emit an HTML trace/report alongside task.json. HTML failure must
         # never mask the underlying run outcome — write_task_html logs and

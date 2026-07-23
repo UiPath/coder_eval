@@ -76,6 +76,8 @@ already written.
 ```bash
 coder-eval report runs/latest              # view latest run
 coder-eval report runs/latest -o summary.md  # export to file
+coder-eval report runs/latest --format html  # re-render task.html per task.json
+coder-eval report runs/latest --format atif  # backfill trajectory.json (ATIF) per task.json
 ```
 
 ### Claude Code slash commands

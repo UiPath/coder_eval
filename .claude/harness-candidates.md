@@ -37,3 +37,4 @@ Deferred lint/test guardrails surfaced during reviews. Promote to a `CExxx` rule
   caught them. The cleanup plan explicitly deferred this as YAGNI for the
   one-time purge, but any future doc rename/deletion re-opens the same blind
   spot — caught in the 2026-07-03 open-source-docs-cleanup implementation run.
+- [ ] Function-local imports inside `Orchestrator._finalize_result` must sit inside a failure-isolation try (an escaping ImportError there swallows a captured teardown interrupt — the 89ec0d0 invariant). Pre-existing `write_task_html` / `spill_judge_transcripts` imports share the unguarded pattern, so a CExxx rule needs a decision on retrofitting them first — caught in adopt-atif-trajectory-emit final review.

@@ -1,0 +1,125 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "session_id": "hello_date_smoke_test/default",
+  "agent": {
+    "name": "claude-code",
+    "version": "0.8.4",
+    "model_name": "claude-sonnet-4-6"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "timestamp": "2026-07-20T10:00:00+00:00",
+      "source": "user",
+      "message": "Create a Python file named app.py that prints hello.",
+      "extra": {"iteration": 1}
+    },
+    {
+      "step_id": 2,
+      "timestamp": "2026-07-20T10:00:05+00:00",
+      "source": "agent",
+      "model_name": "claude-sonnet-4-6",
+      "message": "I'll create app.py now.",
+      "reasoning_content": "The user wants a simple script; Write then run it.",
+      "tool_calls": [
+        {
+          "tool_call_id": "toolu_01",
+          "function_name": "Write",
+          "arguments": {"file_path": "app.py", "content": "print('hello')"}
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "source_call_id": "toolu_01",
+            "content": "File created successfully at: app.py",
+            "extra": {"result_status": "success", "duration_ms": 12.5}
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 2048,
+        "completion_tokens": 150,
+        "cached_tokens": 1024
+      },
+      "extra": {"iteration": 1, "cache_creation_tokens": 512, "reasoning_tokens": 40}
+    },
+    {
+      "step_id": 3,
+      "timestamp": "2026-07-20T10:00:09+00:00",
+      "source": "agent",
+      "model_name": "claude-sonnet-4-6",
+      "message": [
+        {"type": "text", "text": "Delegating verification to a sub-agent."}
+      ],
+      "tool_calls": [
+        {
+          "tool_call_id": "toolu_02",
+          "function_name": "Agent",
+          "arguments": {"prompt": "Verify app.py runs"}
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "source_call_id": "toolu_02",
+            "content": "Verified: app.py prints hello",
+            "subagent_trajectory_ref": [
+              {"trajectory_id": "toolu_02"}
+            ]
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 2300,
+        "completion_tokens": 60,
+        "cached_tokens": 2048
+      },
+      "extra": {"iteration": 1}
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 4948,
+    "total_completion_tokens": 260,
+    "total_cached_tokens": 3472,
+    "total_cost_usd": 0.0421,
+    "total_steps": 3
+  },
+  "extra": {
+    "reconciliation": [
+      {"iteration": 1, "input_tokens": 512, "output_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 400, "note": "prompt slice billed on no streamed message"}
+    ]
+  },
+  "subagent_trajectories": [
+    {
+      "schema_version": "ATIF-v1.7",
+      "trajectory_id": "toolu_02",
+      "agent": {
+        "name": "claude-code",
+        "version": "0.8.4",
+        "model_name": "claude-haiku-4-5"
+      },
+      "steps": [
+        {
+          "step_id": 1,
+          "source": "agent",
+          "model_name": "claude-haiku-4-5",
+          "message": "Running app.py to verify.",
+          "tool_calls": [
+            {
+              "tool_call_id": "toolu_sub_01",
+              "function_name": "Bash",
+              "arguments": {"command": "python app.py"}
+            }
+          ],
+          "observation": {
+            "results": [
+              {"source_call_id": "toolu_sub_01", "content": "hello"}
+            ]
+          },
+          "metrics": {"prompt_tokens": 900, "completion_tokens": 50, "cached_tokens": 0}
+        }
+      ]
+    }
+  ]
+}
