@@ -2,6 +2,103 @@
 
 <!-- version list -->
 
+## v0.8.9 (2026-07-23)
+
+### Bug Fixes
+
+- Code review fixes for welch-t-test-exact ([#38](https://github.com/UiPath/coder_eval/pull/38),
+  [`6df6e9b`](https://github.com/UiPath/coder_eval/commit/6df6e9bb1f3bd009592185ec3473e8f2e67d3816))
+
+- Render weight:0 criteria as informational on every display surface
+  ([#34](https://github.com/UiPath/coder_eval/pull/34),
+  [`9a34e90`](https://github.com/UiPath/coder_eval/commit/9a34e90bba2854316149cad61613a75dd3bd91e4))
+
+- Weight:0 un-gates criteria (informational criteria)
+  ([#34](https://github.com/UiPath/coder_eval/pull/34),
+  [`9a34e90`](https://github.com/UiPath/coder_eval/commit/9a34e90bba2854316149cad61613a75dd3bd91e4))
+
+- Weight:0 un-gates criteria and renders as informational
+  ([#34](https://github.com/UiPath/coder_eval/pull/34),
+  [`9a34e90`](https://github.com/UiPath/coder_eval/commit/9a34e90bba2854316149cad61613a75dd3bd91e4))
+
+- **early-stop**: Decide skill activation on the tool call, not its result
+  ([#43](https://github.com/UiPath/coder_eval/pull/43),
+  [`d34aa97`](https://github.com/UiPath/coder_eval/commit/d34aa97416ae3af09d09cdf78cb6607b4e2e6f7c))
+
+- **early-stop**: Latch skill activation on any engagement, not first
+  ([#43](https://github.com/UiPath/coder_eval/pull/43),
+  [`d34aa97`](https://github.com/UiPath/coder_eval/commit/d34aa97416ae3af09d09cdf78cb6607b4e2e6f7c))
+
+- **evalboard**: Match watchlist skeleton header to avoid layout shift
+  ([#45](https://github.com/UiPath/coder_eval/pull/45),
+  [`acc1c86`](https://github.com/UiPath/coder_eval/commit/acc1c86bc97b80383ce1ef402356853447088e4a))
+
+- **reports**: 1/2 — exact Student-t p-values in welch_t_test
+  ([#38](https://github.com/UiPath/coder_eval/pull/38),
+  [`6df6e9b`](https://github.com/UiPath/coder_eval/commit/6df6e9bb1f3bd009592185ec3473e8f2e67d3816))
+
+- **reports**: Exact Student-t p-values and a paired comparison section
+  ([#38](https://github.com/UiPath/coder_eval/pull/38),
+  [`6df6e9b`](https://github.com/UiPath/coder_eval/commit/6df6e9bb1f3bd009592185ec3473e8f2e67d3816))
+
+- **reports**: Fail loud on t* overflow; surface excluded paired tasks
+  ([#38](https://github.com/UiPath/coder_eval/pull/38),
+  [`6df6e9b`](https://github.com/UiPath/coder_eval/commit/6df6e9bb1f3bd009592185ec3473e8f2e67d3816))
+
+- **reports**: One source of truth for variant series and paired stats
+  ([#38](https://github.com/UiPath/coder_eval/pull/38),
+  [`6df6e9b`](https://github.com/UiPath/coder_eval/commit/6df6e9bb1f3bd009592185ec3473e8f2e67d3816))
+
+- **reports**: Validate confidence and n_resamples in bootstrap_mean_ci
+  ([#38](https://github.com/UiPath/coder_eval/pull/38),
+  [`6df6e9b`](https://github.com/UiPath/coder_eval/commit/6df6e9bb1f3bd009592185ec3473e8f2e67d3816))
+
+### Chores
+
+- **harness**: Defer two guards from the welch-t-test-exact run
+  ([#38](https://github.com/UiPath/coder_eval/pull/38),
+  [`6df6e9b`](https://github.com/UiPath/coder_eval/commit/6df6e9bb1f3bd009592185ec3473e8f2e67d3816))
+
+### Documentation
+
+- Add adopter issue template and ADOPTERS.md ([#40](https://github.com/UiPath/coder_eval/pull/40),
+  [`bfbed4e`](https://github.com/UiPath/coder_eval/commit/bfbed4e4a2ca857167fac2cb15462b7159e97684))
+
+- Switch multi-model review from codex to gpt-5 alias
+  ([#36](https://github.com/UiPath/coder_eval/pull/36),
+  [`0a3f2a7`](https://github.com/UiPath/coder_eval/commit/0a3f2a71a0a1e1e56f42a668fff57bac06eb99ec))
+
+### Features
+
+- **evalboard**: Make all pages harness-aware and stream tables
+  ([#45](https://github.com/UiPath/coder_eval/pull/45),
+  [`acc1c86`](https://github.com/UiPath/coder_eval/commit/acc1c86bc97b80383ce1ef402356853447088e4a))
+
+- **evalboard**: Make analytics surfaces harness-aware and stream tables
+  ([#45](https://github.com/UiPath/coder_eval/pull/45),
+  [`acc1c86`](https://github.com/UiPath/coder_eval/commit/acc1c86bc97b80383ce1ef402356853447088e4a))
+
+- **evalboard**: Scope task trends to one harness
+  ([#45](https://github.com/UiPath/coder_eval/pull/45),
+  [`acc1c86`](https://github.com/UiPath/coder_eval/commit/acc1c86bc97b80383ce1ef402356853447088e4a))
+
+- **reports**: 2/2 — add a Paired Comparison section to experiment reports
+  ([#38](https://github.com/UiPath/coder_eval/pull/38),
+  [`6df6e9b`](https://github.com/UiPath/coder_eval/commit/6df6e9bb1f3bd009592185ec3473e8f2e67d3816))
+
+### Refactoring
+
+- **evalboard**: Address review nits on harness plumbing
+  ([#45](https://github.com/UiPath/coder_eval/pull/45),
+  [`acc1c86`](https://github.com/UiPath/coder_eval/commit/acc1c86bc97b80383ce1ef402356853447088e4a))
+
+### Testing
+
+- **early-stop**: Cover second-review items (two-AgentStart, golden corpus, parity)
+  ([#43](https://github.com/UiPath/coder_eval/pull/43),
+  [`d34aa97`](https://github.com/UiPath/coder_eval/commit/d34aa97416ae3af09d09cdf78cb6607b4e2e6f7c))
+
+
 ## v0.8.8 (2026-07-22)
 
 ### Bug Fixes
