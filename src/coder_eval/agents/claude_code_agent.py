@@ -787,6 +787,14 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                     # that Bedrock's requestMetadata regex rejects (HTTP 400) once LiteLLM
                     # forwards it to Bedrock. Disable it, mirroring the BedrockRoute case above.
                     "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+                    # Neutralize inherited Bedrock creds. The CLI auto-selects Bedrock DIRECT
+                    # when AWS_BEARER_TOKEN_BEDROCK is present (`if(process.env.AWS_BEARER_TOKEN_BEDROCK)`),
+                    # and that token is forwarded into docker task containers via the default
+                    # env-passthrough allowlist — so without blanking it the CLI bypasses
+                    # ANTHROPIC_BASE_URL (the LiteLLM proxy) and calls Bedrock directly. Empty string
+                    # is falsy in the CLI's check, so this forces it back onto the gateway.
+                    "AWS_BEARER_TOKEN_BEDROCK": "",
+                    "CLAUDE_CODE_USE_BEDROCK": "",
                 }
                 if cr.model:
                     env["ANTHROPIC_MODEL"] = cr.model
