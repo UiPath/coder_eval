@@ -179,10 +179,10 @@ job-summary + fail-on-failure into one step:
 
 The action is agent-agnostic — it installs `coder-eval` but not the agent
 runtime, so provide the `claude` CLI (or your agent's runtime) in the job first.
-See the [README "Use as a GitHub Action"](../../README.md#use-as-a-github-action)
-section for the full inputs table and the fork/`pull_request_target` security
-caveat. The rest of this tutorial's hand-rolled workflow is still useful when you
-need finer control than the action's inputs expose.
+See the [CI Gate reference](../CI_GATE.md) for the full inputs table, JUnit
+output, the score-floor gate, and the fork/`pull_request_target` security caveat.
+The rest of this tutorial's hand-rolled workflow is still useful when you need
+finer control than the action's inputs expose.
 
 ## Publishing test results (JUnit)
 

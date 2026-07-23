@@ -83,6 +83,7 @@ New here? Start with **[Tutorial 01 — Your First Evaluation](tutorials/01-firs
 | [Codex Agent Guide](agents/CODEX.md) | Running the OpenAI Codex agent |
 | [Antigravity (Gemini) Agent Guide](agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
 | [Docker Isolation](DOCKER_ISOLATION.md) | The container sandbox driver |
+| [CI Gate: GitHub Action & JUnit](CI_GATE.md) | Run coder_eval as a CI gate — the packaged Action, JUnit output, score floor |
 | [Extending Coder Eval](EXTENDING.md) | Author a custom agent, criterion, or model pricing |
 | [Report Schema](REPORT_SCHEMA.md) | Field-level reference for the JSON outputs |
 | [How it compares](comparison.md) | Coder Eval vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, and hand-rolled harnesses |
