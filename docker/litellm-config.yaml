@@ -35,6 +35,20 @@ model_list:
     litellm_params:
       model: bedrock/converse/moonshotai.kimi-k2.5
       aws_region_name: eu-north-1
+  # OpenRouter models — cost-optimization path. Not on Bedrock; OpenRouter is
+  # OpenAI-format, so LiteLLM does the Anthropic<->OpenAI translation.
+  - model_name: moonshotai/kimi-k3
+    litellm_params:
+      model: openrouter/moonshotai/kimi-k3
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: z-ai/glm-5.2
+    litellm_params:
+      model: openrouter/z-ai/glm-5.2
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: deepseek/deepseek-v4-pro
+    litellm_params:
+      model: openrouter/deepseek/deepseek-v4-pro
+      api_key: os.environ/OPENROUTER_API_KEY
 
 litellm_settings:
   # Silently drop provider-unsupported OpenAI/Anthropic params rather than 400.

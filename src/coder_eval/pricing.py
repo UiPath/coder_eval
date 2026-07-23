@@ -95,6 +95,14 @@ _PRICING: dict[str, ModelPricing] = {
     "deepseek.v3.2": ModelPricing(0.74, 2.22, 0.74, 0.0),
     "zai.glm-5": ModelPricing(1.2, 3.84, 1.2, 0.0),
     "moonshotai.kimi-k2.5": ModelPricing(0.72, 3.6, 0.72, 0.0),
+    # OpenRouter models (cost-optimization path). These providers cache prompt
+    # prefixes IMPLICITLY (no cache_control, no cache-write fee), so cache-creation
+    # is priced at input (unused — cache_creation_tokens is always 0) and cache-read
+    # at OpenRouter's published input_cache_read rate. Rates per OpenRouter's
+    # /models endpoint (per-token x 1e6).
+    "moonshotai/kimi-k3": ModelPricing(3.0, 15.0, 3.0, 0.30),
+    "z-ai/glm-5.2": ModelPricing(0.826, 2.596, 0.826, 0.1534),
+    "deepseek/deepseek-v4-pro": ModelPricing(0.435, 0.87, 0.435, 0.003625),
 }
 
 
