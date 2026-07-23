@@ -394,9 +394,9 @@ All criteria share these fields:
 | `stop_when` | `null` | Arms this criterion for early stop (`pass`/`fail`/`decided`); requires `run_limits.stop_early: true` and an observable criterion type (`skill_triggered`, `command_executed`). See [`stop_early`](#stop_early-opt-in-early-stop). |
 
 **Scoring types:**
-- **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`
+- **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`, `classification_match`, `skill_triggered`
 - **Fractional** (0.0–1.0): `file_contains`, `file_check`, `json_check`, `command_executed`, `uipath_eval`
-- **Continuous** (0.0–1.0): `reference_comparison`, `llm_judge`, `agent_judge`
+- **Continuous** (0.0–1.0): `reference_comparison`, `commands_efficiency`, `llm_judge`, `agent_judge`
 
 **Task success:** all *gating* criteria must score >= their `pass_threshold`. A
 criterion with `weight: 0` is informational — it is still checked, stored, and
@@ -616,6 +616,22 @@ Checks whether the agent executed specific tools/commands during evaluation. Ins
 
 **Codex limitation.** Codex agents map `Read`, `Grep`, and `Glob` tools to `shell` commands (they execute via bash), so `tool_name: "Read"` on Codex returns no matches. Use `tool_name: "Bash"` or `tool_name: null` (any tool) for Codex-compatible checks. This criterion works correctly on Claude Code agents, which emit separate `Read`/`Grep`/`Glob` telemetry.
 
+### `commands_efficiency`
+
+Scores how economically the agent worked, relative to a budget of expected tool calls. **Continuous scoring:** `score = expected_commands / max(actual_commands, expected_commands)` — so a run at or under budget scores `1.0`, and the score decays as the agent takes more calls than expected (e.g. twice the budget → `0.5`).
+
+```yaml
+- type: "commands_efficiency"
+  expected_commands: 8      # budget of tool calls to complete the task (>= 1)
+  description: "Agent should solve this in ~8 tool calls"
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `expected_commands` | *required* | Expected number of tool commands to complete the task (integer, `>= 1`). |
+
+This criterion requires an agent run (it reads `CommandTelemetry`). Pair it with a low `weight` if you want efficiency to *inform* the score without gating pass/fail on its own.
+
 ### `uipath_eval`
 
 Evaluates a UiPath agent against a named evaluation set. **Fractional scoring:** metrics passed / total metrics.
@@ -640,7 +656,7 @@ Evaluates a UiPath agent against a named evaluation set. **Fractional scoring:**
 
 ### `llm_judge`
 
-Have an LLM grade the task against a rubric written in the task YAML. **Continuous scoring** from a JSON verdict `{"score": 0.0-1.0, "rationale": "..."}`; parse failure, non-numeric score, or LLM error all produce `score=0.0` with an `error` populated.
+Have an LLM grade the task against a rubric written in the task YAML. **Continuous scoring** from a verdict the judge returns via a forced `submit_verdict` tool call (`{score: 0.0-1.0, rationale: "..."}`) — the model never returns free-form prose. A missing/malformed verdict, a non-numeric score, or an LLM error all produce `score=0.0` with an `error` populated.
 
 ```yaml
 - type: "llm_judge"
@@ -657,7 +673,7 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
   include_dialog: false              # Opt-in: include the full user<->agent conversation (recommended for simulation)
   model: "anthropic.claude-sonnet-4-6"
   temperature: 0.0
-  max_tokens: 1000
+  max_tokens: 2000
   max_file_chars: 20000              # Per-file content truncation
   weight: 2.0
   pass_threshold: 0.7
@@ -674,7 +690,7 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
 | `max_dialog_chars` | `80000` | Aggregate cap on dialog text rendered into the judge prompt (per-message cap is `max_file_chars`). When exceeded, trailing turns are dropped and a degraded note is recorded. |
 | `model` | `anthropic.claude-sonnet-4-6` | Judge model id (vendor-prefixed; auto-translated per backend) |
 | `temperature` | `0.0` | Sampling temperature (0.0 = deterministic) |
-| `max_tokens` | `1000` | Maximum tokens in the judge's response |
+| `max_tokens` | `2000` | Maximum tokens in the judge's response |
 | `max_file_chars` | `20000` | Per-file (and agent_output) truncation applied before building the prompt |
 
 **Transport selection.** The judge call is routed by the active `API_BACKEND`:
@@ -694,14 +710,14 @@ The `direct`-mode transport is resolved once at startup, logged on the `API rout
 
 **Failure modes** — each sets `score=0.0` and populates `error`:
 
-- Non-JSON response from the model (parse failure)
-- `score` key missing from the JSON verdict
+- The judge never emits the forced `submit_verdict` tool call (no verdict returned)
+- `score` key missing from the verdict
 - `score` is not coercible to float
 - Judge backend unavailable / network error (handled by `@handle_criterion_errors`)
 
 ### `agent_judge`
 
-Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LLM call against a rubric), the judge agent has **tool access** — Bash, Read, Write, Glob, Grep, Edit by default — and runs in an isolated copy of the task sandbox. Use it when functional validation requires executing something (`uip rpa get-errors`, `xmllint`, a test suite) rather than just inspecting file content.
+Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LLM call against a rubric), the judge agent has **tool access** — a read-only toolkit of `Bash`, `Read`, `Glob`, `Grep` by default (no `Write`/`Edit`) — and runs in an isolated copy of the task sandbox. Use it when functional validation requires executing something (`uip rpa get-errors`, `xmllint`, a test suite) rather than just inspecting file content.
 
 ```yaml
 - type: "agent_judge"
@@ -775,6 +791,30 @@ The judge runs with the evaluator's API credentials and can execute arbitrary Ba
 - `score` missing / non-numeric / non-finite
 - `TurnTimeoutError` (judge exceeded `turn_timeout`)
 - SDK subprocess failure (e.g. `claude` CLI missing)
+
+### `classification_match`
+
+Matches a single label the agent wrote to a file against ground truth — the file-based classifier. Reads the file, normalizes the content (strip, and lowercase unless `case_sensitive`), and compares it to `expected_label`. **Binary scoring:** `1.0` on a match, else `0.0`.
+
+The observed label is the canonical form from `allowed_labels` when the content matches; otherwise `(none)` when the file is missing/empty and `(other)` when the content isn't in the allowed set. Both sentinels are recorded so a suite rollup shows them as real failure classes in the confusion matrix.
+
+```yaml
+- type: "classification_match"
+  path: "result.txt"                  # file (relative to sandbox) holding the agent's predicted label
+  expected_label: "positive"
+  allowed_labels: [positive, negative]
+  case_sensitive: false               # default: case-insensitive + canonicalized
+  description: "Sentiment label matches ground truth"
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `path` | *required* | File (relative to sandbox) containing the agent's predicted label. |
+| `expected_label` | *required* | Ground-truth label for this row (drive it from `${row.…}` on a dataset-backed task). |
+| `allowed_labels` | *required* | Canonical label set (≥1). Content not in this set becomes `(other)`. |
+| `case_sensitive` | `false` | When `false`, matching is case-insensitive and labels are canonicalized. |
+
+Like `skill_triggered`, this criterion emits a `ClassificationCriterionResult`, so on a [dataset-backed task](#task-yaml-structure) the suite aggregator computes accuracy / precision / recall / F1 and a confusion matrix — gate them with `suite_thresholds`. Use `classification_match` when the agent writes its answer to a file (labeling/extraction tasks); use `skill_triggered` when the signal is whether a skill fired.
 
 ### `skill_triggered`
 

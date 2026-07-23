@@ -27,8 +27,12 @@ and A/B plumbing.
 - [Task Definition Guide](https://uipath.github.io/coder_eval/TASK_DEFINITION_GUIDE/): task-file schema, all criterion types, scoring, templates
 - [A/B Experiments](https://uipath.github.io/coder_eval/AB_EXPERIMENTS/): compare models/tools/prompts across the same tasks
 - [Bring Your Own Dataset](https://uipath.github.io/coder_eval/BYOD/): fan a single task out over a dataset
-- [Codex Agent Guide](https://uipath.github.io/coder_eval/CODEX_AGENT_GUIDE/): running the Codex agent
+- [Claude Code Agent](https://uipath.github.io/coder_eval/agents/CLAUDE_CODE/): configuring and running the default Claude Code agent
+- [Codex Agent Guide](https://uipath.github.io/coder_eval/agents/CODEX/): running the OpenAI Codex agent
+- [Antigravity (Gemini) Agent Guide](https://uipath.github.io/coder_eval/agents/ANTIGRAVITY/): running the Google Antigravity / Gemini agent
 - [Docker Isolation](https://uipath.github.io/coder_eval/DOCKER_ISOLATION/): the container sandbox driver, custom images
+- [Extending Coder Eval](https://uipath.github.io/coder_eval/EXTENDING/): author a custom agent, criterion, or model pricing via the plugin SPI
+- [Report Schema](https://uipath.github.io/coder_eval/REPORT_SCHEMA/): field-level reference for run.json / variant.json / task.json
 
 ## Tutorials
 

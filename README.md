@@ -183,8 +183,10 @@ alone.
 | [Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md) | The task-file schema — all criterion types, scoring, templates |
 | [A/B Experiments](docs/AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](docs/BYOD.md) | Fan a single task out over a dataset |
-| [Codex Agent Guide](docs/CODEX_AGENT_GUIDE.md) | Running the Codex agent |
+| [Agent Guides](docs/agents/) | Running each agent — [Claude Code](docs/agents/CLAUDE_CODE.md), [Codex](docs/agents/CODEX.md), [Antigravity/Gemini](docs/agents/ANTIGRAVITY.md) |
 | [Docker Isolation](docs/DOCKER_ISOLATION.md) | The container sandbox driver |
+| [Extending Coder Eval](docs/EXTENDING.md) | Author a custom agent, criterion, or model pricing via the plugin SPI |
+| [Report Schema](docs/REPORT_SCHEMA.md) | Field-level reference for `run.json` / `variant.json` / `task.json` |
 | [CLAUDE.md](CLAUDE.md) | Architecture, key patterns, and extension points |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, quality bar, and how to contribute |
 

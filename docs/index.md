@@ -79,8 +79,12 @@ New here? Start with **[Tutorial 01 — Your First Evaluation](tutorials/01-firs
 | [Task Definition Guide](TASK_DEFINITION_GUIDE.md) | The task-file schema — all criterion types, scoring, templates |
 | [A/B Experiments](AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](BYOD.md) | Fan a single task out over a dataset |
-| [Codex Agent Guide](CODEX_AGENT_GUIDE.md) | Running the Codex agent |
+| [Claude Code Agent](agents/CLAUDE_CODE.md) | Configuring and running the default Claude Code agent |
+| [Codex Agent Guide](agents/CODEX.md) | Running the OpenAI Codex agent |
+| [Antigravity (Gemini) Agent Guide](agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
 | [Docker Isolation](DOCKER_ISOLATION.md) | The container sandbox driver |
+| [Extending Coder Eval](EXTENDING.md) | Author a custom agent, criterion, or model pricing |
+| [Report Schema](REPORT_SCHEMA.md) | Field-level reference for the JSON outputs |
 | [How it compares](comparison.md) | Coder Eval vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, and hand-rolled harnesses |
 
 ## How Coder Eval compares

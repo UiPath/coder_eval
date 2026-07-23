@@ -38,11 +38,6 @@ theme:
   icon:
     repo: fontawesome/brands/github
 
-# IDEAS.md is internal engineering backlog (links to source files) — not for the
-# public docs site.
-exclude_docs: |
-  IDEAS.md
-
 # The social plugin generates per-page Open Graph / Twitter card images (and
 # the matching og:/twitter: meta tags) so shared links unfurl properly. It
 # needs Cairo system libraries, so it is enabled only in CI (the Docs workflow
@@ -87,8 +82,16 @@ nav:
   - Guides:
       - User Guide: USER_GUIDE.md
       - Task Definition Guide: TASK_DEFINITION_GUIDE.md
+  - Agents:
+      - Claude Code: agents/CLAUDE_CODE.md
+      - Codex: agents/CODEX.md
+      - Antigravity (Gemini): agents/ANTIGRAVITY.md
+  - Running & scaling:
       - A/B Experiments: AB_EXPERIMENTS.md
       - Bring Your Own Dataset: BYOD.md
-      - Codex Agent Guide: CODEX_AGENT_GUIDE.md
       - Docker Isolation: DOCKER_ISOLATION.md
+  - Extending:
+      - Extending Coder Eval: EXTENDING.md
+  - Reference:
+      - Report Schema: REPORT_SCHEMA.md
   - How it compares: comparison.md
