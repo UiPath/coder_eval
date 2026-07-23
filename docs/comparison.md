@@ -129,7 +129,7 @@ focus on tasks and criteria rather than harness infrastructure.
 ## Next steps
 
 - [Tutorial 01 — Your First Evaluation](tutorials/01-first-evaluation.md)
-- [Tutorial 02 — Running coder_eval in CI](tutorials/02-ci-pipeline.md)
+- [Tutorial 02 — Running Coder Eval in CI](tutorials/02-ci-pipeline.md)
 - [A/B Experiments](AB_EXPERIMENTS.md)
 - [Bring Your Own Dataset](BYOD.md)
 

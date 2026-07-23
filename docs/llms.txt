@@ -31,14 +31,14 @@ and A/B plumbing.
 - [Codex Agent Guide](https://coder-eval.com/docs/agents/codex): running the OpenAI Codex agent
 - [Antigravity (Gemini) Agent Guide](https://coder-eval.com/docs/agents/antigravity): running the Google Antigravity / Gemini agent
 - [Docker Isolation](https://coder-eval.com/docs/docker-isolation): the container sandbox driver, custom images
-- [CI Gate: GitHub Action & JUnit](https://coder-eval.com/docs/ci-gate): run coder_eval as a CI gate — the packaged composite Action, JUnit XML output, per-task score floor
+- [CI Gate: GitHub Action & JUnit](https://coder-eval.com/docs/ci-gate): run Coder Eval as a CI gate — the packaged composite Action, JUnit XML output, per-task score floor
 - [Extending Coder Eval](https://coder-eval.com/docs/extending): author a custom agent, criterion, or model pricing via the plugin SPI
 - [Report Schema](https://coder-eval.com/docs/report-schema): field-level reference for run.json / variant.json / task.json
 
 ## Tutorials
 
 - [01 · Your first evaluation](https://coder-eval.com/docs/tutorials/01-first-evaluation)
-- [02 · Running coder_eval in CI](https://coder-eval.com/docs/tutorials/02-ci-pipeline)
+- [02 · Running Coder Eval in CI](https://coder-eval.com/docs/tutorials/02-ci-pipeline)
 - [03 · Browsing results with evalboard](https://coder-eval.com/docs/tutorials/03-evalboard-local)
 - [04 · Writing a task](https://coder-eval.com/docs/tutorials/04-writing-a-task)
 - [05 · Comparing two models](https://coder-eval.com/docs/tutorials/05-comparing-models)

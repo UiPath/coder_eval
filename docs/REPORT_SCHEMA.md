@@ -1,6 +1,6 @@
 ---
 description: >-
-  Field-level reference for coder_eval's JSON outputs — run.json, task.json,
+  Field-level reference for Coder Eval's JSON outputs — run.json, task.json,
   variant.json, experiment.json, and suite.json — plus the token/criterion
   telemetry sub-models and FinalStatus values, for anyone consuming a run.
 ---

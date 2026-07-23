@@ -1,6 +1,6 @@
 ---
 description: >-
-  Write a coder_eval task YAML from scratch — prompt, isolated sandbox, turn
+  Write a Coder Eval task YAML from scratch — prompt, isolated sandbox, turn
   budget, and three success criteria — validate it without spending tokens, then
   run and score it.
 ---

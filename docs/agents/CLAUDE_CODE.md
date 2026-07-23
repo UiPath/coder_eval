@@ -1,15 +1,15 @@
 ---
 description: >-
-  Configure and run the default Claude Code agent in coder_eval — the full
+  Configure and run the default Claude Code agent in Coder Eval — the full
   agent-config surface, direct vs. Bedrock authentication, permission modes,
   sandbox isolation, skills/plugins, early stop, and token telemetry.
 ---
 
-# Running Claude Code in coder_eval
+# Running Claude Code in Coder Eval
 
 ## Overview
 
-**Claude Code is the default agent** in coder_eval — `agent.type: claude-code`. It
+**Claude Code is the default agent** in Coder Eval — `agent.type: claude-code`. It
 ships in the base install (no extra needed; the `claude-agent-sdk` is a core
 dependency), and most tasks and tutorials assume it. This guide is the reference
 for its config surface, authentication, and telemetry; for the agent-agnostic task
@@ -103,7 +103,7 @@ agent:
 | `system_prompt_file` | `str \| null` | Path (relative to the task YAML) loaded into `system_prompt` at resolution. |
 | `setting_sources` | `list["user"\|"project"\|"local"] \| null` | Which host setting sources the SDK reads. Default resolves to `["project"]`. See [Sandbox isolation](#sandbox-isolation). |
 | `claude_settings` | `str \| dict \| null` | Passed to the SDK `--settings`. A dict is JSON-serialized; a str is a settings file path. Use `permissions.deny` to block tools/paths. |
-| `sdk_options` | `dict` (default `{}`) | Pass-through for `ClaudeAgentOptions` fields coder_eval doesn't own (e.g. `effort`). Validated at load — an unknown or framework-owned key is a hard error. |
+| `sdk_options` | `dict` (default `{}`) | Pass-through for `ClaudeAgentOptions` fields Coder Eval doesn't own (e.g. `effort`). Validated at load — an unknown or framework-owned key is a hard error. |
 | `ignore_patterns` | `list[str] \| null` | Gitignore-style overrides for the workspace copy used by judge sub-agents (supports `!` negation). |
 
 > `sdk_options` is a deliberate escape hatch. Framework-owned keys (`model`,

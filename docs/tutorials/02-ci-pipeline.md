@@ -1,11 +1,11 @@
 ---
 description: >-
-  Run coder_eval in GitHub Actions — install the CLI, execute your coding-agent
+  Run Coder Eval in GitHub Actions — install the CLI, execute your coding-agent
   evaluation suite on demand or on a schedule, and gate merges on a pass/fail
   verdict.
 ---
 
-# Tutorial 02 — Running coder_eval in CI
+# Tutorial 02 — Running Coder Eval in CI
 
 Run your evaluation suite automatically in GitHub Actions: on demand, on a
 schedule, or as a merge gate. By the end you'll have a workflow that installs
@@ -18,7 +18,7 @@ drives its task tree under
 directory checked into the repo, a pinned `coder-eval` version, and a
 `task.json`-based verdict — distilled to the parts that transfer to any project.
 
-## The shape of a coder_eval CI job
+## The shape of a Coder Eval CI job
 
 Every CI setup, however elaborate, is the same five steps:
 
@@ -160,7 +160,7 @@ jobs:
 
 ## Shortcut: the packaged action
 
-The five steps above spell out the mechanics, but coder_eval also ships a
+The five steps above spell out the mechanics, but Coder Eval also ships a
 composite action at the repo root that bundles install + run + JUnit report +
 job-summary + fail-on-failure into one step:
 
