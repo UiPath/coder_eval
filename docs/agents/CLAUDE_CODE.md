@@ -172,7 +172,8 @@ Claude Code produces the richest telemetry of the agents:
   invariant: summing the token buckets across `TurnRecord.messages` equals the turn
   total exactly. It carries no cost and is excluded from turn/generation counts.
 
-Set `CODER_EVAL_RAW_SDK_LOG=1` to dump every raw SDK event to the task log.
+Set the `CODER_EVAL_RAW_SDK_LOG` environment variable to `1` to dump every raw SDK
+event to the task log.
 
 ## Lifecycle & robustness
 
