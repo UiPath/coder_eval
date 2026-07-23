@@ -98,11 +98,11 @@ class TestSkillTriggeredChecker:
         assert result.error is not None
 
 
-class TestSkillTriggeredFirstEngagement:
-    """First-engagement scoring: only the FIRST skill the agent engages is scored.
-
-    A second skill invoked alongside or after the first is not counted as a
-    competing activation, so it is not a false positive against its own criterion.
+class TestSkillTriggeredAnyEngagement:
+    """Any-engagement scoring: a skill counts if it was engaged *at all*, in any
+    order. The expected skill passes its criterion (recall) even when a wrong
+    skill was touched first; an off-target skill still fails its own criterion
+    (precision).
     """
 
     def _admin_platform(self) -> list[CommandTelemetry]:
@@ -112,26 +112,50 @@ class TestSkillTriggeredFirstEngagement:
             _cmd("Skill", {"skill": "uipath-platform"}, tool_id="s2"),
         ]
 
-    def test_first_skill_is_true_positive(self) -> None:
-        # GT=uipath-admin; admin engaged first -> observed=yes, expected=yes.
+    def test_expected_skill_engaged_first_is_true_positive(self) -> None:
+        # GT=uipath-admin; admin engaged (first) -> observed=yes, expected=yes.
         result = _check(expected_skill="uipath-admin", skill_name="uipath-admin", commands=self._admin_platform())
         assert result.observed_label == "yes" and result.score == 1.0
 
-    def test_second_skill_not_false_positive(self) -> None:
-        # Same run scored for the uipath-platform criterion: platform is NOT the
-        # first engagement -> observed=no; expected=no (GT is admin) -> pass, no FP.
+    def test_off_target_skill_engaged_is_false_positive(self) -> None:
+        # Same run scored for the uipath-platform criterion: platform WAS engaged
+        # (second), so on an admin row it is a precision miss -> observed=yes,
+        # expected=no -> score 0.0. This is the per-skill precision signal.
         result = _check(expected_skill="uipath-admin", skill_name="uipath-platform", commands=self._admin_platform())
-        assert result.observed_label == "no" and result.score == 1.0
+        assert result.observed_label == "yes" and result.score == 0.0
 
-    def test_wrong_skill_first_still_penalized(self) -> None:
-        # If the WRONG skill engages first, the GT criterion correctly fails —
-        # first-engagement does not mask a genuine misfire.
+    def test_expected_skill_engaged_after_wrong_still_passes(self) -> None:
+        # Item 1: the WRONG skill engages first, the expected one later. The GT
+        # criterion must still PASS — an earlier wrong touch (comparison, not
+        # commitment) does not fail the row.
         commands = [
             _cmd("Skill", {"skill": "uipath-platform"}, tool_id="s1"),
             _cmd("Skill", {"skill": "uipath-admin"}, tool_id="s2"),
         ]
         result = _check(expected_skill="uipath-admin", skill_name="uipath-admin", commands=commands)
-        assert result.observed_label == "no" and result.score == 0.0
+        assert result.observed_label == "yes" and result.score == 1.0
+
+    def test_negative_row_fails_on_any_engagement(self) -> None:
+        # Negative row (expected_skill == ""): engaging the target skill at all —
+        # even after an unrelated one — is a false positive.
+        commands = [
+            _cmd("Skill", {"skill": "uipath-platform"}, tool_id="s1"),
+            _cmd("Skill", {"skill": "uipath-admin"}, tool_id="s2"),
+        ]
+        result = _check(expected_skill="", skill_name="uipath-admin", commands=commands)
+        assert result.observed_label == "yes" and result.score == 0.0
+
+    def test_stacked_recall_and_precision_on_one_trajectory(self) -> None:
+        # How the stacked criteria score a single positive row (GT=uipath-admin)
+        # on which the agent engaged BOTH the expected skill and an off-target one.
+        # The GT criterion credits recall (pass); the off-target criterion records
+        # a precision miss (fail). No precision hole: an extra engagement is never
+        # silently absorbed — it lands on its own skill's confusion cell.
+        commands = self._admin_platform()
+        recall = _check(expected_skill="uipath-admin", skill_name="uipath-admin", commands=commands)
+        precision = _check(expected_skill="uipath-admin", skill_name="uipath-platform", commands=commands)
+        assert recall.observed_label == "yes" and recall.score == 1.0  # recall: GT engaged
+        assert precision.observed_label == "yes" and precision.score == 0.0  # precision: off-target engaged
 
 
 class TestSkillTriggeredCodex:

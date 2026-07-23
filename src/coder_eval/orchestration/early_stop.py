@@ -296,8 +296,9 @@ class EarlyStopWatcher:
         record = self._collector.build_turn_record()
         if in_flight is not None:
             # The in-flight call has no ToolEnd yet, so the collector (which
-            # reduces commands from ToolEnd) has not captured it. Append it and
-            # re-sort by sequence so the verdict sees it in first-engagement order.
+            # reduces commands from ToolEnd) has not captured it. Append it so its
+            # engagement is visible to the verdict; re-sort by sequence to keep the
+            # partial trajectory in emission order.
             record.commands = sorted([*record.commands, in_flight], key=lambda c: c.sequence_number)
         records = [record]
         # An in-flight call has not been counted by a ToolEnd yet, so report it as
