@@ -59,6 +59,7 @@ def test_success_checker_populates_pass_threshold_on_results():
             type = "unsupported_type"
             description = "fake"
             pass_threshold = 0.42
+            is_gating = True
 
         result = checker._check_single(_Fake(), reference_code=None)  # type: ignore[arg-type]
         assert result.pass_threshold == 0.42
@@ -206,6 +207,7 @@ def test_success_checker_unsupported_type():
     bad_criterion.type = "invalid_type_that_does_not_exist"
     bad_criterion.description = "Test criterion with unsupported type"
     bad_criterion.pass_threshold = 0.9
+    bad_criterion.is_gating = True  # a bare Mock() yields a Mock here, not a bool
 
     # Should return failed result instead of raising
     result = checker.check(bad_criterion)

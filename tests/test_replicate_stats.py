@@ -1,9 +1,13 @@
 """Unit tests for replicate statistics helpers in reports_stats."""
 
+import pytest
+
 from coder_eval.reports_stats import (
     bootstrap_mean_ci,
     cohens_d,
-    paired_bootstrap_diff_ci,
+    paired_t_ci,
+    paired_t_test,
+    student_t_critical,
     wilson_interval,
 )
 
@@ -14,6 +18,16 @@ class TestBootstrapMeanCi:
 
     def test_single_value_returns_triple(self):
         assert bootstrap_mean_ci([0.7]) == (0.7, 0.7, 0.7)
+
+    @pytest.mark.parametrize("confidence", [-1.0, 0.0, 1.0, 1.1])
+    def test_confidence_outside_unit_interval_raises(self, confidence):
+        """Out-of-domain confidence must refuse, not return a wrong-width interval."""
+        with pytest.raises(ValueError, match="confidence must be in"):
+            bootstrap_mean_ci([0.1, 0.5, 0.9], confidence=confidence)
+
+    def test_non_positive_n_resamples_raises(self):
+        with pytest.raises(ValueError, match="n_resamples must be"):
+            bootstrap_mean_ci([0.1, 0.5, 0.9], n_resamples=0)
 
     def test_mean_is_correct(self):
         m, _lo, _hi = bootstrap_mean_ci([0.0, 1.0])
@@ -82,54 +96,62 @@ class TestWilsonInterval:
         assert 0.0 <= hi <= 1.0
 
 
-class TestPairedBootstrapDiffCi:
-    def test_none_on_length_mismatch(self):
-        assert paired_bootstrap_diff_ci([1.0, 2.0], [1.0]) is None
+class TestPairedTCi:
+    """The Student-t paired interval that replaced the percentile bootstrap — it
+    shares a distribution with paired_t_test, so the two always agree about 0."""
 
-    def test_none_on_single_pair(self):
-        assert paired_bootstrap_diff_ci([1.0], [0.5]) is None
+    def test_none_on_invalid_input(self):
+        assert paired_t_ci([1.0, 2.0], [1.0]) is None
+        assert paired_t_ci([1.0], [0.5]) is None
+        assert paired_t_ci([], []) is None
+        assert paired_t_ci([1.0, float("nan")], [0.5, 0.5]) is None
 
-    def test_none_on_empty(self):
-        assert paired_bootstrap_diff_ci([], []) is None
-
-    def test_detects_positive_shift(self):
-        a = [1.0] * 20
-        b = [0.5] * 20
-        result = paired_bootstrap_diff_ci(a, b)
+    def test_zero_variance_shift_is_a_point_interval(self):
+        result = paired_t_ci([1.0] * 20, [0.5] * 20)
         assert result is not None
         mean_diff, lo, hi = result
-        assert abs(mean_diff - 0.5) < 0.01
-        # CI should be very tight around 0.5 (zero variance)
-        assert lo > 0.45
-        assert hi < 0.55
+        assert abs(mean_diff - 0.5) < 1e-12
+        # Every diff identical ⇒ sd = 0 ⇒ the interval collapses onto the mean.
+        assert (lo, hi) == (0.5, 0.5)
 
-    def test_detects_negative_shift(self):
-        # Use non-constant inputs so CI is not degenerate
-        import random
-
-        rng = random.Random(7)
-        a = [0.3 + rng.gauss(0, 0.05) for _ in range(20)]
-        b = [0.8 + rng.gauss(0, 0.05) for _ in range(20)]
-        result = paired_bootstrap_diff_ci(a, b)
-        assert result is not None
-        mean_diff, lo, hi = result
-        assert mean_diff < 0
-        assert lo < hi
-
-    def test_ci_contains_diff(self):
-        a = [float(i) / 9 for i in range(10)]
-        b = [float(i) / 9 + 0.1 for i in range(10)]
-        result = paired_bootstrap_diff_ci(a, b)
+    def test_ci_contains_diff_and_is_symmetric(self):
+        a = [0.3, 0.5, 0.9, 0.2, 0.7]
+        b = [0.2, 0.55, 0.6, 0.3, 0.5]
+        result = paired_t_ci(a, b)
         assert result is not None
         mean_diff, lo, hi = result
         assert lo <= mean_diff <= hi
+        assert abs((mean_diff - lo) - (hi - mean_diff)) < 1e-12
 
-    def test_is_deterministic(self):
-        a = [0.1 * i for i in range(1, 11)]
-        b = [0.1 * i + 0.05 for i in range(1, 11)]
-        r1 = paired_bootstrap_diff_ci(a, b)
-        r2 = paired_bootstrap_diff_ci(a, b)
-        assert r1 == r2
+    def test_agrees_with_paired_t_test_about_zero(self):
+        """The interval excludes 0 exactly when the p-value is below alpha."""
+        for a, b in (
+            ([0.9, 0.5, 0.8, 0.7, 0.95], [0.7, 0.55, 0.6, 0.72, 0.8]),  # p = 0.153, not significant
+            ([0.9, 0.85, 0.95, 0.8, 0.9], [0.2, 0.25, 0.15, 0.3, 0.2]),  # strongly significant
+        ):
+            ci = paired_t_ci(a, b, confidence=0.95)
+            p = paired_t_test(a, b)
+            assert ci is not None and p is not None
+            _, lo, hi = ci
+            excludes_zero = lo > 0 or hi < 0
+            assert excludes_zero == (p < 0.05)
+
+
+class TestStudentTCritical:
+    def test_matches_t_table(self):
+        assert abs(student_t_critical(0.95, 4) - 2.776) < 1e-3
+        assert abs(student_t_critical(0.95, 10) - 2.228) < 1e-3
+        assert abs(student_t_critical(0.99, 10) - 3.169) < 1e-3
+
+    def test_converges_to_normal_at_large_df(self):
+        assert abs(student_t_critical(0.95, 1e7) - 1.959964) < 1e-4
+
+    def test_rejects_confidence_outside_unit_interval(self):
+        with pytest.raises(ValueError, match="confidence must be in"):
+            student_t_critical(1.0, 5)
+
+    def test_degenerate_df_is_infinite(self):
+        assert student_t_critical(0.95, 0) == float("inf")
 
 
 class TestCohensD:

@@ -20,10 +20,10 @@
 | - Cost budget | 0 | 1 | — |
 | Errors | 0 | 0 | — |
 | Success Rate | 50.0% | 50.0% | — |
-| Score | 0.700 ± 0.283 | 0.825 ± 0.177 | 0.596 |
-| Avg Duration (s) | 35.0 ± 7.1 | 55.0 ± 7.1 | 0.005 |
-| Assistant Turns | 5.5 ± 0.7 | 7.5 ± 0.7 | 0.005 |
-| Tokens | 1,100 ± 141 | 1,900 ± 141 | <0.001 |
+| Score | 0.700 ± 0.283 | 0.825 ± 0.177 | 0.658 |
+| Avg Duration (s) | 35.0 ± 7.1 | 55.0 ± 7.1 | 0.106 |
+| Assistant Turns | 5.5 ± 0.7 | 7.5 ± 0.7 | 0.106 |
+| Tokens | 1,100 ± 141 | 1,900 ± 141 | 0.030 |
 
 ## Win Rates
 
@@ -41,3 +41,8 @@
 
 - **task-b**: spread=0.450, best=mutated
 - **task-a**: spread=0.200, best=baseline
+
+## Paired Comparison
+
+*Paired over the per-task mean score of 2 task(s) common to both variants — pairing cancels between-task difficulty, which the pooled Welch test above cannot.*
+**Paired mean diff (baseline - mutated)**: -0.125 [95% CI -4.255, +4.005], Cohen's d = -0.27, p = 0.766

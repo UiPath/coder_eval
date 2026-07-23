@@ -103,6 +103,12 @@ export interface CriterionResult {
     score: number | null;
     details: string | null;
     error: string | null;
+    // Mirrors the Python CriterionResult fields. `gating: false` (weight: 0) means
+    // the criterion is informational — measured, but excluded from the score and
+    // the pass/fail gate, so it must not render as PASS/FAIL. Both default the way
+    // pre-existing task.json files behave: gating, threshold 0.9.
+    passThreshold: number;
+    gating: boolean;
 }
 
 export interface ElementExecution {
@@ -1823,6 +1829,8 @@ export async function readTaskDetail(
             score?: number;
             details?: string;
             error?: string | null;
+            pass_threshold?: number;
+            gating?: boolean;
         }>;
         iterations?: TurnEntry[];
         environment_info?: RawRunJson["environment_info"];
@@ -1836,6 +1844,8 @@ export async function readTaskDetail(
         score: c.score ?? null,
         details: c.details ?? null,
         error: c.error ?? null,
+        passThreshold: c.pass_threshold ?? 0.9,
+        gating: c.gating ?? true,
     }));
 
     const artifactRoot = path.join(contentDir, "artifacts");

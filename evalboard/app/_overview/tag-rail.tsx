@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { TagCount } from "@/lib/overview";
+import { DEFAULT_HARNESS } from "@/lib/harness";
 import type { Window } from "@/lib/reviews-types";
 
 type Variant = "neutral" | "rose" | "indigo";
@@ -35,11 +36,16 @@ function hrefForTag(
     tag: string | null,
     window: Window | null,
     q: string | null,
+    harness: string | null,
 ): string {
     const params = new URLSearchParams();
     if (window) params.set("window", window);
     if (tag) params.set("tag", tag);
     if (q) params.set("q", q);
+    // Preserve the active harness scope across tag clicks (omit the default to
+    // keep URLs clean). Without this, filtering by a tag would silently reset a
+    // codex/antigravity view back to claude-code.
+    if (harness && harness !== DEFAULT_HARNESS) params.set("h", harness);
     const qs = params.toString();
     return qs ? `${basePath}?${qs}` : basePath;
 }
@@ -52,6 +58,7 @@ function TagChip({
     basePath,
     window,
     q,
+    harness,
 }: {
     tag: string;
     count: number;
@@ -60,11 +67,12 @@ function TagChip({
     basePath: string;
     window: Window | null;
     q: string | null;
+    harness: string | null;
 }) {
     const s = STYLES[variant];
     return (
         <Link
-            href={hrefForTag(basePath, active ? null : tag, window, q)}
+            href={hrefForTag(basePath, active ? null : tag, window, q, harness)}
             scroll={false}
             className={`inline-flex items-center gap-1 text-[11px] leading-none px-2 py-1 rounded border transition-colors ${active ? s.chipActive : s.chip}`}
         >
@@ -111,6 +119,7 @@ export function MergedTagRail({
     basePath = "/",
     window = null,
     q = null,
+    harness = null,
     limit = 24,
 }: {
     skills: TagCount[];
@@ -123,6 +132,8 @@ export function MergedTagRail({
     // Null on pages that don't expose a window selector (e.g. /trends).
     window?: Window | null;
     q?: string | null;
+    // Active harness scope to preserve in chip links (null = not harness-scoped).
+    harness?: string | null;
     limit?: number;
 }) {
     const s = pickShown(skills, limit, activeTag);
@@ -146,6 +157,7 @@ export function MergedTagRail({
                     basePath={basePath}
                     window={window}
                     q={q}
+                    harness={harness}
                 />
             ))}
             {r.shown.map((tc) => (
@@ -158,6 +170,7 @@ export function MergedTagRail({
                     basePath={basePath}
                     window={window}
                     q={q}
+                    harness={harness}
                 />
             ))}
             {t.shown.map((tc) => (
@@ -170,6 +183,7 @@ export function MergedTagRail({
                     basePath={basePath}
                     window={window}
                     q={q}
+                    harness={harness}
                 />
             ))}
             {totalRemaining > 0 && (

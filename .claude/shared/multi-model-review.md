@@ -14,7 +14,7 @@ If `mcp__multi__codereview` is available (check the deferred-tools list; if list
 but not loaded, load it with `ToolSearch` → `select:mcp__multi__codereview`), call
 it with:
 
-- `models`: the strongest available (e.g. `["gemini-3", "codex"]`)
+- `models`: the strongest available (e.g. `["gemini-3", "gpt-5"]` — as of July 2026 these resolve to `gemini-3.1-pro-preview` and `gpt-5.6-sol`; check `mcp__multi__models` if unsure)
 - `relevant_files`: absolute paths of every changed / in-scope file
 - `content`: the review request, citing the consumer's rubric (the shared **Review Criteria**, the **Severity Standard**, etc.)
 - `base_path`: project root

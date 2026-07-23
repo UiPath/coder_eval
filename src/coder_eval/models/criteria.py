@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from abc import ABC
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -101,10 +101,11 @@ class BaseSuccessCriterion(BaseModel, ABC):
         ge=0.0,
         description=(
             "Relative importance of this criterion in the weighted score (default: 1.0). Set to 0 to "
-            "exclude it from the weighted SCORE -- useful for informational or side-effect checks "
-            "(e.g. a setup command). NOTE: weight=0 excludes from the score but NOT from the pass/fail "
-            "gate -- a criterion scoring below its pass_threshold still flips the task to FAILURE "
-            "regardless of weight. To make a criterion truly non-gating, also set pass_threshold=0."
+            "make the criterion purely INFORMATIONAL -- useful for side-effect checks (e.g. a setup "
+            "command): it is excluded from the weighted score AND from the pass/fail gate, so scoring "
+            "below its pass_threshold no longer flips the task to FAILURE. The result is still "
+            "computed, stored, and rendered in reports. A weight=0 criterion may not set stop_when "
+            "or suite_thresholds (arming a non-gating criterion for a pass/fail gate is incoherent)."
         ),
     )
 
@@ -144,6 +145,39 @@ class BaseSuccessCriterion(BaseModel, ABC):
         # default, not the caller). Without this, exclude_unset drops the tag and
         # the discriminated union rejects the dump with union_tag_not_found.
         self.__pydantic_fields_set__.add("type")
+
+    @model_validator(mode="after")
+    def check_weight_zero_is_not_gating(self) -> Self:
+        """Reject ``weight: 0`` combined with any gate-arming field.
+
+        ``weight: 0`` makes a criterion informational — excluded from the score
+        and from the pass/fail gate (see ``is_gating``). Both ``stop_when`` (arms
+        the per-row early-stop gate) and ``suite_thresholds`` (arms the
+        across-row suite gate, which drives the run's exit code) would let an
+        "informational" criterion flip a run to failure — directly contradicting
+        the field's contract. So both combinations are authoring errors, caught
+        at load time rather than surfacing as a confusing exit code later.
+        """
+        if self.weight == 0.0:
+            for field, name in (("stop_when", "stop_when"), ("suite_thresholds", "suite_thresholds")):
+                if getattr(self, field) is not None:
+                    raise ValueError(
+                        f"criterion {self.type!r}: weight=0 makes the criterion informational (non-gating), "
+                        + f"so it cannot also set {name} (which arms it for a pass/fail gate). "
+                        + f"Give it a non-zero weight, or drop {name}."
+                    )
+        return self
+
+    @property
+    def is_gating(self) -> bool:
+        """True when this criterion participates in the task's pass/fail gate.
+
+        Single source of truth for "does a low score here fail the task". A
+        ``weight: 0`` criterion is informational: it is excluded from the
+        weighted score (it contributes 0 to both numerator and denominator) and,
+        by the same token, from the gate — so the two never disagree.
+        """
+        return self.weight > 0.0
 
     # Business logic (check operations) moved to SuccessChecker in evaluator.py
 

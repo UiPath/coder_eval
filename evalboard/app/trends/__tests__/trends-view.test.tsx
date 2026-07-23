@@ -1,11 +1,20 @@
 import { describe, expect, test, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import type { TaskTrend } from "@/lib/trends";
+import { KNOWN_HARNESSES } from "@/app/_components/harness-badge";
 
 // The view imports the server action for the expandable history rows; stub it
 // so rendering doesn't pull the blob-backed loader into a jsdom test.
 vi.mock("../actions", () => ({
     fetchTaskHistoryAction: vi.fn(async () => []),
+}));
+
+// The header's HarnessSelector reads router/params hooks; stub them so the view
+// renders in jsdom without a router provider.
+vi.mock("next/navigation", () => ({
+    useRouter: () => ({ replace: vi.fn() }),
+    usePathname: () => "/trends",
+    useSearchParams: () => new URLSearchParams(),
 }));
 
 const { TrendsView } = await import("../trends-view");
@@ -35,6 +44,8 @@ function renderView(tasks: TaskTrend[], runIds: string[]) {
             runIds={runIds}
             q={null}
             activeTag={null}
+            activeHarness="claude-code"
+            harnesses={KNOWN_HARNESSES}
             skills={[]}
             taskTags={[]}
             reviewTags={[]}
