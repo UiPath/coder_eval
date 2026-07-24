@@ -1073,6 +1073,9 @@ The shipped `experiments/*.yaml` use this to drop sandbox-scoped npm dirs (intro
 
 Optional `simulation` block. When present and enabled, the orchestrator replaces the single-shot iteration loop with a multi-turn dialog between the coding agent and a simulated user (a second LLM with a persona and goal). Use this for tasks where the real usage pattern is conversational — clarifying questions, incremental requirements, mid-task corrections — rather than a single fire-and-forget prompt.
 
+> This section is the field reference. For when to use dialog mode, how to design a persona and
+> goal, trials and variance, grading, and cost, see **[Dialog Mode](DIALOG_MODE.md)**.
+
 ```yaml
 simulation:
   enabled: true                        # Master switch; when false, simulation is skipped entirely.
@@ -1097,7 +1100,7 @@ simulation:
 
   # Sampling (variance analysis).
   n_trials: 3                          # Run N independent dialogs per (task, variant).
-  parallel_trials: true                # Trials run concurrently (subject to batch max_parallel).
+  parallel_trials: true                # Accepted, but not currently read — see the note below.
 
   # Criteria timing.
   check_criteria: every_turn           # One of: end_of_dialog | every_turn | both.
@@ -1116,7 +1119,7 @@ simulation:
 | `stop_on_criteria_pass` | `false` | End when all criteria pass (requires per-turn checking). |
 | `max_total_tokens` | *unset* | Optional dialog-wide token budget (simulator **plus** agent). Distinct from [`run_limits.max_total_tokens`](#run-limits) — see below. |
 | `n_trials` | `1` | Independent dialog trajectories per (task, variant). |
-| `parallel_trials` | `true` | Run trials concurrently within the batch. |
+| `parallel_trials` | `true` | Accepted but **currently has no effect** — trials are ordinary batch units, scheduled by `--max-parallel` like any other task. |
 | `check_criteria` | `end_of_dialog` | `end_of_dialog`, `every_turn`, or `both`. |
 
 The simulator runs as a tools-disabled Claude Code agent sharing the coding agent's `ApiRoute` — model/temperature/sampling are resolved at the route level (same `-b` flag as the coding agent), so they are not configured on this block.
@@ -1126,9 +1129,13 @@ The simulator runs as a tools-disabled Claude Code agent sharing the coding agen
 - The task's `initial_prompt` is the user's *opening* message; the simulator picks up from turn 2.
 - `max_turns` is the intra-dialog cap (the worst-case agent call budget per trial). Use `n_trials` for variance sampling.
 - The `reference` solution, if present, is hidden from the simulator (same security posture as for the coding agent).
-- When `n_trials > 1`, each trial becomes its own `ResolvedTask` with `task_id` suffix `/trial-N` (0-indexed), its own run directory, and its own `task.json`. Trial-level metadata appears under `simulation.trial_id` / `simulation.n_trials` on the `EvaluationResult`.
+- When `n_trials > 1`, each trial becomes its own `ResolvedTask` with its own zero-padded replicate directory (`runs/<ts>/<variant_id>/<task_id>/<NN>/`) and its own `task.json` — the same fan-out mechanism as experiment `repeats`, which `n_trials` takes precedence over when simulation is enabled. Trial-level metadata appears under `simulation.replicate_index` / `simulation.n_trials` on the `EvaluationResult`.
 
-**Termination precedence:** `stop_on_criteria_pass` → `stop_token` → `max_turns` → `max_total_tokens`.
+**Termination precedence** (evaluated after each exchange, first match wins): `run_limits` breach →
+`stop_on_criteria_pass` → `max_turns` → `max_total_tokens` → `stop_token`. The stop token is checked
+**last**, on the simulator's next utterance, which is only solicited if nothing above fired — so a
+turn that hits `max_turns` or the token budget ends the dialog before the simulator can emit it.
+A raising simulator call ends the dialog with `stop_reason: error`.
 
 > **`simulation.max_total_tokens` vs. `run_limits.max_total_tokens`.** This one covers the **whole
 > dialog** (simulator + agent) and ends the conversation gracefully with `stop_reason='budget'`, so
