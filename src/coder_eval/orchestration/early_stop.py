@@ -99,7 +99,9 @@ def _requested_polarities(
         return frozenset({"pass", "fail"})
     if stop_when == "pass" or stop_when == "fail":
         return frozenset({stop_when})
-    assert_never(stop_when)
+    # `return` is redundant for control flow (assert_never never returns) but
+    # keeps every path explicit for analyzers that don't model `Never`.
+    return assert_never(stop_when)
 
 
 class EarlyStopConfigError(ValueError):
