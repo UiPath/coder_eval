@@ -26,6 +26,14 @@ loop before the result message is ever pulled.
 
 Live verdicts only *trigger* the stop; the authoritative scores always come
 from the standard ``check_all`` on the frozen trajectory after the cut.
+
+Precision trade-off: a pass-stop cuts the run the instant every *pass-armed*
+criterion is decided, so a *fail-armed* criterion (e.g. a distractor) that would
+only misfire on a LATER tool call is never observed — the frozen trajectory then
+scores that row as a clean pass. This is an intentional precision-for-budget
+trade of the opt-in "smoke" flavor (an already-visible misfire still fail-stops,
+since fail-stop is evaluated before pass-stop each round); the authoritative
+precision/recall must come from a non-early-stop (``stop_early: false``) run.
 """
 
 from __future__ import annotations
@@ -85,6 +93,7 @@ def validate_early_stop(task: TaskDefinition) -> None:
       then per armed criterion:
       3. criterion is not observable mid-run -> error
       4. requested ``stop_when`` polarity the criterion cannot decide -> error
+         (``auto`` errors only on a dead arm: an instance that can decide neither)
 
     Raises:
         EarlyStopConfigError: on any unsupported armed configuration.
@@ -150,6 +159,19 @@ def validate_early_stop(task: TaskDefinition) -> None:
         # arm (a polarity this instance can never fire) would silently degrade to
         # a full run instead of erroring here.
         polarities = checker_cls.live_decidable_polarities(c)
+        if polarity == "auto":
+            # `auto` arms exactly the polarities THIS instance can decide, so the
+            # only invalid case is a dead arm (an instance that can decide
+            # neither) — otherwise there is nothing to arm and it would silently
+            # never fire. A non-empty decidable set is always fully armable by
+            # `auto`, so there is nothing further to validate for this criterion.
+            if not polarities:
+                raise EarlyStopConfigError(
+                    f"criterion type {c.type!r} is armed (stop_when='auto') but this instance can "
+                    + "decide no polarity mid-run; 'auto' requires at least one live-decidable "
+                    + "polarity (its decidability can depend on the criterion's fields)."
+                )
+            continue
         needed = {"pass", "fail"} if polarity == "decided" else {polarity}
         missing = sorted(needed - polarities)
         if missing:
@@ -193,6 +215,15 @@ class EarlyStopWatcher:
     ) -> None:
         self._task_id = task_id
         self._armed = armed
+        # Per-instance resolved arming polarities, aligned with ``_armed``. Static
+        # for the run: a criterion armed ``pass``/``fail`` resolves to that single
+        # polarity, ``decided`` to both, and ``auto`` to whatever THIS instance can
+        # decide (its ``live_decidable_polarities``). The stop rule consults this,
+        # not the raw ``stop_when`` string, so a distractor armed ``auto`` (fail
+        # only) is not required to live-pass for a pass-stop.
+        self._armed_polarities: list[frozenset[str]] = [
+            self._resolve_armed_polarities(criterion, checker) for criterion, checker in armed
+        ]
         self._max_turns = max_turns
         self._collector = EventCollector()
         self._sdk_turn_index = 0
@@ -292,6 +323,25 @@ class EarlyStopWatcher:
 
     # --- Stop rule -------------------------------------------------- #
 
+    @staticmethod
+    def _resolve_armed_polarities(criterion: BaseSuccessCriterion, checker: BaseCriterion[Any]) -> frozenset[str]:
+        """The polarities this armed instance may fire, resolved from ``stop_when``.
+
+        ``pass``/``fail`` -> that single polarity; ``decided`` -> both (validation
+        has already guaranteed the instance can decide both); ``auto`` -> the
+        instance's own ``live_decidable_polarities`` (validation has guaranteed it
+        is non-empty). ``None`` is never armed, but is mapped to the empty set
+        defensively so the caller need not special-case it.
+        """
+        sw = criterion.stop_when
+        if sw == "auto":
+            return checker.live_decidable_polarities(criterion)
+        if sw == "decided":
+            return frozenset({"pass", "fail"})
+        if sw in ("pass", "fail"):
+            return frozenset({sw})
+        return frozenset()
+
     def _evaluate(self, in_flight: CommandTelemetry | None = None) -> None:
         record = self._collector.build_turn_record()
         if in_flight is not None:
@@ -321,22 +371,29 @@ class EarlyStopWatcher:
                 return
 
         # Fail-stop: first armed criterion (criteria order) that live-fails AND
-        # whose stop_when permits fail decides the run.
-        for (criterion, _checker), verdict in zip(self._armed, verdicts, strict=True):
-            if verdict == "fail" and criterion.stop_when in ("fail", "decided"):
+        # whose resolved arming permits fail decides the run.
+        for (criterion, _checker), verdict, armed_pol in zip(
+            self._armed, verdicts, self._armed_polarities, strict=True
+        ):
+            if verdict == "fail" and "fail" in armed_pol:
                 self._fire(EarlyStopReason.CRITERION_FAILED, criterion, tool_call_index=tool_call_index)
                 return
 
-        # Pass-stop: EVERY armed criterion live-passes AND each permits pass.
-        all_pass = all(v == "pass" for v in verdicts)
-        all_permit_pass = all(c.stop_when in ("pass", "decided") for c, _ in self._armed)
-        if all_pass and all_permit_pass:
-            # Deciding criterion = the last armed (criteria order) whose verdict
-            # flipped vs the previous round; fall back to the last armed.
-            deciding = self._armed[-1][0]
-            for (criterion, _checker), verdict, prev in zip(self._armed, verdicts, self._prev_verdicts, strict=True):
-                if verdict != prev:
-                    deciding = criterion
+        # Pass-stop: every PASS-ARMED criterion live-passes. Fail-armed criteria
+        # (e.g. distractors armed ``auto`` -> fail only) are NOT required to pass —
+        # they can never live-pass and only guard the fail side above, so requiring
+        # them would veto every pass-stop (the mixed-arming bug). Guard the vacuous
+        # case: with zero pass-armed criteria (a negative row whose criteria are all
+        # distractors) there is nothing to pass-stop on, so the run must continue to
+        # the cap rather than firing on turn 0 with an empty ``all()``.
+        pass_armed = [i for i, pol in enumerate(self._armed_polarities) if "pass" in pol]
+        if pass_armed and all(verdicts[i] == "pass" for i in pass_armed):
+            # Deciding criterion = the last pass-armed (criteria order) whose verdict
+            # flipped vs the previous round; fall back to the last pass-armed.
+            deciding = self._armed[pass_armed[-1]][0]
+            for i in pass_armed:
+                if verdicts[i] != self._prev_verdicts[i]:
+                    deciding = self._armed[i][0]
             self._fire(EarlyStopReason.CRITERION_PASSED, deciding, tool_call_index=tool_call_index)
             return
 

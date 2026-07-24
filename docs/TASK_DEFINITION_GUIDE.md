@@ -228,23 +228,38 @@ Semantics:
 
 - **Opt-in, per run.** With `stop_early: false` (the default) the run behaves
   exactly as before — `stop_when` is inert and every criterion gates normally.
-- **Polarity.** `stop_when: pass` stops the moment all armed criteria are decided
-  in the pass direction; `stop_when: fail` stops on a definitive wrong-signal
-  fail; `stop_when: decided` stops on either. Only criteria that can decide from a
-  partial trajectory (currently `skill_triggered`, `command_executed`) may be
-  armed — arming any other criterion is a hard error at resolution (plan *and*
-  run), never a silent no-op. Decidability can also depend on a criterion's own
-  fields: `command_executed` can live-**pass** only with `max_count` unset and
-  `min_count > 0`, and live-**fail** only with `max_count` set (which includes
-  the `min_count: 0, max_count: 0` "must-NOT-run" form). Arming a polarity the
-  configured criterion can never reach (e.g. `stop_when: pass` alongside a
-  `max_count`) is likewise a hard error at resolution, not a silent full run.
+- **Polarity.** `stop_when: pass` stops the moment all **pass-armed** criteria are
+  decided in the pass direction; `stop_when: fail` stops on a definitive
+  wrong-signal fail; `stop_when: decided` stops on either (the criterion instance
+  must be able to decide **both**). `stop_when: auto` arms whichever polarities
+  **this instance** can decide — use it when the decidable polarity is
+  instance-dependent, e.g. a `skill_triggered` activation suite where a positive
+  row (`skill_name == expected_skill`) can only live-pass and a distractor can only
+  live-fail, so one static value on a dataset-fanned criterion (whose
+  positive/distractor role flips per row) cannot fit every row. A **pass-stop**
+  needs every pass-armed criterion to pass — fail-armed distractors are not
+  required to, and a row with **zero** pass-armed criteria (e.g. a negative row)
+  never pass-stops; a **fail-stop** fires on the first fail-armed criterion that
+  live-fails. Only criteria that can decide from a partial trajectory (currently
+  `skill_triggered`, `command_executed`) may be armed — arming any other criterion
+  is a hard error at resolution (plan *and* run), never a silent no-op.
+  Decidability can also depend on a criterion's own fields: `command_executed` can
+  live-**pass** only with `max_count` unset and `min_count > 0`, and live-**fail**
+  only with `max_count` set (which includes the `min_count: 0, max_count: 0`
+  "must-NOT-run" form). Arming a polarity the configured criterion can never reach
+  (e.g. `stop_when: pass` alongside a `max_count`, or `auto` on an instance that
+  can decide neither) is likewise a hard error at resolution, not a silent full
+  run.
 - **Verdict.** An early-stopped run is gated on the **armed subset only**; the
   non-armed criteria become **advisory** and are clearly marked (report badge +
   per-criterion note + `stopped_early` row). A run that completes naturally is
   gated on the **full** set, as always. This is what lets one file serve both a
   `smoke` flavor (`stop_early: true`) and an `e2e` flavor (`stop_early: false`)
-  with identical verdicts — see [AB_EXPERIMENTS.md](AB_EXPERIMENTS.md).
+  with identical verdicts — see [AB_EXPERIMENTS.md](AB_EXPERIMENTS.md). Note: on a
+  **pass-stop** the run is cut once the positive is decided, so a distractor that
+  would misfire on a *later* tool call is not observed (the frozen row scores as a
+  clean pass) — the smoke flavor trades some precision completeness for budget, so
+  authoritative precision/recall belongs on the `stop_early: false` run.
 - **Fail-safe.** A live-verdict bug **fails open** to a full run (logged loudly) —
   it can never silently disable a criterion or cause a false early stop.
 
@@ -391,7 +406,7 @@ All criteria share these fields:
 | `description` | — | Human-readable description (required) |
 | `weight` | 1.0 | Relative importance for weighted score. `0` = **informational**: excluded from both the score and the pass/fail gate |
 | `pass_threshold` | 0.9 | Minimum score (0.0–1.0) to pass |
-| `stop_when` | `null` | Arms this criterion for early stop (`pass`/`fail`/`decided`); requires `run_limits.stop_early: true` and an observable criterion type (`skill_triggered`, `command_executed`). See [`stop_early`](#stop_early-opt-in-early-stop). |
+| `stop_when` | `null` | Arms this criterion for early stop (`pass`/`fail`/`decided`/`auto`); requires `run_limits.stop_early: true` and an observable criterion type (`skill_triggered`, `command_executed`). `auto` arms whichever polarity this instance can decide (for dataset-fanned criteria whose positive/distractor role flips per row). See [`stop_early`](#stop_early-opt-in-early-stop). |
 
 **Scoring types:**
 - **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`
