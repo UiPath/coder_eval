@@ -86,13 +86,11 @@ nav:
       - Claude Code: agents/CLAUDE_CODE.md
       - Codex: agents/CODEX.md
       - Antigravity (Gemini): agents/ANTIGRAVITY.md
-  - Running & scaling:
+  - Advanced:
       - A/B Experiments: AB_EXPERIMENTS.md
       - Bring Your Own Dataset: BYOD.md
       - Docker Isolation: DOCKER_ISOLATION.md
       - CI Gate & GitHub Action: CI_GATE.md
-  - Extending:
       - Extending Coder Eval: EXTENDING.md
-  - Reference:
       - Report Schema: REPORT_SCHEMA.md
-  - How it compares: comparison.md
+  - How It Compares: comparison.md

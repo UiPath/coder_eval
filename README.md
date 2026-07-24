@@ -180,9 +180,9 @@ alone.
 | [Tutorials](docs/tutorials/README.md) | Step-by-step walkthroughs — start here |
 | [User Guide](docs/USER_GUIDE.md) | Full CLI, configuration, output, and environment-variable reference |
 | [Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md) | The task-file schema — all criterion types, scoring, templates |
+| [Agent Guides](docs/agents/) | Running each agent — [Claude Code](docs/agents/CLAUDE_CODE.md), [Codex](docs/agents/CODEX.md), [Antigravity/Gemini](docs/agents/ANTIGRAVITY.md) |
 | [A/B Experiments](docs/AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](docs/BYOD.md) | Fan a single task out over a dataset |
-| [Agent Guides](docs/agents/) | Running each agent — [Claude Code](docs/agents/CLAUDE_CODE.md), [Codex](docs/agents/CODEX.md), [Antigravity/Gemini](docs/agents/ANTIGRAVITY.md) |
 | [Docker Isolation](docs/DOCKER_ISOLATION.md) | The container sandbox driver |
 | [CI Gate: GitHub Action & JUnit](docs/CI_GATE.md) | Run Coder Eval as a CI gate — the packaged Action, JUnit output, score floor |
 | [Extending Coder Eval](docs/EXTENDING.md) | Author a custom agent, criterion, or model pricing via the plugin SPI |
