@@ -1100,7 +1100,6 @@ simulation:
 
   # Sampling (variance analysis).
   n_trials: 3                          # Run N independent dialogs per (task, variant).
-  parallel_trials: true                # Accepted, but not currently read — see the note below.
 
   # Criteria timing.
   check_criteria: every_turn           # One of: end_of_dialog | every_turn | both.
@@ -1119,7 +1118,6 @@ simulation:
 | `stop_on_criteria_pass` | `false` | End when all criteria pass (requires per-turn checking). |
 | `max_total_tokens` | *unset* | Optional dialog-wide token budget (simulator **plus** agent). Distinct from [`run_limits.max_total_tokens`](#run-limits) — see below. |
 | `n_trials` | `1` | Independent dialog trajectories per (task, variant). |
-| `parallel_trials` | `true` | Accepted but **currently has no effect** — trials are ordinary batch units, scheduled by `--max-parallel` like any other task. |
 | `check_criteria` | `end_of_dialog` | `end_of_dialog`, `every_turn`, or `both`. |
 
 The simulator runs as a tools-disabled Claude Code agent sharing the coding agent's `ApiRoute` — model/temperature/sampling are resolved at the route level (same `-b` flag as the coding agent), so they are not configured on this block.
