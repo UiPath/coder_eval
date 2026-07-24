@@ -238,10 +238,11 @@ class Dataset(BaseModel):
     sample_seed: int | None = Field(
         default=None,
         description=(
-            "(re-draws every night; broadens coverage for the nightly suites) — this holds whether "
-            "the count comes from YAML or the CLI --sample-per-stratum flag. NOTE: unlike CLI --sample "
-            "(fixed-seed, reproducible by default), the stratified sample_per_stratum draw is "
-            "NONDETERMINISTIC by default; set an integer here to pin a reproducible sample."
+            "Seed for the stratified 'sample_per_stratum' draw. Unlike CLI --sample (fixed-seed, "
+            "reproducible by default), that draw is NONDETERMINISTIC when this is None: it re-draws "
+            "every run, which broadens coverage for the nightly suites. This holds whether the "
+            "per-stratum count comes from YAML or the CLI --sample-per-stratum flag. Set an integer "
+            "here to pin a reproducible sample."
         ),
     )
 
