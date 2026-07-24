@@ -12,6 +12,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
 ## Table of Contents
 
 - [Task YAML Structure](#task-yaml-structure)
+  - [dataset](#dataset)
 - [Agent Configuration](#agent-configuration)
 - [Sandbox Configuration](#sandbox-configuration)
 - [Template Sources](#template-sources)
@@ -53,7 +54,40 @@ success_criteria: [ ... ]             # List of criteria (required, at least 1)
 reference: { ... }                    # Optional reference solution
 pre_run: [ ... ]                      # Optional pre-run commands (before agent starts)
 post_run: [ ... ]                     # Optional post-run commands
+dataset: { ... }                      # Optional dataset fan-out (one task -> N row-tasks)
 ```
+
+### dataset
+
+An optional `dataset:` block fans this single task out into **one sub-task per row**. Each row-task
+gets its own sandbox, run directory, and `task.json`; its `task_id` becomes `<task_id>/<row_id>`.
+Row values substitute into `initial_prompt` and into the string leaves of `success_criteria` via
+`${row.<field>}`. Expansion happens at load time, **before** experiment-variant resolution, so a
+variant can never override the dataset.
+
+```yaml
+dataset:
+  rows:                                # inline rows — mutually exclusive with `paths`
+    - id: alpha
+      expected: "alpha"
+  # paths: ["datasets/rows.jsonl"]     # or JSONL files, relative to this task YAML
+  id_field: "id"                       # which row field is the row identifier
+  sample_per_stratum: 5                # optional: keep up to N rows per stratum
+  stratify_field: "expected_skill"     # which row field defines the stratum
+  sample_seed: 1234                    # optional: pin the stratified draw
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `rows` | `null` | Inline list of row dicts. Mutually exclusive with `paths`; exactly one is required. |
+| `paths` | `null` | JSONL file paths **relative to the task YAML**, concatenated in declared order. |
+| `id_field` | `"id"` | Row field used as the row identifier. Must be present, unique, and match `^[A-Za-z0-9_][A-Za-z0-9_.\-]*$` (it becomes a directory name). |
+| `sample_per_stratum` | `null` | Stratified random sample: keep up to N rows per stratum. Overridden by CLI `--sample`. |
+| `stratify_field` | `"expected_skill"` | Row field whose value defines the stratum for `sample_per_stratum`. |
+| `sample_seed` | `null` | Seed for the stratified draw. Unset means the sample is **re-drawn every run**; set an integer to pin it. CLI `--sample` is separately fixed-seed and always reproducible. |
+
+Full guide — row sources, substitution rules, sampling precedence, suite-level scoring, and worked
+examples: **[Bring Your Own Dataset](DATASETS.md)**.
 
 ## Tags
 
@@ -814,7 +848,7 @@ The observed label is the canonical form from `allowed_labels` when the content 
 | `allowed_labels` | *required* | Canonical label set (≥1). Content not in this set becomes `(other)`. |
 | `case_sensitive` | `false` | When `false`, matching is case-insensitive and labels are canonicalized. |
 
-Like `skill_triggered`, this criterion emits a `ClassificationCriterionResult`, so on a [dataset-backed task](#task-yaml-structure) the suite aggregator computes accuracy / precision / recall / F1 and a confusion matrix — gate them with `suite_thresholds`. Use `classification_match` when the agent writes its answer to a file (labeling/extraction tasks); use `skill_triggered` when the signal is whether a skill fired.
+Like `skill_triggered`, this criterion emits a `ClassificationCriterionResult`, so on a [dataset-backed task](#dataset) the suite aggregator computes accuracy / precision / recall / F1 and a confusion matrix — gate them with `suite_thresholds`. Use `classification_match` when the agent writes its answer to a file (labeling/extraction tasks); use `skill_triggered` when the signal is whether a skill fired.
 
 ### `skill_triggered`
 
@@ -839,7 +873,7 @@ Observed label is `"yes"` when either signal is found, else `"no"`. Expected lab
 
 **Requires agent telemetry.** This criterion reads `turn_records`, so it only works against a real agent run (not a static check). With no turn records it reports `score=0.0` and an `error`.
 
-**Classification metrics.** `skill_triggered` returns a `ClassificationCriterionResult`, so on a [dataset-backed task](#task-yaml-structure) the suite aggregator computes accuracy / precision / recall / F1 / confusion matrix across all rows. Gate the suite with `suite_thresholds` using any of: `accuracy`, `macro_f1`, `weighted_f1`, `micro_f1`, or per-label `precision.<label>` / `recall.<label>` / `f1.<label>` (labels are `yes` / `no`). The run exits non-zero if any listed metric falls below its minimum.
+**Classification metrics.** `skill_triggered` returns a `ClassificationCriterionResult`, so on a [dataset-backed task](#dataset) the suite aggregator computes accuracy / precision / recall / F1 / confusion matrix across all rows. Gate the suite with `suite_thresholds` using any of: `accuracy`, `macro_f1`, `weighted_f1`, `micro_f1`, or per-label `precision.<label>` / `recall.<label>` / `f1.<label>` (labels are `yes` / `no`). The run exits non-zero if any listed metric falls below its minimum.
 
 **Typical pattern.** Label each dataset row with its true skill (`expected_skill`, `""` for negatives) and stack one `skill_triggered` criterion per skill against the same dataset — each gets its own confusion matrix from the same agent traces. This is the natural companion to a skill A/B experiment (skill plugin on vs. off); see the [A/B Experiment Guide](AB_EXPERIMENTS.md#recipe-ab-a-skill).
 
