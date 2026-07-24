@@ -161,9 +161,7 @@ class TestBuildSdkEnvCustom:
 
         custom_path = f"/custom/bin{os.pathsep}/usr/bin"
         monkeypatch.setenv("PATH", custom_path)
-        env, _ = ClaudeCodeAgent._build_sdk_env(
-            LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1")
-        )
+        env, _ = ClaudeCodeAgent._build_sdk_env(LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1"))
         assert env["PATH"] == custom_path
 
     def test_custom_route_neutralizes_inherited_anthropic_api_key(self, monkeypatch):
@@ -171,9 +169,7 @@ class TestBuildSdkEnvCustom:
         empty in options.env (not merely omitted) — else it would fight the
         bearer auth_token against the gateway."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "leaked-key")
-        env, _ = ClaudeCodeAgent._build_sdk_env(
-            LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1")
-        )
+        env, _ = ClaudeCodeAgent._build_sdk_env(LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1"))
         assert env["ANTHROPIC_API_KEY"] == ""
 
 
