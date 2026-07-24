@@ -50,6 +50,14 @@ export const PRICING: Record<string, Pricing> = {
     "gemini-3.1-pro-preview-customtools": p(2, 12, 2, 0.2),
     "gemini-3.5-flash": p(1.5, 9, 1.5, 0.15),
     "gemini-3-flash-preview": p(1.5, 9, 1.5, 0.15),
+    // OpenRouter open-weight models (litellm backend). Mirror of pricing.py;
+    // these providers cache implicitly (cache_write == input, unused) so only
+    // cache_read carries a discounted rate. NOTE: OpenRouter routes per-request,
+    // so these rates are only accurate when the litellm config pins the provider
+    // (sort: price) — otherwise the billed rate can differ from the headline.
+    "moonshotai/kimi-k3": p(3, 15, 3, 0.3),
+    "z-ai/glm-5.2": p(0.826, 2.596, 0.826, 0.1534),
+    "deepseek/deepseek-v4-pro": p(0.435, 0.87, 0.435, 0.003625),
 };
 
 function p(
