@@ -46,6 +46,8 @@ read_env() {
 export AWS_BEARER_TOKEN_BEDROCK="${AWS_BEARER_TOKEN_BEDROCK:-$(read_env AWS_BEARER_TOKEN_BEDROCK)}"
 export AWS_REGION="${AWS_REGION:-$(read_env AWS_REGION)}"
 export AWS_REGION="${AWS_REGION:-eu-north-1}"
+# OpenRouter key for the openrouter/* models in the config (cost-optimization path).
+export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-$(read_env OPENROUTER_API_KEY)}"
 # Master key = the key clients present. Default to .env's LITELLM_AUTH_TOKEN so the
 # client and proxy match; fall back to the local dev key.
 export LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-$(read_env LITELLM_AUTH_TOKEN)}"
