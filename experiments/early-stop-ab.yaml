@@ -7,9 +7,11 @@ description: |
   decide when the `smoke` variant cuts off — as soon as the designated criteria
   are decided — while `e2e` runs every task to completion.
 
-  Expect identical pass/fail verdicts between the two variants (the armed subset
-  gates an early-stopped run; other criteria are advisory and clearly marked),
-  with the `smoke` variant significantly lower on turns, duration, and tokens.
+  Expect the `smoke` variant significantly lower on turns, duration, and tokens.
+  Verdict parity is one-sided: the armed subset gates an early-stopped run
+  (other criteria are advisory, clearly marked), a fail-stop preserves the e2e
+  verdict, but a pass-stop can miss a distractor that would only misfire later —
+  authoritative precision/recall belongs on the e2e variant.
 
 variants:
   - variant_id: e2e

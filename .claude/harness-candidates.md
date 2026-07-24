@@ -27,6 +27,22 @@ Deferred lint/test guardrails surfaced during reviews. Promote to a `CExxx` rule
   reachable (needs a live run).
 - [ ] CE-rule: `type: Literal[...]` fields on models in `coder_eval/models/` must declare their tag default (`type: Literal["x"] = "x"`) — a member without the default degrades `validate_registry` diagnostics (PydanticUndefined in expected_types) and breaks direct construction. Nothing guards it today; needs a rule-design call (second violation class inside CE024 vs. a new CExxx at the next free id), and the failure is already double-caught by the MINIMAL_PAYLOADS parity test + direct-construction tests — caught in the 2026-07-03 top5-review-fixes run (Phase 1 quality review).
 
+## From 2026-07-23 stop_when:auto early-stop review
+
+- [ ] CE-rule: the early-stop watcher stop rule must decide polarity via the
+  resolved `_armed_polarities`, never a raw `criterion.stop_when` comparison —
+  forbid `.stop_when` attribute reads inside `EarlyStopWatcher._evaluate` /
+  `_resolve_armed_polarities`'s callers in `orchestration/early_stop.py`. This
+  diff *was* the fix for exactly that class of bug (the old rule compared
+  `stop_when in ("pass","decided")` and so vetoed every mixed `auto` pass-stop).
+  Deferred, not cheap: existing CE rules scope by file/module, not by a specific
+  method, so a method-scoped attribute-ban needs a new AST-walk shape (and risks
+  false positives on the legitimate `is not None` membership reads elsewhere in
+  the file). Claim the next free id in `tests/lint/rules/`. Caught in the
+  2026-07-23 stop_when:auto review; the behavior itself is guarded by
+  `test_auto_mixed_pass_stops_ignoring_undecided_distractors` +
+  `test_mixed_static_arming_pass_stops_ignoring_fail_armed`.
+
 ## From 2026-07-03 open-source docs cleanup
 
 - [ ] **Dead-relative-link checker for `docs/**/*.md`** — resolve every relative
