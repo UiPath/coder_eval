@@ -233,10 +233,17 @@ jobs:
       # what GitHub Marketplace listings are cut from, so every release needs one.
       #
       # Notes are the CHANGELOG section semantic-release just generated for this
-      # version. If that section can't be located we fall back to GitHub's generated
-      # notes rather than failing a release that has already pushed main and tags.
+      # version; if that section can't be located, fall back to GitHub's generated
+      # notes.
       - name: Publish GitHub Release
         if: steps.mode.outputs.prerelease != 'true' && steps.release.outputs.version != ''
+        # Best-effort, mirroring the GHCR steps below. main, the version tag, and the
+        # moving major tag are all pushed by the time this runs, so a transient GitHub
+        # API failure here must not block the PyPI publish of an already-tagged
+        # version -- that would strand `@vN` on an action.yml pin whose version was
+        # never published. A failure surfaces as a step annotation and the Release can
+        # be created by hand afterwards.
+        continue-on-error: true
         env:
           # The app token, not GITHUB_TOKEN: the workflow's permissions are
           # contents: read, and the release app already carries contents: write.
@@ -246,16 +253,22 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
+          # Written under RUNNER_TEMP, never the repo root: hatchling's default sdist
+          # file selection picks up untracked files at the root (verified -- it ships
+          # even git-ignored paths), so a notes file left in the tree would leak into
+          # the sdist that "Build wheel + sdist" publishes to PyPI two steps below.
+          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+          export NOTES_FILE
           # Slice out the "## vX.Y.Z (date)" section, stopping at the next "## v".
           python3 - <<'PY'
           import os, pathlib, re
           version = os.environ["VERSION"]
           text = pathlib.Path("CHANGELOG.md").read_text()
           m = re.search(rf"(?m)^## v{re.escape(version)}\b.*?$(.*?)(?=^## v|\Z)", text, re.S)
-          pathlib.Path("release-notes.md").write_text(m.group(1).strip() if m else "")
+          pathlib.Path(os.environ["NOTES_FILE"]).write_text(m.group(1).strip() if m else "")
           PY
-          if [ -s release-notes.md ]; then
-            NOTES=(--notes-file release-notes.md)
+          if [ -s "$NOTES_FILE" ]; then
+            NOTES=(--notes-file "$NOTES_FILE")
           else
             echo "::warning::no CHANGELOG section found for v${VERSION}; using generated notes"
             NOTES=(--generate-notes)
