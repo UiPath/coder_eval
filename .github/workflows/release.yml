@@ -226,6 +226,46 @@ jobs:
           git tag -f "$MAJOR" "v${VERSION}"
           git push -f origin "$MAJOR"
 
+      # Publish the GitHub Release for the tag pushed above. semantic-release runs
+      # with --no-vcs-release because it also runs --no-push (the commit is amended
+      # and the tag re-pointed first), so it cannot create the release itself -- it
+      # happens here, once the tag is actually on the remote. A published Release is
+      # what GitHub Marketplace listings are cut from, so every release needs one.
+      #
+      # Notes are the CHANGELOG section semantic-release just generated for this
+      # version. If that section can't be located we fall back to GitHub's generated
+      # notes rather than failing a release that has already pushed main and tags.
+      - name: Publish GitHub Release
+        if: steps.mode.outputs.prerelease != 'true' && steps.release.outputs.version != ''
+        env:
+          # The app token, not GITHUB_TOKEN: the workflow's permissions are
+          # contents: read, and the release app already carries contents: write.
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Passed via env (not interpolated into the script) per GitHub's
+          # injection guidance.
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Slice out the "## vX.Y.Z (date)" section, stopping at the next "## v".
+          python3 - <<'PY'
+          import os, pathlib, re
+          version = os.environ["VERSION"]
+          text = pathlib.Path("CHANGELOG.md").read_text()
+          m = re.search(rf"(?m)^## v{re.escape(version)}\b.*?$(.*?)(?=^## v|\Z)", text, re.S)
+          pathlib.Path("release-notes.md").write_text(m.group(1).strip() if m else "")
+          PY
+          if [ -s release-notes.md ]; then
+            NOTES=(--notes-file release-notes.md)
+          else
+            echo "::warning::no CHANGELOG section found for v${VERSION}; using generated notes"
+            NOTES=(--generate-notes)
+          fi
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --verify-tag \
+            --latest \
+            "${NOTES[@]}"
+
       - name: Build wheel + sdist
         if: steps.ver.outputs.version != ''
         run: uv build
