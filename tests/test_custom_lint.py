@@ -1075,3 +1075,93 @@ class TestCE028DocIndexParity:
         readme.write_text(text.replace("| [User Guide]", "| [Tampered Guide]"), encoding="utf-8")
         findings = check(tmp_path)
         assert str(readme) in findings
+
+
+@pytest.mark.lint
+class TestCE031DeadConfigFields:
+    """CE031 — a behavior-driving config field must be read somewhere in src/.
+
+    Guards the dead-config class that SimulationConfig.parallel_trials was: a
+    field users set in a task YAML that no code reads by name, so it silently
+    does nothing. Scans the whole src/ tree for attribute reads, so it lives
+    here rather than in the per-file AST runner.
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+    SRC = REPO_ROOT / "src"
+
+    def test_no_dead_config_fields(self):
+        from tests.lint.dead_config_fields import find_dead_config_fields
+
+        findings = find_dead_config_fields(self.SRC)
+        assert not findings, (
+            "\nConfig field(s) that no code in src/ reads by name — dead config a user could set "
+            "with no effect. Wire the field to real behavior, remove it, or (if it is consumed only "
+            "via serialization) add an EXEMPT entry with a reason in tests/lint/dead_config_fields.py:\n\n"
+            + "\n".join(f"  {model}: {', '.join(fields)}" for model, fields in sorted(findings.items()))
+        )
+
+    def test_detects_a_dead_field(self):
+        from pydantic import BaseModel, Field
+
+        from tests.lint.dead_config_fields import dead_config_fields
+
+        class Synthetic(BaseModel):
+            wired: str = Field(default="")
+            orphan: str = Field(default="")
+
+        # `wired` is read as an attribute somewhere; `orphan` is not.
+        assert dead_config_fields(Synthetic, consumed={"wired"}, exempt={}) == ["orphan"]
+
+    def test_consumed_field_not_flagged(self):
+        from pydantic import BaseModel, Field
+
+        from tests.lint.dead_config_fields import dead_config_fields
+
+        class Synthetic(BaseModel):
+            live: str = Field(default="")
+
+        assert dead_config_fields(Synthetic, consumed={"live"}, exempt={}) == []
+
+    def test_exempt_field_not_flagged(self):
+        from pydantic import BaseModel, Field
+
+        from tests.lint.dead_config_fields import dead_config_fields
+
+        class Synthetic(BaseModel):
+            serialized_only: str = Field(default="")
+
+        assert dead_config_fields(Synthetic, consumed=set(), exempt={"serialized_only": "read via model_dump"}) == []
+
+    def test_would_catch_parallel_trials_shape(self):
+        # A field named like the removed parallel_trials, absent from the consumed
+        # set, must be reported — the exact regression this rule exists for.
+        from pydantic import BaseModel, Field
+
+        from tests.lint.dead_config_fields import dead_config_fields
+
+        class Synthetic(BaseModel):
+            parallel_trials: bool = Field(default=True)
+
+        assert dead_config_fields(Synthetic, consumed={"n_trials", "max_turns"}, exempt={}) == ["parallel_trials"]
+
+    def test_exemptions_reference_real_fields(self):
+        # A stale EXEMPT entry (field renamed/removed) would silently mask a dead field.
+        from tests.lint.dead_config_fields import CONSUMED_MODELS, EXEMPT
+
+        by_name = {m.__name__: m for m in CONSUMED_MODELS}
+        for model_name, fields in EXEMPT.items():
+            assert model_name in by_name, f"EXEMPT names unregistered model {model_name!r}"
+            real = set(by_name[model_name].model_fields)
+            for field_name, reason in fields.items():
+                assert field_name in real, f"EXEMPT[{model_name}] names non-field {field_name!r}"
+                assert reason and reason.strip(), f"EXEMPT[{model_name}][{field_name}] has an empty reason"
+
+    def test_registered_fields_are_actually_consumed_on_the_real_tree(self):
+        # Belt: prove the attribute scan really finds known-live fields, so a
+        # broken scanner (returning everything or nothing) can't pass silently.
+        from tests.lint.dead_config_fields import consumed_attr_names
+
+        consumed = consumed_attr_names(self.SRC)
+        for name in ("n_trials", "max_usd", "stratify_field"):
+            assert name in consumed, f"expected {name!r} to be read as an attribute in src/"

@@ -155,9 +155,8 @@ Each trial is fanned out as its own unit of work with its own sandbox, its own r
 "Trial *k* of *N*" row. Trials reuse the replicate machinery, so when a simulation task sets
 `n_trials > 1` it takes precedence over experiment-level `repeats`.
 
-Trials are ordinary batch units: they run concurrently exactly as far as `--max-parallel` allows.
-(The `parallel_trials` field is accepted and defaults to `true`, but nothing currently reads it —
-scheduling is entirely `--max-parallel`'s job.)
+Trials are ordinary batch units: they run concurrently exactly as far as `--max-parallel` allows —
+there is no per-task trial-concurrency switch; scheduling is entirely `--max-parallel`'s job.
 
 ## Grading a dialog
 

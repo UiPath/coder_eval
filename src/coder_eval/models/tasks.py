@@ -115,10 +115,6 @@ class SimulationConfig(BaseModel):
         le=100,
         description="Number of independent dialog trajectories to run per (task, variant).",
     )
-    parallel_trials: bool = Field(
-        default=True,
-        description="When True, trials run concurrently (subject to batch max_parallel).",
-    )
 
     # Criteria timing.
     check_criteria: CriteriaCheckTiming = Field(

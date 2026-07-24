@@ -34,7 +34,6 @@ class TestSimulationConfigDefaults:
         assert cfg.max_turns == 8
         assert cfg.stop_token == DEFAULT_SIMULATION_STOP_TOKEN
         assert cfg.n_trials == 1
-        assert cfg.parallel_trials is True
         assert cfg.check_criteria == "end_of_dialog"
         # Default stop_on_criteria_pass=False so that the default
         # check_criteria=end_of_dialog pairing is internally consistent.
