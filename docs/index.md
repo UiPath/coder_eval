@@ -72,21 +72,24 @@ New here? Start with **[Tutorial 01 — Your First Evaluation](tutorials/01-firs
 
 ## Where to go next
 
+<!-- docs-index:start -->
 | Guide | What's in it |
 | --- | --- |
 | [Tutorials](tutorials/README.md) | Step-by-step walkthroughs — start here |
 | [User Guide](USER_GUIDE.md) | Full CLI, configuration, output, and environment-variable reference |
 | [Task Definition Guide](TASK_DEFINITION_GUIDE.md) | The task-file schema — all criterion types, scoring, templates |
-| [Claude Code Agent](agents/CLAUDE_CODE.md) | Configuring and running the default Claude Code agent |
-| [Codex Agent Guide](agents/CODEX.md) | Running the OpenAI Codex agent |
-| [Antigravity (Gemini) Agent Guide](agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
+| [Claude Code](agents/CLAUDE_CODE.md) | Configuring and running the default Claude Code agent |
+| [Codex](agents/CODEX.md) | Running the OpenAI Codex agent |
+| [Antigravity (Gemini)](agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
 | [A/B Experiments](AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](DATASETS.md) | Fan a single task out over a dataset |
-| [Docker Isolation](DOCKER_ISOLATION.md) | The container sandbox driver |
-| [CI Gate: GitHub Action & JUnit](CI_GATE.md) | Run Coder Eval as a CI gate — the packaged Action, JUnit output, score floor |
-| [Extending Coder Eval](EXTENDING.md) | Author a custom agent, criterion, or model pricing |
-| [Report Schema](REPORT_SCHEMA.md) | Field-level reference for the JSON outputs |
-| [How it compares](comparison.md) | Coder Eval vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, and hand-rolled harnesses |
+| [Dialog Mode](DIALOG_MODE.md) | Evaluate agents in multi-turn conversation via a simulated user |
+| [Docker Isolation](DOCKER_ISOLATION.md) | The container sandbox driver, with custom images |
+| [CI Gate & GitHub Action](CI_GATE.md) | Run Coder Eval as a CI gate — the packaged Action, JUnit output, score floor |
+| [Extending Coder Eval](EXTENDING.md) | Author a custom agent, criterion, or model pricing via the plugin SPI |
+| [Report Schema](REPORT_SCHEMA.md) | Field-level reference for run.json / variant.json / task.json |
+| [How It Compares](comparison.md) | vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts |
+<!-- docs-index:end -->
 
 ## How Coder Eval compares
 

@@ -21,28 +21,33 @@ and A/B plumbing.
 
 ## Docs
 
-- [Home / overview](https://coder-eval.com/docs): what Coder Eval is, features, quick start
-- [How it compares](https://coder-eval.com/docs/comparison): vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts
-- [User Guide](https://coder-eval.com/docs/user-guide): full CLI, configuration, output, environment variables
-- [Task Definition Guide](https://coder-eval.com/docs/task-definition-guide): task-file schema, all criterion types, scoring, templates
-- [Claude Code Agent](https://coder-eval.com/docs/agents/claude-code): configuring and running the default Claude Code agent
-- [Codex Agent Guide](https://coder-eval.com/docs/agents/codex): running the OpenAI Codex agent
-- [Antigravity (Gemini) Agent Guide](https://coder-eval.com/docs/agents/antigravity): running the Google Antigravity / Gemini agent
-- [A/B Experiments](https://coder-eval.com/docs/ab-experiments): compare models/tools/prompts across the same tasks
-- [Bring Your Own Dataset](https://coder-eval.com/docs/datasets): fan a single task out over a dataset
-- [Docker Isolation](https://coder-eval.com/docs/docker-isolation): the container sandbox driver, custom images
-- [CI Gate: GitHub Action & JUnit](https://coder-eval.com/docs/ci-gate): run Coder Eval as a CI gate — the packaged composite Action, JUnit XML output, per-task score floor
-- [Extending Coder Eval](https://coder-eval.com/docs/extending): author a custom agent, criterion, or model pricing via the plugin SPI
-- [Report Schema](https://coder-eval.com/docs/report-schema): field-level reference for run.json / variant.json / task.json
+<!-- docs-index:start:docs -->
+- [Home](https://coder-eval.com/docs): What Coder Eval is, its features, and a quick start
+- [User Guide](https://coder-eval.com/docs/user-guide): Full CLI, configuration, output, and environment-variable reference
+- [Task Definition Guide](https://coder-eval.com/docs/task-definition-guide): The task-file schema — all criterion types, scoring, templates
+- [Claude Code](https://coder-eval.com/docs/agents/claude-code): Configuring and running the default Claude Code agent
+- [Codex](https://coder-eval.com/docs/agents/codex): Running the OpenAI Codex agent
+- [Antigravity (Gemini)](https://coder-eval.com/docs/agents/antigravity): Running the Google Antigravity / Gemini agent
+- [A/B Experiments](https://coder-eval.com/docs/ab-experiments): Compare models / tools / prompts across the same tasks
+- [Bring Your Own Dataset](https://coder-eval.com/docs/datasets): Fan a single task out over a dataset
+- [Dialog Mode](https://coder-eval.com/docs/dialog-mode): Evaluate agents in multi-turn conversation via a simulated user
+- [Docker Isolation](https://coder-eval.com/docs/docker-isolation): The container sandbox driver, with custom images
+- [CI Gate & GitHub Action](https://coder-eval.com/docs/ci-gate): Run Coder Eval as a CI gate — the packaged Action, JUnit output, score floor
+- [Extending Coder Eval](https://coder-eval.com/docs/extending): Author a custom agent, criterion, or model pricing via the plugin SPI
+- [Report Schema](https://coder-eval.com/docs/report-schema): Field-level reference for run.json / variant.json / task.json
+- [How It Compares](https://coder-eval.com/docs/comparison): vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts
+<!-- docs-index:end:docs -->
 
 ## Tutorials
 
+<!-- docs-index:start:tutorials -->
 - [01 · Your first evaluation](https://coder-eval.com/docs/tutorials/01-first-evaluation)
 - [02 · Running Coder Eval in CI](https://coder-eval.com/docs/tutorials/02-ci-pipeline)
 - [03 · Browsing results with evalboard](https://coder-eval.com/docs/tutorials/03-evalboard-local)
 - [04 · Writing a task](https://coder-eval.com/docs/tutorials/04-writing-a-task)
 - [05 · Comparing two models](https://coder-eval.com/docs/tutorials/05-comparing-models)
 - [06 · Docker isolation](https://coder-eval.com/docs/tutorials/06-use-docker-isolation)
+<!-- docs-index:end:tutorials -->
 
 ## Source
 

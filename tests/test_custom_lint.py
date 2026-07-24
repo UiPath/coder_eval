@@ -928,3 +928,150 @@ class TestCE030DocSchemaParity:
         findings = find_undocumented_fields(self.REPO_ROOT / "no_such_dir")
         assert findings, "a missing doc file must surface every field, not return empty"
         assert any("RunLimits" in key for key in findings)
+
+
+@pytest.mark.lint
+class TestCE028DocIndexParity:
+    """CE028 — the flat index surfaces (README, docs/index.md, docs/llms.txt) are
+    generated from the mkdocs nav + extra.docs_index; disk must match.
+
+    Also enforces the invariants the render depends on: nav<->blurb bijection,
+    every published docs/ page is in the nav, and the hand-written tutorials
+    table stays in parity with the nav. Reasons over Markdown/YAML, so it lives
+    here rather than in the AST runner.
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+
+    @property
+    def _nav(self):
+        from tests.lint.doc_indexes import load_nav
+
+        return load_nav(self.REPO_ROOT / "mkdocs.yml")
+
+    @property
+    def _blurbs(self):
+        from tests.lint.doc_indexes import load_blurbs
+
+        return load_blurbs(self.REPO_ROOT / "mkdocs.yml")
+
+    def test_repo_indexes_match_generated_output(self):
+        from tests.lint.doc_indexes import check
+
+        findings = check(self.REPO_ROOT)
+        assert not findings, (
+            "\nGenerated index surface(s) drifted from the mkdocs nav — run `make docs-indexes` "
+            "to regenerate:\n\n" + "\n\n".join(f"{path}:\n{diff}" for path, diff in sorted(findings.items()))
+        )
+
+    def test_every_nav_page_has_a_blurb(self):
+        from tests.lint.doc_indexes import missing_blurbs
+
+        missing = missing_blurbs(self._nav, self._blurbs)
+        assert not missing, f"nav pages without an extra.docs_index blurb (tutorial leaves exempt): {missing}"
+
+    def test_no_orphan_blurbs(self):
+        from tests.lint.doc_indexes import orphan_blurbs
+
+        orphans = orphan_blurbs(self._nav, self._blurbs)
+        assert not orphans, f"extra.docs_index blurbs with no matching nav page: {orphans}"
+
+    def test_every_published_doc_is_in_the_nav(self):
+        from tests.lint.doc_indexes import docs_missing_from_nav
+
+        missing = docs_missing_from_nav(self.REPO_ROOT, self._nav)
+        assert not missing, f"published docs/ pages absent from the nav (add to nav or the exclusion set): {missing}"
+
+    def test_tutorials_table_matches_nav(self):
+        from tests.lint.doc_indexes import tutorials_table_drift
+
+        drift = tutorials_table_drift(self.REPO_ROOT, self._nav)
+        assert drift is None, drift
+
+    def test_real_mkdocs_yaml_parses_despite_env_tag(self):
+        # The real mkdocs.yml carries `!ENV [CI, false]`; load_nav must tolerate it.
+        nav = self._nav
+        assert any(p.doc == "index.md" for p in nav)
+        assert any(p.doc == "DIALOG_MODE.md" for p in nav)
+
+    def test_nav_loader_does_not_mutate_global_safeloader(self):
+        import yaml
+
+        from tests.lint.doc_indexes import load_nav
+
+        load_nav(self.REPO_ROOT / "mkdocs.yml")
+        with pytest.raises(yaml.YAMLError):
+            yaml.safe_load("x: !ENV [A, b]")
+
+    def test_python_object_tags_are_still_rejected(self):
+        import yaml
+
+        from tests.lint.doc_indexes import load_nav
+
+        # Prove the private loader stays safe_load-equivalent for object construction.
+        load_nav(self.REPO_ROOT / "mkdocs.yml")
+
+        class _Probe(yaml.SafeLoader):
+            pass
+
+        _Probe.add_multi_constructor("!", lambda loader, suffix, node: None)
+        with pytest.raises(yaml.constructor.ConstructorError):
+            yaml.load("x: !!python/object/apply:os.system ['echo hi']", Loader=_Probe)
+
+    @pytest.mark.parametrize(
+        ("doc", "route"),
+        [
+            ("index.md", "/docs"),
+            ("USER_GUIDE.md", "/docs/user-guide"),
+            ("agents/CLAUDE_CODE.md", "/docs/agents/claude-code"),
+            ("tutorials/README.md", "/docs/tutorials"),
+        ],
+    )
+    def test_route_for_known_shapes(self, doc: str, route: str):
+        from tests.lint.doc_indexes import route_for
+
+        assert route_for(doc) == route
+
+    def test_write_is_idempotent(self, tmp_path: Path):
+        import shutil
+
+        from tests.lint.doc_indexes import check, write
+
+        # Copy the pieces write() touches into a scratch tree so the live repo is untouched.
+        (tmp_path / "docs").mkdir()
+        shutil.copy(self.REPO_ROOT / "mkdocs.yml", tmp_path / "mkdocs.yml")
+        for rel in ("README.md", "docs/index.md", "docs/llms.txt", "docs/tutorials/README.md"):
+            dest = tmp_path / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(self.REPO_ROOT / rel, dest)
+
+        write(tmp_path)
+        first = (tmp_path / "README.md").read_text(encoding="utf-8")
+        write(tmp_path)
+        assert (tmp_path / "README.md").read_text(encoding="utf-8") == first
+        assert check(tmp_path) == {}
+
+    def test_missing_marker_raises_clear_error(self):
+        from tests.lint.doc_indexes import _replace_between
+
+        with pytest.raises(ValueError, match="marker pair"):
+            _replace_between("no markers here", "<!-- start -->", "<!-- end -->", "body")
+
+    def test_drift_is_detected(self, tmp_path: Path):
+        # A hand-edit between the markers must be reported by check().
+        import shutil
+
+        from tests.lint.doc_indexes import check
+
+        (tmp_path / "docs").mkdir()
+        shutil.copy(self.REPO_ROOT / "mkdocs.yml", tmp_path / "mkdocs.yml")
+        for rel in ("README.md", "docs/index.md", "docs/llms.txt", "docs/tutorials/README.md"):
+            dest = tmp_path / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(self.REPO_ROOT / rel, dest)
+
+        readme = tmp_path / "README.md"
+        text = readme.read_text(encoding="utf-8")
+        readme.write_text(text.replace("| [User Guide]", "| [Tampered Guide]"), encoding="utf-8")
+        findings = check(tmp_path)
+        assert str(readme) in findings
