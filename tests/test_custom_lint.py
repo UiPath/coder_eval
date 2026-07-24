@@ -842,3 +842,89 @@ variants:
             )
             is None
         )
+
+
+@pytest.mark.lint
+class TestCE030DocSchemaParity:
+    """CE030 — a registered model's fields must be documented or exempted with a reason.
+
+    Every P0/P1 defect in the docs overhaul was an undocumented user-facing
+    field. This gate makes that recurrence impossible for a small, explicit
+    registry of models: adding a field forces a doc update or a reasoned
+    EXEMPT entry. Scans real Markdown, so it lives here, not in the AST runner.
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+
+    def test_registered_models_are_fully_documented(self):
+        from tests.lint.doc_schema_parity import find_undocumented_fields
+
+        findings = find_undocumented_fields(self.REPO_ROOT)
+        assert not findings, (
+            "\nRegistered model field(s) documented nowhere in their doc page (and not EXEMPT) — "
+            "document them (mention the field name as `inline code`) or add an EXEMPT entry with a "
+            "reason in tests/lint/doc_schema_parity.py:\n\n"
+            + "\n".join(f"  {model}: {', '.join(fields)}" for model, fields in sorted(findings.items()))
+        )
+
+    def test_exempt_fields_carry_a_reason(self):
+        from tests.lint.doc_schema_parity import EXEMPT
+
+        for model_name, fields in EXEMPT.items():
+            for field_name, reason in fields.items():
+                assert reason and reason.strip(), f"EXEMPT[{model_name}][{field_name}] has an empty reason"
+
+    def test_exemptions_reference_real_fields(self):
+        # An exemption left behind after a field rename would silently mask a
+        # real undocumented field. Pin every exempt name to a real model field.
+        from tests.lint.doc_schema_parity import DOCUMENTED_MODELS, EXEMPT
+
+        by_name = {m.__name__: m for m, _ in DOCUMENTED_MODELS}
+        for model_name, fields in EXEMPT.items():
+            assert model_name in by_name, f"EXEMPT names unknown model {model_name!r}"
+            real = set(by_name[model_name].model_fields)
+            for field_name in fields:
+                assert field_name in real, f"EXEMPT[{model_name}] names non-field {field_name!r}"
+
+    def test_detects_an_undocumented_field(self):
+        from pydantic import BaseModel, Field
+
+        from tests.lint.doc_schema_parity import undocumented_fields
+
+        class Synthetic(BaseModel):
+            documented: str = Field(default="")
+            undocumented: str = Field(default="")
+
+        doc = "The `documented` field is described here."
+        assert undocumented_fields(Synthetic, doc, {}) == ["undocumented"]
+
+    def test_inline_code_match_only(self):
+        # A field mentioned in prose without backticks does NOT count as documented.
+        from pydantic import BaseModel, Field
+
+        from tests.lint.doc_schema_parity import undocumented_fields
+
+        class Synthetic(BaseModel):
+            widget: str = Field(default="")
+
+        assert undocumented_fields(Synthetic, "The widget setting is great.", {}) == ["widget"]
+        assert undocumented_fields(Synthetic, "The `widget` setting is great.", {}) == []
+
+    def test_exempt_field_is_not_reported(self):
+        from pydantic import BaseModel, Field
+
+        from tests.lint.doc_schema_parity import undocumented_fields
+
+        class Synthetic(BaseModel):
+            internal: str = Field(default="")
+
+        assert undocumented_fields(Synthetic, "", {"internal": "set by the framework"}) == []
+
+    def test_missing_doc_file_fails_loudly(self):
+        # A moved/renamed doc must fail the gate, not vacuously pass. The
+        # integration wrapper maps a missing file to "" → every field reported.
+        from tests.lint.doc_schema_parity import find_undocumented_fields
+
+        findings = find_undocumented_fields(self.REPO_ROOT / "no_such_dir")
+        assert findings, "a missing doc file must surface every field, not return empty"
+        assert any("RunLimits" in key for key in findings)
