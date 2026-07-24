@@ -53,7 +53,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://coder-eval.com"
 Repository = "https://github.com/UiPath/coder_eval"
-Documentation = "https://github.com/UiPath/coder_eval/tree/main/docs"
+Documentation = "https://coder-eval.com/docs"
 Issues = "https://github.com/UiPath/coder_eval/issues"
 Changelog = "https://github.com/UiPath/coder_eval/blob/main/CHANGELOG.md"
 

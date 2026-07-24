@@ -1,6 +1,6 @@
 ---
 description: >-
-  Switch a coder_eval task from the temp-dir sandbox to a fresh Docker container
+  Switch a Coder Eval task from the temp-dir sandbox to a fresh Docker container
   per task — strong host isolation, a pinned toolchain, and task-specific
   dependencies.
 ---

@@ -1,4 +1,4 @@
-.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra clean run lint docker-image docker-image-full coder-eval-runtime docker-images
+.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra clean run lint docs-indexes docker-image docker-image-full coder-eval-runtime docker-images
 
 # Single source of the installed coder-eval version (used to tag the docker
 # images). Referenced lazily inside the docker recipes, so it doesn't run on
@@ -23,6 +23,9 @@ check:  ## Run linting checks
 
 lint:  ## Run custom architectural lint rules (CE001+)
 	uv run pytest tests/test_custom_lint.py -v --tb=short --no-header -p no:warnings
+
+docs-indexes:  ## Regenerate README/docs indexes from the mkdocs nav (SSOT)
+	uv run python -m tests.lint.doc_indexes
 
 typecheck:  ## Run type checking with pyright
 	uv run pyright

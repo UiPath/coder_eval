@@ -195,11 +195,17 @@ make format      # ruff format
 make check       # ruff check (lint)
 make typecheck   # pyright
 make test        # pytest
-make lint        # custom architectural lint rules (CE001–CE025)
+make lint        # custom architectural lint rules (CE001+)
 make verify      # All of the above + coverage check (CI equivalent)
 ```
 
-When fixing a bug, ask: *could a custom lint rule have prevented this?* If the root cause is a mechanically detectable pattern (e.g., "always import from `coder_eval.models`", "never call blocking IO in async"), add a rule to `tests/lint/rules/` following the CE001–CE025 pattern and wire it up in `tests/lint/runner.py`. This turns a one-time fix into permanent enforcement. See `tests/test_custom_lint.py` for how rules are tested.
+When fixing a bug, ask: *could a custom lint rule have prevented this?* If the root cause is a mechanically detectable pattern (e.g., "always import from `coder_eval.models`", "never call blocking IO in async"), add a rule to `tests/lint/rules/` following the CE001+ pattern and wire it up in `tests/lint/runner.py`. This turns a one-time fix into permanent enforcement. See `tests/test_custom_lint.py` for how rules are tested. (Doc-surface / whole-tree rules that reason over Markdown/YAML or the entire `src/` tree rather than one `.py` AST at a time — CE027–CE031 — are not `BaseRule`s in the runner; they are wired as dedicated `@pytest.mark.lint` test classes. CE031 guards against dead config: a behavior-driving field on `SimulationConfig`/`RunLimits`/`Dataset` that no code reads by name.)
+
+Adding a user-facing field to one of the models CE030 tracks (`TaskDefinition`, `RunLimits`, `Dataset`, `SimulationConfig` — see `tests/lint/doc_schema_parity.py`) means documenting it in its guide (mention the field name as inline code) or adding an `EXEMPT` entry with a reason it is not user-authored. `make lint` fails otherwise.
+
+**Docs index SSOT.** `nav:` plus `extra.docs_index` (blurbs) in `mkdocs.yml` are the single source of truth for the flat index surfaces — `README.md`'s Documentation table, `docs/index.md`'s "Where to go next" table, and the `## Docs` / `## Tutorials` sections of `docs/llms.txt`. Regenerate all three with `make docs-indexes`; **CE028** fails the build if any drifts, if a nav page lacks a blurb (or vice-versa), or if a `docs/*.md` page is missing from the nav. The website sidebar derives from the same `nav:`. When adding or renaming a docs page, edit `nav:` + `extra.docs_index` and run `make docs-indexes` — never hand-edit the generated tables (they sit between `<!-- docs-index:start -->` / `<!-- docs-index:end -->` markers).
+
+**Anchor slugger convention.** The docs are rendered by three sluggers (GitHub, Starlight/github-slugger on coder-eval.com, and python-markdown/mkdocs), which disagree on headings containing `&` or punctuation (`api-routing--benchmarking` vs `api-routing-benchmarking`). Prefer punctuation-free headings so all three agree; if a heading needs `&`, add a GitHub-form `<a id="…"></a>` shim above it and link that form. Verify a new intra-doc anchor link resolves in the built HTML (`mkdocs build`), not by eye.
 
 ## Configuration
 

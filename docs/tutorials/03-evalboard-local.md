@@ -1,6 +1,6 @@
 ---
 description: >-
-  Browse coder_eval runs in evalboard, a local web UI — pass rates, per-task
+  Browse Coder Eval runs in evalboard, a local web UI — pass rates, per-task
   detail, tool and message timelines, token costs, and artifact downloads,
   straight from your filesystem.
 ---
@@ -69,10 +69,10 @@ Then open **http://localhost:3030**.
 - **OSS edition by default.** evalboard runs in its open-source edition with no
   configuration; UiPath-internal surfaces are opt-in via `EVALBOARD_EDITION=internal`.
 - **No database.** Run listings and detail pages are rendered on the fly from the
-  files coder_eval already wrote.
+  files Coder Eval already wrote.
 
 ## Next steps
 
 - **Produce more runs to compare** → [A/B Experiments](../AB_EXPERIMENTS.md)
 - **Automate runs in CI, then download the artifact and open it here** →
-  [Running coder_eval in CI](02-ci-pipeline.md)
+  [Running Coder Eval in CI](02-ci-pipeline.md)
