@@ -37,18 +37,38 @@ model_list:
       aws_region_name: eu-north-1
   # OpenRouter models — cost-optimization path. Not on Bedrock; OpenRouter is
   # OpenAI-format, so LiteLLM does the Anthropic<->OpenAI translation.
+  #
+  # provider routing (extra_body.provider): OpenRouter is a multi-provider router,
+  # and its per-request routing is nondeterministic — a request can land on a
+  # provider far pricier than the model page's headline rate (observed: DeepSeek
+  # V4 Pro routed to Novita at ~$1.47/M input vs the $0.435/M headline, 3.4x).
+  # `sort: price` pins the cheapest upstream and `allow_fallbacks: false` forbids
+  # silently upgrading to a pricier one, so the billed rate is deterministic and
+  # matches the pricing.py table (and is the cost floor we benchmark for).
   - model_name: moonshotai/kimi-k3
     litellm_params:
       model: openrouter/moonshotai/kimi-k3
       api_key: os.environ/OPENROUTER_API_KEY
+      extra_body:
+        provider:
+          sort: price
+          allow_fallbacks: false
   - model_name: z-ai/glm-5.2
     litellm_params:
       model: openrouter/z-ai/glm-5.2
       api_key: os.environ/OPENROUTER_API_KEY
+      extra_body:
+        provider:
+          sort: price
+          allow_fallbacks: false
   - model_name: deepseek/deepseek-v4-pro
     litellm_params:
       model: openrouter/deepseek/deepseek-v4-pro
       api_key: os.environ/OPENROUTER_API_KEY
+      extra_body:
+        provider:
+          sort: price
+          allow_fallbacks: false
 
 litellm_settings:
   # Silently drop provider-unsupported OpenAI/Anthropic params rather than 400.

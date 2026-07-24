@@ -898,8 +898,8 @@ class Orchestrator:
 
             self.route = resolve_route(settings)
             logger.info(
-            "API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None)
-        )
+                "API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None)
+            )
             self.success_checker = SuccessChecker(self.sandbox, route=self.route)
             self._record_route_environment_info()
             return
@@ -966,9 +966,7 @@ class Orchestrator:
 
         # Determine API routing from settings.api_backend enum
         self.route = resolve_route(settings)
-        logger.info(
-            "API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None)
-        )
+        logger.info("API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None))
         self.success_checker = SuccessChecker(self.sandbox, route=self.route)
 
         # Create and start the agent. For a no-op (type: none) task this dispatches
