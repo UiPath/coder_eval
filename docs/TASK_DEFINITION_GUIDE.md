@@ -13,7 +13,9 @@ Complete reference for defining evaluation tasks in Coder Eval.
 
 - [Task YAML Structure](#task-yaml-structure)
   - [dataset](#dataset)
+  - [skip](#skip)
 - [Agent Configuration](#agent-configuration)
+- [Run Limits](#run-limits)
 - [Sandbox Configuration](#sandbox-configuration)
 - [Template Sources](#template-sources)
 - [Success Criteria](#success-criteria)
@@ -47,8 +49,11 @@ description: "What this task tests"   # Human-readable description (required)
 initial_prompt: "Instructions..."     # Prompt sent to the agent (required)
 tags: [smoke, golden, pure-python]    # Optional tags for filtering (kebab-case)
 
+skip: false                           # Optional: quarantine this task (see below)
+
 agent: { ... }                        # Agent configuration (optional, resolved from experiment)
 sandbox: { ... }                      # Sandbox configuration (optional, defaults to tempdir)
+run_limits: { ... }                   # Optional run-time caps (turns, wall-clock, tokens, USD)
 success_criteria: [ ... ]             # List of criteria (required, at least 1)
 
 reference: { ... }                    # Optional reference solution
@@ -57,7 +62,7 @@ post_run: [ ... ]                     # Optional post-run commands
 dataset: { ... }                      # Optional dataset fan-out (one task -> N row-tasks)
 ```
 
-### dataset
+### `dataset`
 
 An optional `dataset:` block fans this single task out into **one sub-task per row**. Each row-task
 gets its own sandbox, run directory, and `task.json`; its `task_id` becomes `<task_id>/<row_id>`.
@@ -89,9 +94,27 @@ dataset:
 Full guide — row sources, substitution rules, sampling precedence, suite-level scoring, and worked
 examples: **[Bring Your Own Dataset](DATASETS.md)**.
 
+### `skip`
+
+`skip: true` quarantines a task. The runner records it in `RunSummary.skipped_tasks` at resolution
+time and it **never reaches the orchestrator** — no dataset fan-out, no variant resolution, no
+sandbox, no API call. Use it to park a task that is blocked on something outside your control
+(an upstream bug, a missing service) without deleting the YAML and losing its history.
+
+```yaml
+task_id: "codex_disallowed_tools_test"
+# Blocked: the Codex SDK doesn't enforce disallowed_tools via config. Re-enable
+# once upstream ships the fix.
+skip: true
+```
+
+Pair it with a comment naming the blocker — a ticket link, an upstream issue — so the next reader
+knows what has to change before it can come back. Run quarantined tasks on demand with
+`coder-eval run --include-skipped`; CI leaves the flag off, so they stay excluded there.
+
 ## Tags
 
-Tags categorize tasks for selective execution. Each tag is lowercase kebab-case and may
+The `tags` list categorizes tasks for selective execution. Each tag is lowercase kebab-case and may
 optionally be namespaced as `key:value` where both sides are kebab-case.
 
 ```yaml
@@ -129,14 +152,10 @@ coder-eval run tasks/*.yaml --exclude-tags example # Skip example tasks
 
 ## Agent Configuration
 
-```yaml
-# Run-time caps (turns, wall-clock, tokens, USD) live under run_limits
-run_limits:
-  max_turns: 20                       # Optional: hard cap on inner-loop turns per iteration
-  expected_turns: 8                   # Optional: SOFT efficiency budget (visible turns) — not a cap
-  turn_timeout: 300                   # Optional: per-communicate() timeout in seconds
-  task_timeout: 600                   # Optional: wall-clock cap across all iterations
+Run-time caps (turns, wall-clock, tokens, USD) are **not** part of this block — they live under
+[`run_limits`](#run-limits).
 
+```yaml
 agent:
   type: "claude-code"                 # Agent type — optional if supplied via experiment / --type
   permission_mode: "acceptEdits"      # Permission mode (see below)
@@ -206,11 +225,78 @@ trajectory (`command_executed`, `skill_triggered`, `reference_comparison`,
 `commands_efficiency`) are rejected. A worked example lives at
 [`tasks/agentless_smoke_test.yaml`](https://github.com/UiPath/coder_eval/blob/main/tasks/agentless_smoke_test.yaml).
 
-### `max_turns`, `task_timeout`, `turn_timeout` location
+## Run Limits
 
-These live under `run_limits:` on the task — alongside the token / USD
-budget caps. They are scenario constraints; the agent identity (type,
-model, etc.) is conceptually separate.
+`run_limits:` is the single namespace for every run-time cap: the **structural** caps that bound how
+long a task may run, and the **budget** caps that bound what it may spend. Any subset of fields is
+valid and an empty block is legal — every field defaults to "no limit".
+
+```yaml
+run_limits:
+  # Structural caps
+  max_turns: 20                       # hard cap on agent inner-loop turns per iteration
+  expected_turns: 8                   # SOFT efficiency budget (visible turns) — never aborts
+  task_timeout: 600                   # wall-clock cap across all iterations, seconds
+  turn_timeout: 300                   # per-communicate() timeout, seconds
+
+  # Budget caps
+  max_total_tokens: 200000            # cumulative input + output
+  max_usd: 2.50                       # cumulative cost
+
+  # Early stop
+  stop_early: true                    # end once the armed criteria are decided
+```
+
+| Field | Default | Constraint | Description |
+|-------|---------|------------|-------------|
+| `max_turns` | *unset* | `> 0` | Hard cap on agent inner-loop turns per iteration. Unset uses the SDK default. |
+| `expected_turns` | *unset* | `>= 1` | **Soft** target for cumulative visible turns. Exceeding it warns and badges the report; it never aborts. See [`expected_turns`](#expected_turns-soft-efficiency-budget). |
+| `task_timeout` | *unset* | `>= 30` | Max seconds for the whole evaluation loop (all iterations). |
+| `turn_timeout` | *unset* | `>= 10` | Max seconds for a single agent `communicate()` call. |
+| `max_input_tokens` | *unset* | `>= 1` | Max cumulative input (prompt) tokens. |
+| `max_output_tokens` | *unset* | `>= 1` | Max cumulative output (completion) tokens. |
+| `max_total_tokens` | *unset* | `>= 1` | Max cumulative input + output tokens. Distinct from [`simulation.max_total_tokens`](#simulation-multi-turn-user-dialog) — see the note below. |
+| `max_usd` | *unset* | `> 0.0` | Max cumulative cost in USD. Requires per-turn SDK cost reporting. |
+| `count_cached_input` | `false` | — | Count `cache_read_input_tokens` toward the input/total budgets. Off by default — cached reads are typically free. |
+| `count_cache_creation` | `false` | — | Count `cache_creation_input_tokens` toward the input/total budgets. Off by default. |
+| `stop_early` | `false` | — | Opt-in master switch for early-stop-on-criterion. See [`stop_early`](#stop_early-opt-in-early-stop). |
+
+The authoritative source is `src/coder_eval/models/limits.py`. A lint rule (CE030) fails the build if
+a field defined there goes undocumented in this guide, so the table can't quietly fall behind the
+model.
+
+**Budget-cap semantics:**
+
+- **Checked after each completed agent turn**, and **cumulative** across all of the task's turns.
+  There is no mid-turn enforcement, so a single runaway turn can overshoot the cap before the
+  between-turns check sees it. Size caps with headroom for one turn.
+- **Subject agent only.** Judge (`llm_judge` / `agent_judge`) and user-simulator token spend are
+  **not** counted against these caps.
+- A breach aborts the task with `FinalStatus.TOKEN_BUDGET_EXCEEDED` (any of the three token caps) or
+  `FinalStatus.COST_BUDGET_EXCEEDED` (`max_usd`). Both categorize as `failed` — see
+  [Report Schema](REPORT_SCHEMA.md).
+- **`max_usd` needs per-turn cost from the SDK.** If no turn reports a cost, the check is **skipped
+  with a one-shot warning per task**, not failed. A run can therefore blow past `max_usd` silently
+  on a backend that doesn't report cost — don't rely on it as your only guardrail.
+- **Cached-read and cache-creation tokens are excluded by default.** `count_cache_creation: true` is
+  what makes an input-token budget meaningful for **Codex**, which buckets its fresh (full-price)
+  prompt slice into `cache_creation`; with the default `false`, a Codex token budget effectively
+  caps output only.
+
+**Setting caps from the CLI** — every field is reachable through `-D`, which merges per-key into
+`run_limits` without disturbing the task's other caps:
+
+```bash
+coder-eval run task.yaml -D run_limits.max_turns=30 -D run_limits.task_timeout=900
+coder-eval run task.yaml -D run_limits.max_usd=2.50 -D run_limits.max_total_tokens=200000
+```
+
+> **`run_limits.max_total_tokens` vs. `simulation.max_total_tokens`.** They are different budgets.
+> `run_limits.max_total_tokens` caps the **subject agent's** cumulative tokens and **aborts the task**
+> with `TOKEN_BUDGET_EXCEEDED`. [`simulation.max_total_tokens`](#simulation-multi-turn-user-dialog)
+> caps the **whole dialog** — simulator *plus* agent — and ends the dialog gracefully with
+> `stop_reason='budget'`, leaving the task to be scored normally. Set both if you want a hard
+> ceiling on a simulated task.
 
 > **No longer supported:** `max_turns` / `turn_timeout` (and top-level
 > `task_timeout`) under `agent:` or at the task top level are rejected —
@@ -1028,7 +1114,7 @@ simulation:
 | `max_turns` | `8` | Hard cap on user↔agent exchanges (1–100). |
 | `stop_token` | `"<<<END>>>"` | Sentinel the simulator emits to end the dialog. |
 | `stop_on_criteria_pass` | `false` | End when all criteria pass (requires per-turn checking). |
-| `max_total_tokens` | *unset* | Optional dialog-wide token budget. |
+| `max_total_tokens` | *unset* | Optional dialog-wide token budget (simulator **plus** agent). Distinct from [`run_limits.max_total_tokens`](#run-limits) — see below. |
 | `n_trials` | `1` | Independent dialog trajectories per (task, variant). |
 | `parallel_trials` | `true` | Run trials concurrently within the batch. |
 | `check_criteria` | `end_of_dialog` | `end_of_dialog`, `every_turn`, or `both`. |
@@ -1043,6 +1129,12 @@ The simulator runs as a tools-disabled Claude Code agent sharing the coding agen
 - When `n_trials > 1`, each trial becomes its own `ResolvedTask` with `task_id` suffix `/trial-N` (0-indexed), its own run directory, and its own `task.json`. Trial-level metadata appears under `simulation.trial_id` / `simulation.n_trials` on the `EvaluationResult`.
 
 **Termination precedence:** `stop_on_criteria_pass` → `stop_token` → `max_turns` → `max_total_tokens`.
+
+> **`simulation.max_total_tokens` vs. `run_limits.max_total_tokens`.** This one covers the **whole
+> dialog** (simulator + agent) and ends the conversation gracefully with `stop_reason='budget'`, so
+> the task is still scored. [`run_limits.max_total_tokens`](#run-limits) covers the **subject agent
+> only** and **aborts** the task with `FinalStatus.TOKEN_BUDGET_EXCEEDED`. They compose — set both
+> for a hard ceiling on a simulated task.
 
 **Grading simulated dialogs.** When a task uses `simulation:`, set `include_dialog: true` on any `llm_judge` / `agent_judge` criterion. Without it, the judge sees only the agent's outputs and may flag a fabricated-but-conceded premise as a hallucination by the agent. The dialog block is rendered with a rubric guard telling the judge to treat any claim made only by the simulated user as possibly invented, and not to penalize the agent for going along with it unless the grading prompt contradicts it.
 
