@@ -5,12 +5,17 @@ import { describe, expect, test } from "vitest";
 import { PRICING } from "../pricing";
 
 // Drift guard: lib/pricing.ts is a hand-copied mirror of the authoritative
-// Python table in src/coder_eval/pricing.py. If the backend reprices a
-// model (or adds one) and this mirror isn't updated, the frontend's "estimated"
-// USD figures silently disagree with the backend's authoritative Cost on the
-// same tokens. This test parses the Python table and asserts both tables have
-// the same model ids and the same four per-MTok rates — turning silent drift
-// into a failing build.
+// Python table in src/coder_eval/pricing.py. It exists so the frontend's
+// "estimated" USD figures agree with the backend's authoritative Cost on the
+// same tokens.
+//
+// Semantics are SUBSET, not exact-match: every model priced in lib/pricing.ts
+// must exist in pricing.py with identical rates (a frontend rate that disagrees
+// with the backend, or prices a model the backend doesn't, fails the build).
+// The frontend is NOT required to mirror every backend model — it only needs to
+// price the ones it displays, and the backend legitimately prices models the
+// evalboard never renders. (Exact-match was too strict: it forced unrelated
+// backend model additions into this file to keep the build green.)
 
 const here = dirname(fileURLToPath(import.meta.url));
 const PY_PATH = resolve(here, "../../../src/coder_eval/pricing.py");
@@ -44,20 +49,24 @@ describe("pricing.ts ↔ pricing.py parity", () => {
         expect(Object.keys(py).length).toBeGreaterThan(10);
     });
 
-    test("both tables list the same model ids", () => {
-        expect(Object.keys(PRICING).sort()).toEqual(Object.keys(py).sort());
+    test("every model in lib/pricing.ts exists in pricing.py", () => {
+        const orphans = Object.keys(PRICING).filter((m) => !(m in py));
+        expect(
+            orphans,
+            `priced in lib/pricing.ts but absent from pricing.py: ${orphans.join(", ")}`,
+        ).toEqual([]);
     });
 
-    test("every model has identical input/output/cacheWrite/cacheRead rates", () => {
-        for (const [model, [input, output, cw, cr]] of Object.entries(py)) {
-            const ts = PRICING[model];
-            expect(ts, `missing in lib/pricing.ts: ${model}`).toBeDefined();
+    test("shared models have identical input/output/cacheWrite/cacheRead rates", () => {
+        for (const [model, ts] of Object.entries(PRICING)) {
+            const rates = py[model];
+            expect(rates, `not priced in pricing.py: ${model}`).toBeDefined();
             expect([
                 ts.inputPerMTok,
                 ts.outputPerMTok,
                 ts.cacheWritePerMTok,
                 ts.cacheReadPerMTok,
-            ]).toEqual([input, output, cw, cr]);
+            ]).toEqual(rates);
         }
     });
 });
