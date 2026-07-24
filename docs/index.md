@@ -81,7 +81,7 @@ New here? Start with **[Tutorial 01 — Your First Evaluation](tutorials/01-firs
 | [Codex Agent Guide](agents/CODEX.md) | Running the OpenAI Codex agent |
 | [Antigravity (Gemini) Agent Guide](agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
 | [A/B Experiments](AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
-| [Bring Your Own Dataset](BYOD.md) | Fan a single task out over a dataset |
+| [Bring Your Own Dataset](DATASETS.md) | Fan a single task out over a dataset |
 | [Docker Isolation](DOCKER_ISOLATION.md) | The container sandbox driver |
 | [CI Gate: GitHub Action & JUnit](CI_GATE.md) | Run Coder Eval as a CI gate — the packaged Action, JUnit output, score floor |
 | [Extending Coder Eval](EXTENDING.md) | Author a custom agent, criterion, or model pricing |
@@ -93,7 +93,7 @@ New here? Start with **[Tutorial 01 — Your First Evaluation](tutorials/01-firs
 - **vs. SWE-bench and fixed benchmarks** — SWE-bench is a fixed dataset; Coder Eval
   is a *framework* for authoring your own tasks in YAML, so you evaluate the skills
   and workflows you care about (and can still wrap a fixed dataset via
-  [Bring Your Own Dataset](BYOD.md)).
+  [Bring Your Own Dataset](DATASETS.md)).
 - **vs. other agent-eval frameworks (e.g. Harbor) and LLM-eval tools (OpenAI Evals)** —
   OpenAI Evals grades model text; Harbor targets large-scale agent eval and RL
   optimization. Coder Eval is purpose-built for coding-agent/skill suites — weighted

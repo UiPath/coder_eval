@@ -51,6 +51,63 @@ sandbox:
     image: my-custom:tag    # override the default image
 ```
 
+## Using a pre-built custom image
+
+When your tasks need extra tools or dependencies, extend the framework image once and point tasks at
+the result — no per-task build. The custom image must extend `coder-eval-agent:<version>` so it
+inherits the coder-eval runtime, the entrypoint script, and the `org.coder-eval.version` label the
+host's preflight check reads. (For a task whose Dockerfile can't be rebased onto Debian, use
+[the runtime kit](#tasks-that-bring-their-own-base-image-the-runtime-kit-coder-eval-runtime)
+instead. To have coder-eval build the image per task rather than pre-building it, see
+[Building the image from a task Dockerfile](#building-the-image-from-a-task-dockerfile).)
+
+```dockerfile
+FROM coder-eval-agent:<version>          # match the version your host runs
+RUN apt-get update && apt-get install -y --no-install-recommends custom-tool \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+```bash
+docker build -t my-team/image:latest .
+```
+
+Select it either in the task YAML:
+
+```yaml
+sandbox:
+  driver: docker
+  docker:
+    image: my-team/image:latest
+```
+
+…or from the CLI, which overrides whatever the YAML says:
+
+```bash
+coder-eval run task.yaml -D sandbox.docker.image=my-team/image:latest
+```
+
+The default when you set nothing is `coder-eval-agent:<installed package version>`.
+
+A worked example ships in-tree: `tasks/byod_smoke_test.yaml` runs against
+`templates/byod_smoke_test/Dockerfile`, which extends the framework image and drops a marker file
+that the task's success criterion then asserts — proving the custom image was actually used. (The
+`byod_*` names here mean "Bring Your Own **Docker**"; they are unrelated to the
+[Bring Your Own Dataset](DATASETS.md) guide, which is about fanning one task out over data rows.)
+
+```bash
+make docker-image                                                   # base image first
+docker build -t byod-custom-image:0.1.0 templates/byod_smoke_test/  # then the derived one
+coder-eval run tasks/byod_smoke_test.yaml
+```
+
+### Troubleshooting custom images
+
+| Symptom | Cause and fix |
+| --- | --- |
+| `docker: Error response from daemon: pull access denied` | The image isn't built locally and isn't pullable. Check `docker images`, then rebuild it. Docker treats an unknown local tag as a remote reference, which is why the error mentions a pull. |
+| `Image <your-image> coder_eval <a> != host <b>` | The custom image carries an `org.coder-eval.version` label inherited from a stale framework base. Rebuild the base with `make docker-image`, then rebuild your derived image with `docker build --no-cache`. |
+| `Image <your-image> has no org.coder-eval.version label` | The image doesn't descend from `coder-eval-agent` (or predates the label). Rebase it on the framework image, or use the runtime kit. |
+
 ## Building the image from a task Dockerfile
 
 Instead of pointing at a pre-built `image`, a task can ship its own `Dockerfile`
