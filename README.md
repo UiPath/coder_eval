@@ -175,18 +175,27 @@ alone.
 
 ## Documentation
 
+<!-- docs-index:start -->
 | Guide | What's in it |
 | --- | --- |
 | [Tutorials](docs/tutorials/README.md) | Step-by-step walkthroughs — start here |
 | [User Guide](docs/USER_GUIDE.md) | Full CLI, configuration, output, and environment-variable reference |
 | [Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md) | The task-file schema — all criterion types, scoring, templates |
-| [Agent Guides](docs/agents/) | Running each agent — [Claude Code](docs/agents/CLAUDE_CODE.md), [Codex](docs/agents/CODEX.md), [Antigravity/Gemini](docs/agents/ANTIGRAVITY.md) |
+| [Claude Code](docs/agents/CLAUDE_CODE.md) | Configuring and running the default Claude Code agent |
+| [Codex](docs/agents/CODEX.md) | Running the OpenAI Codex agent |
+| [Antigravity (Gemini)](docs/agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
 | [A/B Experiments](docs/AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](docs/DATASETS.md) | Fan a single task out over a dataset |
-| [Docker Isolation](docs/DOCKER_ISOLATION.md) | The container sandbox driver |
-| [CI Gate: GitHub Action & JUnit](docs/CI_GATE.md) | Run Coder Eval as a CI gate — the packaged Action, JUnit output, score floor |
+| [Dialog Mode](docs/DIALOG_MODE.md) | Evaluate agents in multi-turn conversation via a simulated user |
+| [Docker Isolation](docs/DOCKER_ISOLATION.md) | The container sandbox driver, with custom images |
+| [CI Gate & GitHub Action](docs/CI_GATE.md) | Run Coder Eval as a CI gate — the packaged Action, JUnit output, score floor |
 | [Extending Coder Eval](docs/EXTENDING.md) | Author a custom agent, criterion, or model pricing via the plugin SPI |
-| [Report Schema](docs/REPORT_SCHEMA.md) | Field-level reference for `run.json` / `variant.json` / `task.json` |
+| [Report Schema](docs/REPORT_SCHEMA.md) | Field-level reference for run.json / variant.json / task.json |
+| [How It Compares](docs/comparison.md) | vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts |
+<!-- docs-index:end -->
+
+| Repo doc | What's in it |
+| --- | --- |
 | [CLAUDE.md](CLAUDE.md) | Architecture, key patterns, and extension points |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, quality bar, and how to contribute |
 
