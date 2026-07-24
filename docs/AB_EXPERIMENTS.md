@@ -122,7 +122,7 @@ From `ExperimentVariant` (`coder_eval/models/experiment.py`):
 | `variant_id`          | str                | Unique arm identifier (required)                                                       |
 | `description`         | str                | Human-readable label shown in reports                                                  |
 | `agent`               | dict               | Partial `AgentConfig` overrides (model, plugins, tools, system_prompt, sdk_options, …) |
-| `simulation`          | dict               | Partial `SimulationConfig` overrides (persona/model/temperature per arm)               |
+| `simulation`          | dict               | Partial `SimulationConfig` overrides (persona, goal, `n_trials`, … per arm) — see [Dialog Mode](DIALOG_MODE.md) |
 | `repeats`             | int                | Replicate count for this arm (overrides experiment default)                            |
 | `template_sources`    | list               | Extra templates appended after the task base (e.g. a docs overlay)                     |
 | `prompt_mutations`    | list               | Ordered mutations applied to `initial_prompt`                                          |
