@@ -182,7 +182,7 @@ alone.
 | [Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md) | The task-file schema — all criterion types, scoring, templates |
 | [Agent Guides](docs/agents/) | Running each agent — [Claude Code](docs/agents/CLAUDE_CODE.md), [Codex](docs/agents/CODEX.md), [Antigravity/Gemini](docs/agents/ANTIGRAVITY.md) |
 | [A/B Experiments](docs/AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
-| [Bring Your Own Dataset](docs/BYOD.md) | Fan a single task out over a dataset |
+| [Bring Your Own Dataset](docs/DATASETS.md) | Fan a single task out over a dataset |
 | [Docker Isolation](docs/DOCKER_ISOLATION.md) | The container sandbox driver |
 | [CI Gate: GitHub Action & JUnit](docs/CI_GATE.md) | Run Coder Eval as a CI gate — the packaged Action, JUnit output, score floor |
 | [Extending Coder Eval](docs/EXTENDING.md) | Author a custom agent, criterion, or model pricing via the plugin SPI |
@@ -194,7 +194,7 @@ alone.
 
 - **vs. fixed benchmarks (SWE-bench, SkillsBench)** — they score a canonical dataset;
   Coder Eval scores *your* tasks with continuous 0.0–1.0 weighted criteria (and can
-  still wrap a fixed dataset via [Bring Your Own Dataset](docs/BYOD.md)).
+  still wrap a fixed dataset via [Bring Your Own Dataset](docs/DATASETS.md)).
 - **vs. large-scale / RL harnesses (Harbor)** — Harbor targets scale and RL rollouts;
   Coder Eval targets weighted, skill-aware suites gated in CI.
 - **vs. model-output eval tools (OpenAI Evals)** — they grade model text; Coder Eval

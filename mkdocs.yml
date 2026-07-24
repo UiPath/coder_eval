@@ -88,7 +88,7 @@ nav:
       - Antigravity (Gemini): agents/ANTIGRAVITY.md
   - Advanced:
       - A/B Experiments: AB_EXPERIMENTS.md
-      - Bring Your Own Dataset: BYOD.md
+      - Bring Your Own Dataset: DATASETS.md
       - Docker Isolation: DOCKER_ISOLATION.md
       - CI Gate & GitHub Action: CI_GATE.md
       - Extending Coder Eval: EXTENDING.md
