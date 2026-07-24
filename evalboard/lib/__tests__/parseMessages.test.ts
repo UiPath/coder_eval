@@ -769,4 +769,65 @@ describe("parseMessages — reconciliation entry", () => {
         expect(recon.parentToolUseId).toBeNull();
         expect(recon.toolUses).toEqual([]);
     });
+
+    test("prices the reconciliation row from the turn model so the Cost column sums to the turn total", () => {
+        // Mirrors the OpenRouter/LiteLLM sparse-stream case that motivated this:
+        // the per-message stream carries only output, and the bulk of the input +
+        // cache-read tokens land in the single reconciliation row. Before the fix
+        // that row read "—" for cost, so the Cost column summed to far less than
+        // the real total.
+        const turns: TurnEntry[] = [
+            {
+                model_used: "deepseek/deepseek-v4-pro",
+                messages: [
+                    {
+                        role: "assistant",
+                        model: "deepseek/deepseek-v4-pro",
+                        started_at: "2026-01-01T00:00:00.000Z",
+                        completed_at: "2026-01-01T00:00:01.000Z",
+                        generation_duration_ms: 1000,
+                        content_blocks: [{ block_type: "text", text: "hi" }],
+                        input_tokens: 0,
+                        output_tokens: 1000,
+                        cache_read_tokens: 0,
+                    },
+                    {
+                        role: "reconciliation",
+                        input_tokens: 100000,
+                        output_tokens: 0,
+                        cache_creation_tokens: 0,
+                        cache_read_tokens: 300000,
+                        note: "billed but not streamed",
+                    },
+                ],
+            },
+        ];
+        const events = parseMessages(turns);
+        const [asst, recon] = events;
+        // deepseek-v4-pro: in 0.435 / out 0.87 / cacheRead 0.003625 per MTok.
+        // reconciliation = 100000*0.435 + 300000*0.003625 = 44587.5 tok-$ / 1e6.
+        expect(recon.model).toBe("deepseek/deepseek-v4-pro");
+        expect(recon.costUsd).toBeCloseTo(0.0445875, 9);
+        // The whole point: assistant + reconciliation sum to the turn total
+        // (1000*0.87/1e6 + 0.0445875), instead of the reconciliation row reading "—".
+        expect((asst.costUsd ?? 0) + (recon.costUsd ?? 0)).toBeCloseTo(0.0454575, 9);
+    });
+
+    test("reconciliation cost stays null when the turn model is absent (legacy runs)", () => {
+        const turns: TurnEntry[] = [
+            {
+                messages: [
+                    {
+                        role: "reconciliation",
+                        input_tokens: 512,
+                        cache_creation_tokens: 1000,
+                        note: "no model",
+                    },
+                ],
+            },
+        ];
+        const recon = parseMessages(turns)[0];
+        expect(recon.model).toBeNull();
+        expect(recon.costUsd).toBeNull();
+    });
 });
