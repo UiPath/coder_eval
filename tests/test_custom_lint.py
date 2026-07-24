@@ -707,3 +707,138 @@ class TestCE027DocEnvVarParity:
         names = src_env_literals(tmp_path)
         assert "CODER_EVAL_REAL" in names  # a genuine os.getenv read is backed
         assert "CODER_EVAL_BOGUS" not in names  # a bare constant is not
+
+
+@pytest.mark.lint
+class TestCE029DocYamlExamples:
+    """CE029 — self-contained YAML examples in the docs must validate.
+
+    A published snippet that raises when copy-pasted reads as a broken feature.
+    The motivating bug: the `prompt_mutations` recipe used `text:` where the
+    field is `content:`, and every mutation model sets `extra="forbid"`. Scans
+    real Markdown, so it lives here rather than in the AST-only runner.
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+
+    @staticmethod
+    def _check(text: str) -> str | None:
+        from tests.lint.doc_examples import extract_yaml_blocks, validate_block
+
+        blocks = extract_yaml_blocks(Path("doc.md"), text)
+        assert len(blocks) == 1, f"expected exactly one yaml block, got {len(blocks)}"
+        return validate_block(blocks[0])
+
+    _VALID_TASK = """```yaml
+task_id: "demo"
+description: "A demo task"
+initial_prompt: "Write hello.py"
+success_criteria:
+  - type: "file_exists"
+    path: "hello.py"
+    description: "hello.py exists"
+```
+"""
+
+    def test_repo_doc_examples_validate(self):
+        from tests.lint.doc_examples import default_doc_paths, find_invalid_doc_examples
+
+        findings = find_invalid_doc_examples(default_doc_paths(self.REPO_ROOT))
+        assert not findings, (
+            "\nSelf-contained YAML example(s) in the docs that do not validate against their "
+            "model — a reader who copy-pastes this hits a ValidationError. Fix the example, or "
+            f"mark the block with `{'<!-- lint-skip: doc-yaml -->'}` if it is intentionally partial:\n\n"
+            + "\n".join(f"  {path}:\n    " + "\n    ".join(errs) for path, errs in sorted(findings.items()))
+        )
+
+    def test_valid_task_block_passes(self):
+        assert self._check(self._VALID_TASK) is None
+
+    def test_catches_the_prompt_mutations_regression(self):
+        # The exact historical bug this rule exists for: `text:` where the
+        # PromptSuffix field is `content:` (every mutation model forbids extras).
+        finding = self._check(
+            """```yaml
+experiment_id: prompt-phrasing
+description: "Terse vs. detailed"
+variants:
+  - variant_id: terse
+  - variant_id: detailed
+    prompt_mutations:
+      - type: suffix
+        text: "Think step by step."
+```
+"""
+        )
+        assert finding is not None
+        assert "content" in finding
+
+    def test_schematic_placeholder_blocks_are_skipped(self):
+        # The task guide's overview block deliberately writes `agent: { ... }`.
+        assert (
+            self._check(
+                """```yaml
+task_id: "my_task"
+description: "What this task tests"
+initial_prompt: "Instructions..."
+agent: { ... }
+success_criteria: [ ... ]
+```
+"""
+            )
+            is None
+        )
+
+    def test_fragment_blocks_are_not_validated(self):
+        # A bare criteria list is illustrative, not a document. Validating it
+        # would flag most blocks in the docs and get the rule deleted.
+        assert (
+            self._check(
+                """```yaml
+success_criteria:
+  - type: "file_exists"
+    path: "app.py"
+```
+"""
+            )
+            is None
+        )
+
+    def test_lint_skip_marker_is_honored(self):
+        from tests.lint.doc_examples import SKIP_MARKER
+
+        broken = self._VALID_TASK.replace('  - type: "file_exists"', "  - type: no_such_criterion")
+        assert self._check(broken) is not None, "control: the block must fail without the marker"
+        assert self._check(f"{SKIP_MARKER}\n\n{broken}") is None
+
+    def test_non_yaml_fences_are_ignored(self):
+        from tests.lint.doc_examples import extract_yaml_blocks
+
+        text = '```json\n{"task_id": 1}\n```\n\n```bash\ncoder-eval run\n```\n'
+        assert extract_yaml_blocks(Path("doc.md"), text) == []
+
+    def test_info_string_attributes_are_still_captured(self):
+        # mkdocs-material allows ```yaml title="x"; such a block must not be
+        # silently skipped, or a broken example there escapes the rule.
+        from tests.lint.doc_examples import extract_yaml_blocks
+
+        text = '```yaml title="task.yaml"\ntask_id: 1\n```\n'
+        blocks = extract_yaml_blocks(Path("doc.md"), text)
+        assert len(blocks) == 1
+
+    def test_valid_experiment_block_passes(self):
+        assert (
+            self._check(
+                """```yaml
+experiment_id: demo-experiment
+description: "A demo experiment"
+variants:
+  - variant_id: baseline
+  - variant_id: treatment
+    agent:
+      model: claude-sonnet-4-6
+```
+"""
+            )
+            is None
+        )
