@@ -1042,9 +1042,12 @@ class TestEarlyStopWatcher:
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
 
-    def test_stacked_wrong_skill_fail_stop(self) -> None:
-        # A positive (armed pass) + a distractor (armed fail). Engaging the
-        # distractor's skill fires the fail-stop while the positive stays undecided.
+    def test_stacked_wrong_skill_defers_fail_stop_until_positive_decides(self) -> None:
+        # The recall guard: a positive (armed pass) + a distractor (armed fail).
+        # The distractor misfiring FIRST must NOT stop — cutting here would freeze
+        # the would-be TP as an FN and deflate suite recall. The misfire is latched
+        # by the criterion's monotone semantics, so once the expected skill engages
+        # (no pass-armed criterion left undecided) the deferred fail-stop fires.
         watcher = _watcher(
             [
                 _skill_crit("date-teller", "date-teller", stop_when="pass"),
@@ -1052,8 +1055,48 @@ class TestEarlyStopWatcher:
             ]
         )
         _feed(watcher, _skill_events("weather-teller"))
+        assert watcher.should_stop() is False  # positive undecided -> fail deferred
+        assert watcher.info is None
+        _feed(watcher, [_tool_end(_skill_cmd("date-teller", tool_id="d"))])
+        assert watcher.should_stop() is True
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+        assert watcher.info.deciding_criterion_description == "weather-teller activation"
+
+    def test_fail_stop_precedes_pass_stop_same_round(self) -> None:
+        # Precedence pin (kills the block-swap mutation): ONE tool call engages
+        # both the expected skill and a distractor via file reads, so the positive
+        # live-passes and the distractor live-fails in the SAME evaluation round
+        # with no pass-armed criterion left undecided. Fail-stop is evaluated
+        # before pass-stop, so the round must record CRITERION_FAILED.
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_when="auto"),  # positive -> pass
+                _skill_crit("weather-teller", "date-teller", stop_when="auto"),  # distractor -> fail
+            ]
+        )
+        both = _cmd("Bash", {"command": "cat skills/date-teller/SKILL.md skills/weather-teller/SKILL.md"})
+        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(both)])
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+        assert watcher.info.deciding_criterion_description == "weather-teller activation"
+
+    def test_auto_positive_row_misfire_alone_never_stops(self) -> None:
+        # A positive row armed `auto` whose agent only ever touches wrong skills:
+        # the fail-stop stays deferred for the whole run (the positive never
+        # decides), so the run continues to the cap and full-trajectory scoring —
+        # never a truncated FN.
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_when="auto"),  # positive -> pass
+                _skill_crit("weather-teller", "date-teller", stop_when="auto"),  # distractor -> fail
+            ]
+        )
+        _feed(watcher, _skill_events("weather-teller"))
+        _feed(watcher, [_turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert watcher.should_stop() is False
+        assert watcher.info is None
 
     def test_auto_positive_pass_stops(self) -> None:
         # `auto` on a positive resolves to pass-armed: engaging the expected skill

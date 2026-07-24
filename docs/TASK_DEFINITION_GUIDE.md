@@ -339,7 +339,7 @@ success_criteria:
   - type: skill_triggered
     skill_name: date-teller
     expected_skill: date-teller
-    stop_when: decided        # arm on pass OR definitive fail
+    stop_when: auto           # arm whichever polarity this instance can decide
   - type: file_exists         # not armed → advisory on an early-stopped run
     path: report.md
 ```
@@ -360,7 +360,13 @@ Semantics:
   needs every pass-armed criterion to pass — fail-armed distractors are not
   required to, and a row with **zero** pass-armed criteria (e.g. a negative row)
   never pass-stops; a **fail-stop** fires on the first fail-armed criterion that
-  live-fails. Only criteria that can decide from a partial trajectory (currently
+  live-fails, but is **deferred while any pass-armed criterion is still
+  undecided** — a distractor misfire on an early tool call must not cut a
+  positive row before its expected signal can appear (that would freeze a
+  would-be true positive as a false negative and deflate suite recall). The
+  misfire is latched, so the deferred fail-stop fires the moment every
+  pass-armed criterion decides; if none ever decides, the run simply continues
+  to the cap. Only criteria that can decide from a partial trajectory (currently
   `skill_triggered`, `command_executed`) may be armed — arming any other criterion
   is a hard error at resolution (plan *and* run), never a silent no-op.
   Decidability can also depend on a criterion's own fields: `command_executed` can
@@ -374,9 +380,11 @@ Semantics:
   non-armed criteria become **advisory** and are clearly marked (report badge +
   per-criterion note + `stopped_early` row). A run that completes naturally is
   gated on the **full** set, as always. This is what lets one file serve both a
-  `smoke` flavor (`stop_early: true`) and an `e2e` flavor (`stop_early: false`)
-  with identical verdicts — see [AB_EXPERIMENTS.md](AB_EXPERIMENTS.md). Note: on a
-  **pass-stop** the run is cut once the positive is decided, so a distractor that
+  `smoke` flavor (`stop_early: true`) and an `e2e` flavor (`stop_early: false`) —
+  see [AB_EXPERIMENTS.md](AB_EXPERIMENTS.md). Verdict parity between the flavors
+  is one-sided: a **fail-stop** is verdict-preserving (the deferral above
+  guarantees every pass-armed signal was allowed to resolve first), but a
+  **pass-stop** cuts the run once the positives are decided, so a distractor that
   would misfire on a *later* tool call is not observed (the frozen row scores as a
   clean pass) — the smoke flavor trades some precision completeness for budget, so
   authoritative precision/recall belongs on the `stop_early: false` run.
