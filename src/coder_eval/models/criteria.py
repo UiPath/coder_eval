@@ -657,6 +657,10 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
     Continuous scoring. LLM error or a "did not call submit_verdict" diagnostic
     -> 0.0 with error. Score is clamped to [0.0, 1.0] by the ``JudgeVerdict``
     validator. Non-numeric / non-finite score -> 0.0 with error.
+
+    Set ``samples`` > 1 to invoke the judge several times over the same rendered
+    prompt and score the median verdict (see the field description for the
+    aggregation semantics).
     """
 
     # Strict YAML-key validation: catch typos at load time rather than silently
@@ -758,6 +762,23 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
         description=(
             "Output token cap. Defaults to 2000 — large enough for the verbose verdict "
             "(score + rationale + a handful of findings) without runaway."
+        ),
+    )
+    samples: int = Field(
+        default=1,
+        ge=1,
+        le=9,
+        description=(
+            "Number of independent judge invocations. The default (1) keeps the single-call "
+            "behavior. With N > 1, the judge grades the same rendered prompt N times and the "
+            "criterion scores the MEDIAN of the sampled scores; rationale/findings/transcript "
+            "come from the sample whose score is closest to the median (earliest on ties), so "
+            "the audit trail is a real verdict rather than a synthetic blend. Per-sample scores "
+            "are rendered in ``details`` and token usage is summed across samples. With N >= 2, "
+            "a sample that produces no verdict degrades to the median of the valid samples "
+            "(with a note in ``details``); when every sample fails, single-sample failure "
+            "semantics apply unchanged. Odd N recommended — an even-N median averages the two "
+            "middle scores."
         ),
     )
     max_file_chars: int = Field(

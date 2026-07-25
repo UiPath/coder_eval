@@ -1080,3 +1080,260 @@ def test_usage_extractors_degrade_non_numeric_values_without_raising() -> None:
 
     # A nested object is also non-coercible → degrades to 0 (here all-zero → None).
     assert token_usage_from_anthropic_dict({"usage": {"input_tokens": {}, "output_tokens": "x"}}) is None
+
+
+# --- multi-sample judging (samples > 1) ---
+
+
+def _sample_resp(
+    score: float, rationale: str = "ok", findings: list[str] | None = None, usage: dict | None = None
+) -> dict:
+    """An Anthropic-shaped submit_verdict response for one judge sample."""
+    verdict_input: dict[str, Any] = {"score": score, "rationale": rationale}
+    if findings is not None:
+        verdict_input["findings"] = findings
+    resp: dict[str, Any] = {"content": [{"type": "tool_use", "name": "submit_verdict", "input": verdict_input}]}
+    if usage is not None:
+        resp["usage"] = usage
+    return resp
+
+
+def _no_verdict_resp(usage: dict | None = None) -> dict:
+    """A text-only response — the model returned prose instead of the tool call."""
+    resp: dict[str, Any] = {"content": [{"type": "text", "text": "no verdict here"}]}
+    if usage is not None:
+        resp["usage"] = usage
+    return resp
+
+
+def test_judge_samples_defaults_to_single_invocation(sandbox: Sandbox) -> None:
+    """Default samples=1: exactly one judge call, no aggregation artifacts in details."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade")
+    assert criterion.samples == 1
+    resp = _sample_resp(0.85, rationale="mostly correct")
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", return_value=resp) as m_anthropic:
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    assert m_anthropic.call_count == 1
+    assert result.score == 0.85
+    assert result.error is None
+    assert "sample_scores" not in (result.details or "")
+
+
+def test_judge_samples_bounds_validation() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        LLMJudgeCriterion(description="x", prompt="grade", samples=0)
+    with pytest.raises(ValidationError):
+        LLMJudgeCriterion(description="x", prompt="grade", samples=10)
+
+
+def test_judge_multi_sample_scores_median_odd(sandbox: Sandbox) -> None:
+    """samples=3: three invocations, median score wins, per-sample scores in details."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=3)
+    responses = [_sample_resp(0.2, "low"), _sample_resp(0.9, "high"), _sample_resp(0.6, "mid")]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses) as m_anthropic:
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    assert m_anthropic.call_count == 3
+    assert result.score == 0.6
+    assert result.error is None
+    details = result.details or ""
+    assert "rationale: mid" in details  # representative = the median sample
+    assert "sample_scores: [0.200, 0.900, 0.600]" in details
+    # All samples succeeded — the degraded note must not appear.
+    assert "judge samples produced no verdict" not in details
+
+
+def test_judge_multi_sample_reuses_identical_prompt(sandbox: Sandbox) -> None:
+    """Every sample grades the same rendered prompt with the same invocation params."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=3)
+    responses = [_sample_resp(0.5), _sample_resp(0.5), _sample_resp(0.5)]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses) as m_anthropic:
+        SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    first_kwargs = m_anthropic.call_args_list[0].kwargs
+    for call in m_anthropic.call_args_list[1:]:
+        assert call.kwargs == first_kwargs
+
+
+def test_judge_multi_sample_even_count_averages_middle(sandbox: Sandbox) -> None:
+    """Even N: median averages the two middle scores; representative is the closest sample."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=4)
+    responses = [_sample_resp(0.2, "r1"), _sample_resp(0.4, "r2"), _sample_resp(0.6, "r3"), _sample_resp(0.8, "r4")]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    assert result.score == pytest.approx(0.5)
+    # 0.4 and 0.6 are equidistant from the 0.5 median — the earlier sample wins.
+    assert "rationale: r2" in (result.details or "")
+
+
+def test_judge_multi_sample_tie_break_is_first_sample(sandbox: Sandbox) -> None:
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=2)
+    responses = [_sample_resp(0.4, "first"), _sample_resp(0.6, "second")]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    assert result.score == pytest.approx(0.5)
+    assert "rationale: first" in (result.details or "")
+
+
+def test_judge_multi_sample_partial_no_verdict_degrades(sandbox: Sandbox) -> None:
+    """One sample returning no verdict must not zero the criterion — median of the valid ones."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=3)
+    responses = [_sample_resp(0.8, "a"), _no_verdict_resp(), _sample_resp(0.6, "b")]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    assert result.score == pytest.approx(0.7)
+    assert result.error is None
+    details = result.details or ""
+    assert "1/3 judge samples produced no verdict" in details
+    assert "median over 2 valid samples" in details
+    assert "sample_scores: [0.800, 0.600]" in details
+
+
+def test_judge_multi_sample_two_samples_one_failure_degrades(sandbox: Sandbox) -> None:
+    """N=2 (the minimal multi-sample count) with one failure: the single valid score stands."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=2)
+    responses = [_no_verdict_resp(), _sample_resp(0.8, "only valid")]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    assert result.score == 0.8
+    assert result.error is None
+    details = result.details or ""
+    assert "rationale: only valid" in details
+    assert "1/2 judge samples produced no verdict" in details
+    assert "median over 1 valid samples" in details
+
+
+def test_judge_multi_sample_transport_exception_degrades(sandbox: Sandbox) -> None:
+    """One sample's transport failure must not void the others."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=3)
+    responses = [_sample_resp(0.8), RuntimeError("gateway down"), _sample_resp(0.6)]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    assert result.score == pytest.approx(0.7)
+    assert result.error is None
+    assert "1/3 judge samples produced no verdict" in (result.details or "")
+
+
+def test_judge_multi_sample_infra_error_degrades_when_verdicts_exist(sandbox: Sandbox) -> None:
+    """An infra failure on one sample degrades (never scores 0.0) when other samples produced verdicts."""
+    from coder_eval.errors import JudgeInfrastructureError
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=3)
+    responses = [JudgeInfrastructureError("api error"), _sample_resp(0.5), _sample_resp(0.9)]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    assert result.score == pytest.approx(0.7)
+    assert result.error is None
+
+
+def test_judge_multi_sample_all_no_verdict_keeps_failure_path(sandbox: Sandbox) -> None:
+    """Every sample failing to call submit_verdict keeps the single-sample failure semantics."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=3)
+    responses = [_no_verdict_resp(), _no_verdict_resp(), _no_verdict_resp()]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    assert result.score == 0.0
+    assert result.error == "Judge did not call submit_verdict"
+
+
+def test_judge_multi_sample_all_fail_reports_first_sample_diagnostic(sandbox: Sandbox) -> None:
+    """When every sample fails to produce a verdict, the FIRST sample's diagnostic is reported."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=2)
+    bad_args = {"content": [{"type": "tool_use", "name": "submit_verdict", "input": {"score": "not numeric"}}]}
+    responses = [bad_args, _no_verdict_resp()]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    assert result.score == 0.0
+    assert result.error is not None
+    assert "score field is not a number" in result.error  # sample #1's diagnostic, not sample #2's
+
+
+def test_judge_multi_sample_all_infra_errors_escalate(sandbox: Sandbox) -> None:
+    """All samples failing on infrastructure escalates — judge infra failure is not an agent failure."""
+    from coder_eval.errors import JudgeInfrastructureError
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=2)
+    responses = [JudgeInfrastructureError("api error"), JudgeInfrastructureError("api error")]
+    with (
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses),
+        pytest.raises(JudgeInfrastructureError),
+    ):
+        SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+
+
+def test_judge_multi_sample_mixed_all_fail_prefers_infra_escalation(sandbox: Sandbox) -> None:
+    """No verdict anywhere + an infra failure in the mix: escalate rather than score 0.0."""
+    from coder_eval.errors import JudgeInfrastructureError
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=2)
+    responses = [_no_verdict_resp(), JudgeInfrastructureError("api error")]
+    with (
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses),
+        pytest.raises(JudgeInfrastructureError),
+    ):
+        SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+
+
+def test_judge_multi_sample_all_unexpected_errors_map_to_score_zero(sandbox: Sandbox) -> None:
+    """Non-infra exceptions on every sample reach @handle_criterion_errors, as with samples=1."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=2)
+    responses = [RuntimeError("gateway down"), RuntimeError("gateway down")]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    assert result.score == 0.0
+    assert result.error is not None
+    assert "gateway down" in result.error
+
+
+def test_judge_multi_sample_token_usage_summed(sandbox: Sandbox) -> None:
+    """Usage sums across every sample that returned a response — including no-verdict samples."""
+    from coder_eval.models import JudgeCriterionResult
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=3)
+    usage = {"input_tokens": 100, "output_tokens": 10}
+    responses = [_sample_resp(0.8, usage=usage), _no_verdict_resp(usage=usage), _sample_resp(0.6, usage=usage)]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    assert isinstance(result, JudgeCriterionResult)
+    assert result.token_usage is not None
+    assert result.token_usage.uncached_input_tokens == 300
+    assert result.token_usage.output_tokens == 30
+
+
+def test_judge_multi_sample_representative_supplies_findings_and_transcript(sandbox: Sandbox) -> None:
+    """Findings and the persisted transcript come from the representative sample, not a blend."""
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=3)
+    responses = [
+        _sample_resp(0.2, "low", findings=["low finding"]),
+        _sample_resp(0.6, "mid", findings=["mid finding"]),
+        _sample_resp(0.9, "high", findings=["high finding"]),
+    ]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    assert result.score == 0.6
+    assert getattr(result, "findings", []) == ["mid finding"]
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    assert '"score":0.6' in transcript.raw_verdict
+
+
+def test_judge_multi_sample_scrubs_reference_everywhere(sandbox: Sandbox) -> None:
+    """Reference scrubbing covers details, findings, and the transcript with samples > 1."""
+    sentinel = "REF_LEAK_MULTI_SAMPLE_321"
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", include_reference=True, samples=3)
+    responses = [
+        _sample_resp(0.4, f"echoed {sentinel}"),
+        _sample_resp(0.5, f"echoed {sentinel}", findings=[f"finding with {sentinel}"]),
+        _sample_resp(0.6, f"echoed {sentinel}"),
+    ]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(
+            criterion, reference_code=sentinel
+        )
+    assert result.score == 0.5
+    assert sentinel not in (result.details or "")
+    for finding in getattr(result, "findings", []) or []:
+        assert sentinel not in finding
+    transcript = getattr(result, "transcript", None)
+    assert transcript is not None
+    assert sentinel not in transcript.raw_verdict
