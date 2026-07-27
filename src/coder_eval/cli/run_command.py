@@ -84,7 +84,9 @@ def _litellm_preflight_error(current_settings: Settings) -> str | None:
         return None
     url = f"{current_settings.litellm_base_url.rstrip('/')}/health/liveliness"
     try:
-        urllib.request.urlopen(url, timeout=5).close()
+        # B310: url is built from the operator-configured LITELLM_BASE_URL (not
+        # untrusted input); this only probes reachability of that proxy endpoint.
+        urllib.request.urlopen(url, timeout=5).close()  # nosec B310
     except urllib.error.HTTPError:
         return None  # server responded (up), just not 200 on this path
     except (urllib.error.URLError, OSError) as exc:
