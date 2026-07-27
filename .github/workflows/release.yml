@@ -1,9 +1,9 @@
 name: Release
 
-# Manually-triggered release: bump the version, tag, build, and publish to
-# public PyPI (wheel) and GHCR (agent image). Merges to main do NOT
-# auto-release -- run this workflow from the Actions tab when you want to cut a
-# release.
+# Manually-triggered release: bump the version, tag, build, publish to public
+# PyPI (wheel) and GHCR (agent image), and cut a GitHub Release for the tag.
+# Merges to main do NOT auto-release -- run this workflow from the Actions tab
+# when you want to cut a release.
 #
 # The bump level is CHOSEN at dispatch, not derived from commit messages:
 # `patch` (default), `minor`, or `major`. A dispatch always cuts a release.
@@ -17,7 +17,8 @@ name: Release
 # PRERELEASE mode (dispatched from a NON-main branch): instead of bumping and
 # pushing main, stamp a throwaway `<next-patch>rc<run#>` version, then build and
 # publish the wheel to public PyPI + a `:<version>` GHCR image. It does NOT move
-# `:latest`, tag, commit, or push to main. This lets a branch be dry-run on the
+# `:latest`, tag, commit, push to main, or create a GitHub Release (there is no
+# tag for a Release to point at). This lets a branch be dry-run on the
 # ADO nightly infra before merge (pinned via the pipeline's `coderEvalVersion`).
 # The `bump` input is ignored off main. On `main` the behavior is unchanged.
 
@@ -160,10 +161,12 @@ jobs:
           version = os.environ["PRE_VERSION"]
           for path, key in (("pyproject.toml", "version"), ("src/coder_eval/__init__.py", "__version__")):
               p = pathlib.Path(path)
-              new, n = re.subn(rf'(?m)^{key}\s*=\s*".+?"$', f'{key} = "{version}"', p.read_text(), count=1)
+              # encoding pinned, not left to the ambient locale: a non-UTF-8 default
+              # would raise UnicodeDecodeError mid-release on a non-ASCII source file.
+              new, n = re.subn(rf'(?m)^{key}\s*=\s*".+?"$', f'{key} = "{version}"', p.read_text(encoding="utf-8"), count=1)
               if n != 1:
                   raise SystemExit(f"version pattern did not match {path} (matched {n})")
-              p.write_text(new)
+              p.write_text(new, encoding="utf-8")
           print(f"Stamped prerelease version: {version}")
           PY
           uv lock
@@ -240,6 +243,106 @@ jobs:
           name: release-dist
           path: dist/
           if-no-files-found: error
+
+      # Publish the GitHub Release for the tag pushed above. semantic-release runs
+      # with --no-vcs-release because it also runs --no-push (the commit is amended
+      # and the tag re-pointed first), so it cannot create the release itself -- it
+      # happens here, once the tag is actually on the remote. A published Release is
+      # what GitHub Marketplace listings are cut from, so every release needs one.
+      # (`gh release create` cannot tick the "Publish this Action to the
+      # Marketplace" checkbox -- that stays a one-time manual step in the GitHub UI
+      # on the first Release; every subsequent release then lists automatically.)
+      #
+      # Deliberately placed AFTER "Build wheel + sdist" and "Upload dist for PyPI
+      # publish" rather than at the earliest legal point after the tag push: those
+      # two steps are the last ones that can still fail for an already-tagged
+      # version, and a Release announcing a version whose artifacts never built is
+      # worse than a missing Release. This narrows the window rather than closing
+      # it -- publish-pypi is a separate job, so the actual upload to PyPI still
+      # happens after this. Running here also keeps a slow/hung `gh` API call from
+      # eating the 15-minute job budget BEFORE the artifacts are safe, which would
+      # produce exactly the stranded-tag state the note below warns about.
+      #
+      # Notes are the CHANGELOG section semantic-release just generated for this
+      # version, sliced by .github/scripts/release_notes.py (a real module, so the
+      # regex is unit-tested -- see tests/test_release_notes.py); an empty result
+      # falls back to GitHub's generated notes.
+      #
+      # ACCEPTED RISK: those notes render commit subjects, i.e. squashed PR titles.
+      # The Release body is a first-party surface that GitHub also fans out in
+      # notification emails, so it carries text that was reviewed as *code*, not as
+      # markdown -- a PR title can land an arbitrary link in it. Bounded to
+      # content/link spoofing (GitHub strips raw HTML from release bodies) and
+      # gated by this repo's mandatory PR review. Revisit with `--draft` plus a
+      # human glance, or link-stripping in release_notes.py, if the repo ever takes
+      # drive-by contributions.
+      - name: Publish GitHub Release
+        id: gh_release
+        if: steps.mode.outputs.prerelease != 'true' && steps.release.outputs.version != ''
+        # Best-effort, mirroring the GHCR steps below. main, the version tag, the
+        # moving major tag, and the dist artifact are all in place by the time this
+        # runs, so a transient GitHub API failure here must not fail the job: the
+        # publish-pypi job is `needs: release`, so a failure would SKIP the PyPI
+        # publish of an already-tagged version and strand `@vN` on an action.yml pin
+        # whose version was never published. The next step turns the swallowed
+        # failure into a loud annotation instead of a collapsed step marker.
+        continue-on-error: true
+        env:
+          # The app token, not GITHUB_TOKEN: the workflow's `permissions:` are
+          # contents: read, and `gh release create` needs contents: write. Granting
+          # the job contents: write to use GITHUB_TOKEN here would ADD a second
+          # write credential rather than remove one -- `actions/checkout` above
+          # already persists this same app token in .git/config for every step in
+          # the job, so scoping it out of this one step's env buys no isolation.
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Passed via env (not interpolated into the script) per GitHub's
+          # injection guidance.
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Written under RUNNER_TEMP, never the repo root: hatchling's default sdist
+          # file selection sweeps in untracked files at the root (verified -- it ships
+          # even git-ignored paths), so a notes file left in the tree would leak into
+          # the sdist that the "Build wheel + sdist" step above produced and the
+          # publish-pypi job uploads.
+          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+          python3 .github/scripts/release_notes.py "$VERSION" "$NOTES_FILE"
+          # Empty notes file => no CHANGELOG section was found (the script already
+          # emitted the ::warning::); let GitHub generate the body instead.
+          if [ -s "$NOTES_FILE" ]; then
+            NOTES=(--notes-file "$NOTES_FILE")
+          else
+            NOTES=(--generate-notes)
+          fi
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --verify-tag \
+            --latest \
+            "${NOTES[@]}"
+
+      # `continue-on-error` above hides a failure in a collapsed step marker that
+      # nobody expands on an otherwise-green release run -- the same silence that
+      # let "no GitHub Releases at all" go unnoticed until this PR. Re-raise it as
+      # an ::error annotation plus a run-summary block, WITHOUT failing the job
+      # (that would skip publish-pypi, see above).
+      - name: Flag missing GitHub Release
+        if: always() && steps.gh_release.outcome == 'failure'
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          MAJOR="v${VERSION%%.*}"
+          echo "::error title=GitHub Release not published::v${VERSION} was tagged and its artifacts built, but 'gh release create' failed. Create the Release by hand so ${MAJOR} and the Marketplace listing resolve."
+          {
+            echo "### :x: GitHub Release for \`v${VERSION}\` was NOT created"
+            echo
+            echo "The version tag, the moving \`${MAJOR}\` tag, and the PyPI artifacts are unaffected —"
+            echo "only \`gh release create\` failed. Create it by hand:"
+            echo
+            echo '```sh'
+            echo "gh release create v${VERSION} --title v${VERSION} --verify-tag --latest --generate-notes"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Build + push the agent image HERE, in the same job that produced the
       # version, so the `:<version>` tag is built from the correct pyproject (bumped
