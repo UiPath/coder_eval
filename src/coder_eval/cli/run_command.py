@@ -90,7 +90,7 @@ def _litellm_preflight_error(current_settings: Settings) -> str | None:
     except (urllib.error.URLError, OSError) as exc:
         return (
             f"LiteLLM proxy not reachable at {current_settings.litellm_base_url} (tried {url}): {exc}. "
-            "Start it (e.g. docker/start-litellm.sh) or unset LITELLM_BASE_URL."
+            "Start it (e.g. litellm/start-litellm.sh) or unset LITELLM_BASE_URL."
         )
     return None
 

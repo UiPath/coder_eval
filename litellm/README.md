@@ -20,8 +20,8 @@ Claude Code SDK ──Anthropic /v1/messages──▶ LiteLLM (localhost:4000) �
 ```
 
 Files:
-- `docker/litellm-config.yaml` — the model list + settings (this is the file you edit to add models).
-- `docker/start-litellm.sh` — launches the proxy, reading credentials out of `.env`.
+- `litellm/litellm-config.yaml` — the model list + settings (this is the file you edit to add models).
+- `litellm/start-litellm.sh` — launches the proxy, reading credentials out of `.env`.
 
 ---
 
@@ -31,12 +31,12 @@ Run the proxy **whenever you run coder_eval against the `litellm` backend** — 
 `API_BACKEND=litellm` in `.env`, or `coder-eval run ... --backend litellm`. coder_eval
 does **not** own the proxy lifecycle: it expects an already-running proxy at
 `LITELLM_BASE_URL` and **fails fast at startup** if it isn't reachable
-(`LiteLLM proxy not reachable at ... — Start it (e.g. docker/start-litellm.sh)`).
+(`LiteLLM proxy not reachable at ... — Start it (e.g. litellm/start-litellm.sh)`).
 
 You do **not** need it for the `direct` (Anthropic) or `bedrock` (Claude-on-Bedrock)
 backends — those talk to their APIs directly.
 
-### Prerequisites (in `.env`, never committed)
+### Prerequisites
 
 `start-litellm.sh` reads these from `.env` and exports them into the proxy's own
 environment before launching:
@@ -46,12 +46,12 @@ environment before launching:
 | `AWS_BEARER_TOKEN_BEDROCK` | Bedrock models | required if you use any `bedrock/*` model |
 | `AWS_REGION` | Bedrock models | defaults to `eu-north-1` |
 | `OPENROUTER_API_KEY` | OpenRouter models | required if you use any `openrouter/*` model |
-| `LITELLM_AUTH_TOKEN` | the virtual key clients present | becomes the proxy's `LITELLM_MASTER_KEY`; falls back to `sk-spike-local` |
+| `LITELLM_AUTH_TOKEN` | the virtual key clients present | becomes the proxy's `LITELLM_MASTER_KEY`; falls back to `sk-spike-local`. It can be customly designed.|
 
 ### Start it
 
 ```bash
-bash docker/start-litellm.sh          # foreground on :4000, Ctrl-C to stop
+bash litellm/start-litellm.sh          # foreground on :4000, Ctrl-C to stop
 ```
 
 Overridable via env: `LITELLM_PORT` (default 4000), `LITELLM_CONFIG`, `ENV_FILE`,

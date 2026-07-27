@@ -1,6 +1,6 @@
 # LiteLLM proxy config for the coder_eval `litellm` (open-weight) backend.
 #
-# Full guide (when to run the proxy, how to add models): docker/LITELLM.md
+# Full guide (when to run the proxy, how to add models): litellm/README.md
 #
 # Translates Anthropic Messages (what the Claude Code SDK speaks) <-> Bedrock
 # Converse (what the non-Claude open-weight models speak), so the native `Skill`
@@ -19,7 +19,7 @@
 #   LITELLM_MASTER_KEY         — the virtual key clients present as LITELLM_AUTH_TOKEN.
 #
 # Run manually:
-#   uvx --from 'litellm[proxy]' litellm --config docker/litellm-config.yaml --port 4000
+#   uvx --from 'litellm[proxy]' litellm --config litellm/litellm-config.yaml --port 4000
 
 model_list:
   # DeepSeek V3.2 — cost lead ($0.74 / $2.22 per Mtok).

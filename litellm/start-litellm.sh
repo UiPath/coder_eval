@@ -10,7 +10,7 @@
 # and exports them explicitly before launching, so that can't happen.
 #
 # Usage:
-#   docker/start-litellm.sh                 # foreground; Ctrl-C to stop
+#   litellm/start-litellm.sh                 # foreground; Ctrl-C to stop
 # Overridable via env:
 #   LITELLM_PORT (default 4000), LITELLM_CONFIG, ENV_FILE, LITELLM_MASTER_KEY
 set -euo pipefail
@@ -18,7 +18,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/.env}"
-CONFIG="${LITELLM_CONFIG:-$REPO_ROOT/docker/litellm-config.yaml}"
+CONFIG="${LITELLM_CONFIG:-$REPO_ROOT/litellm/litellm-config.yaml}"
 PORT="${LITELLM_PORT:-4000}"
 
 # Read a key from .env, returning ONLY the value: content between surrounding
