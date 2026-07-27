@@ -2,6 +2,8 @@
 # templates/flow-v2-shared/sync-tools.sh.
 exclude: ^templates/flow-v2-shared/tools/
 
+default_install_hook_types: [pre-commit, commit-msg]
+
 repos:
   # Ruff for formatting and linting
   - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -41,3 +43,12 @@ repos:
         types: [python]
         pass_filenames: false
         stages: [manual]  # Run only with: pre-commit run --hook-stage manual pyright
+
+      # Mirrors .github/workflows/conventional-commits.yml's commit-message check.
+      # (The PR-title half of that workflow can't be checked locally — GitHub
+      # only knows the PR title once the PR exists.)
+      - id: conventional-commit-msg
+        name: conventional commit message
+        entry: scripts/check_commit_msg.sh
+        language: script
+        stages: [commit-msg]
