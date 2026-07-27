@@ -671,6 +671,18 @@ def test_claude_agent_message_formatting_edge_cases():
     assert "[ASSISTANT] Second response" in formatted
     assert formatted.count("[ASSISTANT]") == 2
 
+    # Test 12: RateLimitEvent — an out-of-band throttling notice the SDK
+    # interleaves into the stream. It is not transcript content, so it is skipped
+    # (matched by class name) and does NOT surface as an "unhandled" tag/warning.
+    class RateLimitEvent:
+        pass
+
+    formatted = agent._format_messages([RateLimitEvent()])
+    assert formatted == "[No output]"
+    # It also does not crowd out real content when interleaved.
+    formatted = agent._format_messages([RateLimitEvent(), _make_assistant("still here")])
+    assert formatted == "[ASSISTANT] still here"
+
 
 def test_format_messages_system_message_subclasses_are_filtered():
     """Regression: SystemMessage SUBCLASSES (TaskStartedMessage, etc.) must

@@ -1,9 +1,28 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import type { PerRun } from "@/lib/overview";
 import type { RunOverview, RunOverviewTask } from "@/lib/runs";
-import { buildWatchlist } from "@/lib/watchlist";
-import { WatchlistView } from "../watchlist-view";
+import { buildWatchlist, type WatchlistData } from "@/lib/watchlist";
+
+// The header's HarnessSelector reads router/params hooks; stub them so the view
+// renders in jsdom without a router provider.
+vi.mock("next/navigation", () => ({
+    useRouter: () => ({ replace: vi.fn() }),
+    usePathname: () => "/watchlist",
+    useSearchParams: () => new URLSearchParams(),
+}));
+
+const { WatchlistView } = await import("../watchlist-view");
+
+function renderView(data: WatchlistData) {
+    return render(
+        <WatchlistView
+            data={data}
+            activeHarness="claude-code"
+            harnesses={["claude-code", "codex", "antigravity"]}
+        />,
+    );
+}
 
 function task(o: Partial<RunOverviewTask>): RunOverviewTask {
     return {
@@ -45,7 +64,7 @@ describe("WatchlistView", () => {
                 task({ taskId: "b", skill: "beta", status: "FAILURE" }),
             ]),
         ]);
-        render(<WatchlistView data={data} />);
+        renderView(data);
 
         expect(screen.getByText("Watchlist")).toBeInTheDocument();
         expect(screen.getByText("Needs Attention")).toBeInTheDocument();
@@ -70,7 +89,7 @@ describe("WatchlistView", () => {
                 task({ taskId: "w2", skill: "wobble", status: "SUCCESS" }),
             ]),
         ]);
-        render(<WatchlistView data={data} />);
+        renderView(data);
 
         // Definition is reachable as the ⓘ tooltip's accessible label.
         expect(
@@ -91,9 +110,7 @@ describe("WatchlistView", () => {
                 status: "FAILURE",
             }),
         );
-        render(
-            <WatchlistView data={buildWatchlist([run("2026-01-01", tasks)])} />,
-        );
+        renderView(buildWatchlist([run("2026-01-01", tasks)]));
         // The expander summary appears with the full count + tie callout.
         expect(screen.getByText(/Show all 12 \(2 more tied\)/)).toBeInTheDocument();
         // Beyond-cap rows are in the DOM (inside <details>), not dropped.
@@ -101,8 +118,8 @@ describe("WatchlistView", () => {
     });
 
     test("empty window renders friendly empty states without throwing", () => {
-        render(<WatchlistView data={buildWatchlist([])} />);
+        renderView(buildWatchlist([]));
         expect(screen.getByText("Nothing needs attention 🎉")).toBeInTheDocument();
-        expect(screen.getByText("last 0 runs")).toBeInTheDocument();
+        expect(screen.getByText("last 0 Claude Code runs")).toBeInTheDocument();
     });
 });

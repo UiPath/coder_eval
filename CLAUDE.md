@@ -20,6 +20,7 @@ coder_eval/
 ├── orchestrator.py                # Main evaluation loop
 ├── reports.py                     # Markdown/JSON report generation (run-level + per-suite rollup via write_suite_rollups)
 ├── reports_experiment.py          # Experiment/cross-variant report generation
+├── reports_junit.py               # JUnit XML report from a finalized run dir (run.json spine; for CI test-report ingestion)
 ├── analysis.py                    # Command statistics aggregation
 ├── logging_config.py              # Structured logging setup
 ├── path_utils.py                  # Run ID generation, path utilities
@@ -35,7 +36,7 @@ coder_eval/
 │   ├── criteria.py                # 14 success criterion types + base + union
 │   ├── experiment.py              # ExperimentDefinition, ExperimentVariant, ResolvedTask, result models
 │   ├── judge_defaults.py          # DEFAULT_JUDGE_MODEL constant (cycle-free leaf)
-│   ├── mutations.py               # PromptMutation variants (prefix/suffix/replace/template/rephrase)
+│   ├── mutations.py               # PromptMutation variants (prefix/suffix/replace/template)
 │   ├── results.py                 # CriterionResult (+ ClassificationCriterionResult), TurnRecord, EvaluationResult, EarlyStopInfo/EarlyStopReason, CriterionAggregate, ThresholdCheck, SuiteRollup
 │   ├── routing.py                 # ApiRoute (DirectRoute/BedrockRoute)
 │   ├── sandbox.py                 # SandboxConfig, ResourceLimits
@@ -120,6 +121,7 @@ tasks/                             # Task definition YAML files
 tests/                             # Test suite
 docs/                              # Documentation
 templates/                         # Sandbox template directories
+action.yml                         # Published composite GitHub Action (coder-eval as a CI gate). release.yml maintains its `version:` default + the moving `v<major>` tag.
 ```
 
 ## Key Architectural Patterns
@@ -139,7 +141,7 @@ templates/                         # Sandbox template directories
 - **Reconciliation message (stream self-reconciles to the turn total)**: The per-message stream consistently under-reports the authoritative turn total — a fixed prompt slice (~512 input tokens on Claude) is billed on no SDK-emitted message, and sub-agent input/cache only partially bubbles up. So `EventCollector.build_turn_record` appends one synthetic `ReconciliationMessage` (`role="reconciliation"`, in the `TranscriptMessage` union) per turn, carrying the per-bucket residual = `token_usage` − Σ(assistant message buckets). The invariant: **summing the four token buckets across `TurnRecord.messages` (assistant + reconciliation) equals `token_usage` exactly**, for both Claude and Codex (Codex's stream is already complete after `_recover_subagent_tool_calls`, so its residual is usually 0 and no entry is emitted). This is what lets the evalboard SUM the message stream as the source of truth instead of reading a separate aggregate ("agent tokens"): `selectTokenTotals` returns the stream sum whenever a reconciliation entry is present, and the timeline renders it as its own row. It is agent-agnostic (booked at the single `EventCollector` seam), carries no cost (cost stays on `token_usage`), and is excluded from generation/turn counts and the cost simulator. The Python `token_usage`/`total_token_usage` aggregate is unchanged and still authoritative for budget/judges/reports.
 - **sandbox isolation**: Tasks that don't need MCP servers should set `setting_sources: []` in their `agent:` block to isolate the sandbox from the host project's CLAUDE.md and settings. Without this, the host project's CLAUDE.md (often 20 KB+) is injected into every API call, inflating cache-creation tokens and cost significantly.
 - **Run-time caps (non-criterion enforcement)**: `TaskDefinition.run_limits` (`RunLimits` model) is the single namespace for all run-time caps — `max_turns` / `task_timeout` / `turn_timeout` (structural) and `max_input_tokens` / `max_output_tokens` / `max_total_tokens` / `max_usd` (cumulative budget). Token/USD breaches abort with `FinalStatus.TOKEN_BUDGET_EXCEEDED` or `COST_BUDGET_EXCEEDED` (both `category == "failed"`). Structural caps are set from the CLI via `-D run_limits.max_turns=…` / `-D run_limits.task_timeout=…` / `-D run_limits.turn_timeout=…` (field-merged into `run_limits`); budget caps via `-D run_limits.max_usd=…` etc. or YAML. Layered config uses field-merge — a variant block overrides individual keys without replacing the task's block.
-- **Early stop on criterion (opt-in)**: `run_limits.stop_early` (default off) ends a single-shot Claude run early once the run's **armed** criteria are decided, so a raised `max_turns` isn't wasted on the smoke flavor. A criterion is armed by `stop_when: pass|fail|decided`; only criteria that can decide from a partial trajectory may arm (they declare a non-empty `live_stop_polarities` ClassVar and override `live_verdict` on `BaseCriterion` — currently `skill_triggered`, `command_executed`; CE025 enforces the two stay consistent). It uses a cooperative `should_stop` seam on the Claude agent's between-messages guard (tool-call granularity, no SIGKILL) driven by `orchestration/early_stop.py::EarlyStopWatcher` (own `EventCollector` + stop rule). Live verdicts only *trigger* the stop; the standard `check_all` on the frozen trajectory is authoritative. An early-stopped run gates on the **armed subset** (`EvaluationResult.armed_criteria_passed`); a completed run gates on the full set. Every unsupported use (non-observable criterion, non-Claude agent, wrong polarity, no armed criterion, simulation mode) is an error at resolution (plan *and* run), and a runtime verdict bug **fails open** to a full run. Surfaces: `EarlyStopInfo` (reason + deciding criterion + when), report notes/badges, `stopped_early` run.json rows, and `EarlyStopped`/`EarlyStopReason` telemetry dims. Defaults off ⇒ behavior byte-for-behavior unchanged.
+- **Early stop on criterion (opt-in)**: `run_limits.stop_early` (default off) ends a single-shot Claude run early once the run's **armed** criteria are decided, so a raised `max_turns` isn't wasted on the smoke flavor. A criterion is armed by `stop_when: pass|fail|decided|auto`; only criteria that can decide from a partial trajectory may arm (non-empty `live_stop_polarities` ClassVar + `live_verdict` override — currently `skill_triggered`, `command_executed`; CE025 keeps the two consistent). `decided` arms **both** polarities; `auto` arms whichever polarities **this instance** can decide — the value for dataset-fanned criteria whose positive/distractor role flips per row. Stop rule: the pass-stop fires when every **pass-armed** criterion live-passes (fail-armed distractors are not required to pass; zero pass-armed ⇒ never pass-stops); the fail-stop fires on the first fail-armed live-fail but is **deferred while any pass-armed criterion is undecided** — a distractor misfire must not truncate a positive row's recall signal, so the latched misfire fires once the positives resolve (or the run continues to the cap). A fail-stop is therefore verdict-preserving; a pass-stop can miss a *later* distractor misfire, so authoritative P/R/F1 comes from a `stop_early: false` run. Driven by `orchestration/early_stop.py::EarlyStopWatcher` through the Claude agent's cooperative `should_stop` seam (tool-call granularity, no SIGKILL); live verdicts only *trigger* the stop — the standard `check_all` on the frozen trajectory is authoritative. An early-stopped run gates on the **armed subset** (`EvaluationResult.armed_criteria_passed`); a completed run gates on the full set. Every unsupported use is a hard error at resolution (plan *and* run), and a runtime verdict bug **fails open** to a full run. Surfaces: `EarlyStopInfo`, report notes/badges, `stopped_early` run.json rows, `EarlyStopped`/`EarlyStopReason` telemetry dims. Worked rationale: docs/TASK_DEFINITION_GUIDE.md § `stop_early`. Defaults off ⇒ behavior byte-for-behavior unchanged.
 
 ## Success Criteria (14 types)
 
@@ -160,7 +162,7 @@ templates/                         # Sandbox template directories
 | `llm_judge` | Continuous | LLM grades artifacts + optional trajectory + optional reference; routes through the run's backend (Bedrock / Anthropic) |
 | `agent_judge` | Continuous | Spawns a Claude Code SDK agent in an isolated sandbox copy; judge uses tools (Bash/Read/Grep/…) to investigate and returns a JSON verdict. Expensive; runs with evaluator credentials — see SECURITY note in the criterion docstring. |
 
-All criteria support `weight` (default 1.0) and `pass_threshold` (default 0.9), plus `stop_when` (`pass`/`fail`/`decided`, default `null`) which arms the criterion for early stop when `run_limits.stop_early` is set (observable criteria only). On dataset-backed tasks, criteria may also set `suite_thresholds: {metric: min_value}` — the suite gate passes iff every listed metric (from the criterion's `aggregate()` output) meets its minimum.
+All criteria support `weight` (default 1.0) and `pass_threshold` (default 0.9), plus `stop_when` (`pass`/`fail`/`decided`/`auto`, default `null`) which arms the criterion for early stop when `run_limits.stop_early` is set (observable criteria only; `auto` arms the instance's own decidable polarities). On dataset-backed tasks, criteria may also set `suite_thresholds: {metric: min_value}` — the suite gate passes iff every listed metric (from the criterion's `aggregate()` output) meets its minimum.
 
 ## Evaluation Flow
 
@@ -193,11 +195,17 @@ make format      # ruff format
 make check       # ruff check (lint)
 make typecheck   # pyright
 make test        # pytest
-make lint        # custom architectural lint rules (CE001–CE025)
+make lint        # custom architectural lint rules (CE001+)
 make verify      # All of the above + coverage check (CI equivalent)
 ```
 
-When fixing a bug, ask: *could a custom lint rule have prevented this?* If the root cause is a mechanically detectable pattern (e.g., "always import from `coder_eval.models`", "never call blocking IO in async"), add a rule to `tests/lint/rules/` following the CE001–CE025 pattern and wire it up in `tests/lint/runner.py`. This turns a one-time fix into permanent enforcement. See `tests/test_custom_lint.py` for how rules are tested.
+When fixing a bug, ask: *could a custom lint rule have prevented this?* If the root cause is a mechanically detectable pattern (e.g., "always import from `coder_eval.models`", "never call blocking IO in async"), add a rule to `tests/lint/rules/` following the CE001+ pattern and wire it up in `tests/lint/runner.py`. This turns a one-time fix into permanent enforcement. See `tests/test_custom_lint.py` for how rules are tested. (Doc-surface / whole-tree rules that reason over Markdown/YAML or the entire `src/` tree rather than one `.py` AST at a time — CE027–CE031 — are not `BaseRule`s in the runner; they are wired as dedicated `@pytest.mark.lint` test classes. CE031 guards against dead config: a behavior-driving field on `SimulationConfig`/`RunLimits`/`Dataset` that no code reads by name.)
+
+Adding a user-facing field to one of the models CE030 tracks (`TaskDefinition`, `RunLimits`, `Dataset`, `SimulationConfig` — see `tests/lint/doc_schema_parity.py`) means documenting it in its guide (mention the field name as inline code) or adding an `EXEMPT` entry with a reason it is not user-authored. `make lint` fails otherwise.
+
+**Docs index SSOT.** `nav:` plus `extra.docs_index` (blurbs) in `mkdocs.yml` are the single source of truth for the flat index surfaces — `README.md`'s Documentation table, `docs/index.md`'s "Where to go next" table, and the `## Docs` / `## Tutorials` sections of `docs/llms.txt`. Regenerate all three with `make docs-indexes`; **CE028** fails the build if any drifts, if a nav page lacks a blurb (or vice-versa), or if a `docs/*.md` page is missing from the nav. The website sidebar derives from the same `nav:`. When adding or renaming a docs page, edit `nav:` + `extra.docs_index` and run `make docs-indexes` — never hand-edit the generated tables (they sit between `<!-- docs-index:start -->` / `<!-- docs-index:end -->` markers).
+
+**Anchor slugger convention.** The docs are rendered by three sluggers (GitHub, Starlight/github-slugger on coder-eval.com, and python-markdown/mkdocs), which disagree on headings containing `&` or punctuation (`api-routing--benchmarking` vs `api-routing-benchmarking`). Prefer punctuation-free headings so all three agree; if a heading needs `&`, add a GitHub-form `<a id="…"></a>` shim above it and link that form. Verify a new intra-doc anchor link resolves in the built HTML (`mkdocs build`), not by eye.
 
 ## Configuration
 
@@ -294,7 +302,7 @@ Tasks are YAML files. See [docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_G
 
 **Runtime (always)**: pydantic, pydantic-settings, pyyaml, typer, rich, python-dotenv, anthropic, claude-agent-sdk, anyio, radon, tqdm, jmespath, jsonschema
 
-**Runtime (optional, `[uipath]` extra)**: uipath — the in-host `uipath` SDK (handy for local sandbox parity with tasks that invoke `uv run uipath eval ...`). Base installs without this extra still run end-to-end; UiPath-dependent paths fail at dispatch with a clear `pip install 'coder-eval[uipath]'` hint. The LLM judge and the `rephrase` mutation no longer use the LLM Gateway client — they route through the run's backend (Bedrock / Anthropic), so `uipath-llmgw-client` is no longer a dependency.
+**Runtime (optional, `[uipath]` extra)**: uipath — the in-host `uipath` SDK (handy for local sandbox parity with tasks that invoke `uv run uipath eval ...`). Base installs without this extra still run end-to-end; UiPath-dependent paths fail at dispatch with a clear `pip install 'coder-eval[uipath]'` hint. The LLM judge no longer uses the LLM Gateway client — it routes through the run's backend (Bedrock / Anthropic), so `uipath-llmgw-client` is no longer a dependency.
 
 **Dev**: pytest, pytest-asyncio, pytest-mock, pytest-cov, ruff, pyright, pip-audit, bandit, pre-commit, mcp
 

@@ -1,3 +1,10 @@
+---
+description: >-
+  A/B-test two Claude models on the same task with Coder Eval's experiment layer
+  and read the cross-variant report — a fair, like-for-like coding-agent model
+  comparison.
+---
+
 # Tutorial 05 — Comparing Two Models
 
 By the end you'll have A/B-tested two Claude models on the same task through the

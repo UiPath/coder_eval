@@ -1,0 +1,209 @@
+name: coder-eval
+description: Run coder-eval evaluation tasks as a CI gate, with JUnit XML output and a job-summary report.
+branding:
+  icon: check-circle
+  color: orange
+
+# This action installs and runs the `coder-eval` CLI. It is agent-agnostic: it
+# does NOT install any coding-agent runtime. Tasks that use the default
+# `claude-code` agent need the `claude` CLI on PATH (Node + the
+# `@anthropic-ai/claude-code` npm package) provided by the calling job before
+# this action runs. See the README "Use as a GitHub Action" section.
+#
+# SECURITY: evaluated tasks execute agent-generated code. Do NOT run this action
+# under `pull_request_target` with secrets exposed to untrusted fork PRs.
+
+inputs:
+  tasks:
+    description: Task YAML path(s)/glob passed to `coder-eval run` (empty = all tasks/ recursively)
+    required: false
+    default: ""
+  tags:
+    description: Only run tasks matching any of these comma-separated tags (--tags)
+    required: false
+    default: ""
+  model:
+    description: Override agent model for all tasks (--model)
+    required: false
+    default: ""
+  extra-args:
+    description: Extra arguments appended verbatim to `coder-eval run` (trusted caller input; covers --experiment, -D overrides, --tags exclusions, etc.)
+    required: false
+    default: ""
+  version:
+    description: coder-eval version to install from PyPI, or "local" to install from the action checkout
+    required: false
+    default: "0.8.10"   # <-- kept in sync with releases by release.yml
+  run-dir:
+    description: Run directory (--run-dir)
+    required: false
+    default: "runs/ci"
+  junit-path:
+    description: Where to write the JUnit XML report
+    required: false
+    default: "coder-eval-junit.xml"
+  step-summary:
+    description: Append run.md to the GitHub job summary ("true"/"false")
+    required: false
+    default: "true"
+  env:
+    description: >-
+      Environment passthrough — newline-separated NAME=VALUE pairs exported for
+      the coder-eval process only (scoped to the run step; NOT written to
+      $GITHUB_ENV, so nothing leaks into later job steps). This is the sole
+      channel for credentials and backend config: set ANTHROPIC_API_KEY,
+      API_BACKEND, model vars, EVALBOARD_*, plugin paths, etc. Names
+      must match ^[A-Za-z_][A-Za-z0-9_]*$; blank lines and `#` comments are
+      ignored. Wire values from repository secrets (secrets.MY_KEY) — never
+      inline a secret literal.
+    required: false
+    default: ""
+  minimum-task-score:
+    description: >-
+      Optional strict floor (0.0–1.0): EVERY scored task, in every variant, must
+      reach it or the step fails. A gate ON TOP OF coder-eval's own exit code —
+      the step fails if EITHER coder-eval exits non-zero OR any task's
+      weighted_score is below this. Empty (the default) disables the floor,
+      leaving coder-eval's exit code the sole gate.
+    required: false
+    default: ""
+
+outputs:
+  run-dir:
+    description: The run directory containing run.json/run.md
+    value: ${{ steps.run.outputs.run-dir }}
+  junit-path:
+    description: Path to the written JUnit XML report
+    value: ${{ steps.run.outputs.junit-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4.2.0
+    - name: Install coder-eval
+      shell: bash
+      env:
+        CE_VERSION: ${{ inputs.version }}
+        CE_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        if [ "$CE_VERSION" = "local" ]; then
+          uv tool install "$CE_ACTION_PATH"
+        else
+          uv tool install "coder-eval==$CE_VERSION"
+        fi
+    - name: Run coder-eval
+      id: run
+      shell: bash
+      env:
+        CE_TASKS: ${{ inputs.tasks }}
+        CE_TAGS: ${{ inputs.tags }}
+        CE_MODEL: ${{ inputs.model }}
+        CE_EXTRA_ARGS: ${{ inputs.extra-args }}
+        CE_RUN_DIR: ${{ inputs.run-dir }}
+        CE_JUNIT: ${{ inputs.junit-path }}
+        CE_SUMMARY: ${{ inputs.step-summary }}
+        CE_ENV: ${{ inputs.env }}
+        CE_MIN_SCORE: ${{ inputs.minimum-task-score }}
+      run: |
+        set -uo pipefail
+
+        # Generic env passthrough. Each NAME=VALUE line is exported for the
+        # coder-eval child of THIS step only — deliberately not written to
+        # $GITHUB_ENV, so a forwarded secret never bleeds into later job steps.
+        # Only NAME is validated; VALUE is treated as opaque data (never eval'd),
+        # so no crafted value can inject shell.
+        n=0
+        while IFS= read -r line; do
+          n=$((n + 1))
+          line="${line%$'\r'}"                       # tolerate CRLF inputs
+          line="${line#"${line%%[![:space:]]*}"}"    # left-trim
+          [ -z "$line" ] && continue
+          case "$line" in '#'*) continue ;; esac      # allow comment lines
+          # Never echo $line/$value on error — a caller who forgets the `NAME=`
+          # prefix would otherwise print a forwarded secret verbatim (GitHub
+          # only masks values it knows are secrets). Report by position instead.
+          if [ "$line" = "${line#*=}" ]; then
+            echo "::error::env entry #$n is not NAME=VALUE (no '=' found)"; exit 1
+          fi
+          name="${line%%=*}"
+          if [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            echo "::error::env entry #$n has an invalid name (must match ^[A-Za-z_][A-Za-z0-9_]*\$)"; exit 1
+          fi
+          export "$name=${line#*=}"
+        done <<< "$CE_ENV"
+
+        args=(run --run-dir "$CE_RUN_DIR" --junit-xml "$CE_JUNIT")
+        [ -n "$CE_TAGS" ] && args+=(--tags "$CE_TAGS")
+        [ -n "$CE_MODEL" ] && args+=(--model "$CE_MODEL")
+        # extra-args is a trusted caller input, split on whitespace intentionally
+        # shellcheck disable=SC2206
+        [ -n "$CE_EXTRA_ARGS" ] && args+=($CE_EXTRA_ARGS)
+        # shellcheck disable=SC2206
+        [ -n "$CE_TASKS" ] && args+=($CE_TASKS)
+        set +e
+        coder-eval "${args[@]}"
+        CODE=$?
+        set -e
+        echo "run-dir=$CE_RUN_DIR" >> "$GITHUB_OUTPUT"
+        echo "junit-path=$CE_JUNIT" >> "$GITHUB_OUTPUT"
+        if [ "$CE_SUMMARY" = "true" ] && [ -f "$CE_RUN_DIR/run.md" ]; then
+          head -c 1000000 "$CE_RUN_DIR/run.md" >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        # Optional per-task score floor. Reads the always-written run.json spine
+        # (task_results[*].weighted_score) rather than experiment.json, so it
+        # works for plain and experiment runs alike. A gate ON TOP OF CODE:
+        # empty CE_MIN_SCORE disables it, leaving CODE the sole verdict. Runs
+        # regardless of CODE (run.json is emitted even on a red run), then the
+        # two verdicts are combined so both surface.
+        GATE=0
+        if [ -n "$CE_MIN_SCORE" ]; then
+          if [ ! -f "$CE_RUN_DIR/run.json" ]; then
+            echo "::error::score gate: $CE_RUN_DIR/run.json not found (cannot verify minimum-task-score=$CE_MIN_SCORE)"
+            GATE=1
+          else
+            RUN_JSON="$CE_RUN_DIR/run.json" MIN_SCORE="$CE_MIN_SCORE" python3 <<'PY' || GATE=1
+        import json, math, os, sys
+
+        raw = os.environ["MIN_SCORE"]
+        try:
+            floor = float(raw)
+        except ValueError:
+            print(f"::error::minimum-task-score must be a number, got '{raw}'")
+            sys.exit(1)
+        if not math.isfinite(floor) or not (0.0 <= floor <= 1.0):
+            print(f"::error::minimum-task-score must be within [0.0, 1.0], got '{raw}'")
+            sys.exit(1)
+        data = json.load(open(os.environ["RUN_JSON"], encoding="utf-8"))
+        rows = []
+        for r in data.get("task_results", []):
+            s = r.get("weighted_score")
+            # bool is an int subclass — exclude it; skip errored rows (score None),
+            # which coder-eval's own exit code already accounts for; and skip
+            # non-finite (NaN/inf) — json.loads accepts them, and NaN makes
+            # min()/>= order-dependent, which could silently MASK a below-floor
+            # task. A blob-pulled/malformed run.json must fail closed, not pass.
+            if isinstance(s, (int, float)) and not isinstance(s, bool) and math.isfinite(s):
+                rows.append((float(s), str(r.get("task_id", "?")), str(r.get("variant_id") or "default")))
+        for s, t, v in sorted(rows):
+            print(f"  [{'ok' if s >= floor else 'BELOW'}] {v}/{t}: {s:.3f}")
+        worst = min(rows) if rows else None
+        ok = worst is not None and worst[0] >= floor
+        if ok:
+            print(f"score gate passed: lowest {worst[0]:.3f} >= floor {floor:.3f}")
+        elif worst is not None:
+            print(f"::error::score gate FAILED: lowest {worst[0]:.3f} ({worst[2]}/{worst[1]}) < floor {floor:.3f}")
+        else:
+            print(f"::error::score gate: no scored tasks in run.json to check against floor {floor:.3f}")
+        sys.exit(0 if ok else 1)
+        PY
+          fi
+        fi
+
+        # Combine: coder-eval's own failure OR the score floor fails the step.
+        if [ "$CODE" -ne 0 ]; then
+          exit "$CODE"
+        fi
+        [ "$GATE" -eq 0 ] || exit 1

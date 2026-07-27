@@ -1,0 +1,53 @@
+name: Docs
+
+# Build the MkDocs Material site and publish it to the `gh-pages` branch via
+# `mkdocs gh-deploy` — the same mechanism UiPath/uipath-python uses. This workflow
+# only pushes a branch (needs `contents: write`); it never calls the Pages API, so
+# it succeeds even before Pages is switched on.
+#
+# One-time setup (org owner): the UiPath org blocks Pages *creation*, so enable
+# Pages for this repo once — Settings → Pages → Build and deployment →
+# Source: "Deploy from a branch" → branch `gh-pages` / `/ (root)`. That's the same
+# (legacy, branch-based) configuration uipath-python already runs on.
+on:
+  # Auto-publish on push is DISABLED: GitHub Pages is not yet enabled for this
+  # repo on uipath.github.io (org owner must switch it on once — Settings → Pages
+  # → Deploy from a branch → gh-pages / root). The published docs currently serve
+  # from coder-eval.com/docs (synced separately by the website), so the gh-pages
+  # deploy is not needed yet. Re-enable by uncommenting the `push:` trigger below.
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - "docs/**"
+  #     - "mkdocs.yml"
+  #     - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: docs-gh-pages
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install social-card system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcairo2 libfreetype6 libjpeg-turbo8 libpng16-16 pngquant
+      - name: Install MkDocs Material
+        run: pip install "mkdocs-material[imaging]>=9.5,<10"
+      - name: Configure git identity for gh-pages commits
+        run: |
+          git config user.name "coder-eval"
+          git config user.email "coder-eval@uipath.com"
+      - name: Build strictly and publish to gh-pages
+        run: mkdocs gh-deploy --force --strict

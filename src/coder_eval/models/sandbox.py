@@ -309,8 +309,9 @@ class SandboxConfig(BaseModel):
     network, process table, and filesystem outside the temp dir.
     ``driver: docker`` runs each task inside its own container; see
     :class:`DockerDriverConfig` for knobs. ``ResourceLimits.timeout`` is the
-    only limit enforced in tempdir mode; under docker, ``max_memory_mb`` also
-    maps to ``--memory`` when set.
+    only limit enforced in tempdir mode; under docker, ``max_memory_mb`` /
+    ``max_cpus`` / ``max_pids`` also map to ``--memory`` / ``--cpus`` /
+    ``--pids-limit`` when set.
     """
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")

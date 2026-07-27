@@ -1,0 +1,56 @@
+# Coder Eval
+
+> Coder Eval (`pip install coder-eval`) is an open-source framework for evaluating,
+> benchmarking, and A/B-testing AI coding agents and their Claude Code skills in a
+> sandbox. It uses declarative YAML tasks with weighted, continuous scoring
+> (0.0–1.0), runs real agents (Claude Code, Codex, Google Antigravity/Gemini) with
+> full tool use, captures per-tool cost/token telemetry, and provides CI-ready
+> pass/fail gates. It is not a fixed benchmark or leaderboard — it scores your own
+> tasks, and can verify whether a Claude Code skill actually triggers.
+
+Choose Coder Eval to: benchmark coding agents on your own tasks; A/B-test model vs.
+model, tool-on vs. tool-off, or prompt vs. prompt; test whether a Claude Code skill
+triggers and catch regressions in CI; gate a build on coding-agent quality. It
+differs from fixed datasets (SWE-bench, SkillsBench) that give a shared leaderboard,
+from OpenAI Evals (which grades model text), and from large-scale agent-eval / RL
+frameworks like Harbor — Coder Eval is purpose-built for coding-agent/skill suites
+with weighted 0.0–1.0 file/command scoring, a skill-activation check, an experiment
+layer, deep cost telemetry, and the evalboard dashboard. It also differs from
+hand-rolled scripts, which lack reproducible sandboxes, weighted criteria, telemetry,
+and A/B plumbing.
+
+## Docs
+
+<!-- docs-index:start:docs -->
+- [Home](https://coder-eval.com/docs): What Coder Eval is, its features, and a quick start
+- [User Guide](https://coder-eval.com/docs/user-guide): Full CLI, configuration, output, and environment-variable reference
+- [Task Definition Guide](https://coder-eval.com/docs/task-definition-guide): The task-file schema — all criterion types, scoring, templates
+- [Claude Code](https://coder-eval.com/docs/agents/claude-code): Configuring and running the default Claude Code agent
+- [Codex](https://coder-eval.com/docs/agents/codex): Running the OpenAI Codex agent
+- [Antigravity (Gemini)](https://coder-eval.com/docs/agents/antigravity): Running the Google Antigravity / Gemini agent
+- [A/B Experiments](https://coder-eval.com/docs/ab-experiments): Compare models / tools / prompts across the same tasks
+- [Bring Your Own Dataset](https://coder-eval.com/docs/datasets): Fan a single task out over a dataset
+- [Dialog Mode](https://coder-eval.com/docs/dialog-mode): Evaluate agents in multi-turn conversation via a simulated user
+- [Docker Isolation](https://coder-eval.com/docs/docker-isolation): The container sandbox driver, with custom images
+- [CI Gate & GitHub Action](https://coder-eval.com/docs/ci-gate): Run Coder Eval as a CI gate — the packaged Action, JUnit output, score floor
+- [Extending Coder Eval](https://coder-eval.com/docs/extending): Author a custom agent, criterion, or model pricing via the plugin SPI
+- [Report Schema](https://coder-eval.com/docs/report-schema): Field-level reference for run.json / variant.json / task.json
+- [How It Compares](https://coder-eval.com/docs/comparison): vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts
+<!-- docs-index:end:docs -->
+
+## Tutorials
+
+<!-- docs-index:start:tutorials -->
+- [01 · Your first evaluation](https://coder-eval.com/docs/tutorials/01-first-evaluation)
+- [02 · Running Coder Eval in CI](https://coder-eval.com/docs/tutorials/02-ci-pipeline)
+- [03 · Browsing results with evalboard](https://coder-eval.com/docs/tutorials/03-evalboard-local)
+- [04 · Writing a task](https://coder-eval.com/docs/tutorials/04-writing-a-task)
+- [05 · Comparing two models](https://coder-eval.com/docs/tutorials/05-comparing-models)
+- [06 · Docker isolation](https://coder-eval.com/docs/tutorials/06-use-docker-isolation)
+<!-- docs-index:end:tutorials -->
+
+## Source
+
+- [GitHub repository](https://github.com/UiPath/coder_eval)
+- [PyPI package](https://pypi.org/project/coder-eval/)
+- [Changelog](https://github.com/UiPath/coder_eval/blob/main/CHANGELOG.md)

@@ -144,3 +144,55 @@ def test_report_html_malformed_task_json_skipped_and_fails(tmp_path: Path) -> No
     assert "Skipping" in res.stdout
     assert "1 task(s) failed" in res.stdout
     assert (run_dir / "task-good" / "task.html").exists()
+
+
+# --------------------------------------------------------------------------
+# JUnit path (-f junit)
+# --------------------------------------------------------------------------
+
+
+def test_report_junit_default_output(write_run_json, tmp_path: Path) -> None:
+    from defusedxml.ElementTree import fromstring
+
+    run_dir = tmp_path / "run"
+    write_run_json(run_dir, [{"task_id": "t", "status": "SUCCESS"}])
+
+    res = runner.invoke(app, ["report", str(run_dir), "-f", "junit"])
+    assert res.exit_code == 0
+    out = run_dir / "junit.xml"
+    assert out.is_file()
+    root = fromstring(out.read_text(encoding="utf-8"))
+    assert root.tag == "testsuites"
+
+
+def test_report_junit_custom_output(write_run_json, tmp_path: Path) -> None:
+    from defusedxml.ElementTree import fromstring
+
+    run_dir = tmp_path / "run"
+    write_run_json(run_dir, [{"task_id": "t", "status": "SUCCESS"}])
+    out = tmp_path / "out" / "custom.xml"
+
+    res = runner.invoke(app, ["report", str(run_dir), "-f", "junit", "-o", str(out)])
+    assert res.exit_code == 0
+    assert out.is_file()
+    fromstring(out.read_text(encoding="utf-8"))
+    assert not (run_dir / "junit.xml").exists()
+
+
+def test_report_junit_missing_run_json_exits_1(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()  # no run.json
+
+    res = runner.invoke(app, ["report", str(run_dir), "-f", "junit"])
+    assert res.exit_code == 1
+    assert "run.json" in res.stdout
+
+
+def test_report_unknown_format_message_lists_junit(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    res = runner.invoke(app, ["report", str(run_dir), "--format", "bogus"])
+    assert res.exit_code == 1
+    assert "unknown --format" in res.stdout
+    assert "junit" in res.stdout

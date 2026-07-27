@@ -132,6 +132,27 @@ def test_evaluate_command_failure(tmp_path):
         assert exc_info.value.exit_code == 1
 
 
+def test_evaluate_command_informational_criterion_does_not_fail_exit(tmp_path):
+    """A failing weight=0 criterion must not flip the exit code (it is non-gating)."""
+    task_file = FIXTURES_DIR / "tasks" / "test_task_informational_criterion.yaml"
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "app.py").write_text("print('hello')")  # gating criterion passes; missing.py absent
+
+    from coder_eval.cli.evaluate_command import evaluate_command
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    with patch("coder_eval.cli.console.console.print"), patch("coder_eval.logging_config.setup_logging"):
+        with pytest.raises(typer.Exit) as exc_info:
+            evaluate_command(task_file=task_file, work_dir=work_dir, run_dir=run_dir)
+
+        # The only gating criterion passed → exit 0, despite the weight=0 miss.
+        assert exc_info.value.exit_code == 0
+
+
 def test_evaluate_command_invalid_task_file(tmp_path):
     """Test evaluate command with invalid task file."""
     # Use non-existent task file

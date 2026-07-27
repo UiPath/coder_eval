@@ -5,7 +5,9 @@ import contextlib
 import json
 import logging
 import os
+import shlex
 import shutil
+import tempfile
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -65,14 +67,6 @@ _CLAUDE_TO_CODEX_TOOL_MAP: dict[str, str] = {
     "Glob": "shell",
 }
 
-# Permission mode → sandbox mode mapping
-_PERMISSION_MODE_TO_SANDBOX: dict[str, str] = {
-    "bypassPermissions": "full-access",
-    "acceptEdits": "workspace-write",
-    "default": "workspace-write",
-    "plan": "read-only",
-}
-
 # Approval mode — the SAME for every permission mode (no per-mode mapping).
 #
 # The Codex SDK exposes exactly two approval modes:
@@ -88,9 +82,9 @@ _PERMISSION_MODE_TO_SANDBOX: dict[str, str] = {
 #     escalations BEYOND the sandbox are refused.
 #
 # An eval harness never wants a reviewer that can flake, so EVERY permission mode
-# uses deny_all. The trust boundary is the sandbox (_PERMISSION_MODE_TO_SANDBOX),
-# which DOES vary by mode: `plan` stays read-only, `bypassPermissions` is
-# full-access (intended for isolated Docker runs).
+# uses deny_all. The trust boundary is coder_eval's per-run sandbox — a docker
+# container or an ephemeral tempdir — NOT Codex's in-process OS sandbox, which
+# _build_thread_options always drops to full-access (rationale there).
 _CODEX_APPROVAL_MODE = "deny_all"
 
 # Provider id registered in thread config when CODEX_BASE_URL routes to a
@@ -214,6 +208,17 @@ def _message_uncached_input(m: AssistantMessage) -> int:
 # supports the Responses API (it rejects `wire_api = "chat"` as "no longer
 # supported"), so this is a fixed constant, not an operator knob.
 _CODEX_WIRE_API = "responses"
+
+# Login-shell profile files generated into the per-task HOME (see
+# _setup_login_shell_home). ``.bash_profile`` is what ``bash -l`` reads;
+# ``.profile`` covers ``sh``/``dash`` login shells. The zsh trio covers macOS,
+# where zsh is the default shell: ``.zshenv`` runs in EVERY zsh, ``.zprofile``
+# in login shells (AFTER /etc/zprofile, whose path_helper resets PATH), and
+# ``.zshrc`` in interactive shells - including codex's shell snapshot, which
+# sources it explicitly. zsh selects its dotfiles via $ZDOTDIR (fallback
+# $HOME), so _build_codex_env points ZDOTDIR at the generated home.
+_LOGIN_PROFILE_NAMES = (".bash_profile", ".profile", ".zshenv", ".zprofile", ".zshrc")
+_ZSH_PROFILE_NAMES = frozenset({".zshenv", ".zprofile", ".zshrc"})
 
 
 def _get_item_root(notification: Any) -> Any:
@@ -649,6 +654,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self.thread: Any = None
         self.working_directory: Path | None = None
         self._env_path_prepend: list[str] = []
+        self._login_shell_home: Path | None = None
         # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
         # bookkeeping lives on the Agent base class (shared defaults + helpers).
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
@@ -677,6 +683,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
+        self._setup_login_shell_home()
         self._state = AgentState.WORKING
 
         try:
@@ -872,6 +879,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._close_client()
         self.thread = None
         self._active_turn_handle = None
+        self._cleanup_login_shell_home()
         self._mark_stopped()
 
     async def kill(self) -> None:
@@ -887,6 +895,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """
         self._interrupt_active_turn()
         self._close_client()
+        self._cleanup_login_shell_home()
 
     def _interrupt_active_turn(self) -> None:
         """Interrupt the in-flight Codex turn, if any (best-effort, idempotent)."""
@@ -1071,7 +1080,164 @@ class CodexAgent(Agent[CodexAgentConfig]):
             path_key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
             env[path_key] = os.pathsep.join([*self._env_path_prepend, os.environ.get(path_key, "")])
             self._log.debug(f"PATH prepend: {os.pathsep.join(self._env_path_prepend)}")
+        if self._login_shell_home is not None:
+            # Point login shells at the generated profile dir (see
+            # _setup_login_shell_home) while pinning codex state (auth, rollout
+            # sessions) to its real location — _codex_home() reads the same
+            # resolution for sub-agent rollout recovery, so both sides agree.
+            # HOME steers bash/sh; ZDOTDIR steers zsh (the macOS default
+            # shell), which ignores HOME for dotfile selection when it is set.
+            env["HOME"] = str(self._login_shell_home)
+            env["ZDOTDIR"] = str(self._login_shell_home)
+            # The binary hard-errors on an explicitly set CODEX_HOME that does
+            # not exist (unset, it materializes the ~/.codex default itself) —
+            # hosts that auth via CODEX_API_KEY never ran `codex login`, so
+            # the dir may not exist yet. Create it before pinning.
+            codex_home = self._codex_home()
+            codex_home.mkdir(parents=True, exist_ok=True)
+            env["CODEX_HOME"] = str(codex_home)
         return env if env else None
+
+    @staticmethod
+    def _login_shell_profiles_supported() -> bool:
+        """Whether to generate login-shell profile shims (POSIX shells only)."""
+        return os.name == "posix"
+
+    def _setup_login_shell_home(self) -> None:
+        """Create a per-task HOME whose profiles restore the mock PATH prepend.
+
+        Codex issues every shell command through the user's default shell as a
+        login shell: ``bash -lc`` on Linux, ``zsh -lc`` on macOS (its default
+        shell; fish would need the same treatment here if codex ever picks
+        it). A login shell re-sources the system profile chain -
+        ``/etc/profile`` on Linux, ``/etc/zprofile``'s path_helper on macOS -
+        which unconditionally RESETS PATH, silently dropping the mock-CLI
+        prepend passed via the app-server environment, so bare commands
+        resolve to the REAL CLIs (real-tenant contamination). The per-user
+        dotfiles are sourced AFTER that chain, so a generated per-task HOME
+        (wired up in ``_build_codex_env``; codex state stays in CODEX_HOME)
+        gets the last word and re-prepends the mock dirs:
+        ``.bash_profile``/``.profile`` for bash/sh (selected via env HOME) and
+        ``.zshenv``/``.zprofile``/``.zshrc`` for zsh (selected via env
+        ZDOTDIR; ``.zshrc`` also feeds codex's shell snapshot, which sources
+        it explicitly). Per-task rather than the user's real dotfiles so
+        parallel tasks with different mocks cannot collide. No-op without mock
+        dirs or on non-POSIX hosts: Windows codex shells through PowerShell
+        (``-NoProfile``) or ``cmd /c``, neither of which re-sources a profile
+        chain that resets PATH, so the plain env prepend survives there as-is.
+
+        Bash uses the env HOME only to PICK the profile file; the generated
+        profile's first act is to export the ORIGINAL home back, so the
+        sourced user profile and the command body see the real ``$HOME``
+        (git config, tool caches, ``$HOME``-relative sourcing keep working).
+        Known residual gap: a NESTED bash/sh login shell inside a command
+        re-reads the real profiles and loses the prepend again (nested zsh
+        keeps it - ZDOTDIR stays exported).
+        """
+        self._cleanup_login_shell_home()
+        if not (self._env_path_prepend and self._login_shell_profiles_supported()):
+            return
+        original_home = os.environ.get("HOME", "")
+        # Where the user's REAL zsh dotfiles live: their own ZDOTDIR when set,
+        # else their home (zsh's fallback).
+        original_zdotdir = os.environ.get("ZDOTDIR", "") or original_home
+        # The profile only ever executes under a POSIX shell, so the PATH
+        # separator is ':' regardless of the host building it.
+        quoted_prepend = shlex.quote(":".join(self._env_path_prepend))
+        export_line = f'export PATH={quoted_prepend}:"$PATH"'
+        # Track the dir BEFORE writing so a failed write can't orphan it —
+        # the except below (and any later cleanup) always sees it.
+        home = Path(tempfile.mkdtemp(prefix="coder-eval-codex-home-"))
+        self._login_shell_home = home
+        try:
+            for name in _LOGIN_PROFILE_NAMES:
+                content = self._login_profile_content(
+                    name,
+                    original_home,
+                    export_line,
+                    original_zdotdir=original_zdotdir,
+                    generated_home=str(home),
+                )
+                # newline="\n": the profile must stay LF-only no matter which host
+                # builds it, or bash sees literal \r at end of line.
+                (home / name).write_text(content, encoding="utf-8", newline="\n")
+        except Exception:
+            self._cleanup_login_shell_home()
+            raise
+        self._log.debug(f"Login-shell mock-PATH home: {home}")
+
+    @staticmethod
+    def _login_profile_content(
+        profile_name: str,
+        original_home: str,
+        export_line: str,
+        *,
+        original_zdotdir: str = "",
+        generated_home: str = "",
+    ) -> str:
+        """One generated profile file: restore the ORIGINAL ``$HOME``, source
+        the user's own counterpart file (so image/user setup isn't lost), then
+        re-prepend the mock dirs.
+
+        The env HOME pointing at the generated dir exists ONLY so bash selects
+        this file; exporting the original home back on the first line keeps
+        every ``$HOME`` consumer (git, npm, the sourced profile's own
+        ``$HOME/.bashrc`` references) on the real home.
+
+        ``.bash_profile`` mimics bash's first-found chain over the original
+        home; the ``.profile`` twin (read by ``sh``/``dash`` login shells)
+        sources only ``.profile`` — the bash-specific files may contain
+        bashisms a POSIX shell would choke on.
+
+        The zsh files each source their exact counterpart from the user's real
+        zsh dotfile dir (``original_zdotdir``) - zsh reads ALL of its startup
+        files, not a first-found chain. ``.zshenv`` additionally re-pins
+        ZDOTDIR to the generated home AFTER sourcing: the user's ``.zshenv``
+        may redefine ZDOTDIR, which would steer the rest of the startup chain
+        away from the generated ``.zprofile``/``.zshrc``. Each zsh file
+        re-prepends because /etc/zprofile resets PATH BETWEEN ``.zshenv`` and
+        ``.zprofile``, and a sourced user file may reset it again; a duplicate
+        PATH entry is harmless, a lost prepend is contamination.
+        """
+        lines = [
+            "# Generated by coder_eval (CodexAgent): the system profile chain resets",
+            "# PATH in login shells, dropping the mock-CLI prepend - this restores it.",
+        ]
+        if original_home:
+            orig = shlex.quote(original_home)
+            lines.append(f"export HOME={orig}")
+        if profile_name in _ZSH_PROFILE_NAMES:
+            if original_zdotdir:
+                origz = shlex.quote(original_zdotdir)
+                lines += [
+                    f"if [ -r {origz}/{profile_name} ]; then . {origz}/{profile_name}",
+                    "fi",
+                ]
+            if profile_name == ".zshenv" and generated_home:
+                lines.append(f"export ZDOTDIR={shlex.quote(generated_home)}")
+        elif original_home:
+            orig = shlex.quote(original_home)
+            if profile_name == ".bash_profile":
+                lines += [
+                    f"if [ -r {orig}/.bash_profile ]; then . {orig}/.bash_profile",
+                    f"elif [ -r {orig}/.bash_login ]; then . {orig}/.bash_login",
+                    f"elif [ -r {orig}/.profile ]; then . {orig}/.profile",
+                    "fi",
+                ]
+            else:
+                lines += [
+                    f"if [ -r {orig}/.profile ]; then . {orig}/.profile",
+                    "fi",
+                ]
+        lines.append(export_line)
+        return "\n".join(lines) + "\n"
+
+    def _cleanup_login_shell_home(self) -> None:
+        """Remove the generated per-task HOME (best-effort, idempotent)."""
+        home, self._login_shell_home = self._login_shell_home, None
+        if home is None:
+            return
+        shutil.rmtree(home, ignore_errors=True)
 
     def _build_thread_options(self) -> dict[str, Any]:
         """Build thread_start options from agent config.
@@ -1090,29 +1256,30 @@ class CodexAgent(Agent[CodexAgentConfig]):
             options["model"] = effective_model
             self._log.debug(f"Codex model pinned to {effective_model}")
 
-        # Map permission_mode to sandbox and approval_mode
         permission_mode = self.config.permission_mode.value
-        sandbox_mode_str = _PERMISSION_MODE_TO_SANDBOX.get(permission_mode, "workspace-write")
         approval_mode_str = _CODEX_APPROVAL_MODE
 
-        # Codex's read-only / workspace-write sandboxes are enforced by a Landlock
-        # helper that can't initialize inside the eval's docker container — its
-        # writes/execs then fail silently and the agent produces no artifacts
-        # (FAILURE with score 0, no loud error). When the harness already provides
-        # container isolation (docker driver, signalled by CODER_EVAL_IN_CONTAINER),
-        # the in-process sandbox is both redundant and broken, so fall back to
-        # full-access: the container IS the trust boundary. No-op on the host
-        # (tempdir/host runs), where Landlock works and the marker is unset.
-        if sandbox_mode_str != "full-access" and os.getenv("CODER_EVAL_IN_CONTAINER"):
-            self._log.warning(
-                f"Codex sandbox '{sandbox_mode_str}' can't initialize inside the eval container "
-                + "(Landlock unavailable); using 'full-access' — the container provides isolation."
-            )
-            sandbox_mode_str = "full-access"
-
-        # Convert to Codex SDK enum values
-        # Sandbox enum values use hyphens, ApprovalMode uses underscores
-        options["sandbox"] = Sandbox(sandbox_mode_str)
+        # Codex always runs full-access. coder_eval owns this run's isolation
+        # boundary either way — a docker container (docker driver) or an ephemeral
+        # per-task tempdir it creates and discards (tempdir driver); those are the
+        # only two drivers — so Codex's own in-process OS sandbox (Landlock/seatbelt)
+        # is always redundant. Worse, it actively breaks on the paths we rely on:
+        # inside the container Landlock is unavailable, on constrained CI agents the
+        # bwrap re-exec is denied ("bwrap: execvp .../codex: Permission denied"), and
+        # on Windows there is no OS sandbox at all — in each case a read-only /
+        # workspace-write run fails its writes/execs silently and scores 0 with no
+        # loud error. Dropping to full-access matches Claude Code and Antigravity,
+        # which run with no in-agent OS sandbox; hard isolation of untrusted actions
+        # is the docker driver's job, and approval_mode stays deny_all regardless.
+        #
+        # Consequence: permission_mode does NOT confine Codex — every mode resolves
+        # to full-access. The docker driver is the only OS-level write boundary here;
+        # the tempdir/host driver is a working directory, not a confinement boundary
+        # (same as Claude Code / Antigravity already run there), so adversarial or
+        # untrusted evals belong on the docker driver. _log_config_enforcement
+        # surfaces this. full-access (danger-full-access) also keeps network on, so
+        # tool installs (the UiPath CLI, npm/pip) work without extra sandbox config.
+        options["sandbox"] = Sandbox.full_access
         options["approval_mode"] = ApprovalMode(approval_mode_str)
 
         # For logging, use the enum names (which use underscores)
@@ -1123,14 +1290,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         # Build config dict for tool enforcement
         tool_config: dict[str, Any] = {}
-
-        # Codex's workspace-write sandbox disables network by default, so any
-        # tool the agent needs to install (npm/pip/etc.) fails with
-        # "fetch failed". Always open network in workspace-write — every task
-        # we exercise needs the UiPath CLI / package installs. Read-only and
-        # danger-full-access keep their built-in network defaults.
-        if sandbox_mode_str == "workspace-write":
-            tool_config["sandbox_workspace_write"] = {"network_access": True}
 
         if self.config.allowed_tools:
             enabled_tools = [_CLAUDE_TO_CODEX_TOOL_MAP.get(tool, tool) for tool in self.config.allowed_tools]
@@ -1195,11 +1354,17 @@ class CodexAgent(Agent[CodexAgentConfig]):
             self._log.debug(f"Disallowed tools: {', '.join(self.config.disallowed_tools)}")
 
         self._log.debug(f"Permission mode: {self.config.permission_mode.value}")
-        if self.config.permission_mode.value == "bypassPermissions":
-            self._log.warning(
-                "[SECURITY] bypassPermissions grants unrestricted sandbox access (full-access). "
-                + "Only use in fully isolated environments with untrusted code execution disabled."
-            )
+        # Codex always runs full-access regardless of permission_mode (see
+        # _build_thread_options — its in-process OS sandbox is redundant given
+        # coder_eval's docker/tempdir boundary and unusable on our CI hosts). The
+        # notice fires for EVERY mode, not just bypassPermissions, so operators are
+        # not misled that plan/acceptEdits/default confine Codex — none of them do.
+        self._log.warning(
+            "[SECURITY] Codex runs full-access on every permission_mode "
+            + f"(configured: {self.config.permission_mode.value}); permission_mode does not confine it. "
+            + "OS-level isolation of untrusted code is the docker driver's job — use it for "
+            + "adversarial or untrusted evals; the tempdir/host driver is not a confinement boundary."
+        )
 
     def _format_turn_result(self, turn_result: Any) -> str:
         """Format a Codex Turn to a readable string — fallback when no text streamed.

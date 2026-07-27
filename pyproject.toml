@@ -1,6 +1,6 @@
 [project]
 name = "coder-eval"
-version = "0.8.6"
+version = "0.8.10"
 description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity) with sandboxed, reproducible YAML task suites."
 readme = "README.md"
 license = "Apache-2.0"
@@ -10,8 +10,9 @@ keywords = [
     "ai", "llm", "agent", "coding-agent", "evaluation", "eval", "evals",
     "benchmark", "swe-bench", "claude", "claude-code", "codex", "anthropic",
     "gemini", "antigravity", "sandbox", "code-generation", "agent-evaluation",
-    "llm-evaluation", "skills-evaluation", "claude-skills", "agent-skills",
-    "skillsbench",
+    "llm-evaluation", "llm-eval", "ai-evaluation", "skills-evaluation",
+    "claude-skills", "claude-code-skills", "agent-skills", "skillsbench",
+    "agent-testing", "llmops",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -34,7 +35,7 @@ dependencies = [
     "rich>=14.3.3",
     "python-dotenv>=1.2.2",
     "anthropic>=0.86.0",
-    "claude-agent-sdk>=0.2.82",
+    "claude-agent-sdk>=0.2.124",
     "anyio>=4.13.0",
     "radon>=6.0.1",
     "tqdm>=4.67.3",
@@ -50,9 +51,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/UiPath/coder_eval"
+Homepage = "https://coder-eval.com"
 Repository = "https://github.com/UiPath/coder_eval"
-Documentation = "https://github.com/UiPath/coder_eval/tree/main/docs"
+Documentation = "https://coder-eval.com/docs"
 Issues = "https://github.com/UiPath/coder_eval/issues"
 Changelog = "https://github.com/UiPath/coder_eval/blob/main/CHANGELOG.md"
 
@@ -69,6 +70,7 @@ dev = [
     "pip-audit>=2.10.0",
     "bandit[toml]>=1.9.4",
     "pre-commit>=4.5.1",
+    "defusedxml>=0.7.1",  # test-side JUnit XML round-trip parsing (defense-in-depth; production code never parses XML)
 ]
 # Optional extra that enables UiPath-specific features:
 #   - the `uipath` Python SDK on the host (handy for local sandbox parity with
@@ -85,19 +87,24 @@ uipath = [
 # Without this extra, the framework still installs and runs; Codex-dependent
 # code paths fail at dispatch with a clear hint pointing back here.
 codex = [
-    "openai-codex>=0.1.0b3",
+    "openai-codex>=0.144.4",
 ]
 # Optional extra that enables Antigravity agent support:
 #   - AntigravityAgent implementation using Google's official google-antigravity SDK
 #     (drives the bundled `localharness` binary, authenticated via GEMINI_API_KEY).
 # Pinned exactly: the harness binary is a dominant non-model driver of eval results,
 # so it travels with the coder_eval release tag and is bumped deliberately (mirrors
-# the claude-code CLI / codex cli-bin pins). The wheel ships platform-specific
-# (manylinux x86_64 + aarch64, macOS, Windows), so CI/Linux/Docker installs work.
+# the claude-code CLI / codex cli-bin pins).
+# glibc note — verify before bumping: the wheel's manylinux_2_17 tag is NOT a
+# reliable floor; the bundled `localharness` ELF can require a newer glibc than the
+# tag advertises. Eval agents run on Ubuntu 22.04 (glibc 2.35), so the pinned build
+# must load there. 0.1.7 links without DT_RELR (max required symbol GLIBC_2.26) and
+# loads on 2.35+; confirm any future pin does too (readelf -d | grep RELR must be
+# empty / max GLIBC symbol <= the oldest target's glibc).
 # Without this extra the framework still installs and runs; Antigravity-dependent
 # code paths fail at start() with a clear hint pointing back here.
 antigravity = [
-    "google-antigravity==0.1.5",
+    "google-antigravity==0.1.7",
 ]
 
 [project.scripts]
@@ -129,12 +136,14 @@ packages = ["src/coder_eval"]
 allow-direct-references = true
 
 [tool.uv]
-# openai-codex 0.1.0b3 hardpins `openai-codex-cli-bin==0.137.0a4`, a
-# PRE-RELEASE. Because that pin is transitive (not referenced directly by us),
-# uv won't select it without an explicit opt-in. Naming it here as an override
-# both enables the pre-release and documents the pinned cli-bin build; 0.137.0a4
-# publishes manylinux wheels (x86_64 + aarch64), so CI/Linux installs work.
-override-dependencies = ["openai-codex-cli-bin==0.137.0a4"]
+# openai-codex 0.144.4 hardpins `openai-codex-cli-bin==0.144.4` (a stable
+# release; the SDK version now tracks the codex CLI version line). Naming it
+# here documents and holds the pinned cli-bin build — the harness binary is a
+# dominant non-model driver of eval results, so it travels with the coder_eval
+# release tag and is bumped deliberately (mirrors the antigravity localharness
+# and claude-code CLI pins). 0.144.4 publishes manylinux wheels (x86_64 +
+# aarch64), so CI/Linux installs work.
+override-dependencies = ["openai-codex-cli-bin==0.144.4"]
 
 constraint-dependencies = [
     # Fix known CVEs in transitive dependencies

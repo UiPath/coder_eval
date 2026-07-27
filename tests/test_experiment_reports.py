@@ -748,6 +748,102 @@ class TestStatisticalHelpers:
 
         assert welch_t_test([1.0], [2.0]) is None
 
+    def test_welch_t_test_exact_reference_value(self):
+        """Exact Student-t p-value, cross-checked against scipy ttest_ind(equal_var=False)."""
+        from coder_eval.reports_stats import welch_t_test
+
+        # Equal variances 2.5, n=5 each ⇒ t=1.0, Welch-Satterthwaite df=8.
+        p = welch_t_test([1.0, 2.0, 3.0, 4.0, 5.0], [2.0, 3.0, 4.0, 5.0, 6.0])
+        assert p is not None
+        assert abs(p - 0.34659) < 5e-4
+
+    def test_welch_t_test_zero_variance_different_means(self):
+        """Zero variance in both groups: deterministic difference ⇒ 0.0, identical ⇒ 1.0."""
+        from coder_eval.reports_stats import welch_t_test
+
+        assert welch_t_test([1.0, 1.0], [2.0, 2.0]) == 0.0
+        assert welch_t_test([1.0, 1.0], [1.0, 1.0]) == 1.0
+
+    def test_student_t_two_tailed_p_small_df_not_normal(self):
+        """Small df must use t tails, not normal ones — the regression sensor for the old bug."""
+        from coder_eval.reports_stats import student_t_two_tailed_p
+
+        p = student_t_two_tailed_p(2.5, 4.0)
+        assert abs(p - 0.06677) < 5e-4
+        # The old normal approximation reported 0.0124 here — falsely significant.
+        assert p > 0.05
+
+    def test_student_t_two_tailed_p_critical_values(self):
+        """Round-trip the standard t-table critical values."""
+        from coder_eval.reports_stats import student_t_two_tailed_p
+
+        assert abs(student_t_two_tailed_p(2.776, 4.0) - 0.05) < 1e-3
+        assert abs(student_t_two_tailed_p(2.228, 10.0) - 0.05) < 1e-3
+        assert abs(student_t_two_tailed_p(0.0, 7.0) - 1.0) < 1e-12
+        # Degenerate df is not reachable through the t-tests, but the helper stays total.
+        assert student_t_two_tailed_p(1.0, 0.0) == 1.0
+
+    def test_student_t_two_tailed_p_large_df_matches_normal(self):
+        """At huge df the t distribution converges to the normal."""
+        import statistics
+
+        from coder_eval.reports_stats import student_t_two_tailed_p
+
+        normal_p = 2.0 * statistics.NormalDist().cdf(-1.96)
+        assert abs(student_t_two_tailed_p(1.96, 1e6) - normal_p) < 1e-5
+
+    def test_regularized_incomplete_beta_closed_forms(self):
+        """I_x(a,b) against the closed forms it has for b=1, a=1, and the symmetric point."""
+        from coder_eval.reports_stats import regularized_incomplete_beta
+
+        assert abs(regularized_incomplete_beta(2.0, 1.0, 0.3) - 0.3**2) < 1e-10
+        assert abs(regularized_incomplete_beta(1.0, 3.0, 0.4) - (1.0 - 0.6**3)) < 1e-10
+        assert abs(regularized_incomplete_beta(5.0, 5.0, 0.5) - 0.5) < 1e-10
+        assert regularized_incomplete_beta(2.0, 3.0, 0.0) == 0.0
+        assert regularized_incomplete_beta(2.0, 3.0, 1.0) == 1.0
+
+    def test_paired_t_test_exact_reference_value(self):
+        """Exact paired-t p-value, cross-checked against scipy ttest_rel."""
+        from coder_eval.reports_stats import paired_t_test, welch_t_test
+
+        a = [0.9, 0.5, 0.8, 0.7, 0.95]
+        b = [0.7, 0.55, 0.6, 0.72, 0.8]
+        p_paired = paired_t_test(a, b)
+        assert p_paired is not None
+        assert abs(p_paired - 0.15273) < 5e-4
+        # On positively correlated pairs like these, pairing is the sharper test —
+        # but that is a property of this data, not a guarantee (it loses df).
+        p_welch = welch_t_test(a, b)
+        assert p_welch is not None
+        assert p_paired < p_welch
+
+    def test_paired_t_test_constant_shift_and_identical(self):
+        """Zero-sd differences: deterministic shift ⇒ 0.0, identical lists ⇒ 1.0."""
+        from coder_eval.reports_stats import paired_t_test
+
+        assert paired_t_test([1.0, 2.0, 3.0, 4.0, 5.0], [2.0, 3.0, 4.0, 5.0, 6.0]) == 0.0
+        assert paired_t_test([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]) == 1.0
+
+    def test_paired_t_test_invalid_input(self):
+        """Length mismatch or fewer than 2 pairs returns None."""
+        from coder_eval.reports_stats import paired_t_test
+
+        assert paired_t_test([1.0, 2.0], [1.0]) is None
+        assert paired_t_test([1.0], [2.0]) is None
+
+    def test_non_finite_inputs_never_report_significance(self):
+        """NaN/inf must not produce a fabricated p-value — fail closed, never significant."""
+        from coder_eval.reports_stats import fmt_p, paired_t_test, student_t_two_tailed_p, welch_t_test
+
+        nan, inf = float("nan"), float("inf")
+        assert student_t_two_tailed_p(nan, 4.0) == 1.0
+        assert student_t_two_tailed_p(2.5, nan) == 1.0
+        assert student_t_two_tailed_p(inf, 4.0) == 1.0
+        # The list-taking helpers can say "no result", which renders as an em dash.
+        assert welch_t_test([1.0, nan], [2.0, 3.0]) is None
+        assert paired_t_test([1.0, nan], [2.0, 3.0]) is None
+        assert fmt_p(welch_t_test([1.0, inf], [2.0, 3.0])) == "—"
+
     def test_mean_and_stddev(self):
         """Basic mean and stddev calculations."""
         from coder_eval.reports_stats import mean, stddev
@@ -1067,25 +1163,27 @@ class TestReplicateStatistics:
         assert "Pass-rate" in md
 
     def test_paired_diff_line_for_two_variants_equal_counts(self):
+        # Two tasks: the paired section pairs their per-task means (n = 2 tasks).
         per_rep = {
-            "a": {"task-1": [0.9, 0.85, 0.95]},
-            "b": {"task-1": [0.6, 0.65, 0.7]},
+            "a": {"task-1": [0.9, 0.85, 0.95], "task-2": [0.7, 0.75, 0.8]},
+            "b": {"task-1": [0.6, 0.65, 0.7], "task-2": [0.5, 0.55, 0.6]},
         }
         result = self._make_result(replicate_count=3, per_replicate_scores=per_rep)
         md = ExperimentReportGenerator.generate_experiment_report(result)
         assert "Paired mean diff" in md
         assert "Cohen's d" in md
 
-    def test_paired_diff_skipped_when_unequal_counts_across_tasks(self):
-        # Variant a has 3 replicates for task-1, variant b has 5 → paired skipped
+    def test_paired_diff_needs_two_common_tasks(self):
+        # Unequal replicate counts no longer exclude a task, but one task is still
+        # a single pair — too few for a paired comparison.
         per_rep = {
             "a": {"task-1": [0.9, 0.85, 0.95]},
             "b": {"task-1": [0.6, 0.65, 0.7, 0.75, 0.8]},
         }
         result = self._make_result(replicate_count=3, per_replicate_scores=per_rep)
         md = ExperimentReportGenerator.generate_experiment_report(result)
-        assert "Paired statistics skipped" in md
-        assert "unequal replicate counts" in md
+        assert "needs at least 2 tasks" in md
+        assert "Paired mean diff" not in md
 
     def test_no_paired_diff_for_single_variant(self):
         per_rep = {"only": {"task-1": [0.7, 0.8, 0.9]}}
@@ -1117,11 +1215,272 @@ class TestReplicateStatistics:
         assert "Score 95% CI" not in md
 
 
+class TestCollectVariantSeries:
+    """The one series collector both reporters share."""
+
+    @staticmethod
+    def _result_with_replicates() -> ExperimentResult:
+        """One task per variant, 3 replicates, 90s summed ⇒ 30s per run."""
+        return ExperimentResult(
+            experiment_id="exp",
+            description="d",
+            variant_ids=["a"],
+            task_summaries=[
+                TaskExperimentSummary(
+                    task_id="t1",
+                    variant_results=[
+                        VariantResult(
+                            variant_id="a",
+                            task_id="t1",
+                            weighted_score=0.8,
+                            final_status="SUCCESS",
+                            duration_seconds=90.0,
+                            replicate_count=3,
+                        )
+                    ],
+                    best_variant="a",
+                    score_spread=0.0,
+                )
+            ],
+            variant_aggregates={
+                "a": VariantAggregate(
+                    variant_id="a",
+                    tasks_run=1,
+                    tasks_succeeded=1,
+                    tasks_failed=0,
+                    tasks_error=0,
+                    average_score=0.8,
+                    average_duration=30.0,
+                    replicate_count=3,
+                )
+            },
+            total_duration_seconds=90.0,
+        )
+
+    def test_duration_is_per_run_not_replicate_inflated(self):
+        """duration_seconds is summed across replicates, so it must be divided out."""
+        from coder_eval.reports_stats import collect_variant_series
+
+        series = collect_variant_series(self._result_with_replicates())
+        assert series["a"].durations == [30.0]
+
+    def test_html_and_markdown_report_the_same_duration(self):
+        """Regression: the HTML copy of this collector used the raw summed duration."""
+        from coder_eval.reports_html import _experiment_aggregate_metrics
+
+        result = self._result_with_replicates()
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        html = _experiment_aggregate_metrics(result)
+        assert "| Avg Duration (s) | 30.0 |" in md
+        assert "<td>30.0</td>" in html
+        assert "90.0" not in html
+
+    def test_result_for_unknown_variant_is_ignored(self):
+        """A task result naming a variant outside variant_ids must not raise."""
+        from coder_eval.reports_stats import collect_variant_series
+
+        result = self._result_with_replicates()
+        result.task_summaries[0].variant_results.append(
+            VariantResult(
+                variant_id="ghost",
+                task_id="t1",
+                weighted_score=0.1,
+                final_status="SUCCESS",
+                duration_seconds=1.0,
+            )
+        )
+        series = collect_variant_series(result)
+        assert set(series) == {"a"}
+
+
+class TestPairedComparisonSection:
+    """Tests for the ``## Paired Comparison`` markdown section."""
+
+    @staticmethod
+    def _make_result(
+        variant_ids: list[str],
+        per_replicate_scores: dict[str, dict[str, list[float]]],
+    ) -> ExperimentResult:
+        task_ids = sorted({tid for per_task in per_replicate_scores.values() for tid in per_task})
+        return ExperimentResult(
+            experiment_id="exp",
+            description="d",
+            variant_ids=variant_ids,
+            task_summaries=[
+                TaskExperimentSummary(
+                    task_id=task_id,
+                    variant_results=[
+                        VariantResult(
+                            variant_id=vid,
+                            task_id=task_id,
+                            weighted_score=next(iter(per_replicate_scores.get(vid, {}).get(task_id, [])), 0.0),
+                            final_status="SUCCESS",
+                            duration_seconds=1.0,
+                        )
+                        for vid in variant_ids
+                    ],
+                    best_variant=variant_ids[0],
+                    score_spread=0.1,
+                )
+                for task_id in task_ids
+            ],
+            variant_aggregates={
+                vid: VariantAggregate(
+                    variant_id=vid,
+                    tasks_run=len(task_ids),
+                    tasks_succeeded=len(task_ids),
+                    tasks_failed=0,
+                    tasks_error=0,
+                    average_score=0.5,
+                    average_duration=1.0,
+                )
+                for vid in variant_ids
+            },
+            total_duration_seconds=10.0,
+            per_replicate_scores=per_replicate_scores,
+        )
+
+    def test_paired_comparison_section_two_variants_single_replicate(self):
+        """A single-replicate 2-variant experiment gets the paired section (no replicate gate)."""
+        result = self._make_result(
+            ["a", "b"],
+            {
+                "a": {"t1": [0.9], "t2": [0.5], "t3": [0.8]},
+                "b": {"t1": [0.7], "t2": [0.55], "t3": [0.6]},
+            },
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "## Paired Comparison" in md
+        assert "**Paired mean diff (a - b)**" in md
+        assert ", p = " in md
+        assert "Cohen's d" in md
+        # Single replicate ⇒ no Replicate Statistics section, but paired still renders.
+        assert "## Replicate Statistics" not in md
+
+    def test_paired_comparison_section_absent(self):
+        """3 variants, or an empty per_replicate_scores, render no paired section."""
+        three = self._make_result(
+            ["a", "b", "c"],
+            {"a": {"t1": [0.9]}, "b": {"t1": [0.7]}, "c": {"t1": [0.6]}},
+        )
+        assert "## Paired Comparison" not in ExperimentReportGenerator.generate_experiment_report(three)
+
+        empty = self._make_result(["a", "b"], {})
+        empty.task_summaries = [
+            TaskExperimentSummary(
+                task_id="t1",
+                variant_results=[
+                    VariantResult(
+                        variant_id=vid,
+                        task_id="t1",
+                        weighted_score=0.5,
+                        final_status="SUCCESS",
+                        duration_seconds=1.0,
+                    )
+                    for vid in ("a", "b")
+                ],
+                best_variant="a",
+                score_spread=0.0,
+            )
+        ]
+        assert "## Paired Comparison" not in ExperimentReportGenerator.generate_experiment_report(empty)
+
+    def test_paired_comparison_averages_replicates_per_task(self):
+        """Replicates are averaged per task, so n is the task count — not the slot count."""
+        result = self._make_result(
+            ["a", "b"],
+            {
+                "a": {"t1": [0.8, 1.0], "t2": [0.4, 0.6]},
+                "b": {"t1": [0.5, 0.7], "t2": [0.2, 0.4]},
+            },
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "per-task mean score of 2 task(s) common to both variants" in md
+        # Task means: a = [0.9, 0.5], b = [0.6, 0.3] ⇒ diffs [+0.3, +0.2], mean +0.250.
+        assert "**Paired mean diff (a - b)**: +0.250" in md
+
+    def test_paired_comparison_single_common_task(self):
+        """One common task ⇒ the section explains why there is no paired result."""
+        result = self._make_result(
+            ["a", "b"],
+            {"a": {"t1": [0.9, 0.85, 0.95]}, "b": {"t1": [0.6, 0.65, 0.7]}},
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "## Paired Comparison" in md
+        assert "*A paired comparison needs at least 2 tasks common to a and b; found 1.*" in md
+        assert "Paired mean diff" not in md
+
+    def test_paired_comparison_keeps_tasks_with_unequal_replicate_counts(self):
+        """Pairing per-task means needs no equal replicate counts — no task is dropped."""
+        result = self._make_result(
+            ["a", "b"],
+            {
+                "a": {"t1": [0.5, 0.7], "t2": [0.4], "t3": [0.8]},
+                "b": {"t1": [0.5], "t2": [0.45], "t3": [0.7]},
+            },
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "per-task mean score of 3 task(s) common to both variants" in md
+        assert "excluded" not in md
+        # Task means: a = [0.6, 0.4, 0.8], b = [0.5, 0.45, 0.7] ⇒ diffs [+0.1, -0.05, +0.1].
+        assert "**Paired mean diff (a - b)**: +0.050" in md
+
+    def test_html_renders_the_same_paired_numbers_as_markdown(self):
+        """Both reporters render one shared computation, so they cannot disagree."""
+        from coder_eval.reports_html import _experiment_paired_comparison
+
+        result = self._make_result(
+            ["a", "b"],
+            {"a": {"t1": [0.9], "t2": [0.5], "t3": [0.8]}, "b": {"t1": [0.7], "t2": [0.55], "t3": [0.6]}},
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        html = _experiment_paired_comparison(result)
+        assert "<h2>Paired Comparison</h2>" in html
+        # Cohen's apostrophe is HTML-escaped, so match the numbers either side of it.
+        for fragment in ("Paired mean diff (a - b): +0.117", "d = 0.81", "p = 0.296"):
+            assert fragment in html
+        assert "**Paired mean diff (a - b)**: +0.117 [95% CI -0.242, +0.475], Cohen's d = 0.81, p = 0.296" in md
+
+    def test_html_paired_section_absent_for_three_variants(self):
+        from coder_eval.reports_html import _experiment_paired_comparison
+
+        result = self._make_result(
+            ["a", "b", "c"],
+            {"a": {"t1": [0.9]}, "b": {"t1": [0.7]}, "c": {"t1": [0.6]}},
+        )
+        assert _experiment_paired_comparison(result) == ""
+
+    def test_paired_ci_agrees_with_p_value(self):
+        """The interval and the p-value share a distribution, so they agree about 0."""
+        result = self._make_result(
+            ["a", "b"],
+            {
+                "a": {"t1": [0.9], "t2": [0.85], "t3": [0.95], "t4": [0.9]},
+                "b": {"t1": [0.2], "t2": [0.25], "t3": [0.15], "t4": [0.3]},
+            },
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        # A large, consistent gap ⇒ p well below 0.05 and a CI clear of zero.
+        assert "p = <0.001" in md
+        assert "[95% CI +0." in md
+
+    def test_paired_comparison_ignores_tasks_with_no_scores(self):
+        """A task with an empty replicate list on either side is not a pair, and the
+        exclusion is surfaced in the rendered note."""
+        result = self._make_result(
+            ["a", "b"],
+            {"a": {"t1": [0.9], "t2": [0.5], "t3": []}, "b": {"t1": [0.7], "t2": [0.6], "t3": [0.4]}},
+        )
+        md = ExperimentReportGenerator.generate_experiment_report(result)
+        assert "per-task mean score of 2 task(s) common to both variants" in md
+        assert "(1 task(s) excluded — not scored by both variants)" in md
+
+
 class TestExperimentReportSnapshots:
     """Byte-identical characterization snapshots for generate_experiment_report — the
-    safety net for its decomposition. Output is deterministic: bootstrap_mean_ci /
-    paired_bootstrap_diff_ci in reports_stats use a fixed default seed, so no scrubbing
-    is needed (do not pass a varying seed)."""
+    safety net for its decomposition. Output is deterministic: bootstrap_mean_ci in
+    reports_stats uses a fixed default seed, so no scrubbing is needed (do not pass a
+    varying seed); the paired section is closed-form Student-t with no randomness."""
 
     def test_experiment_report_snapshot_2variant(self):
         """2 variants → p-value column shown; plus prompt config, budget sub-rows,
@@ -1217,6 +1576,10 @@ class TestExperimentReportSnapshots:
                 ),
             },
             total_duration_seconds=180.0,
+            per_replicate_scores={
+                "baseline": {"task-a": [0.9], "task-b": [0.5]},
+                "mutated": {"task-a": [0.7], "task-b": [0.95]},
+            },
         )
         md = ExperimentReportGenerator.generate_experiment_report(result, experiment=experiment)
         assert_matches_snapshot(md, "experiment_2variant.md")

@@ -139,6 +139,29 @@ class TestComputeSuiteRollup:
         ids = sorted(s.row_id for s in rollup.failed_samples if s.row_id is not None)
         assert ids == ["r2", "r3"]
 
+    def test_informational_criterion_is_not_a_failure_reason(self, tmp_path: Path) -> None:
+        """A weight-0 criterion cannot fail a row, so it must not explain one.
+
+        The row here fails on its gating criterion; the informational one also
+        scored 0. Only the gating miss may appear in failure_reasons — otherwise
+        the sample tells a reviewer to go fix a criterion that never gated.
+        """
+        row = _make_row(
+            suite_id="s",
+            row_id="r1",
+            final_status=FinalStatus.FAILURE,
+            weighted_score=0.0,
+            criteria=[("file_exists", 0.0, None), ("skill_triggered", 0.0, None)],
+        )
+        row.result.success_criteria_results[1].gating = False
+        row.result.success_criteria_results[0].details = "gating miss"
+        row.result.success_criteria_results[1].details = "informational miss"
+
+        rollup = _compute_suite_rollup("s", "v1", [row], tmp_path)
+
+        reasons = rollup.failed_samples[0].failure_reasons
+        assert reasons == ["gating miss"]
+
     def test_per_criterion_stats_averaging(self, tmp_path: Path) -> None:
         rows = [
             _make_row(

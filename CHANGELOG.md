@@ -2,6 +2,327 @@
 
 <!-- version list -->
 
+## v0.8.10 (2026-07-24)
+
+### Bug Fixes
+
+- Remove dead SimulationConfig.parallel_trials; add CE031 to guard the class
+  ([`947acd3`](https://github.com/UiPath/coder_eval/commit/947acd34a4f0451c69cb7bf0eb863127b9995f76))
+
+- **early-stop**: Add stop_when 'auto' — per-instance arming + pass-armed-subset stop rule
+  ([#51](https://github.com/UiPath/coder_eval/pull/51),
+  [`08e21e6`](https://github.com/UiPath/coder_eval/commit/08e21e67b67fdab84d26b8a0e5551e04289d92a8))
+
+- **early-stop**: Defer fail-stop while a pass-armed criterion is undecided
+  ([#51](https://github.com/UiPath/coder_eval/pull/51),
+  [`08e21e6`](https://github.com/UiPath/coder_eval/commit/08e21e67b67fdab84d26b8a0e5551e04289d92a8))
+
+- **early-stop**: Return assert_never explicitly to satisfy CodeQL
+  ([#51](https://github.com/UiPath/coder_eval/pull/51),
+  [`08e21e6`](https://github.com/UiPath/coder_eval/commit/08e21e67b67fdab84d26b8a0e5551e04289d92a8))
+
+- **reports**: Code review fixes for the JUnit CI gate
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+- **reports**: JUnit CI-gate review fixes + CE027 env-var lint
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+- **reports**: Make skipped-task JUnit names platform-independent
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+### Chores
+
+- Re-trigger CI (GitHub dropped the force-push event)
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+- **deps**: Lock defusedxml (dev-only, test-side XML parsing)
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+### Continuous Integration
+
+- Disable Docs gh-pages auto-publish on push (Pages not enabled yet)
+  ([`c289d46`](https://github.com/UiPath/coder_eval/commit/c289d46c5cec269f205224e4dfce27affab5557e))
+
+### Documentation
+
+- 1/8 — add DATASETS.md and a task-schema dataset: section
+  ([`e3d37ac`](https://github.com/UiPath/coder_eval/commit/e3d37ac793e6f12c020b71a4ed19df2279b4b2c1))
+
+- 2/8 — retire BYOD.md into DOCKER_ISOLATION.md
+  ([`1a4a2a5`](https://github.com/UiPath/coder_eval/commit/1a4a2a5893639d14832dbd1614163aa7c18bf70a))
+
+- 3/8 — one complete run_limits reference; document skip
+  ([`bcb7e24`](https://github.com/UiPath/coder_eval/commit/bcb7e24132c229114efe9a38281a37e736d83312))
+
+- 4/8 — add DIALOG_MODE.md and correct four stale simulation claims
+  ([`18dcbe9`](https://github.com/UiPath/coder_eval/commit/18dcbe95d156856149538406ededc8c75ec594f8))
+
+- 5/8 — fix prompt_mutations example; add CE029
+  ([`b524009`](https://github.com/UiPath/coder_eval/commit/b5240099c58f5b50c7b5fe531a12f1f8b98aec29))
+
+- 7/8 — generate flat indexes from the mkdocs nav; add CE028
+  ([`1514bcb`](https://github.com/UiPath/coder_eval/commit/1514bcb8f075ed48f2857a84269513c60878ea81))
+
+- Add CI Gate reference (GitHub Action + JUnit) and wire into indexes
+  ([`b8c6301`](https://github.com/UiPath/coder_eval/commit/b8c63018bd93ba91751511d95f4af96a444d9873))
+
+- Agent guides, extending & report-schema references, and fixes
+  ([`ce74824`](https://github.com/UiPath/coder_eval/commit/ce74824bde2b5322dc745bace045e1806f77324b))
+
+- Fold nav long tail into one Advanced group; align index ordering
+  ([`e2ff053`](https://github.com/UiPath/coder_eval/commit/e2ff0539af8c9e3e6deb85c0a0124c0232224033))
+
+- Point docs links to coder-eval.com/docs; drop Ruff badge
+  ([`60430e5`](https://github.com/UiPath/coder_eval/commit/60430e5e857f0af6fbf08cde00f0621de4610562))
+
+- Point pyproject Documentation URL to coder-eval.com/docs
+  ([`be39df2`](https://github.com/UiPath/coder_eval/commit/be39df23c8ba1a0f6f945dc99e3827eb5d6f2772))
+
+- Reword CODER_EVAL_RAW_SDK_LOG to prose form (satisfy CE027)
+  ([`d7d5b59`](https://github.com/UiPath/coder_eval/commit/d7d5b59b990127810fcfe33272f3ff733a9498cd))
+
+- Use the brand name "Coder Eval" in prose and titles
+  ([`821f11b`](https://github.com/UiPath/coder_eval/commit/821f11bf94762f6578913090568f5b092e237596))
+
+### Features
+
+- Packaged CI gate — JUnit XML output + composite GitHub Action
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+- **action**: Generic env passthrough + minimum-task-score gate
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+- **ci**: 3/3 — publish composite action, release automation, PR dogfood
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+- **cli**: 2/3 — wire run --junit-xml and report -f junit
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+- **reports**: 1/3 — add reports_junit.py disk-driven JUnit XML writer
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+### Testing
+
+- 6/8 — CE030 documents-or-exempts model fields
+  ([`c9a3b16`](https://github.com/UiPath/coder_eval/commit/c9a3b160deeec385386a7009812025bc26021363))
+
+
+## v0.8.9 (2026-07-23)
+
+### Bug Fixes
+
+- Code review fixes for welch-t-test-exact ([#38](https://github.com/UiPath/coder_eval/pull/38),
+  [`6df6e9b`](https://github.com/UiPath/coder_eval/commit/6df6e9bb1f3bd009592185ec3473e8f2e67d3816))
+
+- Render weight:0 criteria as informational on every display surface
+  ([#34](https://github.com/UiPath/coder_eval/pull/34),
+  [`9a34e90`](https://github.com/UiPath/coder_eval/commit/9a34e90bba2854316149cad61613a75dd3bd91e4))
+
+- Weight:0 un-gates criteria (informational criteria)
+  ([#34](https://github.com/UiPath/coder_eval/pull/34),
+  [`9a34e90`](https://github.com/UiPath/coder_eval/commit/9a34e90bba2854316149cad61613a75dd3bd91e4))
+
+- Weight:0 un-gates criteria and renders as informational
+  ([#34](https://github.com/UiPath/coder_eval/pull/34),
+  [`9a34e90`](https://github.com/UiPath/coder_eval/commit/9a34e90bba2854316149cad61613a75dd3bd91e4))
+
+- **early-stop**: Decide skill activation on the tool call, not its result
+  ([#43](https://github.com/UiPath/coder_eval/pull/43),
+  [`d34aa97`](https://github.com/UiPath/coder_eval/commit/d34aa97416ae3af09d09cdf78cb6607b4e2e6f7c))
+
+- **early-stop**: Latch skill activation on any engagement, not first
+  ([#43](https://github.com/UiPath/coder_eval/pull/43),
+  [`d34aa97`](https://github.com/UiPath/coder_eval/commit/d34aa97416ae3af09d09cdf78cb6607b4e2e6f7c))
+
+- **evalboard**: Match watchlist skeleton header to avoid layout shift
+  ([#45](https://github.com/UiPath/coder_eval/pull/45),
+  [`acc1c86`](https://github.com/UiPath/coder_eval/commit/acc1c86bc97b80383ce1ef402356853447088e4a))
+
+- **reports**: 1/2 — exact Student-t p-values in welch_t_test
+  ([#38](https://github.com/UiPath/coder_eval/pull/38),
+  [`6df6e9b`](https://github.com/UiPath/coder_eval/commit/6df6e9bb1f3bd009592185ec3473e8f2e67d3816))
+
+- **reports**: Exact Student-t p-values and a paired comparison section
+  ([#38](https://github.com/UiPath/coder_eval/pull/38),
+  [`6df6e9b`](https://github.com/UiPath/coder_eval/commit/6df6e9bb1f3bd009592185ec3473e8f2e67d3816))
+
+- **reports**: Fail loud on t* overflow; surface excluded paired tasks
+  ([#38](https://github.com/UiPath/coder_eval/pull/38),
+  [`6df6e9b`](https://github.com/UiPath/coder_eval/commit/6df6e9bb1f3bd009592185ec3473e8f2e67d3816))
+
+- **reports**: One source of truth for variant series and paired stats
+  ([#38](https://github.com/UiPath/coder_eval/pull/38),
+  [`6df6e9b`](https://github.com/UiPath/coder_eval/commit/6df6e9bb1f3bd009592185ec3473e8f2e67d3816))
+
+- **reports**: Validate confidence and n_resamples in bootstrap_mean_ci
+  ([#38](https://github.com/UiPath/coder_eval/pull/38),
+  [`6df6e9b`](https://github.com/UiPath/coder_eval/commit/6df6e9bb1f3bd009592185ec3473e8f2e67d3816))
+
+### Chores
+
+- **harness**: Defer two guards from the welch-t-test-exact run
+  ([#38](https://github.com/UiPath/coder_eval/pull/38),
+  [`6df6e9b`](https://github.com/UiPath/coder_eval/commit/6df6e9bb1f3bd009592185ec3473e8f2e67d3816))
+
+### Documentation
+
+- Add adopter issue template and ADOPTERS.md ([#40](https://github.com/UiPath/coder_eval/pull/40),
+  [`bfbed4e`](https://github.com/UiPath/coder_eval/commit/bfbed4e4a2ca857167fac2cb15462b7159e97684))
+
+- Switch multi-model review from codex to gpt-5 alias
+  ([#36](https://github.com/UiPath/coder_eval/pull/36),
+  [`0a3f2a7`](https://github.com/UiPath/coder_eval/commit/0a3f2a71a0a1e1e56f42a668fff57bac06eb99ec))
+
+### Features
+
+- **evalboard**: Make all pages harness-aware and stream tables
+  ([#45](https://github.com/UiPath/coder_eval/pull/45),
+  [`acc1c86`](https://github.com/UiPath/coder_eval/commit/acc1c86bc97b80383ce1ef402356853447088e4a))
+
+- **evalboard**: Make analytics surfaces harness-aware and stream tables
+  ([#45](https://github.com/UiPath/coder_eval/pull/45),
+  [`acc1c86`](https://github.com/UiPath/coder_eval/commit/acc1c86bc97b80383ce1ef402356853447088e4a))
+
+- **evalboard**: Scope task trends to one harness
+  ([#45](https://github.com/UiPath/coder_eval/pull/45),
+  [`acc1c86`](https://github.com/UiPath/coder_eval/commit/acc1c86bc97b80383ce1ef402356853447088e4a))
+
+- **reports**: 2/2 — add a Paired Comparison section to experiment reports
+  ([#38](https://github.com/UiPath/coder_eval/pull/38),
+  [`6df6e9b`](https://github.com/UiPath/coder_eval/commit/6df6e9bb1f3bd009592185ec3473e8f2e67d3816))
+
+### Refactoring
+
+- **evalboard**: Address review nits on harness plumbing
+  ([#45](https://github.com/UiPath/coder_eval/pull/45),
+  [`acc1c86`](https://github.com/UiPath/coder_eval/commit/acc1c86bc97b80383ce1ef402356853447088e4a))
+
+### Testing
+
+- **early-stop**: Cover second-review items (two-AgentStart, golden corpus, parity)
+  ([#43](https://github.com/UiPath/coder_eval/pull/43),
+  [`d34aa97`](https://github.com/UiPath/coder_eval/commit/d34aa97416ae3af09d09cdf78cb6607b4e2e6f7c))
+
+
+## v0.8.8 (2026-07-22)
+
+### Bug Fixes
+
+- **codex**: Create CODEX_HOME before pinning it in the app-server env
+  ([#39](https://github.com/UiPath/coder_eval/pull/39),
+  [`8d98b91`](https://github.com/UiPath/coder_eval/commit/8d98b912ae4767904c7d1c395913c3d0aaec6c66))
+
+### Documentation
+
+- Add Website badge and point PyPI Homepage at coder-eval.com
+  ([#41](https://github.com/UiPath/coder_eval/pull/41),
+  [`0551534`](https://github.com/UiPath/coder_eval/commit/055153409d86b8d537bba73ef7ed58dfd17fee26))
+
+
+## v0.8.7 (2026-07-22)
+
+### Bug Fixes
+
+- Detect Windows skill paths in telemetry ([#24](https://github.com/UiPath/coder_eval/pull/24),
+  [`c57a6b0`](https://github.com/UiPath/coder_eval/commit/c57a6b0408ef116177b15bc9b09a768096aaa33f))
+
+- **agents**: Run codex + antigravity harnesses on the tempdir/host path
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+- **antigravity**: Pin google-antigravity 0.1.7 to load on glibc 2.35
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+- **codex**: Always run full-access; drop the in-process OS sandbox
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+- **codex**: Cover zsh login shells (macOS default) in the mock-PATH home shim
+  ([#26](https://github.com/UiPath/coder_eval/pull/26),
+  [`73f0db2`](https://github.com/UiPath/coder_eval/commit/73f0db24df0b67f82d46e3bf15c85a21837237ef))
+
+- **codex**: Keep mock CLIs shadowed in bash login shells
+  ([#26](https://github.com/UiPath/coder_eval/pull/26),
+  [`73f0db2`](https://github.com/UiPath/coder_eval/commit/73f0db24df0b67f82d46e3bf15c85a21837237ef))
+
+- **codex**: Make login-shell temp-home lifecycle exception-safe incl. kill_sync
+  ([#26](https://github.com/UiPath/coder_eval/pull/26),
+  [`73f0db2`](https://github.com/UiPath/coder_eval/commit/73f0db24df0b67f82d46e3bf15c85a21837237ef))
+
+- **codex**: Restore mock-CLI PATH prepend in login shells via per-task HOME profile
+  ([#26](https://github.com/UiPath/coder_eval/pull/26),
+  [`73f0db2`](https://github.com/UiPath/coder_eval/commit/73f0db24df0b67f82d46e3bf15c85a21837237ef))
+
+- **codex**: Restore original HOME inside generated login-shell profile
+  ([#26](https://github.com/UiPath/coder_eval/pull/26),
+  [`73f0db2`](https://github.com/UiPath/coder_eval/commit/73f0db24df0b67f82d46e3bf15c85a21837237ef))
+
+- **codex**: Use full-access sandbox on coder_eval-managed tempdir path
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+- **deps**: Bump pyasn1 to 0.6.4 for GHSA-8ppf-4f7h-5ppj / GHSA-hm4w-wwcw-mr6r
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+### Chores
+
+- **deps**: Bump pyasn1 0.6.3 -> 0.6.4 (GHSA-8ppf-4f7h-5ppj, GHSA-hm4w-wwcw-mr6r)
+  ([#32](https://github.com/UiPath/coder_eval/pull/32),
+  [`f1f4f9f`](https://github.com/UiPath/coder_eval/commit/f1f4f9fba2bd034a271e50fc1a95bcc74c2ac19b))
+
+- **deps**: Upgrade agent SDKs to latest (claude 0.2.124, codex 0.144.4)
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+### Continuous Integration
+
+- **release**: Publish a prerelease from a non-main branch
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+### Documentation
+
+- Add MkDocs docs site, comparison page, and SEO metadata
+  ([#32](https://github.com/UiPath/coder_eval/pull/32),
+  [`f1f4f9f`](https://github.com/UiPath/coder_eval/commit/f1f4f9fba2bd034a271e50fc1a95bcc74c2ac19b))
+
+- Address PR review — Coder Eval naming, cleaner table, gh-deploy workflow
+  ([#32](https://github.com/UiPath/coder_eval/pull/32),
+  [`f1f4f9f`](https://github.com/UiPath/coder_eval/commit/f1f4f9fba2bd034a271e50fc1a95bcc74c2ac19b))
+
+- Address review — git identity for gh-pages, single strict deploy, table glyphs, uv tool install in
+  Tutorial 01 ([#32](https://github.com/UiPath/coder_eval/pull/32),
+  [`f1f4f9f`](https://github.com/UiPath/coder_eval/commit/f1f4f9fba2bd034a271e50fc1a95bcc74c2ac19b))
+
+### Refactoring
+
+- **codex**: Drop dead sandbox branch + honest full-access messaging
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+### Testing
+
+- Accept sandbox_managed kwarg in agent test doubles
+  ([#33](https://github.com/UiPath/coder_eval/pull/33),
+  [`04498a9`](https://github.com/UiPath/coder_eval/commit/04498a96f6b9ac0cc5c73f36e73a361f3f3fa0ae))
+
+- **codex**: Pin start-to-CodexConfig env composition and tidy test imports
+  ([#26](https://github.com/UiPath/coder_eval/pull/26),
+  [`73f0db2`](https://github.com/UiPath/coder_eval/commit/73f0db24df0b67f82d46e3bf15c85a21837237ef))
+
+
 ## v0.8.6 (2026-07-20)
 
 ### Features

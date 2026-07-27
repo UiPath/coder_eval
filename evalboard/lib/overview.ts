@@ -15,6 +15,7 @@ import { listRunIdsInWindow, readRunReviewIndex, parseRunIdDate } from "./review
 import { withinTurnBudget } from "./turns";
 import { humanizeTaskId } from "./format";
 import { mapWithConcurrency } from "./concurrency";
+import { DEFAULT_HARNESS, KNOWN_HARNESSES, normalizeHarness } from "./harness";
 import type { Window } from "./reviews-types";
 
 export interface RunPoint {
@@ -255,19 +256,62 @@ async function loadWindowDataInner(window: Window): Promise<PerRun[]> {
 }
 
 // Fetch the N most recent runs in PerRun shape. Recency-based (fixed count)
-// rather than date-bounded — used by the trends page.
-export function loadRecentRuns(limit: number): Promise<PerRun[]> {
-    return loadRecentRunsInner(limit);
+// rather than date-bounded — used by the trends page. When `harness` is set,
+// only runs of that harness count toward N (the nightly now rotates
+// claude-code / codex / antigravity, and a trend is only meaningful within one
+// harness — mixing them blends incomparable pass rates and cost profiles).
+export function loadRecentRuns(
+    limit: number,
+    harness?: string,
+): Promise<PerRun[]> {
+    return loadRecentRunsInner(limit, harness);
 }
 
-async function loadRecentRunsInner(limit: number): Promise<PerRun[]> {
+async function loadRecentRunsInner(
+    limit: number,
+    harness?: string,
+): Promise<PerRun[]> {
     // Trends is the daily-cadence view: only pipeline runs belong here. Prune
     // to date-shaped ids BEFORE slicing (cheap, no IO) so ad-hoc runs — whose
     // ids sort lexically above every `2026-…` daily id and would otherwise
     // crowd out the real "recent N" — never occupy a slot.
     const ids = (await listRunIds()).filter((id) => parseRunIdDate(id) != null);
-    return collectPipelineRuns(ids, limit, cachedLoadPerRun);
+    const matchesHarness = harness
+        ? (r: PerRun) => normalizeHarness(r.overview?.harness) === harness
+        : undefined;
+    return collectPipelineRuns(ids, limit, cachedLoadPerRun, matchesHarness);
 }
+
+// How many recent runs to scan when discovering which harnesses are active.
+// All harnesses that run at least weekly appear within a window this size, so
+// the switcher lists them without a hardcoded set (a new harness like
+// "delegate" shows up on its own).
+const HARNESS_DISCOVERY_COUNT = 12;
+
+async function listRecentHarnessesInner(): Promise<string[]> {
+    const perRun = await loadRecentRuns(HARNESS_DISCOVERY_COUNT);
+    const seen = new Set<string>();
+    for (const r of perRun) {
+        if (r.overview) seen.add(normalizeHarness(r.overview.harness));
+    }
+    // Known harnesses first (stable display order), then any newcomers
+    // (alphabetical) so the list is deterministic but self-extending.
+    const known = KNOWN_HARNESSES.filter((h) => seen.has(h));
+    const extras = [...seen]
+        .filter((h) => !(KNOWN_HARNESSES as readonly string[]).includes(h))
+        .sort();
+    const ordered = [...known, ...extras];
+    // Never hand back an empty list — the default must always be selectable.
+    return ordered.length > 0 ? ordered : [DEFAULT_HARNESS];
+}
+
+// The harnesses present in recent runs, ordered for the switcher. Cached (and
+// shares the per-run cache with the aggregates), revalidated every 5 min.
+export const listRecentHarnesses = unstable_cache(
+    listRecentHarnessesInner,
+    ["recent-harnesses-v1"],
+    { revalidate: 300 },
+);
 
 // A loaded run occupies a window slot only when it's usable downstream:
 // pipeline (non-adhoc) AND has a readable overview with at least one task.
@@ -287,6 +331,11 @@ function isUsablePipelineRun(r: PerRun): boolean {
 // deficit-sized rounds from degenerating into one-id-per-round serial loads
 // when a single slot stays unfilled.
 const RECENT_SCAN_FACTOR = 3;
+// When filtering to a single harness, that harness holds only a fraction of the
+// recent runs (codex/antigravity run a few times a week vs. claude-code daily),
+// so the scan has to reach further back to gather `limit` of them. A larger cap
+// keeps a rarer harness from coming up short while still bounding the probe.
+const HARNESS_SCAN_FACTOR = 8;
 const MIN_PROBE_BATCH = 5;
 
 // Load runs newest-first until `limit` usable pipeline runs are in hand, the
@@ -305,8 +354,15 @@ export async function collectPipelineRuns(
     ids: string[],
     limit: number,
     load: (id: string) => Promise<PerRun>,
+    // Optional extra predicate (AND-ed with usability) — e.g. a harness filter.
+    // When set, the scan reaches further back since matches are sparser.
+    isMatch?: (r: PerRun) => boolean,
 ): Promise<PerRun[]> {
-    const maxScan = Math.min(ids.length, limit * RECENT_SCAN_FACTOR);
+    const scanFactor = isMatch ? HARNESS_SCAN_FACTOR : RECENT_SCAN_FACTOR;
+    const maxScan = Math.min(ids.length, limit * scanFactor);
+    const usable = isMatch
+        ? (r: PerRun) => isUsablePipelineRun(r) && isMatch(r)
+        : isUsablePipelineRun;
     const out: PerRun[] = [];
     let cursor = 0;
     while (out.length < limit && cursor < maxScan) {
@@ -318,7 +374,7 @@ export async function collectPipelineRuns(
         const batch = ids.slice(cursor, Math.min(cursor + batchSize, maxScan));
         cursor += batch.length;
         const loaded = await mapWithConcurrency(batch, FETCH_CONCURRENCY, load);
-        out.push(...loaded.filter(isUsablePipelineRun));
+        out.push(...loaded.filter(usable));
     }
     if (out.length < limit && cursor >= maxScan && cursor < ids.length) {
         console.warn(
@@ -477,11 +533,20 @@ export async function getOverview(
     window: Window,
     tag: string | null = null,
     q: string | null = null,
+    // When set, scope the chart + rails to one harness. The nightly rotates
+    // harnesses as separate runs, so an unscoped chart interleaves incomparable
+    // pass rates into one zigzag line. null = all harnesses (legacy behavior).
+    harness: string | null = null,
 ): Promise<OverviewData> {
     // Ad-hoc runs never feed the daily chart or the tag rails — they're not
     // pipeline cadence. (Non-date-named ones are already pruned upstream by
     // listRunIdsInWindow; this also drops date-named runs flagged adhoc.)
-    const perRun = (await loadWindowData(window)).filter((r) => !r.adhoc);
+    const perRun = (await loadWindowData(window)).filter(
+        (r) =>
+            !r.adhoc &&
+            (harness == null ||
+                normalizeHarness(r.overview?.harness) === harness),
+    );
     const needle = q?.trim().toLowerCase() || null;
 
     // ---- Per-run chart points ----
@@ -559,8 +624,14 @@ export interface TagTaskRow {
 export async function getTagTaskBreakdown(
     window: Window,
     tag: string,
+    harness: string | null = null,
 ): Promise<TagTaskRow[]> {
-    const perRun = (await loadWindowData(window)).filter((r) => !r.adhoc);
+    const perRun = (await loadWindowData(window)).filter(
+        (r) =>
+            !r.adhoc &&
+            (harness == null ||
+                normalizeHarness(r.overview?.harness) === harness),
+    );
     const sorted = [...perRun].sort((a, b) => b.id.localeCompare(a.id));
 
     interface Acc {

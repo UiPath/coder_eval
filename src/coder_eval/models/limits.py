@@ -90,11 +90,14 @@ class RunLimits(BaseModel):
     stop_early: bool = Field(
         default=False,
         description=(
-            "Opt-in master switch for early-stop-on-criterion. When True, the run ends as "
-            "soon as the armed criteria (those with stop_when set) are decided mid-run - on "
-            "pass or on a definitive fail - so a raised max_turns is not wasted once the "
-            "measured signal has happened. Default False keeps behavior identical. Requires a "
-            "Claude single-shot task with at least one observable armed criterion; every "
-            "unsupported combination is rejected at resolution time."
+            "Opt-in master switch for early-stop-on-criterion. When True, the run ends early "
+            "once the armed criteria (those with stop_when set, incl. per-instance 'auto') "
+            "are decided mid-run: pass-stop when every pass-armed criterion live-passes, "
+            "fail-stop on the first fail-armed live-fail (deferred while any pass-armed "
+            "criterion is undecided, so a misfire never truncates the recall signal) - so a "
+            "raised max_turns is not wasted once the measured signal has happened. Default "
+            "False keeps behavior identical. Requires a Claude single-shot task with at least "
+            "one observable armed criterion; every unsupported combination is rejected at "
+            "resolution time."
         ),
     )

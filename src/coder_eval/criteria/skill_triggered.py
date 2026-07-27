@@ -44,16 +44,22 @@ _SKILL_PATH_RE = re.compile(r"(?=skills[\\/]+([A-Za-z0-9][A-Za-z0-9_-]*)[\\/]+)"
 def _engaged_skill_names(cmd: CommandTelemetry) -> set[str]:
     """All skill names engaged by ONE command, agent-agnostically (any-skill).
 
-    Generalizes ``_engaged_skill`` (which asks about one named skill) so a
-    live verdict can detect a *competing* skill engagement. Collects:
+    Detects both engagement signals so the criterion scores identically across
+    agents, and returns the (possibly empty) set of engaged skill names:
 
-    - the Claude ``Skill`` tool call's ``skill`` parameter, namespace-stripped
-      via ``.split(":")[-1]`` (the SDK reports ``plugin:skill-name``); and
-    - every ``skills/<name>/`` or ``skills\\<name>\\`` path segment appearing
-      in any string parameter (the Codex / file-read signal — repo layout or
-      the ``.agents/skills`` sandbox symlink).
+    - Claude: an explicit ``Skill`` tool call carries the skill in
+      ``parameters['skill']``, optionally namespaced (e.g.
+      ``plugin:uipath-agents``); the namespace is stripped via ``.split(":")[-1]``.
+    - Codex (and any non-Claude agent): no ``Skill`` tool exists, so a skill is
+      engaged by reading its files off disk via shell. Both the repo layout
+      (``.../skills/<name>/...``) and the sandbox symlink
+      (``.agents/skills/<name>/...``) contain the substring ``skills/<name>/``,
+      matched here in any string parameter (Bash ``parameters['command']`` or a
+      file-path parameter). The trailing separator required by ``_SKILL_PATH_RE``
+      prevents prefix collisions (``uipath-agents`` vs ``uipath-agents-foo``).
 
-    Returns the (possibly empty) set of engaged skill names for this command.
+    Returning the full set (rather than a single-skill yes/no) lets callers detect
+    a *competing* skill engagement.
     """
     names: set[str] = set()
     if cmd.tool_name == "Skill":
@@ -66,21 +72,31 @@ def _engaged_skill_names(cmd: CommandTelemetry) -> set[str]:
     return names
 
 
-def _engaged_skill(cmd: CommandTelemetry, skill_name: str) -> bool:
-    """True when one command engaged ``skill_name`` — agent-agnostically.
+def _all_engaged_skill_names(turn_records: list[TurnRecord]) -> set[str]:
+    """Union of every skill engaged anywhere in the trajectory (any-engagement).
 
-    Claude: an explicit ``Skill`` tool call carries the skill in
-    ``parameters['skill']`` (optionally namespaced, e.g. ``plugin:uipath-agents``).
+    Activation is scored on whether a skill was engaged *at all* during the run,
+    not on which skill was engaged first. This has two consequences that the
+    first-engagement policy could not express:
 
-    Codex (and any non-Claude agent): no ``Skill`` tool exists, so the skill is
-    engaged by reading its files off disk via shell. Both the repo layout
-    (``.../skills/<skill_name>/...``) and the sandbox symlink
-    (``.agents/skills/<skill_name>/...``) contain the substring
-    ``skills/<skill_name>/``, which appears in the recorded command string
-    (Bash ``parameters['command']``) or a file-path parameter. The trailing
-    slash prevents prefix collisions (``uipath-agents`` vs ``uipath-agents-foo``).
+    - **Recall (the positive criterion).** A row that engages the wrong skill
+      before eventually engaging the expected one is still credited for the
+      expected skill — reading a ``SKILL.md`` to compare candidates is
+      exploration, not commitment, so an earlier wrong touch must not fail the
+      row.
+    - **Precision (the distractor/negative criteria).** An unrelated skill
+      engaged *anywhere* is counted against its own criterion, so a positive row
+      that also fires an off-target skill (and a negative row that fires any
+      target skill) is penalized on that skill's confusion cell.
+
+    Order is irrelevant to a set union; the scan is left in ``sequence_number``
+    order purely for determinism.
     """
-    return skill_name in _engaged_skill_names(cmd)
+    names: set[str] = set()
+    for turn in turn_records:
+        for cmd in turn.commands:
+            names.update(_engaged_skill_names(cmd))
+    return names
 
 
 @register_criterion
@@ -94,8 +110,11 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
     criterion_type = "skill_triggered"
 
     # Observable mid-run: a Skill tool call (or a skill file read) is a positive
-    # event in the live stream, so both polarities are decidable the moment the
-    # agent first engages ANY skill (the first-engagement policy in live_verdict).
+    # event in the live stream. The TYPE can decide either polarity — a positive
+    # criterion live-passes when its expected skill is engaged, a
+    # distractor/negative one live-fails when its (wrong) skill is engaged — but
+    # any single INSTANCE decides only one of the two; see
+    # ``live_decidable_polarities``.
     live_stop_polarities: ClassVar[frozenset[str]] = frozenset({"pass", "fail"})
 
     def _check_impl(
@@ -116,9 +135,13 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
                 error="turn_records not provided to checker",
             )
 
-        triggered: bool = any(
-            _engaged_skill(cmd, criterion.skill_name) for turn in turn_records for cmd in turn.commands
-        )
+        # Any-engagement policy (mirrors ``live_verdict``): the row is scored on
+        # whether this skill was engaged AT ALL, regardless of order. A positive
+        # criterion (skill_name == expected_skill) passes iff the expected skill
+        # was engaged somewhere in the run — a wrong skill engaged first does not
+        # fail it (recall). A distractor/negative criterion fails on ANY
+        # engagement of its skill (precision).
+        triggered: bool = criterion.skill_name in _all_engaged_skill_names(turn_records)
         expected_yes: bool = criterion.expected_skill == criterion.skill_name
         score = 1.0 if triggered == expected_yes else 0.0
         observed = _YES if triggered else _NO
@@ -139,31 +162,53 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
         criterion: SkillTriggeredCriterion,
         turn_records: list[TurnRecord],
     ) -> LiveVerdict:
-        """First-engagement policy: the FIRST observed skill engagement decides.
+        """Any-engagement latch: decide the instant THIS skill is engaged.
 
-        Activation measures which skill the agent selects *first*, so every
-        stacked ``skill_triggered`` criterion is decided simultaneously by the
-        first command that engages any skill:
+        Mirrors ``_check_impl``'s any-engagement policy, latched monotonically
+        over the growing partial trajectory:
 
-        - before any engagement -> ``"undecided"``;
-        - on the first command engaging some skill: ``observed = (skill_name in
-          engaged)``, ``expected = (expected_skill == skill_name)`` ->
-          ``"pass"`` iff they match, else ``"fail"``.
+        - this skill not engaged yet -> ``"undecided"`` (the final outcome still
+          depends on the rest of the run — the expected skill may load later, or
+          a distractor may yet fire);
+        - this skill engaged -> ``expected_skill == skill_name`` decides:
+          ``"pass"`` for a positive criterion (the expected skill loaded),
+          ``"fail"`` for a distractor/negative one (a wrong skill loaded).
 
-        This covers the "wrong skill loads" case (a positive wrong signal) and
-        negative rows (``expected_skill == ""`` -> any engagement of the target
-        fails that criterion). It is a *policy* made consistent by stopping: the
-        trajectory is frozen at the deciding event, so the standard checker on the
-        truncated trajectory agrees with this verdict by construction.
+        Because engagement is monotonic (a skill, once engaged, stays engaged), a
+        latched verdict never flips, so it agrees with ``_check_impl`` on the
+        frozen trajectory by construction — whether or not the run stopped early.
+        A positive criterion can therefore only ever live-``pass`` and a
+        distractor/negative one only ever live-``fail``; their *absence* is never
+        decidable mid-run (see ``live_decidable_polarities``). This is the change
+        from first-engagement: a wrong skill engaged first no longer live-fails a
+        positive row — the run keeps going so the expected skill can still load.
+        """
+        if criterion.skill_name not in _all_engaged_skill_names(turn_records):
+            return "undecided"
+        return "pass" if criterion.expected_skill == criterion.skill_name else "fail"
+
+    @classmethod
+    def live_decidable_polarities(cls, criterion: SkillTriggeredCriterion) -> frozenset[str]:
+        """Per-instance narrowing under the any-engagement latch.
+
+        Unlike the type-level capability (``live_stop_polarities`` = both), a
+        single instance decides exactly one polarity:
+
+        - a **positive** criterion (``skill_name == expected_skill``) can only
+          live-``pass`` (the expected skill engaging is a decidable hit; its
+          absence is not knowable mid-run);
+        - a **distractor/negative** criterion (``skill_name != expected_skill``,
+          including the ``expected_skill == ""`` negatives) can only
+          live-``fail`` (a wrong skill engaging is a decidable miss; its absence
+          is not).
+
+        ``validate_early_stop`` gates the requested ``stop_when`` on this set, so
+        arming a positive with ``fail`` / a distractor with ``pass`` — or either
+        with ``decided`` (which needs both) — is rejected at resolution rather
+        than silently degrading to a full run.
         """
         expected_yes = criterion.expected_skill == criterion.skill_name
-        for turn in turn_records:
-            for cmd in turn.commands:
-                engaged = _engaged_skill_names(cmd)
-                if engaged:
-                    observed_yes = criterion.skill_name in engaged
-                    return "pass" if observed_yes == expected_yes else "fail"
-        return "undecided"
+        return frozenset({"pass"}) if expected_yes else frozenset({"fail"})
 
     def aggregate(
         self,
