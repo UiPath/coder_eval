@@ -831,3 +831,61 @@ jobs:
           name: byoa-live-output
           path: tmp/
           retention-days: 7
+
+  action-dogfood:
+    name: Action Dogfood (composite action, real API)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Skip on fork PRs where secrets aren't available (matches e2e-smoke).
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      # The composite action is agent-agnostic and does NOT install a coding-agent
+      # runtime. The dogfood task uses the default claude-code agent, so provide
+      # Node + the Claude CLI here (as e2e-smoke does), before invoking the action.
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "20"
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run coder-eval via local action
+        id: dogfood
+        uses: ./
+        with:
+          version: local
+          tasks: tasks/hello_date.yaml
+          model: claude-haiku-4-5-20251001
+          run-dir: runs/ci-action-dogfood
+          junit-path: runs/ci-action-dogfood/junit.xml
+          # Credentials go through the generic env passthrough (the only channel);
+          # ANTHROPIC_API_KEY reaching the run is proven by the API-backed task
+          # succeeding. A floor of 0.0 passes for any produced score (exercises
+          # the gate path green in CI without flakiness); the second line
+          # exercises multi-line env parsing.
+          minimum-task-score: "0.0"
+          env: |
+            ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+            CE_DOGFOOD_MARKER=1
+
+      - name: Verify outputs and JUnit file
+        env:
+          JUNIT: ${{ steps.dogfood.outputs.junit-path }}
+          RUNDIR: ${{ steps.dogfood.outputs.run-dir }}
+        run: |
+          set -euo pipefail
+          test -n "$JUNIT" && test -f "$JUNIT" || { echo "junit output missing"; exit 1; }
+          # Well-formedness check on a file this job just generated (trusted input;
+          # our writer emits no DTDs/entities) — stdlib ET is fine here.
+          python3 -c "import sys, xml.etree.ElementTree as ET; ET.parse(sys.argv[1])" "$JUNIT"
+          test -f "$RUNDIR/run.json" || { echo "run.json missing"; exit 1; }
+
+      - name: Upload dogfood run on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: action-dogfood-runs
+          path: runs/ci-action-dogfood/
+          retention-days: 7

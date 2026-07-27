@@ -1,18 +1,21 @@
 ---
 description: >-
-  Full schema reference for coder_eval task YAML — agent config, sandboxes, run
+  Full schema reference for Coder Eval task YAML — agent config, sandboxes, run
   limits, dataset fan-out, and all 14 success criterion types with weighted
   0.0–1.0 scoring.
 ---
 
 # Task Definition Guide
 
-Complete reference for defining evaluation tasks in coder_eval.
+Complete reference for defining evaluation tasks in Coder Eval.
 
 ## Table of Contents
 
 - [Task YAML Structure](#task-yaml-structure)
+  - [dataset](#dataset)
+  - [skip](#skip)
 - [Agent Configuration](#agent-configuration)
+- [Run Limits](#run-limits)
 - [Sandbox Configuration](#sandbox-configuration)
 - [Template Sources](#template-sources)
 - [Success Criteria](#success-criteria)
@@ -46,18 +49,72 @@ description: "What this task tests"   # Human-readable description (required)
 initial_prompt: "Instructions..."     # Prompt sent to the agent (required)
 tags: [smoke, golden, pure-python]    # Optional tags for filtering (kebab-case)
 
+skip: false                           # Optional: quarantine this task (see below)
+
 agent: { ... }                        # Agent configuration (optional, resolved from experiment)
 sandbox: { ... }                      # Sandbox configuration (optional, defaults to tempdir)
+run_limits: { ... }                   # Optional run-time caps (turns, wall-clock, tokens, USD)
 success_criteria: [ ... ]             # List of criteria (required, at least 1)
 
 reference: { ... }                    # Optional reference solution
 pre_run: [ ... ]                      # Optional pre-run commands (before agent starts)
 post_run: [ ... ]                     # Optional post-run commands
+dataset: { ... }                      # Optional dataset fan-out (one task -> N row-tasks)
 ```
+
+### `dataset`
+
+An optional `dataset:` block fans this single task out into **one sub-task per row**. Each row-task
+gets its own sandbox, run directory, and `task.json`; its `task_id` becomes `<task_id>/<row_id>`.
+Row values substitute into `initial_prompt` and into the string leaves of `success_criteria` via
+`${row.<field>}`. Expansion happens at load time, **before** experiment-variant resolution, so a
+variant can never override the dataset.
+
+```yaml
+dataset:
+  rows:                                # inline rows — mutually exclusive with `paths`
+    - id: alpha
+      expected: "alpha"
+  # paths: ["datasets/rows.jsonl"]     # or JSONL files, relative to this task YAML
+  id_field: "id"                       # which row field is the row identifier
+  sample_per_stratum: 5                # optional: keep up to N rows per stratum
+  stratify_field: "expected_skill"     # which row field defines the stratum
+  sample_seed: 1234                    # optional: pin the stratified draw
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `rows` | `null` | Inline list of row dicts. Mutually exclusive with `paths`; exactly one is required. |
+| `paths` | `null` | JSONL file paths **relative to the task YAML**, concatenated in declared order. |
+| `id_field` | `"id"` | Row field used as the row identifier. Must be present, unique, and match `^[A-Za-z0-9_][A-Za-z0-9_.\-]*$` (it becomes a directory name). |
+| `sample_per_stratum` | `null` | Stratified random sample: keep up to N rows per stratum. Overridden by CLI `--sample`. |
+| `stratify_field` | `"expected_skill"` | Row field whose value defines the stratum for `sample_per_stratum`. |
+| `sample_seed` | `null` | Seed for the stratified draw. Unset means the sample is **re-drawn every run**; set an integer to pin it. CLI `--sample` is separately fixed-seed and always reproducible. |
+
+Full guide — row sources, substitution rules, sampling precedence, suite-level scoring, and worked
+examples: **[Bring Your Own Dataset](DATASETS.md)**.
+
+### `skip`
+
+`skip: true` quarantines a task. The runner records it in `RunSummary.skipped_tasks` at resolution
+time and it **never reaches the orchestrator** — no dataset fan-out, no variant resolution, no
+sandbox, no API call. Use it to park a task that is blocked on something outside your control
+(an upstream bug, a missing service) without deleting the YAML and losing its history.
+
+```yaml
+task_id: "codex_disallowed_tools_test"
+# Blocked: the Codex SDK doesn't enforce disallowed_tools via config. Re-enable
+# once upstream ships the fix.
+skip: true
+```
+
+Pair it with a comment naming the blocker — a ticket link, an upstream issue — so the next reader
+knows what has to change before it can come back. Run quarantined tasks on demand with
+`coder-eval run --include-skipped`; CI leaves the flag off, so they stay excluded there.
 
 ## Tags
 
-Tags categorize tasks for selective execution. Each tag is lowercase kebab-case and may
+The `tags` list categorizes tasks for selective execution. Each tag is lowercase kebab-case and may
 optionally be namespaced as `key:value` where both sides are kebab-case.
 
 ```yaml
@@ -95,14 +152,10 @@ coder-eval run tasks/*.yaml --exclude-tags example # Skip example tasks
 
 ## Agent Configuration
 
-```yaml
-# Run-time caps (turns, wall-clock, tokens, USD) live under run_limits
-run_limits:
-  max_turns: 20                       # Optional: hard cap on inner-loop turns per iteration
-  expected_turns: 8                   # Optional: SOFT efficiency budget (visible turns) — not a cap
-  turn_timeout: 300                   # Optional: per-communicate() timeout in seconds
-  task_timeout: 600                   # Optional: wall-clock cap across all iterations
+Run-time caps (turns, wall-clock, tokens, USD) are **not** part of this block — they live under
+[`run_limits`](#run-limits).
 
+```yaml
 agent:
   type: "claude-code"                 # Agent type — optional if supplied via experiment / --type
   permission_mode: "acceptEdits"      # Permission mode (see below)
@@ -116,7 +169,7 @@ agent:
 ```
 
 **`sdk_options`** is a typed pass-through dict for Claude Code SDK
-`ClaudeAgentOptions` fields that coder_eval doesn't own directly. Keys are
+`ClaudeAgentOptions` fields that Coder Eval doesn't own directly. Keys are
 validated against the SDK's dataclass at YAML load; framework-managed keys
 (`model`, `allowed_tools`, `permission_mode`, `hooks`, `mcp_servers`, …)
 are rejected. Deep-merged across the 5-layer config chain. Override via
@@ -130,7 +183,7 @@ an error.
 - `plan` — Agent proposes changes, waits for approval
 - `bypassPermissions` — No permission checks (use with caution)
 
-> **Codex note:** `permission_mode` confines the **`claude-code`** agent only. The **`codex`** agent always runs full-access regardless of the mode — its in-process OS sandbox is redundant given coder_eval's docker/tempdir isolation and unusable on our CI hosts (and on Windows). Run adversarial or untrusted Codex evals under the **docker driver**, which is the OS-level write boundary; the tempdir/host driver is a working directory, not a confinement boundary.
+> **Codex note:** `permission_mode` confines the **`claude-code`** agent only. The **`codex`** agent always runs full-access regardless of the mode — its in-process OS sandbox is redundant given Coder Eval's docker/tempdir isolation and unusable on our CI hosts (and on Windows). Run adversarial or untrusted Codex evals under the **docker driver**, which is the OS-level write boundary; the tempdir/host driver is a working directory, not a confinement boundary.
 
 **Agent Types:**
 - `claude-code` (default) — Claude Code SDK agent. Supports `sdk_options`, `claude_settings`, and all permission modes.
@@ -172,11 +225,78 @@ trajectory (`command_executed`, `skill_triggered`, `reference_comparison`,
 `commands_efficiency`) are rejected. A worked example lives at
 [`tasks/agentless_smoke_test.yaml`](https://github.com/UiPath/coder_eval/blob/main/tasks/agentless_smoke_test.yaml).
 
-### `max_turns`, `task_timeout`, `turn_timeout` location
+## Run Limits
 
-These live under `run_limits:` on the task — alongside the token / USD
-budget caps. They are scenario constraints; the agent identity (type,
-model, etc.) is conceptually separate.
+`run_limits:` is the single namespace for every run-time cap: the **structural** caps that bound how
+long a task may run, and the **budget** caps that bound what it may spend. Any subset of fields is
+valid and an empty block is legal — every field defaults to "no limit".
+
+```yaml
+run_limits:
+  # Structural caps
+  max_turns: 20                       # hard cap on agent inner-loop turns per iteration
+  expected_turns: 8                   # SOFT efficiency budget (visible turns) — never aborts
+  task_timeout: 600                   # wall-clock cap across all iterations, seconds
+  turn_timeout: 300                   # per-communicate() timeout, seconds
+
+  # Budget caps
+  max_total_tokens: 200000            # cumulative input + output
+  max_usd: 2.50                       # cumulative cost
+
+  # Early stop
+  stop_early: true                    # end once the armed criteria are decided
+```
+
+| Field | Default | Constraint | Description |
+|-------|---------|------------|-------------|
+| `max_turns` | *unset* | `> 0` | Hard cap on agent inner-loop turns per iteration. Unset uses the SDK default. |
+| `expected_turns` | *unset* | `>= 1` | **Soft** target for cumulative visible turns. Exceeding it warns and badges the report; it never aborts. See [`expected_turns`](#expected_turns-soft-efficiency-budget). |
+| `task_timeout` | *unset* | `>= 30` | Max seconds for the whole evaluation loop (all iterations). |
+| `turn_timeout` | *unset* | `>= 10` | Max seconds for a single agent `communicate()` call. |
+| `max_input_tokens` | *unset* | `>= 1` | Max cumulative input (prompt) tokens. |
+| `max_output_tokens` | *unset* | `>= 1` | Max cumulative output (completion) tokens. |
+| `max_total_tokens` | *unset* | `>= 1` | Max cumulative input + output tokens. Distinct from [`simulation.max_total_tokens`](#simulation-multi-turn-user-dialog) — see the note below. |
+| `max_usd` | *unset* | `> 0.0` | Max cumulative cost in USD. Requires per-turn SDK cost reporting. |
+| `count_cached_input` | `false` | — | Count `cache_read_input_tokens` toward the input/total budgets. Off by default — cached reads are typically free. |
+| `count_cache_creation` | `false` | — | Count `cache_creation_input_tokens` toward the input/total budgets. Off by default. |
+| `stop_early` | `false` | — | Opt-in master switch for early-stop-on-criterion. See [`stop_early`](#stop_early-opt-in-early-stop). |
+
+The authoritative source is `src/coder_eval/models/limits.py`. A lint rule (CE030) fails the build if
+a field defined there goes undocumented in this guide, so the table can't quietly fall behind the
+model.
+
+**Budget-cap semantics:**
+
+- **Checked after each completed agent turn**, and **cumulative** across all of the task's turns.
+  There is no mid-turn enforcement, so a single runaway turn can overshoot the cap before the
+  between-turns check sees it. Size caps with headroom for one turn.
+- **Subject agent only.** Judge (`llm_judge` / `agent_judge`) and user-simulator token spend are
+  **not** counted against these caps.
+- A breach aborts the task with `FinalStatus.TOKEN_BUDGET_EXCEEDED` (any of the three token caps) or
+  `FinalStatus.COST_BUDGET_EXCEEDED` (`max_usd`). Both categorize as `failed` — see
+  [Report Schema](REPORT_SCHEMA.md).
+- **`max_usd` needs per-turn cost from the SDK.** If no turn reports a cost, the check is **skipped
+  with a one-shot warning per task**, not failed. A run can therefore blow past `max_usd` silently
+  on a backend that doesn't report cost — don't rely on it as your only guardrail.
+- **Cached-read and cache-creation tokens are excluded by default.** `count_cache_creation: true` is
+  what makes an input-token budget meaningful for **Codex**, which buckets its fresh (full-price)
+  prompt slice into `cache_creation`; with the default `false`, a Codex token budget effectively
+  caps output only.
+
+**Setting caps from the CLI** — every field is reachable through `-D`, which merges per-key into
+`run_limits` without disturbing the task's other caps:
+
+```bash
+coder-eval run task.yaml -D run_limits.max_turns=30 -D run_limits.task_timeout=900
+coder-eval run task.yaml -D run_limits.max_usd=2.50 -D run_limits.max_total_tokens=200000
+```
+
+> **`run_limits.max_total_tokens` vs. `simulation.max_total_tokens`.** They are different budgets.
+> `run_limits.max_total_tokens` caps the **subject agent's** cumulative tokens and **aborts the task**
+> with `TOKEN_BUDGET_EXCEEDED`. [`simulation.max_total_tokens`](#simulation-multi-turn-user-dialog)
+> caps the **whole dialog** — simulator *plus* agent — and ends the dialog gracefully with
+> `stop_reason='budget'`, leaving the task to be scored normally. Set both if you want a hard
+> ceiling on a simulated task.
 
 > **No longer supported:** `max_turns` / `turn_timeout` (and top-level
 > `task_timeout`) under `agent:` or at the task top level are rejected —
@@ -219,7 +339,7 @@ success_criteria:
   - type: skill_triggered
     skill_name: date-teller
     expected_skill: date-teller
-    stop_when: decided        # arm on pass OR definitive fail
+    stop_when: auto           # arm whichever polarity this instance can decide
   - type: file_exists         # not armed → advisory on an early-stopped run
     path: report.md
 ```
@@ -228,23 +348,46 @@ Semantics:
 
 - **Opt-in, per run.** With `stop_early: false` (the default) the run behaves
   exactly as before — `stop_when` is inert and every criterion gates normally.
-- **Polarity.** `stop_when: pass` stops the moment all armed criteria are decided
-  in the pass direction; `stop_when: fail` stops on a definitive wrong-signal
-  fail; `stop_when: decided` stops on either. Only criteria that can decide from a
-  partial trajectory (currently `skill_triggered`, `command_executed`) may be
-  armed — arming any other criterion is a hard error at resolution (plan *and*
-  run), never a silent no-op. Decidability can also depend on a criterion's own
-  fields: `command_executed` can live-**pass** only with `max_count` unset and
-  `min_count > 0`, and live-**fail** only with `max_count` set (which includes
-  the `min_count: 0, max_count: 0` "must-NOT-run" form). Arming a polarity the
-  configured criterion can never reach (e.g. `stop_when: pass` alongside a
-  `max_count`) is likewise a hard error at resolution, not a silent full run.
+- **Polarity.** `stop_when: pass` stops the moment all **pass-armed** criteria are
+  decided in the pass direction; `stop_when: fail` stops on a definitive
+  wrong-signal fail; `stop_when: decided` stops on either (the criterion instance
+  must be able to decide **both**). `stop_when: auto` arms whichever polarities
+  **this instance** can decide — use it when the decidable polarity is
+  instance-dependent, e.g. a `skill_triggered` activation suite where a positive
+  row (`skill_name == expected_skill`) can only live-pass and a distractor can only
+  live-fail, so one static value on a dataset-fanned criterion (whose
+  positive/distractor role flips per row) cannot fit every row. A **pass-stop**
+  needs every pass-armed criterion to pass — fail-armed distractors are not
+  required to, and a row with **zero** pass-armed criteria (e.g. a negative row)
+  never pass-stops; a **fail-stop** fires on the first fail-armed criterion that
+  live-fails, but is **deferred while any pass-armed criterion is still
+  undecided** — a distractor misfire on an early tool call must not cut a
+  positive row before its expected signal can appear (that would freeze a
+  would-be true positive as a false negative and deflate suite recall). The
+  misfire is latched, so the deferred fail-stop fires the moment every
+  pass-armed criterion decides; if none ever decides, the run simply continues
+  to the cap. Only criteria that can decide from a partial trajectory (currently
+  `skill_triggered`, `command_executed`) may be armed — arming any other criterion
+  is a hard error at resolution (plan *and* run), never a silent no-op.
+  Decidability can also depend on a criterion's own fields: `command_executed` can
+  live-**pass** only with `max_count` unset and `min_count > 0`, and live-**fail**
+  only with `max_count` set (which includes the `min_count: 0, max_count: 0`
+  "must-NOT-run" form). Arming a polarity the configured criterion can never reach
+  (e.g. `stop_when: pass` alongside a `max_count`, or `auto` on an instance that
+  can decide neither) is likewise a hard error at resolution, not a silent full
+  run.
 - **Verdict.** An early-stopped run is gated on the **armed subset only**; the
   non-armed criteria become **advisory** and are clearly marked (report badge +
   per-criterion note + `stopped_early` row). A run that completes naturally is
   gated on the **full** set, as always. This is what lets one file serve both a
-  `smoke` flavor (`stop_early: true`) and an `e2e` flavor (`stop_early: false`)
-  with identical verdicts — see [AB_EXPERIMENTS.md](AB_EXPERIMENTS.md).
+  `smoke` flavor (`stop_early: true`) and an `e2e` flavor (`stop_early: false`) —
+  see [AB_EXPERIMENTS.md](AB_EXPERIMENTS.md). Verdict parity between the flavors
+  is one-sided: a **fail-stop** is verdict-preserving (the deferral above
+  guarantees every pass-armed signal was allowed to resolve first), but a
+  **pass-stop** cuts the run once the positives are decided, so a distractor that
+  would misfire on a *later* tool call is not observed (the frozen row scores as a
+  clean pass) — the smoke flavor trades some precision completeness for budget, so
+  authoritative precision/recall belongs on the `stop_early: false` run.
 - **Fail-safe.** A live-verdict bug **fails open** to a full run (logged loudly) —
   it can never silently disable a criterion or cause a false early stop.
 
@@ -391,12 +534,12 @@ All criteria share these fields:
 | `description` | — | Human-readable description (required) |
 | `weight` | 1.0 | Relative importance for weighted score. `0` = **informational**: excluded from both the score and the pass/fail gate |
 | `pass_threshold` | 0.9 | Minimum score (0.0–1.0) to pass |
-| `stop_when` | `null` | Arms this criterion for early stop (`pass`/`fail`/`decided`); requires `run_limits.stop_early: true` and an observable criterion type (`skill_triggered`, `command_executed`). See [`stop_early`](#stop_early-opt-in-early-stop). |
+| `stop_when` | `null` | Arms this criterion for early stop (`pass`/`fail`/`decided`/`auto`); requires `run_limits.stop_early: true` and an observable criterion type (`skill_triggered`, `command_executed`). `auto` arms whichever polarity this instance can decide (for dataset-fanned criteria whose positive/distractor role flips per row). See [`stop_early`](#stop_early-opt-in-early-stop). |
 
 **Scoring types:**
-- **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`
+- **Binary** (1.0 or 0.0): `file_exists`, `run_command`, `file_matches_regex`, `classification_match`, `skill_triggered`
 - **Fractional** (0.0–1.0): `file_contains`, `file_check`, `json_check`, `command_executed`, `uipath_eval`
-- **Continuous** (0.0–1.0): `reference_comparison`, `llm_judge`, `agent_judge`
+- **Continuous** (0.0–1.0): `reference_comparison`, `commands_efficiency`, `llm_judge`, `agent_judge`
 
 **Task success:** all *gating* criteria must score >= their `pass_threshold`. A
 criterion with `weight: 0` is informational — it is still checked, stored, and
@@ -616,6 +759,22 @@ Checks whether the agent executed specific tools/commands during evaluation. Ins
 
 **Codex limitation.** Codex agents map `Read`, `Grep`, and `Glob` tools to `shell` commands (they execute via bash), so `tool_name: "Read"` on Codex returns no matches. Use `tool_name: "Bash"` or `tool_name: null` (any tool) for Codex-compatible checks. This criterion works correctly on Claude Code agents, which emit separate `Read`/`Grep`/`Glob` telemetry.
 
+### `commands_efficiency`
+
+Scores how economically the agent worked, relative to a budget of expected tool calls. **Continuous scoring:** `score = expected_commands / max(actual_commands, expected_commands)` — so a run at or under budget scores `1.0`, and the score decays as the agent takes more calls than expected (e.g. twice the budget → `0.5`).
+
+```yaml
+- type: "commands_efficiency"
+  expected_commands: 8      # budget of tool calls to complete the task (>= 1)
+  description: "Agent should solve this in ~8 tool calls"
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `expected_commands` | *required* | Expected number of tool commands to complete the task (integer, `>= 1`). |
+
+This criterion requires an agent run (it reads `CommandTelemetry`). Pair it with a low `weight` if you want efficiency to *inform* the score without gating pass/fail on its own.
+
 ### `uipath_eval`
 
 Evaluates a UiPath agent against a named evaluation set. **Fractional scoring:** metrics passed / total metrics.
@@ -640,7 +799,7 @@ Evaluates a UiPath agent against a named evaluation set. **Fractional scoring:**
 
 ### `llm_judge`
 
-Have an LLM grade the task against a rubric written in the task YAML. **Continuous scoring** from a JSON verdict `{"score": 0.0-1.0, "rationale": "..."}`; parse failure, non-numeric score, or LLM error all produce `score=0.0` with an `error` populated.
+Have an LLM grade the task against a rubric written in the task YAML. **Continuous scoring** from a verdict the judge returns via a forced `submit_verdict` tool call (`{score: 0.0-1.0, rationale: "..."}`) — the model never returns free-form prose. A missing/malformed verdict, a non-numeric score, or an LLM error all produce `score=0.0` with an `error` populated.
 
 ```yaml
 - type: "llm_judge"
@@ -657,7 +816,7 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
   include_dialog: false              # Opt-in: include the full user<->agent conversation (recommended for simulation)
   model: "anthropic.claude-sonnet-4-6"
   temperature: 0.0
-  max_tokens: 1000
+  max_tokens: 2000
   max_file_chars: 20000              # Per-file content truncation
   weight: 2.0
   pass_threshold: 0.7
@@ -674,7 +833,7 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
 | `max_dialog_chars` | `80000` | Aggregate cap on dialog text rendered into the judge prompt (per-message cap is `max_file_chars`). When exceeded, trailing turns are dropped and a degraded note is recorded. |
 | `model` | `anthropic.claude-sonnet-4-6` | Judge model id (vendor-prefixed; auto-translated per backend) |
 | `temperature` | `0.0` | Sampling temperature (0.0 = deterministic) |
-| `max_tokens` | `1000` | Maximum tokens in the judge's response |
+| `max_tokens` | `2000` | Maximum tokens in the judge's response |
 | `max_file_chars` | `20000` | Per-file (and agent_output) truncation applied before building the prompt |
 
 **Transport selection.** The judge call is routed by the active `API_BACKEND`:
@@ -694,14 +853,14 @@ The `direct`-mode transport is resolved once at startup, logged on the `API rout
 
 **Failure modes** — each sets `score=0.0` and populates `error`:
 
-- Non-JSON response from the model (parse failure)
-- `score` key missing from the JSON verdict
+- The judge never emits the forced `submit_verdict` tool call (no verdict returned)
+- `score` key missing from the verdict
 - `score` is not coercible to float
 - Judge backend unavailable / network error (handled by `@handle_criterion_errors`)
 
 ### `agent_judge`
 
-Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LLM call against a rubric), the judge agent has **tool access** — Bash, Read, Write, Glob, Grep, Edit by default — and runs in an isolated copy of the task sandbox. Use it when functional validation requires executing something (`uip rpa get-errors`, `xmllint`, a test suite) rather than just inspecting file content.
+Spawn a full Claude Code SDK agent as the judge. Unlike `llm_judge` (a single LLM call against a rubric), the judge agent has **tool access** — a read-only toolkit of `Bash`, `Read`, `Glob`, `Grep` by default (no `Write`/`Edit`) — and runs in an isolated copy of the task sandbox. Use it when functional validation requires executing something (`uip rpa get-errors`, `xmllint`, a test suite) rather than just inspecting file content.
 
 ```yaml
 - type: "agent_judge"
@@ -776,6 +935,30 @@ The judge runs with the evaluator's API credentials and can execute arbitrary Ba
 - `TurnTimeoutError` (judge exceeded `turn_timeout`)
 - SDK subprocess failure (e.g. `claude` CLI missing)
 
+### `classification_match`
+
+Matches a single label the agent wrote to a file against ground truth — the file-based classifier. Reads the file, normalizes the content (strip, and lowercase unless `case_sensitive`), and compares it to `expected_label`. **Binary scoring:** `1.0` on a match, else `0.0`.
+
+The observed label is the canonical form from `allowed_labels` when the content matches; otherwise `(none)` when the file is missing/empty and `(other)` when the content isn't in the allowed set. Both sentinels are recorded so a suite rollup shows them as real failure classes in the confusion matrix.
+
+```yaml
+- type: "classification_match"
+  path: "result.txt"                  # file (relative to sandbox) holding the agent's predicted label
+  expected_label: "positive"
+  allowed_labels: [positive, negative]
+  case_sensitive: false               # default: case-insensitive + canonicalized
+  description: "Sentiment label matches ground truth"
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `path` | *required* | File (relative to sandbox) containing the agent's predicted label. |
+| `expected_label` | *required* | Ground-truth label for this row (drive it from `${row.…}` on a dataset-backed task). |
+| `allowed_labels` | *required* | Canonical label set (≥1). Content not in this set becomes `(other)`. |
+| `case_sensitive` | `false` | When `false`, matching is case-insensitive and labels are canonicalized. |
+
+Like `skill_triggered`, this criterion emits a `ClassificationCriterionResult`, so on a [dataset-backed task](#dataset) the suite aggregator computes accuracy / precision / recall / F1 and a confusion matrix — gate them with `suite_thresholds`. Use `classification_match` when the agent writes its answer to a file (labeling/extraction tasks); use `skill_triggered` when the signal is whether a skill fired.
+
 ### `skill_triggered`
 
 Binary classifier: **did the agent engage the target skill during the run?** Agent-agnostic — scans the run's `turn_records` for either signal: Claude's explicit `Skill` tool call whose `skill` parameter matches `skill_name` (namespace prefixes like `plugin:skill` are stripped, so `skill_name: uipath-agents` matches `Skill(skill="uipath-coded-agents:uipath-agents")`), or — for an agent with no `Skill` tool, e.g. Codex — a command that reads the skill's files off disk (a parameter contains `skills/<skill_name>/`, matching both the repo path and the `.agents/skills/` symlink).
@@ -799,7 +982,7 @@ Observed label is `"yes"` when either signal is found, else `"no"`. Expected lab
 
 **Requires agent telemetry.** This criterion reads `turn_records`, so it only works against a real agent run (not a static check). With no turn records it reports `score=0.0` and an `error`.
 
-**Classification metrics.** `skill_triggered` returns a `ClassificationCriterionResult`, so on a [dataset-backed task](#task-yaml-structure) the suite aggregator computes accuracy / precision / recall / F1 / confusion matrix across all rows. Gate the suite with `suite_thresholds` using any of: `accuracy`, `macro_f1`, `weighted_f1`, `micro_f1`, or per-label `precision.<label>` / `recall.<label>` / `f1.<label>` (labels are `yes` / `no`). The run exits non-zero if any listed metric falls below its minimum.
+**Classification metrics.** `skill_triggered` returns a `ClassificationCriterionResult`, so on a [dataset-backed task](#dataset) the suite aggregator computes accuracy / precision / recall / F1 / confusion matrix across all rows. Gate the suite with `suite_thresholds` using any of: `accuracy`, `macro_f1`, `weighted_f1`, `micro_f1`, or per-label `precision.<label>` / `recall.<label>` / `f1.<label>` (labels are `yes` / `no`). The run exits non-zero if any listed metric falls below its minimum.
 
 **Typical pattern.** Label each dataset row with its true skill (`expected_skill`, `""` for negatives) and stack one `skill_triggered` criterion per skill against the same dataset — each gets its own confusion matrix from the same agent traces. This is the natural companion to a skill A/B experiment (skill plugin on vs. off); see the [A/B Experiment Guide](AB_EXPERIMENTS.md#recipe-ab-a-skill).
 
@@ -913,6 +1096,9 @@ The shipped `experiments/*.yaml` use this to drop sandbox-scoped npm dirs (intro
 
 Optional `simulation` block. When present and enabled, the orchestrator replaces the single-shot iteration loop with a multi-turn dialog between the coding agent and a simulated user (a second LLM with a persona and goal). Use this for tasks where the real usage pattern is conversational — clarifying questions, incremental requirements, mid-task corrections — rather than a single fire-and-forget prompt.
 
+> This section is the field reference. For when to use dialog mode, how to design a persona and
+> goal, trials and variance, grading, and cost, see **[Dialog Mode](DIALOG_MODE.md)**.
+
 ```yaml
 simulation:
   enabled: true                        # Master switch; when false, simulation is skipped entirely.
@@ -937,7 +1123,6 @@ simulation:
 
   # Sampling (variance analysis).
   n_trials: 3                          # Run N independent dialogs per (task, variant).
-  parallel_trials: true                # Trials run concurrently (subject to batch max_parallel).
 
   # Criteria timing.
   check_criteria: every_turn           # One of: end_of_dialog | every_turn | both.
@@ -954,9 +1139,8 @@ simulation:
 | `max_turns` | `8` | Hard cap on user↔agent exchanges (1–100). |
 | `stop_token` | `"<<<END>>>"` | Sentinel the simulator emits to end the dialog. |
 | `stop_on_criteria_pass` | `false` | End when all criteria pass (requires per-turn checking). |
-| `max_total_tokens` | *unset* | Optional dialog-wide token budget. |
+| `max_total_tokens` | *unset* | Optional dialog-wide token budget (simulator **plus** agent). Distinct from [`run_limits.max_total_tokens`](#run-limits) — see below. |
 | `n_trials` | `1` | Independent dialog trajectories per (task, variant). |
-| `parallel_trials` | `true` | Run trials concurrently within the batch. |
 | `check_criteria` | `end_of_dialog` | `end_of_dialog`, `every_turn`, or `both`. |
 
 The simulator runs as a tools-disabled Claude Code agent sharing the coding agent's `ApiRoute` — model/temperature/sampling are resolved at the route level (same `-b` flag as the coding agent), so they are not configured on this block.
@@ -966,9 +1150,19 @@ The simulator runs as a tools-disabled Claude Code agent sharing the coding agen
 - The task's `initial_prompt` is the user's *opening* message; the simulator picks up from turn 2.
 - `max_turns` is the intra-dialog cap (the worst-case agent call budget per trial). Use `n_trials` for variance sampling.
 - The `reference` solution, if present, is hidden from the simulator (same security posture as for the coding agent).
-- When `n_trials > 1`, each trial becomes its own `ResolvedTask` with `task_id` suffix `/trial-N` (0-indexed), its own run directory, and its own `task.json`. Trial-level metadata appears under `simulation.trial_id` / `simulation.n_trials` on the `EvaluationResult`.
+- When `n_trials > 1`, each trial becomes its own `ResolvedTask` with its own zero-padded replicate directory (`runs/<ts>/<variant_id>/<task_id>/<NN>/`) and its own `task.json` — the same fan-out mechanism as experiment `repeats`, which `n_trials` takes precedence over when simulation is enabled. Trial-level metadata appears under `simulation.replicate_index` / `simulation.n_trials` on the `EvaluationResult`.
 
-**Termination precedence:** `stop_on_criteria_pass` → `stop_token` → `max_turns` → `max_total_tokens`.
+**Termination precedence** (evaluated after each exchange, first match wins): `run_limits` breach →
+`stop_on_criteria_pass` → `max_turns` → `max_total_tokens` → `stop_token`. The stop token is checked
+**last**, on the simulator's next utterance, which is only solicited if nothing above fired — so a
+turn that hits `max_turns` or the token budget ends the dialog before the simulator can emit it.
+A raising simulator call ends the dialog with `stop_reason: error`.
+
+> **`simulation.max_total_tokens` vs. `run_limits.max_total_tokens`.** This one covers the **whole
+> dialog** (simulator + agent) and ends the conversation gracefully with `stop_reason='budget'`, so
+> the task is still scored. [`run_limits.max_total_tokens`](#run-limits) covers the **subject agent
+> only** and **aborts** the task with `FinalStatus.TOKEN_BUDGET_EXCEEDED`. They compose — set both
+> for a hard ceiling on a simulated task.
 
 **Grading simulated dialogs.** When a task uses `simulation:`, set `include_dialog: true` on any `llm_judge` / `agent_judge` criterion. Without it, the judge sees only the agent's outputs and may flag a fabricated-but-conceded premise as a hallucination by the agent. The dialog block is rendered with a rubric guard telling the judge to treat any claim made only by the simulated user as possibly invented, and not to penalize the agent for going along with it unless the grading prompt contradicts it.
 

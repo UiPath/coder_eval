@@ -173,6 +173,11 @@ def run_command(
         "--log-file",
         help="Log to file in addition to console",
     ),
+    junit_xml: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--junit-xml",
+        help="Write a JUnit XML report of task results to this path (for CI test-report ingestion).",
+    ),
     tags: str | None = typer.Option(
         None,
         "--tags",
@@ -365,6 +370,7 @@ def run_command(
                 verbose=verbose,
                 resume=resume,
                 include_skipped=include_skipped,
+                junit_xml=junit_xml,
             )
         )
     except KeyboardInterrupt:
@@ -389,6 +395,7 @@ async def _run_all_tasks(
     verbose: bool = False,
     resume: bool = False,
     include_skipped: bool = False,
+    junit_xml: Path | None = None,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -407,6 +414,8 @@ async def _run_all_tasks(
             from -D/--set and the bespoke flag aliases
         stream_mode: Optional stream mode ('full' or 'minimal') for real-time output
         experiment_path: Optional path to experiment YAML (default: experiments/default.yaml)
+        junit_xml: Optional path to write a JUnit XML report to, after the run
+            summary is persisted and before the failure exit-code gate.
     """
     # Prepare run directory
     run_dir = prepare_run_directory(run_dir)
@@ -464,6 +473,16 @@ async def _run_all_tasks(
 
         # Print execution summary
         print_execution_summary(run_dir, summary)
+
+        # Write the JUnit report (if requested) BEFORE the exit-code gate below,
+        # so a failing run still produces the report. suite.json + run.json are
+        # already on disk (written inside _run_with_experiment). A write error
+        # propagates (loud failure, exit != 0) rather than being swallowed.
+        if junit_xml is not None:
+            from ..reports_junit import write_junit_xml
+
+            written = write_junit_xml(run_dir, junit_xml)
+            console.print(f"[green][OK]JUnit report written to {written}[/green]")
     finally:
         # Explicit flush before process exit (belt-and-suspenders with atexit).
         # In a `finally` so it runs on the success path and on any raised

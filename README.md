@@ -2,11 +2,10 @@
 
 [![PyPI](https://img.shields.io/pypi/v/coder-eval.svg)](https://pypi.org/project/coder-eval/)
 [![Website](https://img.shields.io/badge/website-coder--eval.com-1f6feb.svg)](https://coder-eval.com)
-[![Docs](https://img.shields.io/badge/docs-uipath.github.io%2Fcoder__eval-1f6feb.svg)](https://uipath.github.io/coder_eval/)
+[![Docs](https://img.shields.io/badge/docs-coder--eval.com%2Fdocs-1f6feb.svg)](https://coder-eval.com/docs)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
 [![CI](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml/badge.svg)](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml)
-[![Code style: Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 **Coder Eval** (`pip install coder-eval` / `uv tool install coder-eval`) is an open-source framework for
 **evaluating and benchmarking AI coding agents and their skills** — built for CLI
@@ -22,8 +21,8 @@ prompt), or **gate CI on coding-agent quality**. Unlike fixed datasets (SWE-benc
 SkillsBench) that rank models on a shared leaderboard, Coder Eval evaluates the
 tasks, skills, and workflows *you* ship — with weighted 0.0–1.0 criteria, a
 `skill_triggered` activation check, an A/B experiment layer, and per-tool cost
-telemetry. See [How it compares](https://uipath.github.io/coder_eval/comparison/).
-📚 **Full docs:** **[uipath.github.io/coder_eval](https://uipath.github.io/coder_eval/)**.
+telemetry. See [How it compares](https://coder-eval.com/docs/comparison).
+📚 **Full docs:** **[coder-eval.com/docs](https://coder-eval.com/docs)**.
 
 <p align="center">
   <img src="docs/assets/hero.gif" alt="Coder Eval running the hello_date task: a sandboxed agent writes and runs a script from a YAML task, then the scored result is browsed in evalboard" width="100%">
@@ -49,7 +48,7 @@ telemetry. See [How it compares](https://uipath.github.io/coder_eval/comparison/
 > **Keeping skills fresh?** Run Coder Eval as a scheduled GitHub Actions job so your
 > skills are continuously re-evaluated against the latest model — a skill that quietly
 > stops triggering surfaces as a failing criterion before your users hit it. See
-> **[Tutorial 02 — Running coder_eval in CI](docs/tutorials/02-ci-pipeline.md)**.
+> **[Tutorial 02 — Running Coder Eval in CI](docs/tutorials/02-ci-pipeline.md)**.
 
 ## Quick Start
 
@@ -93,8 +92,76 @@ To add it as a project dependency instead: `uv add coder-eval` or
 `pip install coder-eval`. In a real CI gate, pin to a specific released version
 so a harness upgrade can't silently move your results. (The example `tasks/`
 live in this repo — clone it or point the CLI at your own task files.) See
-[Tutorial 02 — Running coder_eval in CI](docs/tutorials/02-ci-pipeline.md) for
+[Tutorial 02 — Running Coder Eval in CI](docs/tutorials/02-ci-pipeline.md) for
 the full setup.
+
+## Use as a GitHub Action
+
+A composite action at the repo root runs `coder-eval` as a CI gate — it installs
+the pinned CLI, runs your tasks, writes a JUnit XML report, appends `run.md` to
+the job summary, and fails the step on any task/gate failure:
+
+```yaml
+- uses: UiPath/coder_eval@v0    # becomes @v1 once 1.0.0 ships; @vX.Y.Z pins exactly
+  with:
+    tasks: tests/tasks/**/*.yaml
+    model: claude-sonnet-5
+    env: |
+      ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+| Input | Default | Purpose |
+| --- | --- | --- |
+| `tasks` | *(all `tasks/`)* | Task YAML path(s)/glob |
+| `tags` | — | `--tags` filter |
+| `model` | — | `--model` override |
+| `extra-args` | — | Verbatim extra args (`--experiment`, `-D …`, …) |
+| `version` | pinned release | PyPI version, or `local` to install from the checkout |
+| `run-dir` | `runs/ci` | Run directory |
+| `junit-path` | `coder-eval-junit.xml` | Where to write the JUnit report |
+| `step-summary` | `true` | Append `run.md` to the job summary |
+| `env` | — | Credentials/backend passthrough: newline-separated `NAME=VALUE` pairs, exported for the run step only |
+| `minimum-task-score` | *(off)* | Strict floor (0.0–1.0): fail the step if any task's `weighted_score` is below it |
+
+Outputs: `run-dir` and `junit-path`. Feed the JUnit file to your platform's
+test-report renderer — e.g. on GitHub Actions with
+[`mikepenz/action-junit-report`](https://github.com/mikepenz/action-junit-report):
+
+```yaml
+- uses: mikepenz/action-junit-report@v5
+  if: always()
+  with:
+    report_paths: coder-eval-junit.xml
+```
+
+**Credentials and backend config** are the sole responsibility of `env` — a
+passthrough exported for the run step only (never written to `$GITHUB_ENV`, so
+it can't leak into later steps). Set whatever the run needs, Anthropic or not:
+
+```yaml
+- uses: UiPath/coder_eval@v0
+  with:
+    tasks: tests/tasks/**/*.yaml
+    minimum-task-score: "0.8"   # fail the build if any task scores below 0.8
+    env: |
+      API_BACKEND=bedrock
+      AWS_BEARER_TOKEN_BEDROCK=${{ secrets.BEDROCK_TOKEN }}
+```
+
+`minimum-task-score` is a strict floor **on top of** coder-eval's own exit
+code: the step fails if *either* coder-eval exits non-zero *or* any task's
+`weighted_score` falls below the floor. Leave it unset to gate on the exit code
+alone.
+
+> **Agent runtime is the caller's responsibility.** The action is agent-agnostic —
+> it installs `coder-eval` but no coding-agent runtime. Tasks using the default
+> `claude-code` agent need the `claude` CLI on `PATH` (`actions/setup-node` +
+> `npm install -g @anthropic-ai/claude-code`) in the job before the action runs.
+
+> **Security.** Evaluated tasks execute agent-generated code. Do **not** run this
+> action under `pull_request_target` with secrets exposed to untrusted fork PRs —
+> use `pull_request` and gate on the same-repo condition, as this repo's own
+> dogfood job does.
 
 ## Telemetry
 
@@ -108,15 +175,27 @@ the full setup.
 
 ## Documentation
 
+<!-- docs-index:start -->
 | Guide | What's in it |
 | --- | --- |
 | [Tutorials](docs/tutorials/README.md) | Step-by-step walkthroughs — start here |
 | [User Guide](docs/USER_GUIDE.md) | Full CLI, configuration, output, and environment-variable reference |
 | [Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md) | The task-file schema — all criterion types, scoring, templates |
+| [Claude Code](docs/agents/CLAUDE_CODE.md) | Configuring and running the default Claude Code agent |
+| [Codex](docs/agents/CODEX.md) | Running the OpenAI Codex agent |
+| [Antigravity (Gemini)](docs/agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
 | [A/B Experiments](docs/AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
-| [Bring Your Own Dataset](docs/BYOD.md) | Fan a single task out over a dataset |
-| [Codex Agent Guide](docs/CODEX_AGENT_GUIDE.md) | Running the Codex agent |
-| [Docker Isolation](docs/DOCKER_ISOLATION.md) | The container sandbox driver |
+| [Bring Your Own Dataset](docs/DATASETS.md) | Fan a single task out over a dataset |
+| [Dialog Mode](docs/DIALOG_MODE.md) | Evaluate agents in multi-turn conversation via a simulated user |
+| [Docker Isolation](docs/DOCKER_ISOLATION.md) | The container sandbox driver, with custom images |
+| [CI Gate & GitHub Action](docs/CI_GATE.md) | Run Coder Eval as a CI gate — the packaged Action, JUnit output, score floor |
+| [Extending Coder Eval](docs/EXTENDING.md) | Author a custom agent, criterion, or model pricing via the plugin SPI |
+| [Report Schema](docs/REPORT_SCHEMA.md) | Field-level reference for run.json / variant.json / task.json |
+| [How It Compares](docs/comparison.md) | vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts |
+<!-- docs-index:end -->
+
+| Repo doc | What's in it |
+| --- | --- |
 | [CLAUDE.md](CLAUDE.md) | Architecture, key patterns, and extension points |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, quality bar, and how to contribute |
 
@@ -124,7 +203,7 @@ the full setup.
 
 - **vs. fixed benchmarks (SWE-bench, SkillsBench)** — they score a canonical dataset;
   Coder Eval scores *your* tasks with continuous 0.0–1.0 weighted criteria (and can
-  still wrap a fixed dataset via [Bring Your Own Dataset](docs/BYOD.md)).
+  still wrap a fixed dataset via [Bring Your Own Dataset](docs/DATASETS.md)).
 - **vs. large-scale / RL harnesses (Harbor)** — Harbor targets scale and RL rollouts;
   Coder Eval targets weighted, skill-aware suites gated in CI.
 - **vs. model-output eval tools (OpenAI Evals)** — they grade model text; Coder Eval
@@ -132,7 +211,7 @@ the full setup.
 - **vs. hand-rolled scripts** — reproducible sandboxes, weighted criteria,
   cost/token telemetry, A/B experiments, and CI-ready pass/fail gates out of the box.
 
-See the full [comparison — with sources](https://uipath.github.io/coder_eval/comparison/).
+See the full [comparison — with sources](https://coder-eval.com/docs/comparison).
 
 ## Task Definition
 

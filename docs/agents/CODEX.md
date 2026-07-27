@@ -1,15 +1,15 @@
 ---
 description: >-
-  Run OpenAI Codex as the agent under evaluation in coder_eval — installation,
+  Run OpenAI Codex as the agent under evaluation in Coder Eval — installation,
   authentication, task configuration, and how Codex telemetry maps to sandboxed,
   weighted scoring.
 ---
 
-# Running OpenAI Codex in coder_eval
+# Running OpenAI Codex in Coder Eval
 
 ## Overview
 
-coder_eval can run OpenAI's Codex as the agent under evaluation, via the official Codex SDK. The `CodexAgent` mirrors the structure of `ClaudeCodeAgent` and plugs into the same sandbox, scoring, and telemetry pipeline — set `agent.type: codex` in a task and the rest of the framework works unchanged.
+Coder Eval can run OpenAI's Codex as the agent under evaluation, via the official Codex SDK. The `CodexAgent` mirrors the structure of `ClaudeCodeAgent` and plugs into the same sandbox, scoring, and telemetry pipeline — set `agent.type: codex` in a task and the rest of the framework works unchanged.
 
 ## Setup
 
@@ -75,7 +75,7 @@ coder-eval run tasks/agents/codex_hello_world.yaml --type codex
 Or override agent type for all tasks in an experiment:
 
 ```bash
-coder-eval run experiments/example.yaml --type codex
+coder-eval run experiments/model-comparison.yaml --type codex
 ```
 
 ### Task Definition (YAML)
@@ -188,7 +188,7 @@ The agent maps `permission_mode` to the Codex SDK's `Sandbox`. The approval mode
 | `default` | `workspace-write` | `deny_all` |
 | `plan` | `read-only` | `deny_all` |
 
-`deny_all` means *run autonomously, never prompt, no server-side reviewer*: in-sandbox operations execute directly and only escalations beyond the sandbox are refused. `coder_eval` uses it for every mode because the alternative (`auto_review`) adds a server-side reviewer that can spuriously return `declined` under gateway load.
+`deny_all` means *run autonomously, never prompt, no server-side reviewer*: in-sandbox operations execute directly and only escalations beyond the sandbox are refused. Coder Eval uses it for every mode because the alternative (`auto_review`) adds a server-side reviewer that can spuriously return `declined` under gateway load.
 
 `allowed_tools` / `disallowed_tools` are normalized (`Bash` → `shell`, `Write`/`Edit` → `apply_patch`, etc.) and passed as `enabled_tools` / `disabled_tools` in the thread `config`. **Note:** the Codex SDK does not currently enforce `disabled_tools`; do not rely on it as a security boundary (the agent logs a warning when it is set).
 
@@ -215,7 +215,7 @@ The Codex SDK is synchronous. The agent uses `_run_async()` helper to detect and
 | **Model Selection** | Direct via `--model` or config | `agent.model` pinned into `thread_start` |
 | **Session Resume** | `--resume {session_id}` | Via thread ID |
 | **Permissions** | `permission_mode` + `allowed_tools` | `permission_mode` → sandbox/approval + `allowed_tools`/`disallowed_tools` → thread config |
-| **Tool Enforcement** | Not enforced by coder_eval wrapper | `enabled_tools` honored; `disabled_tools` NOT enforced by the SDK |
+| **Tool Enforcement** | Not enforced by Coder Eval wrapper | `enabled_tools` honored; `disabled_tools` NOT enforced by the SDK |
 
 ## Known Limitations
 

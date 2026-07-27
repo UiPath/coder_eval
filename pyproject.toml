@@ -1,6 +1,6 @@
 [project]
 name = "coder-eval"
-version = "0.8.8"
+version = "0.8.10"
 description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity) with sandboxed, reproducible YAML task suites."
 readme = "README.md"
 license = "Apache-2.0"
@@ -53,7 +53,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://coder-eval.com"
 Repository = "https://github.com/UiPath/coder_eval"
-Documentation = "https://github.com/UiPath/coder_eval/tree/main/docs"
+Documentation = "https://coder-eval.com/docs"
 Issues = "https://github.com/UiPath/coder_eval/issues"
 Changelog = "https://github.com/UiPath/coder_eval/blob/main/CHANGELOG.md"
 
@@ -70,6 +70,7 @@ dev = [
     "pip-audit>=2.10.0",
     "bandit[toml]>=1.9.4",
     "pre-commit>=4.5.1",
+    "defusedxml>=0.7.1",  # test-side JUnit XML round-trip parsing (defense-in-depth; production code never parses XML)
 ]
 # Optional extra that enables UiPath-specific features:
 #   - the `uipath` Python SDK on the host (handy for local sandbox parity with

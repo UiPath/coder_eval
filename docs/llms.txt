@@ -21,23 +21,33 @@ and A/B plumbing.
 
 ## Docs
 
-- [Home / overview](https://uipath.github.io/coder_eval/): what Coder Eval is, features, quick start
-- [How it compares](https://uipath.github.io/coder_eval/comparison/): vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts
-- [User Guide](https://uipath.github.io/coder_eval/USER_GUIDE/): full CLI, configuration, output, environment variables
-- [Task Definition Guide](https://uipath.github.io/coder_eval/TASK_DEFINITION_GUIDE/): task-file schema, all criterion types, scoring, templates
-- [A/B Experiments](https://uipath.github.io/coder_eval/AB_EXPERIMENTS/): compare models/tools/prompts across the same tasks
-- [Bring Your Own Dataset](https://uipath.github.io/coder_eval/BYOD/): fan a single task out over a dataset
-- [Codex Agent Guide](https://uipath.github.io/coder_eval/CODEX_AGENT_GUIDE/): running the Codex agent
-- [Docker Isolation](https://uipath.github.io/coder_eval/DOCKER_ISOLATION/): the container sandbox driver, custom images
+<!-- docs-index:start:docs -->
+- [Home](https://coder-eval.com/docs): What Coder Eval is, its features, and a quick start
+- [User Guide](https://coder-eval.com/docs/user-guide): Full CLI, configuration, output, and environment-variable reference
+- [Task Definition Guide](https://coder-eval.com/docs/task-definition-guide): The task-file schema — all criterion types, scoring, templates
+- [Claude Code](https://coder-eval.com/docs/agents/claude-code): Configuring and running the default Claude Code agent
+- [Codex](https://coder-eval.com/docs/agents/codex): Running the OpenAI Codex agent
+- [Antigravity (Gemini)](https://coder-eval.com/docs/agents/antigravity): Running the Google Antigravity / Gemini agent
+- [A/B Experiments](https://coder-eval.com/docs/ab-experiments): Compare models / tools / prompts across the same tasks
+- [Bring Your Own Dataset](https://coder-eval.com/docs/datasets): Fan a single task out over a dataset
+- [Dialog Mode](https://coder-eval.com/docs/dialog-mode): Evaluate agents in multi-turn conversation via a simulated user
+- [Docker Isolation](https://coder-eval.com/docs/docker-isolation): The container sandbox driver, with custom images
+- [CI Gate & GitHub Action](https://coder-eval.com/docs/ci-gate): Run Coder Eval as a CI gate — the packaged Action, JUnit output, score floor
+- [Extending Coder Eval](https://coder-eval.com/docs/extending): Author a custom agent, criterion, or model pricing via the plugin SPI
+- [Report Schema](https://coder-eval.com/docs/report-schema): Field-level reference for run.json / variant.json / task.json
+- [How It Compares](https://coder-eval.com/docs/comparison): vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts
+<!-- docs-index:end:docs -->
 
 ## Tutorials
 
-- [01 · Your first evaluation](https://uipath.github.io/coder_eval/tutorials/01-first-evaluation/)
-- [02 · Running coder_eval in CI](https://uipath.github.io/coder_eval/tutorials/02-ci-pipeline/)
-- [03 · Browsing results with evalboard](https://uipath.github.io/coder_eval/tutorials/03-evalboard-local/)
-- [04 · Writing a task](https://uipath.github.io/coder_eval/tutorials/04-writing-a-task/)
-- [05 · Comparing two models](https://uipath.github.io/coder_eval/tutorials/05-comparing-models/)
-- [06 · Docker isolation](https://uipath.github.io/coder_eval/tutorials/06-use-docker-isolation/)
+<!-- docs-index:start:tutorials -->
+- [01 · Your first evaluation](https://coder-eval.com/docs/tutorials/01-first-evaluation)
+- [02 · Running Coder Eval in CI](https://coder-eval.com/docs/tutorials/02-ci-pipeline)
+- [03 · Browsing results with evalboard](https://coder-eval.com/docs/tutorials/03-evalboard-local)
+- [04 · Writing a task](https://coder-eval.com/docs/tutorials/04-writing-a-task)
+- [05 · Comparing two models](https://coder-eval.com/docs/tutorials/05-comparing-models)
+- [06 · Docker isolation](https://coder-eval.com/docs/tutorials/06-use-docker-isolation)
+<!-- docs-index:end:tutorials -->
 
 ## Source
 

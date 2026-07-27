@@ -3,7 +3,7 @@ site_description: >-
   Evaluate & benchmark AI coding agents and Claude Code skills — a sandboxed,
   reproducible framework with declarative YAML eval suites for Claude Code,
   Codex & Gemini, A/B experiments, weighted scoring, and CI gates.
-site_url: https://uipath.github.io/coder_eval/
+site_url: https://coder-eval.com/docs/
 repo_url: https://github.com/UiPath/coder_eval
 repo_name: UiPath/coder_eval
 edit_uri: edit/main/docs/
@@ -38,11 +38,6 @@ theme:
   icon:
     repo: fontawesome/brands/github
 
-# IDEAS.md is internal engineering backlog (links to source files) — not for the
-# public docs site.
-exclude_docs: |
-  IDEAS.md
-
 # The social plugin generates per-page Open Graph / Twitter card images (and
 # the matching og:/twitter: meta tags) so shared links unfurl properly. It
 # needs Cairo system libraries, so it is enabled only in CI (the Docs workflow
@@ -73,13 +68,36 @@ extra:
       link: https://github.com/UiPath/coder_eval
     - icon: fontawesome/brands/python
       link: https://pypi.org/project/coder-eval/
+  # docs_index: one-line blurb per nav page (docs-root-relative path -> blurb),
+  # for every page EXCEPT tutorial leaves (tutorials/0*.md). This map plus `nav`
+  # are the single source of truth for the flat index surfaces — README.md's
+  # Documentation table, docs/index.md's "Where to go next" table, and the
+  # ## Docs / ## Tutorials sections of docs/llms.txt. Regenerate them all with
+  # `make docs-indexes`; CE028 fails the build if any of the three drifts, if a
+  # nav page has no blurb (or vice-versa), or if a docs/ page is missing from nav.
+  docs_index:
+    index.md: "What Coder Eval is, its features, and a quick start"
+    tutorials/README.md: "Step-by-step walkthroughs — start here"
+    USER_GUIDE.md: "Full CLI, configuration, output, and environment-variable reference"
+    TASK_DEFINITION_GUIDE.md: "The task-file schema — all criterion types, scoring, templates"
+    agents/CLAUDE_CODE.md: "Configuring and running the default Claude Code agent"
+    agents/CODEX.md: "Running the OpenAI Codex agent"
+    agents/ANTIGRAVITY.md: "Running the Google Antigravity / Gemini agent"
+    AB_EXPERIMENTS.md: "Compare models / tools / prompts across the same tasks"
+    DATASETS.md: "Fan a single task out over a dataset"
+    DIALOG_MODE.md: "Evaluate agents in multi-turn conversation via a simulated user"
+    DOCKER_ISOLATION.md: "The container sandbox driver, with custom images"
+    CI_GATE.md: "Run Coder Eval as a CI gate — the packaged Action, JUnit output, score floor"
+    EXTENDING.md: "Author a custom agent, criterion, or model pricing via the plugin SPI"
+    REPORT_SCHEMA.md: "Field-level reference for run.json / variant.json / task.json"
+    comparison.md: "vs. SWE-bench, SkillsBench, Harbor, OpenAI Evals, hand-rolled scripts"
 
 nav:
   - Home: index.md
   - Tutorials:
       - Overview: tutorials/README.md
       - 01 · Your first evaluation: tutorials/01-first-evaluation.md
-      - 02 · Running coder_eval in CI: tutorials/02-ci-pipeline.md
+      - 02 · Running Coder Eval in CI: tutorials/02-ci-pipeline.md
       - 03 · Browsing results with evalboard: tutorials/03-evalboard-local.md
       - 04 · Writing a task: tutorials/04-writing-a-task.md
       - 05 · Comparing two models: tutorials/05-comparing-models.md
@@ -87,8 +105,16 @@ nav:
   - Guides:
       - User Guide: USER_GUIDE.md
       - Task Definition Guide: TASK_DEFINITION_GUIDE.md
+  - Agents:
+      - Claude Code: agents/CLAUDE_CODE.md
+      - Codex: agents/CODEX.md
+      - Antigravity (Gemini): agents/ANTIGRAVITY.md
+  - Advanced:
       - A/B Experiments: AB_EXPERIMENTS.md
-      - Bring Your Own Dataset: BYOD.md
-      - Codex Agent Guide: CODEX_AGENT_GUIDE.md
+      - Bring Your Own Dataset: DATASETS.md
+      - Dialog Mode: DIALOG_MODE.md
       - Docker Isolation: DOCKER_ISOLATION.md
-  - How it compares: comparison.md
+      - CI Gate & GitHub Action: CI_GATE.md
+      - Extending Coder Eval: EXTENDING.md
+      - Report Schema: REPORT_SCHEMA.md
+  - How It Compares: comparison.md

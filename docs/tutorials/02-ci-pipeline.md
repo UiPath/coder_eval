@@ -1,11 +1,11 @@
 ---
 description: >-
-  Run coder_eval in GitHub Actions — install the CLI, execute your coding-agent
+  Run Coder Eval in GitHub Actions — install the CLI, execute your coding-agent
   evaluation suite on demand or on a schedule, and gate merges on a pass/fail
   verdict.
 ---
 
-# Tutorial 02 — Running coder_eval in CI
+# Tutorial 02 — Running Coder Eval in CI
 
 Run your evaluation suite automatically in GitHub Actions: on demand, on a
 schedule, or as a merge gate. By the end you'll have a workflow that installs
@@ -18,7 +18,7 @@ drives its task tree under
 directory checked into the repo, a pinned `coder-eval` version, and a
 `task.json`-based verdict — distilled to the parts that transfer to any project.
 
-## The shape of a coder_eval CI job
+## The shape of a Coder Eval CI job
 
 Every CI setup, however elaborate, is the same five steps:
 
@@ -157,6 +157,78 @@ jobs:
   `$GITHUB_STEP_SUMMARY` puts the table on the run's summary page.
 - **`if: always()`** on the verdict and upload steps means you still get results
   even when a task fails.
+
+## Shortcut: the packaged action
+
+The five steps above spell out the mechanics, but Coder Eval also ships a
+composite action at the repo root that bundles install + run + JUnit report +
+job-summary + fail-on-failure into one step:
+
+```yaml
+      - uses: actions/setup-node@v4      # the claude-code agent needs the Claude CLI…
+        with: { node-version: '20' }
+      - run: npm install -g @anthropic-ai/claude-code
+
+      - uses: UiPath/coder_eval@v0       # …then run the gate (pin @vX.Y.Z in production)
+        with:
+          tasks: tests/tasks/**/*.yaml
+          model: claude-sonnet-5
+          env: |
+            ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+The action is agent-agnostic — it installs `coder-eval` but not the agent
+runtime, so provide the `claude` CLI (or your agent's runtime) in the job first.
+See the [CI Gate reference](../CI_GATE.md) for the full inputs table, JUnit
+output, the score-floor gate, and the fork/`pull_request_target` security caveat.
+The rest of this tutorial's hand-rolled workflow is still useful when you need
+finer control than the action's inputs expose.
+
+## Publishing test results (JUnit)
+
+The verdict step above parses `task.json` by hand. If your CI already ingests
+JUnit XML — for the per-test annotations, history, and flake tracking most CI
+systems render from it — let `coder-eval` emit it directly instead. Add
+`--junit-xml` to the run:
+
+```yaml
+      - name: Run evaluations
+        run: coder-eval run $TASK_GLOBS -j 4 --junit-xml coder-eval-junit.xml
+```
+
+The file is written **before** the exit-code decision, so a failing run still
+produces a report. You can also regenerate it from any existing run directory
+without re-running the suite:
+
+```bash
+coder-eval report runs/latest -f junit            # writes runs/latest/junit.xml
+coder-eval report runs/latest -f junit -o out.xml # custom path
+```
+
+The mapping: one `<testcase>` per task row (grouped into a `<testsuite>` per
+variant), failed/errored rows carry a `<failure>`/`<error>` with the per-criterion
+breakdown, skipped tasks and failing suite gates get their own synthetic suites.
+
+Feed the file to whatever your platform uses to render test results. On GitHub
+Actions, [`mikepenz/action-junit-report`](https://github.com/mikepenz/action-junit-report):
+
+```yaml
+      - name: Publish test report
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: coder-eval-junit.xml
+```
+
+On Azure DevOps, `PublishTestResults@2`:
+
+```yaml
+      - task: PublishTestResults@2
+        condition: always()
+        inputs:
+          testResultsFormat: 'JUnit'
+          testResultsFiles: 'coder-eval-junit.xml'
+```
 
 ## Secrets
 

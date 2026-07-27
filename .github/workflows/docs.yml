@@ -10,12 +10,17 @@ name: Docs
 # Source: "Deploy from a branch" → branch `gh-pages` / `/ (root)`. That's the same
 # (legacy, branch-based) configuration uipath-python already runs on.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "docs/**"
-      - "mkdocs.yml"
-      - ".github/workflows/docs.yml"
+  # Auto-publish on push is DISABLED: GitHub Pages is not yet enabled for this
+  # repo on uipath.github.io (org owner must switch it on once — Settings → Pages
+  # → Deploy from a branch → gh-pages / root). The published docs currently serve
+  # from coder-eval.com/docs (synced separately by the website), so the gh-pages
+  # deploy is not needed yet. Re-enable by uncommenting the `push:` trigger below.
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - "docs/**"
+  #     - "mkdocs.yml"
+  #     - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:

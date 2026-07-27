@@ -70,6 +70,7 @@ from coder_eval.streaming.events import (
     AgentStartEvent,
     ToolEndEvent,
     ToolEndStatus,
+    ToolStartEvent,
     TurnEndStatus,
     TurnStartEvent,
 )
@@ -192,6 +193,18 @@ def _tool_end(cmd: CommandTelemetry) -> ToolEndEvent:
     return ToolEndEvent(task_id="t", tool=cmd)
 
 
+def _skill_start(skill: str, *, tool_id: str = "sk-1", sequence_number: int = 0) -> ToolStartEvent:
+    """A Skill ToolStart (the tool CALL) engaging ``skill`` — no result yet."""
+    cmd = CommandTelemetry(
+        tool_name="Skill",
+        tool_id=tool_id,
+        timestamp=_TS,
+        parameters={"skill": skill},
+        sequence_number=sequence_number,
+    )
+    return ToolStartEvent(task_id="t", tool=cmd)
+
+
 def _skill_events(skill: str, *, tool_id: str = "sk-1") -> list[Any]:
     """AgentStart + TurnStart + a Skill ToolEnd engaging ``skill``."""
     return [_agent_start(), _turn_start(), _tool_end(_skill_cmd(skill, tool_id=tool_id))]
@@ -217,13 +230,21 @@ class TestConfigSurface:
     def test_stop_when_defaults_none(self) -> None:
         assert _skill_crit("s", "s").stop_when is None
 
-    @pytest.mark.parametrize("value", ["pass", "fail", "decided"])
+    @pytest.mark.parametrize("value", ["pass", "fail", "decided", "auto"])
     def test_stop_when_accepts_valid_polarities(self, value: str) -> None:
         assert _skill_crit("s", "s", stop_when=value).stop_when == value
 
     def test_stop_when_rejects_invalid_polarity(self) -> None:
         with pytest.raises(ValueError):
             _skill_crit("s", "s", stop_when="maybe")
+
+    def test_stop_when_auto_roundtrips(self) -> None:
+        # The new `auto` value survives model_dump -> model_validate with its
+        # model_fields_set intact (Pydantic round-trip integrity).
+        crit = _skill_crit("s", "s", stop_when="auto")
+        restored = SkillTriggeredCriterion.model_validate_json(crit.model_dump_json())
+        assert restored.stop_when == "auto"
+        assert "stop_when" in restored.model_fields_set
 
 
 # --------------------------------------------------------------------------- #
@@ -269,10 +290,19 @@ class TestSkillTriggeredLiveVerdict:
         rec = [_turn(_cmd("Skill", {"skill": "plugin:date-teller"}))]
         assert self.checker.live_verdict(crit, rec) == "pass"
 
-    def test_fail_when_wrong_skill_engaged(self) -> None:
-        # Positive row expecting date-teller, but a different skill loads first.
+    def test_positive_undecided_when_only_wrong_skill_engaged(self) -> None:
+        # A positive row expecting date-teller, but a different skill loads. Under
+        # any-engagement the positive criterion does NOT fail — date-teller may
+        # still load later, so the verdict stays undecided (the run keeps going).
         crit = _skill_crit("date-teller", "date-teller")
         rec = [_turn(_cmd("Skill", {"skill": "other-skill"}))]
+        assert self.checker.live_verdict(crit, rec) == "undecided"
+
+    def test_distractor_fails_when_its_skill_engaged(self) -> None:
+        # A distractor criterion (skill_name != expected_skill): engaging its
+        # (wrong) skill is a decidable precision miss -> fail.
+        crit = _skill_crit("weather-teller", "date-teller")
+        rec = [_turn(_cmd("Skill", {"skill": "weather-teller"}))]
         assert self.checker.live_verdict(crit, rec) == "fail"
 
     def test_negative_row_target_engaged_is_fail(self) -> None:
@@ -281,19 +311,32 @@ class TestSkillTriggeredLiveVerdict:
         rec = [_turn(_cmd("Skill", {"skill": "date-teller"}))]
         assert self.checker.live_verdict(crit, rec) == "fail"
 
-    def test_negative_row_other_engaged_is_pass(self) -> None:
+    def test_negative_undecided_when_other_engaged(self) -> None:
+        # A negative criterion cannot live-pass: the absence of its skill is not
+        # knowable mid-run, so an unrelated engagement leaves it undecided.
         crit = _skill_crit("date-teller", "")
         rec = [_turn(_cmd("Skill", {"skill": "unrelated"}))]
-        assert self.checker.live_verdict(crit, rec) == "pass"
+        assert self.checker.live_verdict(crit, rec) == "undecided"
 
-    def test_first_engagement_decides(self) -> None:
-        # The wrong skill engages first, the expected one later — first wins.
+    def test_expected_skill_engaged_after_wrong_is_pass(self) -> None:
+        # Item 1: the wrong skill engages first, the expected one later — the
+        # positive criterion passes (any-engagement, order-independent).
         crit = _skill_crit("date-teller", "date-teller")
         rec = [_turn(_cmd("Skill", {"skill": "wrong"}), _cmd("Skill", {"skill": "date-teller"}))]
-        assert self.checker.live_verdict(crit, rec) == "fail"
+        assert self.checker.live_verdict(crit, rec) == "pass"
 
     def test_polarities_declared(self) -> None:
         assert SkillTriggeredChecker.live_stop_polarities == frozenset({"pass", "fail"})
+
+    def test_decidable_narrows_per_instance(self) -> None:
+        # A positive instance decides only pass; a distractor/negative only fail.
+        assert SkillTriggeredChecker.live_decidable_polarities(_skill_crit("date-teller", "date-teller")) == frozenset(
+            {"pass"}
+        )
+        assert SkillTriggeredChecker.live_decidable_polarities(
+            _skill_crit("weather-teller", "date-teller")
+        ) == frozenset({"fail"})
+        assert SkillTriggeredChecker.live_decidable_polarities(_skill_crit("date-teller", "")) == frozenset({"fail"})
 
 
 # --------------------------------------------------------------------------- #
@@ -396,10 +439,18 @@ class TestBaseLiveVerdictDefault:
         assert checker.live_verdict(crit, [_turn()]) == "undecided"
 
     def test_base_decidable_defaults_to_class_polarities(self) -> None:
-        # The base hook returns the ClassVar verbatim: skill_triggered does not
-        # narrow per-instance, so its decidable set equals its class capability.
-        crit = _skill_crit("s", "s")
-        assert SkillTriggeredChecker.live_decidable_polarities(crit) == SkillTriggeredChecker.live_stop_polarities
+        # The base hook returns the ClassVar verbatim for a criterion that does
+        # NOT override it: file_exists (unobservable) reports its empty capability.
+        init_criteria(validate=False)
+        checker_cls = type(CriterionRegistry.get_checker("file_exists")())
+        crit = FileExistsCriterion(type="file_exists", path="x.txt", description="x")
+        assert checker_cls.live_decidable_polarities(crit) == checker_cls.live_stop_polarities == frozenset()
+
+    def test_skill_triggered_decidable_is_subset_of_class_polarities(self) -> None:
+        # skill_triggered DOES narrow per-instance; each instance set stays a
+        # subset of the class capability.
+        for crit in (_skill_crit("s", "s"), _skill_crit("s", "other"), _skill_crit("s", "")):
+            assert SkillTriggeredChecker.live_decidable_polarities(crit) <= SkillTriggeredChecker.live_stop_polarities
 
 
 # --------------------------------------------------------------------------- #
@@ -419,8 +470,27 @@ class TestValidateEarlyStop:
         validate_early_stop(task)  # no raise
 
     def test_armed_happy_path_accepts(self) -> None:
-        task = _task(criteria=[_skill_crit("s", "s", stop_when="decided")], stop_early=True)
+        # A positive skill_triggered decides only "pass", so arm it with pass.
+        task = _task(criteria=[_skill_crit("s", "s", stop_when="pass")], stop_early=True)
         validate_early_stop(task)  # no raise
+
+    def test_armed_distractor_fail_accepts(self) -> None:
+        # A distractor (skill_name != expected_skill) decides only "fail".
+        task = _task(criteria=[_skill_crit("wrong", "s", stop_when="fail")], stop_early=True)
+        validate_early_stop(task)  # no raise
+
+    def test_skill_triggered_positive_fail_arm_rejected(self) -> None:
+        # A positive criterion can never live-fail; arming it with fail is a dead arm.
+        task = _task(criteria=[_skill_crit("s", "s", stop_when="fail")], stop_early=True)
+        with pytest.raises(EarlyStopConfigError, match="cannot decide polarity"):
+            validate_early_stop(task)
+
+    def test_skill_triggered_decided_arm_rejected(self) -> None:
+        # A single skill_triggered instance decides only one polarity, so
+        # stop_when=decided (which needs both) can never be honored.
+        task = _task(criteria=[_skill_crit("s", "s", stop_when="decided")], stop_early=True)
+        with pytest.raises(EarlyStopConfigError, match="cannot decide polarity"):
+            validate_early_stop(task)
 
     def test_armed_command_executed_accepts(self) -> None:
         # A decidable fail arm: must-NOT-run (max_count set) can live-fail.
@@ -499,13 +569,51 @@ class TestValidateEarlyStop:
             validate_early_stop(task)
 
     def test_stacked_activation_criteria_accept(self) -> None:
-        # Multiple armed skill_triggered criteria (the activation pattern).
+        # The activation pattern under the any-engagement latch: the positive (GT)
+        # criterion arms pass, a distractor arms fail. `decided` is invalid for
+        # either because a single instance decides only one polarity.
         crits = [
-            _skill_crit("skill-a", "skill-a", stop_when="decided"),
-            _skill_crit("skill-b", "skill-a", stop_when="decided"),
+            _skill_crit("skill-a", "skill-a", stop_when="pass"),  # positive -> pass
+            _skill_crit("skill-b", "skill-a", stop_when="fail"),  # distractor -> fail
         ]
         task = _task(criteria=crits, stop_early=True)
         validate_early_stop(task)  # no raise
+
+    def test_auto_positive_accepts(self) -> None:
+        # `auto` on a positive resolves to the pass polarity it can decide.
+        task = _task(criteria=[_skill_crit("s", "s", stop_when="auto")], stop_early=True)
+        validate_early_stop(task)  # no raise
+
+    def test_auto_distractor_accepts(self) -> None:
+        # `auto` on a distractor resolves to the fail polarity it can decide.
+        task = _task(criteria=[_skill_crit("wrong", "s", stop_when="auto")], stop_early=True)
+        validate_early_stop(task)  # no raise
+
+    def test_auto_negative_row_distractor_accepts(self) -> None:
+        # A negative row's criterion (expected_skill == "") is a distractor -> fail.
+        task = _task(criteria=[_skill_crit("wrong", "", stop_when="auto")], stop_early=True)
+        validate_early_stop(task)  # no raise
+
+    def test_auto_stacked_activation_accepts(self) -> None:
+        # The real activation shape: ONE uniform `stop_when: auto` across every
+        # stacked criterion, which resolves per-instance to pass (the positive) or
+        # fail (each distractor). This is what a single fanned-out `stop_when` value
+        # can express and `pass`/`fail`/`decided` cannot, since the role flips per row.
+        crits = [
+            _skill_crit("skill-a", "skill-a", stop_when="auto"),  # positive -> pass
+            _skill_crit("skill-b", "skill-a", stop_when="auto"),  # distractor -> fail
+            _skill_crit("skill-c", "skill-a", stop_when="auto"),  # distractor -> fail
+        ]
+        task = _task(criteria=crits, stop_early=True)
+        validate_early_stop(task)  # no raise
+
+    def test_auto_dead_arm_rejected(self) -> None:
+        # `auto` on an instance that can decide NEITHER polarity is a dead arm and
+        # must be rejected, not silently degrade to a full run. command_executed
+        # with min_count=0 + max_count=None supports no live polarity.
+        task = _task(criteria=[_cmd_crit(stop_when="auto", min_count=0, max_count=None)], stop_early=True)
+        with pytest.raises(EarlyStopConfigError, match="no polarity"):
+            validate_early_stop(task)
 
 
 # --------------------------------------------------------------------------- #
@@ -527,7 +635,7 @@ _ARMED_OBSERVABLE_CRITERION = """\
     description: date-teller activation
     skill_name: date-teller
     expected_skill: date-teller
-    stop_when: decided
+    stop_when: pass
 """
 
 
@@ -836,7 +944,7 @@ class TestEarlyStopModels:
     def test_armed_criteria_passed_gates_armed_only(self) -> None:
         # Armed skill passes; advisory file_exists fails. armed gate -> True.
         criteria = [
-            _skill_crit("date-teller", "date-teller", stop_when="decided"),
+            _skill_crit("date-teller", "date-teller", stop_when="pass"),
             FileExistsCriterion(path="x", description="x must exist"),
         ]
         result = _result(criteria_results=[_crit_result("skill_triggered", 1.0), _crit_result("file_exists", 0.0)])
@@ -846,7 +954,7 @@ class TestEarlyStopModels:
 
     def test_armed_criteria_passed_fails_when_armed_fails(self) -> None:
         criteria = [
-            _skill_crit("date-teller", "date-teller", stop_when="decided"),
+            _skill_crit("date-teller", "date-teller", stop_when="pass"),
             FileExistsCriterion(path="x", description="x must exist"),
         ]
         result = _result(criteria_results=[_crit_result("skill_triggered", 0.0), _crit_result("file_exists", 1.0)])
@@ -880,7 +988,7 @@ class TestEarlyStopWatcher:
     def test_for_task_arms_only_stop_criteria(self) -> None:
         watcher = _watcher(
             [
-                _skill_crit("date-teller", "date-teller", stop_when="decided"),
+                _skill_crit("date-teller", "date-teller", stop_when="pass"),
                 FileExistsCriterion(path="x", description="x must exist"),
             ]
         )
@@ -888,37 +996,174 @@ class TestEarlyStopWatcher:
         assert len(watcher._armed) == 1
 
     def test_undecided_before_engagement_no_stop(self) -> None:
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
         _feed(watcher, [_agent_start(), _turn_start()])
         assert watcher.should_stop() is False
         assert watcher.info is None
 
     def test_pass_stop_fires_on_expected_skill(self) -> None:
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
         _feed(watcher, _skill_events("date-teller"))
         assert watcher.should_stop() is True
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
 
-    def test_fail_stop_fires_on_wrong_skill(self) -> None:
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+    def test_fail_stop_fires_on_distractor_skill(self) -> None:
+        # A distractor criterion (its skill != the expected skill) fail-stops the
+        # instant its skill is engaged — the per-skill precision signal.
+        watcher = _watcher([_skill_crit("weather-teller", "date-teller", stop_when="fail")])
         _feed(watcher, _skill_events("weather-teller"))
         assert watcher.should_stop() is True
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
 
-    def test_pass_polarity_does_not_fire_on_fail(self) -> None:
-        # stop_when="pass": a wrong-skill (live-fail) engagement must NOT stop.
+    def test_wrong_skill_does_not_stop_positive_row(self) -> None:
+        # Item 1: a positive row (armed pass) engaging the WRONG skill must NOT
+        # stop — the run keeps going so the expected skill can still load later.
         watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
         _feed(watcher, _skill_events("weather-teller"))
         assert watcher.should_stop() is False
+        assert watcher.info is None
 
-    def test_stacked_pass_stop(self) -> None:
-        # Two armed skill criteria, both expecting date-teller; engaging it passes both.
+    def test_stacked_pass_stop_requires_all(self) -> None:
+        # Pass-stop needs EVERY armed criterion to live-pass. Two positives for
+        # different skills: engaging only the first does not stop; engaging the
+        # second (both now passed) fires the pass-stop.
         watcher = _watcher(
             [
-                _skill_crit("date-teller", "date-teller", stop_when="decided"),
-                _skill_crit("weather-teller", "", stop_when="decided"),
+                _skill_crit("date-teller", "date-teller", stop_when="pass"),
+                _skill_crit("weather-teller", "weather-teller", stop_when="pass"),
+            ]
+        )
+        _feed(watcher, _skill_events("date-teller"))
+        assert watcher.should_stop() is False  # only one of two has passed
+        _feed(watcher, [_tool_end(_skill_cmd("weather-teller", tool_id="w"))])
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+    def test_stacked_wrong_skill_defers_fail_stop_until_positive_decides(self) -> None:
+        # The recall guard: a positive (armed pass) + a distractor (armed fail).
+        # The distractor misfiring FIRST must NOT stop — cutting here would freeze
+        # the would-be TP as an FN and deflate suite recall. The misfire is latched
+        # by the criterion's monotone semantics, so once the expected skill engages
+        # (no pass-armed criterion left undecided) the deferred fail-stop fires.
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_when="pass"),
+                _skill_crit("weather-teller", "date-teller", stop_when="fail"),
+            ]
+        )
+        _feed(watcher, _skill_events("weather-teller"))
+        assert watcher.should_stop() is False  # positive undecided -> fail deferred
+        assert watcher.info is None
+        _feed(watcher, [_tool_end(_skill_cmd("date-teller", tool_id="d"))])
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+        assert watcher.info.deciding_criterion_description == "weather-teller activation"
+
+    def test_fail_stop_precedes_pass_stop_same_round(self) -> None:
+        # Precedence pin (kills the block-swap mutation): ONE tool call engages
+        # both the expected skill and a distractor via file reads, so the positive
+        # live-passes and the distractor live-fails in the SAME evaluation round
+        # with no pass-armed criterion left undecided. Fail-stop is evaluated
+        # before pass-stop, so the round must record CRITERION_FAILED.
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_when="auto"),  # positive -> pass
+                _skill_crit("weather-teller", "date-teller", stop_when="auto"),  # distractor -> fail
+            ]
+        )
+        both = _cmd("Bash", {"command": "cat skills/date-teller/SKILL.md skills/weather-teller/SKILL.md"})
+        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(both)])
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+        assert watcher.info.deciding_criterion_description == "weather-teller activation"
+
+    def test_auto_positive_row_misfire_alone_never_stops(self) -> None:
+        # A positive row armed `auto` whose agent only ever touches wrong skills:
+        # the fail-stop stays deferred for the whole run (the positive never
+        # decides), so the run continues to the cap and full-trajectory scoring —
+        # never a truncated FN.
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_when="auto"),  # positive -> pass
+                _skill_crit("weather-teller", "date-teller", stop_when="auto"),  # distractor -> fail
+            ]
+        )
+        _feed(watcher, _skill_events("weather-teller"))
+        _feed(watcher, [_turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert watcher.should_stop() is False
+        assert watcher.info is None
+
+    def test_auto_positive_pass_stops(self) -> None:
+        # `auto` on a positive resolves to pass-armed: engaging the expected skill
+        # pass-stops, identically to an explicit stop_when="pass".
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="auto")])
+        _feed(watcher, _skill_events("date-teller"))
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+    def test_auto_mixed_pass_stops_ignoring_undecided_distractors(self) -> None:
+        # THE mixed-arming fix: one positive + two distractors, all armed `auto`.
+        # Engaging ONLY the expected skill pass-stops on turn 1 even though the two
+        # distractors are still "undecided" — fail-armed criteria are not required
+        # to live-pass. (Under the old "every armed must pass" rule this could never
+        # fire, since a distractor can never live-pass.)
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_when="auto"),  # positive -> pass
+                _skill_crit("weather-teller", "date-teller", stop_when="auto"),  # distractor -> fail
+                _skill_crit("news-teller", "date-teller", stop_when="auto"),  # distractor -> fail
+            ]
+        )
+        _feed(watcher, _skill_events("date-teller"))
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        # The deciding criterion is the positive that flipped to pass.
+        assert watcher.info.deciding_criterion_description == "date-teller activation"
+
+    def test_auto_negative_row_no_pass_stop_on_benign_call(self) -> None:
+        # THE vacuous guard: a negative row (expected_skill == "") stacks only
+        # distractors, so there are ZERO pass-armed criteria. A benign non-skill
+        # tool call must NOT pass-stop on turn 0 (empty all() would be vacuously
+        # True); the run continues to the cap as intended.
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "", stop_when="auto"),  # distractor -> fail
+                _skill_crit("weather-teller", "", stop_when="auto"),  # distractor -> fail
+            ]
+        )
+        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert watcher.should_stop() is False
+        assert watcher.info is None
+
+    def test_auto_negative_row_misfire_fail_stops(self) -> None:
+        # The other half of the asymmetry: a negative row that DOES engage a skill
+        # is a misfire and fail-stops (the precision signal), even though it can
+        # never pass-stop.
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "", stop_when="auto"),  # distractor -> fail
+                _skill_crit("weather-teller", "", stop_when="auto"),  # distractor -> fail
+            ]
+        )
+        _feed(watcher, _skill_events("date-teller"))
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+
+    def test_mixed_static_arming_pass_stops_ignoring_fail_armed(self) -> None:
+        # The pass-armed-subset rule is not `auto`-specific: an explicit
+        # pass-positive + fail-distractor mix also pass-stops on the positive alone.
+        watcher = _watcher(
+            [
+                _skill_crit("date-teller", "date-teller", stop_when="pass"),  # pass-armed
+                _skill_crit("weather-teller", "date-teller", stop_when="fail"),  # fail-armed
             ]
         )
         _feed(watcher, _skill_events("date-teller"))
@@ -926,39 +1171,27 @@ class TestEarlyStopWatcher:
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
 
-    def test_stacked_wrong_skill_fail_stop(self) -> None:
-        # Engaging weather-teller: date-teller row -> fail; the fail-stop fires first.
-        watcher = _watcher(
-            [
-                _skill_crit("date-teller", "date-teller", stop_when="decided"),
-                _skill_crit("weather-teller", "date-teller", stop_when="decided"),
-            ]
-        )
-        _feed(watcher, _skill_events("weather-teller"))
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
-
     def test_records_turn_and_tool_index(self) -> None:
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
         _feed(watcher, _skill_events("date-teller"))
         assert watcher.info is not None
         assert watcher.info.sdk_turn_index == 1
         assert watcher.info.tool_call_index == 1
 
     def test_turns_remaining_from_max_turns(self) -> None:
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")], max_turns=15)
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")], max_turns=15)
         _feed(watcher, _skill_events("date-teller"))
         assert watcher.info is not None
         assert watcher.info.turns_remaining_at_stop == 14  # 15 - sdk_turn_index(1)
 
     def test_turns_remaining_none_when_max_turns_unset(self) -> None:
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")], max_turns=None)
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")], max_turns=None)
         _feed(watcher, _skill_events("date-teller"))
         assert watcher.info is not None
         assert watcher.info.turns_remaining_at_stop is None
 
     def test_fail_open_on_raising_verdict(self) -> None:
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
         with patch.object(SkillTriggeredChecker, "live_verdict", side_effect=RuntimeError("boom")):
             _feed(watcher, _skill_events("date-teller"))
         # Fail-open: disarmed, no false stop, degrades to a full run.
@@ -971,7 +1204,7 @@ class TestEarlyStopWatcher:
         # loop ends and the terminal status is chosen. Such an orphan Skill
         # engagement must NOT trip a stop, else a naturally-completed (or
         # timed-out / crashed) run gets recorded as early-stopped.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
         _feed(watcher, [_agent_start(), _turn_start(), _unresolved_skill_end("date-teller")])
         assert watcher.should_stop() is False
         assert watcher.info is None
@@ -980,7 +1213,7 @@ class TestEarlyStopWatcher:
     def test_resolved_after_unresolved_still_decides(self) -> None:
         # An UNRESOLVED end is dropped, but a later RESOLVED engagement still fires
         # the stop (dropping orphans never suppresses a real, observed stop).
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
         _feed(watcher, [_agent_start(), _turn_start(), _unresolved_skill_end("date-teller")])
         assert watcher.info is None
         _feed(watcher, [_tool_end(_skill_cmd("date-teller", tool_id="sk-real"))])
@@ -989,7 +1222,7 @@ class TestEarlyStopWatcher:
         assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_decision_latched_after_fire(self) -> None:
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="decided")])
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
         _feed(watcher, _skill_events("date-teller"))
         fired = watcher.info
         # A subsequent (wrong-skill) engagement must not overwrite the latched decision.
@@ -997,6 +1230,83 @@ class TestEarlyStopWatcher:
         assert watcher.info is fired
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+    def test_tool_call_fires_before_result(self) -> None:
+        # The decision latches on the tool CALL (ToolStartEvent): a Skill call
+        # whose result never arrives (a cut-short turn would strip it) still stops.
+        # No ToolEndEvent is ever fed.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
+        _feed(watcher, [_agent_start(), _turn_start(), _skill_start("date-teller")])
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        # The in-flight call reports as the 1st tool call even without a ToolEnd.
+        assert watcher.info.tool_call_index == 1
+
+    def test_tool_call_distractor_fail_fires(self) -> None:
+        # A distractor (armed fail) fail-stops on the tool CALL that engages its
+        # skill, before any result arrives.
+        watcher = _watcher([_skill_crit("weather-teller", "date-teller", stop_when="fail")])
+        _feed(watcher, [_agent_start(), _turn_start(), _skill_start("weather-teller")])
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+
+    def test_tool_call_latches_on_file_read_engagement(self) -> None:
+        # Off-Claude agents (antigravity/codex) engage a skill by READING its files
+        # (skills/<name>/...), not via a Skill tool call. The watcher must latch on
+        # that Read ToolStart — the file-path parameter carries the signal on the
+        # call itself, so early-stop fires off-Claude just as it does for Claude.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
+        read = CommandTelemetry(
+            tool_name="Read",
+            tool_id="r1",
+            timestamp=_TS,
+            parameters={"file_path": "/repo/skills/date-teller/SKILL.md"},
+        )
+        _feed(watcher, [_agent_start(), _turn_start(), ToolStartEvent(task_id="t", tool=read)])
+        assert watcher.should_stop() is True
+        assert watcher.info is not None
+        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+
+    def test_tool_call_latches_before_unresolved_end(self) -> None:
+        # The call fires the stop in-loop; a later finalize() UNRESOLVED end for
+        # the SAME call is short-circuited (decision already latched) — no relabel,
+        # no double count.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
+        _feed(watcher, [_agent_start(), _turn_start(), _skill_start("date-teller", tool_id="sk-1")])
+        fired = watcher.info
+        _feed(watcher, [_unresolved_skill_end("date-teller", tool_id="sk-1")])
+        assert watcher.info is fired
+        assert watcher.info is not None
+        assert watcher.info.tool_call_index == 1
+
+    def test_tool_call_index_counts_prior_resolved_calls(self) -> None:
+        # A prior resolved, non-deciding tool is counted at its ToolEnd; the
+        # deciding in-flight call is then reported as the next (2nd) call.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
+        prior = _cmd("Bash", {"command": "ls"})  # not a skill engagement
+        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(prior)])
+        assert watcher.info is None
+        _feed(watcher, [_skill_start("date-teller", tool_id="sk-1", sequence_number=1)])
+        assert watcher.info is not None
+        assert watcher.info.tool_call_index == 2
+
+    def test_second_agent_start_does_not_reset_origin(self) -> None:
+        # The wall-clock origin is stamped at the FIRST AgentStartEvent only; a
+        # retry's second AgentStart must NOT reset it (the documented no-op branch
+        # in on_event). Exercised deterministically via _started_monotonic rather
+        # than the time-based elapsed_seconds field.
+        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_when="pass")])
+        _feed(watcher, [_agent_start()])
+        origin = watcher._started_monotonic
+        assert origin is not None
+        # A second AgentStart (as on a retry) must leave the origin untouched.
+        _feed(watcher, [_agent_start(), _turn_start()])
+        assert watcher._started_monotonic == origin
+        # The stop that follows anchors elapsed_seconds to that first origin.
+        _feed(watcher, [_skill_start("date-teller")])
+        assert watcher.info is not None
+        assert watcher.info.elapsed_seconds >= 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -1088,10 +1398,17 @@ async def _run_wiring(
 class TestOrchestratorEarlyStopWiring:
     _SKILL = "date-teller"
 
-    def _criteria(self, *, expected: str = "date-teller", stop_when: str | None = "decided") -> list[Any]:
-        # Armed skill_triggered + advisory file_exists (deliberately failing).
+    def _criteria(self, *, expected: str = "date-teller", stop_when: str | None = "pass") -> list[Any]:
+        # Armed positive skill_triggered + advisory file_exists (deliberately failing).
         return [
             _skill_crit(self._SKILL, expected, stop_when=stop_when),
+            FileExistsCriterion(path="artifact.txt", description="artifact must exist"),
+        ]
+
+    def _distractor_criteria(self) -> list[Any]:
+        # A distractor (armed fail) + advisory file_exists, for the fail-stop path.
+        return [
+            _skill_crit("weather-teller", self._SKILL, stop_when="fail"),
             FileExistsCriterion(path="artifact.txt", description="artifact must exist"),
         ]
 
@@ -1122,8 +1439,9 @@ class TestOrchestratorEarlyStopWiring:
         assert result.early_stop.reason == EarlyStopReason.CRITERION_PASSED
 
     async def test_fail_stop_wiring(self, tmp_path) -> None:
+        # A distractor (armed fail) fires the fail-stop when its skill is engaged.
         result, _agent = await _run_wiring(
-            criteria=self._criteria(),
+            criteria=self._distractor_criteria(),
             events=_skill_events("weather-teller"),
             scores=[0.0, 0.0],
             stop_early=True,
@@ -1188,6 +1506,23 @@ class TestOrchestratorEarlyStopWiring:
         assert result.early_stop is None
         assert agent.delivered == 3  # never stopped: the full stream was consumed
         assert result.all_criteria_passed(self._criteria()) is False
+
+    async def test_tool_call_cut_without_tool_end(self, tmp_path) -> None:
+        # End-to-end: the deciding Skill CALL (a ToolStart with no ToolEnd) cuts
+        # the stream and records an early stop — the case that would otherwise run
+        # to the turn cap when a cut-short turn strips the result.
+        events = [_agent_start(), _turn_start(), _skill_start(self._SKILL), _turn_start()]
+        result, agent = await _run_wiring(
+            criteria=self._criteria(),
+            events=events,
+            scores=[1.0, 0.0],
+            stop_early=True,
+            tmp_path=tmp_path,
+        )
+        assert result.early_stop is not None
+        assert result.early_stop.reason == EarlyStopReason.CRITERION_PASSED
+        # Cut at the ToolStart: the trailing turn_start is never delivered.
+        assert agent.delivered == 3
 
     async def test_fail_open_wiring_degrades_to_full_run(self, tmp_path) -> None:
         with patch.object(SkillTriggeredChecker, "live_verdict", side_effect=RuntimeError("boom")):
