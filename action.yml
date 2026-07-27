@@ -33,7 +33,7 @@ inputs:
   version:
     description: coder-eval version to install from PyPI, or "local" to install from the action checkout
     required: false
-    default: "0.8.6"   # <-- kept in sync with releases by release.yml
+    default: "0.8.10"   # <-- kept in sync with releases by release.yml
   run-dir:
     description: Run directory (--run-dir)
     required: false

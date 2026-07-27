@@ -1,6 +1,6 @@
 ---
 description: >-
-  A/B-test AI coding agents with coder_eval's experiment layer — Claude Code vs.
+  A/B-test AI coding agents with Coder Eval's experiment layer — Claude Code vs.
   Codex vs. Gemini, model vs. model, skill on vs. off, prompt vs. prompt — on
   identical tasks.
 ---
@@ -122,7 +122,7 @@ From `ExperimentVariant` (`coder_eval/models/experiment.py`):
 | `variant_id`          | str                | Unique arm identifier (required)                                                       |
 | `description`         | str                | Human-readable label shown in reports                                                  |
 | `agent`               | dict               | Partial `AgentConfig` overrides (model, plugins, tools, system_prompt, sdk_options, …) |
-| `simulation`          | dict               | Partial `SimulationConfig` overrides (persona/model/temperature per arm)               |
+| `simulation`          | dict               | Partial `SimulationConfig` overrides (persona, goal, `n_trials`, … per arm) — see [Dialog Mode](DIALOG_MODE.md) |
 | `repeats`             | int                | Replicate count for this arm (overrides experiment default)                            |
 | `template_sources`    | list               | Extra templates appended after the task base (e.g. a docs overlay)                     |
 | `prompt_mutations`    | list               | Ordered mutations applied to `initial_prompt`                                          |
@@ -212,8 +212,9 @@ variants:
 
 ## Recipe: A/B a Prompt
 
-Use `prompt_mutations` (transform the task prompt) or `initial_prompt` (replace
-it wholesale). They are mutually exclusive per variant.
+Use `prompt_mutations` (transform the task prompt) or `initial_prompt` /
+`initial_prompt_file` (replace it wholesale). All three are mutually exclusive
+per variant — setting two raises at load.
 
 ```yaml
 experiment_id: prompt-phrasing
@@ -224,11 +225,45 @@ variants:
   - variant_id: detailed
     prompt_mutations:
       - type: suffix
-        text: "\n\nThink step by step and validate your work before finishing."
+        content: "Think step by step and validate your work before finishing."
 ```
 
-The full mutation catalog (prefix / suffix / replace / template) is defined in
-`coder_eval/models/mutations.py`.
+### The mutation catalog
+
+Four mutation types, applied to the base `initial_prompt` at **variant
+resolution time** — before the task ever reaches the orchestrator:
+
+| `type`     | Fields                                            | Defaults              |
+| ---------- | ------------------------------------------------- | --------------------- |
+| `prefix`   | `content` (required), `separator`                 | `separator: "\n\n"`   |
+| `suffix`   | `content` (required), `separator`                 | `separator: "\n\n"`   |
+| `replace`  | `pattern`, `replacement` (both required), `regex`  | `regex: false`        |
+| `template` | `variables` (mapping, required)                   | —                     |
+
+- **Ordered.** `prompt_mutations` is a list and each mutation operates on the
+  result of the one before it. A `replace` listed after a `suffix` will rewrite
+  the appended text too, which is occasionally what you want and more often a
+  surprise — keep the list short and ordered deliberately.
+- **`prefix` / `suffix`** join with `separator`, default `"\n\n"` (write it
+  quoted in YAML so the escape is interpreted).
+- **`replace`** is a literal `str.replace` by default. With `regex: true` it
+  becomes `re.sub`, so `pattern` is a Python regular expression and
+  `replacement` follows `re.sub` semantics — `\1` backreferences work, and an
+  unanchored pattern can match far more than you intended.
+- **`template`** substitutes literal `{name}` occurrences with the mapped value
+  via plain string replacement — **not** `str.format`, and unrelated to the
+  `${row.<field>}` syntax used by [datasets](DATASETS.md). A `{name}` with no
+  matching entry in `variables` is left in the prompt verbatim rather than
+  raising, so a typo in a variable name fails silently at the *prompt* level.
+  Read the rendered prompt in the report to confirm.
+
+Every mutation model sets `extra="forbid"`, so a misspelled field (`text:`
+instead of `content:`) is a hard `ValidationError` at load — never a silently
+ignored no-op.
+
+When both `defaults.prompt_mutations` and a variant's `prompt_mutations` are set,
+they **compose** — the experiment-defaults mutations apply first, then the
+variant's, on the already-mutated prompt.
 
 ## Recipe: Smoke vs. e2e Flavors (Early Stop)
 
@@ -257,11 +292,14 @@ flavor) and a `max_turns` generous enough for `e2e`; see
 [`stop_early`](TASK_DEFINITION_GUIDE.md#stop_early-opt-in-early-stop). This recipe
 ships as `experiments/early-stop-ab.yaml`.
 
-Expect **identical pass/fail verdicts** between the two variants — an
-early-stopped run is gated on the armed subset only, and the non-armed criteria
-become advisory (clearly marked in the report), so the `smoke` flavor can't
-"pass for free" — with the `smoke` variant significantly lower on turns,
-duration, and tokens.
+Expect the `smoke` variant significantly lower on turns, duration, and tokens.
+Verdict parity with `e2e` is **one-sided**: an early-stopped run is gated on the
+armed subset only (non-armed criteria become advisory, clearly marked in the
+report), a **fail-stop** is verdict-preserving (it is deferred until every
+pass-armed criterion has resolved), but a **pass-stop** cuts the run once the
+positives are decided — a distractor that would only misfire on a later tool
+call is never observed, so the frozen row scores as a clean pass. Authoritative
+precision/recall therefore belongs on the `e2e` (`stop_early: false`) variant.
 
 ## Replicates (Statistical Power)
 

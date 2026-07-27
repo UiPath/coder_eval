@@ -123,12 +123,17 @@ class BaseSuccessCriterion(BaseModel, ABC):
         ),
     )
 
-    stop_when: Literal["pass", "fail", "decided"] | None = Field(
+    stop_when: Literal["pass", "fail", "decided", "auto"] | None = Field(
         default=None,
         description=(
             "Opt-in early-stop polarity for this criterion (membership in the run's 'armed set'). "
             "None (default) = not a stop criterion. 'pass' = a live PASS may contribute to a stop; "
-            "'fail' = a live definitive FAIL may trigger a stop; 'decided' = either. Inert unless "
+            "'fail' = a live definitive FAIL may trigger a stop; 'decided' = either (the instance "
+            "must be able to decide BOTH polarities). 'auto' = arm whichever polarities THIS instance "
+            "can actually decide (its live_decidable_polarities) - use it when the decidable polarity "
+            "is instance-dependent, e.g. skill_triggered under any-engagement, where a positive row "
+            "(skill_name == expected_skill) can only live-pass and a distractor can only live-fail, "
+            "so no single static polarity fits every fanned-out row. Inert unless "
             "run_limits.stop_early is True. Only valid on criteria observable mid-run (e.g. "
             "skill_triggered, command_executed); an unobservable armed criterion is rejected at "
             "resolution time."

@@ -2,6 +2,121 @@
 
 <!-- version list -->
 
+## v0.8.10 (2026-07-24)
+
+### Bug Fixes
+
+- Remove dead SimulationConfig.parallel_trials; add CE031 to guard the class
+  ([`947acd3`](https://github.com/UiPath/coder_eval/commit/947acd34a4f0451c69cb7bf0eb863127b9995f76))
+
+- **early-stop**: Add stop_when 'auto' — per-instance arming + pass-armed-subset stop rule
+  ([#51](https://github.com/UiPath/coder_eval/pull/51),
+  [`08e21e6`](https://github.com/UiPath/coder_eval/commit/08e21e67b67fdab84d26b8a0e5551e04289d92a8))
+
+- **early-stop**: Defer fail-stop while a pass-armed criterion is undecided
+  ([#51](https://github.com/UiPath/coder_eval/pull/51),
+  [`08e21e6`](https://github.com/UiPath/coder_eval/commit/08e21e67b67fdab84d26b8a0e5551e04289d92a8))
+
+- **early-stop**: Return assert_never explicitly to satisfy CodeQL
+  ([#51](https://github.com/UiPath/coder_eval/pull/51),
+  [`08e21e6`](https://github.com/UiPath/coder_eval/commit/08e21e67b67fdab84d26b8a0e5551e04289d92a8))
+
+- **reports**: Code review fixes for the JUnit CI gate
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+- **reports**: JUnit CI-gate review fixes + CE027 env-var lint
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+- **reports**: Make skipped-task JUnit names platform-independent
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+### Chores
+
+- Re-trigger CI (GitHub dropped the force-push event)
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+- **deps**: Lock defusedxml (dev-only, test-side XML parsing)
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+### Continuous Integration
+
+- Disable Docs gh-pages auto-publish on push (Pages not enabled yet)
+  ([`c289d46`](https://github.com/UiPath/coder_eval/commit/c289d46c5cec269f205224e4dfce27affab5557e))
+
+### Documentation
+
+- 1/8 — add DATASETS.md and a task-schema dataset: section
+  ([`e3d37ac`](https://github.com/UiPath/coder_eval/commit/e3d37ac793e6f12c020b71a4ed19df2279b4b2c1))
+
+- 2/8 — retire BYOD.md into DOCKER_ISOLATION.md
+  ([`1a4a2a5`](https://github.com/UiPath/coder_eval/commit/1a4a2a5893639d14832dbd1614163aa7c18bf70a))
+
+- 3/8 — one complete run_limits reference; document skip
+  ([`bcb7e24`](https://github.com/UiPath/coder_eval/commit/bcb7e24132c229114efe9a38281a37e736d83312))
+
+- 4/8 — add DIALOG_MODE.md and correct four stale simulation claims
+  ([`18dcbe9`](https://github.com/UiPath/coder_eval/commit/18dcbe95d156856149538406ededc8c75ec594f8))
+
+- 5/8 — fix prompt_mutations example; add CE029
+  ([`b524009`](https://github.com/UiPath/coder_eval/commit/b5240099c58f5b50c7b5fe531a12f1f8b98aec29))
+
+- 7/8 — generate flat indexes from the mkdocs nav; add CE028
+  ([`1514bcb`](https://github.com/UiPath/coder_eval/commit/1514bcb8f075ed48f2857a84269513c60878ea81))
+
+- Add CI Gate reference (GitHub Action + JUnit) and wire into indexes
+  ([`b8c6301`](https://github.com/UiPath/coder_eval/commit/b8c63018bd93ba91751511d95f4af96a444d9873))
+
+- Agent guides, extending & report-schema references, and fixes
+  ([`ce74824`](https://github.com/UiPath/coder_eval/commit/ce74824bde2b5322dc745bace045e1806f77324b))
+
+- Fold nav long tail into one Advanced group; align index ordering
+  ([`e2ff053`](https://github.com/UiPath/coder_eval/commit/e2ff0539af8c9e3e6deb85c0a0124c0232224033))
+
+- Point docs links to coder-eval.com/docs; drop Ruff badge
+  ([`60430e5`](https://github.com/UiPath/coder_eval/commit/60430e5e857f0af6fbf08cde00f0621de4610562))
+
+- Point pyproject Documentation URL to coder-eval.com/docs
+  ([`be39df2`](https://github.com/UiPath/coder_eval/commit/be39df23c8ba1a0f6f945dc99e3827eb5d6f2772))
+
+- Reword CODER_EVAL_RAW_SDK_LOG to prose form (satisfy CE027)
+  ([`d7d5b59`](https://github.com/UiPath/coder_eval/commit/d7d5b59b990127810fcfe33272f3ff733a9498cd))
+
+- Use the brand name "Coder Eval" in prose and titles
+  ([`821f11b`](https://github.com/UiPath/coder_eval/commit/821f11bf94762f6578913090568f5b092e237596))
+
+### Features
+
+- Packaged CI gate — JUnit XML output + composite GitHub Action
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+- **action**: Generic env passthrough + minimum-task-score gate
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+- **ci**: 3/3 — publish composite action, release automation, PR dogfood
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+- **cli**: 2/3 — wire run --junit-xml and report -f junit
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+- **reports**: 1/3 — add reports_junit.py disk-driven JUnit XML writer
+  ([#37](https://github.com/UiPath/coder_eval/pull/37),
+  [`74db6fa`](https://github.com/UiPath/coder_eval/commit/74db6facfea6f898af4db6709e563d90af0d7b30))
+
+### Testing
+
+- 6/8 — CE030 documents-or-exempts model fields
+  ([`c9a3b16`](https://github.com/UiPath/coder_eval/commit/c9a3b160deeec385386a7009812025bc26021363))
+
+
 ## v0.8.9 (2026-07-23)
 
 ### Bug Fixes
