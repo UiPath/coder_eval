@@ -73,7 +73,10 @@ export function turnsCellClasses(tint: TurnTint): string {
 }
 
 export function fmtTurnsCount(n: number | null): string {
-    return n == null ? "—" : `${n}`;
+    // Collapsed replicate rows carry an averaged (fractional) turn count, e.g.
+    // 15.333…; cap at 2 decimals and drop trailing zeros so whole counts still
+    // render as "7" (not "7.00") and a half stays "6.5".
+    return n == null ? "—" : `${Number(n.toFixed(2))}`;
 }
 
 // Fail a task's turn-budget check once its visible turns exceed the budget by

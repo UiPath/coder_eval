@@ -14,7 +14,11 @@ import {
     MaturePill,
     StatusPill,
 } from "@/lib/pills";
-import { isPassStatus, perTaskPassCounts, statusSortRank } from "@/lib/status";
+import {
+    collapseReplicates,
+    perTaskPassCounts,
+    statusSortRank,
+} from "@/lib/status";
 import {
     displayedTurns,
     fmtTurnsCount,
@@ -506,30 +510,12 @@ export function TaskGrid({
 
     // Collapse replicates to one row per task: repeated runs share a taskId, so
     // the grid shows a single entry with a k/N ✓ badge; the per-run detail is
-    // selectable on the task page. The representative is chosen so its status,
-    // score, cost, duration AND detail link all describe the SAME run: prefer a
-    // passing replicate when any passed (else the lowest-index one), breaking
-    // ties by lowest replicateIndex for stability. Pick BEFORE sorting so a
-    // metric-sorted view still shows one row per task.
-    const collapsed = useMemo(() => {
-        const byTask = new Map<string, TaskResultSummary>();
-        for (const t of tasks) {
-            const cur = byTask.get(t.taskId);
-            if (!cur) {
-                byTask.set(t.taskId, t);
-                continue;
-            }
-            const curPass = isPassStatus(cur.status);
-            const tPass = isPassStatus(t.status);
-            if (curPass !== tPass) {
-                // A passing replicate always wins over a non-passing one.
-                if (tPass) byTask.set(t.taskId, t);
-            } else if ((t.replicateIndex ?? 0) < (cur.replicateIndex ?? 0)) {
-                byTask.set(t.taskId, t);
-            }
-        }
-        return [...byTask.values()];
-    }, [tasks]);
+    // selectable on the task page. The status pill and detail link come from a
+    // representative replicate (a passing one when any passed, else the
+    // lowest-index one), while the quantitative columns (score, duration, cost,
+    // turns, tokens) are averaged across all repeats — see collapseReplicates.
+    // Collapse BEFORE sorting so a metric-sorted view still shows one row per task.
+    const collapsed = useMemo(() => collapseReplicates(tasks), [tasks]);
 
     const sorted = useMemo(() => {
         const arr = [...collapsed];

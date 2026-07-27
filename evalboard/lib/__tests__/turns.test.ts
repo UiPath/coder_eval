@@ -133,4 +133,10 @@ describe("fmtTurnsCount", () => {
     test("renders zero as 0 (not em dash)", () => {
         expect(fmtTurnsCount(0)).toBe("0");
     });
+
+    test("caps a fractional average at 2 decimals, dropping trailing zeros", () => {
+        expect(fmtTurnsCount(15.3333333333)).toBe("15.33");
+        expect(fmtTurnsCount(6.5)).toBe("6.5");
+        expect(fmtTurnsCount(6.999)).toBe("7"); // rounds to a whole count
+    });
 });
