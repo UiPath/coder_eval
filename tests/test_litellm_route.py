@@ -144,9 +144,10 @@ class TestBuildSdkEnvCustom:
         assert env["ANTHROPIC_MODEL"] == "deepseek.v3.2"
         assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "deepseek.v3.2"
         assert model == "deepseek.v3.2"
-        # No Bedrock/Direct-specific vars.
-        assert "CLAUDE_CODE_USE_BEDROCK" not in env
-        assert "AWS_BEARER_TOKEN_BEDROCK" not in env
+        # Inherited Bedrock creds are neutralized (blanked to ""), not merely
+        # absent, so the CLI can't auto-select Bedrock-direct and bypass the proxy.
+        assert env["CLAUDE_CODE_USE_BEDROCK"] == ""
+        assert env["AWS_BEARER_TOKEN_BEDROCK"] == ""
         assert "AWS_REGION" not in env
 
     def test_custom_route_no_model_omits_model_vars(self):
