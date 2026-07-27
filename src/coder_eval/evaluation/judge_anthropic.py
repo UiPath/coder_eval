@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from anthropic import Anthropic, APIError
+from anthropic import Anthropic, APIError, AsyncAnthropic
 
 from coder_eval.errors import JudgeInfrastructureError
 from coder_eval.evaluation.judge_models import to_anthropic_alias
@@ -51,5 +51,40 @@ def invoke_anthropic_judge(
         except APIError as e:
             # The SDK already retries transient failures internally (2 attempts
             # by default) — do not add another retry loop here.
+            raise JudgeInfrastructureError(f"Anthropic judge API error: {e}") from e
+    return response.model_dump()
+
+
+async def invoke_anthropic_judge_async(
+    *,
+    model: str,
+    system: str,
+    user: str,
+    temperature: float,
+    max_tokens: int,
+    tool_spec: dict[str, Any],
+    timeout_seconds: float = 120.0,
+) -> dict[str, Any]:
+    """Async twin of :func:`invoke_anthropic_judge`.
+
+    Uses ``AsyncAnthropic`` so the call yields the event loop instead of
+    blocking a thread-pool thread for the network wait — lets
+    ``SuccessChecker.check_all_async`` run several judge criteria concurrently
+    without pinning a thread per judge.
+    """
+    alias = to_anthropic_alias(model)
+    client = AsyncAnthropic(timeout=timeout_seconds)
+    async with client:
+        try:
+            response = await client.messages.create(
+                model=alias,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                tools=[tool_spec],  # type: ignore[arg-type]
+                tool_choice={"type": "tool", "name": tool_spec["name"]},
+            )
+        except APIError as e:
             raise JudgeInfrastructureError(f"Anthropic judge API error: {e}") from e
     return response.model_dump()

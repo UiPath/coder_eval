@@ -204,6 +204,71 @@ class SubAgentRunner:
         finally:
             shutil.rmtree(judge_dir, ignore_errors=True)
 
+    async def run_async(self, user_msg: str, *, max_turns: int | None, turn_timeout: float) -> TurnRecord:
+        """Async twin of :meth:`run` — for callers that already own the event loop.
+
+        Same lifecycle (copy sandbox → start agent → communicate → stop, kill on
+        any exception), but awaits ``_run_agent`` directly instead of bridging
+        through a fresh ``asyncio.run()``, and pushes the blocking filesystem
+        work (``copytree``/``rmtree``) to a worker thread so neither blocks the
+        loop. Lets a native-async criterion (``agent_judge``) run concurrently
+        with other judge-type criteria instead of pinning a thread for the
+        duration of the sub-agent's run.
+        """
+        src_dir = self._sandbox.sandbox_dir
+        assert src_dir is not None, "sandbox not initialized"
+
+        judge_dir = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="sub_agent_"))
+        try:
+            await asyncio.to_thread(
+                shutil.copytree,
+                src_dir,
+                judge_dir,
+                symlinks=True,
+                ignore=_ignore_patterns_and_symlinks(self._ignore_patterns),
+                dirs_exist_ok=True,
+            )
+
+            if self._reference_dir is not None:
+                ref_dest = judge_dir / "_reference"
+                if ref_dest.exists():
+                    await asyncio.to_thread(shutil.rmtree, ref_dest, ignore_errors=True)
+                await asyncio.to_thread(
+                    shutil.copytree,
+                    self._reference_dir,
+                    ref_dest,
+                    symlinks=True,
+                    ignore=_ignore_patterns_and_symlinks(self._reference_ignore_patterns),
+                )
+
+            agent = ClaudeCodeAgent(
+                self._agent_config,
+                route=self._route,
+                extra_mcp_servers=self._extra_mcp_servers,
+            )
+            logger.info(
+                "sub_agent: starting (model=%s, max_turns=%s, allowed_tools=%s)",
+                self._agent_config.model,
+                max_turns,
+                self._agent_config.allowed_tools,
+            )
+            turn = await self._run_agent(
+                agent,
+                judge_dir,
+                user_msg,
+                max_turns,
+                turn_timeout,
+                plugin_tools_dir=self._sandbox.plugin_tools_dir,
+            )
+            logger.info(
+                "sub_agent: finished (duration=%.1fs, tokens=%s)",
+                turn.duration_seconds,
+                turn.token_usage,
+            )
+            return turn
+        finally:
+            await asyncio.to_thread(shutil.rmtree, judge_dir, ignore_errors=True)
+
     @staticmethod
     async def _run_agent(
         agent: ClaudeCodeAgent,

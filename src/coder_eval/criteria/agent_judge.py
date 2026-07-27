@@ -95,6 +95,11 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
     """Checker for AgentJudgeCriterion — spawns a Claude Code SDK agent as the judge."""
 
     criterion_type = "agent_judge"
+    # The async path awaits the sub-agent lifecycle directly on the event loop
+    # (SubAgentRunner.run_async) instead of pinning a thread for its whole
+    # duration — see ``_check_impl_async`` — so SuccessChecker gathers it
+    # concurrently with other judge-type criteria instead of serializing them.
+    supports_native_async = True
 
     def _check_impl(
         self,
@@ -105,74 +110,10 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
         turn_records: list[TurnRecord] | None = None,
         context: CheckContext | None = None,
     ) -> CriterionResult:
-        ctx = context or CheckContext()
-        route = ctx.route
-        reference_dir = ctx.reference_dir
-
-        # Master enablement gate. Skipped criteria don't spawn the sub-agent and
-        # don't affect cost; weighted score includes them as 1.0 so they don't penalize.
-        # The route precondition below is intentionally NOT checked when skipped —
-        # disabled criteria should be free to declare in tasks where the route isn't set.
-        if not criterion.enabled:
-            return JudgeCriterionResult(
-                criterion_type=criterion.type,
-                description=criterion.description,
-                score=1.0,
-                details="(skipped: enabled=false)",
-            )
-
-        assert sandbox.sandbox_dir is not None, "sandbox not initialized"
-        if route is None:
-            # Explicit raise (not assert) so `python -O` cannot strip this guard;
-            # `test_agent_judge_with_no_route_raises` locks in the contract message.
-            msg = (
-                "agent_judge requires a route from SuccessChecker; the orchestrator "
-                + "must construct one (DirectRoute / BedrockRoute) and pass "
-                + "it via SuccessChecker(..., route=...)"
-            )
-            raise ValueError(msg)
-
-        # ``criterion.files`` is optional: when set, the named paths are pre-attached
-        # to the prompt envelope (fast verdict, narrow tool surface); when empty, the
-        # judge inspects the sandbox copy via its tools. Both modes compose — the judge
-        # can ``Read`` anything else even when files are pre-attached.
-        judge_ctx = JudgeContextBuilder(
-            files=criterion.files,
-            include_reference=criterion.include_reference,
-            include_agent_output=criterion.include_agent_output,
-            include_tool_calls=criterion.include_tool_calls,
-            include_dialog=criterion.include_dialog,
-            max_dialog_chars=criterion.max_dialog_chars,
-            max_file_chars=criterion.max_file_chars,
-        ).build(sandbox, reference_code, turn_records)
-
-        # Mount the reference directory only when the criterion opted into seeing it.
-        # When include_reference=False the judge MUST NOT see the grading material, so
-        # zero out reference_dir before passing to the runner regardless of what came in.
-        ref_dir_for_runner = reference_dir if criterion.include_reference else None
-        user_msg = _render_user_message(
-            criterion.prompt,
-            judge_ctx,
-            reference_dir_mounted=ref_dir_for_runner is not None,
-        )
-        agent_config = _build_agent_config(criterion, system_prompt=_SYSTEM_PROMPT)
-
-        capture = VerdictCapture()
-        server_name, server = build_submit_verdict_mcp_server(capture)
-
-        runner = SubAgentRunner(
-            sandbox=sandbox,
-            agent_config=agent_config,
-            # Use the floor-enforced patterns from the built config, not the
-            # user's raw ``criterion.agent.ignore_patterns`` — _build_agent_config
-            # injects the required security entries (.claude / .mcp.json /
-            # _reference) unconditionally.
-            ignore_patterns=agent_config.ignore_patterns,
-            route=route,
-            reference_dir=ref_dir_for_runner,
-            extra_mcp_servers={server_name: server},
-            capture=capture,
-        )
+        setup = _prepare(criterion, sandbox, reference_code, turn_records, context)
+        if isinstance(setup, JudgeCriterionResult):
+            return setup
+        runner, user_msg, judge_ctx, scrub_secrets, capture = setup
 
         try:
             turn = runner.run(
@@ -181,46 +122,7 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
                 turn_timeout=float(criterion.turn_timeout),
             )
         except (TurnTimeoutError, AgentCrashError) as e:
-            # Two pre-output failure modes share one return path:
-            #   - TurnTimeoutError: sub-agent's per-turn watchdog fired.
-            #   - AgentCrashError: SDK/CLI emitted an is_error ResultMessage
-            #     (e.g. Bedrock's ``error_during_execution / end_turn`` flake
-            #     when the model returns an empty assistant turn).
-            # No turn was produced, so no token usage is attributable to the judge.
-            is_timeout = isinstance(e, TurnTimeoutError)
-            if is_timeout:
-                logger.warning("agent_judge: turn timeout after %ds", criterion.turn_timeout)
-                details = f"Judge agent timed out after {criterion.turn_timeout}s"
-            else:
-                logger.warning("agent_judge: sub-agent crashed: %s", str(e)[:200])
-                details = f"Judge agent crashed before producing a verdict: {str(e)[:200]}"
-
-            # No turn was produced, so there's no transcript to capture — but
-            # return a JudgeCriterionResult anyway so renderers / aggregators
-            # that switch on ``isinstance(cr, JudgeCriterionResult)`` see the
-            # uniform shape (findings=[], transcript=None) instead of having to
-            # special-case a base CriterionResult with criterion_type='agent_judge'.
-            return JudgeCriterionResult(
-                criterion_type=criterion.type,
-                description=criterion.description,
-                score=0.0,
-                details=details,
-                error=f"{e.__class__.__name__}: {e}",
-                findings=[],
-                transcript=None,
-                token_usage=None,
-            )
-
-        # Build the scrub set: reference_code (if any) plus every file's content
-        # under reference_dir (if any). Either is honored only when the criterion
-        # opted into seeing the reference; otherwise no scrub key is needed because
-        # the judge never saw the material.
-        scrub_secrets: list[str] = []
-        if criterion.include_reference:
-            if reference_code:
-                scrub_secrets.append(reference_code)
-            if reference_dir is not None:
-                scrub_secrets.extend(collect_reference_secrets(reference_dir))
+            return _crash_result(criterion, e)
 
         return _build_result(
             criterion,
@@ -231,6 +133,170 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
             user_msg=user_msg,
             capture=capture,
         )
+
+    async def _check_impl_async(
+        self,
+        criterion: AgentJudgeCriterion,
+        sandbox: Sandbox,
+        reference_code: str | None = None,
+        *,
+        turn_records: list[TurnRecord] | None = None,
+        context: CheckContext | None = None,
+    ) -> CriterionResult:
+        setup = _prepare(criterion, sandbox, reference_code, turn_records, context)
+        if isinstance(setup, JudgeCriterionResult):
+            return setup
+        runner, user_msg, judge_ctx, scrub_secrets, capture = setup
+
+        try:
+            turn = await runner.run_async(
+                user_msg,
+                max_turns=criterion.max_turns,
+                turn_timeout=float(criterion.turn_timeout),
+            )
+        except (TurnTimeoutError, AgentCrashError) as e:
+            return _crash_result(criterion, e)
+
+        return _build_result(
+            criterion,
+            turn,
+            judge_ctx,
+            scrub_secrets=scrub_secrets,
+            system_prompt=_SYSTEM_PROMPT,
+            user_msg=user_msg,
+            capture=capture,
+        )
+
+
+def _crash_result(criterion: AgentJudgeCriterion, e: TurnTimeoutError | AgentCrashError) -> JudgeCriterionResult:
+    """Shared pre-output failure mapping for both the sync and async check paths.
+
+    Two pre-output failure modes share one return path:
+      - TurnTimeoutError: sub-agent's per-turn watchdog fired.
+      - AgentCrashError: SDK/CLI emitted an is_error ResultMessage
+        (e.g. Bedrock's ``error_during_execution / end_turn`` flake
+        when the model returns an empty assistant turn).
+    No turn was produced, so no token usage is attributable to the judge.
+    """
+    is_timeout = isinstance(e, TurnTimeoutError)
+    if is_timeout:
+        logger.warning("agent_judge: turn timeout after %ds", criterion.turn_timeout)
+        details = f"Judge agent timed out after {criterion.turn_timeout}s"
+    else:
+        logger.warning("agent_judge: sub-agent crashed: %s", str(e)[:200])
+        details = f"Judge agent crashed before producing a verdict: {str(e)[:200]}"
+
+    # No turn was produced, so there's no transcript to capture — but
+    # return a JudgeCriterionResult anyway so renderers / aggregators
+    # that switch on ``isinstance(cr, JudgeCriterionResult)`` see the
+    # uniform shape (findings=[], transcript=None) instead of having to
+    # special-case a base CriterionResult with criterion_type='agent_judge'.
+    return JudgeCriterionResult(
+        criterion_type=criterion.type,
+        description=criterion.description,
+        score=0.0,
+        details=details,
+        error=f"{e.__class__.__name__}: {e}",
+        findings=[],
+        transcript=None,
+        token_usage=None,
+    )
+
+
+def _prepare(
+    criterion: AgentJudgeCriterion,
+    sandbox: Sandbox,
+    reference_code: str | None,
+    turn_records: list[TurnRecord] | None,
+    context: CheckContext | None,
+) -> tuple[SubAgentRunner, str, JudgeContext, list[str], VerdictCapture] | JudgeCriterionResult:
+    """Shared pre-dispatch setup for both the sync and async check paths.
+
+    Returns either ``(runner, user_msg, judge_ctx, scrub_secrets, capture)`` to
+    dispatch with, or a terminal ``JudgeCriterionResult`` when the criterion is
+    disabled (short-circuits before any sub-agent spawn).
+    """
+    ctx = context or CheckContext()
+    route = ctx.route
+    reference_dir = ctx.reference_dir
+
+    # Master enablement gate. Skipped criteria don't spawn the sub-agent and
+    # don't affect cost; weighted score includes them as 1.0 so they don't penalize.
+    # The route precondition below is intentionally NOT checked when skipped —
+    # disabled criteria should be free to declare in tasks where the route isn't set.
+    if not criterion.enabled:
+        return JudgeCriterionResult(
+            criterion_type=criterion.type,
+            description=criterion.description,
+            score=1.0,
+            details="(skipped: enabled=false)",
+        )
+
+    assert sandbox.sandbox_dir is not None, "sandbox not initialized"
+    if route is None:
+        # Explicit raise (not assert) so `python -O` cannot strip this guard;
+        # `test_agent_judge_with_no_route_raises` locks in the contract message.
+        msg = (
+            "agent_judge requires a route from SuccessChecker; the orchestrator "
+            + "must construct one (DirectRoute / BedrockRoute) and pass "
+            + "it via SuccessChecker(..., route=...)"
+        )
+        raise ValueError(msg)
+
+    # ``criterion.files`` is optional: when set, the named paths are pre-attached
+    # to the prompt envelope (fast verdict, narrow tool surface); when empty, the
+    # judge inspects the sandbox copy via its tools. Both modes compose — the judge
+    # can ``Read`` anything else even when files are pre-attached.
+    judge_ctx = JudgeContextBuilder(
+        files=criterion.files,
+        include_reference=criterion.include_reference,
+        include_agent_output=criterion.include_agent_output,
+        include_tool_calls=criterion.include_tool_calls,
+        include_dialog=criterion.include_dialog,
+        max_dialog_chars=criterion.max_dialog_chars,
+        max_file_chars=criterion.max_file_chars,
+    ).build(sandbox, reference_code, turn_records)
+
+    # Mount the reference directory only when the criterion opted into seeing it.
+    # When include_reference=False the judge MUST NOT see the grading material, so
+    # zero out reference_dir before passing to the runner regardless of what came in.
+    ref_dir_for_runner = reference_dir if criterion.include_reference else None
+    user_msg = _render_user_message(
+        criterion.prompt,
+        judge_ctx,
+        reference_dir_mounted=ref_dir_for_runner is not None,
+    )
+    agent_config = _build_agent_config(criterion, system_prompt=_SYSTEM_PROMPT)
+
+    capture = VerdictCapture()
+    server_name, server = build_submit_verdict_mcp_server(capture)
+
+    runner = SubAgentRunner(
+        sandbox=sandbox,
+        agent_config=agent_config,
+        # Use the floor-enforced patterns from the built config, not the
+        # user's raw ``criterion.agent.ignore_patterns`` — _build_agent_config
+        # injects the required security entries (.claude / .mcp.json /
+        # _reference) unconditionally.
+        ignore_patterns=agent_config.ignore_patterns,
+        route=route,
+        reference_dir=ref_dir_for_runner,
+        extra_mcp_servers={server_name: server},
+        capture=capture,
+    )
+
+    # Build the scrub set: reference_code (if any) plus every file's content
+    # under reference_dir (if any). Either is honored only when the criterion
+    # opted into seeing the reference; otherwise no scrub key is needed because
+    # the judge never saw the material.
+    scrub_secrets: list[str] = []
+    if criterion.include_reference:
+        if reference_code:
+            scrub_secrets.append(reference_code)
+        if reference_dir is not None:
+            scrub_secrets.extend(collect_reference_secrets(reference_dir))
+
+    return runner, user_msg, judge_ctx, scrub_secrets, capture
 
 
 def _build_agent_config(

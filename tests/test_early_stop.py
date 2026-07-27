@@ -24,7 +24,7 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import typer
@@ -1379,7 +1379,9 @@ async def _run_wiring(
     orch.sandbox = sandbox
 
     checker = MagicMock()
-    checker.check_all = MagicMock(return_value=[_crit_result(c.type, s) for c, s in zip(criteria, scores, strict=True)])
+    checker.check_all_async = AsyncMock(
+        return_value=[_crit_result(c.type, s) for c, s in zip(criteria, scores, strict=True)]
+    )
     orch.success_checker = checker
 
     if stop_early:

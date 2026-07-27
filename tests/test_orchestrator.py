@@ -1623,7 +1623,7 @@ async def test_evaluation_loop_breaks_on_max_turns_exhausted(tmp_path):
 
     # Mock success checker that always fails
     mock_checker = MagicMock()
-    mock_checker.check_all = MagicMock(
+    mock_checker.check_all_async = AsyncMock(
         return_value=[CriterionResult(criterion_type="file_exists", description="test", score=0.0)]
     )
     orchestrator.success_checker = mock_checker
@@ -1740,7 +1740,7 @@ async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
     orchestrator.sandbox = mock_sandbox
 
     mock_checker = MagicMock()
-    mock_checker.check_all = MagicMock(
+    mock_checker.check_all_async = AsyncMock(
         return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
     )
     orchestrator.success_checker = mock_checker
@@ -1843,7 +1843,7 @@ async def test_evaluation_loop_stamps_timeout_reason_on_partial(tmp_path):
     orchestrator.sandbox = mock_sandbox
 
     mock_checker = MagicMock()
-    mock_checker.check_all = MagicMock(
+    mock_checker.check_all_async = AsyncMock(
         return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
     )
     orchestrator.success_checker = mock_checker
@@ -2075,7 +2075,7 @@ async def test_evaluation_loop_evaluate_only_loads_reference(tmp_path):
     "include_reference=True but reference not set" in the judge_context log.
     """
     from datetime import datetime
-    from unittest.mock import MagicMock
+    from unittest.mock import AsyncMock, MagicMock
 
     from coder_eval.models import (
         CriterionResult,
@@ -2135,15 +2135,15 @@ async def test_evaluation_loop_evaluate_only_loads_reference(tmp_path):
     assert orchestrator.agent is None
 
     mock_checker = MagicMock()
-    mock_checker.check_all = MagicMock(
+    mock_checker.check_all_async = AsyncMock(
         return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
     )
     orchestrator.success_checker = mock_checker
 
     await orchestrator._evaluation_loop()
 
-    mock_checker.check_all.assert_called_once()
-    kwargs = mock_checker.check_all.call_args.kwargs
+    mock_checker.check_all_async.assert_called_once()
+    kwargs = mock_checker.check_all_async.call_args.kwargs
     assert kwargs["reference_code"] == "REFERENCE_CONTENT"
     # turn_records is empty in evaluate-only mode but the kwarg should still be wired.
     assert kwargs["turn_records"] == []

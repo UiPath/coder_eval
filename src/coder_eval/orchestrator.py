@@ -1346,8 +1346,7 @@ class Orchestrator:
                 task_file=self.task_file,
                 cached_reference=self._reference_code,
             )
-            criteria_results = await asyncio.to_thread(
-                self.success_checker.check_all,
+            criteria_results = await self.success_checker.check_all_async(
                 self.task.success_criteria,
                 reference_code=reference_code,
                 reference_dir=reference_dir,
@@ -1405,8 +1404,7 @@ class Orchestrator:
             task_file=self.task_file,
             cached_reference=self._reference_code,
         )
-        criteria_results = await asyncio.to_thread(
-            self.success_checker.check_all,
+        criteria_results = await self.success_checker.check_all_async(
             self.task.success_criteria,
             reference_code=reference_code,
             reference_dir=reference_dir,
@@ -1498,8 +1496,7 @@ class Orchestrator:
             task_file=self.task_file,
             cached_reference=self._reference_code,
         )
-        criteria_results = await asyncio.to_thread(
-            self.success_checker.check_all,
+        criteria_results = await self.success_checker.check_all_async(
             self.task.success_criteria,
             reference_code=reference_code,
             reference_dir=reference_dir,

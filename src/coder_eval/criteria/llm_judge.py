@@ -4,8 +4,8 @@ import logging
 from typing import TYPE_CHECKING
 
 from coder_eval.criteria.base import BaseCriterion, CheckContext, register_criterion
-from coder_eval.evaluation.judge_anthropic import invoke_anthropic_judge
-from coder_eval.evaluation.judge_bedrock import invoke_bedrock_judge
+from coder_eval.evaluation.judge_anthropic import invoke_anthropic_judge, invoke_anthropic_judge_async
+from coder_eval.evaluation.judge_bedrock import invoke_bedrock_judge, invoke_bedrock_judge_async
 from coder_eval.evaluation.judge_context import (
     DIALOG_HEADER,
     JudgeContext,
@@ -56,6 +56,10 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
     """Checker for LLMJudgeCriterion — grades the task via an LLM rubric."""
 
     criterion_type = "llm_judge"
+    # The async path makes a real (non-blocking) network call via AsyncAnthropic /
+    # httpx.AsyncClient — see ``_check_impl_async`` — so SuccessChecker gathers it
+    # concurrently with other judge-type criteria instead of serializing them.
+    supports_native_async = True
 
     def _check_impl(
         self,
@@ -66,100 +70,156 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
         turn_records: "list[TurnRecord] | None" = None,
         context: CheckContext | None = None,
     ) -> CriterionResult:
-        ctx = context or CheckContext()
-        route = ctx.route
+        setup = _prepare(criterion, sandbox, reference_code, turn_records, context)
+        if isinstance(setup, JudgeCriterionResult):
+            return setup
+        judge_ctx, user_msg, scrub_key, route = setup
 
-        # Master enablement gate. Skipped criteria don't make an LLM call and don't
-        # affect cost; weighted score includes them as 1.0 so they don't penalize.
-        # Authors who want them excluded from weighted score should remove the
-        # criterion from the YAML or use experiment variants to override.
-        if not criterion.enabled:
-            return JudgeCriterionResult(
-                criterion_type=criterion.type,
-                description=criterion.description,
-                score=1.0,
-                details="(skipped: enabled=false)",
-            )
-
-        judge_ctx = JudgeContextBuilder(
-            files=criterion.files,
-            include_reference=criterion.include_reference,
-            include_agent_output=criterion.include_agent_output,
-            include_tool_calls=criterion.include_tool_calls,
-            include_dialog=criterion.include_dialog,
-            max_dialog_chars=criterion.max_dialog_chars,
-            max_file_chars=criterion.max_file_chars,
-        ).build(sandbox, reference_code, turn_records)
-
-        user_msg = _render_user_message(criterion.prompt, judge_ctx)
-
-        # Transport-unconfigured arm needs to short-circuit BEFORE backend dispatch.
-        # Hit when the run uses the Direct backend with no ANTHROPIC_API_KEY (or no
-        # route at all). The Bedrock backend always has a usable judge transport.
-        if route is None or (isinstance(route, DirectRoute) and route.judge_transport is None):
-            logger.error("llm_judge unreachable: no usable judge transport for the current backend")
-            return JudgeCriterionResult(
-                criterion_type=criterion.type,
-                description=criterion.description,
-                score=0.0,
-                details="(judge transport unconfigured)",
-                error=(
-                    "llm_judge needs the run to use a backend that can reach a judge model:\n"
-                    "  - Bedrock (--backend bedrock), or\n"
-                    "  - Anthropic direct with ANTHROPIC_API_KEY set.\n"
-                    "Set one of the above, or remove/disable the llm_judge criterion."
-                ),
-            )
-
-        scrub_key = reference_code if criterion.include_reference else None
-
-        # Attribute the judge's API call to ``JudgeCriterionResult.token_usage``
-        # from the usage the backend reported in its response.
-        verdict, parse_error, raw_verdict_text, response_usage = _invoke_tool_channel(
+        verdict, parse_error, raw_verdict_text, judge_usage = _invoke_tool_channel(
             criterion=criterion,
             route=route,
             system_msg=_SYSTEM_PROMPT,
             user_msg=user_msg,
         )
-        judge_usage = response_usage
+        return _build_result(
+            criterion, judge_ctx, user_msg, scrub_key, verdict, parse_error, raw_verdict_text, judge_usage
+        )
 
-        # Sanitize any raw model text we persist to CriterionResult.details. A misbehaving
-        # model could echo the reference back in an unparseable response, so we scrub it.
-        scrubbed = scrub_reference(raw_verdict_text, scrub_key)
+    async def _check_impl_async(
+        self,
+        criterion: LLMJudgeCriterion,
+        sandbox: "Sandbox",
+        reference_code: str | None = None,
+        *,
+        turn_records: "list[TurnRecord] | None" = None,
+        context: CheckContext | None = None,
+    ) -> CriterionResult:
+        setup = _prepare(criterion, sandbox, reference_code, turn_records, context)
+        if isinstance(setup, JudgeCriterionResult):
+            return setup
+        judge_ctx, user_msg, scrub_key, route = setup
 
-        def _maybe_transcript() -> JudgeTranscript | None:
-            if not criterion.capture_transcript:
-                return None
-            return build_judge_transcript(
-                raw_verdict=raw_verdict_text,
-                max_chars=criterion.max_transcript_chars,
-                judge_system_prompt=_SYSTEM_PROMPT,
-                judge_prompt=user_msg,
-                scrub_key=scrub_key,
-            )
+        verdict, parse_error, raw_verdict_text, judge_usage = await _invoke_tool_channel_async(
+            criterion=criterion,
+            route=route,
+            system_msg=_SYSTEM_PROMPT,
+            user_msg=user_msg,
+        )
+        return _build_result(
+            criterion, judge_ctx, user_msg, scrub_key, verdict, parse_error, raw_verdict_text, judge_usage
+        )
 
-        if parse_error is not None:
-            return JudgeCriterionResult(
-                criterion_type=criterion.type,
-                description=criterion.description,
-                score=0.0,
-                details=scrubbed[:500],
-                error=scrub_reference(parse_error, scrub_key),
-                transcript=_maybe_transcript(),
-                token_usage=judge_usage,
-            )
-        assert verdict is not None  # parser contract: verdict is set iff parse_error is None
 
-        details = format_details(verdict.score, verdict.rationale, judge_ctx.missing_files, judge_ctx.degraded_notes)
+def _prepare(
+    criterion: LLMJudgeCriterion,
+    sandbox: "Sandbox",
+    reference_code: str | None,
+    turn_records: "list[TurnRecord] | None",
+    context: CheckContext | None,
+) -> tuple[JudgeContext, str, str | None, "ApiRoute | None"] | JudgeCriterionResult:
+    """Shared pre-dispatch setup for both the sync and async check paths.
+
+    Returns either the tuple to dispatch with, or a terminal
+    ``JudgeCriterionResult`` when the criterion is disabled or the route has no
+    usable judge transport (both short-circuit before any LLM call).
+    """
+    ctx = context or CheckContext()
+    route = ctx.route
+
+    # Master enablement gate. Skipped criteria don't make an LLM call and don't
+    # affect cost; weighted score includes them as 1.0 so they don't penalize.
+    # Authors who want them excluded from weighted score should remove the
+    # criterion from the YAML or use experiment variants to override.
+    if not criterion.enabled:
         return JudgeCriterionResult(
             criterion_type=criterion.type,
             description=criterion.description,
-            score=verdict.score,
-            details=scrub_reference(details, scrub_key),
-            findings=[scrub_reference(f, scrub_key) for f in verdict.findings],
+            score=1.0,
+            details="(skipped: enabled=false)",
+        )
+
+    judge_ctx = JudgeContextBuilder(
+        files=criterion.files,
+        include_reference=criterion.include_reference,
+        include_agent_output=criterion.include_agent_output,
+        include_tool_calls=criterion.include_tool_calls,
+        include_dialog=criterion.include_dialog,
+        max_dialog_chars=criterion.max_dialog_chars,
+        max_file_chars=criterion.max_file_chars,
+    ).build(sandbox, reference_code, turn_records)
+
+    user_msg = _render_user_message(criterion.prompt, judge_ctx)
+
+    # Transport-unconfigured arm needs to short-circuit BEFORE backend dispatch.
+    # Hit when the run uses the Direct backend with no ANTHROPIC_API_KEY (or no
+    # route at all). The Bedrock backend always has a usable judge transport.
+    if route is None or (isinstance(route, DirectRoute) and route.judge_transport is None):
+        logger.error("llm_judge unreachable: no usable judge transport for the current backend")
+        return JudgeCriterionResult(
+            criterion_type=criterion.type,
+            description=criterion.description,
+            score=0.0,
+            details="(judge transport unconfigured)",
+            error=(
+                "llm_judge needs the run to use a backend that can reach a judge model:\n"
+                "  - Bedrock (--backend bedrock), or\n"
+                "  - Anthropic direct with ANTHROPIC_API_KEY set.\n"
+                "Set one of the above, or remove/disable the llm_judge criterion."
+            ),
+        )
+
+    scrub_key = reference_code if criterion.include_reference else None
+    return judge_ctx, user_msg, scrub_key, route
+
+
+def _build_result(
+    criterion: LLMJudgeCriterion,
+    judge_ctx: JudgeContext,
+    user_msg: str,
+    scrub_key: str | None,
+    verdict: JudgeVerdict | None,
+    parse_error: str | None,
+    raw_verdict_text: str,
+    judge_usage: TokenUsage | None,
+) -> JudgeCriterionResult:
+    """Shared post-dispatch result assembly for both the sync and async check paths."""
+    # Sanitize any raw model text we persist to CriterionResult.details. A misbehaving
+    # model could echo the reference back in an unparseable response, so we scrub it.
+    scrubbed = scrub_reference(raw_verdict_text, scrub_key)
+
+    def _maybe_transcript() -> JudgeTranscript | None:
+        if not criterion.capture_transcript:
+            return None
+        return build_judge_transcript(
+            raw_verdict=raw_verdict_text,
+            max_chars=criterion.max_transcript_chars,
+            judge_system_prompt=_SYSTEM_PROMPT,
+            judge_prompt=user_msg,
+            scrub_key=scrub_key,
+        )
+
+    if parse_error is not None:
+        return JudgeCriterionResult(
+            criterion_type=criterion.type,
+            description=criterion.description,
+            score=0.0,
+            details=scrubbed[:500],
+            error=scrub_reference(parse_error, scrub_key),
             transcript=_maybe_transcript(),
             token_usage=judge_usage,
         )
+    assert verdict is not None  # parser contract: verdict is set iff parse_error is None
+
+    details = format_details(verdict.score, verdict.rationale, judge_ctx.missing_files, judge_ctx.degraded_notes)
+    return JudgeCriterionResult(
+        criterion_type=criterion.type,
+        description=criterion.description,
+        score=verdict.score,
+        details=scrub_reference(details, scrub_key),
+        findings=[scrub_reference(f, scrub_key) for f in verdict.findings],
+        transcript=_maybe_transcript(),
+        token_usage=judge_usage,
+    )
 
 
 def _invoke_tool_channel(
@@ -206,6 +266,49 @@ def _invoke_tool_channel(
         case _:
             # route is None or an unexpected type — the unconfigured-arm guard in
             # _check_impl handles None before dispatch, so this is defensive only.
+            return None, "llm_judge: no usable API route", "(no route)", None
+
+    if verdict is not None:
+        return verdict, None, verdict.model_dump_json(), response_usage
+    return None, err, f"(no verdict — {err})", response_usage
+
+
+async def _invoke_tool_channel_async(
+    *,
+    criterion: LLMJudgeCriterion,
+    route: "ApiRoute | None",
+    system_msg: str,
+    user_msg: str,
+) -> tuple[JudgeVerdict | None, str | None, str, TokenUsage | None]:
+    """Async twin of ``_invoke_tool_channel`` — dispatches to the non-blocking invokers."""
+    response_usage: TokenUsage | None
+    match route:
+        case BedrockRoute():
+            response = await invoke_bedrock_judge_async(
+                route=route,
+                model=criterion.model,
+                system=system_msg,
+                user=user_msg,
+                temperature=criterion.temperature,
+                max_tokens=criterion.max_tokens,
+                tool_spec=SUBMIT_VERDICT_ANTHROPIC_TOOL,
+            )
+            verdict, err = extract_verdict_from_anthropic_response(response)
+            response_usage = token_usage_from_anthropic_dict(response)
+        case DirectRoute():
+            anthropic_response = await invoke_anthropic_judge_async(
+                model=criterion.model,
+                system=system_msg,
+                user=user_msg,
+                temperature=criterion.temperature,
+                max_tokens=criterion.max_tokens,
+                tool_spec=SUBMIT_VERDICT_ANTHROPIC_TOOL,
+            )
+            verdict, err = extract_verdict_from_anthropic_response(anthropic_response)
+            response_usage = token_usage_from_anthropic_dict(anthropic_response)
+        case _:
+            # route is None or an unexpected type — the unconfigured-arm guard in
+            # _prepare handles None before dispatch, so this is defensive only.
             return None, "llm_judge: no usable API route", "(no route)", None
 
     if verdict is not None:

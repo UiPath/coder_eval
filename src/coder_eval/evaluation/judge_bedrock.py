@@ -16,6 +16,7 @@ intentionally do not share an HTTP client.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -111,4 +112,70 @@ def invoke_bedrock_judge(
         if not isinstance(data, dict):
             raise JudgeInfrastructureError(f"Bedrock response is not a JSON object: {str(data)[:500]}")
         return data
+    raise JudgeInfrastructureError(f"{last_failure} (after {attempts} attempts)") from last_exc
+
+
+async def invoke_bedrock_judge_async(
+    *,
+    route: BedrockRoute,
+    model: str,
+    system: str,
+    user: str,
+    temperature: float,
+    max_tokens: int,
+    tool_spec: dict[str, Any],
+    timeout_seconds: float = 120.0,
+) -> dict[str, Any]:
+    """Async twin of :func:`invoke_bedrock_judge`.
+
+    Uses ``httpx.AsyncClient`` + ``asyncio.sleep`` between retries so the call
+    yields the event loop instead of blocking a thread-pool thread for the
+    network wait — lets ``SuccessChecker.check_all_async`` run several judge
+    criteria concurrently without pinning a thread per judge.
+    """
+    qualified = to_bedrock_model(model, route.region)
+    url = f"https://bedrock-runtime.{route.region}.amazonaws.com/model/{qualified}/invoke"
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+        "tools": [tool_spec],
+        "tool_choice": {"type": "tool", "name": tool_spec["name"]},
+    }
+    headers = {
+        "Authorization": f"Bearer {route.bearer_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    attempts = _JUDGE_RETRY.max_retries + 1
+    last_failure = ""
+    last_exc: Exception | None = None
+    async with httpx.AsyncClient() as client:
+        for attempt in range(attempts):
+            if attempt:
+                await asyncio.sleep(compute_backoff(_JUDGE_RETRY, attempt - 1))
+            try:
+                response = await client.post(url, headers=headers, json=body, timeout=timeout_seconds)
+            except httpx.HTTPError as e:
+                last_failure = f"Bedrock invoke transport error: {e}"
+                last_exc = e
+                logger.warning("Bedrock judge attempt %d/%d failed: %s", attempt + 1, attempts, last_failure)
+                continue
+            if _is_retryable_status(response.status_code):
+                last_failure = f"Bedrock invoke failed: {response.status_code} {response.text[:500]}"
+                last_exc = None
+                logger.warning("Bedrock judge attempt %d/%d failed: %s", attempt + 1, attempts, last_failure)
+                continue
+            if response.status_code >= 300:
+                raise JudgeInfrastructureError(f"Bedrock invoke failed: {response.status_code} {response.text[:500]}")
+            try:
+                data = response.json()
+            except ValueError as e:
+                raise JudgeInfrastructureError(f"Bedrock response is not valid JSON: {e}") from e
+            if not isinstance(data, dict):
+                raise JudgeInfrastructureError(f"Bedrock response is not a JSON object: {str(data)[:500]}")
+            return data
     raise JudgeInfrastructureError(f"{last_failure} (after {attempts} attempts)") from last_exc
