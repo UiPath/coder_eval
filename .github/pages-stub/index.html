@@ -96,14 +96,21 @@
         margin: 0 0 1rem;
         color: var(--muted);
       }
-      /* What the product is — the reason a visitor who lands here should care. */
+      /* What the product is — the reason a visitor who lands here should care.
+         With the h1 visually hidden this is the first thing read, so it carries
+         the visual weight a heading otherwise would. */
       .lead {
         color: var(--fg);
+        font-size: 1.0625rem;
       }
       /* Why this page exists; secondary to the description above it. */
       .notice {
         margin-bottom: 1.5rem;
         font-size: 0.9375rem;
+      }
+      .notice a {
+        color: var(--orange);
+        font-weight: 600;
       }
       ul {
         margin: 0 0 1.75rem;
@@ -210,18 +217,28 @@
     <main>
       <svg class="logo" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 440" fill="none"><g transform="translate(-75,-36)"><path d="M224 176 L216 176 A56 56 0 0 0 160 232 L160 280 A56 56 0 0 0 216 336 L224 336" fill="none" stroke="#FA4616" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/><rect x="200" y="210" width="78" height="18" rx="9" fill="currentColor"/><rect x="200" y="247" width="52" height="18" rx="9" fill="currentColor"/><rect x="200" y="284" width="104" height="18" rx="9" fill="currentColor"/></g><g fill="currentColor"><g transform="translate(270.00,278.00) scale(0.19000,-0.19000)"><path d="M308 -10Q237 -10 185.0 16.5Q133 43 104.5 91.5Q76 140 76 206V524Q76 590 104.5 638.5Q133 687 185.0 713.5Q237 740 308 740Q378 740 430.0 713.5Q482 687 511.0 638.5Q540 590 540 524H414Q414 575 386.5 602.5Q359 630 308 630Q257 630 229.0 602.5Q201 575 201 524V206Q201 155 229.0 127.5Q257 100 308 100Q359 100 386.5 127.5Q414 155 414 206H540Q540 140 511.0 91.5Q482 43 430.0 16.5Q378 -10 308 -10Z"/></g><g transform="translate(380.00,278.00) scale(0.19000,-0.19000)"><path d="M300 -9Q194 -9 132.0 50.5Q70 110 70 211V339Q70 441 132.0 500.0Q194 559 300 559Q406 559 468.0 500.0Q530 441 530 339V211Q530 110 468.0 50.5Q406 -9 300 -9ZM300 100Q350 100 377.5 127.5Q405 155 405 207V343Q405 395 377.5 422.5Q350 450 300 450Q250 450 222.5 422.5Q195 395 195 343V207Q195 155 222.5 127.5Q250 100 300 100Z"/></g><g transform="translate(490.00,278.00) scale(0.19000,-0.19000)"><path d="M250 -10Q170 -10 120.5 47.0Q71 104 71 200V349Q71 446 120.0 503.0Q169 560 250 560Q307 560 346.5 531.0Q386 502 402 450L398 576V730H523V0H401V100Q386 48 347.0 19.0Q308 -10 250 -10ZM297 98Q345 98 371.5 127.0Q398 156 398 209V341Q398 394 371.5 423.0Q345 452 297 452Q249 452 222.5 426.0Q196 400 196 346V204Q196 150 222.5 124.0Q249 98 297 98Z"/></g><g transform="translate(600.00,278.00) scale(0.19000,-0.19000)"><path d="M301 -10Q231 -10 179.0 17.0Q127 44 98.5 93.5Q70 143 70 210V340Q70 407 98.5 456.5Q127 506 179.0 533.0Q231 560 301 560Q370 560 421.5 533.0Q473 506 501.5 457.5Q530 409 530 344V244H190V206Q190 150 219.0 121.5Q248 93 301 93Q340 93 367.5 106.5Q395 120 400 146H524Q511 75 450.0 32.5Q389 -10 301 -10ZM190 344V325L410 326V345Q410 402 382.0 433.0Q354 464 301 464Q246 464 218.0 432.5Q190 401 190 344Z"/></g><g transform="translate(710.00,278.00) scale(0.19000,-0.19000)"><path d="M97 0V550H219V443Q229 497 268.5 528.5Q308 560 371 560Q455 560 502.0 506.0Q549 452 549 355V303H424V349Q424 399 398.0 425.5Q372 452 324 452Q274 452 248.0 422.0Q222 392 222 337V0Z"/></g></g><g fill="#FA4616"><g transform="translate(890.00,278.00) scale(0.19000,-0.19000)"><path d="M88 0V730H526V620H211V430H491V324H211V110H526V0Z"/></g><g transform="translate(1000.00,278.00) scale(0.19000,-0.19000)"><path d="M221 0 36 550H167L273 216Q283 186 290.5 155.5Q298 125 301 103Q305 125 311.5 155.5Q318 186 327 215L432 550H564L380 0Z"/></g><g transform="translate(1110.00,278.00) scale(0.19000,-0.19000)"><path d="M239 -10Q155 -10 106.5 37.5Q58 85 58 162Q58 242 113.0 289.5Q168 337 264 337H398V376Q398 459 301 459Q257 459 231.0 442.0Q205 425 202 394H82Q86 468 144.5 514.0Q203 560 302 560Q407 560 465.0 511.0Q523 462 523 373V0H401V103Q394 50 351.0 20.0Q308 -10 239 -10ZM279 92Q334 92 366.0 119.0Q398 146 398 191V256H270Q229 256 205.0 233.0Q181 210 181 174Q181 137 206.5 114.5Q232 92 279 92Z"/></g><g transform="translate(1220.00,278.00) scale(0.19000,-0.19000)"><path d="M389 0Q307 0 257.5 49.0Q208 98 208 178V617H27V730H333V181Q333 150 350.5 131.5Q368 113 398 113H559V0Z"/></g></g></svg>
 
-      <h1>Coder Eval</h1>
+      <!--
+        Visually hidden on purpose: the wordmark above already renders "Coder
+        Eval", so showing this too was the same two words twice. The heading
+        still exists for document structure, and it is the accessible name for
+        the page now that the logo is aria-hidden.
+      -->
+      <h1 class="sr-only">Coder Eval</h1>
       <p class="lead">
         An open-source framework for evaluating and benchmarking AI coding agents and their Claude
         Code skills: it runs a real agent — Claude Code, Codex, or Gemini — in a sandbox against
         declarative YAML tasks, then scores the files and commands the agent actually produced.
       </p>
-      <p class="notice">The documentation has moved to coder-eval.com.</p>
+      <p class="notice">
+        The documentation has moved to
+        <a href="https://coder-eval.com/docs">coder-eval.com/docs</a>.
+      </p>
 
+      <!--
+        Only the project site here: the docs link lives in the notice above and
+        the repo in the bar below, so each destination appears exactly once.
+      -->
       <ul>
-        <li>
-          <a href="https://coder-eval.com/docs">Documentation <span>coder-eval.com/docs</span></a>
-        </li>
         <li>
           <a href="https://coder-eval.com">Project website <span>coder-eval.com</span></a>
         </li>
