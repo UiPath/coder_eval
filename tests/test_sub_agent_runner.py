@@ -292,6 +292,58 @@ async def test_runner_cleans_up_when_cancelled_mid_communicate(sandbox: Sandbox)
     assert not Path(captured["path"]).exists()
 
 
+async def test_runner_cleans_up_when_cancelled_mid_copytree(sandbox: Sandbox) -> None:
+    """Cancellation reaching mid-``copytree`` (not just mid-``communicate``)
+    must not leak ``judge_dir``. Reproduces the exact race the shield +
+    finally-awaits-pending fix addresses: ``asyncio.to_thread`` is not itself
+    cancellable, so without shielding + waiting for it in ``finally``, an
+    orphan worker thread can keep copying files into ``judge_dir`` — and even
+    finish AFTER ``finally``'s ``rmtree`` already ran, leaving a full,
+    permanent copy behind."""
+    import asyncio
+    import shutil
+    import tempfile
+    import threading
+    import time
+
+    copy_started = threading.Event()
+    real_copytree = shutil.copytree
+
+    def slow_copytree(*args: object, **kwargs: object) -> object:
+        copy_started.set()
+        time.sleep(0.3)
+        return real_copytree(*args, **kwargs)  # type: ignore[arg-type]
+
+    captured_dir: dict[str, Path] = {}
+    real_mkdtemp = tempfile.mkdtemp
+
+    def capture_mkdtemp(*args: object, **kwargs: object) -> str:
+        d = real_mkdtemp(*args, **kwargs)  # type: ignore[arg-type]
+        captured_dir["path"] = Path(d)
+        return d
+
+    runner = SubAgentRunner(
+        sandbox=sandbox,
+        agent_config=_make_agent_config(),
+        ignore_patterns=[],
+        route=DirectRoute(),
+    )
+
+    with (
+        patch("coder_eval.evaluation.sub_agent.shutil.copytree", side_effect=slow_copytree),
+        patch("coder_eval.evaluation.sub_agent.tempfile.mkdtemp", side_effect=capture_mkdtemp),
+    ):
+        task = asyncio.ensure_future(runner.run_async("grade", max_turns=10, turn_timeout=30.0))
+        while not copy_started.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            _ = await task
+
+    assert captured_dir.get("path") is not None
+    assert not captured_dir["path"].exists(), "orphan copytree thread recreated judge_dir after cleanup already ran"
+
+
 async def test_runner_cleans_up_on_communicate_exception(sandbox: Sandbox) -> None:
     runner = SubAgentRunner(
         sandbox=sandbox,

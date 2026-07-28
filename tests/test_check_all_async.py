@@ -22,6 +22,7 @@ counts as "native async" for dispatch purposes iff it overrides
 """
 
 import asyncio
+import threading
 import time
 from unittest.mock import AsyncMock, patch
 
@@ -183,17 +184,18 @@ class TestNativeAsyncConcurrency:
         assert [r.score for r in results] == [1.0, 1.0]
 
     @pytest.mark.asyncio
-    async def test_sync_batch_completes_before_async_batch_starts(self, checker):
-        """The sync-criteria to_thread batch must run to completion BEFORE the
-        native-async batch starts (not concurrently with it) — several
+    async def test_sync_and_async_runs_never_overlap_and_preserve_declaration_order(self, checker):
+        """Sync and native-async criteria must never overlap — several
         first-party sync criteria mutate the sandbox (run_command,
         uipath_eval) while judge criteria read it, so overlapping the two
         would make a judge's score depend on how far a concurrent
-        sandbox-mutating command happened to get.
+        sandbox-mutating command happened to get. Declaration order across the
+        sync/async boundary must be preserved EXACTLY (contiguous-run
+        scheduling), not collapsed to "all sync, then all async" regardless of
+        where each criterion was declared.
 
         Proven deterministically via ordered event markers instead of a
-        wall-clock margin: the sync checker's start/end must both land before
-        the async checker's start.
+        wall-clock margin, for BOTH orderings.
         """
         events: list[str] = []
         async_fake = _SleepyAsyncChecker(sleep_seconds=0.01, events=events, label="async")
@@ -204,10 +206,27 @@ class TestNativeAsyncConcurrency:
         criteria = [_llm_criterion("judge"), _file_criterion("file")]
         results = await asyncio.wait_for(checker.check_all_async(criteria), timeout=5.0)
 
-        assert events == ["sync-start", "sync-end", "async-start", "async-end"], (
-            f"sync and async batches overlapped: {events}"
+        assert events == ["async-start", "async-end", "sync-start", "sync-end"], (
+            f"declared order [judge, file] was not preserved: {events}"
         )
         assert [r.criterion_type for r in results] == ["llm_judge", "file_exists"]
+        assert [r.score for r in results] == [1.0, 1.0]
+
+    async def test_sync_before_async_declaration_order_also_preserved(self, checker):
+        """Same guarantee, reversed declaration order — [file, judge]."""
+        events: list[str] = []
+        async_fake = _SleepyAsyncChecker(sleep_seconds=0.01, events=events, label="async")
+        sync_fake = _SleepyThreadChecker(sleep_seconds=0.01, events=events, label="sync")
+        checker._checker_instances["llm_judge"] = async_fake
+        checker._checker_instances["file_exists"] = sync_fake
+
+        criteria = [_file_criterion("file"), _llm_criterion("judge")]
+        results = await asyncio.wait_for(checker.check_all_async(criteria), timeout=5.0)
+
+        assert events == ["sync-start", "sync-end", "async-start", "async-end"], (
+            f"declared order [file, judge] was not preserved: {events}"
+        )
+        assert [r.criterion_type for r in results] == ["file_exists", "llm_judge"]
         assert [r.score for r in results] == [1.0, 1.0]
 
     @pytest.mark.asyncio
@@ -258,6 +277,63 @@ class TestNativeAsyncConcurrency:
             assert results[1].score == 1.0, (
                 "llm_judge did not see the file run_command wrote — the sandbox-mutating "
                 "sync batch and the sandbox-reading judge batch overlapped"
+            )
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    @pytest.mark.asyncio
+    async def test_llm_judge_declared_before_run_command_sees_pre_mutation_state(self, tmp_path):
+        """Reversed declaration order — [llm_judge, run_command] — is the order
+        a naive "all sync, then all async" scheduler inverts (the judge would
+        run AFTER run_command regardless of declaring it first, silently
+        grading post-mutation state). check_all_async's contiguous-run
+        scheduling must instead match check_all's strict declaration-order
+        semantics: the judge, declared first, must see PRE-mutation state,
+        exactly like it would running serially."""
+        config = SandboxConfig(driver="tempdir")
+        sandbox = Sandbox(config, task_id="reversed_ordering_regression_test")
+        sandbox.setup()
+        try:
+            real_checker = SuccessChecker(sandbox, init_registry=True, validate_registry=False, route=DirectRoute())
+            judge_criterion = LLMJudgeCriterion(
+                description="judge",
+                prompt="grade it",
+                files=["built.txt"],
+                include_agent_output=False,
+                include_tool_calls=False,
+                include_dialog=False,
+            )
+            run_criterion = RunCommandCriterion(
+                description="write file",
+                command="sleep 0.2 && printf hello > built.txt",
+            )
+
+            def fake_invoke(**kwargs):
+                saw_hello = "hello" in kwargs["user"]
+                return {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "submit_verdict",
+                            "input": {"score": 1.0 if saw_hello else 0.0, "rationale": "ok", "findings": []},
+                        }
+                    ]
+                }
+
+            with patch(
+                "coder_eval.criteria.llm_judge.invoke_anthropic_judge_async",
+                new=AsyncMock(side_effect=fake_invoke),
+            ):
+                async_results = await real_checker.check_all_async([judge_criterion, run_criterion])
+                sync_results = real_checker.check_all([judge_criterion, run_criterion])
+
+            assert async_results[1].score == 1.0, "run_command should have succeeded"
+            assert async_results[0].score == 0.0, (
+                "llm_judge declared BEFORE run_command must see PRE-mutation state "
+                "(declaration order was inverted by the async/sync batching)"
+            )
+            assert [r.score for r in async_results] == [r.score for r in sync_results], (
+                "check_all_async must agree with check_all's declaration-order semantics"
             )
         finally:
             sandbox.cleanup(preserve=False)
@@ -325,6 +401,38 @@ class TestNativeAsyncErrorHandling:
     async def test_empty_criteria_returns_empty(self, checker):
         assert await checker.check_all_async([]) == []
 
+    @pytest.mark.asyncio
+    async def test_native_async_checker_constructor_failure_scores_zero_not_abort(self, checker):
+        """_is_native_async's own docstring names this as its design
+        rationale — classification reads the registered CLASS precisely so it
+        never has to construct the checker, meaning a constructor failure is
+        caught by _check_single_async's ordinary error boundary (same as any
+        other checker exception) and scores that ONE criterion 0.0, instead of
+        escaping check_all_async and aborting the whole task."""
+        from coder_eval.criteria import CriterionRegistry
+
+        class _BoomOnInitChecker(BaseCriterion[LLMJudgeCriterion]):
+            criterion_type = "boom_on_init_test"
+
+            def __init__(self):
+                raise RuntimeError("ctor boom")
+
+            async def _check_impl_async(
+                self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None
+            ):
+                raise NotImplementedError
+
+        CriterionRegistry.register(_BoomOnInitChecker)
+        try:
+            criterion = _llm_criterion("j").model_copy(update={"type": "boom_on_init_test"})
+            results = await checker.check_all_async([criterion])
+        finally:
+            CriterionRegistry._checkers.pop("boom_on_init_test", None)
+
+        assert len(results) == 1
+        assert results[0].score == 0.0
+        assert "ctor boom" in (results[0].error or "")
+
 
 class TestCheckAllAsyncMatchesSyncBehavior:
     @pytest.mark.asyncio
@@ -336,15 +444,52 @@ class TestCheckAllAsyncMatchesSyncBehavior:
 
 
 class TestNativeAsyncDetection:
-    def test_default_checker_is_not_native_async(self, checker):
-        """A checker that only overrides _check_impl is dispatched via the sync batch."""
-        checker._checker_instances["file_exists"] = _SleepyThreadChecker(sleep_seconds=0.0)
-        assert checker._is_native_async("file_exists") is False
+    def test_sync_only_checker_registered_class_is_not_native_async(self, checker):
+        """_is_native_async classifies the REGISTERED CLASS, not whatever
+        instance happens to be cached in _checker_instances — register a
+        throwaway sync-only class under a fresh type name (rather than
+        injecting into _checker_instances, which _is_native_async never
+        reads) so the assertion actually exercises the class-based path."""
+        from coder_eval.criteria import CriterionRegistry
 
-    def test_async_override_is_native_async(self, checker):
-        """A checker that overrides _check_impl_async is dispatched directly on the loop."""
-        checker._checker_instances["llm_judge"] = _SleepyAsyncChecker(sleep_seconds=0.0)
-        assert checker._is_native_async("llm_judge") is True
+        class _ThrowawaySyncChecker(BaseCriterion[FileExistsCriterion]):
+            criterion_type = "throwaway_sync_test"
+
+            def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+                raise NotImplementedError
+
+        CriterionRegistry.register(_ThrowawaySyncChecker)
+        try:
+            assert checker._is_native_async("throwaway_sync_test") is False
+        finally:
+            CriterionRegistry._checkers.pop("throwaway_sync_test", None)
+
+    def test_async_only_checker_registered_class_is_native_async(self, checker):
+        """Same as above, for a throwaway async-only class."""
+        from coder_eval.criteria import CriterionRegistry
+
+        class _ThrowawayAsyncChecker(BaseCriterion[LLMJudgeCriterion]):
+            criterion_type = "throwaway_async_test"
+
+            async def _check_impl_async(
+                self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None
+            ):
+                raise NotImplementedError
+
+        CriterionRegistry.register(_ThrowawayAsyncChecker)
+        try:
+            assert checker._is_native_async("throwaway_async_test") is True
+        finally:
+            CriterionRegistry._checkers.pop("throwaway_async_test", None)
+
+    def test_checker_instances_injection_does_not_affect_classification(self, checker):
+        """Pin the documented class-not-instance rule directly: injecting a
+        NATIVE-ASYNC fake under a SYNC type's registered name must not flip
+        the classification — dispatch (_get_checker_instance) and
+        classification (_is_native_async) intentionally read different
+        sources, and this test would catch them silently diverging."""
+        checker._checker_instances["file_exists"] = _SleepyAsyncChecker(sleep_seconds=0.0)
+        assert checker._is_native_async("file_exists") is False
 
     def test_unregistered_type_is_not_native_async(self, checker):
         assert checker._is_native_async("does_not_exist") is False
@@ -358,6 +503,12 @@ class TestNativeAsyncDetection:
         assert checker._is_native_async("llm_judge") is True
         assert checker._is_native_async("agent_judge") is True
 
+    def test_is_native_async_classmethod_on_checker_class(self):
+        """BaseCriterion.is_native_async() is the public, typed capability
+        SuccessChecker._is_native_async delegates to."""
+        assert _SleepyAsyncChecker.is_native_async() is True
+        assert _SleepyThreadChecker.is_native_async() is False
+
 
 class TestBaseCriterionSyncAsyncDerivation:
     """Direct unit coverage of BaseCriterion's cross-derivation, bypassing SuccessChecker."""
@@ -367,10 +518,111 @@ class TestBaseCriterionSyncAsyncDerivation:
         result = asyncio.run(checker.check_async(_file_criterion("f"), sandbox=None))
         assert result.score == 1.0
 
+    def test_sync_only_checker_derived_async_never_blocks_the_loop(self):
+        """The contract _check_impl_async's base default promises is "offloads
+        _check_impl to a worker thread ... so a CPU/file-bound sync checker
+        never blocks the event loop" — assert the thread-affinity property
+        itself, not just the score, so a future rewrite that accidentally
+        calls _check_impl directly on the loop (same score, lost guarantee)
+        would fail this test."""
+
+        class _IdentRecordingChecker(BaseCriterion[FileExistsCriterion]):
+            criterion_type = "file_exists"
+
+            def __init__(self):
+                self.check_impl_thread_ident: int | None = None
+
+            def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+                self.check_impl_thread_ident = threading.get_ident()
+                return CriterionResult(criterion_type=self.criterion_type, description=criterion.description, score=1.0)
+
+        checker = _IdentRecordingChecker()
+
+        async def run() -> int:
+            loop_ident = threading.get_ident()
+            await checker.check_async(_file_criterion("f"), sandbox=None)
+            return loop_ident
+
+        loop_ident = asyncio.run(run())
+        assert checker.check_impl_thread_ident is not None
+        assert checker.check_impl_thread_ident != loop_ident, "_check_impl ran on the event loop's own thread"
+
     def test_async_only_checker_gets_sync_for_free(self):
         checker = _SleepyAsyncChecker(sleep_seconds=0.0)
         result = checker.check(_llm_criterion("j"), sandbox=None)
         assert result.score == 1.0
+
+    def test_async_only_checker_sync_bridge_raises_loudly_from_a_running_loop(self):
+        """The derived sync `_check_impl` (asyncio.run bridge) must raise a
+        loud, named CheckerMisuseError — not silently return a score-0.0
+        CriterionResult — when called from inside a running event loop, e.g.
+        a library/embedder using the public check()/check_all() sync surface
+        from async host code. Without this guard, asyncio.run's RuntimeError
+        gets caught by @handle_criterion_errors and turns a real score into a
+        misleading 0.0."""
+        from coder_eval.errors import CheckerMisuseError
+
+        checker = _SleepyAsyncChecker(sleep_seconds=0.0)
+
+        async def call_from_running_loop():
+            checker.check(_llm_criterion("j"), sandbox=None)
+
+        with pytest.raises(CheckerMisuseError, match="check_async"):
+            asyncio.run(call_from_running_loop())
+
+    def test_checker_overriding_both_impls_raises_at_class_definition(self):
+        """The exactly-ONE contract's other half: overriding BOTH _check_impl
+        and _check_impl_async is also rejected — a checker with two live
+        implementations could silently drift into different scores for the
+        same input depending on which entry point (check vs check_async) ran."""
+        import types
+
+        from coder_eval.models import FileExistsCriterion
+
+        def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+            raise NotImplementedError
+
+        async def _check_impl_async(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+            raise NotImplementedError
+
+        with pytest.raises(TypeError, match="not both"):
+            types.new_class(
+                "_BothChecker",
+                (BaseCriterion[FileExistsCriterion],),
+                exec_body=lambda ns: ns.update(
+                    criterion_type="both_test", _check_impl=_check_impl, _check_impl_async=_check_impl_async
+                ),
+            )
+
+    def test_abstract_intermediate_base_opts_out_of_the_override_check(self):
+        """A shared abstract base for a family of checkers (implements neither
+        _check_impl) can opt out with abstract=True; a concrete subclass of it
+        is still checked normally."""
+        import types
+
+        from coder_eval.models import FileExistsCriterion
+
+        intermediate = types.new_class(
+            "_AbstractFamilyBase",
+            (BaseCriterion[FileExistsCriterion],),
+            kwds={"abstract": True},
+            exec_body=lambda ns: None,
+        )
+
+        # The intermediate itself defines neither impl and did not raise.
+        assert intermediate._check_impl is BaseCriterion._check_impl
+
+        # A concrete subclass that ALSO overrides neither is still rejected.
+        with pytest.raises(TypeError, match="must override _check_impl"):
+            types.new_class(
+                "_StillNeitherChecker",
+                (intermediate,),
+                exec_body=lambda ns: ns.update(criterion_type="still_neither_test"),
+            )
+
+    def test_base_criterion_cannot_be_instantiated_directly(self):
+        with pytest.raises(TypeError, match="abstract"):
+            BaseCriterion()
 
     def test_defining_a_checker_overriding_neither_raises_at_class_definition(self):
         """The override contract is enforced by __init_subclass__ at

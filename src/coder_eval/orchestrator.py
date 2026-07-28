@@ -1319,7 +1319,7 @@ class Orchestrator:
         every judge call across the dialog.
 
         Ledger key is ``(position, criterion_type)`` — a stable criterion
-        identity. ``check_all`` rebuilds ``success_criteria_results`` in the
+        identity. ``check_all_async`` rebuilds ``success_criteria_results`` in the
         same order as ``task.success_criteria`` every turn (the positional
         alignment ``calculate_weighted_score`` enforces via ``zip(strict=True)``),
         so ``position`` is stable across turns; pairing it with the type makes
@@ -1420,7 +1420,7 @@ class Orchestrator:
         self.result.iterations.append(turn_record)
         self._sync_sandbox_command_path_with_agent()
 
-        # Record early-stop info (if the watcher tripped) BEFORE check_all, so it
+        # Record early-stop info (if the watcher tripped) BEFORE check_all_async, so it
         # survives even if a checker raises. None on a full run or when unarmed.
         self.result.early_stop = self._early_stop_watcher.info if self._early_stop_watcher is not None else None
 

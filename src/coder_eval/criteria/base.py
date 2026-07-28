@@ -9,9 +9,9 @@ from abc import ABC
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import wraps
-from typing import TYPE_CHECKING, Any, ClassVar, Concatenate, Literal, ParamSpec
+from typing import TYPE_CHECKING, Any, ClassVar, Concatenate, Literal, ParamSpec, final
 
-from coder_eval.errors import JudgeInfrastructureError
+from coder_eval.errors import CheckerMisuseError, JudgeInfrastructureError
 from coder_eval.models import BaseSuccessCriterion, CriterionAggregate, CriterionResult
 
 
@@ -52,6 +52,36 @@ class CheckContext:
 # uninitialized local; a plain `typing.ParamSpec` is unambiguous to both tools.
 P = ParamSpec("P")
 
+# Exceptions that must escalate rather than be captured into a scored-0.0
+# CriterionResult — a judge-infra outage or a checker-contract misuse is not an
+# agent failure. Shared by both handle_criterion_errors(_async) wrappers below.
+_ESCALATING_EXCEPTIONS: tuple[type[Exception], ...] = (JudgeInfrastructureError, CheckerMisuseError)
+
+
+def _failed_result(owner: Any, criterion: BaseSuccessCriterion, exc: Exception, method: str) -> CriterionResult:
+    """Build the failed ``CriterionResult`` for a captured (non-escalating)
+    checker exception, and log it. Shared by the sync/async
+    ``handle_criterion_errors(_async)`` wrapper tails so the two decorators
+    differ only in ``def``/``async def`` and ``return``/``return await``.
+    """
+    exc_info = f"{exc.__class__.__name__}: {exc}"
+    tb = ""
+    if os.getenv("CODER_EVAL_DEBUG") == "1":
+        tb = "\n" + "".join(traceback.format_exc(limit=5))
+
+    criterion_type = criterion.type
+    logger.error(
+        f"Error in {owner.__class__.__name__}.{method}() for criterion type '{criterion_type}': {exc_info}",
+        exc_info=True,  # Adds full stack trace to logs
+    )
+    return CriterionResult(
+        criterion_type=criterion_type,
+        description=criterion.description,
+        score=0.0,
+        details=f"Error during check: {exc_info}{tb}",
+        error=exc_info,  # Include exception type and message
+    )
+
 
 def handle_criterion_errors(  # noqa: UP047
     func: Callable[Concatenate[Any, BaseSuccessCriterion, P], CriterionResult],
@@ -78,28 +108,13 @@ def handle_criterion_errors(  # noqa: UP047
     ) -> CriterionResult:
         try:
             return func(self, criterion, *args, **kwargs)
-        except JudgeInfrastructureError:
-            # Judge infra failure is NOT an agent failure — do not score it 0.0.
-            # Propagates to Orchestrator.run()'s broad except → FinalStatus.ERROR.
+        except _ESCALATING_EXCEPTIONS:
+            # Judge infra failure / checker-contract misuse is NOT an agent
+            # failure — do not score it 0.0. Propagates to Orchestrator.run()'s
+            # broad except → FinalStatus.ERROR.
             raise
         except Exception as e:
-            exc_info = f"{e.__class__.__name__}: {e}"
-            tb = ""
-            if os.getenv("CODER_EVAL_DEBUG") == "1":
-                tb = "\n" + "".join(traceback.format_exc(limit=5))
-
-            criterion_type = criterion.type
-            logger.error(
-                f"Error in {self.__class__.__name__}.check() for criterion type '{criterion_type}': {exc_info}",
-                exc_info=True,  # Adds full stack trace to logs
-            )
-            return CriterionResult(
-                criterion_type=criterion_type,
-                description=criterion.description,
-                score=0.0,
-                details=f"Error during check: {exc_info}{tb}",
-                error=exc_info,  # Include exception type and message
-            )
+            return _failed_result(self, criterion, e, "check")
 
     return wrapper
 
@@ -123,26 +138,10 @@ def handle_criterion_errors_async(  # noqa: UP047
     ) -> CriterionResult:
         try:
             return await func(self, criterion, *args, **kwargs)
-        except JudgeInfrastructureError:
+        except _ESCALATING_EXCEPTIONS:
             raise
         except Exception as e:
-            exc_info = f"{e.__class__.__name__}: {e}"
-            tb = ""
-            if os.getenv("CODER_EVAL_DEBUG") == "1":
-                tb = "\n" + "".join(traceback.format_exc(limit=5))
-
-            criterion_type = criterion.type
-            logger.error(
-                f"Error in {self.__class__.__name__}.check_async() for criterion type '{criterion_type}': {exc_info}",
-                exc_info=True,
-            )
-            return CriterionResult(
-                criterion_type=criterion_type,
-                description=criterion.description,
-                score=0.0,
-                details=f"Error during check: {exc_info}{tb}",
-                error=exc_info,
-            )
+            return _failed_result(self, criterion, e, "check_async")
 
     return wrapper
 
@@ -169,10 +168,12 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
       base's default ``_check_impl`` derives a sync call by running the async
       one to completion on a fresh event loop (``asyncio.run``).
 
-    ``__init_subclass__`` enforces that a checker overrides at least one of
+    ``__init_subclass__`` enforces that a checker overrides EXACTLY ONE of
     the two, at class-definition time — overriding neither would recurse
     forever between the defaults (``asyncio.run`` <-> ``asyncio.to_thread``)
-    the first time either is called.
+    the first time either is called, and overriding both would let the two
+    implementations silently drift into different scores depending on which
+    entry point (``check`` vs ``check_async``) ran.
 
     ``check()`` / ``check_async()`` are FINAL — they apply centralized error
     handling and must not be overridden; implement ``_check_impl`` /
@@ -206,7 +207,21 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
     # live_verdict; CE025 enforces that the two stay consistent.
     live_stop_polarities: ClassVar[frozenset[str]] = frozenset()
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
+    def __new__(cls, *args: Any, **kwargs: Any) -> "BaseCriterion[C]":
+        """Block direct instantiation of ``BaseCriterion`` itself.
+
+        ``__init_subclass__`` below only runs for SUBCLASSES, so with no
+        ``@abstractmethod`` left on this class (both ``_check_impl*`` methods
+        have concrete default bodies, by design — that's what lets each derive
+        the other), plain ``ABCMeta`` no longer blocks ``BaseCriterion()``
+        directly. This restores that guarantee without reintroducing an
+        abstract method that would break the "override at least one" contract.
+        """
+        if cls is BaseCriterion:
+            raise TypeError("BaseCriterion is abstract and cannot be instantiated directly")
+        return super().__new__(cls)
+
+    def __init_subclass__(cls, *, abstract: bool = False, **kwargs: Any) -> None:
         """Enforce the ``_check_impl`` / ``_check_impl_async`` override contract
         at class-definition time (module import), regardless of which entry
         point later registers the class — closing the gap where a subclass
@@ -214,11 +229,45 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         ``register_criterion`` decorator) escaped the check, and turning the
         mutual-recursion failure mode (``asyncio.run`` <-> ``asyncio.to_thread``
         exhausting OS threads) into an immediate, clearly-named ``TypeError``.
+
+        Enforces "exactly one", not just "at least one": overriding BOTH is
+        also rejected — a checker with two live implementations (sync-path
+        `_check_impl` and async-path `_check_impl_async`) is free to have them
+        drift into different scores for identical agent output depending on
+        which entry point (``check`` vs ``check_async``) happened to run it,
+        which is exactly the class of bug this derivation design exists to
+        eliminate.
+
+        Pass ``abstract=True`` on a class that intentionally implements
+        neither (e.g. a shared abstract base for a family of related
+        checkers) to opt out of the check for that one class; every one of
+        ITS subclasses is still checked normally.
         """
         super().__init_subclass__(**kwargs)
-        if cls._check_impl is BaseCriterion._check_impl and cls._check_impl_async is BaseCriterion._check_impl_async:
+        if abstract:
+            return
+        overrides_sync = cls._check_impl is not BaseCriterion._check_impl
+        overrides_async = cls._check_impl_async is not BaseCriterion._check_impl_async
+        if not overrides_sync and not overrides_async:
             raise TypeError(f"{cls.__name__} must override _check_impl or _check_impl_async")
+        if overrides_sync and overrides_async:
+            msg = f"{cls.__name__} must override exactly one of _check_impl / _check_impl_async, not both"
+            raise TypeError(msg)
 
+    @classmethod
+    def is_native_async(cls) -> bool:
+        """Whether this checker class makes genuine async I/O — i.e. overrides
+        ``_check_impl_async`` itself rather than inheriting the base's
+        to-thread-wrapped-sync default.
+
+        Public + typed so dispatch code (``SuccessChecker._is_native_async``)
+        and anything else that needs to classify a checker doesn't have to
+        reach into ``_check_impl_async`` (a "protected" name) on another
+        class from a different package.
+        """
+        return cls._check_impl_async is not BaseCriterion._check_impl_async
+
+    @final
     @handle_criterion_errors
     def check(
         self,
@@ -283,8 +332,23 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             CriterionResult with score (0.0-1.0), details, and error info
 
         Raises:
-            Any exception - will be caught by @handle_criterion_errors decorator
+            CheckerMisuseError: this bridge is called from inside a running
+                event loop (``asyncio.run`` cannot start a nested loop) — this
+                is a caller mistake (the async-primary surface should have
+                been awaited instead), not an agent failure, so it escalates
+                rather than silently scoring 0.0.
+            Any other exception - will be caught by @handle_criterion_errors
         """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            msg = (
+                f"{type(self).__name__} implements only _check_impl_async; "
+                f"call check_async()/check_all_async() from an event loop, not check()/check_all()"
+            )
+            raise CheckerMisuseError(msg)
         return asyncio.run(
             self._check_impl_async(
                 criterion,
@@ -295,6 +359,7 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             )
         )
 
+    @final
     @handle_criterion_errors_async
     async def check_async(
         self,

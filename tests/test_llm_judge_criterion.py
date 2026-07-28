@@ -107,6 +107,31 @@ def test_judge_happy_path_files_only(sandbox: Sandbox, tmp_path: Path) -> None:
     assert "mostly correct" in (result.details or "")
 
 
+async def test_judge_happy_path_via_check_all_async(sandbox: Sandbox, tmp_path: Path) -> None:
+    """Same happy path, but through check_all_async — the orchestrator's ACTUAL
+    entry point (orchestrator.py awaits it directly on the live loop). Every
+    other test in this file drives the derived sync `.check()` bridge
+    (`_check_impl` -> `asyncio.run(_check_impl_async(...))` on a fresh loop),
+    which production never takes for this criterion — this is the one test
+    that exercises llm_judge on the loop it actually runs on."""
+    (tmp_path / "main.py").write_text("print('hello')")
+
+    criterion = LLMJudgeCriterion(
+        description="grade main.py",
+        prompt="Is this code valid?",
+        files=["main.py"],
+    )
+    resp = _make_judge_response('{"score": 0.85, "rationale": "mostly correct"}')
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge_async", new=AsyncMock(return_value=resp)):
+        checker = SuccessChecker(sandbox, init_registry=False, route=DirectRoute())
+        results = await checker.check_all_async([criterion])
+
+    assert len(results) == 1
+    assert results[0].score == 0.85
+    assert results[0].error is None
+    assert "mostly correct" in (results[0].details or "")
+
+
 def test_judge_score_clamped_high(sandbox: Sandbox) -> None:
     criterion = LLMJudgeCriterion(description="x", prompt="grade")
     resp = _make_judge_response('{"score": 1.7, "rationale": "too high"}')

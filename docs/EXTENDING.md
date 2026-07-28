@@ -174,7 +174,7 @@ class MyChecker(BaseCriterion[MyCriterion]):
 
 Notes:
 
-- **Do not override `check()` / `check_async()`** — both are final and wrap
+- **Do not override `check()` / `check_async()`** — both are `@final` and wrap
   `_check_impl` / `_check_impl_async` with error handling (an exception becomes
   a score-0.0 result with the error captured; a `JudgeInfrastructureError`
   escalates instead).
@@ -182,11 +182,25 @@ Notes:
   above) or `_check_impl_async` (genuine async I/O — an async HTTP client or
   subprocess bridge; see `llm_judge`/`agent_judge`). Whichever you implement,
   `BaseCriterion` derives the other for free (`asyncio.to_thread` / `asyncio.run`),
-  so there is no need to hand-maintain both. Overriding neither raises
-  `TypeError` immediately at class-definition time. `SuccessChecker.check_all_async`
+  so there is no need to hand-maintain both. Overriding neither, or overriding
+  BOTH, raises `TypeError` immediately at class-definition time (a shared
+  abstract base for a family of checkers that intentionally implements neither
+  can opt out with the `abstract=True` class keyword — every one of ITS
+  subclasses is still checked normally). `SuccessChecker.check_all_async`
   — the orchestrator's entry point — awaits every `_check_impl_async`-native
   checker directly on the event loop (concurrently with its siblings), and runs
   everything else through one `asyncio.to_thread` slot.
+- If your checker overrides `_check_impl_async`, it MUST NOT do blocking work
+  (file I/O, subprocess calls) directly on the event loop — that would stall
+  every sibling judge criterion gathered alongside it. Offload blocking calls
+  with `await asyncio.to_thread(...)` (see `llm_judge`/`agent_judge`, which do
+  this for their sandbox/reference file reads).
+- The derived sync bridge (`_check_impl`'s default `asyncio.run(...)` call) can
+  only run when no event loop is already running — calling the public sync
+  `check()`/`check_all()` on an async-only checker from inside a running loop
+  raises `CheckerMisuseError` (escalates, like `JudgeInfrastructureError`)
+  rather than returning a wrong score. Always reach for `check_async()` /
+  `check_all_async()` from async code.
 - Return `score` in `[0.0, 1.0]` — binary criteria use `0.0`/`1.0`; fractional ones
   anything in between.
 - For **suite-level metrics** on dataset-backed tasks, override

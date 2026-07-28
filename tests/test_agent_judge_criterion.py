@@ -131,6 +131,25 @@ def test_agent_judge_happy_path(sandbox: Sandbox, direct_route: DirectRoute) -> 
     assert "duration:" in (result.details or "")
 
 
+async def test_agent_judge_happy_path_via_check_all_async(sandbox: Sandbox, direct_route: DirectRoute) -> None:
+    """Same happy path, but through check_all_async — the orchestrator's ACTUAL
+    entry point. Every other test in this file drives the derived sync
+    `.check()` bridge (`_check_impl` -> `asyncio.run(_check_impl_async(...))`
+    on a fresh loop), which production never takes for this criterion — this
+    is the one test that exercises agent_judge on the loop it actually runs
+    on, including a real SubAgentRunner.run_async coroutine (mocked at the
+    ClaudeCodeAgent boundary, not at run_async itself)."""
+    criterion = AgentJudgeCriterion(description="grade the project", prompt="Is this code valid?")
+    mock_agent = _make_mock_agent('{"score": 0.85, "rationale": "looks good"}')
+    with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
+        results = await SuccessChecker(sandbox, init_registry=False, route=direct_route).check_all_async([criterion])
+
+    assert len(results) == 1
+    assert results[0].score == 0.85
+    assert results[0].error is None
+    assert "looks good" in (results[0].details or "")
+
+
 def test_agent_judge_score_clamped_high(sandbox: Sandbox, direct_route: DirectRoute) -> None:
     criterion = AgentJudgeCriterion(description="x", prompt="grade")
     mock_agent = _make_mock_agent('{"score": 1.7, "rationale": "too high"}')

@@ -124,20 +124,37 @@ class SubAgentRunner:
         is pushed to a worker thread via ``asyncio.to_thread`` so it doesn't block
         the loop either.
 
+        Cancellation safety: ``run_async`` is awaited directly on the
+        orchestrator's own loop (not under its own ``asyncio.run`` on a worker
+        thread), so it is reachable by cancellation (e.g. the ``task_timeout``
+        watchdog cancelling the orchestrator task) at any ``await`` — including
+        mid-``copytree``. ``asyncio.to_thread`` is NOT itself cancellable (the
+        worker thread keeps running after the awaiting coroutine raises
+        ``CancelledError``), so every such call here is wrapped in
+        ``asyncio.shield`` and tracked in ``self._pending`` — the ``finally``
+        below awaits any still-in-flight one BEFORE ``rmtree``, so an orphan
+        thread can never recreate files in ``judge_dir`` after cleanup already
+        ran. ``judge_dir`` itself is bound with a plain synchronous
+        ``tempfile.mkdtemp`` (a single fast syscall — offloading it via
+        ``to_thread`` only widens the cancellation window for no benefit, since
+        a bare syscall isn't itself an await point cancellation can land on).
+
         Raises ``TurnTimeoutError`` when the agent exceeds ``turn_timeout``.
         """
         # Narrow via local var — checked in __init__ but pyright doesn't track that.
         src_dir = self._sandbox.sandbox_dir
         assert src_dir is not None, "sandbox not initialized"
 
-        judge_dir = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="sub_agent_"))
+        judge_dir = Path(tempfile.mkdtemp(prefix="sub_agent_"))
+        pending: list[asyncio.Task[Any]] = []
         try:
             # Copy the sandbox into an isolated temp dir. The sub-agent never touches
             # the original sandbox, so later criteria are unaffected by whatever it
             # does. Symlinks are skipped (vs preserved) so a malicious
             # `creds -> /root/.aws/credentials` plant can't leak host files to a
             # Bash-enabled sub-agent.
-            await asyncio.to_thread(
+            await self._shielded_to_thread(
+                pending,
                 shutil.copytree,
                 src_dir,
                 judge_dir,
@@ -164,7 +181,7 @@ class SubAgentRunner:
             if self._reference_dir is not None:
                 ref_dest = judge_dir / "_reference"
                 if ref_dest.exists():
-                    await asyncio.to_thread(shutil.rmtree, ref_dest, ignore_errors=True)
+                    await self._shielded_to_thread(pending, shutil.rmtree, ref_dest, ignore_errors=True)
                 # Deliberately NO ``dirs_exist_ok=True`` here. The rmtree above
                 # is the canonical clear; if any file survives (read-only flag,
                 # ENOTEMPTY race, hostile permission bits), we want copytree to
@@ -172,7 +189,8 @@ class SubAgentRunner:
                 # into agent-planted content under the same path. Loud failure on
                 # a partial-rmtree edge case is preferred over silently grading
                 # against a tampered ``_reference/``.
-                await asyncio.to_thread(
+                await self._shielded_to_thread(
+                    pending,
                     shutil.copytree,
                     self._reference_dir,
                     ref_dest,
@@ -206,15 +224,36 @@ class SubAgentRunner:
             )
             return turn
         finally:
-            # Deliberately NOT `await asyncio.to_thread(...)` here: run_async is awaited
-            # directly on the orchestrator's own loop (not under its own asyncio.run on a
-            # worker thread), so it is reachable by cancellation (e.g. the task_timeout
-            # watchdog cancelling the orchestrator task). An await inside `finally` is
-            # itself cancellable — cancelling right as this line is reached would skip the
-            # cleanup and leak the mkdtemp sandbox copy with no reaper. rmtree is a
-            # best-effort, bounded filesystem op; call it synchronously so cancellation
-            # can't interrupt it mid-cleanup.
+            # Any shielded to_thread call above keeps running on its worker thread even
+            # after a cancellation unwinds us into this `finally` — awaiting it here
+            # (not itself re-cancelled: asyncio delivers a given cancel() as a single
+            # CancelledError at the point it lands, not to every subsequent await in the
+            # same coroutine) lets it actually finish BEFORE we rmtree, so an orphan
+            # thread can never recreate files in judge_dir after cleanup already ran.
+            if pending:
+                await asyncio.gather(*(t for t in pending if not t.done()), return_exceptions=True)
+            # Deliberately NOT `await asyncio.to_thread(...)` here: a bare await inside
+            # `finally` is itself cancellable — cancelling right as this line is reached
+            # would skip the cleanup and leak the (now up-to-date) sandbox copy with no
+            # reaper. rmtree is a best-effort, bounded filesystem op; call it
+            # synchronously so cancellation can't interrupt it mid-cleanup.
             shutil.rmtree(judge_dir, ignore_errors=True)  # noqa: CE002
+
+    @staticmethod
+    async def _shielded_to_thread(pending: list[asyncio.Task[Any]], func: Any, *args: Any, **kwargs: Any) -> Any:
+        """``await asyncio.to_thread(func, *args, **kwargs)``, but shielded from
+        cancellation and tracked in ``pending`` so ``run_async``'s ``finally``
+        can wait for it to actually finish before cleaning up ``judge_dir``.
+
+        ``asyncio.shield`` makes the AWAIT here cancellable (a cancellation
+        still propagates to the caller immediately, unwinding into `finally`
+        as normal) while the underlying worker-thread task keeps running
+        independently in the background — ``pending`` is how `finally` finds
+        it again to wait for it rather than leaving it to race the cleanup.
+        """
+        task = asyncio.ensure_future(asyncio.to_thread(func, *args, **kwargs))
+        pending.append(task)
+        return await asyncio.shield(task)
 
     @staticmethod
     async def _run_agent(
