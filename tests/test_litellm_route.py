@@ -144,6 +144,19 @@ class TestResolveRouteCustom:
         assert route.auth_token == "sk-master"
         assert route.model == "deepseek.v3.2"
 
+    def test_rejects_scheme_less_base_url(self):
+        # resolve_route is the ONLY validation on the evaluate-only path (which
+        # skips validate_api_keys), so it must reject a malformed URL itself —
+        # otherwise environment_info records an empty host silently.
+        settings = Settings(
+            api_backend=ApiBackend.LITELLM,
+            litellm_base_url="localhost:4000",
+            litellm_auth_token="sk-master",
+            litellm_model="zai.glm-5",
+        )
+        with pytest.raises(ValueError, match="LITELLM_BASE_URL must be an http"):
+            resolve_route(settings)
+
     def test_small_model_falls_back_to_model(self):
         settings = Settings(
             api_backend=ApiBackend.LITELLM,

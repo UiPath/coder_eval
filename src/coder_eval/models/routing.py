@@ -165,10 +165,14 @@ def resolve_route(settings: Settings) -> ApiRoute:
         case ApiBackend.DIRECT:
             return DirectRoute(judge_transport=_resolve_direct_judge_transport(settings))
         case ApiBackend.LITELLM:
-            # base_url/auth_token are guaranteed by validate_api_keys (run first);
-            # asserts narrow the Optional types, mirroring the Bedrock arm.
-            assert settings.litellm_base_url is not None, "LiteLLM backend requires litellm_base_url"
-            assert settings.litellm_auth_token is not None, "LiteLLM backend requires litellm_auth_token"
+            # Validate here (raise, not assert): resolve_route is reached on the
+            # evaluate-only path WITHOUT a preceding validate_api_keys(), so this is
+            # the only guard there and must survive `python -O`. Checks presence +
+            # URL scheme, raising a field-named ValueError (review non-blocking #11).
+            settings._validate_litellm_settings()
+            # Narrowing for pyright only — _validate_litellm_settings guarantees these.
+            assert settings.litellm_base_url is not None
+            assert settings.litellm_auth_token is not None
             # No inference-profile qualification: the id is passed verbatim to the gateway.
             small_model = settings.litellm_small_model or settings.litellm_model
             return LiteLLMRoute(
