@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from coder_eval.errors import truncate_crash_message
 from coder_eval.models import (
     EvaluationResult,
     ExperimentDefinition,
@@ -13,6 +14,7 @@ from coder_eval.models import (
     TaskExperimentSummary,
 )
 from coder_eval.path_utils import replicate_subdir_name
+from coder_eval.pricing import calculate_cost
 from coder_eval.reports import resolve_agent_settings
 from coder_eval.reports_stats import (
     VariantSeries,
@@ -33,6 +35,78 @@ logger = logging.getLogger(__name__)
 
 # Default pass_threshold from BaseSuccessCriterion — used for Wilson pass-rate in replicate stats.
 _REPLICATE_PASS_THRESHOLD = 0.9
+
+# Cap on the ``error_message`` carried into each run.json row. Long enough to
+# identify a failure without a per-task artifact fetch (which is the whole point
+# — a rollup of 900 rows whose errors are only diagnosable one task.json at a
+# time is not diagnosable), short enough that a wholly-errored run doesn't bloat
+# run.json. The untruncated message stays on task.json.
+_ROW_ERROR_MESSAGE_MAX_CHARS = 400
+
+
+def _cost_complete(result: EvaluationResult) -> bool:
+    """Whether every turn that burned tokens on this row also carries a cost.
+
+    False means ``total_cost_usd`` is a floor, not the bill: some turn's spend is
+    missing from it. After the orchestrator's rate-card backfill the only way to
+    land here is a model the rate card cannot price at all, so this is the
+    per-row signal that feeds ``RunSummary.tasks_unpriced``.
+
+    True for a row that burned nothing (an error before the agent ran genuinely
+    cost nothing, and must not be reported as missing cost).
+    """
+    return all(
+        usage.total_cost_usd is not None
+        for t in result.iterations
+        if (usage := t.token_usage) is not None and not usage.is_empty()
+    )
+
+
+def _judge_cost_usd(result: EvaluationResult) -> float | None:
+    """Sum the priced judge spend across this row's criterion results.
+
+    Covers both judge flavors: ``llm_judge`` prices its own one-shot call from
+    the criterion's model, ``agent_judge`` inherits the SDK's cost on the
+    sub-agent's turn. ``None`` when no criterion reported cost, so "no judge ran"
+    stays distinguishable from "a judge ran free".
+    """
+    costs = [
+        usage.total_cost_usd
+        for cr in result.success_criteria_results
+        if (usage := getattr(cr, "token_usage", None)) is not None and usage.total_cost_usd is not None
+    ]
+    return sum(costs) if costs else None
+
+
+def _simulator_cost_usd(result: EvaluationResult) -> float | None:
+    """Price this row's simulator turns. ``None`` outside simulation mode.
+
+    Priced at the ROUTE's model, not the subject agent's. ``UserSimulator`` builds
+    its agent config with ``model=None`` on purpose, so the model resolves to the
+    route default (``BEDROCK_MODEL``) — which is a different model from the subject
+    whenever a task pins ``agent.model``, as the skills suite does throughout.
+    Pricing the simulator at the subject's model would mis-bill every such row.
+
+    Simulator telemetry buckets everything as prompt/completion tokens with no
+    cache split, so the whole prompt prices at the uncached input rate: an upper
+    bound on a dialog whose prefix was cached.
+    """
+    sim = result.simulation
+    if sim is None:
+        return None
+    if not (sim.simulator_input_tokens or sim.simulator_output_tokens):
+        return None
+    route_model = (result.environment_info or {}).get("bedrock_model")
+    # Falls back to the subject's model on a non-Bedrock route, where the SDK
+    # picks its own default and nothing on the record names it.
+    model = route_model if isinstance(route_model, str) and route_model else result.model_used
+    if not model:
+        return None
+    return calculate_cost(
+        model,
+        uncached_input_tokens=sim.simulator_input_tokens,
+        output_tokens=sim.simulator_output_tokens,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +198,27 @@ def eval_result_to_task_dict(
         ),
         "total_tokens": (result.total_token_usage.total_tokens if result.total_token_usage else None),
         "total_cost_usd": (result.total_token_usage.total_cost_usd if result.total_token_usage else None),
+        # False when some turn's tokens are missing a price, so total_cost_usd above
+        # is a floor. Rolled up as RunSummary.tasks_unpriced / cost_complete.
+        "cost_complete": _cost_complete(result),
+        # Evaluation-machinery spend, kept strictly beside the agent bill rather
+        # than inside it: the judge cost is a property of the suite's criteria and
+        # is identical across harnesses, so folding it into total_cost_usd would
+        # make two harnesses look closer than they are. Rolled up run-level as
+        # RunSummary.eval_overhead_cost_usd.
+        "judge_cost_usd": _judge_cost_usd(result),
+        "simulator_cost_usd": _simulator_cost_usd(result),
+        # Why this row errored, on the row. Errors now count as misses, so the
+        # rollup needs to say *why* it lost those points: without these, an errored
+        # run is untriageable without fetching per-task artifacts one at a time
+        # (the 109 zero-iteration codex errors of 2026-07-22 could not be
+        # characterised from run.json at all).
+        "error_message": (
+            truncate_crash_message(result.error_message, limit=_ROW_ERROR_MESSAGE_MAX_CHARS)
+            if result.error_message
+            else None
+        ),
+        "error_category": (result.error_details or {}).get("error_category"),
         "expected_commands": result.expected_commands,
         "actual_commands": result.actual_commands,
         "commands_efficiency": result.commands_efficiency,
@@ -276,13 +371,12 @@ class ExperimentReportGenerator:
             row += " | —"
         lines.append(row + " |")
 
-        # Row: Success Rate (errors excluded from denominator — they're infrastructure failures, not task failures)
-        row = "| Success Rate"
+        # Row: Pass Rate. Every task the variant ran is in the denominator, errors
+        # included — see VariantAggregate.pass_rate.
+        row = "| Pass Rate"
         for vid in result.variant_ids:
-            agg = result.variant_aggregates[vid]
-            evaluable = agg.tasks_run - agg.tasks_error
-            rate = (agg.tasks_succeeded / evaluable * 100) if evaluable > 0 else 0
-            row += f" | {rate:.1f}%"
+            rate = result.variant_aggregates[vid].pass_rate
+            row += f" | {rate * 100:.1f}%" if rate is not None else " | n/a"
         if show_p_values:
             row += " | —"
         lines.append(row + " |")
@@ -539,8 +633,7 @@ class ExperimentReportGenerator:
         from coder_eval.reports import ReportGenerator
 
         agg = result.variant_aggregates[variant_id]
-        evaluable = agg.tasks_run - agg.tasks_error
-        success_rate = (agg.tasks_succeeded / evaluable * 100) if evaluable > 0 else 0
+        pass_rate_str = f"{agg.pass_rate * 100:.1f}%" if agg.pass_rate is not None else "n/a"
         tokens_str = f"{agg.total_tokens:,}" if agg.total_tokens is not None else "N/A"
 
         failed_line = f"- **Failed**: {agg.tasks_failed}"
@@ -562,7 +655,7 @@ class ExperimentReportGenerator:
             f"- **Succeeded**: {agg.tasks_succeeded}",
             failed_line,
             f"- **Errors**: {agg.tasks_error}",
-            f"- **Success Rate**: {success_rate:.1f}%",
+            f"- **Pass Rate**: {pass_rate_str} ({agg.tasks_succeeded}/{agg.tasks_run})",
             f"- **Average Score**: {agg.average_score:.3f}",
             f"- **Average Duration**: {agg.average_duration:.1f}s",
             f"- **Total Tokens**: {tokens_str}",

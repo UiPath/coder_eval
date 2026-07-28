@@ -1320,13 +1320,11 @@ def _experiment_aggregate_metrics(result: ExperimentResult) -> str:
     rows.append(_row("Failed", [str(result.variant_aggregates[vid].tasks_failed) for vid in result.variant_ids], None))
     rows.append(_row("Errors", [str(result.variant_aggregates[vid].tasks_error) for vid in result.variant_ids], None))
 
-    def _success_rate(vid: str) -> str:
-        agg = result.variant_aggregates[vid]
-        evaluable = agg.tasks_run - agg.tasks_error
-        rate = (agg.tasks_succeeded / evaluable * 100) if evaluable > 0 else 0.0
-        return f"{rate:.1f}%"
+    def _pass_rate(vid: str) -> str:
+        rate = result.variant_aggregates[vid].pass_rate
+        return f"{rate * 100:.1f}%" if rate is not None else "n/a"
 
-    rows.append(_row("Success Rate", [_success_rate(vid) for vid in result.variant_ids], None))
+    rows.append(_row("Pass Rate", [_pass_rate(vid) for vid in result.variant_ids], None))
 
     rows.append(
         _row(

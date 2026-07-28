@@ -12,7 +12,7 @@
 | Succeeded | 1 | 1 | — |
 | Failed | 0 | 0 | — |
 | Errors | 0 | 0 | — |
-| Success Rate | 100.0% | 100.0% | — |
+| Pass Rate | 100.0% | 100.0% | — |
 | Score | 0.900 | 0.650 | — |
 | Avg Duration (s) | 3.3 | 3.3 | — |
 | Tokens | 1,000 | 1,000 | — |

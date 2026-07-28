@@ -158,6 +158,30 @@ def _count_crashed_partials(task_results: list[dict[str, Any]]) -> tuple[int, in
     return total, recovered, terminal
 
 
+def _fmt_rate(rate: float | None) -> str:
+    """Render a 0-1 rate as a percentage, or ``n/a`` when it is unknown."""
+    return f"{rate * 100:.1f}%" if rate is not None else "n/a"
+
+
+def _pass_rate_lines(summary: RunSummary) -> list[str]:
+    """The pass rate, plus how much of it is being held down by errors.
+
+    One rate over every dispatched task. The old line divided by
+    ``tasks_run - tasks_error``, which read like a pass rate but paid a bonus for
+    erroring: up to 10 points on a real nightly, and one run that rendered as
+    100.0% while passing 0.8% of its rows. When errors are material the error
+    share is printed beside the rate so a bad infrastructure night is visible
+    rather than absorbed.
+    """
+    lines = [f"- **Pass Rate**: {_fmt_rate(summary.pass_rate)} ({summary.tasks_succeeded}/{summary.tasks_run})"]
+    if summary.tasks_error:
+        lines.append(
+            f"- **Error Share**: {_fmt_rate(summary.error_share)} of tasks never produced a "
+            + "gradeable attempt and count as misses"
+        )
+    return lines
+
+
 class ReportGenerator:
     """Generates reports from evaluation results."""
 
@@ -286,9 +310,6 @@ class ReportGenerator:
 
         Returns a ``## Header``-led block with no leading blank (caller prepends it).
         """
-        evaluable = summary.tasks_run - summary.tasks_error
-        success_rate = (summary.tasks_succeeded / evaluable * 100) if evaluable > 0 else 0
-
         failed_line = f"- **Failed**: {summary.tasks_failed}"
         if summary.tasks_token_budget_exceeded or summary.tasks_cost_budget_exceeded:
             failed_line += (
@@ -303,7 +324,7 @@ class ReportGenerator:
             f"- **Succeeded**: {summary.tasks_succeeded}",
             failed_line,
             f"- **Errors**: {summary.tasks_error}",
-            f"- **Success Rate**: {success_rate:.1f}%",
+            *_pass_rate_lines(summary),
         ]
 
         # Aggregate P0 metrics
@@ -530,11 +551,38 @@ class ReportGenerator:
         costs = [t["total_cost_usd"] for t in tasks_with_tokens if t.get("total_cost_usd") is not None]
         total_cost = sum(costs) if costs else None
 
+        # Rows whose spend is only partly priced. Reported explicitly because the
+        # alternative is what used to happen: a run understating its bill by 19%
+        # with nothing on the report to say the number was incomplete.
+        unpriced = [
+            t
+            for t in task_results
+            if ((t.get("total_tokens") or 0) > 0 and t.get("total_cost_usd") is None) or t.get("cost_complete") is False
+        ]
+        overhead = [
+            c for t in task_results for key in ("judge_cost_usd", "simulator_cost_usd") if (c := t.get(key)) is not None
+        ]
+
         lines.append(f"**Total Tokens**: {total_tokens:,} (input: {total_input:,}, output: {total_output:,})")
         if total_cache_write > 0 or total_cache_read > 0:
             lines.append(f"**Cache Tokens**: write: {total_cache_write:,}, read: {total_cache_read:,}")
+        # Judge/simulator spend is broken out only when there is some: it is a
+        # property of the suite's criteria and identical across harnesses, so folding
+        # it into the agent bill would make two harnesses look closer than they are.
+        # **Total Cost** always means the whole bill.
+        if overhead and total_cost is not None:
+            lines.append(f"**Agent Cost**: ${total_cost:.4f}")
+            lines.append(f"**Eval Overhead (judge + simulator)**: ${sum(overhead):.4f}")
         if total_cost is not None:
-            lines.append(f"**Total Cost**: ${total_cost:.4f}")
+            cost_line = f"**Total Cost**: ${total_cost + sum(overhead):.4f}"
+            if unpriced:
+                cost_line += f" (floor — {len(unpriced)} task(s) burned tokens the rate card could not price)"
+            lines.append(cost_line)
+        elif unpriced:
+            lines.append(
+                f"**Total Cost**: unavailable — {len(unpriced)} task(s) burned tokens "
+                + "the rate card could not price"
+            )
         lines.append(f"**Avg Tokens/Task**: {total_tokens // len(tasks_with_tokens):,}")
         lines.append("")
 

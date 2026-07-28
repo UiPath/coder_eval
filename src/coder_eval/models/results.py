@@ -6,7 +6,16 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    computed_field,
+    model_validator,
+)
 
 from coder_eval.models.agent_config import ResolvedAgentConfig
 from coder_eval.models.criteria import SuccessCriterion
@@ -838,7 +847,24 @@ class SkippedTask(BaseModel):
 
 
 class RunSummary(BaseModel):
-    """Summary of an entire evaluation run across multiple tasks."""
+    """Summary of an entire evaluation run across multiple tasks.
+
+    ``pass_rate`` is ``tasks_succeeded / tasks_run``: **every dispatched task is in
+    the denominator, errors included as misses.** An error is not a free pass. The
+    previous formula excluded errors, which paid a bonus for erroring — up to 10
+    points on a real nightly, and one run that rendered as 100% while passing 0.8%
+    of its rows. A denominator that shrinks when a run goes wrong is not a metric
+    you can set beside another run's. ``error_share`` says how much of the rate is
+    errors, so a bad infrastructure night *shows* instead of being absorbed.
+
+    This is the single denominator for the whole framework. Every reporting
+    surface reads ``pass_rate`` rather than re-deriving one: four surfaces across
+    two repos each computing their own is what made the dashboard and the markdown
+    report disagree by up to 10 points on the same run.json.
+
+    Every derived metric here is computed, never stored, so it cannot drift from
+    the counts it comes from.
+    """
 
     run_id: str = Field(description="Run identifier (timestamp like '2025-10-09_15-30-45')")
     start_time: datetime = Field(description="Run start time")
@@ -901,3 +927,94 @@ class RunSummary(BaseModel):
             total = f"{self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error}"
             raise ValueError(f"Task count invariant violated: {total} != {self.tasks_run}")
         return self
+
+    # ------------------------------------------------------------------
+    # Derived run metrics.
+    #
+    # Every one is a computed_field over the stored counts and ``task_results``,
+    # so it serializes into run.json for downstream consumers (evalboard, the
+    # external eval-runner) while staying impossible to set to something the
+    # rows disagree with. Consumers should READ these rather than re-deriving
+    # them: four surfaces re-deriving two different denominators is what made
+    # the dashboard and the markdown report disagree by up to 10 points.
+    # ------------------------------------------------------------------
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def pass_rate(self) -> float | None:
+        """``tasks_succeeded / tasks_run`` as a 0-1 fraction. ``None`` on an empty run.
+
+        The run's one pass rate. Errors are in the denominator as misses — see the
+        class docstring for why there is no second, error-excluding figure.
+        """
+        return self.tasks_succeeded / self.tasks_run if self.tasks_run else None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def error_share(self) -> float | None:
+        """``tasks_error / tasks_run`` as a 0-1 fraction. ``None`` on an empty run.
+
+        How much of ``pass_rate`` is being held down by rows that never produced a
+        gradeable attempt. Diagnostic: read it with the framework/harness split to
+        tell an infrastructure night from a genuinely weak model.
+        """
+        return self.tasks_error / self.tasks_run if self.tasks_run else None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def tasks_unpriced(self) -> int:
+        """Rows whose recorded spend is incomplete.
+
+        Each one is real money missing from ``agent_cost_usd``. Two ways in: the
+        row burned tokens and got no cost at all, or its per-row ``cost_complete``
+        says some turn within it went unpriced. Both come down to a model the rate
+        card cannot price — the card is a static table baked into the installed
+        version, so a model released after it prices as ``null`` on every turn,
+        with only a log line to say so.
+
+        A row that burned nothing does not count: an error before the agent ran
+        genuinely cost nothing.
+        """
+        return sum(
+            1
+            for row in self.task_results
+            if ((row.get("total_tokens") or 0) > 0 and row.get("total_cost_usd") is None)
+            or row.get("cost_complete") is False
+        )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def cost_complete(self) -> bool:
+        """False when any row's spend is incomplete, so every cost total here is a floor."""
+        return self.tasks_unpriced == 0
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def agent_cost_usd(self) -> float | None:
+        """Subject-agent spend across the run. ``None`` when no row reported cost.
+
+        Excludes evaluation machinery — see ``eval_overhead_cost_usd``. Read
+        alongside ``cost_complete``: with unpriced rows present this is a floor,
+        not the bill.
+        """
+        costs = [c for row in self.task_results if (c := row.get("total_cost_usd")) is not None]
+        return sum(costs) if costs else None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def eval_overhead_cost_usd(self) -> float | None:
+        """Judge + simulator spend across the run. ``None`` when neither reported cost.
+
+        Deliberately NOT folded into ``agent_cost_usd``: comparing harnesses
+        means comparing what the agents cost, and the judge bill is a property of
+        the suite's criteria, identical across harnesses. But it is real money
+        and was previously reported nowhere, so a run's true bill is the two
+        added together.
+        """
+        costs = [
+            c
+            for row in self.task_results
+            for key in ("judge_cost_usd", "simulator_cost_usd")
+            if (c := row.get(key)) is not None
+        ]
+        return sum(costs) if costs else None

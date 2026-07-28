@@ -529,7 +529,7 @@ class TestReportFileWriting:
         # New: variant report should include experiment context and summary
         assert "**Experiment**: model-comparison" in content
         assert "## Summary" in content
-        assert "Success Rate" in content
+        assert "Pass Rate" in content
 
     def test_variant_html_task_links_include_replicate_segment(self, tmp_path, sample_result):
         """variant.html task links must include the /00/ replicate segment so they
@@ -641,7 +641,7 @@ class TestAggregateMetrics:
         assert "| Avg Duration (s) |" in md
         assert "| Tokens |" in md
         assert "| Tasks Run |" in md
-        assert "| Success Rate |" in md
+        assert "| Pass Rate |" in md
 
         # Two-variant comparison should show p-value column
         assert "p-value" in md
