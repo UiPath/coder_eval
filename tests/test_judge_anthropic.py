@@ -7,11 +7,11 @@ response dict so the caller can walk ``content`` for ``tool_use`` blocks.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from coder_eval.evaluation.judge_anthropic import invoke_anthropic_judge
+from coder_eval.evaluation.judge_anthropic import invoke_anthropic_judge_async
 from coder_eval.evaluation.verdict_tool import SUBMIT_VERDICT_ANTHROPIC_TOOL
 
 
@@ -29,11 +29,13 @@ def _make_response(*, score: float = 0.5, rationale: str = "ok") -> MagicMock:
 
 def _make_client(response: MagicMock | None = None) -> MagicMock:
     client = MagicMock()
-    client.messages.create.return_value = response if response is not None else _make_response()
+    client.messages.create = AsyncMock(return_value=response if response is not None else _make_response())
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
     return client
 
 
-def _invoke(**overrides):
+async def _invoke(**overrides):
     defaults = {
         "model": "anthropic.claude-sonnet-4-6",
         "system": "s",
@@ -43,13 +45,13 @@ def _invoke(**overrides):
         "tool_spec": SUBMIT_VERDICT_ANTHROPIC_TOOL,
     }
     defaults.update(overrides)
-    return invoke_anthropic_judge(**defaults)
+    return await invoke_anthropic_judge_async(**defaults)
 
 
-def test_invoke_anthropic_judge_direct_uses_default_client() -> None:
+async def test_invoke_anthropic_judge_direct_uses_default_client() -> None:
     client = _make_client(_make_response(score=0.42))
-    with patch("coder_eval.evaluation.judge_anthropic.Anthropic", return_value=client) as ctor:
-        result = _invoke()
+    with patch("coder_eval.evaluation.judge_anthropic.AsyncAnthropic", return_value=client) as ctor:
+        result = await _invoke()
     # DirectRoute path: no base_url, no api_key — env-driven.
     ctor.assert_called_once()
     kwargs = ctor.call_args.kwargs
@@ -64,22 +66,22 @@ def test_invoke_anthropic_judge_direct_uses_default_client() -> None:
     assert result["content"][0]["type"] == "tool_use"
 
 
-def test_invoke_anthropic_judge_strips_v1_suffix() -> None:
+async def test_invoke_anthropic_judge_strips_v1_suffix() -> None:
     client = _make_client()
-    with patch("coder_eval.evaluation.judge_anthropic.Anthropic", return_value=client):
-        _invoke(model="anthropic.claude-opus-4-6-v1")
+    with patch("coder_eval.evaluation.judge_anthropic.AsyncAnthropic", return_value=client):
+        await _invoke(model="anthropic.claude-opus-4-6-v1")
     assert client.messages.create.call_args.kwargs["model"] == "claude-opus-4-6"
 
 
-def test_invoke_anthropic_judge_raises_on_empty_model() -> None:
+async def test_invoke_anthropic_judge_raises_on_empty_model() -> None:
     with pytest.raises(ValueError):
-        _invoke(model="")
+        await _invoke(model="")
 
 
-def test_invoke_anthropic_judge_passes_temperature_and_max_tokens() -> None:
+async def test_invoke_anthropic_judge_passes_temperature_and_max_tokens() -> None:
     client = _make_client()
-    with patch("coder_eval.evaluation.judge_anthropic.Anthropic", return_value=client):
-        _invoke(temperature=0.7, max_tokens=321, system="sys", user="usr")
+    with patch("coder_eval.evaluation.judge_anthropic.AsyncAnthropic", return_value=client):
+        await _invoke(temperature=0.7, max_tokens=321, system="sys", user="usr")
     kwargs: dict[str, Any] = client.messages.create.call_args.kwargs
     assert kwargs["temperature"] == 0.7
     assert kwargs["max_tokens"] == 321
@@ -87,7 +89,7 @@ def test_invoke_anthropic_judge_passes_temperature_and_max_tokens() -> None:
     assert kwargs["messages"] == [{"role": "user", "content": "usr"}]
 
 
-def test_invoke_anthropic_judge_wraps_api_error() -> None:
+async def test_invoke_anthropic_judge_wraps_api_error() -> None:
     import httpx
     from anthropic import APIConnectionError
 
@@ -97,8 +99,8 @@ def test_invoke_anthropic_judge_wraps_api_error() -> None:
     sdk_error = APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com"))
     client.messages.create.side_effect = sdk_error
     with (
-        patch("coder_eval.evaluation.judge_anthropic.Anthropic", return_value=client),
+        patch("coder_eval.evaluation.judge_anthropic.AsyncAnthropic", return_value=client),
         pytest.raises(JudgeInfrastructureError, match="Anthropic judge API error") as excinfo,
     ):
-        _invoke()
+        await _invoke()
     assert excinfo.value.__cause__ is sdk_error

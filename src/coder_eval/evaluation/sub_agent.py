@@ -109,13 +109,20 @@ class SubAgentRunner:
         # submit_verdict tool). NOT routed through ``sdk_options`` —
         # ``mcp_servers`` is in ``_FRAMEWORK_OWNED_SDK_FIELDS``.
         self._extra_mcp_servers = extra_mcp_servers or {}
-        # Public attribute so the criterion can read it after ``run()`` returns.
+        # Public attribute so the criterion can read it after ``run_async()`` returns.
         # When the caller passes ``capture=None`` the runner doesn't expose one,
         # matching the opt-in-per-construction contract for the verdict channel.
         self.capture = capture
 
-    def run(self, user_msg: str, *, max_turns: int | None, turn_timeout: float) -> TurnRecord:
+    async def run_async(self, user_msg: str, *, max_turns: int | None, turn_timeout: float) -> TurnRecord:
         """Copy sandbox → start agent → communicate → stop. Kill on any exception.
+
+        Async so a genuine network/subprocess wait yields the event loop instead
+        of pinning a thread-pool thread — lets ``SuccessChecker.check_all_async``
+        run this concurrently with other judge-type criteria (llm_judge) instead
+        of serializing them. The blocking filesystem work (``copytree``/``rmtree``)
+        is pushed to a worker thread via ``asyncio.to_thread`` so it doesn't block
+        the loop either.
 
         Raises ``TurnTimeoutError`` when the agent exceeds ``turn_timeout``.
         """
@@ -123,14 +130,15 @@ class SubAgentRunner:
         src_dir = self._sandbox.sandbox_dir
         assert src_dir is not None, "sandbox not initialized"
 
-        judge_dir = Path(tempfile.mkdtemp(prefix="sub_agent_"))
+        judge_dir = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="sub_agent_"))
         try:
             # Copy the sandbox into an isolated temp dir. The sub-agent never touches
             # the original sandbox, so later criteria are unaffected by whatever it
             # does. Symlinks are skipped (vs preserved) so a malicious
             # `creds -> /root/.aws/credentials` plant can't leak host files to a
             # Bash-enabled sub-agent.
-            shutil.copytree(
+            await asyncio.to_thread(
+                shutil.copytree,
                 src_dir,
                 judge_dir,
                 symlinks=True,
@@ -156,7 +164,7 @@ class SubAgentRunner:
             if self._reference_dir is not None:
                 ref_dest = judge_dir / "_reference"
                 if ref_dest.exists():
-                    shutil.rmtree(ref_dest, ignore_errors=True)
+                    await asyncio.to_thread(shutil.rmtree, ref_dest, ignore_errors=True)
                 # Deliberately NO ``dirs_exist_ok=True`` here. The rmtree above
                 # is the canonical clear; if any file survives (read-only flag,
                 # ENOTEMPTY race, hostile permission bits), we want copytree to
@@ -164,7 +172,8 @@ class SubAgentRunner:
                 # into agent-planted content under the same path. Loud failure on
                 # a partial-rmtree edge case is preferred over silently grading
                 # against a tampered ``_reference/``.
-                shutil.copytree(
+                await asyncio.to_thread(
+                    shutil.copytree,
                     self._reference_dir,
                     ref_dest,
                     symlinks=True,
@@ -182,18 +191,13 @@ class SubAgentRunner:
                 max_turns,
                 self._agent_config.allowed_tools,
             )
-            # Safe because callers run check_all via asyncio.to_thread, so this
-            # invocation is on a worker thread with no active event loop. A direct
-            # async caller would get RuntimeError — acceptable for the architecture.
-            turn = asyncio.run(
-                self._run_agent(
-                    agent,
-                    judge_dir,
-                    user_msg,
-                    max_turns,
-                    turn_timeout,
-                    plugin_tools_dir=self._sandbox.plugin_tools_dir,
-                )
+            turn = await self._run_agent(
+                agent,
+                judge_dir,
+                user_msg,
+                max_turns,
+                turn_timeout,
+                plugin_tools_dir=self._sandbox.plugin_tools_dir,
             )
             logger.info(
                 "sub_agent: finished (duration=%.1fs, tokens=%s)",
@@ -202,7 +206,7 @@ class SubAgentRunner:
             )
             return turn
         finally:
-            shutil.rmtree(judge_dir, ignore_errors=True)
+            await asyncio.to_thread(shutil.rmtree, judge_dir, ignore_errors=True)
 
     @staticmethod
     async def _run_agent(

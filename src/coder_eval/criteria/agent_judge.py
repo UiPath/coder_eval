@@ -96,7 +96,7 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
 
     criterion_type = "agent_judge"
 
-    def _check_impl(
+    async def _check_impl_async(
         self,
         criterion: AgentJudgeCriterion,
         sandbox: Sandbox,
@@ -175,7 +175,7 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
         )
 
         try:
-            turn = runner.run(
+            turn = await runner.run_async(
                 user_msg,
                 max_turns=criterion.max_turns,
                 turn_timeout=float(criterion.turn_timeout),

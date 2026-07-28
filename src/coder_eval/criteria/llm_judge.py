@@ -4,8 +4,8 @@ import logging
 from typing import TYPE_CHECKING
 
 from coder_eval.criteria.base import BaseCriterion, CheckContext, register_criterion
-from coder_eval.evaluation.judge_anthropic import invoke_anthropic_judge
-from coder_eval.evaluation.judge_bedrock import invoke_bedrock_judge
+from coder_eval.evaluation.judge_anthropic import invoke_anthropic_judge_async
+from coder_eval.evaluation.judge_bedrock import invoke_bedrock_judge_async
 from coder_eval.evaluation.judge_context import (
     DIALOG_HEADER,
     JudgeContext,
@@ -58,7 +58,7 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
 
     criterion_type = "llm_judge"
 
-    def _check_impl(
+    async def _check_impl_async(
         self,
         criterion: LLMJudgeCriterion,
         sandbox: "Sandbox",
@@ -116,7 +116,7 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
 
         # Attribute the judge's API call to ``JudgeCriterionResult.token_usage``
         # from the usage the backend reported in its response.
-        verdict, parse_error, raw_verdict_text, response_usage = _invoke_tool_channel(
+        verdict, parse_error, raw_verdict_text, response_usage = await _invoke_tool_channel(
             criterion=criterion,
             route=route,
             system_msg=_SYSTEM_PROMPT,
@@ -163,14 +163,14 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
         )
 
 
-def _invoke_tool_channel(
+async def _invoke_tool_channel(
     *,
     criterion: LLMJudgeCriterion,
     route: "ApiRoute | None",
     system_msg: str,
     user_msg: str,
 ) -> tuple[JudgeVerdict | None, str | None, str, TokenUsage | None]:
-    """Dispatch the tool-channel invocation by route.
+    """Dispatch the tool-channel invocation by route, via non-blocking async clients.
 
     Returns ``(verdict, parse_error, raw_verdict_text, response_usage)``.
     ``raw_verdict_text`` is the JSON-dumped verdict for the transcript when
@@ -182,7 +182,7 @@ def _invoke_tool_channel(
     response_usage: TokenUsage | None
     match route:
         case BedrockRoute():
-            response = invoke_bedrock_judge(
+            response = await invoke_bedrock_judge_async(
                 route=route,
                 model=criterion.model,
                 system=system_msg,
@@ -194,7 +194,7 @@ def _invoke_tool_channel(
             verdict, err = extract_verdict_from_anthropic_response(response)
             response_usage = token_usage_from_anthropic_dict(response)
         case DirectRoute():
-            anthropic_response = invoke_anthropic_judge(
+            anthropic_response = await invoke_anthropic_judge_async(
                 model=criterion.model,
                 system=system_msg,
                 user=user_msg,
@@ -211,8 +211,8 @@ def _invoke_tool_channel(
             # keeps the match exhaustive so pyright flags any future route member.)
             return None, "llm_judge: evaluation route must be Bedrock/Direct, got LiteLLM", "(litellm route)", None
         case None:
-            # Handled by the unconfigured-arm guard in _check_impl before dispatch;
-            # defensive only.
+            # Handled by the unconfigured-arm guard in _check_impl_async before
+            # dispatch; defensive only.
             return None, "llm_judge: no usable API route", "(no route)", None
 
     if verdict is not None:

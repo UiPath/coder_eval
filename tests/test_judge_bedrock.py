@@ -7,13 +7,13 @@ response dict so the caller can walk ``content`` for ``tool_use`` blocks.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from coder_eval.errors import JudgeInfrastructureError
 from coder_eval.evaluation import judge_bedrock
-from coder_eval.evaluation.judge_bedrock import invoke_bedrock_judge
+from coder_eval.evaluation.judge_bedrock import invoke_bedrock_judge_async
 from coder_eval.evaluation.verdict_tool import SUBMIT_VERDICT_ANTHROPIC_TOOL
 from coder_eval.models.routing import BedrockRoute
 
@@ -30,7 +30,11 @@ def _make_response(*, status_code: int = 200, json_data: Any = None, text: str =
 def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """Capture backoff sleeps instead of actually sleeping."""
     sleeps: list[float] = []
-    monkeypatch.setattr(judge_bedrock.time, "sleep", lambda s: sleeps.append(s))
+
+    async def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+
+    monkeypatch.setattr(judge_bedrock.asyncio, "sleep", fake_sleep)
     return sleeps
 
 
@@ -46,7 +50,16 @@ def _tool_use_response(score: float = 0.5, rationale: str = "ok") -> dict[str, A
     }
 
 
-def _invoke(monkeypatch_post, **overrides):  # convenience wrapper
+def _make_async_client(post_side_effect) -> MagicMock:
+    """Mock ``httpx.AsyncClient`` — supports the ``async with`` + repeated ``.post(...)`` shape."""
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.post = AsyncMock(side_effect=post_side_effect)
+    return client
+
+
+async def _invoke(**overrides):
     defaults = {
         "route": _route(),
         "model": "anthropic.claude-sonnet-4-6",
@@ -57,10 +70,10 @@ def _invoke(monkeypatch_post, **overrides):  # convenience wrapper
         "tool_spec": SUBMIT_VERDICT_ANTHROPIC_TOOL,
     }
     defaults.update(overrides)
-    return invoke_bedrock_judge(**defaults)
+    return await invoke_bedrock_judge_async(**defaults)
 
 
-def test_invoke_bedrock_judge_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_invoke_bedrock_judge_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
     def fake_post(url: str, *, headers: dict[str, str], json: dict[str, Any], timeout: float) -> MagicMock:
@@ -70,8 +83,8 @@ def test_invoke_bedrock_judge_happy_path(monkeypatch: pytest.MonkeyPatch) -> Non
         captured["timeout"] = timeout
         return _make_response(status_code=200, json_data=_tool_use_response(score=0.5))
 
-    monkeypatch.setattr(judge_bedrock.httpx, "post", fake_post)
-    result = _invoke(monkeypatch, max_tokens=42)
+    monkeypatch.setattr(judge_bedrock.httpx, "AsyncClient", lambda: _make_async_client(fake_post))
+    result = await _invoke(max_tokens=42)
 
     assert result["content"][0]["type"] == "tool_use"
     assert captured["url"] == (
@@ -84,41 +97,45 @@ def test_invoke_bedrock_judge_happy_path(monkeypatch: pytest.MonkeyPatch) -> Non
     assert captured["json"]["max_tokens"] == 42
 
 
-def test_invoke_bedrock_judge_raises_on_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_invoke_bedrock_judge_raises_on_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         judge_bedrock.httpx,
-        "post",
-        lambda *a, **kw: _make_response(status_code=400, text='{"message":"bad model"}'),
+        "AsyncClient",
+        lambda: _make_async_client(lambda *a, **kw: _make_response(status_code=400, text='{"message":"bad model"}')),
     )
     with pytest.raises(JudgeInfrastructureError, match="Bedrock invoke failed: 400") as excinfo:
-        _invoke(monkeypatch)
+        await _invoke()
     assert "bad model" in str(excinfo.value)
 
 
-def test_invoke_bedrock_judge_raises_on_5xx(monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]) -> None:
+async def test_invoke_bedrock_judge_raises_on_5xx(monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]) -> None:
     calls: list[int] = []
 
     def counting_post(*a: Any, **kw: Any) -> MagicMock:
         calls.append(1)
         return _make_response(status_code=500, text="upstream error")
 
-    monkeypatch.setattr(judge_bedrock.httpx, "post", counting_post)
+    monkeypatch.setattr(judge_bedrock.httpx, "AsyncClient", lambda: _make_async_client(counting_post))
     with pytest.raises(JudgeInfrastructureError, match="Bedrock invoke failed: 500"):
-        _invoke(monkeypatch)
+        await _invoke()
     # Exactly 1 initial call + max_retries retries — read from the constant, don't hardcode.
     assert len(calls) == judge_bedrock._JUDGE_RETRY.max_retries + 1
     assert len(no_sleep) == judge_bedrock._JUDGE_RETRY.max_retries
 
 
-def test_invoke_bedrock_judge_raises_on_non_dict_response(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(judge_bedrock.httpx, "post", lambda *a, **kw: _make_response(json_data=["not a dict"]))
+async def test_invoke_bedrock_judge_raises_on_non_dict_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        judge_bedrock.httpx,
+        "AsyncClient",
+        lambda: _make_async_client(lambda *a, **kw: _make_response(json_data=["not a dict"])),
+    )
     with pytest.raises(JudgeInfrastructureError, match="not a JSON object"):
-        _invoke(monkeypatch)
+        await _invoke()
 
 
-def test_invoke_bedrock_judge_raises_on_empty_model() -> None:
+async def test_invoke_bedrock_judge_raises_on_empty_model() -> None:
     with pytest.raises(ValueError):
-        invoke_bedrock_judge(
+        await invoke_bedrock_judge_async(
             route=_route(),
             model="",
             system="s",
@@ -129,32 +146,36 @@ def test_invoke_bedrock_judge_raises_on_empty_model() -> None:
         )
 
 
-def test_invoke_bedrock_judge_wraps_transport_error(monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]) -> None:
+async def test_invoke_bedrock_judge_wraps_transport_error(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
+) -> None:
     import httpx as _httpx
 
     def raising_post(*a: Any, **kw: Any) -> MagicMock:
         raise _httpx.ConnectTimeout("connection timed out")
 
-    monkeypatch.setattr(judge_bedrock.httpx, "post", raising_post)
+    monkeypatch.setattr(judge_bedrock.httpx, "AsyncClient", lambda: _make_async_client(raising_post))
     with pytest.raises(JudgeInfrastructureError, match="Bedrock invoke transport error") as excinfo:
-        _invoke(monkeypatch)
+        await _invoke()
     assert "connection timed out" in str(excinfo.value)
     assert isinstance(excinfo.value.__cause__, _httpx.ConnectTimeout)
 
 
-def test_invoke_bedrock_judge_strips_v1_suffix_in_url(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_invoke_bedrock_judge_strips_v1_suffix_in_url(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
     def fake_post(url: str, **kw: Any) -> MagicMock:
         captured["url"] = url
         return _make_response(json_data=_tool_use_response())
 
-    monkeypatch.setattr(judge_bedrock.httpx, "post", fake_post)
-    _invoke(monkeypatch, model="anthropic.claude-opus-4-6-v1")
+    monkeypatch.setattr(judge_bedrock.httpx, "AsyncClient", lambda: _make_async_client(fake_post))
+    await _invoke(model="anthropic.claude-opus-4-6-v1")
     assert "/model/eu.anthropic.claude-opus-4-6/invoke" in captured["url"]
 
 
-def test_invoke_bedrock_judge_retries_429_then_succeeds(monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]) -> None:
+async def test_invoke_bedrock_judge_retries_429_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
+) -> None:
     responses = iter(
         [
             _make_response(status_code=429, text="throttled"),
@@ -168,28 +189,30 @@ def test_invoke_bedrock_judge_retries_429_then_succeeds(monkeypatch: pytest.Monk
         calls.append(1)
         return next(responses)
 
-    monkeypatch.setattr(judge_bedrock.httpx, "post", sequenced_post)
-    result = _invoke(monkeypatch)
+    monkeypatch.setattr(judge_bedrock.httpx, "AsyncClient", lambda: _make_async_client(sequenced_post))
+    result = await _invoke()
     assert result["content"][0]["input"]["score"] == 0.9
     assert len(calls) == 3
     assert len(no_sleep) == 2
 
 
-def test_invoke_bedrock_judge_403_fails_immediately(monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]) -> None:
+async def test_invoke_bedrock_judge_403_fails_immediately(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
+) -> None:
     calls: list[int] = []
 
     def counting_post(*a: Any, **kw: Any) -> MagicMock:
         calls.append(1)
         return _make_response(status_code=403, text="forbidden")
 
-    monkeypatch.setattr(judge_bedrock.httpx, "post", counting_post)
+    monkeypatch.setattr(judge_bedrock.httpx, "AsyncClient", lambda: _make_async_client(counting_post))
     with pytest.raises(JudgeInfrastructureError, match="Bedrock invoke failed: 403"):
-        _invoke(monkeypatch)
+        await _invoke()
     assert len(calls) == 1
     assert no_sleep == []
 
 
-def test_invoke_bedrock_judge_retries_connect_error_then_succeeds(
+async def test_invoke_bedrock_judge_retries_connect_error_then_succeeds(
     monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
 ) -> None:
     import httpx as _httpx
@@ -202,18 +225,18 @@ def test_invoke_bedrock_judge_retries_connect_error_then_succeeds(
             raise _httpx.ConnectError("connection refused")
         return _make_response(status_code=200, json_data=_tool_use_response())
 
-    monkeypatch.setattr(judge_bedrock.httpx, "post", flaky_post)
-    result = _invoke(monkeypatch)
+    monkeypatch.setattr(judge_bedrock.httpx, "AsyncClient", lambda: _make_async_client(flaky_post))
+    result = await _invoke()
     assert result["content"][0]["type"] == "tool_use"
     assert len(calls) == 2
     assert len(no_sleep) == 1
 
 
-def test_invoke_bedrock_judge_malformed_json_body_escalates(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_invoke_bedrock_judge_malformed_json_body_escalates(monkeypatch: pytest.MonkeyPatch) -> None:
     import json as _json
 
     response = _make_response(status_code=200)
     response.json.side_effect = _json.JSONDecodeError("Expecting value", doc="", pos=0)
-    monkeypatch.setattr(judge_bedrock.httpx, "post", lambda *a, **kw: response)
+    monkeypatch.setattr(judge_bedrock.httpx, "AsyncClient", lambda: _make_async_client(lambda *a, **kw: response))
     with pytest.raises(JudgeInfrastructureError, match="not valid JSON"):
-        _invoke(monkeypatch)
+        await _invoke()

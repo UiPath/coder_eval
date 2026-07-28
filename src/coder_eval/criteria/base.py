@@ -1,11 +1,12 @@
 """Base criterion checker interface with error handling."""
 
+import asyncio
 import logging
 import os
 import statistics
 import traceback
-from abc import ABC, abstractmethod
-from collections.abc import Callable
+from abc import ABC
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import wraps
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
@@ -98,14 +99,85 @@ def handle_criterion_errors(func: Callable[..., CriterionResult]) -> Callable[..
     return wrapper
 
 
+def handle_criterion_errors_async(
+    func: Callable[..., Awaitable[CriterionResult]],
+) -> Callable[..., Awaitable[CriterionResult]]:
+    """Async twin of :func:`handle_criterion_errors`, for ``check_async``.
+
+    Same contract: infra failures escalate, everything else is captured into a
+    failed ``CriterionResult`` instead of propagating.
+    """
+
+    @wraps(func)
+    async def wrapper(
+        self: Any,
+        criterion: BaseSuccessCriterion,
+        sandbox: "Sandbox",
+        reference_code: str | None = None,
+        turn_records: list["TurnRecord"] | None = None,
+        context: "CheckContext | None" = None,
+    ) -> CriterionResult:
+        try:
+            return await func(
+                self,
+                criterion,
+                sandbox,
+                reference_code,
+                turn_records=turn_records,
+                context=context,
+            )
+        except JudgeInfrastructureError:
+            raise
+        except Exception as e:
+            exc_info = f"{e.__class__.__name__}: {e}"
+            tb = ""
+            if os.getenv("CODER_EVAL_DEBUG") == "1":
+                tb = "\n" + "".join(traceback.format_exc(limit=5))
+
+            criterion_type = criterion.type
+            logger.error(
+                f"Error in {self.__class__.__name__}.check_async() for criterion type '{criterion_type}': {exc_info}",
+                exc_info=True,
+            )
+            return CriterionResult(
+                criterion_type=criterion_type,
+                description=criterion.description,
+                score=0.0,
+                details=f"Error during check: {exc_info}{tb}",
+                error=exc_info,
+            )
+
+    return wrapper
+
+
 class BaseCriterion[C: BaseSuccessCriterion](ABC):
     """Abstract base class for all criterion checkers.
 
-    Each criterion checker must:
-    1. Define `criterion_type` as a ClassVar[str] matching the discriminator
-    2. Implement `_check_impl()` with the actual checking logic
+    The checking logic's PRIMARY surface is async (``_check_impl_async``) —
+    every criterion, at bottom, is "read some inputs, produce a score," and
+    async is the strictly more general shape: it covers both a criterion that
+    never awaits anything (a CPU/file-bound check) and one that awaits genuine
+    I/O (an LLM judge call). A checker implements exactly ONE of the two
+    ``_check_impl*`` methods — whichever is its natural form — and the base
+    class derives the other automatically:
 
-    The `check()` method is final and applies centralized error handling.
+    - CPU/file-bound criteria (file_exists, command_executed, ...) override
+      ``_check_impl`` (plain sync code, no event loop to think about). The
+      base's default ``_check_impl_async`` offloads it to a worker thread via
+      ``asyncio.to_thread`` so it never blocks the event loop.
+    - Criteria that make genuine async I/O (llm_judge, agent_judge) override
+      ONLY ``_check_impl_async`` (using an async HTTP client / subprocess
+      bridge) — there is no reason to hand-maintain a second, sync-client
+      implementation just for the rarely-used direct-sync-call path. The
+      base's default ``_check_impl`` derives a sync call by running the async
+      one to completion on a fresh event loop (``asyncio.run``).
+
+    ``register_criterion`` enforces that a checker overrides at least one of
+    the two — overriding neither would recurse forever between the defaults.
+
+    ``check()`` / ``check_async()`` are FINAL — they apply centralized error
+    handling and must not be overridden; implement ``_check_impl`` /
+    ``_check_impl_async`` instead.
 
     Type parameter C binds the checker to its specific criterion model for
     better IDE support and static type checking.
@@ -147,7 +219,7 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         """Execute the criterion check with centralized error handling.
 
         This method is FINAL - subclasses must NOT override it.
-        Implement _check_impl() instead.
+        Implement _check_impl() (or _check_impl_async()) instead.
 
         Args:
             criterion: The specific criterion definition (Pydantic model)
@@ -170,7 +242,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             context=context,
         )
 
-    @abstractmethod
     def _check_impl(
         self,
         criterion: C,
@@ -180,10 +251,12 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         turn_records: list["TurnRecord"] | None = None,
         context: "CheckContext | None" = None,
     ) -> CriterionResult:
-        """Implement the actual criterion checking logic.
+        """Sync checking logic. Override this OR ``_check_impl_async`` (not both).
 
-        Subclasses override this method, NOT check(). Every checker shares this
-        uniform signature; non-judge checkers accept ``context`` and ignore it.
+        Base default: runs ``_check_impl_async`` to completion on a fresh event
+        loop (``asyncio.run``) — the bridge for checkers whose natural form is
+        async (they override ``_check_impl_async`` only). Override THIS instead
+        when the checker's natural form is plain sync CPU/file-bound code.
 
         Args:
             criterion: The specific criterion definition (Pydantic model)
@@ -200,7 +273,64 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         Raises:
             Any exception - will be caught by @handle_criterion_errors decorator
         """
-        pass
+        return asyncio.run(
+            self._check_impl_async(
+                criterion,
+                sandbox,
+                reference_code,
+                turn_records=turn_records,
+                context=context,
+            )
+        )
+
+    @handle_criterion_errors_async
+    async def check_async(
+        self,
+        criterion: C,
+        sandbox: "Sandbox",
+        reference_code: str | None = None,
+        turn_records: list["TurnRecord"] | None = None,
+        context: "CheckContext | None" = None,
+    ) -> CriterionResult:
+        """Async twin of ``check()``. This method is FINAL - subclasses must NOT
+        override it. Implement ``_check_impl`` / ``_check_impl_async`` instead.
+        """
+        return await self._check_impl_async(
+            criterion,
+            sandbox,
+            reference_code,
+            turn_records=turn_records,
+            context=context,
+        )
+
+    async def _check_impl_async(
+        self,
+        criterion: C,
+        sandbox: "Sandbox",
+        reference_code: str | None = None,
+        *,
+        turn_records: list["TurnRecord"] | None = None,
+        context: "CheckContext | None" = None,
+    ) -> CriterionResult:
+        """Async checking logic — the PRIMARY implementation surface.
+
+        Base default: offloads ``_check_impl`` to a worker thread via
+        ``asyncio.to_thread`` so a CPU/file-bound sync checker never blocks the
+        event loop. Override THIS instead when the checker makes genuine async
+        I/O (``llm_judge``, ``agent_judge``) — an async HTTP client / subprocess
+        bridge that actually yields control while waiting. Leave ``_check_impl``
+        unimplemented in that case: the base default derives a sync call from
+        this one via ``asyncio.run()``, so no second (sync-client) implementation
+        is needed.
+        """
+        return await asyncio.to_thread(
+            self._check_impl,
+            criterion,
+            sandbox,
+            reference_code,
+            turn_records=turn_records,
+            context=context,
+        )
 
     def live_verdict(
         self,
@@ -295,12 +425,20 @@ def register_criterion(cls: type[BaseCriterion[Any]]) -> type[BaseCriterion[Any]
 
     Moved here from __init__.py to prevent circular import issues.
 
+    Enforces that the class overrides at least one of ``_check_impl`` /
+    ``_check_impl_async`` — each has a default that derives itself from the
+    other (see ``BaseCriterion``), so overriding neither would recurse forever
+    the first time either is called.
+
     Usage:
         @register_criterion
         class MyChecker(BaseCriterion[MyCriterion]):
             criterion_type = "my_type"
             ...
     """
+    if cls._check_impl is BaseCriterion._check_impl and cls._check_impl_async is BaseCriterion._check_impl_async:
+        raise TypeError(f"{cls.__name__} must override _check_impl or _check_impl_async")
+
     from coder_eval.criteria import CriterionRegistry
 
     return CriterionRegistry.register(cls)

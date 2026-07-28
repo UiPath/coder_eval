@@ -7,7 +7,7 @@ backend routing, and config propagation.
 
 Test pattern: tests mock ``ClaudeCodeAgent`` via ``_AGENT_PATCH_PATH`` and
 pass a JSON ``agent_output`` for legacy convenience; an autouse fixture
-wraps ``SubAgentRunner.run`` so that JSON-shaped agent output is parsed
+wraps ``SubAgentRunner.run_async`` so that JSON-shaped agent output is parsed
 into the runner's ``VerdictCapture``, simulating what the real
 ``submit_verdict`` tool call would do.
 """
@@ -58,14 +58,14 @@ def _make_mock_agent(agent_output: str) -> MagicMock:
     return agent
 
 
-# Original ``SubAgentRunner.run`` — wrapped below so JSON-shaped agent_output
+# Original ``SubAgentRunner.run_async`` — wrapped below so JSON-shaped agent_output
 # in tests populates the runner's ``VerdictCapture`` exactly as the real
 # ``submit_verdict`` tool call would.
-_orig_run = SubAgentRunner.run
+_orig_run_async = SubAgentRunner.run_async
 
 
-def _run_with_capture_simulation(self, user_msg, *, max_turns, turn_timeout):
-    turn = _orig_run(self, user_msg, max_turns=max_turns, turn_timeout=turn_timeout)
+async def _run_with_capture_simulation(self, user_msg, *, max_turns, turn_timeout):
+    turn = await _orig_run_async(self, user_msg, max_turns=max_turns, turn_timeout=turn_timeout)
     if self.capture is not None and self.capture.verdict is None and self.capture.error is None:
         try:
             data = _json.loads(turn.agent_output)
@@ -93,7 +93,7 @@ def _simulate_capture_population(monkeypatch: pytest.MonkeyPatch) -> None:
     criterion sees the verdict via the standard ``extract_verdict_from_capture``
     path.
     """
-    monkeypatch.setattr(SubAgentRunner, "run", _run_with_capture_simulation)
+    monkeypatch.setattr(SubAgentRunner, "run_async", _run_with_capture_simulation)
 
 
 @pytest.fixture
@@ -929,7 +929,7 @@ def test_agent_judge_mounts_reference_dir_when_include_reference_true(
         patch("coder_eval.criteria.agent_judge.SubAgentRunner") as mock_runner_cls,
     ):
         mock_runner = MagicMock()
-        mock_runner.run.return_value = _make_turn('{"score": 0.7, "rationale": "ok"}')
+        mock_runner.run_async = AsyncMock(return_value=_make_turn('{"score": 0.7, "rationale": "ok"}'))
         mock_runner_cls.return_value = mock_runner
         SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion, reference_dir=ref_root)
 
@@ -938,7 +938,7 @@ def test_agent_judge_mounts_reference_dir_when_include_reference_true(
     assert runner_kwargs["reference_dir"] == ref_root
 
     # Prompt envelope points the judge at _reference/.
-    user_msg = mock_runner.run.call_args.args[0]
+    user_msg = mock_runner.run_async.call_args.args[0]
     assert "_reference/" in user_msg
     assert "Use Read / Glob / Grep to browse" in user_msg
 
@@ -958,13 +958,13 @@ def test_agent_judge_skips_reference_dir_when_include_reference_false(
         patch("coder_eval.criteria.agent_judge.SubAgentRunner") as mock_runner_cls,
     ):
         mock_runner = MagicMock()
-        mock_runner.run.return_value = _make_turn('{"score": 0.5, "rationale": "ok"}')
+        mock_runner.run_async = AsyncMock(return_value=_make_turn('{"score": 0.5, "rationale": "ok"}'))
         mock_runner_cls.return_value = mock_runner
         SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion, reference_dir=ref_root)
 
     runner_kwargs = mock_runner_cls.call_args.kwargs
     assert runner_kwargs["reference_dir"] is None
-    user_msg = mock_runner.run.call_args.args[0]
+    user_msg = mock_runner.run_async.call_args.args[0]
     assert "_reference/" not in user_msg
 
 
@@ -1050,8 +1050,8 @@ def test_agent_judge_integration_real_sdk(tmp_path: Path) -> None:
 
 
 def _patch_runner_with_capture(verdict_payload: dict | None, agent_output: str = "Verdict submitted."):
-    """Return a patch context manager that swaps ``SubAgentRunner.run`` for a stub
-    that populates the runner's ``capture`` and returns a synthetic turn.
+    """Return a patch context manager that swaps ``SubAgentRunner.run_async`` for a
+    stub that populates the runner's ``capture`` and returns a synthetic turn.
 
     When ``verdict_payload`` is None the capture stays empty (simulates the judge
     failing to call submit_verdict).
@@ -1059,14 +1059,14 @@ def _patch_runner_with_capture(verdict_payload: dict | None, agent_output: str =
     from coder_eval.evaluation.sub_agent import SubAgentRunner
     from coder_eval.models import JudgeVerdict
 
-    def _stub_run(self, user_msg, *, max_turns, turn_timeout):
+    async def _stub_run(self, user_msg, *, max_turns, turn_timeout):
         if verdict_payload is not None:
             self.capture.verdict = JudgeVerdict.model_validate(verdict_payload)
             self.capture.error = None
             self.capture.called_count += 1
         return _make_turn(agent_output)
 
-    return patch.object(SubAgentRunner, "run", _stub_run)
+    return patch.object(SubAgentRunner, "run_async", _stub_run)
 
 
 def test_agent_judge_tool_channel_happy_path(sandbox: Sandbox, direct_route: DirectRoute) -> None:
@@ -1091,7 +1091,7 @@ def test_agent_judge_tool_channel_overwrites_on_retry(sandbox: Sandbox, direct_r
     """LAST-call discipline at the criterion layer — the final verdict wins."""
     criterion = AgentJudgeCriterion(description="x", prompt="grade")
 
-    def _stub_run(self, user_msg, *, max_turns, turn_timeout):
+    async def _stub_run(self, user_msg, *, max_turns, turn_timeout):
         # Simulate two calls — final one wins.
         self.capture.verdict = JudgeVerdict(score=0.2, rationale="first")
         self.capture.called_count += 1
@@ -1099,7 +1099,7 @@ def test_agent_judge_tool_channel_overwrites_on_retry(sandbox: Sandbox, direct_r
         self.capture.called_count += 1
         return _make_turn("Verdict submitted.")
 
-    with patch.object(SubAgentRunner, "run", _stub_run):
+    with patch.object(SubAgentRunner, "run_async", _stub_run):
         result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
     assert result.score == 0.9
     assert "second" in (result.details or "")
@@ -1147,10 +1147,10 @@ def test_agent_judge_timeout_returns_judge_criterion_result(sandbox: Sandbox, di
 
     criterion = AgentJudgeCriterion(description="x", prompt="grade", turn_timeout=10)
 
-    def _raise(self, user_msg, *, max_turns, turn_timeout):
+    async def _raise(self, user_msg, *, max_turns, turn_timeout):
         raise TurnTimeoutError(10.0, task_id="t", iteration=1)
 
-    with patch.object(SubAgentRunner, "run", _raise):
+    with patch.object(SubAgentRunner, "run_async", _raise):
         result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
     assert result.score == 0.0
     assert "TurnTimeoutError" in (result.error or "")

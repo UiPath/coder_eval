@@ -12,12 +12,18 @@ instead of being scored 0.0.
 
 agent_judge uses the Claude Code SDK subprocess instead — the two paths
 intentionally do not share an HTTP client.
+
+Async on purpose: this is llm_judge's only implementation of the network
+call (there is no sync twin) — ``httpx.AsyncClient`` lets the call yield the
+event loop instead of blocking a thread-pool thread for the wait, so
+``SuccessChecker.check_all_async`` can run several judge criteria
+concurrently without pinning a thread per judge.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import time
 from typing import Any
 
 import httpx
@@ -39,7 +45,7 @@ def _is_retryable_status(status_code: int) -> bool:
     return status_code == 429 or status_code >= 500
 
 
-def invoke_bedrock_judge(
+async def invoke_bedrock_judge_async(
     *,
     route: BedrockRoute,
     model: str,
@@ -80,35 +86,34 @@ def invoke_bedrock_judge(
         "Accept": "application/json",
     }
 
-    # invoke_bedrock_judge is sync (called via asyncio.to_thread), so a plain
-    # time.sleep between attempts is correct here.
     attempts = _JUDGE_RETRY.max_retries + 1
     last_failure = ""
     last_exc: Exception | None = None
-    for attempt in range(attempts):
-        if attempt:
-            time.sleep(compute_backoff(_JUDGE_RETRY, attempt - 1))
-        try:
-            response = httpx.post(url, headers=headers, json=body, timeout=timeout_seconds)
-        except httpx.HTTPError as e:
-            last_failure = f"Bedrock invoke transport error: {e}"
-            last_exc = e
-            logger.warning("Bedrock judge attempt %d/%d failed: %s", attempt + 1, attempts, last_failure)
-            continue
-        if _is_retryable_status(response.status_code):
-            last_failure = f"Bedrock invoke failed: {response.status_code} {response.text[:500]}"
-            last_exc = None
-            logger.warning("Bedrock judge attempt %d/%d failed: %s", attempt + 1, attempts, last_failure)
-            continue
-        if response.status_code >= 300:
-            raise JudgeInfrastructureError(f"Bedrock invoke failed: {response.status_code} {response.text[:500]}")
-        try:
-            data = response.json()
-        except ValueError as e:
-            # A malformed/truncated 2xx body (flaky proxy/gateway) is infra, not
-            # agent quality — escalate like the non-dict arm below.
-            raise JudgeInfrastructureError(f"Bedrock response is not valid JSON: {e}") from e
-        if not isinstance(data, dict):
-            raise JudgeInfrastructureError(f"Bedrock response is not a JSON object: {str(data)[:500]}")
-        return data
+    async with httpx.AsyncClient() as client:
+        for attempt in range(attempts):
+            if attempt:
+                await asyncio.sleep(compute_backoff(_JUDGE_RETRY, attempt - 1))
+            try:
+                response = await client.post(url, headers=headers, json=body, timeout=timeout_seconds)
+            except httpx.HTTPError as e:
+                last_failure = f"Bedrock invoke transport error: {e}"
+                last_exc = e
+                logger.warning("Bedrock judge attempt %d/%d failed: %s", attempt + 1, attempts, last_failure)
+                continue
+            if _is_retryable_status(response.status_code):
+                last_failure = f"Bedrock invoke failed: {response.status_code} {response.text[:500]}"
+                last_exc = None
+                logger.warning("Bedrock judge attempt %d/%d failed: %s", attempt + 1, attempts, last_failure)
+                continue
+            if response.status_code >= 300:
+                raise JudgeInfrastructureError(f"Bedrock invoke failed: {response.status_code} {response.text[:500]}")
+            try:
+                data = response.json()
+            except ValueError as e:
+                # A malformed/truncated 2xx body (flaky proxy/gateway) is infra, not
+                # agent quality — escalate like the non-dict arm below.
+                raise JudgeInfrastructureError(f"Bedrock response is not valid JSON: {e}") from e
+            if not isinstance(data, dict):
+                raise JudgeInfrastructureError(f"Bedrock response is not a JSON object: {str(data)[:500]}")
+            return data
     raise JudgeInfrastructureError(f"{last_failure} (after {attempts} attempts)") from last_exc

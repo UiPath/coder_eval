@@ -132,8 +132,8 @@ def extract_verdict_from_anthropic_response(
     ``{"type": "tool_use", "name": "submit_verdict"}`` and validates the last
     one's ``input`` against ``JudgeVerdict``. Used by:
 
-    * The Bedrock httpx path (``invoke_bedrock_judge``) — raw JSON dict.
-    * The Anthropic SDK Direct path (``invoke_anthropic_judge``) —
+    * The Bedrock httpx path (``invoke_bedrock_judge_async``) — raw JSON dict.
+    * The Anthropic SDK Direct path (``invoke_anthropic_judge_async``) —
       response converted via ``Message.model_dump()``.
 
     Both backends share Anthropic's native message shape.
