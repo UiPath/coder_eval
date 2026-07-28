@@ -552,6 +552,30 @@ class _ClaudeTurnState:
                         )
                     )
 
+    def _finalize_token_usage(self) -> TokenUsage:
+        """Build the turn's cumulative TokenUsage, repricing for LiteLLM.
+
+        Extracted from ``finalize`` so the LiteLLM repricing *wiring* (not just the
+        static ``_reprice_for_litellm`` helper) is directly testable. The SDK's
+        cost estimate assumes Claude pricing and is wrong for an open-weight model
+        behind LiteLLM, so reprice the top-line from the token buckets at the
+        model's real rate — buckets untouched, so the reconciliation invariant
+        holds.
+        """
+        usage = (
+            self._agent._build_token_usage(
+                self.sdk_messages,
+                self.sdk_result_usage,
+                self.sdk_result_cost,
+                self.sdk_result_model_usage,
+                self.effective_model,
+            )
+            or TokenUsage()
+        )
+        if isinstance(self._agent.route, LiteLLMRoute):
+            self._agent._reprice_for_litellm(usage, self.effective_model)
+        return usage
+
     def finalize(self, status: AgentEndStatus, *, crashed: bool = False, crash_reason: str | None = None) -> None:
         """Close orphaned tools + the open turn, emit the terminal AgentEndEvent,
         and on a crash build the partial TurnRecord. Idempotent."""
@@ -592,22 +616,7 @@ class _ClaudeTurnState:
             )
             self.current_turn_id = None
 
-        usage = (
-            self._agent._build_token_usage(
-                self.sdk_messages,
-                self.sdk_result_usage,
-                self.sdk_result_cost,
-                self.sdk_result_model_usage,
-                self.effective_model,
-            )
-            or TokenUsage()
-        )
-        # The SDK's cost estimate assumes Claude pricing; it is wrong for an
-        # open-weight model behind LiteLLM. Reprice the top-line from the token
-        # buckets at the model's real rate (buckets untouched → reconciliation
-        # invariant holds).
-        if isinstance(self._agent.route, LiteLLMRoute):
-            self._agent._reprice_for_litellm(usage, self.effective_model)
+        usage = self._finalize_token_usage()
 
         try:
             agent_output = self._agent._format_messages(self.messages)
@@ -1418,6 +1427,24 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         )
 
     @staticmethod
+    def _price_from_buckets(usage: TokenUsage, model: str | None) -> float | None:
+        """Price the four token buckets at ``model``'s list rate.
+
+        Shared by ``_backfill_cost`` (price-if-absent) and ``_reprice_for_litellm``
+        (always-reprice). Returns ``None`` when ``model`` is unset or absent from
+        the rate card.
+        """
+        if not model:
+            return None
+        return calculate_cost(
+            model,
+            uncached_input_tokens=usage.uncached_input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_creation_tokens=usage.cache_creation_input_tokens,
+            cache_read_tokens=usage.cache_read_input_tokens,
+        )
+
+    @staticmethod
     def _backfill_cost(usage: TokenUsage, model: str | None) -> TokenUsage:
         """Price the token buckets when the SDK gave no cost (timeout / kill).
 
@@ -1430,13 +1457,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         """
         if usage.total_cost_usd is not None or not model:
             return usage
-        cost = calculate_cost(
-            model,
-            uncached_input_tokens=usage.uncached_input_tokens,
-            output_tokens=usage.output_tokens,
-            cache_creation_tokens=usage.cache_creation_input_tokens,
-            cache_read_tokens=usage.cache_read_input_tokens,
-        )
+        cost = ClaudeCodeAgent._price_from_buckets(usage, model)
         if cost is not None:
             usage.total_cost_usd = cost
         else:
@@ -1447,29 +1468,28 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         return usage
 
     @staticmethod
-    def _reprice_for_litellm(usage: TokenUsage, model: str | None) -> TokenUsage:
-        """Recompute the top-line cost for the LiteLLM backend.
+    def _reprice_for_litellm(usage: TokenUsage, model: str | None) -> None:
+        """Recompute the top-line cost for the LiteLLM backend, in place.
 
         The Claude Agent SDK's ``costUSD``/``total_cost_usd`` is a client-side
         estimate that assumes Claude/Anthropic pricing, so it is wrong for an
         open-weight model driven through LiteLLM. Reprice from the (already
         authoritative) token buckets at the model's real rate. The token buckets
         are left untouched, so the per-message stream / reconciliation invariant
-        is unaffected — only the cost scalar changes. An unknown/unpriced model
-        yields ``None`` (an honest "N/A") rather than the misleading SDK figure.
+        is unaffected — only the cost scalar changes.
+
+        An unknown/unpriced model sets the cost to ``None`` (an honest "N/A")
+        **and logs a warning** — mirroring ``_backfill_cost`` — because a proxy
+        model missing from the rate card otherwise silently yields
+        ``total_cost_usd = None``, which makes the orchestrator skip the
+        ``max_usd`` gate with no diagnostic.
         """
-        usage.total_cost_usd = (
-            calculate_cost(
-                model,
-                uncached_input_tokens=usage.uncached_input_tokens,
-                output_tokens=usage.output_tokens,
-                cache_creation_tokens=usage.cache_creation_input_tokens,
-                cache_read_tokens=usage.cache_read_input_tokens,
+        cost = ClaudeCodeAgent._price_from_buckets(usage, model)
+        usage.total_cost_usd = cost
+        if cost is None:
+            logger.warning(
+                "No pricing for litellm model %r; turn cost left unset (max_usd gate will be skipped)", model
             )
-            if model
-            else None
-        )
-        return usage
 
     def get_sdk_options(self) -> dict[str, Any] | None:
         """Get the raw SDK options used for the last agent query.

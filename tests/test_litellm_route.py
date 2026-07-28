@@ -364,6 +364,45 @@ class TestRepriceForLitellm:
         assert u.total_cost_usd is None
 
 
+class TestRepriceWiring:
+    """The finalize path (not just the static helper) reprices a litellm turn. A
+    regression that skips the reprice would silently persist the SDK's Claude cost
+    and disable the max_usd gate — the static-only tests above wouldn't catch it."""
+
+    def _usage_after_finalize(self, effective_model: str | None) -> TokenUsage:
+        from types import SimpleNamespace
+
+        from coder_eval.agents.claude_code_agent import _ClaudeTurnState
+
+        agent = _make_agent(
+            LiteLLMRoute(base_url="http://x:4000", auth_token="k", model="zai.glm-5"),
+            config_model="zai.glm-5",
+        )
+        stub = SimpleNamespace(
+            _agent=agent,
+            sdk_messages=[],
+            sdk_result_usage=None,
+            sdk_result_cost=None,
+            # model_usage carries the SDK's Claude-priced estimate (3.68); the
+            # reprice must override it from the litellm rate table.
+            sdk_result_model_usage={"m": {"inputTokens": 1_000_000, "outputTokens": 1_000_000, "costUSD": 3.68}},
+            effective_model=effective_model,
+        )
+        return _ClaudeTurnState._finalize_token_usage(stub)  # type: ignore[arg-type]
+
+    def test_finalize_reprices_priced_litellm_model(self):
+        usage = self._usage_after_finalize("zai.glm-5")
+        # litellm rate (1.2 + 3.84), NOT the SDK's Claude estimate of 3.68.
+        assert usage.total_cost_usd == pytest.approx(1.2 + 3.84)
+        assert usage.uncached_input_tokens == 1_000_000  # token buckets untouched
+
+    def test_finalize_unpriced_litellm_model_yields_none(self):
+        # An unpriced model → None (not the misleading 3.68), so the orchestrator
+        # skips the max_usd gate rather than gating on a wrong figure.
+        usage = self._usage_after_finalize("some-unpriced-model")
+        assert usage.total_cost_usd is None
+
+
 class TestLitellmPreflight:
     """External-proxy reachability preflight — fail fast instead of hanging on a dead proxy."""
 
