@@ -8,7 +8,7 @@ the criteria registry.
 import asyncio
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ..criteria import BaseCriterion, CriterionRegistry, init_criteria
 from ..criteria.base import CheckContext
@@ -100,6 +100,28 @@ class SuccessChecker:
         if init_registry:
             init_criteria(validate=validate_registry)
 
+    def _resolve_refs(
+        self,
+        reference_code: str | None,
+        turn_records: TurnRecords | None,
+        reference_dir: Path | None,
+    ) -> tuple[str | None, TurnRecords | None, Path | None]:
+        """Persist reference_code / reference_dir / turn_records for subsequent calls
+        that don't pass them explicitly (backward compat), and resolve the effective
+        values for THIS call. Shared by ``check`` / ``check_all`` / ``check_all_async``
+        so the persist-then-resolve preamble lives in exactly one place.
+        """
+        if reference_code is not None:
+            self._reference_code = reference_code
+        if reference_dir is not None:
+            self._reference_dir = reference_dir
+        if turn_records is not None:
+            self._turn_records = turn_records
+        ref_code = reference_code if reference_code is not None else self._reference_code
+        ref_dir = reference_dir if reference_dir is not None else self._reference_dir
+        records = turn_records if turn_records is not None else self._turn_records
+        return ref_code, records, ref_dir
+
     def check(
         self,
         criterion: SuccessCriterion,
@@ -121,16 +143,7 @@ class SuccessChecker:
         Returns:
             CriterionResult with score
         """
-        # Persist reference_code / reference_dir for subsequent calls (backward compat)
-        if reference_code is not None:
-            self._reference_code = reference_code
-        if reference_dir is not None:
-            self._reference_dir = reference_dir
-        if turn_records is not None:
-            self._turn_records = turn_records
-        ref_code = reference_code if reference_code is not None else self._reference_code
-        ref_dir = reference_dir if reference_dir is not None else self._reference_dir
-        records = turn_records if turn_records is not None else self._turn_records
+        ref_code, records, ref_dir = self._resolve_refs(reference_code, turn_records, reference_dir)
         return self._check_single(criterion, ref_code, records, ref_dir)
 
     def check_all(
@@ -152,16 +165,7 @@ class SuccessChecker:
         Returns:
             List of criterion results with scores
         """
-        # Persist for subsequent check() calls
-        if reference_code is not None:
-            self._reference_code = reference_code
-        if reference_dir is not None:
-            self._reference_dir = reference_dir
-        if turn_records is not None:
-            self._turn_records = turn_records
-        ref_code = reference_code if reference_code is not None else self._reference_code
-        ref_dir = reference_dir if reference_dir is not None else self._reference_dir
-        records = turn_records if turn_records is not None else self._turn_records
+        ref_code, records, ref_dir = self._resolve_refs(reference_code, turn_records, reference_dir)
         return self._check_all_sync(criteria, ref_code, records, ref_dir)
 
     async def check_all_async(
@@ -202,20 +206,23 @@ class SuccessChecker:
 
         Results are returned in the same order as ``criteria``, regardless of
         which path each one took.
+
+        Args:
+            criteria: List of criterion definitions.
+            reference_code: Optional reference code (string form).
+            turn_records: Optional turn records for command inspection.
+            reference_dir: Optional resolved path to a reference directory.
+                Only consumed by ``agent_judge``; non-judge criteria ignore it.
+
+        Returns:
+            List of criterion results with scores, in the same order as ``criteria``.
         """
-        if reference_code is not None:
-            self._reference_code = reference_code
-        if reference_dir is not None:
-            self._reference_dir = reference_dir
-        if turn_records is not None:
-            self._turn_records = turn_records
-        ref_code = reference_code if reference_code is not None else self._reference_code
-        ref_dir = reference_dir if reference_dir is not None else self._reference_dir
-        records = turn_records if turn_records is not None else self._turn_records
+        ref_code, records, ref_dir = self._resolve_refs(reference_code, turn_records, reference_dir)
 
-        if not criteria:
-            return []
-
+        # native_async_set as a set (not an `in`-scan over a list per index) keeps the
+        # partition below to one pass instead of O(n^2). With criteria=[] both index
+        # lists come out empty and the two `if` blocks below are skipped, so there is
+        # no separate empty-input fast path to maintain.
         native_async_indices = [i for i, c in enumerate(criteria) if self._is_native_async(c.type)]
         native_async_set = set(native_async_indices)
         sync_indices = [i for i in range(len(criteria)) if i not in native_async_set]
@@ -238,9 +245,11 @@ class SuccessChecker:
                 if isinstance(outcome, BaseException):
                     raise outcome
             for idx, outcome in zip(native_async_indices, outcomes, strict=True):
-                results[idx] = outcome  # type: ignore[assignment]  # BaseException case raised above
+                assert isinstance(outcome, CriterionResult)
+                results[idx] = outcome
 
-        return results  # type: ignore[return-value]  # every slot filled above
+        assert all(r is not None for r in results), "every criterion index must be filled by one of the two batches"
+        return cast("CriteriaResults", results)
 
     def _is_native_async(self, criterion_type: str) -> bool:
         """Whether this criterion type's checker makes genuine async I/O.
@@ -250,12 +259,20 @@ class SuccessChecker:
         ``BaseCriterion`` for the full contract. An unregistered type resolves
         to False so its KeyError surfaces through the shared sync error-handling
         path in ``_check_single`` / ``_check_single_async``.
+
+        Reads the registered CLASS (``CriterionRegistry.get_checker``), not a
+        constructed instance — this classification runs in
+        ``check_all_async`` before any per-criterion error boundary, so it must
+        never invoke a checker's ``__init__`` (a constructor failure would
+        otherwise escape ``check_all_async`` entirely instead of scoring that
+        one criterion 0, which is the contract ``_check_single`` /
+        ``_check_single_async`` provide).
         """
         try:
-            checker = self._get_checker_instance(criterion_type)
+            checker_class = CriterionRegistry.get_checker(criterion_type)
         except KeyError:
             return False
-        return type(checker)._check_impl_async is not BaseCriterion._check_impl_async
+        return checker_class._check_impl_async is not BaseCriterion._check_impl_async
 
     def _check_all_sync(
         self,
@@ -280,6 +297,68 @@ class SuccessChecker:
             self._checker_instances[criterion_type] = checker_class()
         return self._checker_instances[criterion_type]
 
+    def _finalize_result(self, criterion: SuccessCriterion, result: CriterionResult) -> CriterionResult:
+        """Stamp pass_threshold/gating onto a checker's result and log it. Shared
+        by the sync/async success paths in ``_check_single`` / ``_check_single_async``
+        so the two only differ in how they invoke the checker."""
+        criterion_type = criterion.type
+        result.pass_threshold = criterion.pass_threshold
+        result.gating = criterion.is_gating
+
+        logger.debug(f"Criterion '{criterion_type}' score: {result.score:.2f}")
+        if result.score < criterion.pass_threshold:
+            # An informational (weight: 0) criterion cannot fail the task, so
+            # logging it as FAILED contradicts the final status. Say what it is.
+            logger.info(
+                "Criterion '%s' %s (score=%.2f, threshold=%.2f): %s",
+                criterion_type,
+                "FAILED" if criterion.is_gating else "below threshold (informational)",
+                result.score,
+                criterion.pass_threshold,
+                _short_failure_reason(result),
+            )
+        return result
+
+    def _missing_checker_result(self, criterion: SuccessCriterion) -> CriterionResult:
+        """Failed result for an unregistered criterion type. Shared by the sync/async
+        KeyError branches in ``_check_single`` / ``_check_single_async``."""
+        criterion_type = criterion.type
+        # ERROR record carries enough context — skip the companion FAILED line.
+        logger.error(f"No checker found for criterion type '{criterion_type}'")
+        return CriterionResult(
+            criterion_type=criterion_type,
+            description=criterion.description,
+            score=0.0,
+            details=f"No checker registered for criterion type '{criterion_type}'",
+            error=f"Unsupported criterion type: '{criterion_type}'",
+            pass_threshold=criterion.pass_threshold,
+            gating=criterion.is_gating,
+        )
+
+    def _error_result(self, criterion: SuccessCriterion, exc: Exception) -> CriterionResult:
+        """Failed result for any other checker exception, including checker __init__
+        failures. Shared by the sync/async generic-Exception branches in
+        ``_check_single`` / ``_check_single_async``."""
+        criterion_type = criterion.type
+        logger.exception(f"Checker failure for criterion '{criterion_type}': {exc}")
+        failed = CriterionResult(
+            criterion_type=criterion_type,
+            description=criterion.description,
+            score=0.0,
+            details="Error running checker",
+            error=str(exc),
+            pass_threshold=criterion.pass_threshold,
+            gating=criterion.is_gating,
+        )
+        logger.info(
+            "Criterion '%s' %s (score=0.00, threshold=%.2f): %s",
+            criterion_type,
+            "FAILED" if criterion.is_gating else "errored (informational)",
+            criterion.pass_threshold,
+            _short_failure_reason(failed),
+        )
+        return failed
+
     def _check_single(
         self,
         criterion: SuccessCriterion,
@@ -298,12 +377,9 @@ class SuccessChecker:
         Returns:
             CriterionResult with score
         """
-        criterion_type = criterion.type
-
         # V3: Broader exception handling - catches checker constructor failures too
         try:
-            # Get cached instance
-            checker = self._get_checker_instance(criterion_type)
+            checker = self._get_checker_instance(criterion.type)
             context = CheckContext(route=self.route, reference_dir=reference_dir)
             result = checker.check(
                 criterion,
@@ -312,58 +388,14 @@ class SuccessChecker:
                 turn_records=turn_records,
                 context=context,
             )
-            result.pass_threshold = criterion.pass_threshold
-            result.gating = criterion.is_gating
-
-            logger.debug(f"Criterion '{criterion_type}' score: {result.score:.2f}")
-            if result.score < criterion.pass_threshold:
-                # An informational (weight: 0) criterion cannot fail the task, so
-                # logging it as FAILED contradicts the final status. Say what it is.
-                logger.info(
-                    "Criterion '%s' %s (score=%.2f, threshold=%.2f): %s",
-                    criterion_type,
-                    "FAILED" if criterion.is_gating else "below threshold (informational)",
-                    result.score,
-                    criterion.pass_threshold,
-                    _short_failure_reason(result),
-                )
-            return result
-
+            return self._finalize_result(criterion, result)
         except KeyError:
-            # No checker registered for this type - return failed result for consistency.
-            # ERROR record carries enough context — skip the companion FAILED line.
-            logger.error(f"No checker found for criterion type '{criterion_type}'")
-            return CriterionResult(
-                criterion_type=criterion_type,
-                description=criterion.description,
-                score=0.0,
-                details=f"No checker registered for criterion type '{criterion_type}'",
-                error=f"Unsupported criterion type: '{criterion_type}'",
-                pass_threshold=criterion.pass_threshold,
-                gating=criterion.is_gating,
-            )
+            return self._missing_checker_result(criterion)
         except JudgeInfrastructureError:
             raise  # judge infra failure escalates to FinalStatus.ERROR; do not score it
         except Exception as e:
             # V3: Catch ALL exceptions, including checker __init__ failures
-            logger.exception(f"Checker failure for criterion '{criterion_type}': {e}")
-            failed = CriterionResult(
-                criterion_type=criterion_type,
-                description=criterion.description,
-                score=0.0,
-                details="Error running checker",
-                error=str(e),
-                pass_threshold=criterion.pass_threshold,
-                gating=criterion.is_gating,
-            )
-            logger.info(
-                "Criterion '%s' %s (score=0.00, threshold=%.2f): %s",
-                criterion_type,
-                "FAILED" if criterion.is_gating else "errored (informational)",
-                criterion.pass_threshold,
-                _short_failure_reason(failed),
-            )
-            return failed
+            return self._error_result(criterion, e)
 
     async def _check_single_async(
         self,
@@ -373,13 +405,13 @@ class SuccessChecker:
         reference_dir: Path | None = None,
     ) -> CriterionResult:
         """Async twin of ``_check_single`` — used only for native-async checkers,
-        dispatched via ``check_async`` instead of ``check``. Logging and
-        error-shape parity with ``_check_single`` is intentional.
+        dispatched via ``check_async`` instead of ``check``. Shares the result
+        shaping and logging via ``_finalize_result`` / ``_missing_checker_result`` /
+        ``_error_result``, so the two methods differ only in how they invoke the
+        checker (``checker.check`` vs. ``await checker.check_async``).
         """
-        criterion_type = criterion.type
-
         try:
-            checker = self._get_checker_instance(criterion_type)
+            checker = self._get_checker_instance(criterion.type)
             context = CheckContext(route=self.route, reference_dir=reference_dir)
             result = await checker.check_async(
                 criterion,
@@ -388,50 +420,10 @@ class SuccessChecker:
                 turn_records=turn_records,
                 context=context,
             )
-            result.pass_threshold = criterion.pass_threshold
-            result.gating = criterion.is_gating
-
-            logger.debug(f"Criterion '{criterion_type}' score: {result.score:.2f}")
-            if result.score < criterion.pass_threshold:
-                logger.info(
-                    "Criterion '%s' %s (score=%.2f, threshold=%.2f): %s",
-                    criterion_type,
-                    "FAILED" if criterion.is_gating else "below threshold (informational)",
-                    result.score,
-                    criterion.pass_threshold,
-                    _short_failure_reason(result),
-                )
-            return result
-
+            return self._finalize_result(criterion, result)
         except KeyError:
-            logger.error(f"No checker found for criterion type '{criterion_type}'")
-            return CriterionResult(
-                criterion_type=criterion_type,
-                description=criterion.description,
-                score=0.0,
-                details=f"No checker registered for criterion type '{criterion_type}'",
-                error=f"Unsupported criterion type: '{criterion_type}'",
-                pass_threshold=criterion.pass_threshold,
-                gating=criterion.is_gating,
-            )
+            return self._missing_checker_result(criterion)
         except JudgeInfrastructureError:
             raise
         except Exception as e:
-            logger.exception(f"Checker failure for criterion '{criterion_type}': {e}")
-            failed = CriterionResult(
-                criterion_type=criterion_type,
-                description=criterion.description,
-                score=0.0,
-                details="Error running checker",
-                error=str(e),
-                pass_threshold=criterion.pass_threshold,
-                gating=criterion.is_gating,
-            )
-            logger.info(
-                "Criterion '%s' %s (score=0.00, threshold=%.2f): %s",
-                criterion_type,
-                "FAILED" if criterion.is_gating else "errored (informational)",
-                criterion.pass_threshold,
-                _short_failure_reason(failed),
-            )
-            return failed
+            return self._error_result(criterion, e)

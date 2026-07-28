@@ -251,6 +251,47 @@ async def test_runner_cleans_up_on_success(sandbox: Sandbox) -> None:
     assert not Path(captured["path"]).exists()
 
 
+async def test_runner_cleans_up_when_cancelled_mid_communicate(sandbox: Sandbox) -> None:
+    """run_async is awaited directly on the orchestrator's own loop (not under its
+    own asyncio.run on a worker thread), so a cancellation — e.g. the task_timeout
+    watchdog cancelling the orchestrator task — can land while communicate() is in
+    flight. The finally-block cleanup must still remove judge_dir (it's a plain
+    synchronous shutil.rmtree, not an awaited to_thread call, precisely so it can't
+    itself be interrupted by the same cancellation)."""
+    import asyncio
+
+    runner = SubAgentRunner(
+        sandbox=sandbox,
+        agent_config=_make_agent_config(),
+        ignore_patterns=[],
+        route=DirectRoute(),
+    )
+    mock_agent = _make_mock_agent()
+    captured: dict[str, str] = {}
+    started = asyncio.Event()
+
+    async def capture_start(path: str, **_kwargs: object) -> None:
+        captured["path"] = path
+
+    async def hang_forever(*_args: object, **_kwargs: object) -> TurnRecord:
+        started.set()
+        await asyncio.sleep(3600)
+        raise AssertionError("should have been cancelled before waking up")
+
+    mock_agent.start.side_effect = capture_start
+    mock_agent.communicate.side_effect = hang_forever
+
+    with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
+        task = asyncio.ensure_future(runner.run_async("grade", max_turns=10, turn_timeout=30.0))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert captured["path"]
+    assert not Path(captured["path"]).exists()
+
+
 async def test_runner_cleans_up_on_communicate_exception(sandbox: Sandbox) -> None:
     runner = SubAgentRunner(
         sandbox=sandbox,

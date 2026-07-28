@@ -206,7 +206,15 @@ class SubAgentRunner:
             )
             return turn
         finally:
-            await asyncio.to_thread(shutil.rmtree, judge_dir, ignore_errors=True)
+            # Deliberately NOT `await asyncio.to_thread(...)` here: run_async is awaited
+            # directly on the orchestrator's own loop (not under its own asyncio.run on a
+            # worker thread), so it is reachable by cancellation (e.g. the task_timeout
+            # watchdog cancelling the orchestrator task). An await inside `finally` is
+            # itself cancellable — cancelling right as this line is reached would skip the
+            # cleanup and leak the mkdtemp sandbox copy with no reaper. rmtree is a
+            # best-effort, bounded filesystem op; call it synchronously so cancellation
+            # can't interrupt it mid-cleanup.
+            shutil.rmtree(judge_dir, ignore_errors=True)  # noqa: CE002
 
     @staticmethod
     async def _run_agent(

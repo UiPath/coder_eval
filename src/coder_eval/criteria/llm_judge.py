@@ -1,5 +1,6 @@
 """LLM-as-a-judge success criterion checker."""
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -82,15 +83,23 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
                 details="(skipped: enabled=false)",
             )
 
-        judge_ctx = JudgeContextBuilder(
-            files=criterion.files,
-            include_reference=criterion.include_reference,
-            include_agent_output=criterion.include_agent_output,
-            include_tool_calls=criterion.include_tool_calls,
-            include_dialog=criterion.include_dialog,
-            max_dialog_chars=criterion.max_dialog_chars,
-            max_file_chars=criterion.max_file_chars,
-        ).build(sandbox, reference_code, turn_records)
+        # .build() does synchronous file I/O (reading sandbox/reference files) — offload
+        # to a worker thread so it doesn't stall the event loop this checker otherwise
+        # never blocks (that's the whole point of it being native-async).
+        judge_ctx = await asyncio.to_thread(
+            JudgeContextBuilder(
+                files=criterion.files,
+                include_reference=criterion.include_reference,
+                include_agent_output=criterion.include_agent_output,
+                include_tool_calls=criterion.include_tool_calls,
+                include_dialog=criterion.include_dialog,
+                max_dialog_chars=criterion.max_dialog_chars,
+                max_file_chars=criterion.max_file_chars,
+            ).build,
+            sandbox,
+            reference_code,
+            turn_records,
+        )
 
         user_msg = _render_user_message(criterion.prompt, judge_ctx)
 

@@ -12,6 +12,7 @@ See the AgentJudgeCriterion docstring for the security model.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -136,15 +137,22 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
         # to the prompt envelope (fast verdict, narrow tool surface); when empty, the
         # judge inspects the sandbox copy via its tools. Both modes compose — the judge
         # can ``Read`` anything else even when files are pre-attached.
-        judge_ctx = JudgeContextBuilder(
-            files=criterion.files,
-            include_reference=criterion.include_reference,
-            include_agent_output=criterion.include_agent_output,
-            include_tool_calls=criterion.include_tool_calls,
-            include_dialog=criterion.include_dialog,
-            max_dialog_chars=criterion.max_dialog_chars,
-            max_file_chars=criterion.max_file_chars,
-        ).build(sandbox, reference_code, turn_records)
+        # .build() does synchronous file I/O — offload to a worker thread so it
+        # doesn't stall the event loop (see llm_judge.py's identical comment).
+        judge_ctx = await asyncio.to_thread(
+            JudgeContextBuilder(
+                files=criterion.files,
+                include_reference=criterion.include_reference,
+                include_agent_output=criterion.include_agent_output,
+                include_tool_calls=criterion.include_tool_calls,
+                include_dialog=criterion.include_dialog,
+                max_dialog_chars=criterion.max_dialog_chars,
+                max_file_chars=criterion.max_file_chars,
+            ).build,
+            sandbox,
+            reference_code,
+            turn_records,
+        )
 
         # Mount the reference directory only when the criterion opted into seeing it.
         # When include_reference=False the judge MUST NOT see the grading material, so
