@@ -59,6 +59,29 @@ logger = logging.getLogger(__name__)
 # `COPY` destination in docker/Dockerfile -- a drift guard test enforces that.
 CONTAINER_ENTRYPOINT = "/usr/local/bin/coder_eval_entrypoint.sh"
 
+# Docker Desktop's stable alias for the host, from inside a bridge-network
+# container. Auto-resolves on macOS/Windows; on Linux it must be published
+# explicitly via `--add-host host.docker.internal:host-gateway`.
+_DOCKER_HOST_ALIAS = "host.docker.internal"
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _rewrite_loopback_for_container(url: str) -> str | None:
+    """Rewrite a loopback URL to the docker host alias, preserving scheme/port/path.
+
+    Returns the rewritten URL, or None if the host is not loopback (forward as-is).
+    A LiteLLM proxy on the HOST is unreachable at localhost from inside a bridge
+    container, so ``http://localhost:4000`` -> ``http://host.docker.internal:4000``.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    if parts.hostname not in _LOOPBACK_HOSTS:
+        return None
+    netloc = _DOCKER_HOST_ALIAS if parts.port is None else f"{_DOCKER_HOST_ALIAS}:{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
 # Top-level entries under ~/.claude that the per-task RW copy SKIPS. We copy
 # the host's ~/.claude into a throwaway tmp dir and mount that copy read-WRITE
 # so the in-container CLI can write anywhere it needs without ever touching the
@@ -1088,8 +1111,26 @@ class DockerRunner:
         # would silently default to DIRECT — downgrading the judge (and agent) route.
         merged_allowlist = set(cfg.env_passthrough) | set(cfg.env_passthrough_extra)
         for env_var in merged_allowlist:
+            # LITELLM_BASE_URL is forwarded below with a value rewrite, not name-only.
+            if env_var == "LITELLM_BASE_URL":
+                continue
             if env_var in os.environ:
                 argv += ["--env", env_var]
+
+        # LITELLM_BASE_URL points at a proxy on the HOST. A bridge-network container
+        # can't reach the host's loopback, so rewrite localhost/127.0.0.1 to the
+        # docker host alias and publish that alias (`--add-host`) for Linux parity
+        # (it's automatic on macOS/Windows Docker Desktop). It's only a URL, so an
+        # explicit `--env VAR=value` is safe to render in the logged argv — unlike
+        # the auth token, which stays name-only above. Skipped when the container
+        # has no network (the proxy is unreachable anyway → validation errors).
+        litellm_base_url = os.environ.get("LITELLM_BASE_URL")
+        if litellm_base_url and "LITELLM_BASE_URL" in merged_allowlist and cfg.network != "none":
+            rewritten = _rewrite_loopback_for_container(litellm_base_url)
+            if rewritten is not None:
+                argv += ["--env", f"LITELLM_BASE_URL={rewritten}", "--add-host", f"{_DOCKER_HOST_ALIAS}:host-gateway"]
+            else:
+                argv += ["--env", "LITELLM_BASE_URL"]
 
         # Signal to in-container agents that the harness already provides OS-level
         # isolation. The Codex agent reads this to fall back to its full-access

@@ -28,6 +28,7 @@ from coder_eval.models import (
     JudgeCriterionResult,
     JudgeTranscript,
     JudgeVerdict,
+    LiteLLMRoute,
     LLMJudgeCriterion,
     TokenUsage,
 )
@@ -203,9 +204,15 @@ def _invoke_tool_channel(
             )
             verdict, err = extract_verdict_from_anthropic_response(anthropic_response)
             response_usage = token_usage_from_anthropic_dict(anthropic_response)
-        case _:
-            # route is None or an unexpected type — the unconfigured-arm guard in
-            # _check_impl handles None before dispatch, so this is defensive only.
+        case LiteLLMRoute():
+            # Defensive: the evaluation route is pinned to Bedrock/Direct by
+            # resolve_evaluation_route, so a LiteLLM route should never reach the
+            # judge. Fail loudly rather than silently scoring 0.0. (Explicit arm
+            # keeps the match exhaustive so pyright flags any future route member.)
+            return None, "llm_judge: evaluation route must be Bedrock/Direct, got LiteLLM", "(litellm route)", None
+        case None:
+            # Handled by the unconfigured-arm guard in _check_impl before dispatch;
+            # defensive only.
             return None, "llm_judge: no usable API route", "(no route)", None
 
     if verdict is not None:

@@ -11,6 +11,7 @@ from datetime import datetime
 from inspect import isawaitable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .agent import Agent
 from .agents.watchdog import ThreadedWatchdog
@@ -37,6 +38,7 @@ from .models import (
     EvaluationResult,
     FinalStatus,
     JudgeCriterionResult,
+    LiteLLMRoute,
     PostRunCommand,
     PostRunResult,
     PreRunCommand,
@@ -48,6 +50,7 @@ from .models import (
     TokenUsage,
     TurnRecord,
     UserMessage,
+    resolve_evaluation_route,
     resolve_route,
 )
 from .orchestration.early_stop import EarlyStopWatcher, validate_early_stop
@@ -115,16 +118,21 @@ async def _pump_stream(
 _UTTERANCE_TAG_RE = re.compile(r"^\[(ASSISTANT|RESULT - SUCCESS|RESULT - ERROR|TOOL USE)\](?: (.*))?$")
 
 
-def _format_routing(route: ApiRoute) -> str:
+def _format_routing(route: ApiRoute, effective_model: str | None = None) -> str:
     """Format the route name for the ``API routing:`` log line.
 
     For ``DirectRoute`` the resolved judge transport is appended so the choice
     (anthropic / none) is visible on every run, not only in the persisted
-    ``environment_info`` record.
+    ``environment_info`` record. For ``LiteLLMRoute`` the model is shown — the
+    ``effective_model`` (the resolved ``agent.model``, e.g. from ``--model``)
+    when supplied, else the route's own default — so the line reflects what the
+    agent will actually send rather than the route-level fallback.
     """
     name = ROUTE_NAMES[type(route)]
     if isinstance(route, DirectRoute):
         return f"{name} (judge transport: {route.judge_transport or 'none'})"
+    if isinstance(route, LiteLLMRoute):
+        return f"{name} (model: {effective_model or route.model or 'default'})"
     return name
 
 
@@ -361,6 +369,11 @@ class Orchestrator:
 
         # API routing (initialized in _setup)
         self.route: ApiRoute | None = None
+        # Route for the evaluation side (llm_judge / agent_judge / simulated user):
+        # pinned to a constant Claude backend so grading stays comparable when the
+        # agent runs on an open-weight (LiteLLM) model. Equals self.route for the
+        # Direct/Bedrock backends.
+        self.eval_route: ApiRoute | None = None
 
         # Result tracking
         self.result: EvaluationResult | None = None
@@ -890,8 +903,11 @@ class Orchestrator:
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
 
             self.route = resolve_route(settings)
-            logger.info("API routing: %s", _format_routing(self.route))
-            self.success_checker = SuccessChecker(self.sandbox, route=self.route)
+            self.eval_route = resolve_evaluation_route(settings, self.route)
+            logger.info(
+                "API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None)
+            )
+            self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
             self._record_route_environment_info()
             return
 
@@ -957,8 +973,9 @@ class Orchestrator:
 
         # Determine API routing from settings.api_backend enum
         self.route = resolve_route(settings)
-        logger.info("API routing: %s", _format_routing(self.route))
-        self.success_checker = SuccessChecker(self.sandbox, route=self.route)
+        self.eval_route = resolve_evaluation_route(settings, self.route)
+        logger.info("API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None))
+        self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
 
         # Create and start the agent. For a no-op (type: none) task this dispatches
         # to NoOpAgent, whose start/communicate/stop are no-ops — the orchestrator
@@ -1074,6 +1091,12 @@ class Orchestrator:
         assert self.result is not None
         assert self.route is not None
         self.result.environment_info["api_routing"] = ROUTE_NAMES[type(self.route)]
+        # The evaluation side (llm_judge / agent_judge / simulated user) may run on
+        # a different, constant backend — pinned to Claude when the agent is on
+        # LiteLLM — so record it: a run then shows what actually graded/simulated
+        # it, distinct from the agent's api_routing.
+        if self.eval_route is not None:
+            self.result.environment_info["eval_routing"] = ROUTE_NAMES[type(self.eval_route)]
         if isinstance(self.route, BedrockRoute):
             self.result.environment_info["aws_region"] = self.route.region
             if self.route.model:
@@ -1082,6 +1105,12 @@ class Orchestrator:
             # Record which transport llm_judge will use under DirectRoute so the
             # choice is visible in run artifacts (and not just the startup log).
             self.result.environment_info["judge_transport"] = self.route.judge_transport or "none"
+        elif isinstance(self.route, LiteLLMRoute):
+            # Host only (never the base_url or auth token) — mirrors the Codex
+            # agent's host-only recording so secrets stay out of run artifacts.
+            self.result.environment_info["litellm_base_url_host"] = urlparse(self.route.base_url).hostname or ""
+            if self.route.model:
+                self.result.environment_info["litellm_model"] = self.route.model
         # Agent-specific routing (e.g. Codex custom-endpoint / Azure). No-op for
         # the evaluate-only path (no agent) and for agents that add nothing.
         if self.agent is not None:
@@ -1660,7 +1689,10 @@ class Orchestrator:
             config=sim_config,
             task_description=self.task.description,
             initial_prompt=initial_prompt,
-            route=self.route,
+            # Pin the simulated user to the constant Claude eval route, not the
+            # agent's (possibly open-weight) route, so the simulator behaves
+            # identically across the models under test.
+            route=self.eval_route,
         )
         await simulator.start()
 

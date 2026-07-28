@@ -1,0 +1,81 @@
+# LiteLLM proxy config for the coder_eval `litellm` (open-weight) backend.
+#
+# Full guide (when to run the proxy, how to add models): litellm/README.md
+#
+# Translates Anthropic Messages (what the Claude Code SDK speaks) <-> Bedrock
+# Converse (what the non-Claude open-weight models speak), so the native `Skill`
+# tool and UiPath skills fire unchanged. Verified 2026-07-21: HTTP 200 on both
+# models via POST /v1/messages, and tool_use blocks survive the translation.
+#
+# Two ways to run the proxy:
+#   - Manual: the operator starts the proxy and points coder_eval at it via
+#     LITELLM_BASE_URL (coder_eval owns no proxy lifecycle).
+#   - Autostart: coder_eval spawns the proxy against this same file, or an
+#     always-on docker sidecar mounts it.
+#
+# Required env in the proxy's environment (NOT committed):
+#   AWS_BEARER_TOKEN_BEDROCK  — Bedrock bearer token (LiteLLM forwards it).
+#   AWS_REGION=eu-north-1      — EU residency (Stockholm).
+#   LITELLM_MASTER_KEY         — the virtual key clients present as LITELLM_AUTH_TOKEN.
+#
+# Run manually:
+#   uvx --from 'litellm[proxy]' litellm --config litellm/litellm-config.yaml --port 4000
+
+model_list:
+  # DeepSeek V3.2 — cost lead ($0.74 / $2.22 per Mtok).
+  - model_name: deepseek.v3.2
+    litellm_params:
+      model: bedrock/converse/deepseek.v3.2
+      aws_region_name: eu-north-1
+  # GLM 5 — quality lead ($1.20 / $3.84 per Mtok, eu-north-1).
+  - model_name: zai.glm-5
+    litellm_params:
+      model: bedrock/converse/zai.glm-5
+      aws_region_name: eu-north-1
+  # Kimi K2.5 (Moonshot AI) — Bedrock eu-north-1 (bare id, Converse).
+  - model_name: moonshotai.kimi-k2.5
+    litellm_params:
+      model: bedrock/converse/moonshotai.kimi-k2.5
+      aws_region_name: eu-north-1
+  # OpenRouter models — cost-optimization path. Not on Bedrock; OpenRouter is
+  # OpenAI-format, so LiteLLM does the Anthropic<->OpenAI translation.
+  #
+  # provider routing (extra_body.provider): OpenRouter is a multi-provider router,
+  # and its per-request routing is nondeterministic — a request can land on a
+  # provider far pricier than the model page's headline rate (observed: DeepSeek
+  # V4 Pro routed to Novita at ~$1.47/M input vs the $0.435/M headline, 3.4x).
+  # `sort: price` pins the cheapest upstream and `allow_fallbacks: false` forbids
+  # silently upgrading to a pricier one, so the billed rate is deterministic and
+  # matches the pricing.py table (and is the cost floor we benchmark for).
+  - model_name: moonshotai/kimi-k3
+    litellm_params:
+      model: openrouter/moonshotai/kimi-k3
+      api_key: os.environ/OPENROUTER_API_KEY
+      extra_body:
+        provider:
+          sort: price
+          allow_fallbacks: false
+  - model_name: z-ai/glm-5.2
+    litellm_params:
+      model: openrouter/z-ai/glm-5.2
+      api_key: os.environ/OPENROUTER_API_KEY
+      extra_body:
+        provider:
+          sort: price
+          allow_fallbacks: false
+  - model_name: deepseek/deepseek-v4-pro
+    litellm_params:
+      model: openrouter/deepseek/deepseek-v4-pro
+      api_key: os.environ/OPENROUTER_API_KEY
+      extra_body:
+        provider:
+          sort: price
+          allow_fallbacks: false
+
+litellm_settings:
+  # Silently drop provider-unsupported OpenAI/Anthropic params rather than 400.
+  drop_params: true
+
+general_settings:
+  # Read the virtual key from the environment — never hardcode a secret here.
+  master_key: os.environ/LITELLM_MASTER_KEY

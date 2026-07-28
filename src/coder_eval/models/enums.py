@@ -67,6 +67,7 @@ class ApiBackend(StrEnum):
 
     DIRECT = "direct"  # Anthropic API directly (ANTHROPIC_API_KEY)
     BEDROCK = "bedrock"  # AWS Bedrock (bearer token auth)
+    LITELLM = "litellm"  # LiteLLM (Anthropic-compatible) endpoint, e.g. LiteLLM -> Bedrock
 
 
 class PermissionMode(StrEnum):

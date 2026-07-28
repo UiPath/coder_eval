@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from coder_eval.models.enums import ApiBackend
+from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
 
 
 if TYPE_CHECKING:
@@ -101,24 +102,42 @@ class BedrockRoute:
     disable_attribution_header: bool = True
 
 
-ApiRoute = DirectRoute | BedrockRoute
+@dataclass(frozen=True)
+class LiteLLMRoute:
+    """Route through a custom Anthropic-compatible endpoint (e.g. a LiteLLM
+    gateway fronting Bedrock open-weight models).
+
+    The Claude Code SDK is pointed at ``base_url`` via ``ANTHROPIC_BASE_URL`` and
+    authenticates with ``auth_token`` via ``ANTHROPIC_AUTH_TOKEN`` (bearer). The
+    ``model``/``small_model`` ids are passed **verbatim** (no Bedrock
+    inference-profile qualification) — the gateway maps them to its backend.
+    """
+
+    base_url: str
+    auth_token: str
+    model: str | None = None
+    small_model: str | None = None
+
+
+ApiRoute = DirectRoute | BedrockRoute | LiteLLMRoute
 
 
 # Stable string names for environment_info recording (decoupled from class names)
 ROUTE_NAMES: dict[type, str] = {
     DirectRoute: "anthropic_direct",
     BedrockRoute: "aws_bedrock",
+    LiteLLMRoute: "litellm",
 }
 
 
 def resolve_route(settings: Settings) -> ApiRoute:
     """Resolve an ``ApiRoute`` from static settings.
 
-    Handles the two supported backends (``DIRECT`` and ``BEDROCK``), whose
-    route is fully determined by ``Settings``.
+    Handles the three supported backends (``DIRECT``, ``BEDROCK``, ``LITELLM``),
+    whose route is fully determined by ``Settings``.
 
     Called after ``validate_api_keys()`` has verified credentials. Uses
-    ``assert`` for type narrowing (not ``ValueError``) since the Bedrock
+    ``assert`` for type narrowing (not ``ValueError``) since the Bedrock/custom
     credential checks are an internal contract.
     """
     match settings.api_backend:
@@ -145,6 +164,52 @@ def resolve_route(settings: Settings) -> ApiRoute:
             )
         case ApiBackend.DIRECT:
             return DirectRoute(judge_transport=_resolve_direct_judge_transport(settings))
+        case ApiBackend.LITELLM:
+            # Validate here (raise, not assert): resolve_route is reached on the
+            # evaluate-only path WITHOUT a preceding validate_api_keys(), so this is
+            # the only guard there and must survive `python -O`. Checks presence +
+            # URL scheme, raising a field-named ValueError (review non-blocking #11).
+            settings._validate_litellm_settings()
+            # Narrowing for pyright only — _validate_litellm_settings guarantees these.
+            assert settings.litellm_base_url is not None
+            assert settings.litellm_auth_token is not None
+            # No inference-profile qualification: the id is passed verbatim to the gateway.
+            small_model = settings.litellm_small_model or settings.litellm_model
+            return LiteLLMRoute(
+                base_url=settings.litellm_base_url,
+                auth_token=settings.litellm_auth_token,
+                model=settings.litellm_model,
+                small_model=small_model,
+            )
+
+
+def resolve_evaluation_route(settings: Settings, agent_route: ApiRoute) -> ApiRoute:
+    """Resolve the route used by the *evaluation* side — the ``llm_judge`` /
+    ``agent_judge`` criteria and the simulated user — which must stay on a
+    constant Claude backend regardless of the agent under test, so grading and
+    simulation stay comparable across models.
+
+    - Agent on Bedrock/Direct: the judge already runs on Claude via that route,
+      so reuse it unchanged (no behavior change for existing runs).
+    - Agent on LiteLLM (open-weight): the agent route cannot serve a Claude
+      judge, so pin evaluation to Bedrock (preferred, from the AWS bearer token)
+      or Direct (``ANTHROPIC_API_KEY``). If neither is configured, fall back to a
+      ``DirectRoute`` with no judge transport so ``llm_judge`` fails with its
+      clean "unconfigured" error rather than silently scoring 0.0.
+    """
+    if isinstance(agent_route, BedrockRoute | DirectRoute):
+        return agent_route
+    # agent_route is LiteLLMRoute → pin evaluation to a constant Claude backend.
+    if settings.aws_bearer_token_bedrock and settings.aws_region:
+        judge_model = settings.bedrock_model or DEFAULT_JUDGE_MODEL
+        qualified = to_bedrock_inference_profile(judge_model, settings.aws_region)
+        return BedrockRoute(
+            bearer_token=settings.aws_bearer_token_bedrock,
+            region=settings.aws_region,
+            model=qualified,
+            small_model=qualified,
+        )
+    return DirectRoute(judge_transport=_resolve_direct_judge_transport(settings))
 
 
 def _resolve_direct_judge_transport(settings: Settings) -> JudgeTransport | None:

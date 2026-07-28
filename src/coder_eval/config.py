@@ -7,6 +7,7 @@ import base64
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values, load_dotenv
 from pydantic import AliasChoices, Field
@@ -103,6 +104,17 @@ class Settings(BaseSettings):
     bedrock_model: str | None = None  # Cross-region model ID
     bedrock_small_model: str | None = None  # Cross-region small model ID
 
+    # LiteLLM (Anthropic-compatible) endpoint settings (used when api_backend == "litellm").
+    # These map to ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL /
+    # ANTHROPIC_SMALL_FAST_MODEL, but ONLY inside the SDK subprocess env (see
+    # ClaudeCodeAgent._build_sdk_env). They are deliberately NOT named anthropic_*
+    # so the os.environ export loop below can't leak ANTHROPIC_BASE_URL process-wide
+    # (which would silently redirect the judge's in-process Anthropic() client).
+    litellm_base_url: str | None = None
+    litellm_auth_token: str | None = None
+    litellm_model: str | None = None
+    litellm_small_model: str | None = None
+
     # Codex settings (CodexAgent). CODEX_MODEL is the fallback model/deployment
     # used when a task doesn't pin agent.model; CODEX_BASE_URL routes to a custom
     # OpenAI-/responses-compatible endpoint (incl. Azure OpenAI). For Azure also
@@ -169,6 +181,36 @@ class Settings(BaseSettings):
                 + " Please set them in your .env file."
             )
 
+    def _validate_litellm_settings(self) -> None:
+        """Validate that required custom Anthropic-endpoint settings are present.
+
+        Raises:
+            ValueError: If required custom settings are missing
+        """
+        missing = []
+        if not self.litellm_base_url:
+            missing.append("LITELLM_BASE_URL")
+        if not self.litellm_auth_token:
+            missing.append("LITELLM_AUTH_TOKEN")
+        # LITELLM_MODEL is required for the same reason BEDROCK_MODEL is: a None
+        # model sent to the SDK/gateway yields an opaque 400. Fail fast instead.
+        if not self.litellm_model:
+            missing.append("LITELLM_MODEL")
+        if missing:
+            raise ValueError(
+                f"LiteLLM-endpoint routing is enabled but missing required settings: {', '.join(missing)}."
+                + " Please set them in your .env file."
+            )
+        # base_url is present (not in `missing`); reject a malformed one so the
+        # downstream preflight (urlopen) and environment_info (urlparse hostname)
+        # get a well-formed absolute URL instead of a raw ValueError / empty host.
+        parts = urlsplit(self.litellm_base_url or "")
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError(
+                f"LITELLM_BASE_URL must be an http(s) URL with a host, got {self.litellm_base_url!r}. "
+                + "Set it to e.g. http://localhost:4000 in your .env file."
+            )
+
     def validate_api_keys(self, agent_type: str) -> None:
         """Validate that required API keys are present.
 
@@ -185,6 +227,9 @@ class Settings(BaseSettings):
 
         if self.api_backend == ApiBackend.BEDROCK:
             self._validate_bedrock_settings()
+
+        if self.api_backend == ApiBackend.LITELLM:
+            self._validate_litellm_settings()
 
         # Claude Code agent can use either:
         # 1. ANTHROPIC_API_KEY environment variable

@@ -88,6 +88,21 @@ _PRICING: dict[str, ModelPricing] = {
     "gemini-3.1-pro-preview-customtools": ModelPricing(2.0, 12.0, 2.0, 0.20),
     "gemini-3.5-flash": ModelPricing(1.5, 9.0, 1.5, 0.15),
     "gemini-3-flash-preview": ModelPricing(1.5, 9.0, 1.5, 0.15),
+    # Open-weight models on Bedrock (eu-north-1), driven via the LiteLLM backend.
+    # Bedrock lists no prompt-cache read/write rate for these, so cache-creation
+    # is priced at the input rate and cache-read at 0 (conservative — see the
+    # per-provider cost-accounting caveat; revisit against the AWS model cards).
+    "deepseek.v3.2": ModelPricing(0.74, 2.22, 0.74, 0.0),
+    "zai.glm-5": ModelPricing(1.2, 3.84, 1.2, 0.0),
+    "moonshotai.kimi-k2.5": ModelPricing(0.72, 3.6, 0.72, 0.0),
+    # OpenRouter models (cost-optimization path). These providers cache prompt
+    # prefixes IMPLICITLY (no cache_control, no cache-write fee), so cache-creation
+    # is priced at input (unused — cache_creation_tokens is always 0) and cache-read
+    # at OpenRouter's published input_cache_read rate. Rates per OpenRouter's
+    # /models endpoint (per-token x 1e6).
+    "moonshotai/kimi-k3": ModelPricing(3.0, 15.0, 3.0, 0.30),
+    "z-ai/glm-5.2": ModelPricing(0.826, 2.596, 0.826, 0.1534),
+    "deepseek/deepseek-v4-pro": ModelPricing(0.435, 0.87, 0.435, 0.003625),
 }
 
 
@@ -144,6 +159,12 @@ def _normalize_model(model: str) -> str:
     so it is safe to apply unconditionally for every route.
     """
     model = model.strip()
+    # LiteLLM/Bedrock routing prefixes (e.g. "converse/zai.glm-5",
+    # "bedrock/converse/deepseek.v3.2") → bare model id.
+    for routing_prefix in ("bedrock/converse/", "bedrock/", "converse/"):
+        if model.startswith(routing_prefix):
+            model = model[len(routing_prefix) :]
+            break
     for prefix in _BEDROCK_REGION_PREFIXES:
         if model.startswith(prefix):
             model = model[len(prefix) :]
