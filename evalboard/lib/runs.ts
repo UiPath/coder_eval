@@ -54,7 +54,16 @@ export interface RunSummary {
     tasksSucceeded: number;
     tasksFailed: number;
     tasksError: number;
+    // Pass rate as a 0-1 fraction, errors counted as misses. Read from run.json's
+    // canonical `pass_rate` when present so this never diverges from the report.
+    passRate: number | null;
     totalCostUsd: number | null;
+    // False when some task's spend went unpriced, so totalCostUsd is a floor.
+    costComplete: boolean;
+    tasksUnpriced: number;
+    // Judge + simulator spend. Kept out of totalCostUsd (a property of the suite's
+    // criteria, identical across harnesses) but real money all the same.
+    evalOverheadCostUsd: number | null;
     componentShas: ComponentSha[];
 }
 
@@ -95,6 +104,19 @@ export interface TaskResultSummary {
     // carried forward as a pass (run.json `mature_skipped`). The task wasn't
     // executed, so it has no per-task detail to link to. False on normal rows.
     matureSkipped: boolean;
+    // False when this row burned tokens whose cost is missing, so totalCostUsd is
+    // a floor. Every cost sum treats a null cost as $0, so without this an
+    // unpriced row is indistinguishable from a free one and the run's bill reads
+    // low with nothing to say so. All five fields below are optional so test
+    // factories predating them stay valid (undefined === complete / absent).
+    costComplete?: boolean;
+    // Judge + simulator spend for this row, outside totalCostUsd.
+    judgeCostUsd?: number | null;
+    simulatorCostUsd?: number | null;
+    // Why this row errored (null otherwise). Errors count as misses in the pass
+    // rate, so the dashboard has to be able to say what the points went to.
+    errorMessage?: string | null;
+    errorCategory?: string | null;
 }
 
 export interface CriterionResult {
@@ -326,6 +348,9 @@ interface RawTaskResult {
     weighted_score?: number;
     duration?: number;
     total_cost_usd?: number;
+    // Row-level token total. Present alongside the disjoint buckets below; used to
+    // tell "burned tokens but has no cost" (unpriced) from "burned nothing" (free).
+    total_tokens?: number | null;
     input_tokens?: number | null;
     output_tokens?: number | null;
     cache_creation_input_tokens?: number | null;
@@ -367,6 +392,16 @@ interface RawTaskResult {
     // Set by the nightly runner (eval_runner) on a carried-forward row for a
     // "mature" task it skipped this run. Absent on normal rows.
     mature_skipped?: boolean;
+    // False when a turn on this row burned tokens the rate card could not price,
+    // so total_cost_usd is a floor. Absent on runs predating the field.
+    cost_complete?: boolean | null;
+    // Evaluation-machinery spend for this row, kept out of total_cost_usd.
+    judge_cost_usd?: number | null;
+    simulator_cost_usd?: number | null;
+    // Why an errored row errored. Errors count as misses, so the rollup needs to
+    // say what it lost the points to.
+    error_message?: string | null;
+    error_category?: string | null;
 }
 
 interface RawRunJson {
@@ -378,6 +413,19 @@ interface RawRunJson {
     tasks_succeeded?: number;
     tasks_failed?: number;
     tasks_error?: number;
+    // Canonical pass rate (0-1) computed by coder_eval: tasks_succeeded /
+    // tasks_run, errors included as misses. READ THIS rather than re-deriving a
+    // denominator here — four surfaces each deriving their own is what made this
+    // dashboard and the markdown report disagree by up to 10 points on the same
+    // file. Absent on runs predating the field; the fallback below reproduces the
+    // identical formula, so historical runs render unchanged.
+    pass_rate?: number | null;
+    // False when some task burned tokens the rate card could not price, making
+    // every cost total on this run a floor rather than the bill.
+    cost_complete?: boolean | null;
+    tasks_unpriced?: number | null;
+    // Judge + simulator spend, deliberately outside the agent bill.
+    eval_overhead_cost_usd?: number | null;
     task_results?: RawTaskResult[];
     // Values are scalars except `tool_plugins`, a {plugin: version} map of
     // the installed @uipath/*-tool packages (recorded since coder_eval #366).
@@ -640,6 +688,15 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
         tags,
         skill: deriveSkill(t.task_path, tags),
         matureSkipped: t.mature_skipped ?? false,
+        // A row predating the field is assumed complete unless it visibly burned
+        // tokens with no cost — the same test the Python side applies.
+        costComplete:
+            t.cost_complete ??
+            !((t.total_tokens ?? 0) > 0 && t.total_cost_usd == null),
+        judgeCostUsd: t.judge_cost_usd ?? null,
+        simulatorCostUsd: t.simulator_cost_usd ?? null,
+        errorMessage: t.error_message ?? null,
+        errorCategory: t.error_category ?? null,
     };
 }
 
@@ -665,16 +722,38 @@ export async function readRunSummary(id: string): Promise<RunSummary | null> {
     const taskDurationSeconds = allHaveDuration
         ? taskDurationSum
         : (data.total_duration_seconds ?? null);
+    const tasksRun = data.tasks_run ?? taskResults.length;
+    const tasksSucceeded = data.tasks_succeeded ?? 0;
+    // A row whose tokens went unpriced contributes 0 to totalCost above, so the
+    // sum silently understates the bill. Count those rows and say so rather than
+    // presenting a floor as the total.
+    const tasksUnpriced = taskResults.filter(
+        (t) =>
+            ((t.total_tokens ?? 0) > 0 && t.total_cost_usd == null) ||
+            t.cost_complete === false,
+    ).length;
+    const overhead = taskResults.reduce(
+        (a, t) => a + (t.judge_cost_usd ?? 0) + (t.simulator_cost_usd ?? 0),
+        0,
+    );
     return {
         id,
         startTime: data.start_time ?? null,
         endTime: data.end_time ?? null,
         taskDurationSeconds,
-        tasksRun: data.tasks_run ?? taskResults.length,
-        tasksSucceeded: data.tasks_succeeded ?? 0,
+        tasksRun,
+        tasksSucceeded,
         tasksFailed: data.tasks_failed ?? 0,
         tasksError: data.tasks_error ?? 0,
+        // Prefer the canonical field; the fallback is the identical formula, so
+        // historical runs without it render exactly as they did before.
+        passRate:
+            data.pass_rate ?? (tasksRun > 0 ? tasksSucceeded / tasksRun : null),
         totalCostUsd: taskResults.length ? totalCost : null,
+        costComplete: data.cost_complete ?? tasksUnpriced === 0,
+        tasksUnpriced: data.tasks_unpriced ?? tasksUnpriced,
+        evalOverheadCostUsd:
+            data.eval_overhead_cost_usd ?? (overhead > 0 ? overhead : null),
         componentShas: extractComponentShas(data.environment_info),
     };
 }
@@ -790,6 +869,11 @@ export interface RunOverviewTask {
     // Optional so test factories that predate the field stay valid (undefined
     // === a normal executed row).
     matureSkipped?: boolean;
+    // False when this row burned tokens whose cost is missing, so totalCostUsd is
+    // a floor. Every cost sum counts a null cost as $0, so without this an
+    // unpriced row is indistinguishable from a free one. Optional so test
+    // factories predating it stay valid (undefined === complete).
+    costComplete?: boolean;
 }
 
 export interface RunOverview {
@@ -905,6 +989,9 @@ export async function readRunOverview(
                 visibleTurns: visibleTurnsFromRaw(t),
                 hasFinalReply: t.has_final_reply ?? false,
                 matureSkipped: t.mature_skipped ?? false,
+                costComplete:
+                    t.cost_complete ??
+                    !((t.total_tokens ?? 0) > 0 && t.total_cost_usd == null),
             };
         });
     const totalCost = taskResults.reduce(

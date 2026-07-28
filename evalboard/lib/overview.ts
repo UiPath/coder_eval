@@ -95,6 +95,10 @@ export interface RunListingRow {
     tasksSucceeded: number;
     tasksRun: number;
     totalCostUsd: number | null;
+    // False when a task in scope burned tokens whose cost is missing, so
+    // totalCostUsd is a floor. Optional so existing test factories stay valid;
+    // absent reads as complete.
+    costComplete?: boolean;
     taskDurationSeconds: number | null;
     // Run-level harness (coder-eval AgentKind) for the Harness column; null on
     // legacy runs that predate the RunConfig stamp / carry no agent_config.type.
@@ -109,7 +113,10 @@ export interface RunListingRow {
 // sum instead of silently understating it.
 export interface RunListingTotals {
     costUsd: number | null; // null when no matched run recorded a cost
-    costPartial: boolean; // some matched runs had no cost (sum understates)
+    // The sum understates: either a matched run recorded no cost at all, or one
+    // recorded a partial cost because some task's tokens went unpriced. Both make
+    // costUsd a floor, and both used to be invisible.
+    costPartial: boolean;
     tasksSucceeded: number;
     tasksRun: number;
     durationSeconds: number | null; // null when no matched run recorded a duration
@@ -126,6 +133,7 @@ export function summarizeListing(rows: RunListingRow[]): RunListingTotals {
     let tasksRun = 0;
     let durationSeconds = 0;
     let durationRuns = 0;
+    let anyCostIncomplete = false;
     for (const r of rows) {
         tasksSucceeded += r.tasksSucceeded;
         tasksRun += r.tasksRun;
@@ -133,6 +141,7 @@ export function summarizeListing(rows: RunListingRow[]): RunListingTotals {
             costUsd += r.totalCostUsd;
             costRuns += 1;
         }
+        if (r.costComplete === false) anyCostIncomplete = true;
         if (r.taskDurationSeconds != null) {
             durationSeconds += r.taskDurationSeconds;
             durationRuns += 1;
@@ -140,7 +149,8 @@ export function summarizeListing(rows: RunListingRow[]): RunListingTotals {
     }
     return {
         costUsd: costRuns > 0 ? costUsd : null,
-        costPartial: costRuns > 0 && costRuns < rows.length,
+        costPartial:
+            (costRuns > 0 && costRuns < rows.length) || anyCostIncomplete,
         tasksSucceeded,
         tasksRun,
         durationSeconds: durationRuns > 0 ? durationSeconds : null,
@@ -754,6 +764,9 @@ export async function getRunListing(
                 .length,
             tasksRun: scopedTasks.length,
             totalCostUsd: scopedCost,
+            // Scoped like cost: with a filter active, only the matching tasks'
+            // completeness bears on the cost shown for this row.
+            costComplete: scopedTasks.every((t) => t.costComplete !== false),
             taskDurationSeconds: scopedDur,
             harness: overview.harness ?? null,
         });

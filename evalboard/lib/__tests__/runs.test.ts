@@ -46,6 +46,44 @@ describe("toTaskRow", () => {
         const row = toTaskRow({ task_id: "x", expected_turns: null });
         expect(row.expectedTurns).toBeNull();
     });
+
+    test("reads cost_complete and the eval-overhead costs", () => {
+        const row = toTaskRow({
+            task_id: "x",
+            cost_complete: false,
+            judge_cost_usd: 0.02,
+            simulator_cost_usd: 0.01,
+        });
+        expect(row.costComplete).toBe(false);
+        expect(row.judgeCostUsd).toBeCloseTo(0.02);
+        expect(row.simulatorCostUsd).toBeCloseTo(0.01);
+    });
+
+    test("infers incomplete cost on a run predating the field", () => {
+        // Tokens on the wire with no cost is the unpriced shape, whether or not
+        // the row carries the explicit flag.
+        const row = toTaskRow({ task_id: "x", total_tokens: 5_000_000 });
+        expect(row.costComplete).toBe(false);
+    });
+
+    test("a row that burned nothing is complete, not unpriced", () => {
+        // An error before the agent ran genuinely cost nothing.
+        const row = toTaskRow({ task_id: "x", total_tokens: 0 });
+        expect(row.costComplete).toBe(true);
+    });
+
+    test("carries the error reason for an errored row", () => {
+        // Errors count as misses in the pass rate, so the dashboard has to be
+        // able to say where the points went.
+        const row = toTaskRow({
+            task_id: "x",
+            status: "ERROR",
+            error_message: "no space left on device",
+            error_category: "disk_full",
+        });
+        expect(row.errorMessage).toBe("no space left on device");
+        expect(row.errorCategory).toBe("disk_full");
+    });
 });
 
 describe("aggregateSubAgentUsage", () => {
