@@ -859,17 +859,22 @@ class Orchestrator:
     def _backfill_turn_costs(self) -> None:
         """Price any turn that recorded tokens but no cost, from the rate card.
 
-        The agent-agnostic cost seam. A turn arrives unpriced whenever the SDK had
-        no chance to report one — which is precisely the error and timeout paths:
-        the agent is killed mid-turn, so the partial ``TurnRecord`` carries real
-        billed tokens and ``total_cost_usd=None``. Those turns were being summed as
-        free. On one nightly that hid $209.81 (18.9% of the run) across 62
-        timed-out tasks, each holding 3.5M-8M tokens.
+        Makes "tokens on the record imply a cost on the record" an invariant at one
+        agent-agnostic seam, instead of a convention each agent has to remember.
+
+        Every in-tree agent already prices its own turns, including the killed
+        partials an error or timeout produces (``ClaudeCodeAgent._backfill_cost``;
+        codex and antigravity compute from buckets and never depend on an SDK
+        cost), so this is a net rather than a fix for a live gap — verified by
+        A/B on a real timed-out Bedrock run, which booked its spend with this
+        disabled. It earns its keep for the plugin SPI: an out-of-tree agent that
+        registers pricing but doesn't apply it would otherwise lose 100% of its
+        cost silently, with only its token counts to show anything happened.
 
         Only fills in what is missing: a turn the SDK priced keeps the SDK's
         number, which is the authoritative billed figure. A model absent from the
         rate card stays unpriced and is counted by ``RunSummary.tasks_unpriced``
-        rather than silently dropped.
+        rather than being passed off as free.
         """
         assert self.result is not None
         for turn in self.result.iterations:

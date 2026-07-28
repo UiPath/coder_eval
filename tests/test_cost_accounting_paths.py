@@ -1,18 +1,19 @@
-"""Cost accounting on the error and timeout paths, where it used to go missing.
+"""Cost accounting on the error and timeout paths, where spend went missing.
 
-Three seams, each of which independently lost real spend:
+Three seams:
 
-1. **The pre-flight** (``check_pricing_coverage``) — the rate card is a static table
-   baked into the installed version, so a model released after it prices every turn
-   as ``null``. Sonnet 5's rates landed one release after the 2026-07-21 nightly,
-   which recorded $209.81 (18.9% of the run) as no cost at all, with one log line to
-   show for it.
-2. **The per-turn backfill** (``Orchestrator._backfill_turn_costs``) — a turn killed
-   mid-flight by a timeout or crash carries real billed tokens and no SDK cost.
-   Those partials were summed as free.
-3. **The row projection** (``eval_result_to_task_dict``) — judge spend was captured
-   per criterion and rolled up nowhere, and a row whose turns were only partly
-   priced reported its partial sum as the whole.
+1. **The pre-flight** (``check_pricing_coverage``) — the measured loss. The rate
+   card is a static table baked into the installed version, so a model released
+   after it prices every turn as ``null``. Sonnet 5's rates landed one release
+   after the 2026-07-21 nightly, which recorded $209.81 (18.9% of its true bill)
+   across 62 errored rows as no cost at all, with one log line to show for it.
+2. **The per-turn backfill** (``Orchestrator._backfill_turn_costs``) — a net, not a
+   fix for a live gap: every in-tree agent already prices its own killed partials.
+   It makes "tokens on the record imply a cost on the record" an invariant at one
+   seam, so a plugin agent that doesn't price can't silently lose all of its spend.
+3. **The row projection** (``eval_result_to_task_dict``) — judge and simulator
+   spend was captured and rolled up nowhere, and a row whose turns were only
+   partly priced reported its partial sum as the whole.
 """
 
 from __future__ import annotations
@@ -121,7 +122,7 @@ class TestTurnCostBackfill:
         orch._backfill_turn_costs()
 
     def test_prices_a_killed_turn_from_the_rate_card(self):
-        """The timeout shape: real tokens on the wire, no SDK cost, previously free."""
+        """The timeout shape: real tokens on the wire, no cost attached yet."""
         result = self._result_with_partial()
         self._backfill(result)
 
