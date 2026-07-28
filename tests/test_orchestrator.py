@@ -12,6 +12,7 @@ from coder_eval.models import (
     ClaudeCodeAgentConfig,
     DirectRoute,
     FileExistsCriterion,
+    LiteLLMRoute,
     PreservationMode,
     SandboxConfig,
     TaskDefinition,
@@ -45,6 +46,22 @@ def test_format_routing_direct_judge_transport_none_renders_as_none():
 def test_format_routing_non_direct_routes_unchanged():
     """BedrockRoute keeps the original bare-name format — judge transport is a Direct-only concern."""
     assert _format_routing(BedrockRoute(bearer_token="t", region="us-east-1")) == "aws_bedrock"
+
+
+def test_format_routing_litellm_shows_model():
+    out = _format_routing(LiteLLMRoute(base_url="http://localhost:4000", auth_token="k", model="zai.glm-5"))
+    assert out.startswith("litellm")
+    assert "zai.glm-5" in out
+
+
+def test_format_routing_litellm_effective_model_wins_over_route_default():
+    """The --model override (effective_model) must be logged, not the route's LITELLM_MODEL default."""
+    out = _format_routing(
+        LiteLLMRoute(base_url="http://localhost:4000", auth_token="k", model="zai.glm-5"),
+        effective_model="deepseek.v3.2",
+    )
+    assert "deepseek.v3.2" in out
+    assert "zai.glm-5" not in out
 
 
 def _make_orchestrator_with_route(tmp_path: Path, route) -> Orchestrator:
@@ -98,6 +115,24 @@ def test_record_route_environment_info_bedrock(tmp_path):
     assert info["api_routing"] == "aws_bedrock"
     assert info["aws_region"] == "eu-north-1"
     assert info["bedrock_model"] == "eu.anthropic.claude-sonnet-4-6"
+
+
+def test_record_route_environment_info_litellm_records_host_only_no_secret(tmp_path):
+    """LiteLLM route records host + model, but NEVER the auth token or full base_url."""
+    orchestrator = _make_orchestrator_with_route(
+        tmp_path,
+        LiteLLMRoute(base_url="http://localhost:4000", auth_token="sk-super-secret", model="zai.glm-5"),
+    )
+    orchestrator._record_route_environment_info()
+    assert orchestrator.result is not None
+    info = orchestrator.result.environment_info
+    assert info["api_routing"] == "litellm"
+    assert info["litellm_base_url_host"] == "localhost"
+    assert info["litellm_model"] == "zai.glm-5"
+    # No secret and no full URL anywhere in the recorded audit dict.
+    blob = str(info)
+    assert "sk-super-secret" not in blob
+    assert "http://localhost:4000" not in blob
     assert "judge_transport" not in info  # Direct-only field
 
 
