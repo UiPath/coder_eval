@@ -29,6 +29,7 @@ from ..models import (
     TaskResult,
 )
 from ..path_utils import format_task_log_id
+from ..pricing import unpriced_models
 from ..reports_experiment import eval_result_to_task_dict
 from ..streaming.callbacks import StreamCallback
 from ..utils import get_version_info, looks_like_version
@@ -36,6 +37,45 @@ from .config import BatchRunConfig, resolve_preservation_mode
 
 
 logger = logging.getLogger(__name__)
+
+
+def check_pricing_coverage(resolved_tasks: list[ResolvedTask], *, strict: bool = False) -> list[str]:
+    """Pre-flight the rate card against the models this run will use.
+
+    The rate card is a static table baked into the installed framework version,
+    so a model released after that version prices as ``None`` on every turn — the
+    run completes, records full token counts, and reports a cost that is silently
+    low. (One nightly under-reported $209.81, 18.9% of its bill, because the
+    model's rates landed in the next release.) This turns that into a warning at
+    dispatch, or a refusal under ``strict``.
+
+    Only pinned ``agent.model`` values are visible here; a task that defers its
+    model to the route resolves it inside the agent and can't be pre-flighted.
+    Those still get counted after the fact by ``RunSummary.tasks_unpriced``.
+
+    Args:
+        resolved_tasks: The fully-resolved tasks about to run.
+        strict: Raise instead of warning when any model is unpriced.
+
+    Returns:
+        The sorted, de-duplicated unpriced model ids (empty when all are priced).
+
+    Raises:
+        ValueError: Under ``strict`` when at least one model is unpriced.
+    """
+    missing = unpriced_models(rt.task.agent.model if rt.task.agent else None for rt in resolved_tasks)
+    if not missing:
+        return []
+    detail = (
+        f"No pricing rate for {', '.join(repr(m) for m in missing)}. Cost for these tasks "
+        + "will be recorded as null and every run-level total will understate the bill "
+        + "(RunSummary.cost_complete reports false). Add the rate to coder_eval.pricing "
+        + "or register it from a plugin via register_pricing()."
+    )
+    if strict:
+        raise ValueError(f"strict_pricing: refusing to start. {detail}")
+    logger.warning(detail)
+    return missing
 
 
 async def run_batch(
@@ -74,6 +114,8 @@ async def run_batch(
     from ..orchestrator import Orchestrator
 
     start_time = datetime.now()
+
+    check_pricing_coverage(resolved_tasks, strict=config.strict_pricing)
 
     if on_batch_start is not None:
         on_batch_start(len(resolved_tasks))

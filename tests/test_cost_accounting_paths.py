@@ -1,0 +1,295 @@
+"""Cost accounting on the error and timeout paths, where it used to go missing.
+
+Three seams, each of which independently lost real spend:
+
+1. **The pre-flight** (``check_pricing_coverage``) — the rate card is a static table
+   baked into the installed version, so a model released after it prices every turn
+   as ``null``. Sonnet 5's rates landed one release after the 2026-07-21 nightly,
+   which recorded $209.81 (18.9% of the run) as no cost at all, with one log line to
+   show for it.
+2. **The per-turn backfill** (``Orchestrator._backfill_turn_costs``) — a turn killed
+   mid-flight by a timeout or crash carries real billed tokens and no SDK cost.
+   Those partials were summed as free.
+3. **The row projection** (``eval_result_to_task_dict``) — judge spend was captured
+   per criterion and rolled up nowhere, and a row whose turns were only partly
+   priced reported its partial sum as the whole.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+
+from coder_eval.models import (
+    ClaudeCodeAgentConfig,
+    EvaluationResult,
+    FinalStatus,
+    JudgeCriterionResult,
+    ResolvedTask,
+    SimulationTelemetry,
+    TaskDefinition,
+    TokenUsage,
+    TurnRecord,
+)
+from coder_eval.orchestration.batch import check_pricing_coverage
+from coder_eval.reports_experiment import eval_result_to_task_dict
+
+
+def _resolved(model: str | None, tmp_path: Path) -> ResolvedTask:
+    task = TaskDefinition(
+        task_id="t1",
+        description="d",
+        initial_prompt="p",
+        agent=ClaudeCodeAgentConfig(type="claude-code", model=model),
+        sandbox={"driver": "tempdir"},
+        success_criteria=[{"type": "file_exists", "path": "f.py", "description": "d"}],
+    )
+    return ResolvedTask(
+        task=task,
+        task_file=tmp_path / "t1.yaml",
+        run_dir=tmp_path / "runs" / "t1",
+        variant_id="default",
+    )
+
+
+def _turn(iteration: int, usage: TokenUsage | None, model: str | None = None, crashed: bool = False) -> TurnRecord:
+    return TurnRecord(
+        iteration=iteration,
+        user_input="p",
+        agent_output="o",
+        token_usage=usage,
+        model_used=model,
+        crashed=crashed,
+    )
+
+
+def _result(turns: list[TurnRecord], *, model: str | None = "claude-sonnet-5", **extra) -> EvaluationResult:
+    return EvaluationResult(
+        task_id="t1",
+        task_description="d",
+        agent_type="claude-code",
+        model_used=model,
+        started_at=datetime(2026, 7, 28, 0, 0, 0),
+        final_status=FinalStatus.SUCCESS,
+        iteration_count=len(turns),
+        iterations=turns,
+        **extra,
+    )
+
+
+class TestPricingPreflight:
+    def test_priced_model_is_silent(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING):
+            assert check_pricing_coverage([_resolved("claude-sonnet-5", tmp_path)]) == []
+        assert "No pricing rate" not in caplog.text
+
+    def test_unpriced_model_warns_but_runs(self, tmp_path, caplog):
+        """Default is a loud warning, not a refusal: a brand-new model stays evaluable."""
+        with caplog.at_level(logging.WARNING):
+            missing = check_pricing_coverage([_resolved("claude-sonnet-99", tmp_path)])
+        assert missing == ["claude-sonnet-99"]
+        assert "No pricing rate" in caplog.text
+        assert "understate the bill" in caplog.text
+
+    def test_strict_refuses_to_start(self, tmp_path):
+        """The cost-bearing-run setting: fail at dispatch, not in the cost column."""
+        with pytest.raises(ValueError, match="strict_pricing"):
+            check_pricing_coverage([_resolved("claude-sonnet-99", tmp_path)], strict=True)
+
+    def test_unpinned_model_is_not_flagged(self, tmp_path):
+        """A task deferring its model to the route can't be pre-flighted from here."""
+        assert check_pricing_coverage([_resolved(None, tmp_path)], strict=True) == []
+
+
+class TestTurnCostBackfill:
+    """``_backfill_turn_costs`` is exercised through a bare Orchestrator instance.
+
+    Built with ``__new__`` rather than a full construction because the method reads
+    only ``self.result`` — a real Orchestrator needs a sandbox, an agent, and a
+    route, none of which participate in pricing.
+    """
+
+    @staticmethod
+    def _backfill(result: EvaluationResult) -> None:
+        from coder_eval.orchestrator import Orchestrator
+
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.result = result
+        orch._backfill_turn_costs()
+
+    def test_prices_a_killed_turn_from_the_rate_card(self):
+        """The timeout shape: real tokens on the wire, no SDK cost, previously free."""
+        result = self._result_with_partial()
+        self._backfill(result)
+
+        priced = result.iterations[1].token_usage
+        assert priced is not None and priced.total_cost_usd is not None
+        # 1M uncached input + 100k output on sonnet-5 ($3/$15 per MTok).
+        assert priced.total_cost_usd == pytest.approx(3.0 + 1.5)
+
+    def test_leaves_an_sdk_reported_cost_alone(self):
+        """The SDK's number is the authoritative billed figure; never overwrite it."""
+        result = self._result_with_partial()
+        self._backfill(result)
+        assert result.iterations[0].token_usage.total_cost_usd == pytest.approx(0.99)
+
+    def test_falls_back_to_the_row_model(self):
+        """A partial that never learned its model still prices off the resolved one."""
+        result = _result(
+            [_turn(1, TokenUsage(uncached_input_tokens=1_000_000, output_tokens=0), model=None, crashed=True)],
+            model="claude-sonnet-5",
+        )
+        self._backfill(result)
+        assert result.iterations[0].token_usage.total_cost_usd == pytest.approx(3.0)
+
+    def test_unpriceable_model_stays_unpriced(self):
+        """Not a guess: leave it null so tasks_unpriced can count it."""
+        result = _result(
+            [_turn(1, TokenUsage(uncached_input_tokens=1_000_000, output_tokens=0), model="made-up-model")],
+            model="made-up-model",
+        )
+        self._backfill(result)
+        assert result.iterations[0].token_usage.total_cost_usd is None
+
+    def test_empty_usage_is_not_priced(self):
+        """A turn that burned nothing must not acquire a $0.00 cost it never had."""
+        result = _result([_turn(1, TokenUsage())])
+        self._backfill(result)
+        assert result.iterations[0].token_usage.total_cost_usd is None
+
+    @staticmethod
+    def _result_with_partial() -> EvaluationResult:
+        return _result(
+            [
+                _turn(
+                    1,
+                    TokenUsage(uncached_input_tokens=1000, output_tokens=100, total_cost_usd=0.99),
+                    model="claude-sonnet-5",
+                ),
+                _turn(
+                    2,
+                    TokenUsage(uncached_input_tokens=1_000_000, output_tokens=100_000),
+                    model="claude-sonnet-5",
+                    crashed=True,
+                ),
+            ]
+        )
+
+
+class TestRowCostProjection:
+    def test_cost_complete_false_when_a_turn_is_unpriced(self):
+        result = _result(
+            [
+                _turn(1, TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1)),
+                _turn(2, TokenUsage(uncached_input_tokens=10, output_tokens=1)),
+            ]
+        )
+        assert eval_result_to_task_dict(result)["cost_complete"] is False
+
+    def test_cost_complete_true_when_every_burning_turn_is_priced(self):
+        result = _result([_turn(1, TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1))])
+        assert eval_result_to_task_dict(result)["cost_complete"] is True
+
+    def test_cost_complete_true_when_nothing_burned(self):
+        """An error before the agent ran genuinely cost nothing — not 'missing cost'."""
+        assert eval_result_to_task_dict(_result([]))["cost_complete"] is True
+        assert eval_result_to_task_dict(_result([_turn(1, TokenUsage())]))["cost_complete"] is True
+
+    def test_judge_cost_rolls_up_onto_the_row(self):
+        """Judge spend was captured per criterion and totalled nowhere."""
+        result = _result([_turn(1, TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1))])
+        result.total_token_usage = TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1)
+        result.success_criteria_results = [
+            JudgeCriterionResult(
+                criterion_type="llm_judge",
+                description="d",
+                score=1.0,
+                token_usage=TokenUsage(uncached_input_tokens=5000, output_tokens=500, total_cost_usd=0.02),
+            ),
+            JudgeCriterionResult(
+                criterion_type="llm_judge",
+                description="d2",
+                score=1.0,
+                token_usage=TokenUsage(uncached_input_tokens=5000, output_tokens=500, total_cost_usd=0.03),
+            ),
+        ]
+        row = eval_result_to_task_dict(result)
+        assert row["judge_cost_usd"] == pytest.approx(0.05)
+        # Kept out of the agent's bill.
+        assert row["total_cost_usd"] == pytest.approx(0.1)
+
+    def test_no_judge_means_no_judge_cost(self):
+        """None, not 0.0 — 'no judge ran' must stay distinct from 'a judge ran free'."""
+        result = _result([_turn(1, TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1))])
+        assert eval_result_to_task_dict(result)["judge_cost_usd"] is None
+
+    @staticmethod
+    def _simulated(**env) -> EvaluationResult:
+        return _result(
+            [_turn(1, TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1))],
+            simulation=SimulationTelemetry(
+                n_trials=1,
+                replicate_index=0,
+                stop_reason="stop_token",
+                simulator_input_tokens=1_000_000,
+                simulator_output_tokens=100_000,
+                total_turns=3,
+            ),
+            environment_info=env,
+        )
+
+    def test_simulator_prices_at_the_route_model_not_the_subject(self):
+        """UserSimulator pins model=None, so it bills at BEDROCK_MODEL.
+
+        Every skills task pins ``agent.model``, so pricing the simulator at the
+        subject's model would mis-bill the whole suite. Here the subject is
+        sonnet-5 ($3/$15) while the route is haiku-4.5 ($0.80/$4) — the simulator
+        must cost the haiku rate.
+        """
+        result = self._simulated(bedrock_model="claude-haiku-4-5-20251001")
+        assert eval_result_to_task_dict(result)["simulator_cost_usd"] == pytest.approx(0.80 + 0.40)
+
+    def test_simulator_falls_back_to_the_subject_model_off_bedrock(self):
+        """A non-Bedrock route names no model on the record; the subject's is the best available."""
+        result = self._simulated()
+        # sonnet-5 at $3/$15 per MTok.
+        assert eval_result_to_task_dict(result)["simulator_cost_usd"] == pytest.approx(3.0 + 1.5)
+
+    def test_single_shot_row_has_no_simulator_cost(self):
+        result = _result([_turn(1, TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1))])
+        assert eval_result_to_task_dict(result)["simulator_cost_usd"] is None
+
+
+class TestErrorDiagnosticsOnTheRow:
+    """Errors count as misses, so the rollup has to say why it lost those points.
+
+    The 2026-07-22 codex nightly had 109 zero-iteration errors that could not be
+    characterised from run.json at all — every one needed its own task.json fetch.
+    """
+
+    def test_error_message_and_category_land_on_the_row(self):
+        result = _result([], model=None)
+        result.final_status = FinalStatus.ERROR
+        result.error_message = "sandbox setup failed: no space left on device"
+        result.error_details = {"error_category": "disk_full", "component": "orchestrator.setup"}
+
+        row = eval_result_to_task_dict(result)
+        assert row["error_message"] == "sandbox setup failed: no space left on device"
+        assert row["error_category"] == "disk_full"
+
+    def test_error_message_is_truncated(self):
+        result = _result([], model=None)
+        result.final_status = FinalStatus.ERROR
+        result.error_message = "x" * 5000
+
+        row = eval_result_to_task_dict(result)
+        assert len(row["error_message"]) < 500
+        assert row["error_message"].endswith("…")
+
+    def test_clean_row_carries_no_error_fields(self):
+        row = eval_result_to_task_dict(_result([]))
+        assert row["error_message"] is None
+        assert row["error_category"] is None

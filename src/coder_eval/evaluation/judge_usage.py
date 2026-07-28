@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from coder_eval.models import TokenUsage
+from coder_eval.pricing import calculate_cost
 
 
 def _coerce_int(value: Any) -> int:
@@ -31,12 +32,18 @@ def _coerce_int(value: Any) -> int:
         return 0
 
 
-def token_usage_from_anthropic_dict(resp: dict[str, Any]) -> TokenUsage | None:
+def token_usage_from_anthropic_dict(resp: dict[str, Any], *, model: str | None = None) -> TokenUsage | None:
     """Extract usage from an Anthropic / Bedrock-invoke Messages response dict.
 
     Both ``invoke_anthropic_judge`` (``response.model_dump()``) and
     ``invoke_bedrock_judge`` (parsed ``/invoke`` JSON) carry an Anthropic-shaped
     ``usage`` block. Returns ``None`` when usage is missing or carries no tokens.
+
+    ``model`` prices the call from the rate card. Neither judge backend returns a
+    cost, so without it the judge's spend is invisible in every rollup — a suite
+    with ~100 ``llm_judge`` rows books real Bedrock tokens against no dollar
+    figure anywhere. Left unpriced (``total_cost_usd=None``) when the model is
+    absent from the rate card, which the run-level unpriced count then surfaces.
     """
     u = resp.get("usage")
     if not isinstance(u, dict):
@@ -47,4 +54,14 @@ def token_usage_from_anthropic_dict(resp: dict[str, Any]) -> TokenUsage | None:
         cache_creation_input_tokens=_coerce_int(u.get("cache_creation_input_tokens")),
         cache_read_input_tokens=_coerce_int(u.get("cache_read_input_tokens")),
     )
-    return None if tu.is_empty() else tu
+    if tu.is_empty():
+        return None
+    if model:
+        tu.total_cost_usd = calculate_cost(
+            model,
+            uncached_input_tokens=tu.uncached_input_tokens,
+            output_tokens=tu.output_tokens,
+            cache_creation_tokens=tu.cache_creation_input_tokens,
+            cache_read_tokens=tu.cache_read_input_tokens,
+        )
+    return tu

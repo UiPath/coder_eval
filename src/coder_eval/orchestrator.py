@@ -56,6 +56,7 @@ from .models import (
 from .orchestration.early_stop import EarlyStopWatcher, validate_early_stop
 from .orchestration.evaluation import load_reference
 from .path_utils import format_task_log_id, task_log_path
+from .pricing import calculate_cost
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
 from .streaming.callbacks import CompositeStreamCallback, StreamCallback, TaskScopedCallback, safe_emit
@@ -660,16 +661,19 @@ class Orchestrator:
         if not self.result.model_used and self.task.agent is not None and self.task.agent.model:
             self.result.model_used = self.task.agent.model
 
-        # Aggregate token usage
-        self._aggregate_token_usage()
-
         # Record whether per-turn cost data was available when a cost budget was set.
         # Lets users audit whether a configured max_usd budget was actually enforceable.
+        # Computed BEFORE the aggregate, because _aggregate_token_usage backfills
+        # missing per-turn cost from the rate card: enforceability depends on the cost
+        # the SDK reported live, during the run, not on what we could price afterwards.
         if self.task.run_limits is not None and self.task.run_limits.max_usd is not None:
             any_cost_reported = any(
                 t.token_usage is not None and t.token_usage.total_cost_usd is not None for t in self.result.iterations
             )
             self.result.environment_info["cost_data_available"] = any_cost_reported
+
+        # Aggregate token usage
+        self._aggregate_token_usage()
 
         if self.result.iterations:
             self.result.total_assistant_turns = sum(t.assistant_turn_count for t in self.result.iterations)
@@ -852,6 +856,37 @@ class Orchestrator:
             )
             self._expected_turns_warning_emitted = True
 
+    def _backfill_turn_costs(self) -> None:
+        """Price any turn that recorded tokens but no cost, from the rate card.
+
+        The agent-agnostic cost seam. A turn arrives unpriced whenever the SDK had
+        no chance to report one — which is precisely the error and timeout paths:
+        the agent is killed mid-turn, so the partial ``TurnRecord`` carries real
+        billed tokens and ``total_cost_usd=None``. Those turns were being summed as
+        free. On one nightly that hid $209.81 (18.9% of the run) across 62
+        timed-out tasks, each holding 3.5M-8M tokens.
+
+        Only fills in what is missing: a turn the SDK priced keeps the SDK's
+        number, which is the authoritative billed figure. A model absent from the
+        rate card stays unpriced and is counted by ``RunSummary.tasks_unpriced``
+        rather than silently dropped.
+        """
+        assert self.result is not None
+        for turn in self.result.iterations:
+            usage = turn.token_usage
+            if usage is None or usage.total_cost_usd is not None or usage.is_empty():
+                continue
+            model = turn.model_used or self.result.model_used
+            if not model:
+                continue
+            usage.total_cost_usd = calculate_cost(
+                model,
+                uncached_input_tokens=usage.uncached_input_tokens,
+                output_tokens=usage.output_tokens,
+                cache_creation_tokens=usage.cache_creation_input_tokens,
+                cache_read_tokens=usage.cache_read_input_tokens,
+            )
+
     def _aggregate_token_usage(self) -> None:
         """Aggregate token usage from turns, storing on self.result.
 
@@ -863,8 +898,13 @@ class Orchestrator:
         the corresponding ``JudgeCriterionResult.token_usage`` and is
         intentionally NOT included in this aggregate — it represents the
         main agent's bill, not the eval-machinery overhead.
+
+        Runs ``_backfill_turn_costs`` first so an error/timeout partial
+        contributes its cost instead of being summed as free.
         """
         assert self.result is not None
+
+        self._backfill_turn_costs()
 
         # Include crashed=True partials: each API call is billed independently.
         if self.result.iterations:

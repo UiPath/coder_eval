@@ -192,7 +192,7 @@ def _invoke_tool_channel(
                 tool_spec=SUBMIT_VERDICT_ANTHROPIC_TOOL,
             )
             verdict, err = extract_verdict_from_anthropic_response(response)
-            response_usage = token_usage_from_anthropic_dict(response)
+            response_usage = token_usage_from_anthropic_dict(response, model=criterion.model)
         case DirectRoute():
             anthropic_response = invoke_anthropic_judge(
                 model=criterion.model,
@@ -203,7 +203,7 @@ def _invoke_tool_channel(
                 tool_spec=SUBMIT_VERDICT_ANTHROPIC_TOOL,
             )
             verdict, err = extract_verdict_from_anthropic_response(anthropic_response)
-            response_usage = token_usage_from_anthropic_dict(anthropic_response)
+            response_usage = token_usage_from_anthropic_dict(anthropic_response, model=criterion.model)
         case LiteLLMRoute():
             # Defensive: the evaluation route is pinned to Bedrock/Direct by
             # resolve_evaluation_route, so a LiteLLM route should never reach the

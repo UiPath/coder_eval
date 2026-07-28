@@ -882,8 +882,60 @@ class TestReportTokenUsageSection:
 
         assert "## Token Usage" in joined
         assert "**Total Tokens**: 5,000 (input: 3,000, output: 2,000)" in joined
-        assert "**Total Cost**" not in joined  # No cost line when all costs are None
+        # Tokens were burned, so there IS a bill — the report must say the number is
+        # missing rather than omit the cost line, which reads as "this run was free".
+        assert "**Total Cost**: unavailable" in joined
+        assert "1 task(s) burned tokens the rate card could not price" in joined
         assert "| task1 | 3,000 | 2,000 | 0 | 0 | 5,000 | N/A |" in joined
+
+    def test_token_section_omits_cost_when_no_tokens_burned(self):
+        """A row that burned nothing is genuinely free — no unpriced warning."""
+        task_results = [
+            {
+                "task_id": "task1",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "total_cost_usd": None,
+            },
+        ]
+        joined = "\n".join(ReportGenerator._generate_token_usage_section(task_results))
+
+        assert "## Token Usage" in joined
+        assert "**Total Cost**" not in joined
+
+    def test_token_section_marks_partial_cost_as_floor(self):
+        """A priced row beside an unpriced one reports the total as a floor.
+
+        The failure this guards: summing only the rows that carry a cost and
+        presenting it as the run's bill. One nightly under-reported $209.81 (18.9%)
+        exactly this way.
+        """
+        task_results = [
+            {"task_id": "priced", "total_tokens": 1000, "total_cost_usd": 0.25, "cost_complete": True},
+            {"task_id": "unpriced", "total_tokens": 4_000_000, "total_cost_usd": None, "cost_complete": False},
+        ]
+        joined = "\n".join(ReportGenerator._generate_token_usage_section(task_results))
+
+        assert "**Total Cost**: $0.2500 (floor" in joined
+        assert "1 task(s) burned tokens the rate card could not price" in joined
+
+    def test_token_section_breaks_out_eval_overhead(self):
+        """Judge spend is reported beside the agent bill, and folded into the total."""
+        task_results = [
+            {
+                "task_id": "task1",
+                "total_tokens": 1000,
+                "total_cost_usd": 1.0,
+                "cost_complete": True,
+                "judge_cost_usd": 0.25,
+            },
+        ]
+        joined = "\n".join(ReportGenerator._generate_token_usage_section(task_results))
+
+        assert "**Agent Cost**: $1.0000" in joined
+        assert "**Eval Overhead (judge + simulator)**: $0.2500" in joined
+        assert "**Total Cost**: $1.2500" in joined
 
     def test_token_section_in_full_report(self):
         """Test that token section appears in generate_markdown when data is available."""

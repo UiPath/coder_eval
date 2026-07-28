@@ -65,7 +65,7 @@ def test_invoke_tool_channel_handles_every_route(monkeypatch):
     monkeypatch.setattr(llm_judge, "invoke_bedrock_judge", lambda **_: {})
     monkeypatch.setattr(llm_judge, "invoke_anthropic_judge", lambda **_: {})
     monkeypatch.setattr(llm_judge, "extract_verdict_from_anthropic_response", lambda _resp: (None, "stub"))
-    monkeypatch.setattr(llm_judge, "token_usage_from_anthropic_dict", lambda _resp: None)
+    monkeypatch.setattr(llm_judge, "token_usage_from_anthropic_dict", lambda _resp, **_kwargs: None)
     criterion = MagicMock()
     for r in _INSTANCES:
         result = _invoke_tool_channel(criterion=criterion, route=r, system_msg="s", user_msg="u")  # type: ignore[arg-type]

@@ -5,6 +5,7 @@ Anthropic/OpenAI built-in rates; plugins contribute additional rates via
 Source: https://www.anthropic.com/pricing
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 
@@ -172,6 +173,26 @@ def _normalize_model(model: str) -> str:
     if model.startswith("anthropic."):
         model = model[len("anthropic.") :]
     return model
+
+
+def is_priced(model: str) -> bool:
+    """Whether the rate card can price this model (after prefix normalization).
+
+    The rate card is a static table, so a model that shipped after the installed
+    framework version prices as ``None`` — silently, per turn, for a whole run.
+    Call this at run start to make that a warning (or a refusal) instead of a
+    number that reads 19% low with nothing on the report to say so.
+    """
+    return _lookup_rate(_normalize_model(model)) is not None
+
+
+def unpriced_models(models: Iterable[str | None]) -> list[str]:
+    """Sorted, de-duplicated models from ``models`` that the rate card can't price.
+
+    Falsy entries are dropped: a task with no pinned model resolves its model at
+    the route level, which this pre-flight check cannot see.
+    """
+    return sorted({m for m in models if m and not is_priced(m)})
 
 
 def calculate_cost(
