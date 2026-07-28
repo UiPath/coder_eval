@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -82,10 +83,21 @@ def _litellm_preflight_error(current_settings: Settings) -> str | None:
 
     if current_settings.api_backend != ApiBackend.LITELLM or not current_settings.litellm_base_url:
         return None
-    url = f"{current_settings.litellm_base_url.rstrip('/')}/health/liveliness"
+    base_url = current_settings.litellm_base_url
+    # Reject a scheme-less/non-http(s) URL with a clear message instead of letting
+    # urlopen raise a bare ValueError ("unknown url type") that escapes as a
+    # traceback. Also makes the `# nosec B310` below honest — the scheme is now
+    # constrained to http(s), which is exactly what B310 audits.
+    if urllib.parse.urlsplit(base_url).scheme not in ("http", "https"):
+        return (
+            f"LITELLM_BASE_URL must be an http(s) URL, got {base_url!r}. "
+            "Set it to e.g. http://localhost:4000 (or unset LITELLM_BASE_URL and switch backends)."
+        )
+    url = f"{base_url.rstrip('/')}/health/liveliness"
     try:
-        # B310: url is built from the operator-configured LITELLM_BASE_URL (not
-        # untrusted input); this only probes reachability of that proxy endpoint.
+        # B310: url is built from the operator-configured LITELLM_BASE_URL, whose
+        # scheme is validated to http(s) just above — not untrusted input; this
+        # only probes reachability of that proxy endpoint.
         urllib.request.urlopen(url, timeout=5).close()  # nosec B310
     except urllib.error.HTTPError:
         return None  # server responded (up), just not 200 on this path

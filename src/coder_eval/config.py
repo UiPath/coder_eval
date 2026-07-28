@@ -7,6 +7,7 @@ import base64
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values, load_dotenv
 from pydantic import AliasChoices, Field
@@ -199,6 +200,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"LiteLLM-endpoint routing is enabled but missing required settings: {', '.join(missing)}."
                 + " Please set them in your .env file."
+            )
+        # base_url is present (not in `missing`); reject a malformed one so the
+        # downstream preflight (urlopen) and environment_info (urlparse hostname)
+        # get a well-formed absolute URL instead of a raw ValueError / empty host.
+        parts = urlsplit(self.litellm_base_url or "")
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError(
+                f"LITELLM_BASE_URL must be an http(s) URL with a host, got {self.litellm_base_url!r}. "
+                + "Set it to e.g. http://localhost:4000 in your .env file."
             )
 
     def validate_api_keys(self, agent_type: str) -> None:

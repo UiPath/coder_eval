@@ -205,6 +205,18 @@ class TestValidateApiKeysCustom:
         with pytest.raises(ValueError, match="LITELLM_BASE_URL"):
             settings.validate_api_keys("claude-code")
 
+    def test_scheme_less_base_url_raises_naming_it(self):
+        # "localhost:4000" has no http(s) scheme — must fail at validation with a
+        # field-named message, not later as a raw urlopen ValueError.
+        settings = Settings(
+            api_backend=ApiBackend.LITELLM,
+            litellm_base_url="localhost:4000",
+            litellm_auth_token="sk-master",
+            litellm_model="zai.glm-5",
+        )
+        with pytest.raises(ValueError, match="LITELLM_BASE_URL must be an http"):
+            settings.validate_api_keys("claude-code")
+
     def test_all_present_does_not_raise(self):
         settings = Settings(
             api_backend=ApiBackend.LITELLM,
@@ -362,6 +374,13 @@ class TestLitellmPreflight:
     def test_none_when_no_base_url(self):
         s = Settings(api_backend=ApiBackend.LITELLM, litellm_base_url=None, litellm_model="m")
         assert _litellm_preflight_error(s) is None
+
+    def test_scheme_less_base_url_returns_clean_error(self):
+        # Regression: a scheme-less URL used to make urlopen raise a bare
+        # ValueError that escaped as a traceback. Now it returns a clean message.
+        s = Settings(api_backend=ApiBackend.LITELLM, litellm_base_url="localhost:4000", litellm_model="m")
+        err = _litellm_preflight_error(s)
+        assert err is not None and "http(s)" in err
 
     def test_error_when_proxy_down(self, monkeypatch):
         monkeypatch.setattr(urllib.request, "urlopen", MagicMock(side_effect=urllib.error.URLError("refused")))
