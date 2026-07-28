@@ -46,7 +46,7 @@ coder_eval/
 │
 ├── criteria/                      # Criterion checker plugins (one file per type)
 │   ├── __init__.py                # CriterionRegistry with auto-discovery
-│   ├── base.py                    # BaseCriterion (incl. default aggregate()) + @handle_criterion_errors
+│   ├── base.py                    # BaseCriterion (async _check_impl_async is primary; sync _check_impl derives from it, or vice versa) + @handle_criterion_errors(_async)
 │   ├── _classification_aggregate.py  # Shared overlay: accuracy / P/R/F1 / confusion matrix
 │   ├── classification_match.py    # File-based label matcher
 │   ├── command_executed.py
@@ -182,7 +182,7 @@ Per-task (single iteration; simulation mode runs a multi-turn dialog):
         agent.communicate with execute_with_retry, per-attempt
         turn_timeout, and on_attempt_error → preserves crashed=True
         partial TurnRecords on AgentCrashError / TurnTimeoutError)
-  2. SuccessChecker.check_all() → List[CriterionResult]
+  2. SuccessChecker.check_all_async() → List[CriterionResult]
 
 Cleanup: Stop agent, save EvaluationResult, generate reports
 ```

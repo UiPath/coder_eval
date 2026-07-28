@@ -1512,7 +1512,7 @@ class Orchestrator:
 
         The block lifted verbatim from the three identical sites (per-turn,
         budget-gate fallback, end-of-dialog): (re)load the reference, run
-        ``check_all`` off the event loop, fold this turn's judge usage into the
+        ``check_all_async``, fold this turn's judge usage into the
         dialog-wide accumulator, store the results, and recompute the weighted score.
         Whether to additionally set ``all_passed`` and emit a ``CriteriaCheckEvent`` is
         left to the caller — those differ across the sites (the budget-gate fallback

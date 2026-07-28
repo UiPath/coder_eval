@@ -25,9 +25,9 @@ from coder_eval.sandbox import Sandbox
 def _make_judge_response(content: str) -> dict:
     """Return an Anthropic-shaped response dict the judge's dict extractor parses.
 
-    The judge now dispatches through ``invoke_anthropic_judge`` /
-    ``invoke_bedrock_judge``, both of which return an Anthropic-native message
-    dict (content blocks). ``extract_verdict_from_anthropic_response`` walks
+    The judge now dispatches through ``invoke_anthropic_judge_async`` /
+    ``invoke_bedrock_judge_async``, both of which return an Anthropic-native
+    message dict (content blocks). ``extract_verdict_from_anthropic_response`` walks
     ``response["content"]`` for a ``submit_verdict`` ``tool_use`` block and
     validates its ``input`` against ``JudgeVerdict``.
 
@@ -993,7 +993,7 @@ def test_llm_judge_tool_channel_bedrock(sandbox: Sandbox) -> None:
 
 
 def test_llm_judge_tool_channel_anthropic_direct(sandbox: Sandbox) -> None:
-    """DirectRoute (anthropic transport) uses invoke_anthropic_judge returning a dict."""
+    """DirectRoute (anthropic transport) uses invoke_anthropic_judge_async returning a dict."""
     from coder_eval.models.routing import DirectRoute
 
     criterion = LLMJudgeCriterion(description="x", prompt="grade")

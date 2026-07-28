@@ -182,8 +182,23 @@ class SuccessChecker:
 
         Everything else (CPU/file-bound criteria that only override the sync
         ``_check_impl``) still runs together in a single ``asyncio.to_thread``
-        slot, same as before — and that slot itself runs concurrently with the
-        native-async batch.
+        slot, same as before. That sync batch runs to completion BEFORE the
+        native-async batch starts (not concurrently with it): several
+        first-party sync criteria mutate the sandbox (``run_command``,
+        ``uipath_eval``) while judge criteria read it, so overlapping the two
+        batches would make a judge's score depend on how far a concurrent
+        sandbox-mutating command happened to get — an ordering hazard main
+        never had (criteria observed the sandbox in declaration order).
+        Sequencing the batches preserves that guarantee while still fixing the
+        original problem this method exists for: multiple judge criteria no
+        longer serialize against EACH OTHER.
+
+        The native-async batch is gathered with ``return_exceptions=True`` so
+        a ``JudgeInfrastructureError`` from one judge does not abandon its
+        siblings mid-flight (an abandoned coroutine could otherwise keep a
+        credentialed ``agent_judge`` sub-agent running, and spending budget,
+        against a sandbox the orchestrator is already tearing down) — every
+        sibling settles before the first such error is re-raised.
 
         Results are returned in the same order as ``criteria``, regardless of
         which path each one took.
@@ -202,23 +217,30 @@ class SuccessChecker:
             return []
 
         native_async_indices = [i for i, c in enumerate(criteria) if self._is_native_async(c.type)]
-        sync_indices = [i for i in range(len(criteria)) if i not in native_async_indices]
+        native_async_set = set(native_async_indices)
+        sync_indices = [i for i in range(len(criteria)) if i not in native_async_set]
 
         results: list[CriterionResult | None] = [None] * len(criteria)
 
-        async def run_sync_batch() -> None:
-            if not sync_indices:
-                return
+        if sync_indices:
             sync_criteria = [criteria[i] for i in sync_indices]
             sync_results = await asyncio.to_thread(self._check_all_sync, sync_criteria, ref_code, records, ref_dir)
             for idx, result in zip(sync_indices, sync_results, strict=True):
                 results[idx] = result
 
-        async def run_async_one(i: int) -> None:
-            results[i] = await self._check_single_async(criteria[i], ref_code, records, ref_dir)
+        if native_async_indices:
 
-        await asyncio.gather(run_sync_batch(), *(run_async_one(i) for i in native_async_indices))
-        return results  # type: ignore[return-value]  # every slot filled by the gather above
+            async def run_async_one(i: int) -> CriterionResult:
+                return await self._check_single_async(criteria[i], ref_code, records, ref_dir)
+
+            outcomes = await asyncio.gather(*(run_async_one(i) for i in native_async_indices), return_exceptions=True)
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException):
+                    raise outcome
+            for idx, outcome in zip(native_async_indices, outcomes, strict=True):
+                results[idx] = outcome  # type: ignore[assignment]  # BaseException case raised above
+
+        return results  # type: ignore[return-value]  # every slot filled above
 
     def _is_native_async(self, criterion_type: str) -> bool:
         """Whether this criterion type's checker makes genuine async I/O.

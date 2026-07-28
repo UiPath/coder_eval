@@ -174,8 +174,19 @@ class MyChecker(BaseCriterion[MyCriterion]):
 
 Notes:
 
-- **Do not override `check()`** — it's final and wraps `_check_impl` with error
-  handling (an exception becomes a score-0.0 result with the error captured).
+- **Do not override `check()` / `check_async()`** — both are final and wrap
+  `_check_impl` / `_check_impl_async` with error handling (an exception becomes
+  a score-0.0 result with the error captured; a `JudgeInfrastructureError`
+  escalates instead).
+- Implement exactly ONE of `_check_impl` (plain sync — the common case, shown
+  above) or `_check_impl_async` (genuine async I/O — an async HTTP client or
+  subprocess bridge; see `llm_judge`/`agent_judge`). Whichever you implement,
+  `BaseCriterion` derives the other for free (`asyncio.to_thread` / `asyncio.run`),
+  so there is no need to hand-maintain both. Overriding neither raises
+  `TypeError` immediately at class-definition time. `SuccessChecker.check_all_async`
+  — the orchestrator's entry point — awaits every `_check_impl_async`-native
+  checker directly on the event loop (concurrently with its siblings), and runs
+  everything else through one `asyncio.to_thread` slot.
 - Return `score` in `[0.0, 1.0]` — binary criteria use `0.0`/`1.0`; fractional ones
   anything in between.
 - For **suite-level metrics** on dataset-backed tasks, override

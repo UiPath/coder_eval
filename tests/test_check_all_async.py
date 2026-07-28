@@ -9,8 +9,13 @@ counts as "native async" for dispatch purposes iff it overrides
 ``check_all_async`` must:
   - run all native-async criteria concurrently with each other (not serially),
   - run the remaining sync criteria together in a single ``to_thread`` slot,
-  - overlap the sync batch with the async batch,
+  - run that sync batch to completion BEFORE starting the native-async batch
+    (not concurrently) — several sync criteria mutate the sandbox
+    (run_command, uipath_eval) while judge criteria read it, so overlapping
+    the two would make scores depend on unrelated timing,
   - preserve result ordering regardless of which path each criterion took,
+  - let every native-async sibling settle before re-raising a
+    JudgeInfrastructureError (no orphaned judge work),
   - preserve the sync path's error-handling contract (KeyError / generic
     Exception captured into a failed CriterionResult; JudgeInfrastructureError
     escalates).
@@ -112,8 +117,13 @@ class TestNativeAsyncConcurrency:
         assert [r.score for r in results] == [1.0, 1.0]
 
     @pytest.mark.asyncio
-    async def test_async_batch_overlaps_sync_batch(self, checker):
-        """The native-async batch and the sync-criteria to_thread batch must overlap."""
+    async def test_sync_batch_completes_before_async_batch_starts(self, checker):
+        """The sync-criteria to_thread batch must run to completion BEFORE the
+        native-async batch starts (not concurrently with it) — several
+        first-party sync criteria mutate the sandbox (run_command,
+        uipath_eval) while judge criteria read it, so overlapping the two
+        would make a judge's score depend on how far a concurrent
+        sandbox-mutating command happened to get."""
         async_fake = _SleepyAsyncChecker()
         sync_fake = _SleepyThreadChecker()
         checker._checker_instances["llm_judge"] = async_fake
@@ -124,7 +134,7 @@ class TestNativeAsyncConcurrency:
         results = await checker.check_all_async(criteria)
         elapsed = time.monotonic() - start
 
-        assert elapsed < SLEEP_SECONDS * 1.5, f"sync and async batches serialized: took {elapsed:.3f}s"
+        assert elapsed >= SLEEP_SECONDS * 1.8, f"sync and async batches overlapped: took {elapsed:.3f}s"
         assert [r.criterion_type for r in results] == ["llm_judge", "file_exists"]
         assert [r.score for r in results] == [1.0, 1.0]
 
@@ -161,6 +171,33 @@ class TestNativeAsyncErrorHandling:
             await checker.check_all_async([_llm_criterion("j")])
 
     @pytest.mark.asyncio
+    async def test_judge_infrastructure_error_does_not_orphan_sibling_judges(self, checker):
+        """A raising judge must not abandon its siblings mid-flight — the
+        gather uses return_exceptions=True so every sibling settles (and any
+        side effect it performs completes) before the error is re-raised."""
+        completed: list[str] = []
+
+        class _SideEffectAsyncChecker(_SleepyAsyncChecker):
+            async def _check_impl_async(
+                self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None
+            ):
+                result = await super()._check_impl_async(
+                    criterion, sandbox, reference_code, turn_records=turn_records, context=context
+                )
+                completed.append(criterion.description)
+                return result
+
+        checker._checker_instances["llm_judge"] = _RaisingAsyncChecker(JudgeInfrastructureError("down"))
+        checker._checker_instances["agent_judge"] = _SideEffectAsyncChecker(sleep_seconds=SLEEP_SECONDS)
+
+        from coder_eval.models import AgentJudgeCriterion
+
+        criteria = [_llm_criterion("j"), AgentJudgeCriterion(description="sibling", prompt="grade it")]
+        with pytest.raises(JudgeInfrastructureError, match="down"):
+            await checker.check_all_async(criteria)
+        assert completed == ["sibling"], "sibling judge was orphaned instead of being allowed to settle"
+
+    @pytest.mark.asyncio
     async def test_empty_criteria_returns_empty(self, checker):
         assert await checker.check_all_async([]) == []
 
@@ -188,6 +225,15 @@ class TestNativeAsyncDetection:
     def test_unregistered_type_is_not_native_async(self, checker):
         assert checker._is_native_async("does_not_exist") is False
 
+    def test_registered_llm_judge_and_agent_judge_are_native_async(self, checker):
+        """Pin native-async dispatch for the *real* registered checkers — the
+        one-line assertion that encodes the whole point of this module: if a
+        future refactor moves llm_judge/agent_judge back to overriding only
+        _check_impl, they would silently serialize behind one to_thread slot
+        again, and only this test would catch it."""
+        assert checker._is_native_async("llm_judge") is True
+        assert checker._is_native_async("agent_judge") is True
+
 
 class TestBaseCriterionSyncAsyncDerivation:
     """Direct unit coverage of BaseCriterion's cross-derivation, bypassing SuccessChecker."""
@@ -202,12 +248,13 @@ class TestBaseCriterionSyncAsyncDerivation:
         result = checker.check(_llm_criterion("j"), sandbox=None)
         assert result.score == 1.0
 
-    def test_register_criterion_rejects_a_checker_overriding_neither(self):
-        from coder_eval.criteria.base import register_criterion
+    def test_defining_a_checker_overriding_neither_raises_at_class_definition(self):
+        """The override contract is enforced by __init_subclass__ at
+        class-definition time — before register_criterion (or any other entry
+        point, e.g. CriterionRegistry.register called directly) ever runs."""
         from coder_eval.models import FileExistsCriterion
 
-        class _NeitherChecker(BaseCriterion[FileExistsCriterion]):
-            criterion_type = "neither_test"
-
         with pytest.raises(TypeError, match="must override _check_impl"):
-            register_criterion(_NeitherChecker)
+
+            class _NeitherChecker(BaseCriterion[FileExistsCriterion]):
+                criterion_type = "neither_test"

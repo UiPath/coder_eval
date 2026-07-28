@@ -1,5 +1,7 @@
 """Tests for evaluator reference code support."""
 
+import pytest
+
 from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.models import (
     ReferenceComparisonCriterion,
@@ -23,6 +25,28 @@ class TestSuccessCheckerReference:
         # Should not raise
         results = checker.check_all([], reference_code=reference_code)
         assert results == []
+
+        sandbox.cleanup(preserve=False)
+
+    @pytest.mark.asyncio
+    async def test_check_all_async_persists_reference_code_and_dir(self, tmp_path):
+        """check_all_async — the orchestrator's actual entry point — must persist
+        reference_code/reference_dir the same way the sync check_all does, so a
+        later check()/check_all() call on the same checker without an explicit
+        reference still sees it."""
+        config = SandboxConfig(driver="tempdir", python=None)
+        sandbox = Sandbox(config, "test")
+        sandbox.setup()
+
+        checker = SuccessChecker(sandbox)
+        reference_code = "def foo(): pass"
+        reference_dir = tmp_path / "ref"
+        reference_dir.mkdir()
+
+        results = await checker.check_all_async([], reference_code=reference_code, reference_dir=reference_dir)
+        assert results == []
+        assert checker._reference_code == reference_code
+        assert checker._reference_dir == reference_dir
 
         sandbox.cleanup(preserve=False)
 

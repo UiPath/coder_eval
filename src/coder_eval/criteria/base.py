@@ -9,7 +9,7 @@ from abc import ABC
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import wraps
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Concatenate, Literal
 
 from coder_eval.errors import JudgeInfrastructureError
 from coder_eval.models import BaseSuccessCriterion, CriterionAggregate, CriterionResult
@@ -46,33 +46,31 @@ class CheckContext:
     reference_dir: "Path | None" = None
 
 
-def handle_criterion_errors(func: Callable[..., CriterionResult]) -> Callable[..., CriterionResult]:
+def handle_criterion_errors[**P](
+    func: Callable[Concatenate[Any, BaseSuccessCriterion, P], CriterionResult],
+) -> Callable[Concatenate[Any, BaseSuccessCriterion, P], CriterionResult]:
     """Decorator to handle errors in criterion checkers.
 
     Wraps checker methods to catch exceptions and return a failed
     CriterionResult with error details instead of raising.
 
     This is the CENTRALIZED error handling that was in evaluator.py.
+
+    Typed with ``ParamSpec``/``Concatenate`` rather than ``Callable[..., ...]``
+    so the decorated method's parameter list (sandbox, reference_code,
+    turn_records, context) stays visible to callers instead of erasing to
+    ``(...) -> CriterionResult``.
     """
 
     @wraps(func)
     def wrapper(
         self: Any,
         criterion: BaseSuccessCriterion,
-        sandbox: "Sandbox",
-        reference_code: str | None = None,
-        turn_records: list["TurnRecord"] | None = None,
-        context: "CheckContext | None" = None,
+        *args: P.args,
+        **kwargs: P.kwargs,
     ) -> CriterionResult:
         try:
-            return func(
-                self,
-                criterion,
-                sandbox,
-                reference_code,
-                turn_records=turn_records,
-                context=context,
-            )
+            return func(self, criterion, *args, **kwargs)
         except JudgeInfrastructureError:
             # Judge infra failure is NOT an agent failure — do not score it 0.0.
             # Propagates to Orchestrator.run()'s broad except → FinalStatus.ERROR.
@@ -99,33 +97,25 @@ def handle_criterion_errors(func: Callable[..., CriterionResult]) -> Callable[..
     return wrapper
 
 
-def handle_criterion_errors_async(
-    func: Callable[..., Awaitable[CriterionResult]],
-) -> Callable[..., Awaitable[CriterionResult]]:
+def handle_criterion_errors_async[**P](
+    func: Callable[Concatenate[Any, BaseSuccessCriterion, P], Awaitable[CriterionResult]],
+) -> Callable[Concatenate[Any, BaseSuccessCriterion, P], Awaitable[CriterionResult]]:
     """Async twin of :func:`handle_criterion_errors`, for ``check_async``.
 
     Same contract: infra failures escalate, everything else is captured into a
-    failed ``CriterionResult`` instead of propagating.
+    failed ``CriterionResult`` instead of propagating. Same ``ParamSpec``/
+    ``Concatenate`` typing rationale applies (see the sync twin's docstring).
     """
 
     @wraps(func)
     async def wrapper(
         self: Any,
         criterion: BaseSuccessCriterion,
-        sandbox: "Sandbox",
-        reference_code: str | None = None,
-        turn_records: list["TurnRecord"] | None = None,
-        context: "CheckContext | None" = None,
+        *args: P.args,
+        **kwargs: P.kwargs,
     ) -> CriterionResult:
         try:
-            return await func(
-                self,
-                criterion,
-                sandbox,
-                reference_code,
-                turn_records=turn_records,
-                context=context,
-            )
+            return await func(self, criterion, *args, **kwargs)
         except JudgeInfrastructureError:
             raise
         except Exception as e:
@@ -172,8 +162,10 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
       base's default ``_check_impl`` derives a sync call by running the async
       one to completion on a fresh event loop (``asyncio.run``).
 
-    ``register_criterion`` enforces that a checker overrides at least one of
-    the two — overriding neither would recurse forever between the defaults.
+    ``__init_subclass__`` enforces that a checker overrides at least one of
+    the two, at class-definition time — overriding neither would recurse
+    forever between the defaults (``asyncio.run`` <-> ``asyncio.to_thread``)
+    the first time either is called.
 
     ``check()`` / ``check_async()`` are FINAL — they apply centralized error
     handling and must not be overridden; implement ``_check_impl`` /
@@ -206,6 +198,19 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
     # polarities it supports (e.g. frozenset({"pass", "fail"})) AND overrides
     # live_verdict; CE025 enforces that the two stay consistent.
     live_stop_polarities: ClassVar[frozenset[str]] = frozenset()
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Enforce the ``_check_impl`` / ``_check_impl_async`` override contract
+        at class-definition time (module import), regardless of which entry
+        point later registers the class — closing the gap where a subclass
+        registered via ``CriterionRegistry.register`` directly (bypassing the
+        ``register_criterion`` decorator) escaped the check, and turning the
+        mutual-recursion failure mode (``asyncio.run`` <-> ``asyncio.to_thread``
+        exhausting OS threads) into an immediate, clearly-named ``TypeError``.
+        """
+        super().__init_subclass__(**kwargs)
+        if cls._check_impl is BaseCriterion._check_impl and cls._check_impl_async is BaseCriterion._check_impl_async:
+            raise TypeError(f"{cls.__name__} must override _check_impl or _check_impl_async")
 
     @handle_criterion_errors
     def check(
@@ -425,10 +430,11 @@ def register_criterion(cls: type[BaseCriterion[Any]]) -> type[BaseCriterion[Any]
 
     Moved here from __init__.py to prevent circular import issues.
 
-    Enforces that the class overrides at least one of ``_check_impl`` /
-    ``_check_impl_async`` — each has a default that derives itself from the
-    other (see ``BaseCriterion``), so overriding neither would recurse forever
-    the first time either is called.
+    The ``_check_impl`` / ``_check_impl_async`` override contract is enforced
+    by ``BaseCriterion.__init_subclass__`` at class-definition time (before
+    this decorator ever runs), so it applies uniformly regardless of which
+    entry point registers the class — this decorator, or
+    ``CriterionRegistry.register`` called directly.
 
     Usage:
         @register_criterion
@@ -436,9 +442,6 @@ def register_criterion(cls: type[BaseCriterion[Any]]) -> type[BaseCriterion[Any]
             criterion_type = "my_type"
             ...
     """
-    if cls._check_impl is BaseCriterion._check_impl and cls._check_impl_async is BaseCriterion._check_impl_async:
-        raise TypeError(f"{cls.__name__} must override _check_impl or _check_impl_async")
-
     from coder_eval.criteria import CriterionRegistry
 
     return CriterionRegistry.register(cls)
