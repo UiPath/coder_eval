@@ -834,7 +834,10 @@ Have an LLM grade the task against a rubric written in the task YAML. **Continuo
 | `model` | `anthropic.claude-sonnet-4-6` | Judge model id (vendor-prefixed; auto-translated per backend) |
 | `temperature` | `0.0` | Sampling temperature (0.0 = deterministic) |
 | `max_tokens` | `2000` | Maximum tokens in the judge's response |
+| `samples` | `1` | Number of independent judge invocations (1–9). `1` = single call, unchanged behavior. With N > 1 the criterion scores the **median** of N sampled verdicts; rationale/findings come from the sample closest to the median (earliest on ties); per-sample scores land in `details`; token usage sums across samples. |
 | `max_file_chars` | `20000` | Per-file (and agent_output) truncation applied before building the prompt |
+
+**Sampling the judge.** Even at `temperature: 0.0`, judge verdicts are not perfectly repeatable — the same artifacts can draw a strict or a lenient reading of the rubric on different calls. Set `samples: 3` (odd values recommended) to invoke the judge three times over the same rendered prompt and score the median verdict, damping a single outlier reading. Because every sample grades identical artifacts, the spread across samples is pure judge variance — unlike experiment-level `replicates`, which re-run the whole agent and mix agent variance into the same number. A sample that returns no verdict degrades to the median of the remaining valid samples (with a note in `details`) rather than scoring the criterion 0.0; only when every sample fails does the single-sample failure behavior apply.
 
 **Transport selection.** The judge call is routed by the active `API_BACKEND`:
 

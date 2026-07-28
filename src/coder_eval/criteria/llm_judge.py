@@ -1,9 +1,12 @@
 """LLM-as-a-judge success criterion checker."""
 
 import logging
-from typing import TYPE_CHECKING
+from collections.abc import Iterable
+from statistics import median
+from typing import TYPE_CHECKING, NamedTuple
 
 from coder_eval.criteria.base import BaseCriterion, CheckContext, register_criterion
+from coder_eval.errors import JudgeInfrastructureError
 from coder_eval.evaluation.judge_anthropic import invoke_anthropic_judge
 from coder_eval.evaluation.judge_bedrock import invoke_bedrock_judge
 from coder_eval.evaluation.judge_context import (
@@ -114,6 +117,18 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
 
         scrub_key = reference_code if criterion.include_reference else None
 
+        # Multi-sample grading (samples > 1) aggregates independent verdicts over
+        # the same rendered prompt; the default (1) stays on the single-call path
+        # below, unchanged.
+        if criterion.samples > 1:
+            return _grade_with_sampling(
+                criterion=criterion,
+                route=route,
+                user_msg=user_msg,
+                judge_ctx=judge_ctx,
+                scrub_key=scrub_key,
+            )
+
         # Attribute the judge's API call to ``JudgeCriterionResult.token_usage``
         # from the usage the backend reported in its response.
         verdict, parse_error, raw_verdict_text, response_usage = _invoke_tool_channel(
@@ -128,17 +143,6 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
         # model could echo the reference back in an unparseable response, so we scrub it.
         scrubbed = scrub_reference(raw_verdict_text, scrub_key)
 
-        def _maybe_transcript() -> JudgeTranscript | None:
-            if not criterion.capture_transcript:
-                return None
-            return build_judge_transcript(
-                raw_verdict=raw_verdict_text,
-                max_chars=criterion.max_transcript_chars,
-                judge_system_prompt=_SYSTEM_PROMPT,
-                judge_prompt=user_msg,
-                scrub_key=scrub_key,
-            )
-
         if parse_error is not None:
             return JudgeCriterionResult(
                 criterion_type=criterion.type,
@@ -146,7 +150,7 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
                 score=0.0,
                 details=scrubbed[:500],
                 error=scrub_reference(parse_error, scrub_key),
-                transcript=_maybe_transcript(),
+                transcript=_build_transcript(criterion, raw_verdict_text, user_msg, scrub_key),
                 token_usage=judge_usage,
             )
         assert verdict is not None  # parser contract: verdict is set iff parse_error is None
@@ -158,7 +162,7 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
             score=verdict.score,
             details=scrub_reference(details, scrub_key),
             findings=[scrub_reference(f, scrub_key) for f in verdict.findings],
-            transcript=_maybe_transcript(),
+            transcript=_build_transcript(criterion, raw_verdict_text, user_msg, scrub_key),
             token_usage=judge_usage,
         )
 
@@ -218,6 +222,135 @@ def _invoke_tool_channel(
     if verdict is not None:
         return verdict, None, verdict.model_dump_json(), response_usage
     return None, err, f"(no verdict — {err})", response_usage
+
+
+class _SampleOutcome(NamedTuple):
+    """One judge invocation's outcome, in ``_invoke_tool_channel`` return order."""
+
+    verdict: JudgeVerdict | None
+    parse_error: str | None
+    raw_verdict_text: str
+    response_usage: TokenUsage | None
+
+
+def _grade_with_sampling(
+    *,
+    criterion: LLMJudgeCriterion,
+    route: "ApiRoute",
+    user_msg: str,
+    judge_ctx: JudgeContext,
+    scrub_key: str | None,
+) -> JudgeCriterionResult:
+    """Invoke the judge ``criterion.samples`` times and score the median verdict.
+
+    Every sample grades the SAME rendered prompt, so score spread across samples
+    is judge variance by construction — the median damps a single strict-or-lenient
+    outlier reading of the rubric. The representative sample (score closest to the
+    median, earliest on ties) supplies rationale/findings/transcript so the
+    persisted audit trail is a real verdict, never a synthetic blend.
+
+    A sample that produces no verdict (a transport failure, or a response with no
+    usable ``submit_verdict`` call) degrades to the median of the remaining valid
+    samples with a note in ``details``. When NO sample produces a verdict, the
+    single-sample failure semantics apply: an infrastructure failure escalates
+    (``JudgeInfrastructureError`` propagates to ``FinalStatus.ERROR`` — judge infra
+    failure is not an agent failure), any other exception reaches
+    ``@handle_criterion_errors``, and all-parse-failures score 0.0 with the first
+    sample's diagnostic.
+    """
+    outcomes: list[_SampleOutcome] = []
+    infra_errors: list[JudgeInfrastructureError] = []
+    unexpected_errors: list[Exception] = []
+    for _ in range(criterion.samples):
+        try:
+            outcomes.append(
+                _SampleOutcome(
+                    *_invoke_tool_channel(
+                        criterion=criterion,
+                        route=route,
+                        system_msg=_SYSTEM_PROMPT,
+                        user_msg=user_msg,
+                    )
+                )
+            )
+        except JudgeInfrastructureError as exc:
+            infra_errors.append(exc)
+        except Exception as exc:
+            unexpected_errors.append(exc)
+
+    # Cost is real for every sample that returned a response, verdict or not.
+    token_usage = _sum_usage(o.response_usage for o in outcomes)
+    valid: list[tuple[JudgeVerdict, str]] = [(o.verdict, o.raw_verdict_text) for o in outcomes if o.verdict is not None]
+
+    if not valid:
+        if infra_errors:
+            raise infra_errors[0]
+        if unexpected_errors:
+            raise unexpected_errors[0]
+        first = outcomes[0]
+        assert first.parse_error is not None  # parser contract: verdict is set iff parse_error is None
+        scrubbed = scrub_reference(first.raw_verdict_text, scrub_key)
+        return JudgeCriterionResult(
+            criterion_type=criterion.type,
+            description=criterion.description,
+            score=0.0,
+            details=scrubbed[:500],
+            error=scrub_reference(first.parse_error, scrub_key),
+            transcript=_build_transcript(criterion, first.raw_verdict_text, user_msg, scrub_key),
+            token_usage=token_usage,
+        )
+
+    scores = [verdict.score for verdict, _ in valid]
+    median_score = float(median(scores))
+    rep_verdict, rep_raw = min(valid, key=lambda pair: abs(pair[0].score - median_score))
+
+    degraded_notes = list(judge_ctx.degraded_notes)
+    failed_samples = criterion.samples - len(valid)
+    if failed_samples:
+        summary = f"median over {len(valid)} valid samples"
+        degraded_notes.append(f"{failed_samples}/{criterion.samples} judge samples produced no verdict; {summary}")
+
+    details = format_details(median_score, rep_verdict.rationale, judge_ctx.missing_files, degraded_notes)
+    rendered_scores = ", ".join(f"{s:.3f}" for s in scores)
+    details = f"{details}\nsample_scores: [{rendered_scores}]"
+    return JudgeCriterionResult(
+        criterion_type=criterion.type,
+        description=criterion.description,
+        score=median_score,
+        details=scrub_reference(details, scrub_key),
+        findings=[scrub_reference(f, scrub_key) for f in rep_verdict.findings],
+        transcript=_build_transcript(criterion, rep_raw, user_msg, scrub_key),
+        token_usage=token_usage,
+    )
+
+
+def _sum_usage(usages: Iterable[TokenUsage | None]) -> TokenUsage | None:
+    """Field-wise sum of the reported usages; ``None`` when no sample reported any."""
+    present = [u for u in usages if u is not None]
+    if not present:
+        return None
+    total = present[0]
+    for u in present[1:]:
+        total = total + u
+    return total
+
+
+def _build_transcript(
+    criterion: LLMJudgeCriterion,
+    raw_verdict_text: str,
+    user_msg: str,
+    scrub_key: str | None,
+) -> JudgeTranscript | None:
+    """Build the persisted judge transcript when ``capture_transcript`` is on."""
+    if not criterion.capture_transcript:
+        return None
+    return build_judge_transcript(
+        raw_verdict=raw_verdict_text,
+        max_chars=criterion.max_transcript_chars,
+        judge_system_prompt=_SYSTEM_PROMPT,
+        judge_prompt=user_msg,
+        scrub_key=scrub_key,
+    )
 
 
 def _render_user_message(prompt: str, context: JudgeContext) -> str:
