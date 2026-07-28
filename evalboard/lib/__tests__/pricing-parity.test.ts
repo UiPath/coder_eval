@@ -69,4 +69,29 @@ describe("pricing.ts ↔ pricing.py parity", () => {
             ]).toEqual(rates);
         }
     });
+
+    // Python-priced models we deliberately do NOT mirror to the frontend: heavy
+    // frontier Claude/GPT variants the evalboard never runs, so pricing them here
+    // adds nothing. Kept explicit (not a blanket "ignore extras") so a NEW model
+    // added to pricing.py that ISN'T here and ISN'T in PRICING breaks the build —
+    // catching a real litellm-relevant omission (e.g. the Bedrock open-weight ids
+    // that previously rendered "—" for cost).
+    const DELIBERATELY_UNMIRRORED = new Set([
+        "claude-sonnet-5",
+        "gpt-5.4-mini",
+        "gpt-5.4-nano",
+        "gpt-5.4-pro",
+        "gpt-5.5-pro",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ]);
+
+    test("every pricing.py model is mirrored in pricing.ts or explicitly unmirrored", () => {
+        const missing = Object.keys(py).filter((m) => !(m in PRICING) && !DELIBERATELY_UNMIRRORED.has(m));
+        expect(
+            missing,
+            `priced in pricing.py but missing from pricing.ts — mirror it or add to DELIBERATELY_UNMIRRORED: ${missing.join(", ")}`,
+        ).toEqual([]);
+    });
 });
