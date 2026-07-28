@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Coder Eval documentation has moved</title>
+
+    <!--
+      This page replaces the MkDocs build that used to be published here.
+
+      Two copies of the same docs were live — this GitHub Pages mirror and
+      coder-eval.com/docs — each declaring itself canonical, which splits search
+      signals and lets the wrong host rank. The docs are now published only at
+      coder-eval.com/docs; this stub exists so anything still pointing here
+      (a crawl queue entry, an internal link) lands somewhere useful instead of
+      on a 404.
+
+      `noindex, follow` rather than a canonical pointing at /docs: this page's
+      content differs from the target, and Google both discourages combining
+      noindex with rel=canonical and ignores canonicals across substantially
+      different pages. noindex keeps the stub out of the index while its links
+      are still followed.
+    -->
+    <meta name="robots" content="noindex, follow" />
+
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #17202a;
+        --muted: #5b6b7c;
+        --bg: #ffffff;
+        --accent: #d9480f;
+        --border: #e3e8ee;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #e8eef5;
+          --muted: #9aabbc;
+          --bg: #0b1826;
+          --accent: #ff8b57;
+          --border: #21354a;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem 1.25rem;
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      main {
+        width: 100%;
+        max-width: 34rem;
+      }
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.5rem;
+        line-height: 1.3;
+      }
+      p {
+        margin: 0 0 1.5rem;
+        color: var(--muted);
+      }
+      ul {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        border-top: 1px solid var(--border);
+      }
+      li {
+        border-bottom: 1px solid var(--border);
+      }
+      a {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.25rem 0.75rem;
+        align-items: baseline;
+        padding: 0.9rem 0.25rem;
+        color: var(--accent);
+        font-weight: 600;
+        text-decoration: none;
+      }
+      a:hover,
+      a:focus-visible {
+        text-decoration: underline;
+      }
+      a span {
+        color: var(--muted);
+        font-weight: 400;
+        font-size: 0.9375rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Coder Eval documentation has moved</h1>
+      <p>The documentation is now published at coder-eval.com.</p>
+      <ul>
+        <li>
+          <a href="https://coder-eval.com/docs"
+            >Documentation <span>coder-eval.com/docs</span></a
+          >
+        </li>
+        <li>
+          <a href="https://coder-eval.com">Project website <span>coder-eval.com</span></a>
+        </li>
+        <li>
+          <a href="https://github.com/UiPath/coder_eval"
+            >Source on GitHub <span>UiPath/coder_eval</span></a
+          >
+        </li>
+      </ul>
+    </main>
+  </body>
+</html>

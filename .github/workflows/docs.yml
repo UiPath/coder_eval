@@ -1,26 +1,29 @@
-name: Docs
+name: Pages stub
 
-# Build the MkDocs Material site and publish it to the `gh-pages` branch via
-# `mkdocs gh-deploy` — the same mechanism UiPath/uipath-python uses. This workflow
-# only pushes a branch (needs `contents: write`); it never calls the Pages API, so
-# it succeeds even before Pages is switched on.
+# Publishes `.github/pages-stub/` to the `gh-pages` branch, which GitHub Pages
+# serves at https://uipath.github.io/coder_eval/.
 #
-# One-time setup (org owner): the UiPath org blocks Pages *creation*, so enable
-# Pages for this repo once — Settings → Pages → Build and deployment →
-# Source: "Deploy from a branch" → branch `gh-pages` / `/ (root)`. That's the same
-# (legacy, branch-based) configuration uipath-python already runs on.
+# This workflow used to run `mkdocs gh-deploy`, publishing a full second copy of
+# docs/ here. That was a duplicate of coder-eval.com/docs: both copies declared
+# themselves canonical, which splits search signals and lets the wrong host rank —
+# and the mirror drifted, serving pages (BYOD, CODEX_AGENT_GUIDE) that had been
+# renamed upstream. The docs are now published only at coder-eval.com/docs, synced
+# from docs/ by the website's scripts/sync-docs.mjs.
+#
+# The mkdocs deploy is REMOVED rather than commented out: leaving it one
+# uncomment away meant a future run would silently restore the duplicate. mkdocs
+# itself is still used — `mkdocs.yml` remains the docs IA source of truth (CE028
+# generates the index surfaces from its `nav:`, and the website derives its
+# sidebar from it), and `mkdocs build` is still the way to verify anchors locally.
+# What's gone is only the *publishing* of a second site.
+#
+# The gh-pages branch is force-replaced with the stub on each run, so the stale
+# MkDocs output — including its sitemap.xml, which was still advertising the old
+# URLs for indexing — is cleared rather than left alongside.
+#
+# Manual-only by design: the stub changes about once a year. Run it from the
+# Actions tab when the stub itself changes.
 on:
-  # Auto-publish on push is DISABLED: GitHub Pages is not yet enabled for this
-  # repo on uipath.github.io (org owner must switch it on once — Settings → Pages
-  # → Deploy from a branch → gh-pages / root). The published docs currently serve
-  # from coder-eval.com/docs (synced separately by the website), so the gh-pages
-  # deploy is not needed yet. Re-enable by uncommenting the `push:` trigger below.
-  # push:
-  #   branches: [main]
-  #   paths:
-  #     - "docs/**"
-  #     - "mkdocs.yml"
-  #     - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:
@@ -35,19 +38,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - name: Install social-card system libraries
+
+      - name: Assemble the published tree
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libcairo2 libfreetype6 libjpeg-turbo8 libpng16-16 pngquant
-      - name: Install MkDocs Material
-        run: pip install "mkdocs-material[imaging]>=9.5,<10"
-      - name: Configure git identity for gh-pages commits
+          set -euo pipefail
+          out="$(mktemp -d)"
+          cp .github/pages-stub/index.html "$out/index.html"
+          # Pages serves 404.html for any unknown path, so the same stub catches
+          # every old deep URL (/USER_GUIDE/, /tutorials/01-.../, …) without
+          # needing a file per route.
+          cp .github/pages-stub/index.html "$out/404.html"
+          # Without .nojekyll, Pages runs the tree through Jekyll, which strips
+          # files and directories whose names begin with an underscore.
+          touch "$out/.nojekyll"
+          # The old MkDocs llms.txt lived here and is referenced from the site's
+          # /llms.txt history; a .txt cannot meta-refresh, so point it in prose.
+          printf '# Coder Eval\n\nThe documentation moved to https://coder-eval.com/docs\n\nllms.txt: https://coder-eval.com/llms.txt\nFull docs in one file: https://coder-eval.com/llms-full.txt\n' \
+            > "$out/llms.txt"
+          echo "OUT_DIR=$out" >> "$GITHUB_ENV"
+
+      - name: Force-replace gh-pages with the stub
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          cd "$OUT_DIR"
+          git init -q -b gh-pages
           git config user.name "coder-eval"
           git config user.email "coder-eval@uipath.com"
-      - name: Build strictly and publish to gh-pages
-        run: mkdocs gh-deploy --force --strict
+          git add -A
+          git commit -qm "Publish Pages stub redirecting to coder-eval.com/docs"
+          # A fresh single-commit history, force-pushed: gh-pages is a build
+          # artifact, so there is no history worth preserving, and this guarantees
+          # none of the old MkDocs output survives.
+          git push --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
