@@ -18,17 +18,114 @@ from coder_eval.cli.run_command import _litellm_preflight_error
 from coder_eval.config import Settings
 from coder_eval.models import (
     AgentKind,
+    BedrockRoute,
+    DirectRoute,
     LiteLLMRoute,
     TokenUsage,
     parse_agent_config,
 )
 from coder_eval.models.enums import ApiBackend
-from coder_eval.models.routing import ROUTE_NAMES, resolve_route
+from coder_eval.models.routing import ROUTE_NAMES, resolve_evaluation_route, resolve_route
 from coder_eval.pricing import _normalize_model, calculate_cost
 
 
 def _make_agent(route, *, config_model: str | None = None) -> ClaudeCodeAgent:
     return ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, model=config_model), route=route)
+
+
+class TestResolveEvaluationRoute:
+    """resolve_evaluation_route() pins the judge + simulated user to a constant
+    Claude backend regardless of the agent's backend, so grading/simulation stay
+    comparable across the models under test."""
+
+    @staticmethod
+    def _isolated_settings(monkeypatch, **kwargs):
+        # Skip .env and clear the credential env vars so presence/absence is
+        # driven purely by kwargs (config republishes .env into os.environ).
+        for var in ("AWS_BEARER_TOKEN_BEDROCK", "AWS_REGION", "ANTHROPIC_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        return Settings(_env_file=None, **kwargs)
+
+    def test_bedrock_agent_route_is_reused_unchanged(self, monkeypatch):
+        route = BedrockRoute(bearer_token="tok", region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
+        settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.BEDROCK)
+        assert resolve_evaluation_route(settings, route) is route
+
+    def test_direct_agent_route_is_reused_unchanged(self, monkeypatch):
+        route = DirectRoute(judge_transport="anthropic")
+        settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.DIRECT)
+        assert resolve_evaluation_route(settings, route) is route
+
+    def test_litellm_agent_pins_evaluation_to_bedrock_when_aws_creds_present(self, monkeypatch):
+        agent = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1", model="zai.glm-5")
+        settings = self._isolated_settings(
+            monkeypatch,
+            api_backend=ApiBackend.LITELLM,
+            aws_bearer_token_bedrock="aws-tok",
+            aws_region="eu-north-1",
+        )
+        ev = resolve_evaluation_route(settings, agent)
+        assert isinstance(ev, BedrockRoute)
+        assert ev.bearer_token == "aws-tok"
+        assert ev.region == "eu-north-1"
+        # Judge + simulator run on a Claude model, region-qualified.
+        assert ev.model == "eu.anthropic.claude-sonnet-4-6"
+
+    def test_litellm_agent_falls_back_to_direct_when_only_anthropic_key(self, monkeypatch):
+        agent = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1", model="zai.glm-5")
+        settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.LITELLM, anthropic_api_key="sk-ant")
+        ev = resolve_evaluation_route(settings, agent)
+        assert isinstance(ev, DirectRoute)
+        assert ev.judge_transport == "anthropic"
+
+    def test_litellm_agent_unconfigured_yields_direct_with_no_transport(self, monkeypatch):
+        # No Bedrock creds and no ANTHROPIC_API_KEY → DirectRoute(None), which makes
+        # llm_judge fail with its clean "unconfigured" error rather than scoring 0.0.
+        agent = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1", model="zai.glm-5")
+        settings = self._isolated_settings(monkeypatch, api_backend=ApiBackend.LITELLM)
+        ev = resolve_evaluation_route(settings, agent)
+        assert isinstance(ev, DirectRoute)
+        assert ev.judge_transport is None
+
+
+class TestEvalRouteWiring:
+    """The orchestrator must hand the simulated user the eval_route (constant
+    Claude), never the agent's (possibly open-weight) route — guards the
+    simulation path the senior review flagged as untested."""
+
+    async def test_simulator_receives_eval_route_not_agent_route(self, monkeypatch):
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from coder_eval import orchestrator as orch_mod
+        from coder_eval.orchestrator import Orchestrator
+
+        eval_route = BedrockRoute(bearer_token="t", region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
+        agent_route = LiteLLMRoute(base_url="http://x:4000", auth_token="k", model="zai.glm-5")
+        captured: dict = {}
+
+        class _SpySimulator:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            async def start(self):
+                # Abort before the dialog loop; we only care which route was passed.
+                raise RuntimeError("__stop_dialog__")
+
+        monkeypatch.setattr(orch_mod, "UserSimulator", _SpySimulator)
+        fake = SimpleNamespace(
+            result=SimpleNamespace(simulation=None),
+            task=SimpleNamespace(simulation=object(), agent=object(), description="d"),
+            agent=object(),
+            success_checker=object(),
+            eval_route=eval_route,
+            route=agent_route,
+        )
+        with pytest.raises(RuntimeError, match="__stop_dialog__"):
+            await Orchestrator._simulation_dialog_loop(fake, initial_prompt="hi", sandbox_dir=Path("/tmp"))
+        # If someone reverts to route=self.route this flips to the litellm route.
+        assert captured["route"] is eval_route
+        assert captured["route"] is not agent_route
 
 
 class TestResolveRouteCustom:

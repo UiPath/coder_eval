@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from coder_eval.models.enums import ApiBackend
+from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
 
 
 if TYPE_CHECKING:
@@ -176,6 +177,35 @@ def resolve_route(settings: Settings) -> ApiRoute:
                 model=settings.litellm_model,
                 small_model=small_model,
             )
+
+
+def resolve_evaluation_route(settings: Settings, agent_route: ApiRoute) -> ApiRoute:
+    """Resolve the route used by the *evaluation* side — the ``llm_judge`` /
+    ``agent_judge`` criteria and the simulated user — which must stay on a
+    constant Claude backend regardless of the agent under test, so grading and
+    simulation stay comparable across models.
+
+    - Agent on Bedrock/Direct: the judge already runs on Claude via that route,
+      so reuse it unchanged (no behavior change for existing runs).
+    - Agent on LiteLLM (open-weight): the agent route cannot serve a Claude
+      judge, so pin evaluation to Bedrock (preferred, from the AWS bearer token)
+      or Direct (``ANTHROPIC_API_KEY``). If neither is configured, fall back to a
+      ``DirectRoute`` with no judge transport so ``llm_judge`` fails with its
+      clean "unconfigured" error rather than silently scoring 0.0.
+    """
+    if isinstance(agent_route, BedrockRoute | DirectRoute):
+        return agent_route
+    # agent_route is LiteLLMRoute → pin evaluation to a constant Claude backend.
+    if settings.aws_bearer_token_bedrock and settings.aws_region:
+        judge_model = settings.bedrock_model or DEFAULT_JUDGE_MODEL
+        qualified = to_bedrock_inference_profile(judge_model, settings.aws_region)
+        return BedrockRoute(
+            bearer_token=settings.aws_bearer_token_bedrock,
+            region=settings.aws_region,
+            model=qualified,
+            small_model=qualified,
+        )
+    return DirectRoute(judge_transport=_resolve_direct_judge_transport(settings))
 
 
 def _resolve_direct_judge_transport(settings: Settings) -> JudgeTransport | None:

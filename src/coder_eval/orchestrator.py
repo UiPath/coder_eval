@@ -50,6 +50,7 @@ from .models import (
     TokenUsage,
     TurnRecord,
     UserMessage,
+    resolve_evaluation_route,
     resolve_route,
 )
 from .orchestration.early_stop import EarlyStopWatcher, validate_early_stop
@@ -368,6 +369,11 @@ class Orchestrator:
 
         # API routing (initialized in _setup)
         self.route: ApiRoute | None = None
+        # Route for the evaluation side (llm_judge / agent_judge / simulated user):
+        # pinned to a constant Claude backend so grading stays comparable when the
+        # agent runs on an open-weight (LiteLLM) model. Equals self.route for the
+        # Direct/Bedrock backends.
+        self.eval_route: ApiRoute | None = None
 
         # Result tracking
         self.result: EvaluationResult | None = None
@@ -897,10 +903,11 @@ class Orchestrator:
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
 
             self.route = resolve_route(settings)
+            self.eval_route = resolve_evaluation_route(settings, self.route)
             logger.info(
                 "API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None)
             )
-            self.success_checker = SuccessChecker(self.sandbox, route=self.route)
+            self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
             self._record_route_environment_info()
             return
 
@@ -966,8 +973,9 @@ class Orchestrator:
 
         # Determine API routing from settings.api_backend enum
         self.route = resolve_route(settings)
+        self.eval_route = resolve_evaluation_route(settings, self.route)
         logger.info("API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None))
-        self.success_checker = SuccessChecker(self.sandbox, route=self.route)
+        self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
 
         # Create and start the agent. For a no-op (type: none) task this dispatches
         # to NoOpAgent, whose start/communicate/stop are no-ops — the orchestrator
@@ -1083,6 +1091,12 @@ class Orchestrator:
         assert self.result is not None
         assert self.route is not None
         self.result.environment_info["api_routing"] = ROUTE_NAMES[type(self.route)]
+        # The evaluation side (llm_judge / agent_judge / simulated user) may run on
+        # a different, constant backend — pinned to Claude when the agent is on
+        # LiteLLM — so record it: a run then shows what actually graded/simulated
+        # it, distinct from the agent's api_routing.
+        if self.eval_route is not None:
+            self.result.environment_info["eval_routing"] = ROUTE_NAMES[type(self.eval_route)]
         if isinstance(self.route, BedrockRoute):
             self.result.environment_info["aws_region"] = self.route.region
             if self.route.model:
@@ -1675,7 +1689,10 @@ class Orchestrator:
             config=sim_config,
             task_description=self.task.description,
             initial_prompt=initial_prompt,
-            route=self.route,
+            # Pin the simulated user to the constant Claude eval route, not the
+            # agent's (possibly open-weight) route, so the simulator behaves
+            # identically across the models under test.
+            route=self.eval_route,
         )
         await simulator.start()
 
