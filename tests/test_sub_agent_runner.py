@@ -286,7 +286,7 @@ async def test_runner_cleans_up_when_cancelled_mid_communicate(sandbox: Sandbox)
         await started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            _ = await task  # the await's effect is propagating the cancellation raised above
 
     assert captured["path"]
     assert not Path(captured["path"]).exists()

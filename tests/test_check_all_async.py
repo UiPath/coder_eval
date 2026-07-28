@@ -375,10 +375,20 @@ class TestBaseCriterionSyncAsyncDerivation:
     def test_defining_a_checker_overriding_neither_raises_at_class_definition(self):
         """The override contract is enforced by __init_subclass__ at
         class-definition time — before register_criterion (or any other entry
-        point, e.g. CriterionRegistry.register called directly) ever runs."""
+        point, e.g. CriterionRegistry.register called directly) ever runs.
+
+        Built via ``type(...)`` rather than a ``class`` statement so no name is
+        bound to the (never fully constructed) class — __init_subclass__ raises
+        before the class object exists, so there would be nothing to reference
+        afterward anyway.
+        """
+        import types
+
         from coder_eval.models import FileExistsCriterion
 
         with pytest.raises(TypeError, match="must override _check_impl"):
-
-            class _NeitherChecker(BaseCriterion[FileExistsCriterion]):
-                criterion_type = "neither_test"
+            types.new_class(
+                "_NeitherChecker",
+                (BaseCriterion[FileExistsCriterion],),
+                exec_body=lambda ns: ns.update(criterion_type="neither_test"),
+            )

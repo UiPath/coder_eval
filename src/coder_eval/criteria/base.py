@@ -9,7 +9,7 @@ from abc import ABC
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import wraps
-from typing import TYPE_CHECKING, Any, ClassVar, Concatenate, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Concatenate, Literal, ParamSpec
 
 from coder_eval.errors import JudgeInfrastructureError
 from coder_eval.models import BaseSuccessCriterion, CriterionAggregate, CriterionResult
@@ -46,7 +46,14 @@ class CheckContext:
     reference_dir: "Path | None" = None
 
 
-def handle_criterion_errors[**P](
+# Module-level ParamSpec (rather than the PEP 695 `def f[**P](...)` form ruff's
+# UP047 prefers) — CodeQL's Python extractor doesn't yet parse PEP 695 type
+# parameters referenced via `P.args`/`P.kwargs` and flags `P` as a potentially
+# uninitialized local; a plain `typing.ParamSpec` is unambiguous to both tools.
+P = ParamSpec("P")
+
+
+def handle_criterion_errors(  # noqa: UP047
     func: Callable[Concatenate[Any, BaseSuccessCriterion, P], CriterionResult],
 ) -> Callable[Concatenate[Any, BaseSuccessCriterion, P], CriterionResult]:
     """Decorator to handle errors in criterion checkers.
@@ -97,7 +104,7 @@ def handle_criterion_errors[**P](
     return wrapper
 
 
-def handle_criterion_errors_async[**P](
+def handle_criterion_errors_async(  # noqa: UP047
     func: Callable[Concatenate[Any, BaseSuccessCriterion, P], Awaitable[CriterionResult]],
 ) -> Callable[Concatenate[Any, BaseSuccessCriterion, P], Awaitable[CriterionResult]]:
     """Async twin of :func:`handle_criterion_errors`, for ``check_async``.
