@@ -58,17 +58,24 @@ def test_format_routing_handles_every_route():
         assert out and out.startswith(ROUTE_NAMES[type(r)])
 
 
-def test_invoke_tool_channel_handles_every_route(monkeypatch):
+async def test_invoke_tool_channel_handles_every_route(monkeypatch):
     """The llm_judge dispatch must handle every route type — an unhandled member
     would fall past all cases and raise UnboundLocalError. Network-touching arms
     (Bedrock/Direct) are stubbed so this only checks dispatch coverage."""
-    monkeypatch.setattr(llm_judge, "invoke_bedrock_judge", lambda **_: {})
-    monkeypatch.setattr(llm_judge, "invoke_anthropic_judge", lambda **_: {})
+
+    async def _stub_bedrock(**_: object) -> dict[str, object]:
+        return {}
+
+    async def _stub_anthropic(**_: object) -> dict[str, object]:
+        return {}
+
+    monkeypatch.setattr(llm_judge, "invoke_bedrock_judge_async", _stub_bedrock)
+    monkeypatch.setattr(llm_judge, "invoke_anthropic_judge_async", _stub_anthropic)
     monkeypatch.setattr(llm_judge, "extract_verdict_from_anthropic_response", lambda _resp: (None, "stub"))
     monkeypatch.setattr(llm_judge, "token_usage_from_anthropic_dict", lambda _resp: None)
     criterion = MagicMock()
     for r in _INSTANCES:
-        result = _invoke_tool_channel(criterion=criterion, route=r, system_msg="s", user_msg="u")  # type: ignore[arg-type]
+        result = await _invoke_tool_channel(criterion=criterion, route=r, system_msg="s", user_msg="u")  # type: ignore[arg-type]
         # (verdict, parse_error, raw_text, response_usage) — a 4-tuple means the
         # route matched an explicit arm rather than falling through.
         assert isinstance(result, tuple) and len(result) == 4

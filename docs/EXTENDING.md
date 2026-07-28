@@ -188,13 +188,15 @@ Notes:
   can opt out with the `abstract=True` class keyword — every one of ITS
   subclasses is still checked normally). `SuccessChecker.check_all_async`
   — the orchestrator's entry point — awaits every `_check_impl_async`-native
-  checker directly on the event loop (concurrently with its siblings), and runs
-  everything else through one `asyncio.to_thread` slot.
+  checker directly on the event loop instead of pinning a thread, and offloads
+  everything else to `asyncio.to_thread`. Criteria currently run SEQUENTIALLY
+  (strictly in declaration order, matching the sync `check_all`); running
+  multiple judge criteria concurrently is a follow-up.
 - If your checker overrides `_check_impl_async`, it MUST NOT do blocking work
   (file I/O, subprocess calls) directly on the event loop — that would stall
-  every sibling judge criterion gathered alongside it. Offload blocking calls
-  with `await asyncio.to_thread(...)` (see `llm_judge`/`agent_judge`, which do
-  this for their sandbox/reference file reads).
+  the orchestrator's own loop for the duration of the call. Offload blocking
+  calls with `await asyncio.to_thread(...)` (see `llm_judge`/`agent_judge`,
+  which do this for their sandbox/reference file reads).
 - The derived sync bridge (`_check_impl`'s default `asyncio.run(...)` call) can
   only run when no event loop is already running — calling the public sync
   `check()`/`check_all()` on an async-only checker from inside a running loop

@@ -1,4 +1,4 @@
-"""Tests for SuccessChecker.check_all_async (GH #55).
+"""Tests for SuccessChecker.check_all_async.
 
 BaseCriterion's primary surface is async: a checker overrides exactly one of
 ``_check_impl`` (sync CPU/file-bound) or ``_check_impl_async`` (genuine async
@@ -6,19 +6,17 @@ I/O — llm_judge / agent_judge), and the base derives the other. A checker
 counts as "native async" for dispatch purposes iff it overrides
 ``_check_impl_async`` itself.
 
-``check_all_async`` must:
-  - run all native-async criteria concurrently with each other (not serially),
-  - run the remaining sync criteria together in a single ``to_thread`` slot,
-  - run that sync batch to completion BEFORE starting the native-async batch
-    (not concurrently) — several sync criteria mutate the sandbox
-    (run_command, uipath_eval) while judge criteria read it, so overlapping
-    the two would make scores depend on unrelated timing,
-  - preserve result ordering regardless of which path each criterion took,
-  - let every native-async sibling settle before re-raising a
-    JudgeInfrastructureError (no orphaned judge work),
-  - preserve the sync path's error-handling contract (KeyError / generic
-    Exception captured into a failed CriterionResult; JudgeInfrastructureError
-    escalates).
+``check_all_async`` currently runs every criterion SEQUENTIALLY, strictly in
+declaration order — the same order/isolation guarantee ``check_all`` (the
+sync twin) provides. Concurrent dispatch of adjacent judge criteria (the
+GH #55 motivation) is intentionally deferred to a follow-up PR; this module
+pins the sequential contract in the meantime:
+  - every criterion is fully awaited before the next one starts, regardless
+    of whether it's native-async or sync-offloaded-to-a-thread,
+  - declaration order is preserved exactly (matches ``check_all``),
+  - the sync path's error-handling contract carries over unchanged (KeyError /
+    generic Exception captured into a failed CriterionResult;
+    JudgeInfrastructureError escalates and stops any remaining criteria).
 """
 
 import asyncio
@@ -45,32 +43,6 @@ from coder_eval.sandbox import Sandbox
 SLEEP_SECONDS = 0.2
 
 
-class _ConcurrencyProbe:
-    """Deterministic barrier for proving N coroutines are in flight at once,
-    instead of asserting on measured wall-clock elapsed time (which only
-    proves concurrency with however much slack the margin allows, and is
-    sensitive to CPU oversubscription under a parallel test run)."""
-
-    def __init__(self, expected: int):
-        self._expected = expected
-        self._in_flight = 0
-        self.peak_in_flight = 0
-        self._arrived = asyncio.Event()
-        self._count = 0
-
-    async def enter(self) -> None:
-        self._in_flight += 1
-        self.peak_in_flight = max(self.peak_in_flight, self._in_flight)
-        self._count += 1
-        if self._count >= self._expected:
-            self._arrived.set()
-        else:
-            await self._arrived.wait()
-
-    def leave(self) -> None:
-        self._in_flight -= 1
-
-
 @pytest.fixture
 def sandbox(tmp_path):
     config = SandboxConfig(driver="tempdir")
@@ -91,9 +63,8 @@ class _SleepyAsyncChecker(BaseCriterion[LLMJudgeCriterion]):
     """Stand-in for llm_judge/agent_judge: overrides _check_impl_async only,
     and sleeps on the event loop (not a thread) — the "native async" shape.
 
-    Optionally rendezvous on a ``_ConcurrencyProbe`` (deterministic) and/or
-    append markers to a shared ``events`` list (for ordering assertions)
-    instead of relying on wall-clock timing.
+    Optionally appends markers to a shared ``events`` list (for ordering
+    assertions) instead of relying on wall-clock timing.
     """
 
     criterion_type = "llm_judge"
@@ -101,13 +72,11 @@ class _SleepyAsyncChecker(BaseCriterion[LLMJudgeCriterion]):
     def __init__(
         self,
         sleep_seconds: float = SLEEP_SECONDS,
-        probe: "_ConcurrencyProbe | None" = None,
         events: list[str] | None = None,
         label: str = "async",
     ):
         self.sleep_seconds = sleep_seconds
         self.calls = 0
-        self.probe = probe
         self.events = events
         self.label = label
 
@@ -115,12 +84,7 @@ class _SleepyAsyncChecker(BaseCriterion[LLMJudgeCriterion]):
         self.calls += 1
         if self.events is not None:
             self.events.append(f"{self.label}-start")
-        if self.probe is not None:
-            await self.probe.enter()
-        else:
-            await asyncio.sleep(self.sleep_seconds)
-        if self.probe is not None:
-            self.probe.leave()
+        await asyncio.sleep(self.sleep_seconds)
         if self.events is not None:
             self.events.append(f"{self.label}-end")
         return CriterionResult(criterion_type=self.criterion_type, description=criterion.description, score=1.0)
@@ -164,35 +128,35 @@ def _file_criterion(description: str, path: str = "x.txt") -> FileExistsCriterio
     return FileExistsCriterion(description=description, path=path)
 
 
-class TestNativeAsyncConcurrency:
+class TestSequentialExecution:
     @pytest.mark.asyncio
-    async def test_two_judge_criteria_run_concurrently(self, checker):
-        """Two llm_judge-type criteria must overlap, not serialize (issue #55 point 1).
+    async def test_two_judge_criteria_run_sequentially_not_concurrently(self, checker):
+        """check_all_async currently runs every criterion SEQUENTIALLY —
+        concurrent dispatch of adjacent judges (the GH #55 motivation) is
+        deferred to a follow-up PR. Two llm_judge-type criteria must NOT
+        overlap: the first must fully finish (start AND end) before the
+        second starts, proven deterministically via ordered event markers."""
+        events: list[str] = []
+        fake = _SleepyAsyncChecker(sleep_seconds=0.01, events=events)
 
-        Proven deterministically via a rendezvous barrier (peak_in_flight==2)
-        instead of a wall-clock margin.
-        """
-        probe = _ConcurrencyProbe(expected=2)
-        fake = _SleepyAsyncChecker(probe=probe)
         checker._checker_instances["llm_judge"] = fake
-
         criteria = [_llm_criterion("a"), _llm_criterion("b")]
         results = await asyncio.wait_for(checker.check_all_async(criteria), timeout=5.0)
 
         assert fake.calls == 2
-        assert probe.peak_in_flight == 2, "judge criteria serialized instead of overlapping"
+        assert events == ["async-start", "async-end", "async-start", "async-end"], (
+            f"judge criteria overlapped instead of running sequentially: {events}"
+        )
         assert [r.score for r in results] == [1.0, 1.0]
 
     @pytest.mark.asyncio
-    async def test_sync_and_async_runs_never_overlap_and_preserve_declaration_order(self, checker):
+    async def test_sync_and_async_criteria_never_overlap_and_preserve_declaration_order(self, checker):
         """Sync and native-async criteria must never overlap — several
         first-party sync criteria mutate the sandbox (run_command,
         uipath_eval) while judge criteria read it, so overlapping the two
         would make a judge's score depend on how far a concurrent
-        sandbox-mutating command happened to get. Declaration order across the
-        sync/async boundary must be preserved EXACTLY (contiguous-run
-        scheduling), not collapsed to "all sync, then all async" regardless of
-        where each criterion was declared.
+        sandbox-mutating command happened to get. Declaration order must be
+        preserved exactly, matching check_all's serial semantics.
 
         Proven deterministically via ordered event markers instead of a
         wall-clock margin, for BOTH orderings.
@@ -230,13 +194,11 @@ class TestNativeAsyncConcurrency:
         assert [r.score for r in results] == [1.0, 1.0]
 
     @pytest.mark.asyncio
-    async def test_run_command_writes_are_visible_to_concurrent_llm_judge(self, tmp_path):
+    async def test_run_command_writes_are_visible_to_subsequent_llm_judge(self, tmp_path):
         """End-to-end regression test (real registered run_command + llm_judge
-        checkers, not fakes) for the ordering hazard this PR's sequencing fix
-        closes: a sandbox-mutating sync criterion must complete BEFORE a
-        sandbox-reading judge criterion starts, so the judge's view of the
-        sandbox is deterministic — not dependent on how far a concurrently
-        running shell command happened to get."""
+        checkers, not fakes): a sandbox-mutating sync criterion must complete
+        BEFORE a sandbox-reading judge criterion declared after it starts, so
+        the judge's view of the sandbox is deterministic."""
         config = SandboxConfig(driver="tempdir")
         sandbox = Sandbox(config, task_id="ordering_regression_test")
         sandbox.setup()
@@ -283,13 +245,10 @@ class TestNativeAsyncConcurrency:
 
     @pytest.mark.asyncio
     async def test_llm_judge_declared_before_run_command_sees_pre_mutation_state(self, tmp_path):
-        """Reversed declaration order — [llm_judge, run_command] — is the order
-        a naive "all sync, then all async" scheduler inverts (the judge would
-        run AFTER run_command regardless of declaring it first, silently
-        grading post-mutation state). check_all_async's contiguous-run
-        scheduling must instead match check_all's strict declaration-order
-        semantics: the judge, declared first, must see PRE-mutation state,
-        exactly like it would running serially."""
+        """Reversed declaration order — [llm_judge, run_command] — must match
+        check_all's strict declaration-order semantics: the judge, declared
+        first, must see PRE-mutation state, exactly like it would running
+        serially (which is exactly what check_all_async does today)."""
         config = SandboxConfig(driver="tempdir")
         sandbox = Sandbox(config, task_id="reversed_ordering_regression_test")
         sandbox.setup()
@@ -328,10 +287,7 @@ class TestNativeAsyncConcurrency:
                 sync_results = real_checker.check_all([judge_criterion, run_criterion])
 
             assert async_results[1].score == 1.0, "run_command should have succeeded"
-            assert async_results[0].score == 0.0, (
-                "llm_judge declared BEFORE run_command must see PRE-mutation state "
-                "(declaration order was inverted by the async/sync batching)"
-            )
+            assert async_results[0].score == 0.0, "llm_judge declared BEFORE run_command must see PRE-mutation state"
             assert [r.score for r in async_results] == [r.score for r in sync_results], (
                 "check_all_async must agree with check_all's declaration-order semantics"
             )
@@ -371,31 +327,32 @@ class TestNativeAsyncErrorHandling:
             await checker.check_all_async([_llm_criterion("j")])
 
     @pytest.mark.asyncio
-    async def test_judge_infrastructure_error_does_not_orphan_sibling_judges(self, checker):
-        """A raising judge must not abandon its siblings mid-flight — the
-        gather uses return_exceptions=True so every sibling settles (and any
-        side effect it performs completes) before the error is re-raised."""
-        completed: list[str] = []
+    async def test_judge_infrastructure_error_stops_remaining_criteria(self, checker):
+        """Sequential dispatch means a JudgeInfrastructureError from one
+        criterion propagates immediately, exactly like check_all's serial
+        list-building — criteria declared AFTER the raising one never even
+        start (there is nothing concurrent to orphan, since nothing runs
+        concurrently)."""
+        ran: list[str] = []
 
-        class _SideEffectAsyncChecker(_SleepyAsyncChecker):
+        class _TrackingAsyncChecker(_SleepyAsyncChecker):
             async def _check_impl_async(
                 self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None
             ):
-                result = await super()._check_impl_async(
+                ran.append(criterion.description)
+                return await super()._check_impl_async(
                     criterion, sandbox, reference_code, turn_records=turn_records, context=context
                 )
-                completed.append(criterion.description)
-                return result
 
         checker._checker_instances["llm_judge"] = _RaisingAsyncChecker(JudgeInfrastructureError("down"))
-        checker._checker_instances["agent_judge"] = _SideEffectAsyncChecker(sleep_seconds=SLEEP_SECONDS)
+        checker._checker_instances["agent_judge"] = _TrackingAsyncChecker(sleep_seconds=0.0)
 
         from coder_eval.models import AgentJudgeCriterion
 
-        criteria = [_llm_criterion("j"), AgentJudgeCriterion(description="sibling", prompt="grade it")]
+        criteria = [_llm_criterion("j"), AgentJudgeCriterion(description="never_runs", prompt="grade it")]
         with pytest.raises(JudgeInfrastructureError, match="down"):
             await checker.check_all_async(criteria)
-        assert completed == ["sibling"], "sibling judge was orphaned instead of being allowed to settle"
+        assert ran == [], "criterion declared after the raising one should never have started"
 
     @pytest.mark.asyncio
     async def test_empty_criteria_returns_empty(self, checker):

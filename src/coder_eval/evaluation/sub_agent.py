@@ -119,10 +119,11 @@ class SubAgentRunner:
 
         Async so a genuine network/subprocess wait yields the event loop instead
         of pinning a thread-pool thread — lets ``SuccessChecker.check_all_async``
-        run this concurrently with other judge-type criteria (llm_judge) instead
-        of serializing them. The blocking filesystem work (``copytree``/``rmtree``)
-        is pushed to a worker thread via ``asyncio.to_thread`` so it doesn't block
-        the loop either.
+        await this directly without pinning a thread. (``check_all_async``
+        currently runs criteria sequentially; running this concurrently with
+        other judge-type criteria is deferred to a follow-up PR.) The blocking
+        filesystem work (``copytree``/``rmtree``) is pushed to a worker thread
+        via ``asyncio.to_thread`` so it doesn't block the loop either.
 
         Cancellation safety: ``run_async`` is awaited directly on the
         orchestrator's own loop (not under its own ``asyncio.run`` on a worker

@@ -16,8 +16,9 @@ intentionally do not share an HTTP client.
 Async on purpose: this is llm_judge's only implementation of the network
 call (there is no sync twin) — ``httpx.AsyncClient`` lets the call yield the
 event loop instead of blocking a thread-pool thread for the wait, so
-``SuccessChecker.check_all_async`` can run several judge criteria
-concurrently without pinning a thread per judge.
+``SuccessChecker.check_all_async`` awaits it directly without pinning a
+thread. (``check_all_async`` currently runs criteria sequentially; running
+several judges concurrently is deferred to a follow-up PR.)
 """
 
 from __future__ import annotations

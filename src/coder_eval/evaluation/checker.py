@@ -177,39 +177,26 @@ class SuccessChecker:
     ) -> CriteriaResults:
         """Async twin of ``check_all`` — the orchestrator's entry point.
 
-        A checker is "native async" when it overrides ``_check_impl_async``
-        itself (see ``BaseCriterion``) — that's the criteria making genuine
-        async I/O (``llm_judge``, ``agent_judge``). Those are awaited directly
-        on the event loop, concurrently with any ADJACENT native-async
-        criteria, so a task stacking two judge criteria back-to-back fires
-        both LLM calls at once instead of serializing them, and neither pins
-        a thread for the network wait.
+        Runs every criterion SEQUENTIALLY, strictly in declaration order —
+        the same order/isolation guarantee ``check_all`` provides. A checker
+        is "native async" when it overrides ``_check_impl_async`` itself (see
+        ``BaseCriterion``) — that's the criteria making genuine async I/O
+        (``llm_judge``, ``agent_judge``); those are awaited directly on the
+        event loop instead of pinning a thread-pool thread for the network
+        wait. Everything else (CPU/file-bound criteria that only override the
+        sync ``_check_impl``) is offloaded to a worker thread via
+        ``asyncio.to_thread`` so it doesn't block the loop either. Neither of
+        those is about concurrency between criteria — each criterion is fully
+        awaited before the next one starts, exactly like ``check_all``.
 
-        Everything else (CPU/file-bound criteria that only override the sync
-        ``_check_impl``) still runs together in a single ``asyncio.to_thread``
-        slot per contiguous run, same as before.
-
-        Declaration order is preserved EXACTLY across the sync/async boundary:
-        ``criteria`` is split into maximal contiguous runs of the same kind
-        (sync or native-async) and the runs execute strictly in declaration
-        order — never overlapping a run with its neighbor. This matters
-        because several first-party sync criteria mutate the sandbox
-        (``run_command``, ``uipath_eval``) while judge criteria read it; a
-        naive "all sync, then all async" batching (regardless of declaration
-        order) would let a judge declared BEFORE a mutating criterion grade
-        its POST-mutation state — a silent scoring change from ``check_all``'s
-        strict declaration-order semantics. Splitting into contiguous runs
-        keeps that invariant true for every ordering while still parallelizing
-        judges that are adjacent to each other.
-
-        Each native-async run is gathered with ``return_exceptions=True`` so a
-        ``JudgeInfrastructureError`` from one judge does not abandon its
-        siblings mid-flight (an abandoned coroutine could otherwise keep a
-        credentialed ``agent_judge`` sub-agent running, and spending budget,
-        against a sandbox the orchestrator is already tearing down) — every
-        sibling in that run settles before the first such error is re-raised.
-        Every captured sibling exception is logged (not silently dropped) even
-        though only the first is re-raised.
+        Concurrent dispatch of adjacent judge criteria (the actual GH #55
+        motivation — firing multiple judges' LLM calls at once instead of
+        serializing them) is DELIBERATELY NOT done here; that scheduling
+        change is scoped to a follow-up PR so it can be reviewed (and its
+        sandbox-mutation-ordering implications tested) on its own. This
+        method exists as the async entry point the orchestrator now calls
+        unconditionally, with sequential semantics identical to ``check_all``
+        in the meantime.
 
         Args:
             criteria: List of criterion definitions.
@@ -223,76 +210,13 @@ class SuccessChecker:
         """
         ref_code, records, ref_dir = self._resolve_refs(reference_code, turn_records, reference_dir)
 
-        results: dict[int, CriterionResult] = {}
-        for is_async, run_indices in self._contiguous_runs(criteria):
-            if is_async:
-                await self._run_async_run(criteria, run_indices, ref_code, records, ref_dir, results)
+        results: list[CriterionResult] = []
+        for criterion in criteria:
+            if self._is_native_async(criterion.type):
+                results.append(await self._check_single_async(criterion, ref_code, records, ref_dir))
             else:
-                run_criteria = [criteria[i] for i in run_indices]
-                run_results = await asyncio.to_thread(self._check_all_sync, run_criteria, ref_code, records, ref_dir)
-                for idx, result in zip(run_indices, run_results, strict=True):
-                    results[idx] = result
-
-        # Building the ordered list from a dict that's provably total (every index was
-        # assigned by exactly one run above) type-checks as list[CriterionResult] with
-        # no cast, and raises a plain KeyError — not a silently-stripped-under -O
-        # assert — if a future refactor ever drops an index.
-        return [results[i] for i in range(len(criteria))]
-
-    def _contiguous_runs(self, criteria: SuccessCriteria) -> list[tuple[bool, list[int]]]:
-        """Split ``criteria`` indices into maximal contiguous runs of the same
-        kind (native-async vs sync), preserving declaration order between
-        runs. E.g. ``[judge, judge, run_command, judge]`` -> ``[(True, [0,1]),
-        (False, [2]), (True, [3])]`` — the two adjacent judges still form one
-        run (so they gather concurrently), but neither run reorders past the
-        sync criterion between them.
-        """
-        runs: list[tuple[bool, list[int]]] = []
-        for i, c in enumerate(criteria):
-            is_async = self._is_native_async(c.type)
-            if runs and runs[-1][0] == is_async:
-                runs[-1][1].append(i)
-            else:
-                runs.append((is_async, [i]))
-        return runs
-
-    async def _run_async_run(
-        self,
-        criteria: SuccessCriteria,
-        indices: list[int],
-        reference_code: str | None,
-        turn_records: TurnRecords | None,
-        reference_dir: Path | None,
-        results: dict[int, CriterionResult],
-    ) -> None:
-        """Run one contiguous native-async run concurrently, writing into ``results``.
-
-        Uses ``return_exceptions=True`` so a ``JudgeInfrastructureError`` from
-        one judge doesn't abandon its siblings in THIS run mid-flight; every
-        exceptional outcome is logged, and the first (in index order) is
-        re-raised after all siblings have settled.
-        """
-
-        async def run_one(i: int) -> CriterionResult:
-            return await self._check_single_async(criteria[i], reference_code, turn_records, reference_dir)
-
-        outcomes = await asyncio.gather(*(run_one(i) for i in indices), return_exceptions=True)
-
-        first_exc: BaseException | None = None
-        for idx, outcome in zip(indices, outcomes, strict=True):
-            if isinstance(outcome, BaseException):
-                logger.error(
-                    "Criterion '%s' (index %d) raised during concurrent judge dispatch: %s",
-                    criteria[idx].type,
-                    idx,
-                    outcome,
-                )
-                if first_exc is None:
-                    first_exc = outcome
-            else:
-                results[idx] = outcome
-        if first_exc is not None:
-            raise first_exc
+                results.append(await asyncio.to_thread(self._check_single, criterion, ref_code, records, ref_dir))
+        return results
 
     def _is_native_async(self, criterion_type: str) -> bool:
         """Whether this criterion type's checker makes genuine async I/O.
