@@ -144,6 +144,36 @@
         gap: 0.3rem;
         font-variant-numeric: tabular-nums;
       }
+      /* Reserve the width of a 3-digit count so swapping snapshot -> spinner ->
+         live value doesn't shift the bar's layout. */
+      .count {
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-end;
+        min-width: 2.25ch;
+      }
+      /* Installed by JS only (see the script) — a spinner that can never be
+         resolved would be a lie, so no-JS keeps the static snapshot instead. */
+      .spinner {
+        display: inline-block;
+        width: 0.8em;
+        height: 0.8em;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        opacity: 0.75;
+        animation: spin 0.6s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .spinner {
+          animation-duration: 2.4s;
+        }
+      }
       /* Visually hidden, still announced — the counts are bare numbers otherwise. */
       .sr-only {
         position: absolute;
@@ -187,7 +217,7 @@
               d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z"
             />
           </svg>
-          <span data-stat="stars">107</span>
+          <span class="count" data-stat="stars">107</span>
           <span class="sr-only">stars</span>
         </span>
         <span class="stat" title="Forks">
@@ -196,30 +226,77 @@
               d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75v-.878a2.25 2.25 0 111.5 0v.878a2.25 2.25 0 01-2.25 2.25h-1.5v2.128a2.251 2.251 0 11-1.5 0V8.5h-1.5A2.25 2.25 0 013.5 6.25v-.878a2.25 2.25 0 111.5 0zM5 3.25a.75.75 0 10-1.5 0 .75.75 0 001.5 0zm6.75.75a.75.75 0 100-1.5.75.75 0 000 1.5zm-3 8.75a.75.75 0 100-1.5.75.75 0 000 1.5z"
             />
           </svg>
-          <span data-stat="forks">2</span>
+          <span class="count" data-stat="forks">2</span>
           <span class="sr-only">forks</span>
         </span>
       </a>
     </main>
 
     <script>
-      // The counts above are a committed snapshot so the bar is never blank or
-      // half-rendered; this refreshes them to live values. Unauthenticated
-      // api.github.com allows 60 requests/hour/IP, which is ample for a stub
-      // nobody should be landing on. Any failure (offline, rate limit, schema
-      // change) silently leaves the snapshot in place.
-      fetch("https://api.github.com/repos/UiPath/coder_eval")
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d) => {
-          if (!d) return;
-          const set = (key, value) => {
-            const el = document.querySelector(`[data-stat="${key}"]`);
-            if (el && Number.isFinite(value)) el.textContent = value.toLocaleString();
-          };
-          set("stars", d.stargazers_count);
-          set("forks", d.forks_count);
-        })
-        .catch(() => {});
+      // Star/fork counts: a committed snapshot in the markup, refreshed to live
+      // values from api.github.com on load.
+      //
+      // The spinner is installed HERE rather than shipped in the HTML, which is
+      // the whole trick. A spinner baked into the markup would still be spinning
+      // for a visitor with JavaScript disabled — nothing would ever resolve it —
+      // so it would claim "fetching…" forever and read as broken. Because only
+      // JS can start the spinner, it only ever appears where JS is also able to
+      // finish the job; no-JS visitors keep the static snapshot, which is
+      // slightly stale at worst but never a lie.
+      //
+      // Every exit restores or replaces the spinner: success writes the live
+      // number, and failure (offline, rate limit — unauthenticated is 60
+      // requests/hour/IP — unexpected payload, or the 4s timeout) puts the
+      // snapshot back.
+      (function () {
+        const cells = Array.from(document.querySelectorAll("[data-stat]"));
+        if (!cells.length || !("fetch" in window) || !("AbortController" in window)) return;
+
+        const snapshot = new Map(cells.map((el) => [el, el.textContent]));
+        const restore = () => cells.forEach((el) => (el.textContent = snapshot.get(el)));
+
+        cells.forEach((el) => {
+          el.textContent = "";
+          const spinner = document.createElement("span");
+          spinner.className = "spinner";
+          // The adjacent .sr-only label already names the metric; announcing a
+          // transient spinner on top of it is noise.
+          spinner.setAttribute("aria-hidden", "true");
+          el.appendChild(spinner);
+        });
+
+        // The timeout RESTORES, it does not merely abort. Aborting alone would
+        // leave the spinner running forever against any fetch implementation
+        // that ignores the signal, which is the precise failure this whole
+        // arrangement exists to prevent — so the deadline resolves the UI itself
+        // and the abort is just cleanup. `settled` makes the race single-shot, so
+        // a response arriving after the deadline can't overwrite the restored
+        // snapshot (or vice versa).
+        let settled = false;
+        let timer;
+        const abort = new AbortController();
+        const finish = (apply) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          apply();
+        };
+        timer = setTimeout(() => {
+          finish(restore);
+          abort.abort();
+        }, 4000);
+
+        fetch("https://api.github.com/repos/UiPath/coder_eval", { signal: abort.signal })
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+          .then((d) => {
+            const values = { stars: d.stargazers_count, forks: d.forks_count };
+            // All-or-nothing: a partial payload would otherwise leave one cell
+            // spinning next to a resolved one.
+            if (!cells.every((el) => Number.isFinite(values[el.dataset.stat]))) throw new Error("bad payload");
+            finish(() => cells.forEach((el) => (el.textContent = values[el.dataset.stat].toLocaleString())));
+          })
+          .catch(() => finish(restore));
+      })();
     </script>
   </body>
 </html>
