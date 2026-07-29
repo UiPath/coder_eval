@@ -1,8 +1,9 @@
 """Model pricing for cost calculation.
 
-Anthropic/OpenAI built-in rates; plugins contribute additional rates via
+Anthropic/OpenAI/Google built-in rates; plugins contribute additional rates via
 ``register_pricing()``. Prices are per million tokens (MTok).
-Source: https://www.anthropic.com/pricing
+Sources: https://claude.com/pricing#api, https://developers.openai.com/api/docs/pricing,
+https://ai.google.dev/gemini-api/docs/pricing (all verified 2026-07-29).
 """
 
 from collections.abc import Iterable
@@ -19,7 +20,7 @@ class ModelPricing:
     cache_read_per_mtok: float  # prompt caching read
 
 
-# Official Anthropic pricing as of 2025
+# Official vendor rate cards, verified 2026-07-29.
 # Key: CLI model name (before gateway mapping)
 _PRICING: dict[str, ModelPricing] = {
     # Claude 5 Fable / Mythos: $10/$50.
@@ -67,8 +68,8 @@ _PRICING: dict[str, ModelPricing] = {
     # Claude 3 Haiku
     "claude-3-haiku-20240307": ModelPricing(0.25, 1.25, 0.30, 0.03),
     # OpenAI GPT-5 / Codex (direct or via Azure OpenAI). Released 2025-09-23.
-    # Source: https://openai.com/api/pricing (gpt-5-codex: $1.25/M in,
-    # $0.125/M cached in, $10/M out). OpenAI does not bill cache writes
+    # Source: https://developers.openai.com/api/docs/pricing (gpt-5-codex: $1.25/M
+    # in, $0.125/M cached in, $10/M out). OpenAI does not bill cache writes
     # separately, so cache_write == input rate.
     "gpt-5-codex": ModelPricing(1.25, 10.0, 1.25, 0.125),
     "gpt-5": ModelPricing(1.25, 10.0, 1.25, 0.125),
@@ -97,21 +98,33 @@ _PRICING: dict[str, ModelPricing] = {
     "gpt-5.6-terra": ModelPricing(2.5, 15.0, 2.5, 0.25),
     "gpt-5.6-luna": ModelPricing(1.0, 6.0, 1.0, 0.10),
     # Google Gemini (AntigravityAgent, via the Gemini Developer API). Per-MTok
-    # rates from ai.google.dev/gemini-api/docs/pricing (2026). Gemini bills no
-    # separate cache-WRITE fee, so cache_write == input (the agent maps
-    # cache_creation_tokens to 0, so this value is effectively unused); cache_read
-    # is the cached-input rate (~10% of input). CAVEAT: Pro's >200K-token tier is
-    # higher ($4/$18); this flat rate reads low for very-large-context runs — fine
-    # for typical eval tasks. Keyed on the bare model id in agent.model.
-    "gemini-3-pro-preview": ModelPricing(2.0, 12.0, 2.0, 0.20),
+    # rates from ai.google.dev/gemini-api/docs/pricing. Gemini bills no separate
+    # cache-WRITE fee, so cache_write == input (the agent maps cache_creation_tokens
+    # to 0, so this value is effectively unused); cache_read is the cached-input
+    # rate (~10% of input). Keyed on the bare model id in agent.model — the ids
+    # below are the literal codes returned by the ListModels endpoint.
+    # Two CAVEATS, both of which read LOW rather than high:
+    #  - Pro's >200K-token tier costs more ($4/$18 in/out, $0.40 cached). Fine for
+    #    typical eval tasks; revisit if benchmarking very-large-context runs.
+    #  - Audio input is billed above the text/image/video rate on the Flash-Lite and
+    #    3-Flash-Preview tiers. Coding agents send no audio, so the text rate applies.
+    "gemini-3.6-flash": ModelPricing(1.5, 7.5, 1.5, 0.15),
+    "gemini-3.5-flash": ModelPricing(1.5, 9.0, 1.5, 0.15),
+    "gemini-3.5-flash-lite": ModelPricing(0.30, 2.5, 0.30, 0.03),
     "gemini-3.1-pro-preview": ModelPricing(2.0, 12.0, 2.0, 0.20),
     "gemini-3.1-pro-preview-customtools": ModelPricing(2.0, 12.0, 2.0, 0.20),
-    "gemini-3.5-flash": ModelPricing(1.5, 9.0, 1.5, 0.15),
-    "gemini-3-flash-preview": ModelPricing(1.5, 9.0, 1.5, 0.15),
+    "gemini-3.1-flash-lite": ModelPricing(0.25, 1.5, 0.25, 0.025),
+    "gemini-3.1-flash-lite-preview": ModelPricing(0.25, 1.5, 0.25, 0.025),
+    "gemini-3-flash-preview": ModelPricing(0.50, 3.0, 0.50, 0.05),
+    # Gemini 3 Pro Preview has been dropped from the public rate card (superseded by
+    # 3.1 Pro). Its last published rate is kept so historical runs still price.
+    "gemini-3-pro-preview": ModelPricing(2.0, 12.0, 2.0, 0.20),
     # Open-weight models on Bedrock (eu-north-1), driven via the LiteLLM backend.
+    # These are the Stockholm rates, a ~20% premium over the us-east-1 rate card —
+    # do NOT "correct" them against the US column of the AWS pricing page.
     # Bedrock lists no prompt-cache read/write rate for these, so cache-creation
     # is priced at the input rate and cache-read at 0 (conservative — see the
-    # per-provider cost-accounting caveat; revisit against the AWS model cards).
+    # per-provider cost-accounting caveat).
     "deepseek.v3.2": ModelPricing(0.74, 2.22, 0.74, 0.0),
     "zai.glm-5": ModelPricing(1.2, 3.84, 1.2, 0.0),
     "moonshotai.kimi-k2.5": ModelPricing(0.72, 3.6, 0.72, 0.0),
@@ -121,7 +134,7 @@ _PRICING: dict[str, ModelPricing] = {
     # at OpenRouter's published input_cache_read rate. Rates per OpenRouter's
     # /models endpoint (per-token x 1e6).
     "moonshotai/kimi-k3": ModelPricing(3.0, 15.0, 3.0, 0.30),
-    "z-ai/glm-5.2": ModelPricing(0.826, 2.596, 0.826, 0.1534),
+    "z-ai/glm-5.2": ModelPricing(0.7168, 2.2528, 0.7168, 0.13312),
     "deepseek/deepseek-v4-pro": ModelPricing(0.435, 0.87, 0.435, 0.003625),
 }
 
