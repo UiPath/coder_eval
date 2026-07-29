@@ -11,6 +11,7 @@ from coder_eval.models import (
     EvaluationResult,
     ExperimentDefinition,
     ExperimentResult,
+    FinalStatus,
     TaskExperimentSummary,
 )
 from coder_eval.path_utils import replicate_subdir_name
@@ -45,21 +46,33 @@ _ROW_ERROR_MESSAGE_MAX_CHARS = 400
 
 
 def _cost_complete(result: EvaluationResult) -> bool:
-    """Whether every turn that burned tokens on this row also carries a cost.
+    """Whether this row's recorded spend accounts for everything it spent.
 
-    False means ``total_cost_usd`` is a floor, not the bill: some turn's spend is
-    missing from it. Every in-tree agent prices its own turns, so in practice the
-    way to land here is a model the rate card cannot price at all. This is the
-    per-row signal that feeds ``RunSummary.tasks_unpriced``.
+    False means ``total_cost_usd`` is a floor, not the bill. Two ways to get there,
+    and they are different failures:
 
-    True for a row that burned nothing (an error before the agent ran genuinely
-    cost nothing, and must not be reported as missing cost).
+    1. **A turn burned tokens the rate card could not price.** The agent's own
+       backend prices a clean turn, so the rate card only matters for a turn the
+       backend never priced (a killed partial). With no rate, that turn books
+       tokens against no money.
+    2. **A task-level timeout preserved no turn at all.** ``TaskTimeoutError``
+       comes from the watchdog, which SIGKILLs the agent by PID; unlike a
+       turn-level timeout it never reaches ``_on_attempt_failure``, so no partial
+       turn is drained and the row lands with zero turns and zero tokens. A task
+       timeout means the evaluation loop was still running, so that spend is real
+       and simply unrecorded. Reporting such a row as fully priced would be a
+       false claim: it is the one case where cost is missing with no tokens to
+       point at.
+
+    True for a row that burned nothing. An error before the agent ran genuinely
+    cost zero and must not be reported as missing cost, which is why case 2 is
+    keyed on ``TIMEOUT`` rather than on elapsed time: a fast setup failure and a
+    slow one are both free, while a task timeout is never free.
     """
-    return all(
-        usage.total_cost_usd is not None
-        for t in result.iterations
-        if (usage := t.token_usage) is not None and not usage.is_empty()
-    )
+    priced = [usage for t in result.iterations if (usage := t.token_usage) is not None and not usage.is_empty()]
+    if not priced:
+        return result.final_status is not FinalStatus.TIMEOUT
+    return all(usage.total_cost_usd is not None for usage in priced)
 
 
 def _judge_cost_usd(result: EvaluationResult) -> float | None:

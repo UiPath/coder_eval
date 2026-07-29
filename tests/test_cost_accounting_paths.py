@@ -115,6 +115,30 @@ class TestRowCostProjection:
         assert eval_result_to_task_dict(_result([]))["cost_complete"] is True
         assert eval_result_to_task_dict(_result([_turn(1, TokenUsage())]))["cost_complete"] is True
 
+    def test_cost_complete_false_when_a_task_timeout_preserved_no_turn(self):
+        """A task timeout with zero turns is unrecorded spend, not free.
+
+        The watchdog SIGKILLs the agent by PID, so unlike a turn-level timeout this
+        never reaches ``_on_attempt_failure`` and no partial turn is drained. The
+        row lands with no turns, no tokens and no cost. Since a task timeout means
+        the evaluation loop was still running, calling that row fully priced would
+        be a false claim — the one case where cost is missing with no tokens to
+        point at.
+        """
+        result = _result([])
+        result.final_status = FinalStatus.TIMEOUT
+        assert eval_result_to_task_dict(result)["cost_complete"] is False
+
+    def test_cost_complete_true_for_a_fast_error_with_no_turn(self):
+        """The companion: a setup failure has no turns either, and really is free.
+
+        Keyed on status rather than elapsed time so a slow setup failure stays free
+        while a task timeout never does.
+        """
+        result = _result([])
+        result.final_status = FinalStatus.ERROR
+        assert eval_result_to_task_dict(result)["cost_complete"] is True
+
     def test_judge_cost_rolls_up_onto_the_row(self):
         """Judge spend was captured per criterion and totalled nowhere."""
         result = _result([_turn(1, TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1))])
