@@ -87,9 +87,11 @@ def _simulator_cost_usd(result: EvaluationResult) -> float | None:
     whenever a task pins ``agent.model``, as the skills suite does throughout.
     Pricing the simulator at the subject's model would mis-bill every such row.
 
-    Simulator telemetry buckets everything as prompt/completion tokens with no
-    cache split, so the whole prompt prices at the uncached input rate: an upper
-    bound on a dialog whose prefix was cached.
+    A floor, not the exact figure. ``UserSimulator`` records only
+    ``uncached_input_tokens`` and drops both cache buckets, so a prompt whose
+    prefix was cached is largely absent from the count: a live run's full
+    persona-and-goal prompt recorded 6 input tokens. Widening that telemetry is a
+    change to what the run captures, not to what this reports.
     """
     sim = result.simulation
     if sim is None:

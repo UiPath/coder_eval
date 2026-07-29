@@ -180,8 +180,8 @@ def is_priced(model: str) -> bool:
 
     The rate card is a static table, so a model that shipped after the installed
     framework version prices as ``None`` — silently, per turn, for a whole run.
-    Call this at run start to make that a warning (or a refusal) instead of a
-    number that reads 19% low with nothing on the report to say so.
+    Call this at run start to make that a warning instead of a number that reads
+    19% low with nothing on the report to say so.
     """
     return _lookup_rate(_normalize_model(model)) is not None
 

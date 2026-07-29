@@ -238,14 +238,13 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
     @computed_field  # type: ignore[prop-decorator]
     @property
     def pass_rate(self) -> float | None:
-        """``tasks_succeeded / tasks_run`` as a 0-1 fraction. ``None`` on an empty variant."""
-        return self.tasks_succeeded / self.tasks_run if self.tasks_run else None
+        """``tasks_succeeded / tasks_run`` as a 0-1 fraction. ``None`` on an empty variant.
 
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def error_share(self) -> float | None:
-        """``tasks_error / tasks_run`` as a 0-1 fraction. ``None`` on an empty variant."""
-        return self.tasks_error / self.tasks_run if self.tasks_run else None
+        No variant-level ``error_share`` counterpart: the variant tables already
+        print ``Errors`` beside ``Pass Rate (n/m)``, and nothing else consumes the
+        experiment JSON, so a second computed field would be published unread.
+        """
+        return self.tasks_succeeded / self.tasks_run if self.tasks_run else None
 
 
 class TaskExperimentSummary(BaseModel):  # noqa: CE009 -- persisted result model; round-trip leniency like models/results.py

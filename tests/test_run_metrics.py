@@ -114,7 +114,6 @@ class TestPassRateDenominator:
             average_duration=1.0,
         )
         assert agg.pass_rate == pytest.approx(0.25)
-        assert agg.error_share == pytest.approx(0.5)
 
     def test_rates_serialize_into_run_json(self):
         """Downstream consumers must be able to READ the rate instead of re-deriving it.
