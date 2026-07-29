@@ -58,14 +58,25 @@ def test_all_criterion_checkers_accept_context_kwarg():
     import inspect
 
     from coder_eval.criteria import CriterionRegistry, init_criteria
+    from coder_eval.criteria.base import BaseCriterion
 
     init_criteria(validate=False)
     checkers = {t: CriterionRegistry.get_checker(t) for t in CriterionRegistry.list_types()}
     assert checkers, "registry discovered no checkers"
     for criterion_type, checker_cls in checkers.items():
-        params = inspect.signature(checker_cls._check_impl).parameters
+        # Inspect whichever of _check_impl / _check_impl_async this checker actually
+        # overrides (see BaseCriterion) — a checker that overrides only the async
+        # surface (llm_judge, agent_judge) inherits BaseCriterion._check_impl
+        # unchanged, so inspecting that would vacuously pass regardless of what the
+        # checker's real override declares.
+        impl = (
+            checker_cls._check_impl
+            if checker_cls._check_impl is not BaseCriterion._check_impl
+            else (checker_cls._check_impl_async)
+        )
+        params = inspect.signature(impl).parameters
         assert "context" in params, (
-            f"{checker_cls.__name__} (_check_impl for '{criterion_type}') missing 'context' kwarg"
+            f"{checker_cls.__name__} (checking impl for '{criterion_type}') missing 'context' kwarg"
         )
         # No checker should still declare the removed route/reference_dir/proxy kwargs.
         for removed in ("route", "reference_dir", "proxy"):

@@ -19,7 +19,6 @@ just as it is never passed to the coding agent.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import shutil
 import tempfile
@@ -232,9 +231,18 @@ class UserSimulator:
 
         Shared by stop() and start()'s failure path so the rmtree idiom lives in
         one place. Best-effort (ignore_errors=True); idempotent (safe to call twice).
+
+        Deliberately NOT `await asyncio.to_thread(...)`: both callers (`stop()`,
+        and `start()`'s `except BaseException` arm) are cancellation-reachable,
+        and a bare await inside that path is itself cancellable — cancelling
+        right as this line is reached would skip the cleanup and leak the
+        (empty, but still real) scratch dir with no reaper. The scratch dir
+        never has real content (the simulator has no tools to write into it),
+        so a plain synchronous rmtree is cheap and bounded — same rationale as
+        `SubAgentRunner.run_async`'s `finally` cleanup.
         """
         if self._scratch_dir is not None and self._scratch_dir.exists():
-            await asyncio.to_thread(shutil.rmtree, self._scratch_dir, ignore_errors=True)
+            shutil.rmtree(self._scratch_dir, ignore_errors=True)  # noqa: CE002
         self._scratch_dir = None
 
     async def start(self) -> None:
