@@ -1367,7 +1367,7 @@ class Orchestrator:
         every judge call across the dialog.
 
         Ledger key is ``(position, criterion_type)`` — a stable criterion
-        identity. ``check_all`` rebuilds ``success_criteria_results`` in the
+        identity. ``check_all_async`` rebuilds ``success_criteria_results`` in the
         same order as ``task.success_criteria`` every turn (the positional
         alignment ``calculate_weighted_score`` enforces via ``zip(strict=True)``),
         so ``position`` is stable across turns; pairing it with the type makes
@@ -1423,8 +1423,7 @@ class Orchestrator:
                 task_file=self.task_file,
                 cached_reference=self._reference_code,
             )
-            criteria_results = await asyncio.to_thread(
-                self.success_checker.check_all,
+            criteria_results = await self.success_checker.check_all_async(
                 self.task.success_criteria,
                 reference_code=reference_code,
                 reference_dir=reference_dir,
@@ -1469,7 +1468,7 @@ class Orchestrator:
         self.result.iterations.append(turn_record)
         self._sync_sandbox_command_path_with_agent()
 
-        # Record early-stop info (if the watcher tripped) BEFORE check_all, so it
+        # Record early-stop info (if the watcher tripped) BEFORE check_all_async, so it
         # survives even if a checker raises. None on a full run or when unarmed.
         self.result.early_stop = self._early_stop_watcher.info if self._early_stop_watcher is not None else None
 
@@ -1482,8 +1481,7 @@ class Orchestrator:
             task_file=self.task_file,
             cached_reference=self._reference_code,
         )
-        criteria_results = await asyncio.to_thread(
-            self.success_checker.check_all,
+        criteria_results = await self.success_checker.check_all_async(
             self.task.success_criteria,
             reference_code=reference_code,
             reference_dir=reference_dir,
@@ -1562,7 +1560,7 @@ class Orchestrator:
 
         The block lifted verbatim from the three identical sites (per-turn,
         budget-gate fallback, end-of-dialog): (re)load the reference, run
-        ``check_all`` off the event loop, fold this turn's judge usage into the
+        ``check_all_async``, fold this turn's judge usage into the
         dialog-wide accumulator, store the results, and recompute the weighted score.
         Whether to additionally set ``all_passed`` and emit a ``CriteriaCheckEvent`` is
         left to the caller — those differ across the sites (the budget-gate fallback
@@ -1575,8 +1573,7 @@ class Orchestrator:
             task_file=self.task_file,
             cached_reference=self._reference_code,
         )
-        criteria_results = await asyncio.to_thread(
-            self.success_checker.check_all,
+        criteria_results = await self.success_checker.check_all_async(
             self.task.success_criteria,
             reference_code=reference_code,
             reference_dir=reference_dir,

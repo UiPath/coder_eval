@@ -190,7 +190,7 @@ async def test_no_timeout_when_none(tmp_path) -> None:
     mock_agent.communicate = AsyncMock(return_value=_make_turn_record())
     orchestrator.agent = mock_agent
 
-    orchestrator.success_checker.check_all = MagicMock(  # type: ignore[union-attr]
+    orchestrator.success_checker.check_all_async = AsyncMock(  # type: ignore[union-attr]
         return_value=[CriterionResult(criterion_type="file_exists", description="test", score=1.0)]
     )
 
@@ -407,7 +407,7 @@ async def test_turn_timeout_is_per_attempt_not_cycle(tmp_path):
     orchestrator.sandbox = mock_sandbox
 
     mock_checker = MagicMock()
-    mock_checker.check_all = MagicMock(
+    mock_checker.check_all_async = AsyncMock(
         return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
     )
     orchestrator.success_checker = mock_checker

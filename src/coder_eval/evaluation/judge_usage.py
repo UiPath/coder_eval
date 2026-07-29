@@ -35,8 +35,8 @@ def _coerce_int(value: Any) -> int:
 def token_usage_from_anthropic_dict(resp: dict[str, Any], *, model: str | None = None) -> TokenUsage | None:
     """Extract usage from an Anthropic / Bedrock-invoke Messages response dict.
 
-    Both ``invoke_anthropic_judge`` (``response.model_dump()``) and
-    ``invoke_bedrock_judge`` (parsed ``/invoke`` JSON) carry an Anthropic-shaped
+    Both ``invoke_anthropic_judge_async`` (``response.model_dump()``) and
+    ``invoke_bedrock_judge_async`` (parsed ``/invoke`` JSON) carry an Anthropic-shaped
     ``usage`` block. Returns ``None`` when usage is missing or carries no tokens.
 
     ``model`` prices the call from the rate card. Neither judge backend returns a

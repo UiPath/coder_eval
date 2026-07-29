@@ -810,7 +810,7 @@ def _compute_suite_rollup(
 
     # Drive each criterion's aggregate() + evaluate suite_thresholds. Per-row
     # results are sliced per criterion INSTANCE by position: SuccessChecker.
-    # check_all appends one CriterionResult per criterion in declared order
+    # check_all_async appends one CriterionResult per criterion in declared order
     # (evaluation/checker.py), so row.success_criteria_results[i] belongs to
     # task_criteria[i]. Aggregating per-instance (not pooled by type) is what
     # lets a task stack many criteria of the SAME type — e.g. activation's
