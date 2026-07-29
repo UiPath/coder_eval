@@ -168,18 +168,15 @@ as every other agent.
 
 ## Known limitations
 
-1. **No cooperative early stop.** Antigravity does not support the `should_stop`
-   seam, so `run_limits.stop_early` is unsupported for this agent (it errors at
-   resolution, as it does for any non-Claude agent).
-2. **No endpoint routing.** Only `GEMINI_API_KEY` + `ANTIGRAVITY_MODEL` are read —
+1. **No endpoint routing.** Only `GEMINI_API_KEY` + `ANTIGRAVITY_MODEL` are read —
    there is no base-URL, project, region, or gateway override.
-3. **Default-model drift.** The runtime fallback (`gemini-3.5-flash`) may differ from
+2. **Default-model drift.** The runtime fallback (`gemini-3.5-flash`) may differ from
    what a given release's docs or example tasks pin; always set `agent.model`
    explicitly for reproducible runs.
-4. **`kill_sync()` is best-effort.** The SDK's cancel/disconnect are async-only, so
+3. **`kill_sync()` is best-effort.** The SDK's cancel/disconnect are async-only, so
    the watchdog's synchronous kill only flips agent state to `ERROR`; real teardown
    happens on the subsequent async `stop()`.
-5. **Process-global spawn lock.** The SDK spawns `localharness` via a subprocess with
+4. **Process-global spawn lock.** The SDK spawns `localharness` via a subprocess with
    no env-injection seam, so the agent transiently mutates `PATH` across the spawn
    under a process-wide lock. This serializes harness startup across concurrent
    tasks (it does not serialize the turns themselves).
