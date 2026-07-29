@@ -148,19 +148,12 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         raise AgentCrashError(message)
 
     def _finalize_external_cancel(self, finalize: _FinalizeFn) -> None:
-        """Mark ERROR and finalize an externally-cancelled turn as a crash. Does NOT raise.
+        """Finalize a turn cancelled from outside (the task watchdog) as a crash. Does NOT raise.
 
-        A cancel that is not this turn's own timeout was delivered from outside the
-        turn — the task-level watchdog kills the agent and cancels the task running
-        it. Everything the event stream delivered is still intact at this point and
-        ``finalize`` reduces it into a complete record, but only the ``crashed``
-        branch parks that record on ``pending_turn``; finalizing as ``COMPLETED``
-        drops it, and the frame is unwinding so the return value goes nowhere
-        either. So a turn killed from outside must finalize as a crash for its
-        telemetry to survive at all.
-
-        The caller re-raises the ``CancelledError`` afterwards — this helper only
-        preserves the record, it does not alter cancellation semantics.
+        Only the ``crashed`` branch parks the record on ``pending_turn``; finalizing
+        as ``COMPLETED`` drops it, and the unwinding frame takes the return value
+        with it, so a killed turn's telemetry survives only via this path. The caller
+        re-raises the ``CancelledError`` afterwards.
         """
         self._state = AgentState.ERROR
         finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason="turn cancelled")

@@ -280,10 +280,8 @@ class _MockAssistantMessage:
 async def test_external_cancel_parks_the_turn_it_interrupted():
     """A turn cancelled from outside must leave its telemetry on ``pending_turn``.
 
-    This is the task-level timeout's kill path: the watchdog kills the agent and
-    cancels the task awaiting ``communicate()``, so the turn never returns a record
-    and the frame that held one unwinds. Whatever it spent before the kill is real
-    and billed, so the pending slot is the only place it can survive.
+    The task-timeout kill path: the turn never returns a record and the frame that
+    held one unwinds, so the pending slot is the only place its spend can survive.
     """
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits", model="claude-sonnet-5")
     agent = ClaudeCodeAgent(config)
@@ -305,7 +303,7 @@ async def test_external_cancel_parks_the_turn_it_interrupted():
             await streaming.wait()
             turn.cancel()
             with pytest.raises(asyncio.CancelledError):
-                await turn
+                await asyncio.wait_for(turn, timeout=5)
 
     partial = agent.pending_turn
     assert partial is not None, "the interrupted turn's record was discarded"

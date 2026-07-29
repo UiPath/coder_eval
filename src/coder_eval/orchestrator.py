@@ -530,11 +530,10 @@ class Orchestrator:
 
                 logger.error(f"Task timed out: {e}")
 
-                # Recover the turn that was in flight when the watchdog killed the
-                # agent. Nothing else on this path does: the cancel is delivered as
-                # a BaseException, so it never reaches the retry executor's
-                # per-attempt failure hook that drains the slot on a turn-level
-                # timeout. Runs here, before teardown clears the slot.
+                # Recover the turn in flight when the watchdog killed the agent.
+                # Nothing else on this path does: the cancel arrives as a
+                # BaseException, so it never reaches the retry executor's
+                # per-attempt hook that drains the slot on a turn-level timeout.
                 await self._drain_killed_turn()
             except BudgetExceededError as e:
                 # Map token-budget breaches and cost-budget breaches to distinct
@@ -622,27 +621,20 @@ class Orchestrator:
     async def _drain_killed_turn(self) -> None:
         """Move a hard-killed turn's partial record from the agent onto the result.
 
-        The task-level watchdog kills the agent and cancels the task running it, so
-        the in-flight turn never returns a record. What it managed to spend is real
-        and already recorded by the agent, which parks the partial on
-        ``pending_turn`` when it is cancelled from outside; this is the only reader
-        of that slot on the task-timeout path.
+        The only reader of ``pending_turn`` on the task-timeout path. Ordering
+        matters both ways: it must run before ``_cleanup`` (whose ``agent.stop()``
+        clears the slot) and before ``_finalize_result``, so the recovered turn
+        feeds token aggregation and command stats like any other.
 
-        Ordering matters in both directions. It runs before ``_cleanup``, whose
-        ``agent.stop()`` clears the slot, and before ``_finalize_result``, so the
-        recovered turn is picked up by token aggregation, command statistics and
-        model resolution exactly like a turn that ended on its own.
-
-        Best-effort by design: a task killed before its first turn has nothing
-        parked, and this runs on the way to a saved row, so it must not raise.
+        Best-effort: a task killed before its first turn has nothing parked, and
+        this runs on the way to a saved row, so it must not raise.
         """
         if self.agent is None or self.result is None:
             return
         try:
             partial = self.agent.pending_turn
-            # Type-checked because `pending_turn` is a slot any agent implementation
-            # fills, and a non-record here would fail validation during teardown and
-            # take the whole row down with it.
+            # `pending_turn` is a slot any agent implementation fills, so a non-record
+            # here would fail validation during teardown and take the row down with it.
             if not isinstance(partial, TurnRecord):
                 logger.debug("[%s] Hard-killed task preserved no partial turn", self.task.task_id)
                 return

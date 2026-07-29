@@ -40,10 +40,9 @@ def token_usage_from_anthropic_dict(resp: dict[str, Any], *, model: str | None =
     ``usage`` block. Returns ``None`` when usage is missing or carries no tokens.
 
     ``model`` prices the call from the rate card. Neither judge backend returns a
-    cost, so without it the judge's spend is invisible in every rollup — a suite
-    with ~100 ``llm_judge`` rows books real Bedrock tokens against no dollar
-    figure anywhere. Left unpriced (``total_cost_usd=None``) when the model is
-    absent from the rate card, which the run-level unpriced count then surfaces.
+    cost, so without it the judge's spend is invisible in every rollup. Left
+    unpriced (``total_cost_usd=None``) when the model is absent from the card,
+    which ``RunSummary.tasks_cost_incomplete`` then surfaces.
     """
     u = resp.get("usage")
     if not isinstance(u, dict):

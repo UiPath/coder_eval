@@ -197,10 +197,8 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
     """Aggregated statistics for a single variant across all tasks.
 
     ``pass_rate`` uses the same denominator as ``RunSummary.pass_rate``: every task
-    the variant ran, errors included as misses. The variant tables previously
-    divided by ``tasks_run - tasks_error``, so an A/B whose variants errored at
-    different rates compared two different denominators and read the noisier
-    variant as the better one.
+    the variant ran, errors included as misses. Otherwise an A/B whose variants
+    error at different rates compares two different denominators.
     """
 
     variant_id: str
@@ -238,12 +236,7 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
     @computed_field  # type: ignore[prop-decorator]
     @property
     def pass_rate(self) -> float | None:
-        """``tasks_succeeded / tasks_run`` as a 0-1 fraction. ``None`` on an empty variant.
-
-        No variant-level ``error_share`` counterpart: the variant tables already
-        print ``Errors`` beside ``Pass Rate (n/m)``, and nothing else consumes the
-        experiment JSON, so a second computed field would be published unread.
-        """
+        """``tasks_succeeded / tasks_run`` as a 0-1 fraction. ``None`` on an empty variant."""
         return self.tasks_succeeded / self.tasks_run if self.tasks_run else None
 
 
