@@ -159,7 +159,7 @@ def validate_early_stop(task: TaskDefinition) -> None:
     if not supports:
         raise EarlyStopConfigError(
             "run_limits.stop_early requires an agent that supports cooperative stopping "
-            + f"(currently Claude Code); agent type {agent_type!r} does not."
+            + f"(claude-code, codex, antigravity); agent type {agent_type!r} does not."
         )
 
     # (2) Arming requires at least one stop criterion.

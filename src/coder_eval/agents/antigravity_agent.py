@@ -27,7 +27,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter
@@ -184,6 +184,10 @@ def _to_token_usage(usage: Any, model: str | None) -> TokenUsage:
 @AgentRegistry.register(AgentKind.ANTIGRAVITY, AntigravityAgentConfig)
 class AntigravityAgent(Agent[AntigravityAgentConfig]):
     """Implementation of the Agent interface for Google Antigravity (Gemini)."""
+
+    # The step loop has a between-steps guard where the cooperative
+    # ``should_stop`` check runs, so this agent supports early-stop-on-criterion.
+    supports_cooperative_stop: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -413,10 +417,10 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
     ) -> TurnRecord:
         """Send a message to the Antigravity agent and receive its response.
 
-        ``should_stop`` is accepted for ``Agent.communicate`` override
-        compatibility and ignored — Antigravity does not support cooperative
-        early-stop (``supports_cooperative_stop`` is False), so the orchestrator
-        never passes it.
+        ``should_stop`` is the cooperative early-stop callback, polled after each
+        processed step. When it returns True the step loop breaks, the
+        conversation is cancelled (best-effort) and the turn finalizes cleanly as
+        ``STOPPED_EARLY`` (``crashed=False``).
 
         Drives one logical turn: ``conversation.send(prompt)`` then iterate
         ``receive_steps()`` until the turn goes idle, mapping the Gemini step
@@ -468,8 +472,21 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 conversation = self._sdk_agent.conversation
                 try:
                     await conversation.send(user_input)
+                    # The cooperative should_stop poll runs AFTER process_step (the
+                    # emission that lets the watcher latch on the deciding tool
+                    # call) and BEFORE the next step is pulled — the deciding step
+                    # is kept, the next is not. No-op when should_stop is None.
                     async for step in conversation.receive_steps():
                         state.process_step(step)
+                        if should_stop is not None and should_stop():
+                            state.stopped_early_hit = True
+                            self._log.debug("Cooperative stop requested; ending step loop at this boundary")
+                            break
+                    if state.stopped_early_hit:
+                        # Best-effort server-side cancel, mirrors kill(); a raising
+                        # cancel() lands in the guarded handler below.
+                        with contextlib.suppress(Exception):
+                            await conversation.cancel()
                 except asyncio.CancelledError:
                     if state.timeout_hit:
                         self._finalize_and_raise_timeout(state.finalize, timeout or 0)
@@ -477,9 +494,17 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 except Exception as e:
                     if state.timeout_hit:
                         self._finalize_and_raise_timeout(state.finalize, timeout or 0, cause=e)
-                    self._finalize_and_raise_crash(
-                        state.finalize, truncate_crash_message(f"Antigravity turn failed: {e!s}"), cause=e
-                    )
+                    if state.stopped_early_hit:
+                        # The turn already stopped cleanly (e.g. the generator's
+                        # aclose() raised on the break); escalating to a crash
+                        # would trigger the orchestrator's retry with the watcher's
+                        # decision still latched → immediate stop-at-turn-0 on the
+                        # retry (wasted spend). Fall through to the clean tail.
+                        self._log.warning("Ignoring post-stop exception; finalizing as STOPPED_EARLY: %s", e)
+                    else:
+                        self._finalize_and_raise_crash(
+                            state.finalize, truncate_crash_message(f"Antigravity turn failed: {e!s}"), cause=e
+                        )
 
             if state.timeout_hit:
                 # Watchdog fired but the pump finished before the cancel landed.
@@ -492,13 +517,20 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 self._finalize_external_cancel(state.finalize)
             raise
         except Exception as e:
-            self._finalize_and_raise_crash(
-                state.finalize, truncate_crash_message(f"Antigravity turn failed: {e!s}"), cause=e
-            )
+            if state.stopped_early_hit and not state.timeout_hit:
+                # Same retry-poisoning guard as the inner handler: a cooperative
+                # stop already happened, so finalize cleanly instead of crashing.
+                self._log.warning("Ignoring post-stop exception; finalizing as STOPPED_EARLY: %s", e)
+            else:
+                self._finalize_and_raise_crash(
+                    state.finalize, truncate_crash_message(f"Antigravity turn failed: {e!s}"), cause=e
+                )
 
         self._state = AgentState.WORKING
         self._end_turn_ok()
-        state.finalize(AgentEndStatus.COMPLETED, crashed=False, crash_reason=None)
+        # Precedence matches Claude: timeout (raised above) > stopped_early > completed.
+        status = AgentEndStatus.STOPPED_EARLY if state.stopped_early_hit else AgentEndStatus.COMPLETED
+        state.finalize(status, crashed=False, crash_reason=None)
         return collector.build_turn_record()
 
     async def stop(self) -> None:
@@ -588,6 +620,7 @@ class _AntigravityTurnState:
         self.turn_start_time = turn_start_time
 
         self.timeout_hit = False
+        self.stopped_early_hit = False
         self.finalized = False
 
         self.total_usage = TokenUsage()

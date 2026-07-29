@@ -106,6 +106,45 @@ async def test_codex_live_edits_file_and_records_telemetry(tmp_path):
 
 
 @_live
+async def test_codex_live_cooperative_stop_ends_turn_promptly(tmp_path):
+    """A ``should_stop`` that flips True after the first ToolStart ends the turn
+    cleanly as STOPPED_EARLY instead of running the multi-step task out — the
+    only automated check of real ``handle.interrupt()`` behavior."""
+    from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, ToolStartEvent
+
+    class _Sink:
+        def __init__(self):
+            self.tool_started = False
+            self.ends = []
+
+        def on_event(self, event):
+            if isinstance(event, ToolStartEvent):
+                self.tool_started = True
+            if isinstance(event, AgentEndEvent):
+                self.ends.append(event)
+
+    sink = _Sink()
+    agent = _make_agent()
+    await agent.start(str(tmp_path))
+    try:
+        record = await agent.communicate(
+            "Run `echo one`, then `echo two`, then `echo three`, each as a separate shell command, "
+            "then create three files a.txt, b.txt and c.txt.",
+            timeout=180,
+            stream_callback=sink,
+            should_stop=lambda: sink.tool_started,
+        )
+    finally:
+        await agent.stop()
+
+    # Clean cooperative stop: no crash, no pending partial, STOPPED_EARLY status.
+    assert record.crashed is False
+    assert agent.pending_turn is None
+    assert sink.ends, "expected an AgentEndEvent"
+    assert sink.ends[-1].status == AgentEndStatus.STOPPED_EARLY
+
+
+@_live
 async def test_codex_live_token_usage_populated(tmp_path):
     """Token usage is captured from the SDK and attached to the TurnRecord."""
     agent = _make_agent()
