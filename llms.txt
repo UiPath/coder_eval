@@ -1,0 +1,6 @@
+# Coder Eval
+
+The documentation moved to https://coder-eval.com/docs
+
+llms.txt: https://coder-eval.com/llms.txt
+Full docs in one file: https://coder-eval.com/llms-full.txt

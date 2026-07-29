@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Coder Eval — evaluate AI coding agents and Claude Code skills</title>
+    <!--
+      The description is here for link previews and for anyone reading source,
+      not for ranking: this page is noindex (see below), so search engines will
+      not surface it. It mirrors the wording used on coder-eval.com and in the
+      package metadata so the product is described the same way everywhere.
+    -->
+    <meta
+      name="description"
+      content="Coder Eval is an open-source framework for evaluating and benchmarking AI coding agents and Claude Code skills — sandboxed runs of Claude Code, Codex, and Gemini against declarative YAML tasks, with weighted scoring and CI gates. Documentation: coder-eval.com/docs"
+    />
+
+    <!--
+      This page replaces the MkDocs build that used to be published here.
+
+      Two copies of the same docs were live — this GitHub Pages mirror and
+      coder-eval.com/docs — each declaring itself canonical, which splits search
+      signals and lets the wrong host rank. The docs are now published only at
+      coder-eval.com/docs; this stub exists so anything still pointing here
+      (a crawl queue entry, an internal link) lands somewhere useful instead of
+      on a 404.
+
+      `noindex, follow` rather than a canonical pointing at /docs: this page's
+      content differs from the target, and Google both discourages combining
+      noindex with rel=canonical and ignores canonicals across substantially
+      different pages. noindex keeps the stub out of the index while its links
+      are still followed.
+
+      Self-contained by design: the logo is inlined from the website's
+      src/assets/logo-light.svg with its navy fills swapped to `currentColor`
+      (the "Eval" wordmark and the icon arc stay brand orange), so one copy
+      serves both colour schemes. No external stylesheets, fonts, or images.
+    -->
+    <meta name="robots" content="noindex, follow" />
+
+    <style>
+      :root {
+        color-scheme: light dark;
+        /* Brand palette, matching the website's src/assets logos. */
+        --orange: #fa4616;
+        --navy: #10233a;
+        --offwhite: #f5f7fa;
+
+        --fg: var(--navy);
+        --muted: #5b6b7c;
+        --bg: #ffffff;
+        --border: #e3e8ee;
+        --on-orange: #ffffff;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: var(--offwhite);
+          --muted: #9aabbc;
+          --bg: #0b1826;
+          --border: #21354a;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem 1.25rem;
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      main {
+        width: 100%;
+        max-width: 34rem;
+      }
+      /* The inlined wordmark inherits `color` for its navy parts. */
+      .logo {
+        display: block;
+        width: 11rem;
+        max-width: 60%;
+        height: auto;
+        margin-bottom: 1.75rem;
+        color: var(--fg);
+      }
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.5rem;
+        line-height: 1.3;
+      }
+      p {
+        margin: 0 0 1rem;
+        color: var(--muted);
+      }
+      /* What the product is — the reason a visitor who lands here should care.
+         With the h1 visually hidden this is the first thing read, so it carries
+         the visual weight a heading otherwise would. */
+      .lead {
+        color: var(--fg);
+        font-size: 1.0625rem;
+      }
+      /* Why this page exists; secondary to the description above it. */
+      .notice {
+        margin-bottom: 1.5rem;
+        font-size: 0.9375rem;
+      }
+      .notice a {
+        color: var(--orange);
+        font-weight: 600;
+      }
+      ul {
+        margin: 0 0 1.75rem;
+        padding: 0;
+        list-style: none;
+        border-top: 1px solid var(--border);
+      }
+      li {
+        border-bottom: 1px solid var(--border);
+      }
+      ul a {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.25rem 0.75rem;
+        align-items: baseline;
+        padding: 0.9rem 0.25rem;
+        color: var(--orange);
+        font-weight: 600;
+        text-decoration: none;
+      }
+      ul a:hover,
+      ul a:focus-visible {
+        text-decoration: underline;
+      }
+      ul a span {
+        color: var(--muted);
+        font-weight: 400;
+        font-size: 0.9375rem;
+      }
+      /* Repo bar: brand-orange pill with the repo name and live star/fork counts. */
+      .repo {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem 0.9rem;
+        padding: 0.7rem 1rem;
+        border-radius: 0.5rem;
+        background: var(--orange);
+        color: var(--on-orange);
+        text-decoration: none;
+        font-weight: 600;
+      }
+      .repo:hover,
+      .repo:focus-visible {
+        filter: brightness(1.07);
+      }
+      .repo svg {
+        flex: none;
+        fill: currentColor;
+      }
+      .repo-name {
+        margin-right: auto;
+      }
+      .stat {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        font-variant-numeric: tabular-nums;
+      }
+      /* Reserve a few digits of width so replacing the spinner with the fetched
+         number doesn't shift the rest of the bar. */
+      .count {
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-end;
+        min-width: 2.25ch;
+      }
+      /* The counts' initial state; the script swaps each one for a real number. */
+      .spinner {
+        display: inline-block;
+        width: 0.8em;
+        height: 0.8em;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        opacity: 0.75;
+        animation: spin 0.6s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .spinner {
+          animation-duration: 2.4s;
+        }
+      }
+      /* Visually hidden, still announced — the counts are bare numbers otherwise. */
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <svg class="logo" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 440" fill="none"><g transform="translate(-75,-36)"><path d="M224 176 L216 176 A56 56 0 0 0 160 232 L160 280 A56 56 0 0 0 216 336 L224 336" fill="none" stroke="#FA4616" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/><rect x="200" y="210" width="78" height="18" rx="9" fill="currentColor"/><rect x="200" y="247" width="52" height="18" rx="9" fill="currentColor"/><rect x="200" y="284" width="104" height="18" rx="9" fill="currentColor"/></g><g fill="currentColor"><g transform="translate(270.00,278.00) scale(0.19000,-0.19000)"><path d="M308 -10Q237 -10 185.0 16.5Q133 43 104.5 91.5Q76 140 76 206V524Q76 590 104.5 638.5Q133 687 185.0 713.5Q237 740 308 740Q378 740 430.0 713.5Q482 687 511.0 638.5Q540 590 540 524H414Q414 575 386.5 602.5Q359 630 308 630Q257 630 229.0 602.5Q201 575 201 524V206Q201 155 229.0 127.5Q257 100 308 100Q359 100 386.5 127.5Q414 155 414 206H540Q540 140 511.0 91.5Q482 43 430.0 16.5Q378 -10 308 -10Z"/></g><g transform="translate(380.00,278.00) scale(0.19000,-0.19000)"><path d="M300 -9Q194 -9 132.0 50.5Q70 110 70 211V339Q70 441 132.0 500.0Q194 559 300 559Q406 559 468.0 500.0Q530 441 530 339V211Q530 110 468.0 50.5Q406 -9 300 -9ZM300 100Q350 100 377.5 127.5Q405 155 405 207V343Q405 395 377.5 422.5Q350 450 300 450Q250 450 222.5 422.5Q195 395 195 343V207Q195 155 222.5 127.5Q250 100 300 100Z"/></g><g transform="translate(490.00,278.00) scale(0.19000,-0.19000)"><path d="M250 -10Q170 -10 120.5 47.0Q71 104 71 200V349Q71 446 120.0 503.0Q169 560 250 560Q307 560 346.5 531.0Q386 502 402 450L398 576V730H523V0H401V100Q386 48 347.0 19.0Q308 -10 250 -10ZM297 98Q345 98 371.5 127.0Q398 156 398 209V341Q398 394 371.5 423.0Q345 452 297 452Q249 452 222.5 426.0Q196 400 196 346V204Q196 150 222.5 124.0Q249 98 297 98Z"/></g><g transform="translate(600.00,278.00) scale(0.19000,-0.19000)"><path d="M301 -10Q231 -10 179.0 17.0Q127 44 98.5 93.5Q70 143 70 210V340Q70 407 98.5 456.5Q127 506 179.0 533.0Q231 560 301 560Q370 560 421.5 533.0Q473 506 501.5 457.5Q530 409 530 344V244H190V206Q190 150 219.0 121.5Q248 93 301 93Q340 93 367.5 106.5Q395 120 400 146H524Q511 75 450.0 32.5Q389 -10 301 -10ZM190 344V325L410 326V345Q410 402 382.0 433.0Q354 464 301 464Q246 464 218.0 432.5Q190 401 190 344Z"/></g><g transform="translate(710.00,278.00) scale(0.19000,-0.19000)"><path d="M97 0V550H219V443Q229 497 268.5 528.5Q308 560 371 560Q455 560 502.0 506.0Q549 452 549 355V303H424V349Q424 399 398.0 425.5Q372 452 324 452Q274 452 248.0 422.0Q222 392 222 337V0Z"/></g></g><g fill="#FA4616"><g transform="translate(890.00,278.00) scale(0.19000,-0.19000)"><path d="M88 0V730H526V620H211V430H491V324H211V110H526V0Z"/></g><g transform="translate(1000.00,278.00) scale(0.19000,-0.19000)"><path d="M221 0 36 550H167L273 216Q283 186 290.5 155.5Q298 125 301 103Q305 125 311.5 155.5Q318 186 327 215L432 550H564L380 0Z"/></g><g transform="translate(1110.00,278.00) scale(0.19000,-0.19000)"><path d="M239 -10Q155 -10 106.5 37.5Q58 85 58 162Q58 242 113.0 289.5Q168 337 264 337H398V376Q398 459 301 459Q257 459 231.0 442.0Q205 425 202 394H82Q86 468 144.5 514.0Q203 560 302 560Q407 560 465.0 511.0Q523 462 523 373V0H401V103Q394 50 351.0 20.0Q308 -10 239 -10ZM279 92Q334 92 366.0 119.0Q398 146 398 191V256H270Q229 256 205.0 233.0Q181 210 181 174Q181 137 206.5 114.5Q232 92 279 92Z"/></g><g transform="translate(1220.00,278.00) scale(0.19000,-0.19000)"><path d="M389 0Q307 0 257.5 49.0Q208 98 208 178V617H27V730H333V181Q333 150 350.5 131.5Q368 113 398 113H559V0Z"/></g></g></svg>
+
+      <!--
+        Visually hidden on purpose: the wordmark above already renders "Coder
+        Eval", so showing this too was the same two words twice. The heading
+        still exists for document structure, and it is the accessible name for
+        the page now that the logo is aria-hidden.
+      -->
+      <h1 class="sr-only">Coder Eval</h1>
+      <p class="lead">
+        An open-source framework for evaluating and benchmarking AI coding agents and their Claude
+        Code skills: it runs a real agent — Claude Code, Codex, or Gemini — in a sandbox against
+        declarative YAML tasks, then scores the files and commands the agent actually produced.
+      </p>
+      <p class="notice">
+        The documentation has moved to
+        <a href="https://coder-eval.com/docs">coder-eval.com/docs</a>.
+      </p>
+
+      <!--
+        Only the project site here: the docs link lives in the notice above and
+        the repo in the bar below, so each destination appears exactly once.
+      -->
+      <ul>
+        <li>
+          <a href="https://coder-eval.com">Project website <span>coder-eval.com</span></a>
+        </li>
+      </ul>
+
+      <a class="repo" href="https://github.com/UiPath/coder_eval">
+        <svg width="20" height="20" viewBox="0 0 16 16" aria-hidden="true">
+          <path
+            d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.07-.2-.36-1.02.07-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.43 1.1.14 1.92.07 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0016 8c0-4.42-3.58-8-8-8z"
+          />
+        </svg>
+        <span class="repo-name">UiPath/coder_eval</span>
+        <span class="stat" title="Stars">
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+            <path
+              d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z"
+            />
+          </svg>
+          <span class="count" data-stat="stars"><span class="spinner" aria-hidden="true"></span></span>
+          <span class="sr-only">stars</span>
+        </span>
+        <span class="stat" title="Forks">
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+            <path
+              d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75v-.878a2.25 2.25 0 111.5 0v.878a2.25 2.25 0 01-2.25 2.25h-1.5v2.128a2.251 2.251 0 11-1.5 0V8.5h-1.5A2.25 2.25 0 013.5 6.25v-.878a2.25 2.25 0 111.5 0zM5 3.25a.75.75 0 10-1.5 0 .75.75 0 001.5 0zm6.75.75a.75.75 0 100-1.5.75.75 0 000 1.5zm-3 8.75a.75.75 0 100-1.5.75.75 0 000 1.5z"
+            />
+          </svg>
+          <span class="count" data-stat="forks"><span class="spinner" aria-hidden="true"></span></span>
+          <span class="sr-only">forks</span>
+        </span>
+      </a>
+    </main>
+
+    <script>
+      // Fill the star/fork counts from api.github.com, replacing the spinners the
+      // markup ships. Nothing is hardcoded: a committed count would be wrong
+      // within days. Any failure — offline, rate limit (unauthenticated is 60
+      // requests/hour/IP), unexpected payload, scripting disabled — simply leaves
+      // the spinner in place rather than showing a stale or invented number.
+      fetch("https://api.github.com/repos/UiPath/coder_eval")
+        .then((r) => r.json())
+        .then((d) => {
+          const values = { stars: d.stargazers_count, forks: d.forks_count };
+          document.querySelectorAll("[data-stat]").forEach((el) => {
+            const n = values[el.dataset.stat];
+            if (Number.isFinite(n)) el.textContent = n.toLocaleString();
+          });
+        })
+        .catch(() => {});
+    </script>
+  </body>
+</html>
