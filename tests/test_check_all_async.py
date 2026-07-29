@@ -279,12 +279,26 @@ class TestSequentialExecution:
                     ]
                 }
 
-            with patch(
-                "coder_eval.criteria.llm_judge.invoke_anthropic_judge_async",
-                new=AsyncMock(side_effect=fake_invoke),
-            ):
-                async_results = await real_checker.check_all_async([judge_criterion, run_criterion])
-                sync_results = real_checker.check_all([judge_criterion, run_criterion])
+            sandbox2 = Sandbox(config, task_id="reversed_ordering_regression_test_sync_twin")
+            sandbox2.setup()
+            try:
+                sync_checker = SuccessChecker(
+                    sandbox2, init_registry=True, validate_registry=False, route=DirectRoute()
+                )
+                with patch(
+                    "coder_eval.criteria.llm_judge.invoke_anthropic_judge_async",
+                    new=AsyncMock(side_effect=fake_invoke),
+                ):
+                    async_results = await real_checker.check_all_async([judge_criterion, run_criterion])
+                    # check_all is the fully-sync surface: run it off the test's own
+                    # event loop (asyncio.to_thread) so its derived asyncio.run bridge
+                    # doesn't see a running loop and raise CheckerMisuseError. A
+                    # separate sandbox/checker avoids reusing built.txt from the
+                    # check_all_async run above, which would let the sync run's
+                    # judge see already-mutated state regardless of ordering.
+                    sync_results = await asyncio.to_thread(sync_checker.check_all, [judge_criterion, run_criterion])
+            finally:
+                sandbox2.cleanup(preserve=False)
 
             assert async_results[1].score == 1.0, "run_command should have succeeded"
             assert async_results[0].score == 0.0, "llm_judge declared BEFORE run_command must see PRE-mutation state"
@@ -389,6 +403,24 @@ class TestNativeAsyncErrorHandling:
         assert len(results) == 1
         assert results[0].score == 0.0
         assert "ctor boom" in (results[0].error or "")
+
+    def test_checker_misuse_error_escalates_through_success_checker_not_scored_zero(self, checker):
+        """CheckerMisuseError must escalate through SuccessChecker.check / check_all
+        exactly like JudgeInfrastructureError, not fall into _check_single's generic
+        `except Exception` arm and get scored 0.0. The prior fix only pinned this at
+        the BaseCriterion.check() layer (test_async_only_checker_sync_bridge_raises_loudly_from_a_running_loop);
+        this test exercises it through the SuccessChecker entry point a caller
+        actually uses, since _check_single/_check_single_async each have their own
+        except clauses that must also name CheckerMisuseError."""
+        from coder_eval.errors import CheckerMisuseError
+
+        checker._checker_instances["llm_judge"] = _SleepyAsyncChecker(sleep_seconds=0.0)
+
+        async def call_check_from_running_loop():
+            checker.check(_llm_criterion("j"))
+
+        with pytest.raises(CheckerMisuseError, match="check_async"):
+            asyncio.run(call_check_from_running_loop())
 
 
 class TestCheckAllAsyncMatchesSyncBehavior:

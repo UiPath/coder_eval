@@ -11,8 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..criteria import BaseCriterion, CriterionRegistry, init_criteria
-from ..criteria.base import CheckContext
-from ..errors import JudgeInfrastructureError
+from ..criteria.base import _ESCALATING_EXCEPTIONS, CheckContext
 from ..models import CriteriaResults, CriterionResult, SuccessCriteria, SuccessCriterion, TurnRecords
 from ..sandbox import Sandbox
 
@@ -361,8 +360,8 @@ class SuccessChecker:
             return self._finalize_result(criterion, result)
         except KeyError:
             return self._missing_checker_result(criterion)
-        except JudgeInfrastructureError:
-            raise  # judge infra failure escalates to FinalStatus.ERROR; do not score it
+        except _ESCALATING_EXCEPTIONS:
+            raise  # judge infra failure / checker misuse escalates to FinalStatus.ERROR; do not score it
         except Exception as e:
             # V3: Catch ALL exceptions, including checker __init__ failures
             return self._error_result(criterion, e)
@@ -399,7 +398,7 @@ class SuccessChecker:
             # methods' exception shape identical, in case that invariant ever
             # changes.
             return self._missing_checker_result(criterion)
-        except JudgeInfrastructureError:
+        except _ESCALATING_EXCEPTIONS:
             raise
         except Exception as e:
             return self._error_result(criterion, e)
