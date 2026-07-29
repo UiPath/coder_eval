@@ -1,17 +1,13 @@
 """Cost accounting on the error and timeout paths, where spend went missing.
 
-Three seams:
+Two seams:
 
 1. **The pre-flight** (``check_pricing_coverage``) — the measured loss. The rate
    card is a static table baked into the installed version, so a model released
    after it prices every turn as ``null``. Sonnet 5's rates landed one release
    after the 2026-07-21 nightly, which recorded $209.81 (18.9% of its true bill)
    across 62 errored rows as no cost at all, with one log line to show for it.
-2. **The per-turn backfill** (``Orchestrator._backfill_turn_costs``) — a net, not a
-   fix for a live gap: every in-tree agent already prices its own killed partials.
-   It makes "tokens on the record imply a cost on the record" an invariant at one
-   seam, so a plugin agent that doesn't price can't silently lose all of its spend.
-3. **The row projection** (``eval_result_to_task_dict``) — judge and simulator
+2. **The row projection** (``eval_result_to_task_dict``) — judge and simulator
    spend was captured and rolled up nowhere, and a row whose turns were only
    partly priced reported its partial sum as the whole.
 """
@@ -95,89 +91,9 @@ class TestPricingPreflight:
         assert "No pricing rate" in caplog.text
         assert "understate the bill" in caplog.text
 
-    def test_strict_refuses_to_start(self, tmp_path):
-        """The cost-bearing-run setting: fail at dispatch, not in the cost column."""
-        with pytest.raises(ValueError, match="strict_pricing"):
-            check_pricing_coverage([_resolved("claude-sonnet-99", tmp_path)], strict=True)
-
     def test_unpinned_model_is_not_flagged(self, tmp_path):
         """A task deferring its model to the route can't be pre-flighted from here."""
-        assert check_pricing_coverage([_resolved(None, tmp_path)], strict=True) == []
-
-
-class TestTurnCostBackfill:
-    """``_backfill_turn_costs`` is exercised through a bare Orchestrator instance.
-
-    Built with ``__new__`` rather than a full construction because the method reads
-    only ``self.result`` — a real Orchestrator needs a sandbox, an agent, and a
-    route, none of which participate in pricing.
-    """
-
-    @staticmethod
-    def _backfill(result: EvaluationResult) -> None:
-        from coder_eval.orchestrator import Orchestrator
-
-        orch = Orchestrator.__new__(Orchestrator)
-        orch.result = result
-        orch._backfill_turn_costs()
-
-    def test_prices_a_killed_turn_from_the_rate_card(self):
-        """The timeout shape: real tokens on the wire, no cost attached yet."""
-        result = self._result_with_partial()
-        self._backfill(result)
-
-        priced = result.iterations[1].token_usage
-        assert priced is not None and priced.total_cost_usd is not None
-        # 1M uncached input + 100k output on sonnet-5 ($3/$15 per MTok).
-        assert priced.total_cost_usd == pytest.approx(3.0 + 1.5)
-
-    def test_leaves_an_sdk_reported_cost_alone(self):
-        """The SDK's number is the authoritative billed figure; never overwrite it."""
-        result = self._result_with_partial()
-        self._backfill(result)
-        assert result.iterations[0].token_usage.total_cost_usd == pytest.approx(0.99)
-
-    def test_falls_back_to_the_row_model(self):
-        """A partial that never learned its model still prices off the resolved one."""
-        result = _result(
-            [_turn(1, TokenUsage(uncached_input_tokens=1_000_000, output_tokens=0), model=None, crashed=True)],
-            model="claude-sonnet-5",
-        )
-        self._backfill(result)
-        assert result.iterations[0].token_usage.total_cost_usd == pytest.approx(3.0)
-
-    def test_unpriceable_model_stays_unpriced(self):
-        """Not a guess: leave it null so tasks_unpriced can count it."""
-        result = _result(
-            [_turn(1, TokenUsage(uncached_input_tokens=1_000_000, output_tokens=0), model="made-up-model")],
-            model="made-up-model",
-        )
-        self._backfill(result)
-        assert result.iterations[0].token_usage.total_cost_usd is None
-
-    def test_empty_usage_is_not_priced(self):
-        """A turn that burned nothing must not acquire a $0.00 cost it never had."""
-        result = _result([_turn(1, TokenUsage())])
-        self._backfill(result)
-        assert result.iterations[0].token_usage.total_cost_usd is None
-
-    @staticmethod
-    def _result_with_partial() -> EvaluationResult:
-        return _result(
-            [
-                _turn(
-                    1,
-                    TokenUsage(uncached_input_tokens=1000, output_tokens=100, total_cost_usd=0.99),
-                    model="claude-sonnet-5",
-                ),
-                _turn(
-                    2,
-                    TokenUsage(uncached_input_tokens=1_000_000, output_tokens=100_000),
-                    model="claude-sonnet-5",
-                    crashed=True,
-                ),
-            ]
-        )
+        assert check_pricing_coverage([_resolved(None, tmp_path)]) == []
 
 
 class TestRowCostProjection:

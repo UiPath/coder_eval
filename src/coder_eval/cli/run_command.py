@@ -211,11 +211,6 @@ def run_command(
         "-v",
         help="Enable verbose (DEBUG level) logging",
     ),
-    strict_pricing: bool = typer.Option(
-        False,
-        "--strict-pricing",
-        help="Refuse to start if a task's model has no pricing rate (default: warn and run)",
-    ),
     log_file: Path | None = typer.Option(  # noqa: B008
         None,
         "--log-file",
@@ -419,7 +414,6 @@ def run_command(
                 resume=resume,
                 include_skipped=include_skipped,
                 junit_xml=junit_xml,
-                strict_pricing=strict_pricing,
             )
         )
     except KeyboardInterrupt:
@@ -445,7 +439,6 @@ async def _run_all_tasks(
     resume: bool = False,
     include_skipped: bool = False,
     junit_xml: Path | None = None,
-    strict_pricing: bool = False,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -491,7 +484,6 @@ async def _run_all_tasks(
         repeats=repeats,
         verbose=verbose,
         include_skipped=include_skipped,
-        strict_pricing=strict_pricing,
     )
 
     from ..telemetry import flush_telemetry, track_event

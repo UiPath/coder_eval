@@ -39,7 +39,7 @@ from .config import BatchRunConfig, resolve_preservation_mode
 logger = logging.getLogger(__name__)
 
 
-def check_pricing_coverage(resolved_tasks: list[ResolvedTask], *, strict: bool = False) -> list[str]:
+def check_pricing_coverage(resolved_tasks: list[ResolvedTask]) -> list[str]:
     """Pre-flight the rate card against the models this run will use.
 
     The rate card is a static table baked into the installed framework version,
@@ -47,34 +47,30 @@ def check_pricing_coverage(resolved_tasks: list[ResolvedTask], *, strict: bool =
     run completes, records full token counts, and reports a cost that is silently
     low. (One nightly under-reported $209.81, 18.9% of its bill, because the
     model's rates landed in the next release.) This turns that into a warning at
-    dispatch, or a refusal under ``strict``.
+    dispatch instead of a discovery weeks later.
+
+    A warning rather than a refusal, so a brand-new model stays evaluable on the
+    day it ships: the cost is what degrades, not the evaluation. What the run
+    actually lost is then counted after the fact by ``RunSummary.tasks_unpriced``.
 
     Only pinned ``agent.model`` values are visible here; a task that defers its
     model to the route resolves it inside the agent and can't be pre-flighted.
-    Those still get counted after the fact by ``RunSummary.tasks_unpriced``.
 
     Args:
         resolved_tasks: The fully-resolved tasks about to run.
-        strict: Raise instead of warning when any model is unpriced.
 
     Returns:
         The sorted, de-duplicated unpriced model ids (empty when all are priced).
-
-    Raises:
-        ValueError: Under ``strict`` when at least one model is unpriced.
     """
     missing = unpriced_models(rt.task.agent.model if rt.task.agent else None for rt in resolved_tasks)
     if not missing:
         return []
-    detail = (
-        f"No pricing rate for {', '.join(repr(m) for m in missing)}. Cost for these tasks "
-        + "will be recorded as null and every run-level total will understate the bill "
-        + "(RunSummary.cost_complete reports false). Add the rate to coder_eval.pricing "
-        + "or register it from a plugin via register_pricing()."
+    logger.warning(
+        "No pricing rate for %s. Cost for these tasks will be recorded as null and every "
+        + "run-level total will understate the bill (RunSummary.cost_complete reports false). "
+        + "Add the rate to coder_eval.pricing or register it from a plugin via register_pricing().",
+        ", ".join(repr(m) for m in missing),
     )
-    if strict:
-        raise ValueError(f"strict_pricing: refusing to start. {detail}")
-    logger.warning(detail)
     return missing
 
 
@@ -115,7 +111,7 @@ async def run_batch(
 
     start_time = datetime.now()
 
-    check_pricing_coverage(resolved_tasks, strict=config.strict_pricing)
+    check_pricing_coverage(resolved_tasks)
 
     if on_batch_start is not None:
         on_batch_start(len(resolved_tasks))

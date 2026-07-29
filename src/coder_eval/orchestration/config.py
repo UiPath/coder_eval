@@ -97,16 +97,6 @@ class BatchRunConfig(BaseModel):
     # Logging
     verbose: bool = Field(default=False, description="Enable verbose (DEBUG level) logging for Docker output")
 
-    strict_pricing: bool = Field(
-        default=False,
-        description=(
-            "Refuse to start when a task's model is absent from the pricing rate card, "
-            "instead of warning and running with that model's spend recorded as null. "
-            "Off by default so a brand-new model is still evaluable; on for cost-bearing "
-            "runs (the nightly), where an unpriced model silently understates the bill."
-        ),
-    )
-
     # TODO(container-death-diagnostics): consider a run-level default resource
     # cap. Containers run uncapped today (sandbox.limits.{max_memory_mb,
     # max_cpus,max_pids} default to None -> _build_argv emits no --memory/
