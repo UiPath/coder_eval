@@ -881,16 +881,16 @@ class RunSummary(BaseModel):
 
     ``pass_rate`` is ``tasks_succeeded / tasks_run``: **every dispatched task is in
     the denominator, errors included as misses.** An error is not a free pass. The
-    previous formula excluded errors, which paid a bonus for erroring — up to 10
-    points on a real nightly, and one run that rendered as 100% while passing 0.8%
-    of its rows. A denominator that shrinks when a run goes wrong is not a metric
-    you can set beside another run's. ``error_share`` says how much of the rate is
+    previous formula excluded errors, which paid a bonus for erroring: a harness
+    that fell over enough could render as a perfect score while passing almost
+    nothing. A denominator that shrinks when a run goes wrong is not a metric you
+    can set beside another run's. ``error_share`` says how much of the rate is
     errors, so a bad infrastructure night *shows* instead of being absorbed.
 
     This is the single denominator for the whole framework. Every reporting
-    surface reads ``pass_rate`` rather than re-deriving one: four surfaces across
-    two repos each computing their own is what made the dashboard and the markdown
-    report disagree by up to 10 points on the same run.json.
+    surface reads ``pass_rate`` rather than re-deriving one: independent
+    re-derivations drift, and consumers reading the same run.json then publish
+    different rates for it.
 
     Every derived metric here is computed, never stored, so it cannot drift from
     the counts it comes from.
@@ -962,11 +962,10 @@ class RunSummary(BaseModel):
     # Derived run metrics.
     #
     # Every one is a computed_field over the stored counts and ``task_results``,
-    # so it serializes into run.json for downstream consumers (evalboard, the
-    # external eval-runner) while staying impossible to set to something the
-    # rows disagree with. Consumers should READ these rather than re-deriving
-    # them: four surfaces re-deriving two different denominators is what made
-    # the dashboard and the markdown report disagree by up to 10 points.
+    # so it serializes into run.json for downstream consumers (dashboards,
+    # external runners) while staying impossible to set to something the rows
+    # disagree with. Consumers should READ these rather than re-deriving them:
+    # every independent re-derivation is another denominator that can drift.
     # ------------------------------------------------------------------
 
     @computed_field  # type: ignore[prop-decorator]

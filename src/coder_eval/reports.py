@@ -170,10 +170,9 @@ def _pass_rate_lines(summary: RunSummary) -> list[str]:
 
     One rate over every dispatched task. The old line divided by
     ``tasks_run - tasks_error``, which read like a pass rate but paid a bonus for
-    erroring: up to 10 points on a real nightly, and one run that rendered as
-    100.0% while passing 0.8% of its rows. When errors are material the error
-    share is printed beside the rate so a bad infrastructure night is visible
-    rather than absorbed.
+    erroring: a run that fell over enough could print a near-perfect score while
+    passing almost nothing. When errors are material the error share is printed
+    beside the rate so a bad infrastructure night is visible rather than absorbed.
     """
     lines = [f"- **Pass Rate**: {_fmt_rate(summary.pass_rate)} ({summary.tasks_succeeded}/{summary.tasks_run})"]
     if summary.tasks_error:
@@ -554,8 +553,8 @@ class ReportGenerator:
         total_cost = sum(costs) if costs else None
 
         # Rows whose spend is only partly priced. Reported explicitly because the
-        # alternative is what used to happen: a run understating its bill by 19%
-        # with nothing on the report to say the number was incomplete. Both of
+        # alternative is a total that reads materially low with nothing on the
+        # report to say the number was incomplete. Both of
         # these come from the same helpers RunSummary.tasks_unpriced /
         # eval_overhead_cost_usd use, so the report and run.json cannot disagree
         # about which rows lost money.

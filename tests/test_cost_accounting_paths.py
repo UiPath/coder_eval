@@ -2,11 +2,11 @@
 
 Two seams:
 
-1. **The pre-flight** (``check_pricing_coverage``) — the measured loss. The rate
-   card is a static table baked into the installed version, so a model released
-   after it prices every turn as ``null``. Sonnet 5's rates landed one release
-   after the 2026-07-21 nightly, which recorded $209.81 (18.9% of its true bill)
-   across 62 errored rows as no cost at all, with one log line to show for it.
+1. **The pre-flight** (``check_pricing_coverage``). The rate card is a static
+   table baked into the installed version, so a model released after it has no
+   rate. It is the fallback for turns the agent's backend never priced, which
+   makes killed and timed-out partials the ones that book their tokens against no
+   money at all, with one log line to show for it.
 2. **The row projection** (``eval_result_to_task_dict``) — judge and simulator
    spend was captured and rolled up nowhere, and a row whose turns were only
    partly priced reported its partial sum as the whole.
@@ -183,8 +183,8 @@ class TestRowCostProjection:
 class TestErrorDiagnosticsOnTheRow:
     """Errors count as misses, so the rollup has to say why it lost those points.
 
-    The 2026-07-22 codex nightly had 109 zero-iteration errors that could not be
-    characterised from run.json at all — every one needed its own task.json fetch.
+    Without these, a run's zero-iteration errors cannot be characterised from
+    run.json at all: every one needs its own task.json fetch.
     """
 
     def test_error_message_and_category_land_on_the_row(self):

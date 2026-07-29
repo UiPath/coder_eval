@@ -3,14 +3,14 @@
 Two bugs are pinned here.
 
 **The denominator.** ``pass_rate`` used to be ``succeeded / (run - error)``, which
-paid a bonus for erroring. Measured on real nightlies: +10.0 points for a codex run
-with 116 errors of 947, +7.1 for a sonnet-5 run, and a LiteLLM run that rendered as
-**100.0%** while passing 7 of 861 rows. Every surface now divides by ``tasks_run``.
+paid a bonus for erroring: the more a run fell over, the smaller its denominator
+got, up to the degenerate case of a run rendering as a perfect score while passing
+a handful of rows. Every surface now divides by ``tasks_run``.
 
 **The bill.** Cost was summed over whatever rows happened to carry one, so a run
 whose model was missing from the rate card, or whose turns were killed before the
-SDK reported a cost, understated its spend silently. One nightly hid $209.81
-(18.9%) that way. Unpriced spend is now counted and the total is labelled a floor.
+backend reported a cost, understated its spend silently. Unpriced spend is now
+counted and the total is labelled a floor.
 """
 
 from __future__ import annotations
@@ -84,9 +84,9 @@ class TestPassRateDenominator:
         assert summary.pass_rate == pytest.approx(0.2)
 
     def test_mostly_errored_run_cannot_render_as_perfect(self):
-        """The reductio from run adhoc-2026-07-16_18-12-48: 854 errors of 861 rows.
+        """The reductio: 854 errors out of 861 rows.
 
-        Reported 100.0% under the old formula (7 evaluable, 7 passed). Must now
+        Under the old formula this reported 100.0% (7 evaluable, 7 passed). It must
         read as what it was.
         """
         rows = [_row(FinalStatus.SUCCESS) for _ in range(7)] + [_row(FinalStatus.ERROR) for _ in range(854)]
@@ -118,8 +118,8 @@ class TestPassRateDenominator:
     def test_rates_serialize_into_run_json(self):
         """Downstream consumers must be able to READ the rate instead of re-deriving it.
 
-        Four surfaces across two repos each deriving their own denominator is what
-        made the dashboard and the markdown report disagree by up to 10 points.
+        Independent re-derivations drift, and then two consumers publish different
+        rates for the same run.
         """
         summary = _summary([_row(FinalStatus.SUCCESS), _row(FinalStatus.ERROR)])
         dumped = summary.model_dump()
@@ -204,9 +204,10 @@ class TestPricingCoverage:
 class TestRateCardCoversCheckedInExperiments:
     """CI guard: a model referenced by a committed experiment must be priced.
 
-    The 2026-07-21 nightly recorded $209.81 as null because Sonnet 5's rates landed
-    one release after the run. The rate card is a static table, so this class is what
-    makes the next new model fail CI instead of a nightly's cost column.
+    The rate card is a static table baked into the installed version, so a model
+    whose rates land in a later release prices as null on any turn the agent's own
+    backend did not price. This class is what makes the next new model fail CI
+    instead of a run's cost column.
     """
 
     @staticmethod

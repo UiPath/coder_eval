@@ -925,8 +925,8 @@ class TestReportTokenUsageSection:
         """A priced row beside an unpriced one reports the total as a floor.
 
         The failure this guards: summing only the rows that carry a cost and
-        presenting it as the run's bill. One nightly under-reported $209.81 (18.9%)
-        exactly this way.
+        presenting it as the run's bill. The unpriced rows are typically the
+        killed ones, which are also the ones that burned the most getting there.
         """
         task_results = [
             {"task_id": "priced", "total_tokens": 1000, "total_cost_usd": 0.25, "cost_complete": True},

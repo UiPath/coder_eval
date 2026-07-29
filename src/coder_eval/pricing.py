@@ -179,9 +179,11 @@ def is_priced(model: str) -> bool:
     """Whether the rate card can price this model (after prefix normalization).
 
     The rate card is a static table, so a model that shipped after the installed
-    framework version prices as ``None`` — silently, per turn, for a whole run.
-    Call this at run start to make that a warning instead of a number that reads
-    19% low with nothing on the report to say so.
+    framework version has no rate. It is the fallback for turns the agent's own
+    backend never priced (timed-out and killed partials), so an unpriced model
+    means those turns book their tokens against no money. Call this at run start
+    to make that a warning instead of a total that reads low with nothing on the
+    report to say so.
     """
     return _lookup_rate(_normalize_model(model)) is not None
 

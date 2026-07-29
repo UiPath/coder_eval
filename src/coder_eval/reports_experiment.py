@@ -37,10 +37,10 @@ logger = logging.getLogger(__name__)
 _REPLICATE_PASS_THRESHOLD = 0.9
 
 # Cap on the ``error_message`` carried into each run.json row. Long enough to
-# identify a failure without a per-task artifact fetch (which is the whole point
-# — a rollup of 900 rows whose errors are only diagnosable one task.json at a
-# time is not diagnosable), short enough that a wholly-errored run doesn't bloat
-# run.json. The untruncated message stays on task.json.
+# identify a failure without a per-task artifact fetch (a large rollup whose
+# errors are only diagnosable one task.json at a time is not diagnosable),
+# short enough that a wholly-errored run doesn't bloat run.json. The untruncated
+# message stays on task.json.
 _ROW_ERROR_MESSAGE_MAX_CHARS = 400
 
 
@@ -84,14 +84,13 @@ def _simulator_cost_usd(result: EvaluationResult) -> float | None:
     Priced at the ROUTE's model, not the subject agent's. ``UserSimulator`` builds
     its agent config with ``model=None`` on purpose, so the model resolves to the
     route default (``BEDROCK_MODEL``) — which is a different model from the subject
-    whenever a task pins ``agent.model``, as the skills suite does throughout.
-    Pricing the simulator at the subject's model would mis-bill every such row.
+    whenever a task pins ``agent.model``, which suites routinely do. Pricing the
+    simulator at the subject's model would mis-bill every such row.
 
     A floor, not the exact figure. ``UserSimulator`` records only
     ``uncached_input_tokens`` and drops both cache buckets, so a prompt whose
-    prefix was cached is largely absent from the count: a live run's full
-    persona-and-goal prompt recorded 6 input tokens. Widening that telemetry is a
-    change to what the run captures, not to what this reports.
+    prefix was cached is largely absent from the count. Widening that telemetry is
+    a change to what the run captures, not to what this reports.
     """
     sim = result.simulation
     if sim is None:
@@ -212,9 +211,7 @@ def eval_result_to_task_dict(
         "simulator_cost_usd": _simulator_cost_usd(result),
         # Why this row errored, on the row. Errors now count as misses, so the
         # rollup needs to say *why* it lost those points: without these, an errored
-        # run is untriageable without fetching per-task artifacts one at a time
-        # (the 109 zero-iteration codex errors of 2026-07-22 could not be
-        # characterised from run.json at all).
+        # run is untriageable without fetching per-task artifacts one at a time.
         "error_message": (
             truncate_crash_message(result.error_message, limit=_ROW_ERROR_MESSAGE_MAX_CHARS)
             if result.error_message

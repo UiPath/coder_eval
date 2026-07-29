@@ -42,12 +42,18 @@ logger = logging.getLogger(__name__)
 def check_pricing_coverage(resolved_tasks: list[ResolvedTask]) -> list[str]:
     """Pre-flight the rate card against the models this run will use.
 
-    The rate card is a static table baked into the installed framework version,
-    so a model released after that version prices as ``None`` on every turn — the
-    run completes, records full token counts, and reports a cost that is silently
-    low. (One nightly under-reported $209.81, 18.9% of its bill, because the
-    model's rates landed in the next release.) This turns that into a warning at
-    dispatch instead of a discovery weeks later.
+    The rate card is a static table baked into the installed framework version, so
+    a model released after that version has no rate here. Whether that costs you
+    anything depends on the turn: an agent whose backend reports its own cost (the
+    Claude Code SDK does) still prices a clean turn, so most rows look fine. The
+    rate card is the FALLBACK, and it is the only source for a turn the backend
+    never priced — a timed-out or killed partial, which arrives with full token
+    counts and no cost. With no rate, that fallback is a no-op and the tokens book
+    no money at all.
+
+    That is not a rare corner: on a large suite the killed tail is where the
+    biggest token counts live, since a task that ran to the wall spent the most
+    getting there.
 
     A warning rather than a refusal, so a brand-new model stays evaluable on the
     day it ships: the cost is what degrades, not the evaluation. What the run
@@ -66,8 +72,9 @@ def check_pricing_coverage(resolved_tasks: list[ResolvedTask]) -> list[str]:
     if not missing:
         return []
     logger.warning(
-        "No pricing rate for %s. Cost for these tasks will be recorded as null and every "
-        + "run-level total will understate the bill (RunSummary.cost_complete reports false). "
+        "No pricing rate for %s. Turns the agent's own backend prices are unaffected, but any "
+        + "timed-out or killed partial will book its tokens with no cost, so run-level totals will "
+        + "understate the bill (RunSummary.cost_complete reports false). "
         + "Add the rate to coder_eval.pricing or register it from a plugin via register_pricing().",
         ", ".join(repr(m) for m in missing),
     )
