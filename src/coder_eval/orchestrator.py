@@ -529,6 +529,13 @@ class Orchestrator:
                 )
 
                 logger.error(f"Task timed out: {e}")
+
+                # Recover the turn that was in flight when the watchdog killed the
+                # agent. Nothing else on this path does: the cancel is delivered as
+                # a BaseException, so it never reaches the retry executor's
+                # per-attempt failure hook that drains the slot on a turn-level
+                # timeout. Runs here, before teardown clears the slot.
+                await self._drain_killed_turn()
             except BudgetExceededError as e:
                 # Map token-budget breaches and cost-budget breaches to distinct
                 # statuses so per-task records preserve the failure mode.
@@ -611,6 +618,47 @@ class Orchestrator:
                     raise teardown_interrupt
 
         return self.result
+
+    async def _drain_killed_turn(self) -> None:
+        """Move a hard-killed turn's partial record from the agent onto the result.
+
+        The task-level watchdog kills the agent and cancels the task running it, so
+        the in-flight turn never returns a record. What it managed to spend is real
+        and already recorded by the agent, which parks the partial on
+        ``pending_turn`` when it is cancelled from outside; this is the only reader
+        of that slot on the task-timeout path.
+
+        Ordering matters in both directions. It runs before ``_cleanup``, whose
+        ``agent.stop()`` clears the slot, and before ``_finalize_result``, so the
+        recovered turn is picked up by token aggregation, command statistics and
+        model resolution exactly like a turn that ended on its own.
+
+        Best-effort by design: a task killed before its first turn has nothing
+        parked, and this runs on the way to a saved row, so it must not raise.
+        """
+        if self.agent is None or self.result is None:
+            return
+        try:
+            partial = self.agent.pending_turn
+            # Type-checked because `pending_turn` is a slot any agent implementation
+            # fills, and a non-record here would fail validation during teardown and
+            # take the whole row down with it.
+            if not isinstance(partial, TurnRecord):
+                logger.debug("[%s] Hard-killed task preserved no partial turn", self.task.task_id)
+                return
+            self.result.iterations.append(partial)
+            await self.agent.discard_pending_turn()
+            usage = partial.token_usage
+            logger.info(
+                "[%s] Recovered the hard-killed turn: %d tokens, %s",
+                self.task.task_id,
+                usage.total_tokens if usage is not None else 0,
+                f"${usage.total_cost_usd:.4f}"
+                if usage is not None and usage.total_cost_usd is not None
+                else "unpriced",
+            )
+        except Exception:
+            logger.warning("[%s] Could not recover the hard-killed turn", self.task.task_id, exc_info=True)
 
     def _finalize_result(self, start_time: float) -> None:
         """Finalize the evaluation result: scores, telemetry, and persistence."""

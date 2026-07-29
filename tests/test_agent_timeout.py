@@ -258,3 +258,62 @@ async def test_communicate_without_timeout_does_not_construct_transport():
         ):
             await agent.communicate("prompt")  # no timeout
             mock_transport_cls.assert_not_called()
+
+
+class _MockTextBlock:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _MockAssistantMessage:
+    """Duck-typed SDK AssistantMessage carrying one text block and a usage dict."""
+
+    def __init__(self, text: str, usage: dict[str, int]) -> None:
+        self.content = [_MockTextBlock(text)]
+        self.model = "claude-sonnet-5"
+        self.usage = usage
+        self.stop_reason = "end_turn"
+        self.message_id = "msg_partial_1"
+
+
+@pytest.mark.asyncio
+async def test_external_cancel_parks_the_turn_it_interrupted():
+    """A turn cancelled from outside must leave its telemetry on ``pending_turn``.
+
+    This is the task-level timeout's kill path: the watchdog kills the agent and
+    cancels the task awaiting ``communicate()``, so the turn never returns a record
+    and the frame that held one unwinds. Whatever it spent before the kill is real
+    and billed, so the pending slot is the only place it can survive.
+    """
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits", model="claude-sonnet-5")
+    agent = ClaudeCodeAgent(config)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+
+        streaming = asyncio.Event()
+
+        async def mock_query(prompt, options):
+            yield _MockAssistantMessage("working on it", {"input_tokens": 40_000, "output_tokens": 2_000})
+            streaming.set()
+            # Still mid-turn when the cancel lands, as on a real hard kill: no
+            # terminal ResultMessage is ever delivered.
+            await asyncio.sleep(30)
+
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            turn = asyncio.create_task(agent.communicate("prompt"))
+            await streaming.wait()
+            turn.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await turn
+
+    partial = agent.pending_turn
+    assert partial is not None, "the interrupted turn's record was discarded"
+    assert partial.crashed is True
+    usage = partial.token_usage
+    assert usage is not None
+    assert usage.output_tokens == 2_000
+    # No ResultMessage means the backend never priced this turn, so the cost is
+    # backfilled from the buckets at the model's rate.
+    assert usage.total_cost_usd is not None
+    assert usage.total_cost_usd > 0

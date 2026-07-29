@@ -129,6 +129,23 @@ class TestRowCostProjection:
         result.final_status = FinalStatus.TIMEOUT
         assert eval_result_to_task_dict(result)["cost_complete"] is False
 
+    def test_recovered_timeout_row_reports_its_cost_and_still_flags_incomplete(self):
+        """Recovering the killed turn narrows the gap; it does not close it.
+
+        The interrupted turn is drained onto the row and priced, so the row carries
+        a real number instead of nothing. The generation the agent was waiting on
+        when it died was never delivered by anyone, so the number is still a floor.
+        """
+        killed = _turn(1, TokenUsage(uncached_input_tokens=40_000, output_tokens=2_000, total_cost_usd=0.15))
+        killed.crashed = True
+        result = _result([killed])
+        result.final_status = FinalStatus.TIMEOUT
+        result.total_token_usage = TokenUsage(uncached_input_tokens=40_000, output_tokens=2_000, total_cost_usd=0.15)
+
+        row = eval_result_to_task_dict(result)
+        assert row["total_cost_usd"] == pytest.approx(0.15)
+        assert row["cost_complete"] is False
+
     def test_cost_complete_true_for_a_fast_error_with_no_turn(self):
         """The companion: a setup failure has no turns either, and really is free.
 

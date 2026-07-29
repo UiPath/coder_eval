@@ -55,17 +55,19 @@ def _cost_complete(result: EvaluationResult) -> bool:
        backend prices a clean turn, so the rate card only matters for a turn the
        backend never priced (a killed partial). With no rate, that turn books
        tokens against no money.
-    2. **The task was hard-killed by the task-level timeout.** ``TaskTimeoutError``
-       comes from the watchdog, which SIGKILLs the agent by PID. Unlike a
-       turn-level timeout it never reaches ``_on_attempt_failure``, so the turn
-       that was in flight is never drained and its spend is not merely unpriced
-       but unrecorded: no tokens, no cost, nothing to point at.
+    2. **The task was hard-killed by the task-level timeout.** The agent is killed
+       mid-turn, so the generation it was waiting on is never delivered and its
+       tokens are never reported by anyone. ``Orchestrator._drain_killed_turn``
+       recovers everything the event stream had delivered up to the kill, which is
+       most of it, but the tail is not observable from inside the harness and no
+       amount of bookkeeping makes it so.
 
        Every ``TIMEOUT`` row is affected, not just the ones that look empty. The
        watchdog fires while the evaluation loop is running, so there is always an
        in-flight turn. A row that completed two dialog turns before the wall hit
-       still lost the third, and reporting it as fully priced because the first two
-       carry costs would be the same false claim in a less obvious costume.
+       still lost part of the third, and reporting it as fully priced because the
+       recovered turns carry costs would be the same false claim in a less obvious
+       costume.
 
     True for a row that burned nothing. An error before the agent ran genuinely
     cost zero and must not be reported as missing cost, which is why case 2 keys on

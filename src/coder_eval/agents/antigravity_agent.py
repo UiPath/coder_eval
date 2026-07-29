@@ -489,8 +489,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             raise
         except asyncio.CancelledError:
             if not state.finalized:
-                self._state = AgentState.ERROR
-                state.finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason="turn cancelled")
+                self._finalize_external_cancel(state.finalize)
             raise
         except Exception as e:
             self._finalize_and_raise_crash(

@@ -852,8 +852,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             # stays balanced and the pending-turn contract holds. finalize is
             # idempotent, so the timeout case is a no-op here.
             if not state.finalized:
-                self._state = AgentState.ERROR
-                state.finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason="turn cancelled")
+                self._finalize_external_cancel(state.finalize)
             raise
         except Exception as e:
             # Catches failures OUTSIDE the inner turn block — notably thread_start
