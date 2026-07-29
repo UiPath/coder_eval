@@ -436,8 +436,8 @@ class TestBuildTokenUsage:
         ]
         usage = ClaudeCodeAgent._build_token_usage(messages, None, None, None, "claude-opus-4-8")
         assert usage is not None
-        # opus-4-8: 15/M in, 75/M out, 18.75/M cache-write, 1.50/M cache-read.
-        expected = (1_000_000 * 15.0 + 500_000 * 75.0 + 200_000 * 18.75 + 4_000_000 * 1.50) / 1_000_000
+        # opus-4-8: 5/M in, 25/M out, 6.25/M cache-write, 0.50/M cache-read.
+        expected = (1_000_000 * 5.0 + 500_000 * 25.0 + 200_000 * 6.25 + 4_000_000 * 0.50) / 1_000_000
         assert usage.total_cost_usd == pytest.approx(expected)
 
     def test_backfill_via_resultmessage_snapshot_path(self):

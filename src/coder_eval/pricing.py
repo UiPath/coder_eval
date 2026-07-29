@@ -22,24 +22,39 @@ class ModelPricing:
 # Official Anthropic pricing as of 2025
 # Key: CLI model name (before gateway mapping)
 _PRICING: dict[str, ModelPricing] = {
-    # Claude 5 Opus: $5/$25, cache write 1.25x input, cache read 0.1x input.
+    # Claude 5 Fable / Mythos: $10/$50.
+    "claude-fable-5": ModelPricing(10.0, 50.0, 12.50, 1.0),
+    "claude-mythos-5": ModelPricing(10.0, 50.0, 12.50, 1.0),
+    # Opus 4.5 and later dropped to $5/$25. Opus 4.1 and Opus 4 keep the old
+    # $15/$75 — the version boundary is the price boundary, so do NOT assume a
+    # newer Opus costs more than an older one.
     "claude-opus-5": ModelPricing(5.0, 25.0, 6.25, 0.50),
-    # Claude 4.8 / 4.7 / 4.6 / 4.5 / 4 Opus
-    "claude-opus-4-8": ModelPricing(15.0, 75.0, 18.75, 1.50),
-    "claude-opus-4-7": ModelPricing(15.0, 75.0, 18.75, 1.50),
-    "claude-opus-4-6": ModelPricing(15.0, 75.0, 18.75, 1.50),
-    "claude-opus-4-6-20250514": ModelPricing(15.0, 75.0, 18.75, 1.50),
-    "claude-opus-4-5-20251101": ModelPricing(15.0, 75.0, 18.75, 1.50),
+    "claude-opus-4-8": ModelPricing(5.0, 25.0, 6.25, 0.50),
+    "claude-opus-4-7": ModelPricing(5.0, 25.0, 6.25, 0.50),
+    "claude-opus-4-6": ModelPricing(5.0, 25.0, 6.25, 0.50),
+    "claude-opus-4-6-20250514": ModelPricing(5.0, 25.0, 6.25, 0.50),
+    "claude-opus-4-5": ModelPricing(5.0, 25.0, 6.25, 0.50),
+    "claude-opus-4-5-20251101": ModelPricing(5.0, 25.0, 6.25, 0.50),
+    # Claude 4.1 / 4 Opus (deprecated / retired) — still $15/$75.
+    "claude-opus-4-1": ModelPricing(15.0, 75.0, 18.75, 1.50),
+    "claude-opus-4": ModelPricing(15.0, 75.0, 18.75, 1.50),
     "claude-opus-4-20250514": ModelPricing(15.0, 75.0, 18.75, 1.50),
-    # Claude 5 Sonnet (2026-06-30 on Bedrock): standard $3/$15 (promo $2/$10 thru 2026-08-31).
+    # Claude 5 Sonnet. Deliberately the STANDARD $3/$15 rather than the $2/$10
+    # introductory rate in effect through 2026-08-31: a static table cannot
+    # express a promo window, and of the two errors available this one overstates
+    # cost for a few weeks instead of understating it indefinitely afterwards.
     "claude-sonnet-5": ModelPricing(3.0, 15.0, 3.75, 0.30),
     # Claude 4.6 / 4.5 / 4 Sonnet
     "claude-sonnet-4-6": ModelPricing(3.0, 15.0, 3.75, 0.30),
     "claude-sonnet-4-6-20250514": ModelPricing(3.0, 15.0, 3.75, 0.30),
+    "claude-sonnet-4-5": ModelPricing(3.0, 15.0, 3.75, 0.30),
     "claude-sonnet-4-5-20250929": ModelPricing(3.0, 15.0, 3.75, 0.30),
     "claude-sonnet-4-20250514": ModelPricing(3.0, 15.0, 3.75, 0.30),
-    # Claude 4.5 Haiku
-    "claude-haiku-4-5-20251001": ModelPricing(0.80, 4.0, 1.0, 0.08),
+    # Claude 4.5 Haiku: $1/$5. (Not $0.80/$4 — those are Haiku 3.5's rates.)
+    "claude-haiku-4-5": ModelPricing(1.0, 5.0, 1.25, 0.10),
+    "claude-haiku-4-5-20251001": ModelPricing(1.0, 5.0, 1.25, 0.10),
+    # Claude 3.5 Haiku (retired)
+    "claude-haiku-3-5": ModelPricing(0.80, 4.0, 1.0, 0.08),
     # Claude 3.7 Sonnet
     "claude-3-7-sonnet-20250219": ModelPricing(3.0, 15.0, 3.75, 0.30),
     # Claude 3.5 Sonnet
@@ -75,10 +90,12 @@ _PRICING: dict[str, ModelPricing] = {
     "gpt-5.4-mini": ModelPricing(0.75, 4.5, 0.75, 0.075),
     "gpt-5.4-nano": ModelPricing(0.20, 1.25, 0.20, 0.02),
     # GPT-5.6 family (2026-07-09): sol flagship / terra balanced (Codex default) / luna
-    # economy. Terra matches gpt-5.4's rate; sol matches gpt-5.5.
-    "gpt-5.6-sol": ModelPricing(5.0, 30.0, 6.25, 0.50),
-    "gpt-5.6-terra": ModelPricing(2.5, 15.0, 3.125, 0.25),
-    "gpt-5.6-luna": ModelPricing(1.0, 6.0, 1.25, 0.10),
+    # economy. Terra matches gpt-5.4's rate; sol matches gpt-5.5. cache_write ==
+    # input, as for every other OpenAI entry above: OpenAI bills no separate
+    # cache-write fee, so a 1.25x Anthropic-style write rate would overcharge.
+    "gpt-5.6-sol": ModelPricing(5.0, 30.0, 5.0, 0.50),
+    "gpt-5.6-terra": ModelPricing(2.5, 15.0, 2.5, 0.25),
+    "gpt-5.6-luna": ModelPricing(1.0, 6.0, 1.0, 0.10),
     # Google Gemini (AntigravityAgent, via the Gemini Developer API). Per-MTok
     # rates from ai.google.dev/gemini-api/docs/pricing (2026). Gemini bills no
     # separate cache-WRITE fee, so cache_write == input (the agent maps

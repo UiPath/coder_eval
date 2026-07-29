@@ -161,13 +161,13 @@ class TestRowCostProjection:
     def test_simulator_prices_at_the_route_model_not_the_subject(self):
         """UserSimulator pins model=None, so it bills at BEDROCK_MODEL.
 
-        Every skills task pins ``agent.model``, so pricing the simulator at the
-        subject's model would mis-bill the whole suite. Here the subject is
-        sonnet-5 ($3/$15) while the route is haiku-4.5 ($0.80/$4) — the simulator
-        must cost the haiku rate.
+        A task that pins ``agent.model`` would otherwise mis-bill every simulated
+        row. Here the subject is sonnet-5 ($3/$15) while the route is haiku-4.5
+        ($1/$5), so the simulator must cost the haiku rate.
         """
         result = self._simulated(bedrock_model="claude-haiku-4-5-20251001")
-        assert eval_result_to_task_dict(result)["simulator_cost_usd"] == pytest.approx(0.80 + 0.40)
+        # 1M uncached input at $1/MTok + 100K output at $5/MTok.
+        assert eval_result_to_task_dict(result)["simulator_cost_usd"] == pytest.approx(1.00 + 0.50)
 
     def test_simulator_falls_back_to_the_subject_model_off_bedrock(self):
         """A non-Bedrock route names no model on the record; the subject's is the best available."""
