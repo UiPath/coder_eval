@@ -967,38 +967,71 @@ class Sandbox:
     # needs filesystem access beyond the sandbox root (e.g., reading installed packages,
     # system headers). Path traversal protection is handled at the agent permission level.
 
+    def resolve_files(self, path: str) -> list[Path]:
+        """Resolve a criterion ``path`` to the sandbox files it addresses.
+
+        A plain path resolves to itself. A path containing a glob
+        metacharacter (``*``, ``?``, ``[``) is expanded against the sandbox
+        root, so a criterion can address a file whose exact location the task
+        prompt does not pin — e.g. ``**/*.flow`` matches a scaffolded wrapper
+        directory the agent was free to name. Matches are sorted so grading is
+        deterministic, and directories are dropped so a glob cannot resolve to
+        something unreadable.
+
+        Args:
+            path: Relative path or glob pattern
+
+        Returns:
+            Sorted matching files; empty when nothing matches
+        """
+        if not self.sandbox_dir:
+            return []
+
+        if not any(c in path for c in "*?["):
+            candidate = self.sandbox_dir / path
+            return [candidate] if candidate.exists() else []
+
+        return sorted(p for p in self.sandbox_dir.glob(path) if p.is_file())
+
     def get_file_content(self, path: str) -> str:
         """Read the content of a file in the sandbox.
 
         Args:
-            path: Relative path to the file
+            path: Relative path to the file, or a glob pattern matching exactly
+                one file
 
         Returns:
             File content as string
 
         Raises:
             RuntimeError: If sandbox is not set up
-            FileNotFoundError: If file doesn't exist
+            FileNotFoundError: If nothing matches ``path``
+            ValueError: If a glob matches more than one file
         """
         if not self.sandbox_dir:
             raise RuntimeError("Sandbox not set up")
 
-        file_path = self.sandbox_dir / path
-        return file_path.read_text(encoding="utf-8")
+        matches = self.resolve_files(path)
+        if not matches:
+            raise FileNotFoundError(f"No file matches '{path}' in the sandbox")
+        if len(matches) > 1:
+            listed = ", ".join(str(p.relative_to(self.sandbox_dir)) for p in matches)
+            raise ValueError(
+                f"Pattern '{path}' matches {len(matches)} files — refusing to guess which to grade: {listed}"
+            )
+
+        return matches[0].read_text(encoding="utf-8")
 
     def file_exists(self, path: str) -> bool:
         """Check if a file exists in the sandbox.
 
         Args:
-            path: Relative path to the file
+            path: Relative path to the file, or a glob pattern
 
         Returns:
-            True if file exists, False otherwise
+            True if at least one file matches, False otherwise
         """
-        if not self.sandbox_dir:
-            return False
-
-        return (self.sandbox_dir / path).exists()
+        return bool(self.resolve_files(path))
 
     def list_files(self, path: str = ".") -> list[str]:
         """List files in a directory within the sandbox.

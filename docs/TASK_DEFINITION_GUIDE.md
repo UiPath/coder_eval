@@ -20,6 +20,7 @@ Complete reference for defining evaluation tasks in Coder Eval.
 - [Template Sources](#template-sources)
 - [Success Criteria](#success-criteria)
   - [Continuous Scoring](#continuous-scoring)
+  - [Glob patterns in path](#glob-patterns-in-path)
   - [file_exists](#file_exists)
   - [file_contains](#file_contains)
   - [file_check](#file_check)
@@ -557,6 +558,26 @@ every consumer, so no reader needs the original criterion to know whether a low
 score mattered.
 
 **Weighted score:** `weighted_score = sum(score * weight) / sum(weight)` — calculated regardless for quality assessment.
+
+### Glob patterns in `path`
+
+Every path-based criterion (`file_exists`, `file_contains`, `file_matches_regex`, `file_check`, `json_check`, `import_check`) accepts a glob in `path`. Use one when the prompt does not pin where the file lands — a scaffolding tool that creates a wrapper directory the agent names itself, for example.
+
+```yaml
+- type: "file_contains"
+  path: "**/*.flow"                     # matches any depth under the sandbox root
+  includes: ['"core.logic.decision"']
+  description: "flow wires a Decision node"
+```
+
+Rules:
+
+- A `path` with no `*`, `?`, or `[` behaves exactly as before.
+- Matches are sorted, and directories are skipped.
+- `file_exists` passes when the glob matches **at least one** file.
+- Content checks require the glob to match **exactly one** file. An ambiguous glob scores 0.0 and reports every match rather than silently grading one of them — narrow the pattern.
+
+Prefer a glob over a hardcoded path whose leading directory the task prompt never specifies: a correct artifact in an unexpected directory otherwise scores 0.0 on the path alone.
 
 ### `file_exists`
 

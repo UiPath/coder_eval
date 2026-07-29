@@ -194,7 +194,9 @@ class FileExistsCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["file_exists"] = "file_exists"
-    path: str = Field(description="Path to the file that must exist")
+    path: str = Field(
+        description="Path to the file that must exist; a glob pattern passes when it matches at least one file"
+    )
 
 
 class FileContainsCriterion(BaseSuccessCriterion):
@@ -204,7 +206,7 @@ class FileContainsCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["file_contains"] = "file_contains"
-    path: str = Field(description="Path to the file to check")
+    path: str = Field(description="Path to the file to check; may be a glob matching exactly one file")
     includes: list[str] = Field(description="List of strings that must be present in the file")
     excludes: list[str] | None = Field(default=None, description="List of strings that must NOT be present in the file")
 
@@ -277,7 +279,7 @@ class FileMatchesRegexCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["file_matches_regex"] = "file_matches_regex"
-    path: str = Field(description="Path to the file to check")
+    path: str = Field(description="Path to the file to check; may be a glob matching exactly one file")
     pattern: str = Field(description="Regex pattern that must match somewhere in the file")
     must_match: bool = Field(default=True, description="If True, pattern must match; if False, pattern must NOT match")
     flags: int = Field(default=0, description="Regex flags (e.g., re.IGNORECASE=2, re.MULTILINE=8, re.DOTALL=16)")
@@ -408,7 +410,9 @@ class FileCheckCriterion(BaseSuccessCriterion):
     """
 
     type: Literal["file_check"] = "file_check"
-    path: str = Field(description="Path to the file to check (relative to sandbox root)")
+    path: str = Field(
+        description="Path to the file to check (relative to sandbox root); may be a glob matching exactly one file"
+    )
     includes: list[str] = Field(default_factory=list, description="Strings that must be present in the file")
     excludes: list[str] = Field(default_factory=list, description="Strings that must NOT be present in the file")
     patterns: list[RegexPattern] = Field(
