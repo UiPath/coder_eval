@@ -44,6 +44,10 @@ export interface RunMetrics {
     // repeated runs.
     taskFailed: number;
     cost: number | null;
+    // Executed tasks whose spend is missing money, so `cost` is a floor. A null
+    // cost sums as $0, so without this an unpriced task is indistinguishable from
+    // a free one and the tile presents a floor as the bill.
+    costUnpriced: number;
     costP50: number | null;
     costP90: number | null;
     duration: number | null;
@@ -66,6 +70,7 @@ export function computeRunMetrics(tasks: TaskResultSummary[]): RunMetrics {
     let failed = 0;
     let errored = 0;
     let cost = 0;
+    let costUnpriced = 0;
     let durationSum = 0;
     const costSamples: number[] = [];
     const durSamples: number[] = [];
@@ -75,6 +80,9 @@ export function computeRunMetrics(tasks: TaskResultSummary[]): RunMetrics {
         else if (cat === "error") errored++;
         else failed++;
         if (t.matureSkipped) continue;
+        // Counted after the mature-skip guard, alongside cost itself: a task that
+        // never executed has no spend to be missing.
+        if (t.costComplete === false) costUnpriced++;
         if (t.totalCostUsd != null) {
             cost += t.totalCostUsd;
             costSamples.push(t.totalCostUsd);
@@ -103,6 +111,7 @@ export function computeRunMetrics(tasks: TaskResultSummary[]): RunMetrics {
             };
         })(),
         cost: costSamples.length ? cost : null,
+        costUnpriced,
         costP50: percentile(costSamples, 0.5),
         costP90: percentile(costSamples, 0.9),
         duration: durSamples.length ? durationSum : null,
@@ -459,17 +468,25 @@ export function RunView({
                 {activation && (
                     <ActivationCard runId={runId} activation={activation} />
                 )}
+                {/* An unpriced task sums as $0, so the total is a floor and the
+                    percentiles describe only the priced tasks. Say so in place of
+                    the percentiles rather than beside them: a number presented as
+                    exact is worse than one presented as a bound. */}
                 <Metric
                     label="Total cost"
                     value={
                         metrics.cost != null
-                            ? `$${metrics.cost.toFixed(2)}`
+                            ? `${metrics.costUnpriced ? "≥" : ""}$${metrics.cost.toFixed(2)}`
                             : "—"
                     }
                     sub={
-                        metrics.costP50 != null && metrics.costP90 != null
-                            ? `p50 $${metrics.costP50.toFixed(2)} · p90 $${metrics.costP90.toFixed(2)}`
-                            : undefined
+                        metrics.costUnpriced
+                            ? `floor · ${metrics.costUnpriced} task${
+                                  metrics.costUnpriced === 1 ? "" : "s"
+                              } unpriced`
+                            : metrics.costP50 != null && metrics.costP90 != null
+                              ? `p50 $${metrics.costP50.toFixed(2)} · p90 $${metrics.costP90.toFixed(2)}`
+                              : undefined
                     }
                 />
                 <Metric
