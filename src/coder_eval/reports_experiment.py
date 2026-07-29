@@ -48,8 +48,8 @@ def _cost_complete(result: EvaluationResult) -> bool:
     """Whether every turn that burned tokens on this row also carries a cost.
 
     False means ``total_cost_usd`` is a floor, not the bill: some turn's spend is
-    missing from it. After the orchestrator's rate-card backfill the only way to
-    land here is a model the rate card cannot price at all, so this is the
+    missing from it. Every in-tree agent prices its own turns, so in practice the
+    way to land here is a model the rate card cannot price at all. This is the
     per-row signal that feeds ``RunSummary.tasks_unpriced``.
 
     True for a row that burned nothing (an error before the agent ran genuinely

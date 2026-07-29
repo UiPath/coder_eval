@@ -348,9 +348,6 @@ interface RawTaskResult {
     weighted_score?: number;
     duration?: number;
     total_cost_usd?: number;
-    // Row-level token total. Present alongside the disjoint buckets below; used to
-    // tell "burned tokens but has no cost" (unpriced) from "burned nothing" (free).
-    total_tokens?: number | null;
     input_tokens?: number | null;
     output_tokens?: number | null;
     cache_creation_input_tokens?: number | null;
@@ -688,11 +685,11 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
         tags,
         skill: deriveSkill(t.task_path, tags),
         matureSkipped: t.mature_skipped ?? false,
-        // A row predating the field is assumed complete unless it visibly burned
-        // tokens with no cost — the same test the Python side applies.
-        costComplete:
-            t.cost_complete ??
-            !((t.total_tokens ?? 0) > 0 && t.total_cost_usd == null),
+        // Absent means complete: a row written before the field existed is read as
+        // priced rather than inferred from its tokens. Guessing at the past would
+        // buy a caveat on old runs at the cost of a second definition of
+        // "unpriced" living here, out of step with the Python one.
+        costComplete: t.cost_complete ?? true,
         judgeCostUsd: t.judge_cost_usd ?? null,
         simulatorCostUsd: t.simulator_cost_usd ?? null,
         errorMessage: t.error_message ?? null,
@@ -727,11 +724,8 @@ export async function readRunSummary(id: string): Promise<RunSummary | null> {
     // A row whose tokens went unpriced contributes 0 to totalCost above, so the
     // sum silently understates the bill. Count those rows and say so rather than
     // presenting a floor as the total.
-    const tasksUnpriced = taskResults.filter(
-        (t) =>
-            ((t.total_tokens ?? 0) > 0 && t.total_cost_usd == null) ||
-            t.cost_complete === false,
-    ).length;
+    const tasksUnpriced = taskResults.filter((t) => t.cost_complete === false)
+        .length;
     const overhead = taskResults.reduce(
         (a, t) => a + (t.judge_cost_usd ?? 0) + (t.simulator_cost_usd ?? 0),
         0,
@@ -989,9 +983,7 @@ export async function readRunOverview(
                 visibleTurns: visibleTurnsFromRaw(t),
                 hasFinalReply: t.has_final_reply ?? false,
                 matureSkipped: t.mature_skipped ?? false,
-                costComplete:
-                    t.cost_complete ??
-                    !((t.total_tokens ?? 0) > 0 && t.total_cost_usd == null),
+                costComplete: t.cost_complete ?? true,
             };
         });
     const totalCost = taskResults.reduce(

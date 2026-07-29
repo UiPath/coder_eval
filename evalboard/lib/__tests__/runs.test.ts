@@ -59,16 +59,10 @@ describe("toTaskRow", () => {
         expect(row.simulatorCostUsd).toBeCloseTo(0.01);
     });
 
-    test("infers incomplete cost on a run predating the field", () => {
-        // Tokens on the wire with no cost is the unpriced shape, whether or not
-        // the row carries the explicit flag.
-        const row = toTaskRow({ task_id: "x", total_tokens: 5_000_000 });
-        expect(row.costComplete).toBe(false);
-    });
-
-    test("a row that burned nothing is complete, not unpriced", () => {
-        // An error before the agent ran genuinely cost nothing.
-        const row = toTaskRow({ task_id: "x", total_tokens: 0 });
+    test("a row predating the field reads as complete", () => {
+        // Deliberately not inferred from tokens: an old run renders exactly as it
+        // did before, and "unpriced" keeps one definition instead of two.
+        const row = toTaskRow({ task_id: "x" });
         expect(row.costComplete).toBe(true);
     });
 

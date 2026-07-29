@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
@@ -846,6 +847,35 @@ class SkippedTask(BaseModel):
     )
 
 
+def row_cost_incomplete(row: Mapping[str, Any]) -> bool:
+    """True when a task row's recorded spend is missing money.
+
+    Reads the row's own ``cost_complete``, which the row projection sets by asking
+    whether every turn that burned tokens also carries a cost. A row that burned
+    nothing is complete, not unpriced: an error before the agent ran genuinely cost
+    nothing.
+
+    Absent means complete. Rows written before the field existed are read as
+    priced rather than inferred from their token counts: guessing at the past would
+    buy a caveat on old runs at the cost of a second definition of "unpriced",
+    which is the kind of drift this helper exists to prevent.
+
+    Defined once here, on the row schema, because every surface that reports cost
+    has to apply the same test. Reports and ``RunSummary`` disagreeing about which
+    rows lost money would put the framework back where it started.
+    """
+    return row.get("cost_complete") is False
+
+
+def eval_overhead_costs(rows: Iterable[Mapping[str, Any]]) -> list[float]:
+    """Every judge / simulator cost present across ``rows``, unsummed.
+
+    Returned as a list rather than a total because callers need to distinguish
+    "no overhead was recorded" from "overhead was recorded and came to $0".
+    """
+    return [c for row in rows for key in ("judge_cost_usd", "simulator_cost_usd") if (c := row.get(key)) is not None]
+
+
 class RunSummary(BaseModel):
     """Summary of an entire evaluation run across multiple tasks.
 
@@ -955,8 +985,10 @@ class RunSummary(BaseModel):
         """``tasks_error / tasks_run`` as a 0-1 fraction. ``None`` on an empty run.
 
         How much of ``pass_rate`` is being held down by rows that never produced a
-        gradeable attempt. Diagnostic: read it with the framework/harness split to
-        tell an infrastructure night from a genuinely weak model.
+        gradeable attempt. Diagnostic only: it does not adjust the rate. A run whose
+        rate dropped with a high ``error_share`` had an infrastructure night; the same
+        drop at a normal share is the model. Per-row ``error_message`` /
+        ``error_category`` say which.
         """
         return self.tasks_error / self.tasks_run if self.tasks_run else None
 
@@ -965,22 +997,13 @@ class RunSummary(BaseModel):
     def tasks_unpriced(self) -> int:
         """Rows whose recorded spend is incomplete.
 
-        Each one is real money missing from ``agent_cost_usd``. Two ways in: the
-        row burned tokens and got no cost at all, or its per-row ``cost_complete``
-        says some turn within it went unpriced. Both come down to a model the rate
-        card cannot price — the card is a static table baked into the installed
-        version, so a model released after it prices as ``null`` on every turn,
-        with only a log line to say so.
-
-        A row that burned nothing does not count: an error before the agent ran
-        genuinely cost nothing.
+        Each one is real money missing from ``agent_cost_usd``, because the rate
+        card is a static table baked into the installed version: a model released
+        after it prices as ``null`` on every turn, with only a log line to say so.
+        ``row_cost_incomplete`` defines what counts, and the report applies the
+        same helper so the two can never disagree.
         """
-        return sum(
-            1
-            for row in self.task_results
-            if ((row.get("total_tokens") or 0) > 0 and row.get("total_cost_usd") is None)
-            or row.get("cost_complete") is False
-        )
+        return sum(1 for row in self.task_results if row_cost_incomplete(row))
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -993,7 +1016,8 @@ class RunSummary(BaseModel):
     def agent_cost_usd(self) -> float | None:
         """Subject-agent spend across the run. ``None`` when no row reported cost.
 
-        Excludes evaluation machinery — see ``eval_overhead_cost_usd``. Read
+        Excludes evaluation machinery: that is ``eval_overhead_cost_usd``, and the
+        two are published as a pair because a run's true bill is their sum. Read
         alongside ``cost_complete``: with unpriced rows present this is a floor,
         not the bill.
         """
@@ -1011,10 +1035,5 @@ class RunSummary(BaseModel):
         and was previously reported nowhere, so a run's true bill is the two
         added together.
         """
-        costs = [
-            c
-            for row in self.task_results
-            for key in ("judge_cost_usd", "simulator_cost_usd")
-            if (c := row.get(key)) is not None
-        ]
+        costs = eval_overhead_costs(self.task_results)
         return sum(costs) if costs else None

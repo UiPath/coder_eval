@@ -127,6 +127,8 @@ from coder_eval.models.results import (
     TaskConfigRecord,
     ThresholdCheck,
     TurnRecord,
+    eval_overhead_costs,
+    row_cost_incomplete,
 )
 
 # Routing
@@ -291,6 +293,10 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "TaskConfigRecord",
     "RunSummary",
     "SkippedTask",
+    # Row-level cost predicates, shared by RunSummary's computed fields and the
+    # reports so every surface agrees on which rows lost money.
+    "row_cost_incomplete",
+    "eval_overhead_costs",
     # Judge defaults
     "DEFAULT_JUDGE_MODEL",
     # Judge

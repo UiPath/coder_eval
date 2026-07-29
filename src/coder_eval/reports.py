@@ -15,6 +15,8 @@ from .models import (
     SuiteRollup,
     TaskResult,
     ThresholdCheck,
+    eval_overhead_costs,
+    row_cost_incomplete,
 )
 from .path_utils import build_task_run_dir
 
@@ -553,15 +555,12 @@ class ReportGenerator:
 
         # Rows whose spend is only partly priced. Reported explicitly because the
         # alternative is what used to happen: a run understating its bill by 19%
-        # with nothing on the report to say the number was incomplete.
-        unpriced = [
-            t
-            for t in task_results
-            if ((t.get("total_tokens") or 0) > 0 and t.get("total_cost_usd") is None) or t.get("cost_complete") is False
-        ]
-        overhead = [
-            c for t in task_results for key in ("judge_cost_usd", "simulator_cost_usd") if (c := t.get(key)) is not None
-        ]
+        # with nothing on the report to say the number was incomplete. Both of
+        # these come from the same helpers RunSummary.tasks_unpriced /
+        # eval_overhead_cost_usd use, so the report and run.json cannot disagree
+        # about which rows lost money.
+        unpriced = [t for t in task_results if row_cost_incomplete(t)]
+        overhead = eval_overhead_costs(task_results)
 
         lines.append(f"**Total Tokens**: {total_tokens:,} (input: {total_input:,}, output: {total_output:,})")
         if total_cache_write > 0 or total_cache_read > 0:

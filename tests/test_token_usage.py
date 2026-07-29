@@ -875,6 +875,7 @@ class TestReportTokenUsageSection:
                 "output_tokens": 2000,
                 "total_tokens": 5000,
                 "total_cost_usd": None,
+                "cost_complete": False,
             },
         ]
         lines = ReportGenerator._generate_token_usage_section(task_results)
@@ -887,6 +888,22 @@ class TestReportTokenUsageSection:
         assert "**Total Cost**: unavailable" in joined
         assert "1 task(s) burned tokens the rate card could not price" in joined
         assert "| task1 | 3,000 | 2,000 | 0 | 0 | 5,000 | N/A |" in joined
+
+    def test_token_section_leaves_a_legacy_row_uncaveated(self):
+        """A row predating ``cost_complete`` is read as priced, not inferred.
+
+        The same shape as above minus the flag, which is what runs written before
+        the field look like. Deliberately silent: inferring unpriced-ness from
+        tokens would give old runs a caveat at the price of a second definition of
+        "unpriced", and every new run carries the flag.
+        """
+        task_results = [
+            {"task_id": "task1", "total_tokens": 5000, "total_cost_usd": None},
+        ]
+        joined = "\n".join(ReportGenerator._generate_token_usage_section(task_results))
+
+        assert "## Token Usage" in joined
+        assert "could not price" not in joined
 
     def test_token_section_omits_cost_when_no_tokens_burned(self):
         """A row that burned nothing is genuinely free — no unpriced warning."""
