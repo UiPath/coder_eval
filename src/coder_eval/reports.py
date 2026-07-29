@@ -15,7 +15,8 @@ from .models import (
     SuiteRollup,
     TaskResult,
     ThresholdCheck,
-    eval_overhead_costs,
+    eval_overhead_cost,
+    full_cost,
     row_cost_incomplete,
 )
 from .path_utils import build_task_run_dir
@@ -166,14 +167,7 @@ def _fmt_rate(rate: float | None) -> str:
 
 
 def _pass_rate_lines(summary: RunSummary) -> list[str]:
-    """The pass rate, plus how much of it is being held down by errors.
-
-    One rate over every dispatched task. The old line divided by
-    ``tasks_run - tasks_error``, which read like a pass rate but paid a bonus for
-    erroring: a run that fell over enough could print a near-perfect score while
-    passing almost nothing. When errors are material the error share is printed
-    beside the rate so a bad infrastructure night is visible rather than absorbed.
-    """
+    """The pass rate over every dispatched task, plus the error share when non-zero."""
     lines = [f"- **Pass Rate**: {_fmt_rate(summary.pass_rate)} ({summary.tasks_succeeded}/{summary.tasks_run})"]
     if summary.tasks_error:
         lines.append(
@@ -549,38 +543,34 @@ class ReportGenerator:
         total_cache_write = sum(t.get("cache_creation_input_tokens") or 0 for t in tasks_with_tokens)
         total_cache_read = sum(t.get("cache_read_input_tokens") or 0 for t in tasks_with_tokens)
         total_tokens = sum(t["total_tokens"] for t in tasks_with_tokens)
-        costs = [t["total_cost_usd"] for t in tasks_with_tokens if t.get("total_cost_usd") is not None]
-        total_cost = sum(costs) if costs else None
+        agent_cost = full_cost(*(t.get("total_cost_usd") for t in tasks_with_tokens))
 
-        # Rows whose recorded spend is missing money, either because a turn's tokens
-        # could not be priced or because a hard kill lost the in-flight turn
-        # entirely. Worded cause-agnostically ("spend missing") because those two
-        # causes reach the same conclusion and the report cannot always tell which
-        # applied. Reported explicitly because the alternative is a total that reads
-        # materially low with nothing to say the number is incomplete. Both of these
-        # come from the same helpers RunSummary.tasks_unpriced /
-        # eval_overhead_cost_usd use, so the report and run.json cannot disagree
-        # about which rows lost money.
-        unpriced = [t for t in task_results if row_cost_incomplete(t)]
-        overhead = eval_overhead_costs(task_results)
+        # Same helpers RunSummary uses, so the report and run.json cannot disagree
+        # about the bill. Worded cause-agnostically ("spend missing") because an
+        # unpriced turn and a hard kill reach the same conclusion and the report
+        # cannot always tell which applied.
+        incomplete = [t for t in task_results if row_cost_incomplete(t)]
+        overhead = eval_overhead_cost(task_results)
+        total_cost = full_cost(agent_cost, overhead)
 
         lines.append(f"**Total Tokens**: {total_tokens:,} (input: {total_input:,}, output: {total_output:,})")
         if total_cache_write > 0 or total_cache_read > 0:
             lines.append(f"**Cache Tokens**: write: {total_cache_write:,}, read: {total_cache_read:,}")
-        # Judge/simulator spend is broken out only when there is some: it is a
-        # property of the suite's criteria and identical across harnesses, so folding
-        # it into the agent bill would make two harnesses look closer than they are.
-        # **Total Cost** always means the whole bill.
-        if overhead and total_cost is not None:
-            lines.append(f"**Agent Cost**: ${total_cost:.4f}")
-            lines.append(f"**Eval Overhead (judge + simulator)**: ${sum(overhead):.4f}")
+        # The agent bill is broken out separately only when there is overhead to
+        # distinguish it from: judge spend is a property of the suite's criteria and
+        # identical across harnesses, so comparing harnesses means comparing the
+        # agent line. **Total Cost** always means the whole bill.
+        if overhead is not None:
+            if agent_cost is not None:
+                lines.append(f"**Agent Cost**: ${agent_cost:.4f}")
+            lines.append(f"**Eval Overhead (judge + simulator)**: ${overhead:.4f}")
         if total_cost is not None:
-            cost_line = f"**Total Cost**: ${total_cost + sum(overhead):.4f}"
-            if unpriced:
-                cost_line += f" (floor — {len(unpriced)} task(s) have spend missing from this total)"
+            cost_line = f"**Total Cost**: ${total_cost:.4f}"
+            if incomplete:
+                cost_line += f" (floor — {len(incomplete)} task(s) have spend missing from this total)"
             lines.append(cost_line)
-        elif unpriced:
-            lines.append(f"**Total Cost**: unavailable — {len(unpriced)} task(s) have spend missing from this total")
+        elif incomplete:
+            lines.append(f"**Total Cost**: unavailable — {len(incomplete)} task(s) have spend missing from this total")
         lines.append(f"**Avg Tokens/Task**: {total_tokens // len(tasks_with_tokens):,}")
         lines.append("")
 
@@ -597,7 +587,9 @@ class ReportGenerator:
             cache_write = t.get("cache_creation_input_tokens") or 0
             cache_read = t.get("cache_read_input_tokens") or 0
             tokens = t.get("total_tokens", 0)
-            cost = t.get("total_cost_usd")
+            # The row's whole bill, so the column sums to **Total Cost** above.
+            # Legacy rows predate full_cost_usd and carry only the agent figure.
+            cost = t.get("full_cost_usd", t.get("total_cost_usd"))
             cost_str = f"${cost:.4f}" if cost is not None else "N/A"
             row = (
                 f"| {t['task_id']} | {input_tok:,} | {output_tok:,} "

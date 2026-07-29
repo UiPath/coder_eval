@@ -137,7 +137,7 @@ class TestCostCompleteness:
                 _row(FinalStatus.TIMEOUT, total_tokens=8_000_000, total_cost_usd=None, cost_complete=False),
             ]
         )
-        assert summary.tasks_unpriced == 1
+        assert summary.tasks_cost_incomplete == 1
         assert summary.cost_complete is False
         # The priced row's cost still totals — a floor beats no number at all.
         assert summary.agent_cost_usd == pytest.approx(0.5)
@@ -152,13 +152,13 @@ class TestCostCompleteness:
         summary = _summary(
             [_row(FinalStatus.TIMEOUT, total_tokens=5_000_000, total_cost_usd=1.25, cost_complete=False)]
         )
-        assert summary.tasks_unpriced == 1
+        assert summary.tasks_cost_incomplete == 1
         assert summary.cost_complete is False
 
     def test_zero_token_error_is_not_unpriced(self):
         """A row that died before the agent ran genuinely cost nothing."""
         summary = _summary([_row(FinalStatus.ERROR, total_tokens=0, total_cost_usd=None, cost_complete=True)])
-        assert summary.tasks_unpriced == 0
+        assert summary.tasks_cost_incomplete == 0
         assert summary.cost_complete is True
         assert summary.agent_cost_usd is None
 

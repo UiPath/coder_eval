@@ -13,9 +13,11 @@ from coder_eval.models import (
     ExperimentResult,
     FinalStatus,
     TaskExperimentSummary,
+    full_cost,
+    judge_cost_usd,
+    simulator_cost_usd,
 )
 from coder_eval.path_utils import replicate_subdir_name
-from coder_eval.pricing import calculate_cost
 from coder_eval.reports import resolve_agent_settings
 from coder_eval.reports_stats import (
     VariantSeries,
@@ -37,42 +39,27 @@ logger = logging.getLogger(__name__)
 # Default pass_threshold from BaseSuccessCriterion — used for Wilson pass-rate in replicate stats.
 _REPLICATE_PASS_THRESHOLD = 0.9
 
-# Cap on the ``error_message`` carried into each run.json row. Long enough to
-# identify a failure without a per-task artifact fetch (a large rollup whose
-# errors are only diagnosable one task.json at a time is not diagnosable),
-# short enough that a wholly-errored run doesn't bloat run.json. The untruncated
-# message stays on task.json.
+# Cap on the ``error_message`` carried into each run.json row: enough to identify
+# a failure without fetching the task artifact, short enough that a wholly-errored
+# run doesn't bloat run.json. The untruncated message stays on task.json.
 _ROW_ERROR_MESSAGE_MAX_CHARS = 400
 
 
 def _cost_complete(result: EvaluationResult) -> bool:
-    """Whether this row's recorded spend accounts for everything it spent.
+    """Whether this row's recorded agent spend accounts for everything it spent.
 
-    False means ``total_cost_usd`` is a floor, not the bill. Two ways to get there,
-    and they are different failures:
+    False means the costs on the row are a floor, not the bill. Two ways in:
 
-    1. **A turn burned tokens the rate card could not price.** The agent's own
-       backend prices a clean turn, so the rate card only matters for a turn the
-       backend never priced (a killed partial). With no rate, that turn books
-       tokens against no money.
-    2. **The task was hard-killed by the task-level timeout.** The agent is killed
-       mid-turn, so the generation it was waiting on is never delivered and its
-       tokens are never reported by anyone. ``Orchestrator._drain_killed_turn``
-       recovers everything the event stream had delivered up to the kill, which is
-       most of it, but the tail is not observable from inside the harness and no
-       amount of bookkeeping makes it so.
+    1. A turn burned tokens the rate card could not price. The card is the fallback
+       for anything the backend did not price itself, so with no rate those tokens
+       book no money.
+    2. The task was hard-killed by the task-level timeout. Keyed on the status
+       rather than on emptiness: the watchdog fires while the evaluation loop is
+       running, so a TIMEOUT row always lost an in-flight turn, even one that
+       completed earlier turns that do carry costs.
 
-       Every ``TIMEOUT`` row is affected, not just the ones that look empty. The
-       watchdog fires while the evaluation loop is running, so there is always an
-       in-flight turn. A row that completed two dialog turns before the wall hit
-       still lost part of the third, and reporting it as fully priced because the
-       recovered turns carry costs would be the same false claim in a less obvious
-       costume.
-
-    True for a row that burned nothing. An error before the agent ran genuinely
-    cost zero and must not be reported as missing cost, which is why case 2 keys on
-    the status rather than on elapsed time: a fast setup failure and a slow one are
-    both free, while a hard-killed task never is.
+    True for a row that burned nothing: an error before the agent ran genuinely
+    cost zero, and a slow setup failure is as free as a fast one.
     """
     if result.final_status is FinalStatus.TIMEOUT:
         return False
@@ -80,54 +67,6 @@ def _cost_complete(result: EvaluationResult) -> bool:
         usage.total_cost_usd is not None
         for t in result.iterations
         if (usage := t.token_usage) is not None and not usage.is_empty()
-    )
-
-
-def _judge_cost_usd(result: EvaluationResult) -> float | None:
-    """Sum the priced judge spend across this row's criterion results.
-
-    Covers both judge flavors: ``llm_judge`` prices its own one-shot call from
-    the criterion's model, ``agent_judge`` inherits the SDK's cost on the
-    sub-agent's turn. ``None`` when no criterion reported cost, so "no judge ran"
-    stays distinguishable from "a judge ran free".
-    """
-    costs = [
-        usage.total_cost_usd
-        for cr in result.success_criteria_results
-        if (usage := getattr(cr, "token_usage", None)) is not None and usage.total_cost_usd is not None
-    ]
-    return sum(costs) if costs else None
-
-
-def _simulator_cost_usd(result: EvaluationResult) -> float | None:
-    """Price this row's simulator turns. ``None`` outside simulation mode.
-
-    Priced at the ROUTE's model, not the subject agent's. ``UserSimulator`` builds
-    its agent config with ``model=None`` on purpose, so the model resolves to the
-    route default (``BEDROCK_MODEL``) — which is a different model from the subject
-    whenever a task pins ``agent.model``, which suites routinely do. Pricing the
-    simulator at the subject's model would mis-bill every such row.
-
-    A floor, not the exact figure. ``UserSimulator`` records only
-    ``uncached_input_tokens`` and drops both cache buckets, so a prompt whose
-    prefix was cached is largely absent from the count. Widening that telemetry is
-    a change to what the run captures, not to what this reports.
-    """
-    sim = result.simulation
-    if sim is None:
-        return None
-    if not (sim.simulator_input_tokens or sim.simulator_output_tokens):
-        return None
-    route_model = (result.environment_info or {}).get("bedrock_model")
-    # Falls back to the subject's model on a non-Bedrock route, where the SDK
-    # picks its own default and nothing on the record names it.
-    model = route_model if isinstance(route_model, str) and route_model else result.model_used
-    if not model:
-        return None
-    return calculate_cost(
-        model,
-        uncached_input_tokens=sim.simulator_input_tokens,
-        output_tokens=sim.simulator_output_tokens,
     )
 
 
@@ -180,6 +119,11 @@ def eval_result_to_task_dict(
     # per-task content.
     has_reply = _has_final_reply(result)
 
+    agent_cost = result.total_token_usage.total_cost_usd if result.total_token_usage else None
+    judge_cost = judge_cost_usd(result)
+    simulator_cost = simulator_cost_usd(result)
+    row_full_cost = full_cost(agent_cost, judge_cost, simulator_cost)
+
     expected_turns_value: int | None = None
     if result.task_config is not None:
         rl = (result.task_config.resolved or {}).get("run_limits") or {}
@@ -219,20 +163,24 @@ def eval_result_to_task_dict(
             result.total_token_usage.cache_read_input_tokens if result.total_token_usage else None
         ),
         "total_tokens": (result.total_token_usage.total_tokens if result.total_token_usage else None),
-        "total_cost_usd": (result.total_token_usage.total_cost_usd if result.total_token_usage else None),
-        # False when some turn's tokens are missing a price, so total_cost_usd above
-        # is a floor. Rolled up as RunSummary.tasks_unpriced / cost_complete.
+        # Subject-agent spend only. `total_cost_usd` predates the judge/simulator
+        # fields and the dashboard already reads it as the agent bill, so its
+        # meaning is unchanged and `full_cost_usd` below carries the whole figure.
+        "total_cost_usd": agent_cost,
+        # False when the agent spend above is missing money, so it is a floor.
+        # Rolled up as RunSummary.tasks_cost_incomplete / cost_complete.
         "cost_complete": _cost_complete(result),
-        # Evaluation-machinery spend, kept strictly beside the agent bill rather
-        # than inside it: the judge cost is a property of the suite's criteria and
-        # is identical across harnesses, so folding it into total_cost_usd would
-        # make two harnesses look closer than they are. Rolled up run-level as
-        # RunSummary.eval_overhead_cost_usd.
-        "judge_cost_usd": _judge_cost_usd(result),
-        "simulator_cost_usd": _simulator_cost_usd(result),
-        # Why this row errored, on the row. Errors now count as misses, so the
-        # rollup needs to say *why* it lost those points: without these, an errored
-        # run is untriageable without fetching per-task artifacts one at a time.
+        # Evaluation-machinery spend, kept beside the agent bill rather than inside
+        # it: judge cost is a property of the suite's criteria and identical across
+        # harnesses, so folding it in would make two harnesses look closer than they
+        # are. Rolled up as RunSummary.eval_overhead_cost_usd.
+        "judge_cost_usd": judge_cost,
+        "simulator_cost_usd": simulator_cost,
+        # What the task actually cost: agent + judge + simulator. None when nothing
+        # was priced at all. Published so no consumer has to add the three itself.
+        "full_cost_usd": row_full_cost,
+        # Errors count as misses, so the rollup has to say why it lost those points.
+        # Without these, triaging an errored run needs one task.json fetch per row.
         "error_message": (
             truncate_crash_message(result.error_message, limit=_ROW_ERROR_MESSAGE_MAX_CHARS)
             if result.error_message
@@ -391,8 +339,7 @@ class ExperimentReportGenerator:
             row += " | —"
         lines.append(row + " |")
 
-        # Row: Pass Rate. Every task the variant ran is in the denominator, errors
-        # included — see VariantAggregate.pass_rate.
+        # Every task the variant ran is in the denominator, errors included.
         row = "| Pass Rate"
         for vid in result.variant_ids:
             rate = result.variant_aggregates[vid].pass_rate

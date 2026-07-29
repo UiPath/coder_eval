@@ -1,15 +1,8 @@
 """Cost accounting on the error and timeout paths, where spend went missing.
 
-Two seams:
-
-1. **The pre-flight** (``check_pricing_coverage``). The rate card is a static
-   table baked into the installed version, so a model released after it has no
-   rate. It is the fallback for turns the agent's backend never priced, which
-   makes killed and timed-out partials the ones that book their tokens against no
-   money at all, with one log line to show for it.
-2. **The row projection** (``eval_result_to_task_dict``) — judge and simulator
-   spend was captured and rolled up nowhere, and a row whose turns were only
-   partly priced reported its partial sum as the whole.
+Two seams: the ``check_pricing_coverage`` pre-flight, which warns when a model the
+run will use has no rate, and the ``eval_result_to_task_dict`` row projection,
+which reports judge/simulator spend and flags a row whose costs are only partial.
 """
 
 from __future__ import annotations
@@ -17,6 +10,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -35,14 +29,14 @@ from coder_eval.orchestration.batch import check_pricing_coverage
 from coder_eval.reports_experiment import eval_result_to_task_dict
 
 
-def _resolved(model: str | None, tmp_path: Path) -> ResolvedTask:
+def _resolved(model: str | None, tmp_path: Path, criteria: list[dict[str, Any]] | None = None) -> ResolvedTask:
     task = TaskDefinition(
         task_id="t1",
         description="d",
         initial_prompt="p",
         agent=ClaudeCodeAgentConfig(type="claude-code", model=model),
         sandbox={"driver": "tempdir"},
-        success_criteria=[{"type": "file_exists", "path": "f.py", "description": "d"}],
+        success_criteria=criteria or [{"type": "file_exists", "path": "f.py", "description": "d"}],
     )
     return ResolvedTask(
         task=task,
@@ -94,6 +88,20 @@ class TestPricingPreflight:
     def test_unpinned_model_is_not_flagged(self, tmp_path):
         """A task deferring its model to the route can't be pre-flighted from here."""
         assert check_pricing_coverage([_resolved(None, tmp_path)]) == []
+
+    def test_judge_criterion_model_is_pre_flighted(self, tmp_path):
+        """A judge call is ALWAYS priced from the rate card, so its model matters most.
+
+        No judge backend reports a cost, unlike an agent whose SDK prices a clean
+        turn, so an unpriced ``criterion.model`` loses money on every graded row.
+        """
+        judge = {"type": "llm_judge", "description": "d", "prompt": "grade it", "model": "claude-sonnet-99"}
+        assert check_pricing_coverage([_resolved("claude-sonnet-5", tmp_path, [judge])]) == ["claude-sonnet-99"]
+
+    def test_default_judge_model_is_priced(self, tmp_path):
+        """The out-of-the-box judge must not warn on a stock task."""
+        judge = {"type": "llm_judge", "description": "d", "prompt": "grade it"}
+        assert check_pricing_coverage([_resolved("claude-sonnet-5", tmp_path, [judge])]) == []
 
 
 class TestRowCostProjection:
@@ -184,6 +192,33 @@ class TestRowCostProjection:
         result = _result([_turn(1, TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1))])
         assert eval_result_to_task_dict(result)["judge_cost_usd"] is None
 
+    def test_unpriced_judge_is_skipped_not_fatal(self):
+        """An unpriced judge lowers the total; it must never raise or zero the row.
+
+        The pre-flight warns about this at dispatch. After that the run carries on
+        and the figures are a floor, which is the trade this framework makes
+        everywhere: cost degrades, the evaluation does not.
+        """
+        result = _result([_turn(1, TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1))])
+        result.total_token_usage = TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1)
+        result.success_criteria_results = [
+            JudgeCriterionResult(
+                criterion_type="llm_judge",
+                description="priced",
+                score=1.0,
+                token_usage=TokenUsage(uncached_input_tokens=5000, output_tokens=500, total_cost_usd=0.02),
+            ),
+            JudgeCriterionResult(
+                criterion_type="llm_judge",
+                description="unpriced",
+                score=1.0,
+                token_usage=TokenUsage(uncached_input_tokens=5000, output_tokens=500),
+            ),
+        ]
+        row = eval_result_to_task_dict(result)
+        assert row["judge_cost_usd"] == pytest.approx(0.02)
+        assert row["full_cost_usd"] == pytest.approx(0.12)
+
     @staticmethod
     def _simulated(**env) -> EvaluationResult:
         return _result(
@@ -219,6 +254,73 @@ class TestRowCostProjection:
     def test_single_shot_row_has_no_simulator_cost(self):
         result = _result([_turn(1, TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1))])
         assert eval_result_to_task_dict(result)["simulator_cost_usd"] is None
+
+    def test_unpriced_simulator_route_is_skipped_not_fatal(self):
+        """An unpriced simulator route leaves the rest of the row intact."""
+        result = self._simulated(bedrock_model="claude-sonnet-99")
+        result.total_token_usage = TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1)
+        row = eval_result_to_task_dict(result)
+        assert row["simulator_cost_usd"] is None
+        # The agent's own spend still lands; only the simulator slice is missing.
+        assert row["full_cost_usd"] == pytest.approx(0.1)
+
+
+class TestFullCost:
+    """``full_cost_usd`` is the number to quote: agent + judge + simulator."""
+
+    def test_sums_every_component(self):
+        result = _result(
+            [_turn(1, TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=1.0))],
+            simulation=SimulationTelemetry(
+                n_trials=1,
+                replicate_index=0,
+                stop_reason="stop_token",
+                simulator_input_tokens=1_000_000,
+                simulator_output_tokens=0,
+                total_turns=2,
+            ),
+            environment_info={"bedrock_model": "claude-haiku-4-5-20251001"},
+        )
+        result.total_token_usage = TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=1.0)
+        result.success_criteria_results = [
+            JudgeCriterionResult(
+                criterion_type="llm_judge",
+                description="d",
+                score=1.0,
+                token_usage=TokenUsage(uncached_input_tokens=5000, output_tokens=500, total_cost_usd=0.25),
+            ),
+        ]
+        row = eval_result_to_task_dict(result)
+        # 1.0 agent + 0.25 judge + 1M input at haiku's $1/MTok.
+        assert row["full_cost_usd"] == pytest.approx(2.25)
+        # The agent bill stays comparable across harnesses.
+        assert row["total_cost_usd"] == pytest.approx(1.0)
+
+    def test_none_when_nothing_was_priced(self):
+        """Not 0.0 — an unpriced row must not read as a free one."""
+        assert eval_result_to_task_dict(_result([]))["full_cost_usd"] is None
+
+    def test_run_level_total_is_the_sum_of_both_halves(self):
+        from coder_eval.models import RunSummary
+
+        summary = RunSummary(
+            run_id="2026-07-29_00-00-00",
+            start_time=datetime(2026, 7, 29, 0, 0, 0),
+            end_time=datetime(2026, 7, 29, 1, 0, 0),
+            total_duration_seconds=3600.0,
+            tasks_run=1,
+            tasks_succeeded=1,
+            tasks_failed=0,
+            tasks_error=0,
+            task_results=[
+                {"task_id": "t", "total_cost_usd": 1.0, "judge_cost_usd": 0.2, "simulator_cost_usd": 0.05},
+            ],
+            framework_version="0.0.0-test",
+        )
+        assert summary.agent_cost_usd == pytest.approx(1.0)
+        assert summary.eval_overhead_cost_usd == pytest.approx(0.25)
+        assert summary.full_cost_usd == pytest.approx(1.25)
+        assert summary.model_dump()["full_cost_usd"] == pytest.approx(1.25)
 
 
 class TestErrorDiagnosticsOnTheRow:

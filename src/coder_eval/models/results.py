@@ -850,50 +850,96 @@ class SkippedTask(BaseModel):
 def row_cost_incomplete(row: Mapping[str, Any]) -> bool:
     """True when a task row's recorded spend is missing money.
 
-    Reads the row's own ``cost_complete``, which the row projection sets by asking
-    whether every turn that burned tokens also carries a cost. A row that burned
-    nothing is complete, not unpriced: an error before the agent ran genuinely cost
-    nothing.
+    Reads the row's own ``cost_complete`` flag. Absent means complete: rows written
+    before the field existed are read as priced rather than inferred from their
+    token counts, which would be a second definition of the same predicate.
 
-    Absent means complete. Rows written before the field existed are read as
-    priced rather than inferred from their token counts: guessing at the past would
-    buy a caveat on old runs at the cost of a second definition of "unpriced",
-    which is the kind of drift this helper exists to prevent.
-
-    Defined once here, on the row schema, because every surface that reports cost
-    has to apply the same test. Reports and ``RunSummary`` disagreeing about which
-    rows lost money would put the framework back where it started.
+    Defined here, on the row schema, so the reports and ``RunSummary`` cannot
+    disagree about which rows lost money.
     """
     return row.get("cost_complete") is False
 
 
-def eval_overhead_costs(rows: Iterable[Mapping[str, Any]]) -> list[float]:
-    """Every judge / simulator cost present across ``rows``, unsummed.
+def full_cost(*components: float | None) -> float | None:
+    """Total of whichever cost components were priced. ``None`` when none were.
 
-    Returned as a list rather than a total because callers need to distinguish
-    "no overhead was recorded" from "overhead was recorded and came to $0".
+    The one way cost components are combined, so every surface adds them up the
+    same way. Never raises and never invents a zero: an unpriced component is
+    skipped, which makes the result a floor rather than a failure.
     """
-    return [c for row in rows for key in ("judge_cost_usd", "simulator_cost_usd") if (c := row.get(key)) is not None]
+    priced = [c for c in components if c is not None]
+    return sum(priced) if priced else None
+
+
+def eval_overhead_cost(rows: Iterable[Mapping[str, Any]]) -> float | None:
+    """Total judge + simulator spend across ``rows``, or ``None`` if none was recorded.
+
+    ``None`` rather than ``0.0`` so "no judge ran" stays distinct from "a judge ran free".
+    """
+    return full_cost(*(row.get(key) for row in rows for key in ("judge_cost_usd", "simulator_cost_usd")))
+
+
+def judge_cost_usd(result: EvaluationResult) -> float | None:
+    """Sum the priced judge spend across an evaluation's criterion results.
+
+    Covers both flavors: ``llm_judge`` prices its own one-shot call from the
+    criterion's model, ``agent_judge`` inherits the SDK's cost on the sub-agent's
+    turn. ``None`` when no criterion reported cost.
+    """
+    usages = [u for cr in result.success_criteria_results if (u := getattr(cr, "token_usage", None)) is not None]
+    return full_cost(*(u.total_cost_usd for u in usages))
+
+
+def simulator_cost_usd(result: EvaluationResult) -> float | None:
+    """Price an evaluation's simulator turns. ``None`` outside simulation mode.
+
+    Priced at the ROUTE's model, not the subject's: ``UserSimulator`` pins
+    ``model=None`` so it resolves to ``BEDROCK_MODEL``, which differs from the
+    subject on any task that pins ``agent.model``.
+
+    A floor. ``UserSimulator`` records only ``uncached_input_tokens`` and drops
+    both cache buckets, so a cached prefix is largely absent from the count.
+    """
+    from coder_eval.pricing import calculate_cost
+
+    sim = result.simulation
+    if sim is None or not (sim.simulator_input_tokens or sim.simulator_output_tokens):
+        return None
+    route_model = (result.environment_info or {}).get("bedrock_model")
+    # Falls back to the subject's model on a non-Bedrock route, where the SDK picks
+    # its own default and nothing on the record names it.
+    model = route_model if isinstance(route_model, str) and route_model else result.model_used
+    if not model:
+        return None
+    return calculate_cost(
+        model,
+        uncached_input_tokens=sim.simulator_input_tokens,
+        output_tokens=sim.simulator_output_tokens,
+    )
+
+
+def eval_result_full_cost(result: EvaluationResult) -> float | None:
+    """Everything one evaluation cost: agent + judge + simulator.
+
+    ``None`` when nothing could be priced, a floor when only part of it could. The
+    same figure the row projection publishes as ``full_cost_usd``, for the surfaces
+    that hold an ``EvaluationResult`` rather than a row dict.
+    """
+    agent = result.total_token_usage.total_cost_usd if result.total_token_usage else None
+    return full_cost(agent, judge_cost_usd(result), simulator_cost_usd(result))
 
 
 class RunSummary(BaseModel):
     """Summary of an entire evaluation run across multiple tasks.
 
-    ``pass_rate`` is ``tasks_succeeded / tasks_run``: **every dispatched task is in
-    the denominator, errors included as misses.** An error is not a free pass. The
-    previous formula excluded errors, which paid a bonus for erroring: a harness
-    that fell over enough could render as a perfect score while passing almost
-    nothing. A denominator that shrinks when a run goes wrong is not a metric you
-    can set beside another run's. ``error_share`` says how much of the rate is
-    errors, so a bad infrastructure night *shows* instead of being absorbed.
+    ``pass_rate`` is ``tasks_succeeded / tasks_run``: every dispatched task is in the
+    denominator, errors included as misses. The previous formula excluded errors,
+    which paid a bonus for erroring. ``error_share`` reports how much of the rate is
+    errors, so a bad infrastructure night shows instead of being absorbed.
 
-    This is the single denominator for the whole framework. Every reporting
-    surface reads ``pass_rate`` rather than re-deriving one: independent
-    re-derivations drift, and consumers reading the same run.json then publish
-    different rates for it.
-
-    Every derived metric here is computed, never stored, so it cannot drift from
-    the counts it comes from.
+    This is the framework's single denominator: every reporting surface reads
+    ``pass_rate`` rather than re-deriving one. Derived metrics here are computed,
+    never stored, so they cannot drift from the counts they come from.
     """
 
     run_id: str = Field(description="Run identifier (timestamp like '2025-10-09_15-30-45')")
@@ -958,24 +1004,15 @@ class RunSummary(BaseModel):
             raise ValueError(f"Task count invariant violated: {total} != {self.tasks_run}")
         return self
 
-    # ------------------------------------------------------------------
-    # Derived run metrics.
-    #
-    # Every one is a computed_field over the stored counts and ``task_results``,
-    # so it serializes into run.json for downstream consumers (dashboards,
-    # external runners) while staying impossible to set to something the rows
-    # disagree with. Consumers should READ these rather than re-deriving them:
-    # every independent re-derivation is another denominator that can drift.
-    # ------------------------------------------------------------------
+    # Derived run metrics: computed_fields over the stored counts and
+    # ``task_results``, so they serialize into run.json while staying impossible to
+    # set to something the rows disagree with. Consumers should read these rather
+    # than re-derive them.
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def pass_rate(self) -> float | None:
-        """``tasks_succeeded / tasks_run`` as a 0-1 fraction. ``None`` on an empty run.
-
-        The run's one pass rate. Errors are in the denominator as misses — see the
-        class docstring for why there is no second, error-excluding figure.
-        """
+        """``tasks_succeeded / tasks_run`` as a 0-1 fraction. ``None`` on an empty run."""
         return self.tasks_succeeded / self.tasks_run if self.tasks_run else None
 
     @computed_field  # type: ignore[prop-decorator]
@@ -983,56 +1020,50 @@ class RunSummary(BaseModel):
     def error_share(self) -> float | None:
         """``tasks_error / tasks_run`` as a 0-1 fraction. ``None`` on an empty run.
 
-        How much of ``pass_rate`` is being held down by rows that never produced a
-        gradeable attempt. Diagnostic only: it does not adjust the rate. A run whose
-        rate dropped with a high ``error_share`` had an infrastructure night; the same
-        drop at a normal share is the model. Per-row ``error_message`` /
-        ``error_category`` say which.
+        Diagnostic only, never adjusts the rate: a drop at a high error share is an
+        infrastructure night, the same drop at a normal share is the model.
         """
         return self.tasks_error / self.tasks_run if self.tasks_run else None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
-    def tasks_unpriced(self) -> int:
-        """Rows whose recorded spend is incomplete.
-
-        Each one is real money missing from ``agent_cost_usd``, because the rate
-        card is a static table baked into the installed version: a model released
-        after it prices as ``null`` on every turn, with only a log line to say so.
-        ``row_cost_incomplete`` defines what counts, and the report applies the
-        same helper so the two can never disagree.
-        """
+    def tasks_cost_incomplete(self) -> int:
+        """Rows with money missing from their recorded spend (see ``row_cost_incomplete``)."""
         return sum(1 for row in self.task_results if row_cost_incomplete(row))
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def cost_complete(self) -> bool:
         """False when any row's spend is incomplete, so every cost total here is a floor."""
-        return self.tasks_unpriced == 0
+        return self.tasks_cost_incomplete == 0
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def agent_cost_usd(self) -> float | None:
         """Subject-agent spend across the run. ``None`` when no row reported cost.
 
-        Excludes evaluation machinery: that is ``eval_overhead_cost_usd``, and the
-        two are published as a pair because a run's true bill is their sum. Read
-        alongside ``cost_complete``: with unpriced rows present this is a floor,
-        not the bill.
+        Excludes evaluation machinery (``eval_overhead_cost_usd``); ``full_cost_usd``
+        is the two added together. A floor when ``cost_complete`` is False.
         """
-        costs = [c for row in self.task_results if (c := row.get("total_cost_usd")) is not None]
-        return sum(costs) if costs else None
+        return full_cost(*(row.get("total_cost_usd") for row in self.task_results))
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def eval_overhead_cost_usd(self) -> float | None:
         """Judge + simulator spend across the run. ``None`` when neither reported cost.
 
-        Deliberately NOT folded into ``agent_cost_usd``: comparing harnesses
-        means comparing what the agents cost, and the judge bill is a property of
-        the suite's criteria, identical across harnesses. But it is real money
-        and was previously reported nowhere, so a run's true bill is the two
-        added together.
+        Kept out of ``agent_cost_usd`` on purpose: the judge bill is a property of the
+        suite's criteria and identical across harnesses, so folding it in would make
+        two harnesses look closer than they are.
         """
-        costs = eval_overhead_costs(self.task_results)
-        return sum(costs) if costs else None
+        return eval_overhead_cost(self.task_results)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def full_cost_usd(self) -> float | None:
+        """What the run actually cost: agent + judge + simulator.
+
+        The number to quote for a run's bill. ``None`` when nothing could be priced,
+        and a floor rather than an error when only some of it could.
+        """
+        return full_cost(self.agent_cost_usd, self.eval_overhead_cost_usd)

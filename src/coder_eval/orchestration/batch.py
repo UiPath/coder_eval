@@ -12,7 +12,7 @@ import asyncio
 import json
 import logging
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -39,42 +39,41 @@ from .config import BatchRunConfig, resolve_preservation_mode
 logger = logging.getLogger(__name__)
 
 
+def _run_models(resolved_tasks: list[ResolvedTask]) -> Iterator[str | None]:
+    """Every model id this run pins up front: subject agents and judge criteria.
+
+    A criterion's model is always priced from the rate card (no judge backend
+    reports a cost), so it matters more here than the agent's, which only falls
+    back to the card on a turn the backend never priced.
+    """
+    for rt in resolved_tasks:
+        yield rt.task.agent.model if rt.task.agent else None
+        for criterion in rt.task.success_criteria:
+            yield getattr(criterion, "model", None)
+
+
 def check_pricing_coverage(resolved_tasks: list[ResolvedTask]) -> list[str]:
     """Pre-flight the rate card against the models this run will use.
 
-    The rate card is a static table baked into the installed framework version, so
-    a model released after that version has no rate here. Whether that costs you
-    anything depends on the turn: an agent whose backend reports its own cost (the
-    Claude Code SDK does) still prices a clean turn, so most rows look fine. The
-    rate card is the FALLBACK, and it is the only source for a turn the backend
-    never priced — a timed-out or killed partial, which arrives with full token
-    counts and no cost. With no rate, that fallback is a no-op and the tokens book
-    no money at all.
+    The rate card is a static table baked into the installed version, so a model
+    released after it has no rate and its tokens book no money. A warning rather
+    than a refusal, so a brand-new model stays evaluable the day it ships: cost is
+    what degrades, not the evaluation. What the run actually lost is counted after
+    the fact by ``RunSummary.tasks_cost_incomplete``.
 
-    That is not a rare corner: on a large suite the killed tail is where the
-    biggest token counts live, since a task that ran to the wall spent the most
-    getting there.
-
-    A warning rather than a refusal, so a brand-new model stays evaluable on the
-    day it ships: the cost is what degrades, not the evaluation. What the run
-    actually lost is then counted after the fact by ``RunSummary.tasks_unpriced``.
-
-    Only pinned ``agent.model`` values are visible here; a task that defers its
-    model to the route resolves it inside the agent and can't be pre-flighted.
-
-    Args:
-        resolved_tasks: The fully-resolved tasks about to run.
+    Only models pinned in the task YAML are visible here; one deferred to the route
+    resolves inside the agent and can't be pre-flighted.
 
     Returns:
         The sorted, de-duplicated unpriced model ids (empty when all are priced).
     """
-    missing = unpriced_models(rt.task.agent.model if rt.task.agent else None for rt in resolved_tasks)
+    missing = unpriced_models(_run_models(resolved_tasks))
     if not missing:
         return []
     logger.warning(
         "No pricing rate for %s. Turns the agent's own backend prices are unaffected, but any "
-        + "timed-out or killed partial will book its tokens with no cost, so run-level totals will "
-        + "understate the bill (RunSummary.cost_complete reports false). "
+        + "judge call, timed-out turn or killed partial will book its tokens with no cost, so "
+        + "run-level totals will understate the bill (RunSummary.cost_complete reports false). "
         + "Add the rate to coder_eval.pricing or register it from a plugin via register_pricing().",
         ", ".join(repr(m) for m in missing),
     )
