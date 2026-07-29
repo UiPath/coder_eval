@@ -860,8 +860,8 @@ def row_cost_incomplete(row: Mapping[str, Any]) -> bool:
     return row.get("cost_complete") is False
 
 
-def full_cost(*components: float | None) -> float | None:
-    """Total of whichever cost components were priced. ``None`` when none were.
+def sum_costs(*components: float | None) -> float | None:
+    """Add whichever cost components were priced. ``None`` when none were.
 
     The one way cost components are combined, so every surface adds them up the
     same way. Never raises and never invents a zero: an unpriced component is
@@ -876,7 +876,7 @@ def eval_overhead_cost(rows: Iterable[Mapping[str, Any]]) -> float | None:
 
     ``None`` rather than ``0.0`` so "no judge ran" stays distinct from "a judge ran free".
     """
-    return full_cost(*(row.get(key) for row in rows for key in ("judge_cost_usd", "simulator_cost_usd")))
+    return sum_costs(*(row.get(key) for row in rows for key in ("judge_cost_usd", "simulator_cost_usd")))
 
 
 def judge_cost_usd(result: EvaluationResult) -> float | None:
@@ -887,7 +887,7 @@ def judge_cost_usd(result: EvaluationResult) -> float | None:
     turn. ``None`` when no criterion reported cost.
     """
     usages = [u for cr in result.success_criteria_results if (u := getattr(cr, "token_usage", None)) is not None]
-    return full_cost(*(u.total_cost_usd for u in usages))
+    return sum_costs(*(u.total_cost_usd for u in usages))
 
 
 def simulator_cost_usd(result: EvaluationResult) -> float | None:
@@ -918,15 +918,15 @@ def simulator_cost_usd(result: EvaluationResult) -> float | None:
     )
 
 
-def eval_result_full_cost(result: EvaluationResult) -> float | None:
+def eval_result_total_cost(result: EvaluationResult) -> float | None:
     """Everything one evaluation cost: agent + judge + simulator.
 
     ``None`` when nothing could be priced, a floor when only part of it could. The
-    same figure the row projection publishes as ``full_cost_usd``, for the surfaces
+    same figure the row projection publishes as ``total_cost_usd``, for the surfaces
     that hold an ``EvaluationResult`` rather than a row dict.
     """
     agent = result.total_token_usage.total_cost_usd if result.total_token_usage else None
-    return full_cost(agent, judge_cost_usd(result), simulator_cost_usd(result))
+    return sum_costs(agent, judge_cost_usd(result), simulator_cost_usd(result))
 
 
 class RunSummary(BaseModel):
@@ -1042,28 +1042,25 @@ class RunSummary(BaseModel):
     def agent_cost_usd(self) -> float | None:
         """Subject-agent spend across the run. ``None`` when no row reported cost.
 
-        Excludes evaluation machinery (``eval_overhead_cost_usd``); ``full_cost_usd``
-        is the two added together. A floor when ``cost_complete`` is False.
+        The comparison figure, not the bill: judge spend is a property of the suite's
+        criteria and identical across harnesses, so folding it in would make two
+        harnesses look closer than they are. ``total_cost_usd`` is the bill.
         """
-        return full_cost(*(row.get("total_cost_usd") for row in self.task_results))
+        return sum_costs(*(row.get("agent_cost_usd") for row in self.task_results))
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def eval_overhead_cost_usd(self) -> float | None:
-        """Judge + simulator spend across the run. ``None`` when neither reported cost.
-
-        Kept out of ``agent_cost_usd`` on purpose: the judge bill is a property of the
-        suite's criteria and identical across harnesses, so folding it in would make
-        two harnesses look closer than they are.
-        """
+        """Judge + simulator spend across the run. ``None`` when neither reported cost."""
         return eval_overhead_cost(self.task_results)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
-    def full_cost_usd(self) -> float | None:
-        """What the run actually cost: agent + judge + simulator.
+    def total_cost_usd(self) -> float | None:
+        """What the run cost: agent + judge + simulator.
 
-        The number to quote for a run's bill. ``None`` when nothing could be priced,
-        and a floor rather than an error when only some of it could.
+        The number to quote for a run's bill, and what every surface means by "total
+        cost". ``None`` when nothing could be priced, and a floor rather than an error
+        when only some of it could.
         """
-        return full_cost(self.agent_cost_usd, self.eval_overhead_cost_usd)
+        return sum_costs(*(row.get("total_cost_usd") for row in self.task_results))

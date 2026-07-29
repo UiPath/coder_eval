@@ -13,9 +13,9 @@ from coder_eval.models import (
     ExperimentResult,
     FinalStatus,
     TaskExperimentSummary,
-    full_cost,
     judge_cost_usd,
     simulator_cost_usd,
+    sum_costs,
 )
 from coder_eval.path_utils import replicate_subdir_name
 from coder_eval.reports import resolve_agent_settings
@@ -122,7 +122,7 @@ def eval_result_to_task_dict(
     agent_cost = result.total_token_usage.total_cost_usd if result.total_token_usage else None
     judge_cost = judge_cost_usd(result)
     simulator_cost = simulator_cost_usd(result)
-    row_full_cost = full_cost(agent_cost, judge_cost, simulator_cost)
+    row_total_cost = sum_costs(agent_cost, judge_cost, simulator_cost)
 
     expected_turns_value: int | None = None
     if result.task_config is not None:
@@ -163,22 +163,22 @@ def eval_result_to_task_dict(
             result.total_token_usage.cache_read_input_tokens if result.total_token_usage else None
         ),
         "total_tokens": (result.total_token_usage.total_tokens if result.total_token_usage else None),
-        # Subject-agent spend only. `total_cost_usd` predates the judge/simulator
-        # fields and the dashboard already reads it as the agent bill, so its
-        # meaning is unchanged and `full_cost_usd` below carries the whole figure.
-        "total_cost_usd": agent_cost,
+        # What the task cost: agent + judge + simulator. `total_cost_usd` means the
+        # whole bill on every surface, so a consumer that reads it gets the real
+        # number without adding anything up. None when nothing was priced at all.
+        "total_cost_usd": row_total_cost,
+        # Subject-agent spend alone, broken out for harness-vs-harness comparison:
+        # judge cost is a property of the suite's criteria and identical across
+        # harnesses, so leaving it in would make two harnesses look closer than they
+        # are. Rolled up as RunSummary.agent_cost_usd.
+        "agent_cost_usd": agent_cost,
         # False when the agent spend above is missing money, so it is a floor.
         # Rolled up as RunSummary.tasks_cost_incomplete / cost_complete.
         "cost_complete": _cost_complete(result),
-        # Evaluation-machinery spend, kept beside the agent bill rather than inside
-        # it: judge cost is a property of the suite's criteria and identical across
-        # harnesses, so folding it in would make two harnesses look closer than they
-        # are. Rolled up as RunSummary.eval_overhead_cost_usd.
+        # The two halves of the eval-machinery bill, rolled up as
+        # RunSummary.eval_overhead_cost_usd.
         "judge_cost_usd": judge_cost,
         "simulator_cost_usd": simulator_cost,
-        # What the task actually cost: agent + judge + simulator. None when nothing
-        # was priced at all. Published so no consumer has to add the three itself.
-        "full_cost_usd": row_full_cost,
         # Errors count as misses, so the rollup has to say why it lost those points.
         # Without these, triaging an errored run needs one task.json fetch per row.
         "error_message": (

@@ -16,8 +16,8 @@ from .models import (
     TaskResult,
     ThresholdCheck,
     eval_overhead_cost,
-    full_cost,
     row_cost_incomplete,
+    sum_costs,
 )
 from .path_utils import build_task_run_dir
 
@@ -543,7 +543,7 @@ class ReportGenerator:
         total_cache_write = sum(t.get("cache_creation_input_tokens") or 0 for t in tasks_with_tokens)
         total_cache_read = sum(t.get("cache_read_input_tokens") or 0 for t in tasks_with_tokens)
         total_tokens = sum(t["total_tokens"] for t in tasks_with_tokens)
-        agent_cost = full_cost(*(t.get("total_cost_usd") for t in tasks_with_tokens))
+        agent_cost = sum_costs(*(t.get("agent_cost_usd") for t in tasks_with_tokens))
 
         # Same helpers RunSummary uses, so the report and run.json cannot disagree
         # about the bill. Worded cause-agnostically ("spend missing") because an
@@ -551,7 +551,7 @@ class ReportGenerator:
         # cannot always tell which applied.
         incomplete = [t for t in task_results if row_cost_incomplete(t)]
         overhead = eval_overhead_cost(task_results)
-        total_cost = full_cost(agent_cost, overhead)
+        total_cost = sum_costs(*(t.get("total_cost_usd") for t in task_results))
 
         lines.append(f"**Total Tokens**: {total_tokens:,} (input: {total_input:,}, output: {total_output:,})")
         if total_cache_write > 0 or total_cache_read > 0:
@@ -588,8 +588,7 @@ class ReportGenerator:
             cache_read = t.get("cache_read_input_tokens") or 0
             tokens = t.get("total_tokens", 0)
             # The row's whole bill, so the column sums to **Total Cost** above.
-            # Legacy rows predate full_cost_usd and carry only the agent figure.
-            cost = t.get("full_cost_usd", t.get("total_cost_usd"))
+            cost = t.get("total_cost_usd")
             cost_str = f"${cost:.4f}" if cost is not None else "N/A"
             row = (
                 f"| {t['task_id']} | {input_tok:,} | {output_tok:,} "

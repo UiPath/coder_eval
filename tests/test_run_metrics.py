@@ -22,12 +22,22 @@ from typing import Any
 import pytest
 import yaml
 
-from coder_eval.models import FinalStatus, RunSummary
+from coder_eval.models import FinalStatus, RunSummary, sum_costs
 from coder_eval.pricing import is_priced, unpriced_models
 
 
 def _row(status: FinalStatus | str, **extra: Any) -> dict[str, Any]:
-    return {"task_id": f"t{id(extra)}", "status": status, **extra}
+    """A run.json row. ``total_cost_usd`` is derived the way the real projection derives it.
+
+    Callers give the three cost slices; the row's total is their sum, so a test can
+    never assert against a total the projection would not have written.
+    """
+    row: dict[str, Any] = {"task_id": f"t{id(extra)}", "status": status, **extra}
+    if any(k in extra for k in ("agent_cost_usd", "judge_cost_usd", "simulator_cost_usd")):
+        row["total_cost_usd"] = sum_costs(
+            extra.get("agent_cost_usd"), extra.get("judge_cost_usd"), extra.get("simulator_cost_usd")
+        )
+    return row
 
 
 def _summary(rows: list[dict[str, Any]]) -> RunSummary:
@@ -133,8 +143,8 @@ class TestCostCompleteness:
     def test_unpriced_row_is_counted_and_flagged(self):
         summary = _summary(
             [
-                _row(FinalStatus.SUCCESS, total_tokens=1000, total_cost_usd=0.5, cost_complete=True),
-                _row(FinalStatus.TIMEOUT, total_tokens=8_000_000, total_cost_usd=None, cost_complete=False),
+                _row(FinalStatus.SUCCESS, total_tokens=1000, agent_cost_usd=0.5, cost_complete=True),
+                _row(FinalStatus.TIMEOUT, total_tokens=8_000_000, agent_cost_usd=None, cost_complete=False),
             ]
         )
         assert summary.tasks_cost_incomplete == 1
@@ -150,14 +160,14 @@ class TestCostCompleteness:
         it the row's cost is the silent 19% understatement.
         """
         summary = _summary(
-            [_row(FinalStatus.TIMEOUT, total_tokens=5_000_000, total_cost_usd=1.25, cost_complete=False)]
+            [_row(FinalStatus.TIMEOUT, total_tokens=5_000_000, agent_cost_usd=1.25, cost_complete=False)]
         )
         assert summary.tasks_cost_incomplete == 1
         assert summary.cost_complete is False
 
     def test_zero_token_error_is_not_unpriced(self):
         """A row that died before the agent ran genuinely cost nothing."""
-        summary = _summary([_row(FinalStatus.ERROR, total_tokens=0, total_cost_usd=None, cost_complete=True)])
+        summary = _summary([_row(FinalStatus.ERROR, total_tokens=0, agent_cost_usd=None, cost_complete=True)])
         assert summary.tasks_cost_incomplete == 0
         assert summary.cost_complete is True
         assert summary.agent_cost_usd is None
@@ -173,7 +183,7 @@ class TestCostCompleteness:
                 _row(
                     FinalStatus.SUCCESS,
                     total_tokens=1000,
-                    total_cost_usd=1.0,
+                    agent_cost_usd=1.0,
                     cost_complete=True,
                     judge_cost_usd=0.2,
                     simulator_cost_usd=0.05,
@@ -182,9 +192,11 @@ class TestCostCompleteness:
         )
         assert summary.agent_cost_usd == pytest.approx(1.0)
         assert summary.eval_overhead_cost_usd == pytest.approx(0.25)
+        # And the bill is the two together, which is what `total_cost_usd` means.
+        assert summary.total_cost_usd == pytest.approx(1.25)
 
     def test_no_overhead_reports_none(self):
-        summary = _summary([_row(FinalStatus.SUCCESS, total_tokens=1, total_cost_usd=0.1, cost_complete=True)])
+        summary = _summary([_row(FinalStatus.SUCCESS, total_tokens=1, agent_cost_usd=0.1, cost_complete=True)])
         assert summary.eval_overhead_cost_usd is None
 
 

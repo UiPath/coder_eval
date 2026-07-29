@@ -184,8 +184,9 @@ class TestRowCostProjection:
         ]
         row = eval_result_to_task_dict(result)
         assert row["judge_cost_usd"] == pytest.approx(0.05)
-        # Kept out of the agent's bill.
-        assert row["total_cost_usd"] == pytest.approx(0.1)
+        # Folded into the row's bill, and kept out of the agent-only slice.
+        assert row["total_cost_usd"] == pytest.approx(0.15)
+        assert row["agent_cost_usd"] == pytest.approx(0.1)
 
     def test_no_judge_means_no_judge_cost(self):
         """None, not 0.0 — 'no judge ran' must stay distinct from 'a judge ran free'."""
@@ -217,7 +218,7 @@ class TestRowCostProjection:
         ]
         row = eval_result_to_task_dict(result)
         assert row["judge_cost_usd"] == pytest.approx(0.02)
-        assert row["full_cost_usd"] == pytest.approx(0.12)
+        assert row["total_cost_usd"] == pytest.approx(0.12)
 
     @staticmethod
     def _simulated(**env) -> EvaluationResult:
@@ -262,11 +263,11 @@ class TestRowCostProjection:
         row = eval_result_to_task_dict(result)
         assert row["simulator_cost_usd"] is None
         # The agent's own spend still lands; only the simulator slice is missing.
-        assert row["full_cost_usd"] == pytest.approx(0.1)
+        assert row["total_cost_usd"] == pytest.approx(0.1)
 
 
-class TestFullCost:
-    """``full_cost_usd`` is the number to quote: agent + judge + simulator."""
+class TestTotalCost:
+    """``total_cost_usd`` is the whole bill: agent + judge + simulator."""
 
     def test_sums_every_component(self):
         result = _result(
@@ -292,13 +293,13 @@ class TestFullCost:
         ]
         row = eval_result_to_task_dict(result)
         # 1.0 agent + 0.25 judge + 1M input at haiku's $1/MTok.
-        assert row["full_cost_usd"] == pytest.approx(2.25)
-        # The agent bill stays comparable across harnesses.
-        assert row["total_cost_usd"] == pytest.approx(1.0)
+        assert row["total_cost_usd"] == pytest.approx(2.25)
+        # The agent slice stays broken out so harnesses stay comparable.
+        assert row["agent_cost_usd"] == pytest.approx(1.0)
 
     def test_none_when_nothing_was_priced(self):
         """Not 0.0 — an unpriced row must not read as a free one."""
-        assert eval_result_to_task_dict(_result([]))["full_cost_usd"] is None
+        assert eval_result_to_task_dict(_result([]))["total_cost_usd"] is None
 
     def test_run_level_total_is_the_sum_of_both_halves(self):
         from coder_eval.models import RunSummary
@@ -313,14 +314,20 @@ class TestFullCost:
             tasks_failed=0,
             tasks_error=0,
             task_results=[
-                {"task_id": "t", "total_cost_usd": 1.0, "judge_cost_usd": 0.2, "simulator_cost_usd": 0.05},
+                {
+                    "task_id": "t",
+                    "total_cost_usd": 1.25,
+                    "agent_cost_usd": 1.0,
+                    "judge_cost_usd": 0.2,
+                    "simulator_cost_usd": 0.05,
+                },
             ],
             framework_version="0.0.0-test",
         )
         assert summary.agent_cost_usd == pytest.approx(1.0)
         assert summary.eval_overhead_cost_usd == pytest.approx(0.25)
-        assert summary.full_cost_usd == pytest.approx(1.25)
-        assert summary.model_dump()["full_cost_usd"] == pytest.approx(1.25)
+        assert summary.total_cost_usd == pytest.approx(1.25)
+        assert summary.model_dump()["total_cost_usd"] == pytest.approx(1.25)
 
 
 class TestErrorDiagnosticsOnTheRow:

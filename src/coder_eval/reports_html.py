@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from coder_eval.models import FinalStatus, eval_result_full_cost, full_cost
+from coder_eval.models import FinalStatus, eval_result_total_cost, sum_costs
 
 
 if TYPE_CHECKING:
@@ -335,7 +335,7 @@ def _render_header(result: EvaluationResult) -> str:
     subtitle = _esc(result.task_description.strip().splitlines()[0] if result.task_description else "")
     turns_count = result.total_assistant_turns or 0
     cost_badge = ""
-    task_cost = eval_result_full_cost(result)
+    task_cost = eval_result_total_cost(result)
     if task_cost is not None:
         cost_badge = f'<span class="badge neutral">${task_cost:.4f}</span>'
     expected_turns_badge = ""
@@ -876,7 +876,7 @@ def _render_token_usage(result: EvaluationResult) -> str:
     if tu is None:
         return ""
     total = tu.total_tokens
-    task_cost = eval_result_full_cost(result)
+    task_cost = eval_result_total_cost(result)
     cost_str = f"${task_cost:.4f}" if task_cost is not None else "N/A"
     uncached_fmt = f"{tu.uncached_input_tokens:,}"
     cache_write_fmt = f"{tu.cache_creation_input_tokens:,}"
@@ -1178,7 +1178,7 @@ def _render_variant_token_usage(eval_results: list[EvaluationResult]) -> str:
     cache_write = sum(u.cache_creation_input_tokens for u in usages)
     cache_read = sum(u.cache_read_input_tokens for u in usages)
     total = input_tok + output_tok + cache_write + cache_read
-    variant_cost = full_cost(*(eval_result_full_cost(r) for r in eval_results))
+    variant_cost = sum_costs(*(eval_result_total_cost(r) for r in eval_results))
     cost_str = f"${variant_cost:.4f}" if variant_cost is not None else "N/A"
     return f"""
 <h2>Token Usage</h2>

@@ -929,8 +929,20 @@ class TestReportTokenUsageSection:
         killed ones, which are also the ones that burned the most getting there.
         """
         task_results = [
-            {"task_id": "priced", "total_tokens": 1000, "total_cost_usd": 0.25, "cost_complete": True},
-            {"task_id": "unpriced", "total_tokens": 4_000_000, "total_cost_usd": None, "cost_complete": False},
+            {
+                "task_id": "priced",
+                "total_tokens": 1000,
+                "total_cost_usd": 0.25,
+                "agent_cost_usd": 0.25,
+                "cost_complete": True,
+            },
+            {
+                "task_id": "unpriced",
+                "total_tokens": 4_000_000,
+                "total_cost_usd": None,
+                "agent_cost_usd": None,
+                "cost_complete": False,
+            },
         ]
         joined = "\n".join(ReportGenerator._generate_token_usage_section(task_results))
 
@@ -943,7 +955,8 @@ class TestReportTokenUsageSection:
             {
                 "task_id": "task1",
                 "total_tokens": 1000,
-                "total_cost_usd": 1.0,
+                "total_cost_usd": 1.25,
+                "agent_cost_usd": 1.0,
                 "cost_complete": True,
                 "judge_cost_usd": 0.25,
             },
@@ -953,6 +966,8 @@ class TestReportTokenUsageSection:
         assert "**Agent Cost**: $1.0000" in joined
         assert "**Eval Overhead (judge + simulator)**: $0.2500" in joined
         assert "**Total Cost**: $1.2500" in joined
+        # And the per-task column carries the whole bill, so it sums to that total.
+        assert "| task1 | 0 | 0 | 0 | 0 | 1,000 | $1.2500 |" in joined
 
     def test_token_section_in_full_report(self):
         """Test that token section appears in generate_markdown when data is available."""
