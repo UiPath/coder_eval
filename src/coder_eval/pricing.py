@@ -73,8 +73,17 @@ _PRICING: dict[str, ModelPricing] = {
     # separately, so cache_write == input rate.
     "gpt-5-codex": ModelPricing(1.25, 10.0, 1.25, 0.125),
     "gpt-5": ModelPricing(1.25, 10.0, 1.25, 0.125),
-    # gpt-5.3-codex (2026-02-24): $1.75/M input, $0.175/M cached, $14/M output.
+    # Older codex tiers still on OpenAI's rate card — a task may pin any of them,
+    # and an unpriced model books its tokens against no money.
+    "gpt-5.1-codex-max": ModelPricing(1.25, 10.0, 1.25, 0.125),
+    "gpt-5.1-codex": ModelPricing(1.25, 10.0, 1.25, 0.125),
+    "gpt-5.1-codex-mini": ModelPricing(0.25, 2.0, 0.25, 0.025),
+    # codex-mini-latest is the one OpenAI entry whose cached rate is NOT 10% of
+    # input — it is 25% ($0.375 against $1.50). Do not "normalize" it.
+    "codex-mini-latest": ModelPricing(1.50, 6.0, 1.50, 0.375),
+    # gpt-5.3-codex / gpt-5.2-codex: $1.75/M input, $0.175/M cached, $14/M output.
     "gpt-5.3-codex": ModelPricing(1.75, 14.0, 1.75, 0.175),
+    "gpt-5.2-codex": ModelPricing(1.75, 14.0, 1.75, 0.175),
     # gpt-5.4 (2026-03-05): $2.50/M input, $0.25/M cached, $15/M output.
     "gpt-5.4": ModelPricing(2.5, 15.0, 2.5, 0.25),
     # gpt-5.5: $5/M input, $0.50/M cached, $30/M output.
