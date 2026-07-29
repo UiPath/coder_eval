@@ -10,7 +10,7 @@
 - **Succeeded**: 0
 - **Failed**: 0
 - **Errors**: 0
-- **Success Rate**: 0.0%
+- **Pass Rate**: n/a (0/0)
 
 ## Task Details
 

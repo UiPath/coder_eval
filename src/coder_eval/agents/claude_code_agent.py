@@ -980,6 +980,11 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             if self._timed_out(state.timeout_hit, deadline):
                 assert timeout is not None
                 self._finalize_and_raise_timeout(state.finalize, timeout)
+            # Cancelled from outside this turn: park the telemetry on `pending_turn`
+            # for the caller to drain. Otherwise the `finally` below finalizes as
+            # COMPLETED, which keeps no record.
+            if not state.finalized:
+                self._finalize_external_cancel(state.finalize)
             raise
         except ProcessError as e:
             # When the watchdog SIGKILLs the subprocess, the SDK surfaces it as a

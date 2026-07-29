@@ -51,6 +51,21 @@ run-level summary; full per-replicate detail lives in each `task.json`.
 | `framework_version` | `str` | Coder Eval version chip. |
 | `environment_info` | `dict` | Version/dependency info (may nest, e.g. `tool_plugins`). |
 
+These are **computed**, not stored — derived from the counts and rows above on every
+serialization, so they cannot drift from what they summarize. Read them rather than
+re-deriving your own; independent re-derivations are how two consumers end up
+publishing different numbers for the same run.
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `pass_rate` | `float \| None` | `tasks_succeeded / tasks_run` — errors are in the denominator, counted as misses. `None` on an empty run (0/0 is unknown, not 0%). |
+| `error_share` | `float \| None` | `tasks_error / tasks_run`. Diagnostic only; never adjusts the rate. |
+| `total_cost_usd` | `float \| None` | **The bill**: agent + judge + simulator, summed over the rows. `None` when nothing could be priced. |
+| `agent_cost_usd` | `float \| None` | Subject-agent spend alone. The harness-vs-harness comparison figure — judge spend is a property of the suite's criteria and identical across harnesses, so leaving it in would make two harnesses look closer than they are. |
+| `eval_overhead_cost_usd` | `float \| None` | Judge + simulator spend. The other half of `total_cost_usd`. |
+| `tasks_cost_incomplete` | `int` | Rows whose recorded spend is missing money (unpriced model, or a hard kill that lost an in-flight turn). |
+| `cost_complete` | `bool` | `tasks_cost_incomplete == 0`. When false, every cost figure above is a **floor**, not the bill. A run is never failed for this — see [Missing cost is never fatal](#missing-cost-is-never-fatal). |
+
 ### `task_results[]` — the flat per-task row
 
 Each entry is an **untyped dict** (a denormalization, not a Pydantic model) with keys
@@ -58,13 +73,39 @@ including: `task_id`, `replicate_index`, `variant_id`, `status`
 ([`FinalStatus`](#finalstatus)), `weighted_score`, `duration`, `iteration_count`,
 `tags`, `task_path`, `model_used`, `reference_similarity`, the token buckets
 (`input_tokens` = uncached input, `output_tokens`, `cache_creation_input_tokens`,
-`cache_read_input_tokens`, `total_tokens`), `total_cost_usd`, `expected_commands`,
+`cache_read_input_tokens`, `total_tokens`), the cost fields
+(`total_cost_usd` = agent + judge + simulator, plus the `agent_cost_usd` /
+`judge_cost_usd` / `simulator_cost_usd` slices and the `cost_complete` flag),
+`expected_commands`,
 `actual_commands`, `commands_efficiency`, `agent_config`, `sdk_options`,
 `installed_tools`, turn accounting (`total_turns`, `visible_turns`, `expected_turns`,
 `max_turns_exhausted`, `has_final_reply`), and early-stop fields (`stopped_early`,
 `early_stop_reason`, `turns_remaining_at_stop`). `iterations` here is a **reduced**
 turn digest (`{iteration, duration_seconds, command_count, assistant_turn_count,
 crashed, crash_reason}`) — the full transcript is in `task.json`.
+
+### Missing cost is never fatal
+
+Pricing degrades; the evaluation does not. A model absent from the rate card, a turn
+the backend never priced, a hard-killed task that lost its in-flight spend: each one
+lowers a total and sets `cost_complete: false`. None of them raises, none of them
+books a zero, and none of them changes a run's exit code.
+
+The reasoning is that the two failure modes are not symmetric. A missing cost is
+recoverable after the fact — the token counts are on the record, so a corrected rate
+card reprices the run from its artifacts. A failed run is not: the tokens are already
+spent and the only way back is to run it again. So the framework warns loudly and
+keeps going.
+
+The warning fires up front. `check_pricing_coverage` walks every model the run pins
+(subject agents and judge criteria) before the first task dispatches, and logs the
+ones the card cannot price — early enough to fix the card and restart while it is
+still cheap. After that the run is on its own: totals become floors, and
+`tasks_cost_incomplete` says how many rows are behind that floor.
+
+Consumers should treat any cost field as a lower bound whenever `cost_complete` is
+false, and must not read `None` as `0.0` — "nothing could be priced" and "it was
+free" are different facts.
 
 ---
 
@@ -247,6 +288,12 @@ respectively), checked after each completed agent turn — see
 - `TokenUsage.total_tokens` is not serialized; sum the buckets (or use the computed
   `input_tokens` + `output_tokens` + cache buckets).
 - `EarlyStopInfo` presence is itself the "stopped early" signal.
+- `total_cost_usd` is the whole bill (agent + judge + simulator) at both row and run
+  level; `agent_cost_usd` is the agent-only slice. `TokenUsage.total_cost_usd` is a
+  different thing: the cost of those tokens, so always agent-only. `run_limits.max_usd`
+  gates on that one, since judge and simulator spend is not known mid-run.
+- A cost of `None` means unpriced, not free, and any total is a floor while
+  `cost_complete` is false — see [Missing cost is never fatal](#missing-cost-is-never-fatal).
 
 ## See also
 

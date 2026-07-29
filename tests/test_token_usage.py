@@ -436,8 +436,8 @@ class TestBuildTokenUsage:
         ]
         usage = ClaudeCodeAgent._build_token_usage(messages, None, None, None, "claude-opus-4-8")
         assert usage is not None
-        # opus-4-8: 15/M in, 75/M out, 18.75/M cache-write, 1.50/M cache-read.
-        expected = (1_000_000 * 15.0 + 500_000 * 75.0 + 200_000 * 18.75 + 4_000_000 * 1.50) / 1_000_000
+        # opus-4-8: 5/M in, 25/M out, 6.25/M cache-write, 0.50/M cache-read.
+        expected = (1_000_000 * 5.0 + 500_000 * 25.0 + 200_000 * 6.25 + 4_000_000 * 0.50) / 1_000_000
         assert usage.total_cost_usd == pytest.approx(expected)
 
     def test_backfill_via_resultmessage_snapshot_path(self):
@@ -875,6 +875,7 @@ class TestReportTokenUsageSection:
                 "output_tokens": 2000,
                 "total_tokens": 5000,
                 "total_cost_usd": None,
+                "cost_complete": False,
             },
         ]
         lines = ReportGenerator._generate_token_usage_section(task_results)
@@ -882,8 +883,91 @@ class TestReportTokenUsageSection:
 
         assert "## Token Usage" in joined
         assert "**Total Tokens**: 5,000 (input: 3,000, output: 2,000)" in joined
-        assert "**Total Cost**" not in joined  # No cost line when all costs are None
+        # Tokens were burned, so there IS a bill — the report must say the number is
+        # missing rather than omit the cost line, which reads as "this run was free".
+        assert "**Total Cost**: unavailable" in joined
+        assert "1 task(s) have spend missing from this total" in joined
         assert "| task1 | 3,000 | 2,000 | 0 | 0 | 5,000 | N/A |" in joined
+
+    def test_token_section_leaves_a_legacy_row_uncaveated(self):
+        """A row predating ``cost_complete`` is read as priced, not inferred.
+
+        The same shape as above minus the flag, which is what runs written before
+        the field look like. Deliberately silent: inferring unpriced-ness from
+        tokens would give old runs a caveat at the price of a second definition of
+        "unpriced", and every new run carries the flag.
+        """
+        task_results = [
+            {"task_id": "task1", "total_tokens": 5000, "total_cost_usd": None},
+        ]
+        joined = "\n".join(ReportGenerator._generate_token_usage_section(task_results))
+
+        assert "## Token Usage" in joined
+        assert "spend missing" not in joined
+
+    def test_token_section_omits_cost_when_no_tokens_burned(self):
+        """A row that burned nothing is genuinely free — no unpriced warning."""
+        task_results = [
+            {
+                "task_id": "task1",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "total_cost_usd": None,
+            },
+        ]
+        joined = "\n".join(ReportGenerator._generate_token_usage_section(task_results))
+
+        assert "## Token Usage" in joined
+        assert "**Total Cost**" not in joined
+
+    def test_token_section_marks_partial_cost_as_floor(self):
+        """A priced row beside an unpriced one reports the total as a floor.
+
+        The failure this guards: summing only the rows that carry a cost and
+        presenting it as the run's bill. The unpriced rows are typically the
+        killed ones, which are also the ones that burned the most getting there.
+        """
+        task_results = [
+            {
+                "task_id": "priced",
+                "total_tokens": 1000,
+                "total_cost_usd": 0.25,
+                "agent_cost_usd": 0.25,
+                "cost_complete": True,
+            },
+            {
+                "task_id": "unpriced",
+                "total_tokens": 4_000_000,
+                "total_cost_usd": None,
+                "agent_cost_usd": None,
+                "cost_complete": False,
+            },
+        ]
+        joined = "\n".join(ReportGenerator._generate_token_usage_section(task_results))
+
+        assert "**Total Cost**: $0.2500 (floor" in joined
+        assert "1 task(s) have spend missing from this total" in joined
+
+    def test_token_section_breaks_out_eval_overhead(self):
+        """Judge spend is reported beside the agent bill, and folded into the total."""
+        task_results = [
+            {
+                "task_id": "task1",
+                "total_tokens": 1000,
+                "total_cost_usd": 1.25,
+                "agent_cost_usd": 1.0,
+                "cost_complete": True,
+                "judge_cost_usd": 0.25,
+            },
+        ]
+        joined = "\n".join(ReportGenerator._generate_token_usage_section(task_results))
+
+        assert "**Agent Cost**: $1.0000" in joined
+        assert "**Eval Overhead (judge + simulator)**: $0.2500" in joined
+        assert "**Total Cost**: $1.2500" in joined
+        # And the per-task column carries the whole bill, so it sums to that total.
+        assert "| task1 | 0 | 0 | 0 | 0 | 1,000 | $1.2500 |" in joined
 
     def test_token_section_in_full_report(self):
         """Test that token section appears in generate_markdown when data is available."""

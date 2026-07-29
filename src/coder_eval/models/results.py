@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    computed_field,
+    model_validator,
+)
 
 from coder_eval.models.agent_config import ResolvedAgentConfig
 from coder_eval.models.criteria import SuccessCriterion
@@ -837,8 +847,100 @@ class SkippedTask(BaseModel):
     )
 
 
+def row_cost_incomplete(row: Mapping[str, Any]) -> bool:
+    """True when a task row's recorded spend is missing money.
+
+    Reads the row's own ``cost_complete`` flag. Absent means complete: rows written
+    before the field existed are read as priced rather than inferred from their
+    token counts, which would be a second definition of the same predicate.
+
+    Defined here, on the row schema, so the reports and ``RunSummary`` cannot
+    disagree about which rows lost money.
+    """
+    return row.get("cost_complete") is False
+
+
+def sum_costs(*components: float | None) -> float | None:
+    """Add whichever cost components were priced. ``None`` when none were.
+
+    The one way cost components are combined, so every surface adds them up the
+    same way. Never raises and never invents a zero: an unpriced component is
+    skipped, which makes the result a floor rather than a failure.
+    """
+    priced = [c for c in components if c is not None]
+    return sum(priced) if priced else None
+
+
+def eval_overhead_cost(rows: Iterable[Mapping[str, Any]]) -> float | None:
+    """Total judge + simulator spend across ``rows``, or ``None`` if none was recorded.
+
+    ``None`` rather than ``0.0`` so "no judge ran" stays distinct from "a judge ran free".
+    """
+    return sum_costs(*(row.get(key) for row in rows for key in ("judge_cost_usd", "simulator_cost_usd")))
+
+
+def judge_cost_usd(result: EvaluationResult) -> float | None:
+    """Sum the priced judge spend across an evaluation's criterion results.
+
+    Covers both flavors: ``llm_judge`` prices its own one-shot call from the
+    criterion's model, ``agent_judge`` inherits the SDK's cost on the sub-agent's
+    turn. ``None`` when no criterion reported cost.
+    """
+    usages = [u for cr in result.success_criteria_results if (u := getattr(cr, "token_usage", None)) is not None]
+    return sum_costs(*(u.total_cost_usd for u in usages))
+
+
+def simulator_cost_usd(result: EvaluationResult) -> float | None:
+    """Price an evaluation's simulator turns. ``None`` outside simulation mode.
+
+    Priced at the ROUTE's model, not the subject's: ``UserSimulator`` pins
+    ``model=None`` so it resolves to ``BEDROCK_MODEL``, which differs from the
+    subject on any task that pins ``agent.model``.
+
+    A floor. ``UserSimulator`` records only ``uncached_input_tokens`` and drops
+    both cache buckets, so a cached prefix is largely absent from the count.
+    """
+    from coder_eval.pricing import calculate_cost
+
+    sim = result.simulation
+    if sim is None or not (sim.simulator_input_tokens or sim.simulator_output_tokens):
+        return None
+    route_model = (result.environment_info or {}).get("bedrock_model")
+    # Falls back to the subject's model on a non-Bedrock route, where the SDK picks
+    # its own default and nothing on the record names it.
+    model = route_model if isinstance(route_model, str) and route_model else result.model_used
+    if not model:
+        return None
+    return calculate_cost(
+        model,
+        uncached_input_tokens=sim.simulator_input_tokens,
+        output_tokens=sim.simulator_output_tokens,
+    )
+
+
+def eval_result_total_cost(result: EvaluationResult) -> float | None:
+    """Everything one evaluation cost: agent + judge + simulator.
+
+    ``None`` when nothing could be priced, a floor when only part of it could. The
+    same figure the row projection publishes as ``total_cost_usd``, for the surfaces
+    that hold an ``EvaluationResult`` rather than a row dict.
+    """
+    agent = result.total_token_usage.total_cost_usd if result.total_token_usage else None
+    return sum_costs(agent, judge_cost_usd(result), simulator_cost_usd(result))
+
+
 class RunSummary(BaseModel):
-    """Summary of an entire evaluation run across multiple tasks."""
+    """Summary of an entire evaluation run across multiple tasks.
+
+    ``pass_rate`` is ``tasks_succeeded / tasks_run``: every dispatched task is in the
+    denominator, errors included as misses. The previous formula excluded errors,
+    which paid a bonus for erroring. ``error_share`` reports how much of the rate is
+    errors, so a bad infrastructure night shows instead of being absorbed.
+
+    This is the framework's single denominator: every reporting surface reads
+    ``pass_rate`` rather than re-deriving one. Derived metrics here are computed,
+    never stored, so they cannot drift from the counts they come from.
+    """
 
     run_id: str = Field(description="Run identifier (timestamp like '2025-10-09_15-30-45')")
     start_time: datetime = Field(description="Run start time")
@@ -901,3 +1003,64 @@ class RunSummary(BaseModel):
             total = f"{self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error}"
             raise ValueError(f"Task count invariant violated: {total} != {self.tasks_run}")
         return self
+
+    # Derived run metrics: computed_fields over the stored counts and
+    # ``task_results``, so they serialize into run.json while staying impossible to
+    # set to something the rows disagree with. Consumers should read these rather
+    # than re-derive them.
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def pass_rate(self) -> float | None:
+        """``tasks_succeeded / tasks_run`` as a 0-1 fraction. ``None`` on an empty run."""
+        return self.tasks_succeeded / self.tasks_run if self.tasks_run else None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def error_share(self) -> float | None:
+        """``tasks_error / tasks_run`` as a 0-1 fraction. ``None`` on an empty run.
+
+        Diagnostic only, never adjusts the rate: a drop at a high error share is an
+        infrastructure night, the same drop at a normal share is the model.
+        """
+        return self.tasks_error / self.tasks_run if self.tasks_run else None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def tasks_cost_incomplete(self) -> int:
+        """Rows with money missing from their recorded spend (see ``row_cost_incomplete``)."""
+        return sum(1 for row in self.task_results if row_cost_incomplete(row))
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def cost_complete(self) -> bool:
+        """False when any row's spend is incomplete, so every cost total here is a floor."""
+        return self.tasks_cost_incomplete == 0
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def agent_cost_usd(self) -> float | None:
+        """Subject-agent spend across the run. ``None`` when no row reported cost.
+
+        The comparison figure, not the bill: judge spend is a property of the suite's
+        criteria and identical across harnesses, so folding it in would make two
+        harnesses look closer than they are. ``total_cost_usd`` is the bill.
+        """
+        return sum_costs(*(row.get("agent_cost_usd") for row in self.task_results))
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def eval_overhead_cost_usd(self) -> float | None:
+        """Judge + simulator spend across the run. ``None`` when neither reported cost."""
+        return eval_overhead_cost(self.task_results)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def total_cost_usd(self) -> float | None:
+        """What the run cost: agent + judge + simulator.
+
+        The number to quote for a run's bill, and what every surface means by "total
+        cost". ``None`` when nothing could be priced, and a floor rather than an error
+        when only some of it could.
+        """
+        return sum_costs(*(row.get("total_cost_usd") for row in self.task_results))
