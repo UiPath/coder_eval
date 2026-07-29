@@ -552,10 +552,13 @@ class ReportGenerator:
         costs = [t["total_cost_usd"] for t in tasks_with_tokens if t.get("total_cost_usd") is not None]
         total_cost = sum(costs) if costs else None
 
-        # Rows whose spend is only partly priced. Reported explicitly because the
-        # alternative is a total that reads materially low with nothing on the
-        # report to say the number was incomplete. Both of
-        # these come from the same helpers RunSummary.tasks_unpriced /
+        # Rows whose recorded spend is missing money, either because a turn's tokens
+        # could not be priced or because a hard kill lost the in-flight turn
+        # entirely. Worded cause-agnostically ("spend missing") because those two
+        # causes reach the same conclusion and the report cannot always tell which
+        # applied. Reported explicitly because the alternative is a total that reads
+        # materially low with nothing to say the number is incomplete. Both of these
+        # come from the same helpers RunSummary.tasks_unpriced /
         # eval_overhead_cost_usd use, so the report and run.json cannot disagree
         # about which rows lost money.
         unpriced = [t for t in task_results if row_cost_incomplete(t)]
@@ -574,13 +577,10 @@ class ReportGenerator:
         if total_cost is not None:
             cost_line = f"**Total Cost**: ${total_cost + sum(overhead):.4f}"
             if unpriced:
-                cost_line += f" (floor — {len(unpriced)} task(s) burned tokens the rate card could not price)"
+                cost_line += f" (floor — {len(unpriced)} task(s) have spend missing from this total)"
             lines.append(cost_line)
         elif unpriced:
-            lines.append(
-                f"**Total Cost**: unavailable — {len(unpriced)} task(s) burned tokens "
-                + "the rate card could not price"
-            )
+            lines.append(f"**Total Cost**: unavailable — {len(unpriced)} task(s) have spend missing from this total")
         lines.append(f"**Avg Tokens/Task**: {total_tokens // len(tasks_with_tokens):,}")
         lines.append("")
 

@@ -55,24 +55,30 @@ def _cost_complete(result: EvaluationResult) -> bool:
        backend prices a clean turn, so the rate card only matters for a turn the
        backend never priced (a killed partial). With no rate, that turn books
        tokens against no money.
-    2. **A task-level timeout preserved no turn at all.** ``TaskTimeoutError``
-       comes from the watchdog, which SIGKILLs the agent by PID; unlike a
-       turn-level timeout it never reaches ``_on_attempt_failure``, so no partial
-       turn is drained and the row lands with zero turns and zero tokens. A task
-       timeout means the evaluation loop was still running, so that spend is real
-       and simply unrecorded. Reporting such a row as fully priced would be a
-       false claim: it is the one case where cost is missing with no tokens to
-       point at.
+    2. **The task was hard-killed by the task-level timeout.** ``TaskTimeoutError``
+       comes from the watchdog, which SIGKILLs the agent by PID. Unlike a
+       turn-level timeout it never reaches ``_on_attempt_failure``, so the turn
+       that was in flight is never drained and its spend is not merely unpriced
+       but unrecorded: no tokens, no cost, nothing to point at.
+
+       Every ``TIMEOUT`` row is affected, not just the ones that look empty. The
+       watchdog fires while the evaluation loop is running, so there is always an
+       in-flight turn. A row that completed two dialog turns before the wall hit
+       still lost the third, and reporting it as fully priced because the first two
+       carry costs would be the same false claim in a less obvious costume.
 
     True for a row that burned nothing. An error before the agent ran genuinely
-    cost zero and must not be reported as missing cost, which is why case 2 is
-    keyed on ``TIMEOUT`` rather than on elapsed time: a fast setup failure and a
-    slow one are both free, while a task timeout is never free.
+    cost zero and must not be reported as missing cost, which is why case 2 keys on
+    the status rather than on elapsed time: a fast setup failure and a slow one are
+    both free, while a hard-killed task never is.
     """
-    priced = [usage for t in result.iterations if (usage := t.token_usage) is not None and not usage.is_empty()]
-    if not priced:
-        return result.final_status is not FinalStatus.TIMEOUT
-    return all(usage.total_cost_usd is not None for usage in priced)
+    if result.final_status is FinalStatus.TIMEOUT:
+        return False
+    return all(
+        usage.total_cost_usd is not None
+        for t in result.iterations
+        if (usage := t.token_usage) is not None and not usage.is_empty()
+    )
 
 
 def _judge_cost_usd(result: EvaluationResult) -> float | None:

@@ -886,7 +886,7 @@ class TestReportTokenUsageSection:
         # Tokens were burned, so there IS a bill — the report must say the number is
         # missing rather than omit the cost line, which reads as "this run was free".
         assert "**Total Cost**: unavailable" in joined
-        assert "1 task(s) burned tokens the rate card could not price" in joined
+        assert "1 task(s) have spend missing from this total" in joined
         assert "| task1 | 3,000 | 2,000 | 0 | 0 | 5,000 | N/A |" in joined
 
     def test_token_section_leaves_a_legacy_row_uncaveated(self):
@@ -903,7 +903,7 @@ class TestReportTokenUsageSection:
         joined = "\n".join(ReportGenerator._generate_token_usage_section(task_results))
 
         assert "## Token Usage" in joined
-        assert "could not price" not in joined
+        assert "spend missing" not in joined
 
     def test_token_section_omits_cost_when_no_tokens_burned(self):
         """A row that burned nothing is genuinely free — no unpriced warning."""
@@ -935,7 +935,7 @@ class TestReportTokenUsageSection:
         joined = "\n".join(ReportGenerator._generate_token_usage_section(task_results))
 
         assert "**Total Cost**: $0.2500 (floor" in joined
-        assert "1 task(s) burned tokens the rate card could not price" in joined
+        assert "1 task(s) have spend missing from this total" in joined
 
     def test_token_section_breaks_out_eval_overhead(self):
         """Judge spend is reported beside the agent bill, and folded into the total."""
