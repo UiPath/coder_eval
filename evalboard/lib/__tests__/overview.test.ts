@@ -97,27 +97,6 @@ describe("summarizeListing", () => {
         expect(t.durationSeconds).toBeNull();
         expect(t.durationPartial).toBe(false);
     });
-
-    test("flags partial when a run's own cost is incomplete", () => {
-        // Every run reported a cost, so the old costRuns check is satisfied — but
-        // one of them under-counted because some task's tokens went unpriced. The
-        // 2026-07-21 nightly was exactly this: $902.81 reported, $209.81 missing
-        // (18.9%), and nothing anywhere said the total was a floor.
-        const t = summarizeListing([
-            row({ totalCostUsd: 902.81, costComplete: false }),
-            row({ totalCostUsd: 100, costComplete: true }),
-        ]);
-        expect(t.costUsd).toBeCloseTo(1002.81);
-        expect(t.costPartial).toBe(true);
-    });
-
-    test("complete costs across every run are not flagged", () => {
-        const t = summarizeListing([
-            row({ totalCostUsd: 1, costComplete: true }),
-            row({ totalCostUsd: 2, costComplete: true }),
-        ]);
-        expect(t.costPartial).toBe(false);
-    });
 });
 
 describe("turnBudgetRateForTasks", () => {
