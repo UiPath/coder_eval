@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from statistics import median
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -116,54 +117,31 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
 
         scrub_key = reference_code if criterion.include_reference else None
 
-        # Multi-sample grading (samples > 1) aggregates independent verdicts over
-        # the same rendered prompt; the default (1) stays on the single-call path
-        # below, unchanged.
-        if criterion.samples > 1:
-            return _grade_with_sampling(
-                criterion=criterion,
-                route=route,
-                user_msg=user_msg,
-                judge_ctx=judge_ctx,
-                scrub_key=scrub_key,
-            )
-
-        # Attribute the judge's API call to ``JudgeCriterionResult.token_usage``
-        # from the usage the backend reported in its response.
-        verdict, parse_error, raw_verdict_text, response_usage = _invoke_tool_channel(
+        # One grading path for every N: samples=1 is the one-element case whose
+        # median is its own score and whose summed usage is its own usage.
+        return _grade_with_sampling(
             criterion=criterion,
             route=route,
-            system_msg=_SYSTEM_PROMPT,
             user_msg=user_msg,
+            judge_ctx=judge_ctx,
+            scrub_key=scrub_key,
         )
-        judge_usage = response_usage
 
-        # Sanitize any raw model text we persist to CriterionResult.details. A misbehaving
-        # model could echo the reference back in an unparseable response, so we scrub it.
-        scrubbed = scrub_reference(raw_verdict_text, scrub_key)
 
-        if parse_error is not None:
-            return JudgeCriterionResult(
-                criterion_type=criterion.type,
-                description=criterion.description,
-                score=0.0,
-                details=scrubbed[:500],
-                error=scrub_reference(parse_error, scrub_key),
-                transcript=_build_transcript(criterion, raw_verdict_text, user_msg, scrub_key),
-                token_usage=judge_usage,
-            )
-        assert verdict is not None  # parser contract: verdict is set iff parse_error is None
+class _SampleOutcome(NamedTuple):
+    """One judge invocation's outcome.
 
-        details = format_details(verdict.score, verdict.rationale, judge_ctx.missing_files, judge_ctx.degraded_notes)
-        return JudgeCriterionResult(
-            criterion_type=criterion.type,
-            description=criterion.description,
-            score=verdict.score,
-            details=scrub_reference(details, scrub_key),
-            findings=[scrub_reference(f, scrub_key) for f in verdict.findings],
-            transcript=_build_transcript(criterion, raw_verdict_text, user_msg, scrub_key),
-            token_usage=judge_usage,
-        )
+    ``raw_verdict_text`` is the JSON-dumped verdict for the transcript when a
+    verdict was parsed, or a fallback marker when the model failed to call the
+    tool — preserves the "judge transcript carries the structured payload"
+    invariant. ``response_usage`` is the usage the model reported (``None``
+    when the backend surfaced none).
+    """
+
+    verdict: JudgeVerdict | None
+    parse_error: str | None
+    raw_verdict_text: str
+    response_usage: TokenUsage | None
 
 
 def _invoke_tool_channel(
@@ -172,16 +150,8 @@ def _invoke_tool_channel(
     route: "ApiRoute | None",
     system_msg: str,
     user_msg: str,
-) -> tuple[JudgeVerdict | None, str | None, str, TokenUsage | None]:
-    """Dispatch the tool-channel invocation by route.
-
-    Returns ``(verdict, parse_error, raw_verdict_text, response_usage)``.
-    ``raw_verdict_text`` is the JSON-dumped verdict for the transcript when
-    present, or a fallback marker when the model failed to call the tool —
-    preserves the "judge transcript carries the structured payload" invariant.
-    ``response_usage`` is the usage the model reported (``None`` when the
-    backend surfaced none).
-    """
+) -> _SampleOutcome:
+    """Dispatch the tool-channel invocation by route."""
     response_usage: TokenUsage | None
     match route:
         case BedrockRoute():
@@ -210,20 +180,26 @@ def _invoke_tool_channel(
         case _:
             # route is None or an unexpected type — the unconfigured-arm guard in
             # _check_impl handles None before dispatch, so this is defensive only.
-            return None, "llm_judge: no usable API route", "(no route)", None
+            return _SampleOutcome(
+                verdict=None,
+                parse_error="llm_judge: no usable API route",
+                raw_verdict_text="(no route)",
+                response_usage=None,
+            )
 
     if verdict is not None:
-        return verdict, None, verdict.model_dump_json(), response_usage
-    return None, err, f"(no verdict — {err})", response_usage
-
-
-class _SampleOutcome(NamedTuple):
-    """One judge invocation's outcome, in ``_invoke_tool_channel`` return order."""
-
-    verdict: JudgeVerdict | None
-    parse_error: str | None
-    raw_verdict_text: str
-    response_usage: TokenUsage | None
+        return _SampleOutcome(
+            verdict=verdict,
+            parse_error=None,
+            raw_verdict_text=verdict.model_dump_json(),
+            response_usage=response_usage,
+        )
+    return _SampleOutcome(
+        verdict=None,
+        parse_error=err,
+        raw_verdict_text=f"(no verdict — {err})",
+        response_usage=response_usage,
+    )
 
 
 def _grade_with_sampling(
@@ -236,50 +212,63 @@ def _grade_with_sampling(
 ) -> JudgeCriterionResult:
     """Invoke the judge ``criterion.samples`` times and score the median verdict.
 
-    Every sample grades the SAME rendered prompt, so score spread across samples
-    is judge variance by construction — the median damps a single strict-or-lenient
-    outlier reading of the rubric. The representative sample (score closest to the
-    median, earliest on ties) supplies rationale/findings/transcript so the
-    persisted audit trail is a real verdict, never a synthetic blend.
+    The single grading path: ``samples: 1`` is the one-element case (its median
+    is its own score, the summed usage is its own usage), so single-sample and
+    multi-sample results are built by the same code. Samples are independent and
+    grade the SAME rendered prompt, so they are dispatched concurrently — score
+    spread across samples is judge variance by construction, and wall-clock stays
+    close to one judge call. Futures are collected in SUBMISSION order, not
+    completion order, so the representative tie-break (earliest sample), the
+    first-sample diagnostic, and error triage stay deterministic.
 
     A sample that produces no verdict (a transport failure, or a response with no
     usable ``submit_verdict`` call) degrades to the median of the remaining valid
-    samples with a note in ``details``. When NO sample produces a verdict, the
-    single-sample failure semantics apply: an infrastructure failure escalates
-    (``JudgeInfrastructureError`` propagates to ``FinalStatus.ERROR`` — judge infra
-    failure is not an agent failure), any other exception reaches
-    ``@handle_criterion_errors``, and all-parse-failures score 0.0 with the first
-    sample's diagnostic.
+    samples — every swallowed exception is logged at WARNING and named in the
+    degraded note so a systematic first-party bug stays loud. When NO sample
+    produces a verdict, the single-sample failure semantics apply: an
+    infrastructure failure escalates (``JudgeInfrastructureError`` propagates to
+    ``FinalStatus.ERROR`` — judge infra failure is not an agent failure), any
+    other exception reaches ``@handle_criterion_errors``, and all-parse-failures
+    score 0.0 with the first sample's diagnostic.
     """
     outcomes: list[_SampleOutcome] = []
-    infra_errors: list[JudgeInfrastructureError] = []
-    unexpected_errors: list[Exception] = []
-    for _ in range(criterion.samples):
-        try:
-            outcomes.append(
-                _SampleOutcome(
-                    *_invoke_tool_channel(
-                        criterion=criterion,
-                        route=route,
-                        system_msg=_SYSTEM_PROMPT,
-                        user_msg=user_msg,
-                    )
-                )
+    failure_labels: list[str] = []
+    first_infra: JudgeInfrastructureError | None = None
+    first_unexpected: Exception | None = None
+    with ThreadPoolExecutor(max_workers=criterion.samples) as pool:
+        futures = [
+            pool.submit(
+                _invoke_tool_channel,
+                criterion=criterion,
+                route=route,
+                system_msg=_SYSTEM_PROMPT,
+                user_msg=user_msg,
             )
-        except JudgeInfrastructureError as exc:
-            infra_errors.append(exc)
-        except Exception as exc:
-            unexpected_errors.append(exc)
+            for _ in range(criterion.samples)
+        ]
+        for future in futures:
+            try:
+                outcomes.append(future.result())
+            except JudgeInfrastructureError as exc:
+                logger.warning("llm_judge sample failed: %s", exc, exc_info=True)
+                failure_labels.append(f"{type(exc).__name__}: {exc}")
+                if first_infra is None:
+                    first_infra = exc
+            except Exception as exc:
+                logger.warning("llm_judge sample failed: %s", exc, exc_info=True)
+                failure_labels.append(f"{type(exc).__name__}: {exc}")
+                if first_unexpected is None:
+                    first_unexpected = exc
 
     # Cost is real for every sample that returned a response, verdict or not.
     token_usage = _sum_usage(o.response_usage for o in outcomes)
     valid: list[tuple[JudgeVerdict, str]] = [(o.verdict, o.raw_verdict_text) for o in outcomes if o.verdict is not None]
 
     if not valid:
-        if infra_errors:
-            raise infra_errors[0]
-        if unexpected_errors:
-            raise unexpected_errors[0]
+        if first_infra is not None:
+            raise first_infra
+        if first_unexpected is not None:
+            raise first_unexpected
         first = outcomes[0]
         assert first.parse_error is not None  # parser contract: verdict is set iff parse_error is None
         scrubbed = scrub_reference(first.raw_verdict_text, scrub_key)
@@ -289,30 +278,46 @@ def _grade_with_sampling(
             score=0.0,
             details=scrubbed[:500],
             error=scrub_reference(first.parse_error, scrub_key),
-            transcript=_build_transcript(criterion, first.raw_verdict_text, user_msg, scrub_key),
+            transcript=_build_transcript(
+                criterion=criterion,
+                raw_verdict_text=first.raw_verdict_text,
+                user_msg=user_msg,
+                scrub_key=scrub_key,
+            ),
             token_usage=token_usage,
         )
 
     scores = [verdict.score for verdict, _ in valid]
-    median_score = float(median(scores))
+    median_score = median(scores)
     rep_verdict, rep_raw = min(valid, key=lambda pair: abs(pair[0].score - median_score))
 
     degraded_notes = list(judge_ctx.degraded_notes)
     failed_samples = criterion.samples - len(valid)
-    if failed_samples:
-        summary = f"median over {len(valid)} valid samples"
-        degraded_notes.append(f"{failed_samples}/{criterion.samples} judge samples produced no verdict; {summary}")
+    if criterion.samples > 1 and failed_samples:
+        note = (
+            f"{failed_samples}/{criterion.samples} judge samples produced no verdict; "
+            f"median over {len(valid)} valid samples"
+        )
+        if failure_labels:
+            note = f"{note} ({'; '.join(failure_labels)})"
+        degraded_notes.append(note)
 
     details = format_details(median_score, rep_verdict.rationale, judge_ctx.missing_files, degraded_notes)
-    rendered_scores = ", ".join(f"{s:.3f}" for s in scores)
-    details = f"{details}\nsample_scores: [{rendered_scores}]"
+    if criterion.samples > 1:
+        rendered_scores = ", ".join(f"{s:.3f}" for s in scores)
+        details = f"{details}\nsample_scores: [{rendered_scores}]"
     return JudgeCriterionResult(
         criterion_type=criterion.type,
         description=criterion.description,
         score=median_score,
         details=scrub_reference(details, scrub_key),
         findings=[scrub_reference(f, scrub_key) for f in rep_verdict.findings],
-        transcript=_build_transcript(criterion, rep_raw, user_msg, scrub_key),
+        transcript=_build_transcript(
+            criterion=criterion,
+            raw_verdict_text=rep_raw,
+            user_msg=user_msg,
+            scrub_key=scrub_key,
+        ),
         token_usage=token_usage,
     )
 
@@ -329,6 +334,7 @@ def _sum_usage(usages: Iterable[TokenUsage | None]) -> TokenUsage | None:
 
 
 def _build_transcript(
+    *,
     criterion: LLMJudgeCriterion,
     raw_verdict_text: str,
     user_msg: str,

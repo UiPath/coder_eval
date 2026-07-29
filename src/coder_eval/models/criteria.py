@@ -657,10 +657,6 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
     Continuous scoring. LLM error or a "did not call submit_verdict" diagnostic
     -> 0.0 with error. Score is clamped to [0.0, 1.0] by the ``JudgeVerdict``
     validator. Non-numeric / non-finite score -> 0.0 with error.
-
-    Set ``samples`` > 1 to invoke the judge several times over the same rendered
-    prompt and score the median verdict (see the field description for the
-    aggregation semantics).
     """
 
     # Strict YAML-key validation: catch typos at load time rather than silently
@@ -778,7 +774,12 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
             "a sample that produces no verdict degrades to the median of the valid samples "
             "(with a note in ``details``); when every sample fails, single-sample failure "
             "semantics apply unchanged. Odd N recommended — an even-N median averages the two "
-            "middle scores."
+            "middle scores. Samples run concurrently, so wall-clock stays close to one judge "
+            "call; judge SPEND still multiplies by N and is not gated by ``run_limits.max_usd``. "
+            "Capped at 9 because the median's variance damping flattens well before that while "
+            "cost grows linearly — past 9 you pay for noise reduction you can no longer measure. "
+            "Unrelated to the dataset-level ``sample_per_stratum`` / CLI ``--sample`` (those "
+            "subsample dataset ROWS; this re-samples the judge's verdict on one row)."
         ),
     )
     max_file_chars: int = Field(

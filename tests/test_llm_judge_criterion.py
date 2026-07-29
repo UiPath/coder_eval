@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import Future
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1106,6 +1107,39 @@ def _no_verdict_resp(usage: dict | None = None) -> dict:
     return resp
 
 
+class _SerialExecutor:
+    """Inline-executing stand-in for ``ThreadPoolExecutor``, with real Futures.
+
+    Concurrent dispatch makes a mock ``side_effect`` list's response-to-sample
+    mapping scheduler-dependent (whichever worker thread calls first consumes
+    the next list item). Ordering-pinning tests — sample_scores order,
+    earliest-sample tie-breaks, the first-sample diagnostic — patch this
+    executor so response N deterministically lands on sample N. Everything the
+    production code touches (context manager, ``submit`` returning a ``Future``
+    that carries a result or an exception) behaves identically.
+    """
+
+    def __init__(self, max_workers: int | None = None) -> None:
+        self.max_workers = max_workers
+
+    def __enter__(self) -> _SerialExecutor:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Future[Any]:
+        future: Future[Any] = Future()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except Exception as exc:
+            future.set_exception(exc)
+        return future
+
+
+_SERIAL_EXECUTOR_PATCH = "coder_eval.criteria.llm_judge.ThreadPoolExecutor"
+
+
 def test_judge_samples_defaults_to_single_invocation(sandbox: Sandbox) -> None:
     """Default samples=1: exactly one judge call, no aggregation artifacts in details."""
     criterion = LLMJudgeCriterion(description="x", prompt="grade")
@@ -1132,7 +1166,10 @@ def test_judge_multi_sample_scores_median_odd(sandbox: Sandbox) -> None:
     """samples=3: three invocations, median score wins, per-sample scores in details."""
     criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=3)
     responses = [_sample_resp(0.2, "low"), _sample_resp(0.9, "high"), _sample_resp(0.6, "mid")]
-    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses) as m_anthropic:
+    with (
+        patch(_SERIAL_EXECUTOR_PATCH, _SerialExecutor),
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses) as m_anthropic,
+    ):
         result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
     assert m_anthropic.call_count == 3
     assert result.score == 0.6
@@ -1159,7 +1196,10 @@ def test_judge_multi_sample_even_count_averages_middle(sandbox: Sandbox) -> None
     """Even N: median averages the two middle scores; representative is the closest sample."""
     criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=4)
     responses = [_sample_resp(0.2, "r1"), _sample_resp(0.4, "r2"), _sample_resp(0.6, "r3"), _sample_resp(0.8, "r4")]
-    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+    with (
+        patch(_SERIAL_EXECUTOR_PATCH, _SerialExecutor),
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses),
+    ):
         result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
     assert result.score == pytest.approx(0.5)
     # 0.4 and 0.6 are equidistant from the 0.5 median — the earlier sample wins.
@@ -1169,7 +1209,10 @@ def test_judge_multi_sample_even_count_averages_middle(sandbox: Sandbox) -> None
 def test_judge_multi_sample_tie_break_is_first_sample(sandbox: Sandbox) -> None:
     criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=2)
     responses = [_sample_resp(0.4, "first"), _sample_resp(0.6, "second")]
-    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+    with (
+        patch(_SERIAL_EXECUTOR_PATCH, _SerialExecutor),
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses),
+    ):
         result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
     assert result.score == pytest.approx(0.5)
     assert "rationale: first" in (result.details or "")
@@ -1179,7 +1222,10 @@ def test_judge_multi_sample_partial_no_verdict_degrades(sandbox: Sandbox) -> Non
     """One sample returning no verdict must not zero the criterion — median of the valid ones."""
     criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=3)
     responses = [_sample_resp(0.8, "a"), _no_verdict_resp(), _sample_resp(0.6, "b")]
-    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+    with (
+        patch(_SERIAL_EXECUTOR_PATCH, _SerialExecutor),
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses),
+    ):
         result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
     assert result.score == pytest.approx(0.7)
     assert result.error is None
@@ -1203,15 +1249,32 @@ def test_judge_multi_sample_two_samples_one_failure_degrades(sandbox: Sandbox) -
     assert "median over 1 valid samples" in details
 
 
-def test_judge_multi_sample_transport_exception_degrades(sandbox: Sandbox) -> None:
-    """One sample's transport failure must not void the others."""
+def test_judge_multi_sample_transport_exception_degrades(sandbox: Sandbox, caplog: pytest.LogCaptureFixture) -> None:
+    """One sample's transport failure must not void the others — but it must stay loud.
+
+    The swallowed exception is logged at WARNING with exc_info and its type name
+    lands in the degraded note, so a systematic first-party bug that trips on a
+    fraction of responses can never ship as a silently-shifted green median.
+    """
+    import logging
+
     criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=3)
     responses = [_sample_resp(0.8), RuntimeError("gateway down"), _sample_resp(0.6)]
-    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+    with (
+        caplog.at_level(logging.WARNING, logger="coder_eval.criteria.llm_judge"),
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses),
+    ):
         result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
     assert result.score == pytest.approx(0.7)
     assert result.error is None
-    assert "1/3 judge samples produced no verdict" in (result.details or "")
+    details = result.details or ""
+    assert "1/3 judge samples produced no verdict" in details
+    assert "RuntimeError: gateway down" in details  # the failure is NAMED, not just counted
+    warning_records = [
+        r for r in caplog.records if r.levelno == logging.WARNING and "llm_judge sample failed" in r.getMessage()
+    ]
+    assert len(warning_records) == 1
+    assert warning_records[0].exc_info is not None  # traceback preserved for triage
 
 
 def test_judge_multi_sample_infra_error_degrades_when_verdicts_exist(sandbox: Sandbox) -> None:
@@ -1241,7 +1304,10 @@ def test_judge_multi_sample_all_fail_reports_first_sample_diagnostic(sandbox: Sa
     criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=2)
     bad_args = {"content": [{"type": "tool_use", "name": "submit_verdict", "input": {"score": "not numeric"}}]}
     responses = [bad_args, _no_verdict_resp()]
-    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+    with (
+        patch(_SERIAL_EXECUTOR_PATCH, _SerialExecutor),
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses),
+    ):
         result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
     assert result.score == 0.0
     assert result.error is not None
@@ -1337,3 +1403,111 @@ def test_judge_multi_sample_scrubs_reference_everywhere(sandbox: Sandbox) -> Non
     transcript = getattr(result, "transcript", None)
     assert transcript is not None
     assert sentinel not in transcript.raw_verdict
+
+
+def test_judge_multi_sample_bedrock_route(sandbox: Sandbox) -> None:
+    """samples>1 on the Bedrock arm — the nightly's route, and the invoker whose
+    every failure mode is a ``JudgeInfrastructureError`` (the escalate-vs-degrade branch)."""
+    from coder_eval.errors import JudgeInfrastructureError
+    from coder_eval.models.routing import BedrockRoute
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=3)
+    responses = [_sample_resp(0.2, "low"), JudgeInfrastructureError("bedrock api down"), _sample_resp(0.6, "mid")]
+    route = BedrockRoute(bearer_token="t", region="us-east-1")
+    with (
+        patch("coder_eval.criteria.llm_judge.invoke_bedrock_judge", side_effect=responses) as m_bedrock,
+        patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge") as m_anthropic,
+    ):
+        result = SuccessChecker(sandbox, init_registry=False, route=route).check(criterion)
+    assert m_bedrock.call_count == 3
+    assert m_anthropic.call_count == 0
+    # One infra failure with valid verdicts remaining degrades — never escalates.
+    assert result.score == pytest.approx(0.4)
+    assert result.error is None
+    details = result.details or ""
+    assert "1/3 judge samples produced no verdict" in details
+    assert "JudgeInfrastructureError: bedrock api down" in details
+    assert "sample_scores" in details
+
+
+def test_judge_multi_sample_token_usage_sums_cache_buckets(sandbox: Sandbox) -> None:
+    """Cache-token buckets sum across samples — N identical prompts are exactly
+    what populates cache_read on every sample after the first."""
+    from coder_eval.models import JudgeCriterionResult
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=3)
+    usage = {
+        "input_tokens": 100,
+        "output_tokens": 10,
+        "cache_creation_input_tokens": 7,
+        "cache_read_input_tokens": 900,
+    }
+    responses = [_sample_resp(0.8, usage=usage), _sample_resp(0.5, usage=usage), _sample_resp(0.6, usage=usage)]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    assert isinstance(result, JudgeCriterionResult)
+    assert result.token_usage is not None
+    assert result.token_usage.uncached_input_tokens == 300
+    assert result.token_usage.output_tokens == 30
+    assert result.token_usage.cache_creation_input_tokens == 21
+    assert result.token_usage.cache_read_input_tokens == 2700
+
+
+def test_judge_multi_sample_token_usage_none_when_unreported(sandbox: Sandbox) -> None:
+    """No sample reported usage: token_usage stays None — 'unknown' is not 'zero'."""
+    from coder_eval.models import JudgeCriterionResult
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=2)
+    responses = [_sample_resp(0.8), _sample_resp(0.6)]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    assert isinstance(result, JudgeCriterionResult)
+    assert result.score == pytest.approx(0.7)
+    assert result.token_usage is None
+
+
+def test_judge_multi_sample_all_fail_carries_usage_and_transcript(sandbox: Sandbox) -> None:
+    """The all-parse-fail result still audits: summed usage + the first sample's transcript."""
+    from coder_eval.models import JudgeCriterionResult
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=2)
+    usage = {"input_tokens": 40, "output_tokens": 4}
+    responses = [_no_verdict_resp(usage=usage), _no_verdict_resp(usage=usage)]
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=responses):
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+    assert isinstance(result, JudgeCriterionResult)
+    assert result.score == 0.0
+    assert result.error == "Judge did not call submit_verdict"
+    # Cost was real for both samples even though neither produced a verdict.
+    assert result.token_usage is not None
+    assert result.token_usage.uncached_input_tokens == 80
+    assert result.token_usage.output_tokens == 8
+    # The transcript carries the first sample's fallback marker.
+    assert result.transcript is not None
+    assert "(no verdict" in result.transcript.raw_verdict
+
+
+def test_judge_multi_sample_runs_concurrently(sandbox: Sandbox) -> None:
+    """samples=N wall-clock stays ~ one sample, not N — the dispatch is concurrent.
+
+    A sleeping fake pins the concurrency property itself: serial dispatch would
+    take >= samples * delay, so the assertion fails if the executor ever goes
+    back to a sequential loop.
+    """
+    import time
+
+    delay = 0.25
+
+    def _slow_judge(**kwargs: Any) -> dict:
+        time.sleep(delay)
+        return _sample_resp(0.5)
+
+    criterion = LLMJudgeCriterion(description="x", prompt="grade", samples=4)
+    with patch("coder_eval.criteria.llm_judge.invoke_anthropic_judge", side_effect=_slow_judge):
+        start = time.monotonic()
+        result = SuccessChecker(sandbox, init_registry=False, route=DirectRoute()).check(criterion)
+        elapsed = time.monotonic() - start
+    assert result.score == 0.5
+    # Serial would be >= 4 * delay = 1.0s; concurrent is ~delay. The 3x bound
+    # leaves generous headroom for slow CI without admitting serial dispatch.
+    assert elapsed < 3 * delay
