@@ -91,6 +91,7 @@ Set these in coder_eval's .env (or shell) to use it:
   API_BACKEND=litellm
   LITELLM_BASE_URL=http://localhost:$PORT
   LITELLM_AUTH_TOKEN=$LITELLM_MASTER_KEY
+  LITELLM_COST_LOG=$LITELLM_COST_LOG   # SAME path as above, so the run joins ACTUAL per-call cost (else static pricing)
   # then run:  coder-eval run <task> --model zai.glm-5   (or deepseek.v3.2 / moonshotai.kimi-k2.5)
 
 EOF

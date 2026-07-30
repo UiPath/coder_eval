@@ -236,6 +236,12 @@ class DockerDriverConfig(BaseModel):
             "LITELLM_AUTH_TOKEN",
             "LITELLM_MODEL",
             "LITELLM_SMALL_MODEL",
+            # Path to the proxy's per-call cost log for the actual-cost join. NOTE:
+            # forwarding the var is necessary but not sufficient under --driver docker
+            # — the log file itself must also be bind-mounted into the container for
+            # the join to see it (follow-up); without the mount, docker runs keep
+            # static pricing while local runs get real cost.
+            "LITELLM_COST_LOG",
             # Codex agent auth/routing — without these the in-container codex
             # binary falls back to a ChatGPT login that doesn't exist in the
             # container and auth fails. CODEX_API_KEY drives login_api_key;
