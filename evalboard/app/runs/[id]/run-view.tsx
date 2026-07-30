@@ -405,11 +405,14 @@ export function RunView({
                         const totalN = hasRepeats
                             ? metrics.taskTotal
                             : metrics.total;
+                        // null when nothing ran, so an empty run reads neutral
+                        // rather than as a measured 0%.
+                        const tone = totalN > 0 ? pct : null;
                         return (
                             <>
                                 <div className="flex items-baseline gap-2 mt-1">
                                     <span
-                                        className={`text-2xl font-semibold tabular-nums ${passClass(pct, totalN > 0)}`}
+                                        className={`text-2xl font-semibold tabular-nums ${passClass(tone)}`}
                                     >
                                         {pct.toFixed(0)}%
                                     </span>
@@ -433,7 +436,7 @@ export function RunView({
                                     number beside it. */}
                                 <div className="mt-3 h-2 bg-gray-100 rounded-full overflow-hidden">
                                     <div
-                                        className={`h-full ${passBarClass(pct, totalN > 0)}`}
+                                        className={`h-full ${passBarClass(tone)}`}
                                         style={{ width: `${pct}%` }}
                                     />
                                 </div>

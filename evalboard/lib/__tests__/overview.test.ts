@@ -3,6 +3,7 @@ import {
     buildAdhocRows,
     collectPipelineRuns,
     projectRunRow,
+    scopeRunTasks,
     summarizeListing,
     turnBudgetRateForTasks,
     type PerRun,
@@ -298,6 +299,20 @@ describe("collectPipelineRuns", () => {
         warn.mockRestore();
     });
 
+    test("probeAll reaches a match sitting past the scan cap", async () => {
+        // The paged run table derives "Show more" from finding one extra row, so
+        // a scan that gave up at the cap would report "no more" and strand every
+        // older matching run. Only r1 matches, 30 ids deep — well past
+        // limit x HARNESS_SCAN_FACTOR.
+        const ids = Array.from({ length: 30 }, (_, i) => `r${30 - i}`);
+        const load = vi.fn(async (id: string) => run(id));
+        const isMatch = (r: PerRun) => r.id === "r1";
+
+        expect(await collectPipelineRuns(ids, 1, load, isMatch)).toEqual([]);
+        const out = await collectPipelineRuns(ids, 1, load, isMatch, true);
+        expect(out.map((r) => r.id)).toEqual(["r1"]);
+    });
+
     test("limit=0 and empty ids short-circuit without loading", async () => {
         const load = vi.fn(async (id: string) => run(id));
         expect(await collectPipelineRuns(["r1"], 0, load)).toEqual([]);
@@ -587,5 +602,41 @@ describe("projectRunRow", () => {
             overview: { ...r.overview!, harness: "codex" },
         };
         expect(projectRunRow(withHarness, null, null)?.harness).toBe("codex");
+    });
+
+    // getOverview reads the task LIST out of the same call (for the turn-budget
+    // rate), while the table only ever sees the counts. If the two disagreed
+    // about which tasks are in scope, the charts and the tiles would describe
+    // different runs with nothing on the page to show it.
+    describe("scopeRunTasks, the seam both share", () => {
+        test("hands back the matching tasks themselves, not just a count", () => {
+            const scoped = scopeRunTasks(
+                run("r", [
+                    task({ taskId: "keep-me", tags: ["keep"] }),
+                    task({ taskId: "drop-me" }),
+                ]),
+                "keep",
+                null,
+            );
+            expect(scoped?.tasks.map((t) => t.taskId)).toEqual(["keep-me"]);
+        });
+
+        test("agrees with projectRunRow on which runs are in scope", () => {
+            const r = run("r", [task({ taskId: "a", tags: ["other"] })]);
+            expect(scopeRunTasks(r, "keep", null)).toBeNull();
+            expect(projectRunRow(r, "keep", null)).toBeNull();
+        });
+
+        test("the run-id fallback widens back to every task", () => {
+            const scoped = scopeRunTasks(
+                run("2026-07-30_04-38-11", [
+                    task({ taskId: "a" }),
+                    task({ taskId: "b" }),
+                ]),
+                null,
+                "07-30",
+            );
+            expect(scoped?.tasks).toHaveLength(2);
+        });
     });
 });

@@ -27,13 +27,16 @@ describe("seriesKey", () => {
     test("prefixes and sanitizes so recharts can't read it as a path", () => {
         // A dataKey containing "." is a nested-object path in recharts, which
         // would resolve to undefined and silently draw no line.
-        expect(seriesKey("gpt-5.5")).not.toContain(".");
-        expect(seriesKey("claude-code")).toBe("h_claude_code");
+        expect(seriesKey("gpt-5.5", 0)).not.toContain(".");
+        expect(seriesKey("claude-code", 0)).toBe("h0_claude_code");
     });
 
-    test("is injective across the known harness ids", () => {
-        const ids = ["claude-code", "codex", "antigravity", "delegate-sdk"];
-        expect(new Set(ids.map(seriesKey)).size).toBe(ids.length);
+    test("is injective even when two ids sanitize alike", () => {
+        // Without the index prefix "a.b" and "a-b" both become "h_a_b", and one
+        // harness's line would silently take over the other's column.
+        const ids = ["claude-code", "codex", "gpt-5.5", "gpt-5-5"];
+        const keys = ids.map((id, i) => seriesKey(id, i));
+        expect(new Set(keys).size).toBe(ids.length);
     });
 });
 
@@ -45,13 +48,14 @@ describe("pivotByHarness", () => {
             "successRate",
         );
         expect(series.map((s) => s.harness)).toEqual(["claude-code", "codex"]);
+        const [cc, cx] = series.map((s) => s.dataKey);
         expect(rows).toEqual([
-            { timestamp: 100, h_claude_code: 90 },
-            { timestamp: 200, h_codex: 70 },
+            { timestamp: 100, [cc]: 90 },
+            { timestamp: 200, [cx]: 70 },
         ]);
         // The absent key on each row is what connectNulls bridges — that is how
         // interleaved runs become one continuous line per harness.
-        expect(rows[0]).not.toHaveProperty("h_codex");
+        expect(rows[0]).not.toHaveProperty(cx);
     });
 
     test("colors come from the harness, not the series index", () => {
@@ -67,14 +71,13 @@ describe("pivotByHarness", () => {
     });
 
     test("merges two harnesses that share a timestamp into one row", () => {
-        const { rows } = pivotByHarness(
+        const { rows, series } = pivotByHarness(
             [point("claude-code", 100, 90), point("codex", 100, 70)],
             ["claude-code", "codex"],
             "successRate",
         );
-        expect(rows).toEqual([
-            { timestamp: 100, h_claude_code: 90, h_codex: 70 },
-        ]);
+        const [cc, cx] = series.map((s) => s.dataKey);
+        expect(rows).toEqual([{ timestamp: 100, [cc]: 90, [cx]: 70 }]);
     });
 
     test("sorts rows by timestamp regardless of input order", () => {
@@ -91,12 +94,13 @@ describe("pivotByHarness", () => {
         // by the metric key — reading the wrong one would put the success rate
         // on the turn-budget chart with no visible error.
         const pts = [point("codex", 100, 90, 40)];
+        const key = seriesKey("codex", 0);
         expect(pivotByHarness(pts, ["codex"], "successRate").rows[0]).toEqual({
             timestamp: 100,
-            h_codex: 90,
+            [key]: 90,
         });
         expect(pivotByHarness(pts, ["codex"], "turnBudgetRate").rows[0]).toEqual(
-            { timestamp: 100, h_codex: 40 },
+            { timestamp: 100, [key]: 40 },
         );
     });
 
@@ -132,7 +136,7 @@ describe("pivotByHarness", () => {
             "successRate",
         );
         expect(series).toHaveLength(1);
-        expect(rows[0].h_codex).toBe(0);
+        expect(rows[0][series[0].dataKey]).toBe(0);
     });
 
     test("handles an empty window", () => {

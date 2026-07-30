@@ -16,9 +16,7 @@ export type HarnessMetric = "successRate" | "turnBudgetRate";
 
 export interface HarnessSeries {
     harness: string;
-    // Column name in the pivoted rows. Prefixed and sanitized because recharts
-    // reads a dataKey containing "." as a nested object path, which would
-    // silently resolve to undefined for a harness id with a dot in it.
+    // Column name in the pivoted rows. See seriesKey.
     dataKey: string;
     color: string;
 }
@@ -28,8 +26,13 @@ export interface HarnessChartData {
     series: HarnessSeries[];
 }
 
-export function seriesKey(harness: string): string {
-    return `h_${harness.replace(/[^\w]/g, "_")}`;
+// Sanitized because recharts reads a dataKey containing "." as a nested object
+// path, which would resolve to undefined and silently draw no line. Prefixed
+// with the series index because sanitizing alone is not injective — `a.b` and
+// `a-b` would collide onto one column and one harness's data would vanish
+// under the other's.
+export function seriesKey(harness: string, index: number): string {
+    return `h${index}_${harness.replace(/[^\w]/g, "_")}`;
 }
 
 export function pivotByHarness(
@@ -37,11 +40,12 @@ export function pivotByHarness(
     harnesses: string[],
     metric: HarnessMetric,
 ): HarnessChartData {
-    const series: HarnessSeries[] = harnesses.map((harness) => ({
+    const series: HarnessSeries[] = harnesses.map((harness, i) => ({
         harness,
-        dataKey: seriesKey(harness),
+        dataKey: seriesKey(harness, i),
         color: harnessColor(harness),
     }));
+    const keyByHarness = new Map(series.map((s) => [s.harness, s.dataKey]));
 
     // Merge on timestamp so two harnesses that happen to start a run in the same
     // second share one row instead of producing two points recharts would render
@@ -49,12 +53,16 @@ export function pivotByHarness(
     const byTimestamp = new Map<number, Record<string, number>>();
     for (const p of points) {
         if (p[metric] == null) continue;
+        // A point whose harness isn't in the requested series list has no column
+        // to land in; dropping it keeps a stale id out of the chart.
+        const key = keyByHarness.get(p.harness);
+        if (!key) continue;
         let row = byTimestamp.get(p.timestamp);
         if (!row) {
             row = { timestamp: p.timestamp };
             byTimestamp.set(p.timestamp, row);
         }
-        row[seriesKey(p.harness)] = p[metric] as number;
+        row[key] = p[metric] as number;
     }
 
     const rows = [...byTimestamp.values()].sort(

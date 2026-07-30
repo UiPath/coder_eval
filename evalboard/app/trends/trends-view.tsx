@@ -46,14 +46,6 @@ function fmtCount(n: number | null): string {
     return n.toFixed(0);
 }
 
-// Per-task rate across the recent runs, on the same traffic-light cutoffs as
-// every other pass rate on the site (lib/pass-rate.ts). This used to be green
-// only at a perfect 100%, which painted a task that passed 9 of its last 10 runs
-// the same red as one that never passed.
-function passRateClass(rate: number, hasRuns: boolean): string {
-    return passClassRatio(rate, hasRuns);
-}
-
 type SortKey =
     | "task"
     | "runs"
@@ -382,7 +374,11 @@ function TaskRow({
     pending: boolean;
     onToggle: () => void;
 }) {
-    const rateClass = passRateClass(t.passRate, t.totalRuns > 0);
+    // Same traffic-light cutoffs as every other pass rate on the site
+    // (lib/pass-rate.ts). This used to be green only at a perfect 100%, which
+    // painted a task that passed 9 of its last 10 runs the same red as one that
+    // never passed.
+    const rateClass = passClassRatio(t.totalRuns > 0 ? t.passRate : null);
     return (
         <>
             <tr

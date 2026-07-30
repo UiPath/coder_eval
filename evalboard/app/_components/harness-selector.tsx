@@ -1,7 +1,6 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { ALL_HARNESSES } from "@/lib/harness";
 import { HarnessBadge, harnessShortLabel } from "./harness-badge";
 
 // Segmented control for a page's harness scope. Sets `?h=<harness>` while
@@ -100,7 +99,3 @@ export function HarnessSelector({
         </div>
     );
 }
-
-// Re-exported so a caller can build an `?h=all` link without importing the leaf
-// constants module directly.
-export { ALL_HARNESSES };

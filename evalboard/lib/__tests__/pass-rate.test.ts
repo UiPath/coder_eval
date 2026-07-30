@@ -35,7 +35,6 @@ describe("passTone", () => {
     test("distinguishes no data from a low rate", () => {
         expect(passTone(null)).toBe("none");
         expect(passTone(undefined)).toBe("none");
-        expect(passTone(50, false)).toBe("none");
         expect(passClass(null)).toBe("text-gray-500");
     });
 

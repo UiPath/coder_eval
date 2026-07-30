@@ -9,12 +9,13 @@
 export const PASS_GREEN_PCT = 95;
 export const PASS_RED_PCT = 85;
 
-// "none" is the absence of a measurement (no tasks ran), which is not the same
-// as a measured 0% — that one is genuinely bad and must read red.
+// "none" is the absence of a measurement, which callers signal by passing null.
+// That is not the same as a measured 0% — that one is genuinely bad and must
+// read red.
 export type PassTone = "none" | "good" | "warn" | "bad";
 
-export function passTone(pct: number | null | undefined, hasData = true): PassTone {
-    if (!hasData || pct == null || !Number.isFinite(pct)) return "none";
+export function passTone(pct: number | null | undefined): PassTone {
+    if (pct == null || !Number.isFinite(pct)) return "none";
     if (pct >= PASS_GREEN_PCT) return "good";
     if (pct < PASS_RED_PCT) return "bad";
     return "warn";
@@ -36,18 +37,18 @@ const BAR_CLASS: Record<PassTone, string> = {
     bad: "bg-red-500",
 };
 
-// Pass rate as a percent (0-100) -> Tailwind text color. `hasData` distinguishes
-// "no tasks yet" (neutral) from a real 0%.
-export function passClass(pct: number | null | undefined, hasData = true): string {
-    return TEXT_CLASS[passTone(pct, hasData)];
+// Pass rate as a percent (0-100) -> Tailwind text color. Pass null when there is
+// nothing to measure so it reads neutral rather than red.
+export function passClass(pct: number | null | undefined): string {
+    return TEXT_CLASS[passTone(pct)];
 }
 
-export function passBarClass(pct: number | null | undefined, hasData = true): string {
-    return BAR_CLASS[passTone(pct, hasData)];
+export function passBarClass(pct: number | null | undefined): string {
+    return BAR_CLASS[passTone(pct)];
 }
 
 // Same, for the tables that carry a rate as a 0-1 fraction (trends, watchlist)
 // rather than a percent.
-export function passClassRatio(rate: number | null | undefined, hasData = true): string {
-    return passClass(rate == null ? null : rate * 100, hasData);
+export function passClassRatio(rate: number | null | undefined): string {
+    return passClass(rate == null ? null : rate * 100);
 }

@@ -3,7 +3,6 @@ import {
     getAdhocRunListing,
     getOverview,
     getRunListing,
-    getWindowRollup,
     listRecentHarnesses,
     type TagCount,
 } from "@/lib/overview";
@@ -50,13 +49,14 @@ function parseQ(raw: string | string[] | undefined): string | null {
     return trimmed ? trimmed.slice(0, 200) : null;
 }
 
-// Hard ceiling on how far the tables can be paged out. Both sections grow a
-// page at a time and never expose a "show all" jump: every extra row is another
-// multi-MB run.json read, so an unbounded jump is the one interaction that can
-// stall the page. Well above the store's run count, so in practice you can keep
-// expanding to the oldest run; a hand-typed `?limit=` above this clamps here.
+// Hard ceiling on how far the tables can be paged out, since every row is
+// another multi-MB run.json read. Well above the store's run count, so in
+// practice you can keep expanding to the oldest run; a hand-typed `?limit=`
+// above this clamps here.
 const MAX_LIMIT = 500;
 
+// The two sections page independently (`limit` / `alimit`) so expanding one
+// doesn't reset the other.
 function parsePagedLimit(
     raw: string | string[] | undefined,
     fallback: number,
@@ -66,16 +66,6 @@ function parsePagedLimit(
     const n = parseInt(v, 10);
     if (!Number.isFinite(n) || n <= 0) return fallback;
     return Math.min(n, MAX_LIMIT);
-}
-
-function parseLimit(raw: string | string[] | undefined): number {
-    return parsePagedLimit(raw, DEFAULT_LIMIT);
-}
-
-// Separate from the main table's `limit` so expanding one section doesn't
-// reset the other's pagination.
-function parseAdhocLimit(raw: string | string[] | undefined): number {
-    return parsePagedLimit(raw, ADHOC_LIMIT);
 }
 
 function fmtCost(c: number | null): string {
@@ -121,18 +111,22 @@ export default async function Page({
     // null = every harness, and that is the default: the page opens on the
     // cross-harness comparison and narrows from there.
     const harness = parseHarnessScope(params.h);
-    const limit = parseLimit(params.limit);
-    const adhocLimit = parseAdhocLimit(params.alimit);
+    const limit = parsePagedLimit(params.limit, DEFAULT_LIMIT);
+    const adhocLimit = parsePagedLimit(params.alimit, ADHOC_LIMIT);
+    // Tasks WITHIN a run are narrowed: drives the "Matching tasks" column header
+    // and the clear-filters link.
     const isFiltered = activeTag != null || q != null;
+    // The set of RUNS is narrowed, harness scope included: drives every "n of N"
+    // count, since N only means "everything" when nothing is scoped.
+    const isNarrowed = isFiltered || harness != null;
 
     // One harness scope drives everything on the page: the charts split into a
     // line per harness in the window, and the summary tiles + run list are
     // filtered to the same set. Picking a harness therefore recomputes the
     // tiles and the charts and narrows the table, instead of re-scoping the
     // analytics block while the table silently kept showing every harness.
-    const [overview, rollup, listing, adhoc, harnesses] = await Promise.all([
+    const [overview, listing, adhoc, harnesses] = await Promise.all([
         getOverview(WINDOW, activeTag, q, harness),
-        getWindowRollup(WINDOW, activeTag, q, harness),
         getRunListing(activeTag, q, limit, harness),
         getAdhocRunListing(adhocLimit),
         listRecentHarnesses(),
@@ -148,7 +142,7 @@ export default async function Page({
     // match would mean reading all of them, so the table reports what it has
     // and offers another page while one is there.
     const hasMore = listing.hasMore && shownCount < MAX_LIMIT;
-    const tableCountLabel = isFiltered
+    const tableCountLabel = isNarrowed
         ? `${shownCount} matching`
         : `${shownCount} of ${listing.totalCandidates}`;
 
@@ -170,9 +164,7 @@ export default async function Page({
         alimit: rawAlimit,
     };
 
-    // Both tables grow one page at a time. There is deliberately no "show all"
-    // link: each row is backed by a run.json read, so an unbounded jump is the
-    // one click that can hang the page.
+    // Both tables grow one page at a time, up to MAX_LIMIT.
     const nextPageSize = Math.min(DEFAULT_LIMIT, MAX_LIMIT - shownCount);
     const showMoreHref = buildHref({
         ...base,
@@ -206,10 +198,10 @@ export default async function Page({
             </div>
 
             <WindowSummary
-                totals={rollup.totals}
+                totals={overview.totals}
                 window={WINDOW}
-                runCount={rollup.runCount}
-                isFiltered={isFiltered}
+                runCount={overview.runCount}
+                isFiltered={isNarrowed}
             />
 
             {/* The analytics block — daily success / turn-budget charts, the
@@ -293,7 +285,8 @@ export default async function Page({
                     <p className="text-xs text-gray-500">
                         % of budgeted tasks that stayed within 1.5× their
                         expected turns (a budgeted task that failed counts as
-                        over budget)
+                        over budget) · runs with no budgeted task are omitted
+                        rather than plotted at 0
                         {activeTag || q ? " · scoped to the active filter" : ""}
                     </p>
                     <TurnBudgetChart
@@ -311,7 +304,6 @@ export default async function Page({
                             taskTags={taskTags}
                             reviewTags={reviewTags}
                             activeTag={activeTag}
-                            window={WINDOW}
                             q={q}
                             harness={harness}
                             limit={24}
@@ -423,10 +415,7 @@ export default async function Page({
                                     )}
                                     <td className="py-3 px-4 tabular-nums">
                                         <span
-                                            className={`font-medium ${passClass(
-                                                pct,
-                                                total > 0,
-                                            )}`}
+                                            className={`font-medium ${passClass(pct)}`}
                                         >
                                             {pct != null
                                                 ? `${pct.toFixed(0)}%`
@@ -569,10 +558,7 @@ export default async function Page({
                                             </td>
                                             <td className="py-3 px-4 tabular-nums">
                                                 <span
-                                                    className={`font-medium ${passClass(
-                                                        pct,
-                                                        total > 0,
-                                                    )}`}
+                                                    className={`font-medium ${passClass(pct)}`}
                                                 >
                                                     {pct != null
                                                         ? `${pct.toFixed(0)}%`

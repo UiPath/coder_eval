@@ -493,11 +493,12 @@ const COMPONENTS: {
         nonShaUrl: null,
         // Releases are tagged `v<version>` by the Release workflow, so the
         // version resolves to an exact release page. Runs from before tagging
-        // began (v0.8.2) recorded a placeholder `0.1.0` and will 404 — the honest
-        // answer, since no such release exists, and not worth a version floor
-        // that would rot.
+        // began (v0.8.2) recorded a hardcoded `0.1.0` that was never released;
+        // render those as plain text rather than a link that 404s.
         versionUrl: (v) =>
-            `https://github.com/UiPath/coder_eval/releases/tag/v${v}`,
+            v === "0.1.0"
+                ? null
+                : `https://github.com/UiPath/coder_eval/releases/tag/v${v}`,
         // The framework identifies itself by the released package version
         // (env_info `coder_eval`, e.g. "0.9.1"), which is what the suite
         // actually pins — so that is the chip, and it links to the release.

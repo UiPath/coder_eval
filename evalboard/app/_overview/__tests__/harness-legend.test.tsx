@@ -5,9 +5,9 @@ import { HarnessLegend, HarnessTooltip } from "../harness-legend";
 import { seriesKey } from "../harness-series";
 
 function series(...harnesses: string[]) {
-    return harnesses.map((harness) => ({
+    return harnesses.map((harness, i) => ({
         harness,
-        dataKey: seriesKey(harness),
+        dataKey: seriesKey(harness, i),
         color: harnessColor(harness),
     }));
 }
