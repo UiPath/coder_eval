@@ -56,6 +56,16 @@ export interface RunSummary {
     tasksError: number;
     totalCostUsd: number | null;
     componentShas: ComponentSha[];
+    // What actually produced this run, for the run header. `harness` is the
+    // coder-eval AgentKind from the RunConfig stamp (falling back to the per-task
+    // agent_config vote); null only on legacy runs that identify neither.
+    harness: string | null;
+    // Dominant per-task `model_used`, with how many distinct models the run
+    // touched. Normally 1 — a run is one model — but an A/B experiment fans
+    // variants across models in a single run, and a header claiming one model
+    // would be wrong there, so the count is carried and surfaced.
+    model: string | null;
+    modelCount: number;
 }
 
 export interface TaskResultSummary {
@@ -471,13 +481,30 @@ const COMPONENTS: {
     display: string;
     repo: string | null;
     nonShaUrl: string | null;
+    // Link target for a semver-shaped value, given the value itself. Takes
+    // precedence over `nonShaUrl` when it returns a URL. This is how a released
+    // component links at its own version rather than at a moving list page.
+    versionUrl?: (version: string) => string | null;
     keys: string[];
 }[] = [
     {
         display: "coder_eval",
         repo: "UiPath/coder_eval",
         nonShaUrl: null,
-        keys: ["git_commit"],
+        // Releases are tagged `v<version>` by the Release workflow, so the
+        // version resolves to an exact release page. Runs from before tagging
+        // began (v0.8.2) recorded a placeholder `0.1.0` and will 404 — the honest
+        // answer, since no such release exists, and not worth a version floor
+        // that would rot.
+        versionUrl: (v) =>
+            `https://github.com/UiPath/coder_eval/releases/tag/v${v}`,
+        // The framework identifies itself by the released package version
+        // (env_info `coder_eval`, e.g. "0.9.1"), which is what the suite
+        // actually pins — so that is the chip, and it links to the release.
+        // `git_commit` is a fallback for two cases the version can't cover: an
+        // editable checkout between releases, and legacy runs written before the
+        // version was captured. It is a SHA, so it links to the tree.
+        keys: ["coder_eval", "git_commit"],
     },
     {
         display: "skills",
@@ -516,8 +543,10 @@ export function extractComponentShas(
         let url: string | null = null;
         if (comp.repo && SHA_RE.test(value)) {
             url = `https://github.com/${comp.repo}/tree/${value}`;
-        } else if (comp.nonShaUrl) {
-            url = comp.nonShaUrl;
+        } else {
+            // Not SHA-shaped, so it's a version label. Prefer an exact
+            // per-version link; fall back to the component's list page.
+            url = comp.versionUrl?.(value) ?? comp.nonShaUrl;
         }
         out.push({ name: comp.display, sha: value, url });
     }
@@ -665,6 +694,7 @@ export async function readRunSummary(id: string): Promise<RunSummary | null> {
     const taskDurationSeconds = allHaveDuration
         ? taskDurationSum
         : (data.total_duration_seconds ?? null);
+    const models = tallyModels(taskResults);
     return {
         id,
         startTime: data.start_time ?? null,
@@ -676,7 +706,34 @@ export async function readRunSummary(id: string): Promise<RunSummary | null> {
         tasksError: data.tasks_error ?? 0,
         totalCostUsd: taskResults.length ? totalCost : null,
         componentShas: extractComponentShas(data.environment_info),
+        harness: extractRunConfig(data).harness,
+        model: models.dominant,
+        modelCount: models.distinct,
     };
+}
+
+// Dominant `model_used` across a run's rows, plus how many distinct models
+// appeared. Mirrors mostCommonAgentType's "the thing these tasks ran on" vote,
+// but also reports the spread so the run header can say when there was more than
+// one instead of silently picking a winner.
+export function tallyModels(rows: RawTaskResult[]): {
+    dominant: string | null;
+    distinct: number;
+} {
+    const counts = new Map<string, number>();
+    for (const r of rows) {
+        const m = r.model_used;
+        if (typeof m === "string" && m) counts.set(m, (counts.get(m) ?? 0) + 1);
+    }
+    let dominant: string | null = null;
+    let bestN = 0;
+    for (const [model, n] of counts) {
+        if (n > bestN) {
+            dominant = model;
+            bestN = n;
+        }
+    }
+    return { dominant, distinct: counts.size };
 }
 
 export async function readRunTasks(
