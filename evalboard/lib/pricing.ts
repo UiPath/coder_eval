@@ -55,7 +55,7 @@ export const PRICING: Record<string, Pricing> = {
     // billed rate depends on the provider it landed on), and there is no per-bucket
     // rate to show. Instead the harness captures each call's ACTUAL cost proxy-side
     // and the detail view renders it per call (TurnRecord.provider_call_costs →
-    // distributeActualCost); a static estimate here would only reintroduce the
+    // ProviderCallTableSection); a static estimate here would only reintroduce the
     // wrong number. See pricing.py (kept for the Python-side max_usd fallback).
     // Bedrock open-weight models (litellm backend, eu-north-1). Mirror of pricing.py.
     // These run on Bedrock (fixed rates, like Claude) with NO OpenRouter actual-cost

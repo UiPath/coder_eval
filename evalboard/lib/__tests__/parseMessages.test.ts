@@ -812,7 +812,7 @@ describe("parseMessages — reconciliation entry", () => {
     test("does NOT statically price OpenRouter models (their cost is the captured actual)", () => {
         // OpenRouter routes per-request, so a static headline rate is wrong; the
         // evalboard deliberately leaves these unpriced (→ "—") and shows the real
-        // per-call cost via distributeActualCost / the per-call section instead.
+        // per-call cost in the per-call table (ProviderCallTableSection) instead.
         const turns: TurnEntry[] = [
             {
                 model_used: "deepseek/deepseek-v4-pro",

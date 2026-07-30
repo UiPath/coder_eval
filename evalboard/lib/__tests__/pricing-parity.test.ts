@@ -88,7 +88,7 @@ describe("pricing.ts ↔ pricing.py parity", () => {
         // OpenRouter open-weight models: priced in pricing.py only for the Python
         // max_usd static fallback. The evalboard deliberately does NOT statically
         // price them — OpenRouter routes per-request, so it shows the captured
-        // ACTUAL per-call cost instead (see lib/pricing.ts + distributeActualCost).
+        // ACTUAL per-call cost instead (see the per-call table, provider_call_costs).
         "moonshotai/kimi-k3",
         "z-ai/glm-5.2",
         "deepseek/deepseek-v4-pro",

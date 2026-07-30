@@ -187,11 +187,13 @@ export interface MessageEvent {
     // cascade-aware thinking-cost simulator to price each message. null when
     // no raw in the group recorded it.
     model: string | null;
-    // True cost in USD for this message's API call, priced from the per-message
-    // token buckets and model against the shared rate table (lib/pricing.ts).
-    // The SDK only reports a cumulative per-turn cost, so this is the
-    // rate-accurate per-message attribution. null when the model is unpriced or
-    // no token figure was recorded (older runs).
+    // Rate-card ESTIMATE of this message's cost in USD, priced from the
+    // per-message token buckets and model against the shared rate table
+    // (lib/pricing.ts). The SDK only reports a cumulative per-turn cost, so this
+    // is the rate-accurate per-message attribution. Actual per-call cost (LiteLLM
+    // backend) is NOT distributed here — it lives in the separate providerCalls
+    // per-call table. null when the model is unpriced or no token figure was
+    // recorded (older runs).
     costUsd: number | null;
     // Only set on a `reconciliation` row: the human-readable explanation of why
     // these tokens are unattributed (e.g. fixed prompt overhead + sub-agent
@@ -273,14 +275,27 @@ export interface TaskDetail extends TaskResultSummary {
     // the Agent row). The cost simulator consumes the values via Object.values().
     // Empty for runs/turns with no spawned sub-agents.
     subAgentUsageByToolId: Record<string, SubAgentTotals>;
+    // Per-call ACTUAL cost + cache audit rows, grouped by turn iteration. Only
+    // turns whose `provider_call_costs` list is non-empty appear (LiteLLM/
+    // open-weight backend; empty on Claude/Bedrock). Rendered as a standalone
+    // per-call table, NOT distributed onto individual transcript messages.
+    providerCalls: { iteration: number; calls: ProviderCallEntry[] }[];
 }
 
-// Per-call ACTUAL cost + cache (open-weight/LiteLLM backend) is captured proxy-side
-// and joined onto each generation in Python (litellm_cost.apply_actual_cost) when
-// the generations align 1:1 with the calls — so it surfaces INLINE in the message
-// timeline (MessageEvent.costUsd + the cache token buckets), with the reconciliation
-// row drained to the residual. There is no separate per-call panel and no fragile
-// evalboard-side distribution; on a shape mismatch the join leaves the sparse stream.
+// One per-call audit row from `TurnRecord.provider_call_costs` — the actual
+// cost + cache split the LiteLLM proxy captured for a single upstream call
+// (open-weight backend). The turn-level total_cost_usd remains the real bill;
+// these rows are an itemized breakdown surfaced as a separate table. Empty list
+// on non-LiteLLM backends.
+export interface ProviderCallEntry {
+    callId: string | null;
+    provider: string | null;
+    costUsd: number | null;
+    inputTokens: number | null;
+    cacheReadTokens: number | null;
+    cacheWriteTokens: number | null;
+    outputTokens: number | null;
+}
 
 // Full per-sub-agent token breakdown (all components, cache-read included).
 export interface SubAgentTotals {
@@ -1198,12 +1213,20 @@ interface MessageEntry {
     cache_read_tokens?: number | null;
     reasoning_tokens?: number | null;
     model?: string | null;
-    // Real per-call cost (USD), joined post-run from the LiteLLM proxy's captured
-    // OpenRouter usage.cost (open-weight backend only). Preferred over the static
-    // rate-card estimate when present; absent/null on other backends.
-    cost_usd?: number | null;
     // Only on a role="reconciliation" entry: why these tokens are unattributed.
     note?: string | null;
+}
+
+// One raw per-call audit row on a turn's `provider_call_costs` list. Snake-case
+// as serialized in task.json; mapped to ProviderCallEntry (camelCase).
+interface ProviderCallEntryRaw {
+    call_id?: string | null;
+    provider?: string | null;
+    cost_usd?: number | null;
+    input_tokens?: number | null;
+    cache_read_tokens?: number | null;
+    cache_write_tokens?: number | null;
+    output_tokens?: number | null;
 }
 
 export interface TurnEntry {
@@ -1213,6 +1236,9 @@ export interface TurnEntry {
     // reconciliation row, which carries no model of its own.
     model_used?: string | null;
     token_usage?: TokenUsageEntry | null;
+    // Per-call actual cost + cache audit rows (LiteLLM/open-weight backend);
+    // empty/absent on Claude/Bedrock. Surfaced as a standalone per-call table.
+    provider_call_costs?: ProviderCallEntryRaw[];
     result_summary?: {
         result?: string | null;
         stop_reason?: string | null;
@@ -1396,7 +1422,6 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             cacheReadTokens: number | null;
             reasoningTokens: number | null;
             model: string | null;
-            costUsd: number | null;
         };
         const raws: Raw[] = [];
         for (const msg of turn.messages ?? []) {
@@ -1441,7 +1466,6 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                         ? msg.reasoning_tokens
                         : null,
                 model: typeof msg.model === "string" ? msg.model : null,
-                costUsd: typeof msg.cost_usd === "number" ? msg.cost_usd : null,
             };
             for (const b of msg.content_blocks ?? []) {
                 if (b.block_type === "thinking") {
@@ -1565,11 +1589,6 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             let haveCacheRead = false;
             let reasoningSum = 0;
             let haveReasoning = false;
-            // Real per-call cost joined from the proxy (open-weight backend). When
-            // any raw in the group carries it, it's authoritative for this message
-            // and preferred over the static rate-card estimate below.
-            let costUsdSum = 0;
-            let haveActualCost = false;
             // Real per-emission output attributed to thinking: the agent
             // distributes a call's output_tokens across its block-emissions by
             // content length, so a thinking-only emission's output_tokens IS
@@ -1633,10 +1652,6 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                     reasoningSum += r.reasoningTokens;
                     haveReasoning = true;
                 }
-                if (r.costUsd != null) {
-                    costUsdSum += r.costUsd;
-                    haveActualCost = true;
-                }
             }
             // Per-block output comes straight from each emission's recorded
             // output_tokens (thinking + text here, tools in the first pass) —
@@ -1671,17 +1686,15 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 thinkingOutputTokens: haveThinkingOut ? thinkingOutSum : null,
                 textOutputTokens,
                 model,
-                // Prefer the real proxy-captured per-call cost (open-weight backend);
-                // fall back to the static rate-card estimate when it's absent.
-                costUsd: haveActualCost
-                    ? costUsdSum
-                    : messageCostUsd({
-                          model,
-                          inputTokens: haveInputTok ? inputTokSum : null,
-                          outputTokens: haveOutputTok ? outputTokSum : null,
-                          cacheWriteTokens: haveCacheWrite ? cacheWriteSum : null,
-                          cacheReadTokens: haveCacheRead ? cacheReadSum : null,
-                      }),
+                // Rate-card estimate for this message (actual per-call cost lives
+                // in the separate providerCalls table, not distributed here).
+                costUsd: messageCostUsd({
+                    model,
+                    inputTokens: haveInputTok ? inputTokSum : null,
+                    outputTokens: haveOutputTok ? outputTokSum : null,
+                    cacheWriteTokens: haveCacheWrite ? cacheWriteSum : null,
+                    cacheReadTokens: haveCacheRead ? cacheReadSum : null,
+                }),
                 note: null,
             });
             group = [];
@@ -1754,24 +1767,49 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 // task total_cost_usd is unaffected (it reads the backend aggregate,
                 // not a sum of per-message costUsd), so there is no double-count.
                 model: turn.model_used ?? null,
-                // Prefer the residual cost the actual-cost join wrote onto this row
-                // (open-weight backend; ≈0 when generations aligned); else price the
-                // residual tokens from the rate card (Claude/Bedrock).
-                costUsd:
-                    typeof msg.cost_usd === "number"
-                        ? msg.cost_usd
-                        : messageCostUsd({
-                              model: turn.model_used ?? null,
-                              inputTokens: typeof msg.input_tokens === "number" ? msg.input_tokens : null,
-                              outputTokens: typeof msg.output_tokens === "number" ? msg.output_tokens : null,
-                              cacheWriteTokens:
-                                  typeof msg.cache_creation_tokens === "number" ? msg.cache_creation_tokens : null,
-                              cacheReadTokens: typeof msg.cache_read_tokens === "number" ? msg.cache_read_tokens : null,
-                          }),
+                // Price the residual tokens from the rate card (Claude/Bedrock).
+                // Actual per-call cost (LiteLLM backend) is not distributed onto
+                // messages — it lives in the separate providerCalls table.
+                costUsd: messageCostUsd({
+                    model: turn.model_used ?? null,
+                    inputTokens: typeof msg.input_tokens === "number" ? msg.input_tokens : null,
+                    outputTokens: typeof msg.output_tokens === "number" ? msg.output_tokens : null,
+                    cacheWriteTokens:
+                        typeof msg.cache_creation_tokens === "number" ? msg.cache_creation_tokens : null,
+                    cacheReadTokens: typeof msg.cache_read_tokens === "number" ? msg.cache_read_tokens : null,
+                }),
                 note: typeof msg.note === "string" ? msg.note : null,
             });
         }
     }
+    return out;
+}
+
+// Project each turn's `provider_call_costs` audit rows (LiteLLM/open-weight
+// backend) into the per-call table shape, keyed by iteration index. Turns with
+// no rows are skipped, so the result is empty on Claude/Bedrock runs and the
+// table doesn't render.
+export function parseProviderCalls(
+    turns: TurnEntry[],
+): { iteration: number; calls: ProviderCallEntry[] }[] {
+    const out: { iteration: number; calls: ProviderCallEntry[] }[] = [];
+    turns.forEach((turn, iteration) => {
+        const raw = turn.provider_call_costs ?? [];
+        if (raw.length === 0) return;
+        const calls: ProviderCallEntry[] = raw.map((c) => ({
+            callId: typeof c.call_id === "string" ? c.call_id : null,
+            provider: typeof c.provider === "string" ? c.provider : null,
+            costUsd: typeof c.cost_usd === "number" ? c.cost_usd : null,
+            inputTokens: typeof c.input_tokens === "number" ? c.input_tokens : null,
+            cacheReadTokens:
+                typeof c.cache_read_tokens === "number" ? c.cache_read_tokens : null,
+            cacheWriteTokens:
+                typeof c.cache_write_tokens === "number" ? c.cache_write_tokens : null,
+            outputTokens:
+                typeof c.output_tokens === "number" ? c.output_tokens : null,
+        }));
+        out.push({ iteration, calls });
+    });
     return out;
 }
 
@@ -1917,6 +1955,7 @@ export async function readTaskDetail(
     const flowDebug = parseFlowDebug(criteria);
     const toolCalls = parseToolCalls(task?.iterations ?? []);
     const messages = parseMessages(task?.iterations ?? []);
+    const providerCalls = parseProviderCalls(task?.iterations ?? []);
     // The per-message stream is the authoritative cumulative bill and is
     // preferred whenever it carries token data. Iteration token_usage comes
     // from the SDK ResultMessage snapshot, which is NOT cumulative for
@@ -1969,6 +2008,7 @@ export async function readTaskDetail(
         messages,
         tokens,
         subAgentUsageByToolId,
+        providerCalls,
     };
 }
 
