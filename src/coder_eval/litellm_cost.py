@@ -8,23 +8,47 @@ them onto the matching turns:
 
 * the turn's ``token_usage.total_cost_usd`` is overridden with the SUM of its
   calls' real cost (the bill), replacing the static rate-card estimate;
-* the per-call breakdown is attached as ``TurnRecord.provider_call_costs`` (for
-  the evalboard's per-call cache/cost view).
+* the per-call breakdown is attached as ``TurnRecord.provider_call_costs``.
 
-Reconciliation rule (see the plan): cost comes from the proxy actuals; token
-buckets are left untouched (SDK-authoritative), so any reconciliation-row token
-residual carries $0 rather than being re-priced at the rate card. A turn with no
-matching record keeps its static estimate (whole-turn fallback).
+Ownership rule (see the plan). Cost always comes from the proxy actuals. Token
+buckets have a single owner *per turn*:
+
+* when every generation binds cleanly to a call (the common case), the proxy is
+  authoritative for that turn — each generation's buckets are rewritten from its
+  call AND ``token_usage`` is recomputed from the summed calls, so the invariant
+  ``Σ(four buckets over messages) == token_usage`` holds EXACTLY (the reconcile
+  residual is zero, never clamped). This is required because on the LiteLLM route
+  the SDK reports ``cache_read_input_tokens == 0`` while the proxy carries the
+  real cache read — so leaving the SDK buckets would break the invariant the
+  evalboard's ``selectTokenTotals`` relies on;
+* when the walk cannot bind every generation (sub-agent runs whose transcript vs
+  proxy orderings diverge), the SDK token buckets are left untouched
+  (SDK-authoritative, invariant already holds) and only the whole-turn cost is
+  attributed onto the reconciliation row.
+
+Partial coverage. A turn's cost is overridden ONLY when every one of its calls
+reports a cost. If any call is unpriced (e.g. a Bedrock-served model on the same
+proxy returns no OpenRouter ``usage.cost``), overriding would bill those calls at
+$0 and understate the turn — so the turn keeps its static estimate, no breakdown
+is attached, and a warning names the unpriced call ids. A turn with no matching
+record keeps its static estimate too (whole-turn fallback).
 
 Retry safety: multiple ``TurnRecord``s can share an ``iteration`` (a crashed
 attempt + its retry), and the proxy calls of both carry that same iteration tag.
 To avoid double-counting at the run level, an iteration's calls are credited to a
-single survivor turn (the last with that iteration); earlier siblings are zeroed.
+single survivor turn (the last with that iteration THAT HAS GENERATIONS); earlier
+siblings are zeroed.
+
+Transactional: the full plan is computed before any turn is mutated, so a
+malformed record (which raises while building the per-call breakdown) aborts the
+whole join with the run left untouched — matching the caller's "keeping static
+pricing" contract.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -33,7 +57,10 @@ from coder_eval.models import AssistantMessage, ProviderCallCost, Reconciliation
 
 
 if TYPE_CHECKING:
-    from coder_eval.models import EvaluationResult
+    from coder_eval.models import EvaluationResult, TurnRecord
+
+
+logger = logging.getLogger(__name__)
 
 
 def load_cost_records(path: str | Path) -> list[dict[str, Any]]:
@@ -97,108 +124,136 @@ def apply_actual_cost(
         by_iteration[str(record.get("iteration"))].append(record)
 
     turns = result.iterations
-    # Survivor = the turn a given iteration's calls are credited to. Multiple
-    # TurnRecords can share an iteration — a crash+retry, or (seen on multi-turn
-    # runs) a trailing empty/model=None turn — so pick the LAST turn with that
-    # iteration THAT HAS GENERATIONS (assistant messages); the calls belong to
-    # whichever turn actually generated, and crediting an empty turn would strand
-    # them off their generations. Fall back to the last turn if none have any.
-    survivor_index: dict[str, int] = {}
-    for i, turn in enumerate(turns):
-        key = str(turn.iteration)
-        has_generations = any(isinstance(m, AssistantMessage) for m in turn.messages)
-        if key not in survivor_index:
-            survivor_index[key] = i
-        else:
-            prev_has_generations = any(isinstance(m, AssistantMessage) for m in turns[survivor_index[key]].messages)
-            if has_generations or not prev_has_generations:
-                survivor_index[key] = i
+    survivor_index = _survivor_index(turns)
 
-    applied = 0
+    # Phase 1 — COMPUTE the plan without mutating any turn. Building the per-call
+    # breakdown (_to_call) validates each record, so a malformed row raises HERE,
+    # before any mutation, and the caller keeps static pricing for the whole run
+    # rather than persisting a half-joined mix.
+    to_credit: list[tuple[TurnRecord, list[ProviderCallCost]]] = []
+    to_zero: list[TurnRecord] = []
+    matched_iterations: set[str] = set()
     for i, turn in enumerate(turns):
         key = str(turn.iteration)
         turn_records = by_iteration.get(key)
         if not turn_records:
             continue  # no proxy data for this iteration → keep the static estimate
+        matched_iterations.add(key)
         if survivor_index[key] != i:
-            # Earlier crashed sibling of a retried iteration: its calls are credited
-            # to the survivor, so zero it here to keep the run aggregate exact.
-            if turn.token_usage is not None:
-                turn.token_usage.total_cost_usd = 0.0
+            to_zero.append(turn)  # earlier crashed sibling of a retried iteration
             continue
+        to_credit.append((turn, [_to_call(record) for record in turn_records]))
 
-        calls = [_to_call(record) for record in turn_records]
+    # Phase 2 — MUTATE. Pure attribute assignment below; nothing raises.
+    for turn in to_zero:
+        # Credited to the survivor instead, so zero it to keep the run aggregate exact.
+        if turn.token_usage is not None:
+            turn.token_usage.total_cost_usd = 0.0
+
+    applied = 0
+    for turn, calls in to_credit:
+        unpriced = [c.call_id for c in calls if c.cost_usd is None]
+        if unpriced:
+            # Partial (or total) unpriced coverage: overriding would bill the
+            # null-cost calls at $0 and understate the turn, so keep the static
+            # estimate and attach no misleading breakdown. Loud, not silent.
+            logger.warning(
+                "LiteLLM actual-cost: iteration=%s has %d/%d unpriced call(s) %s; keeping the static estimate",
+                turn.iteration,
+                len(unpriced),
+                len(calls),
+                unpriced,
+            )
+            continue
         turn.provider_call_costs = calls
-        costs = [c.cost_usd for c in calls if c.cost_usd is not None]
-        if costs:
-            total = sum(costs)
-            if turn.token_usage is None:
-                turn.token_usage = TokenUsage(total_cost_usd=total)
-            else:
-                turn.token_usage.total_cost_usd = total
+        total = sum(c.cost_usd for c in calls if c.cost_usd is not None)
+        if turn.token_usage is None:
+            turn.token_usage = TokenUsage(total_cost_usd=total)
+        else:
+            turn.token_usage.total_cost_usd = total
         _distribute_onto_messages(turn, calls)
         applied += 1
+
+    orphans = sorted(set(by_iteration) - matched_iterations)
+    if orphans:
+        logger.warning(
+            "LiteLLM actual-cost: %d cost-record iteration(s) %s matched no turn (run=%s task=%s); spend unbooked",
+            len(orphans),
+            orphans,
+            run_id,
+            task_id,
+        )
     return applied
 
 
-def _distribute_onto_messages(turn: Any, calls: list[ProviderCallCost]) -> None:
+def _survivor_index(turns: list[TurnRecord]) -> dict[str, int]:
+    """Map each iteration to the turn its calls are credited to. Multiple
+    ``TurnRecord``s can share an iteration — a crash+retry, or (multi-turn runs) a
+    trailing empty/model=None turn — so pick the LAST turn with that iteration THAT
+    HAS GENERATIONS; the calls belong to whichever turn actually generated, and
+    crediting an empty turn would strand them off their generations. Fall back to
+    the last turn if none have any."""
+    survivor: dict[str, int] = {}
+    for i, turn in enumerate(turns):
+        key = str(turn.iteration)
+        has_generations = any(isinstance(m, AssistantMessage) for m in turn.messages)
+        if key not in survivor:
+            survivor[key] = i
+        else:
+            prev_has_generations = any(isinstance(m, AssistantMessage) for m in turns[survivor[key]].messages)
+            if has_generations or not prev_has_generations:
+                survivor[key] = i
+    return survivor
+
+
+def _distribute_onto_messages(turn: TurnRecord, calls: list[ProviderCallCost]) -> None:
     """Attribute each proxy call's real tokens + cost onto its generation in the
     turn's transcript and reconcile the residual, so the message timeline shows
-    real per-call cache/cost.
+    real per-call cache/cost while the four-bucket invariant is preserved.
 
-    A generation is one ``message_id`` group; it's matched to a proxy call by
-    ``output_tokens`` — both sides carry the real per-call output (the CLI just
-    splits one call's output across block emissions, so the group sums back to the
-    call total). The match is an ORDER-RESPECTING walk: the transcript and the
-    proxy log are both chronological, so each generation binds to the next call
-    whose output matches, and a call matching no pending generation (an auxiliary
-    small-model call — no ``message_id`` in the transcript, e.g. Claude Code's
-    background haiku/init call) is skipped into reconcile. Distribution is applied
-    ONLY if every generation bound cleanly, in order; otherwise (sub-agent runs
-    whose transcript vs proxy orderings diverge, or any output disagreement) the
-    stream is left sparse — we never present a guessed per-generation split.
-    Empirically clean on 14/15 observed runs (all but the sub-agent one).
+    A generation is one ``message_id`` group; it's matched to a proxy call by an
+    ORDER-RESPECTING walk on ``output_tokens`` (both the transcript and the proxy
+    log are chronological, so each generation binds to the next call whose output
+    matches; a call matching no pending generation — an auxiliary small-model call
+    with no transcript ``message_id`` — is skipped into reconcile).
 
-    The reconciliation row is ALWAYS set to the residual tokens + the real cost not
-    attributed to a generation (the whole total when distribution was skipped), so
-    the timeline reconciles to the bill and the price is visible there, not blank.
+    On a clean bind (every generation matched, in order) the proxy is authoritative
+    for this turn: each generation's buckets + cost are rewritten from its call and
+    ``token_usage`` is recomputed from the summed calls, so the reconcile residual
+    is exactly zero (no clamp). Otherwise (sub-agent orderings diverge) the SDK
+    token buckets are left untouched — invariant already holds — and only the
+    whole-turn cost lands on the reconciliation row.
     """
     assistants = [m for m in turn.messages if isinstance(m, AssistantMessage)]
     reconciliation = next((m for m in turn.messages if isinstance(m, ReconciliationMessage)), None)
+    usage = turn.token_usage
+    if usage is None:
+        return
 
-    # Group generations by message_id (in first-seen order). A missing id disables
-    # grouping (→ distribution skipped; the reconcile step below still runs).
+    # Group generations by message_id (first-seen order). A missing id disables
+    # grouping → distribution is skipped (bail path); the cost still reconciles.
     groups: dict[str, list[AssistantMessage]] = {}
     order: list[str] = []
-    groupable = True
     for message in assistants:
         if message.message_id is None:
-            groupable = False
+            groups, order = {}, []
             break
         if message.message_id not in groups:
             groups[message.message_id] = []
             order.append(message.message_id)
         groups[message.message_id].append(message)
 
-    if groupable and order:
+    distributed = False
+    if order:
         gen_outputs = [sum(m.output_tokens for m in groups[mid]) for mid in order]
-        # Order-respecting walk: both the transcript and the proxy log are
-        # chronological, so bind each generation, in order, to the NEXT call whose
-        # output matches; a call that matches no pending generation is an aux /
-        # unpaired call and is skipped (it lands in reconcile). Unlike a
-        # match-anywhere greedy this can't grab a same-output call out of sequence.
         matched: list[tuple[str, ProviderCallCost]] = []
         gi = 0
         for call in calls:
             if gi < len(order) and (call.output_tokens or 0) == gen_outputs[gi]:
                 matched.append((order[gi], call))
                 gi += 1
-
-        # Distribute ONLY when every generation bound cleanly, in order. Otherwise
-        # — sub-agent runs where the transcript vs proxy orderings diverge, or any
-        # output disagreement — leave the stream sparse and let the reconcile step
-        # carry the real total, rather than present a guessed per-generation split.
         if gi == len(order):
+            # Clean bind → proxy-authoritative for this turn.
             for message_id, call in matched:
                 members = groups[message_id]
                 cache_read = call.cache_read_tokens or 0
@@ -213,22 +268,31 @@ def _distribute_onto_messages(turn: Any, calls: list[ProviderCallCost]) -> None:
                     other.cache_read_tokens = 0
                     other.cache_creation_tokens = 0
                     other.cost_usd = None
+            # Recompute the turn totals from the SAME calls the generations now
+            # carry, so Σ(message buckets) == token_usage EXACTLY (residual zero).
+            usage.uncached_input_tokens = sum(
+                max(0, (c.input_tokens or 0) - (c.cache_read_tokens or 0) - (c.cache_write_tokens or 0)) for c in calls
+            )
+            usage.cache_read_input_tokens = sum(c.cache_read_tokens or 0 for c in calls)
+            usage.cache_creation_input_tokens = sum(c.cache_write_tokens or 0 for c in calls)
+            usage.output_tokens = sum(c.output_tokens or 0 for c in calls)
+            distributed = True
 
-    if reconciliation is None or turn.token_usage is None:
+    if reconciliation is None:
         return
-    # Reconcile ALWAYS: the residual tokens keep the four-bucket sum equal to the
-    # authoritative turn total (the invariant), and the residual cost = the real
-    # total minus what landed on generations (the whole total when distribution was
-    # skipped) — so the timeline shows the correct price even in the fallback case.
-    usage = turn.token_usage
-    reconciliation.input_tokens = max(0, usage.uncached_input_tokens - sum(m.input_tokens for m in assistants))
-    reconciliation.cache_read_tokens = max(
-        0, usage.cache_read_input_tokens - sum(m.cache_read_tokens for m in assistants)
-    )
-    reconciliation.cache_creation_tokens = max(
-        0, usage.cache_creation_input_tokens - sum(m.cache_creation_tokens for m in assistants)
-    )
-    reconciliation.output_tokens = max(0, usage.output_tokens - sum(m.output_tokens for m in assistants))
+    if distributed:
+        # Residual is zero by construction (usage recomputed from the same calls);
+        # set it explicitly as a plain subtraction — never max(0, …)-clamped, which
+        # would silently destroy the invariant when the two sources disagreed.
+        reconciliation.input_tokens = usage.uncached_input_tokens - sum(m.input_tokens for m in assistants)
+        reconciliation.cache_read_tokens = usage.cache_read_input_tokens - sum(m.cache_read_tokens for m in assistants)
+        reconciliation.cache_creation_tokens = usage.cache_creation_input_tokens - sum(
+            m.cache_creation_tokens for m in assistants
+        )
+        reconciliation.output_tokens = usage.output_tokens - sum(m.output_tokens for m in assistants)
+    # On the bail path the SDK token reconciliation (set by EventCollector) is left
+    # untouched — the invariant already holds there. Cost is attributed either way:
+    # zero residual on the clean path, the whole turn cost on the bail path.
     if usage.total_cost_usd is not None:
         reconciliation.cost_usd = usage.total_cost_usd - sum(m.cost_usd or 0.0 for m in assistants)
     else:

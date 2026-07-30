@@ -11,6 +11,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 import coder_eval.orchestrator as orch_mod
 from coder_eval.litellm_cost import apply_actual_cost, load_cost_records
@@ -125,13 +126,39 @@ class TestApplyActualCost:
         assert result.iterations[0].token_usage is not None
         assert result.iterations[0].token_usage.total_cost_usd == 0.04
 
-    def test_tag_only_records_attach_calls_but_keep_static_cost(self):
-        # A record with no cost (cost=None) still attaches the call, but must NOT
-        # wipe the static estimate to None.
+    def test_unpriced_call_keeps_static_and_attaches_nothing(self):
+        # A record with no cost (cost=None) must NOT override the static estimate
+        # (that would bill it at $0 and understate the turn) and must NOT attach a
+        # misleading breakdown — the turn falls back to static, loudly (warned).
         result = _result([_turn(0, static_cost=0.5)])
-        apply_actual_cost(result, run_id="R", task_id="T", records=[_rec(0, None)])
+        applied = apply_actual_cost(result, run_id="R", task_id="T", records=[_rec(0, None)])
+        assert applied == 0
         assert result.iterations[0].token_usage.total_cost_usd == 0.5
-        assert len(result.iterations[0].provider_call_costs) == 1
+        assert result.iterations[0].provider_call_costs == []
+
+    def test_partial_coverage_keeps_static_for_that_turn(self):
+        # One priced call + one unpriced call on the same turn: overriding would bill
+        # the unpriced call at $0, so the whole turn keeps its static estimate.
+        result = _result([_turn(0, static_cost=0.42)])
+        records = [_rec(0, 0.01, call_id="a"), _rec(0, None, call_id="b")]
+        applied = apply_actual_cost(result, run_id="R", task_id="T", records=records)
+        assert applied == 0
+        assert result.iterations[0].token_usage.total_cost_usd == 0.42
+        assert result.iterations[0].provider_call_costs == []
+
+    def test_transactional_no_mutation_when_a_record_is_malformed(self):
+        # A well-formed JSON row with a wrong-typed cost raises while building the
+        # per-call breakdown. The whole join must abort with NO turn mutated (the
+        # caller keeps static pricing), not leave a half-joined run.
+        result = _result([_turn(0, static_cost=0.5), _turn(1, static_cost=0.7)])
+        good = _rec(0, 0.03)
+        bad = {**_rec(1, 0.0), "cost": {"not": "a number"}}
+        with pytest.raises(ValidationError):
+            apply_actual_cost(result, run_id="R", task_id="T", records=[good, bad])
+        # Byte-identical to the pre-join state: neither turn was overridden.
+        assert result.iterations[0].token_usage.total_cost_usd == 0.5
+        assert result.iterations[1].token_usage.total_cost_usd == 0.7
+        assert result.iterations[0].provider_call_costs == []
 
     def test_credits_gen_bearing_turn_not_trailing_empty_turn(self):
         # Two TurnRecords share iteration=1 (seen on multi-turn runs): the real
@@ -324,15 +351,50 @@ class TestDistributeOntoMessages:
         assert a1.input_tokens == 0 and recon.input_tokens == 1000  # untouched (can't group)
         assert recon.cost_usd == 0.01  # cost still surfaced on the reconcile row
 
-    def test_cost_less_run_leaves_reconcile_cost_none(self):
-        # A call with no reported cost on a turn whose total_cost_usd is None: the
-        # reconcile row's cost stays None (not 0.0), while token buckets still reconcile.
-        msgs = [_asst("m1", output=5), ReconciliationMessage()]
-        turn = _turn_msgs(1, msgs, uncached=1000, cache_read=0, output=5, static_cost=None)
-        apply_actual_cost(_result([turn]), run_id="R", task_id="T", records=[_call_rec(1, None, 1000, 0, "g1", out=5)])
+    def test_recomputes_token_buckets_from_proxy_and_holds_invariant(self):
+        # The real LiteLLM shape: the SDK turn reports cache_read=0 (the whole bug),
+        # while the proxy call carries the real cache read. On a clean bind the proxy
+        # is authoritative — token_usage is recomputed from the calls so the real
+        # cache read shows AND Σ(message buckets) == token_usage EXACTLY (no clamp).
+        msgs = [_asst("m1", output=20), ReconciliationMessage()]
+        turn = _turn_msgs(1, msgs, uncached=5000, cache_read=0, output=20)  # SDK sees cache_read=0
+        apply_actual_cost(
+            _result([turn]),
+            run_id="R",
+            task_id="T",
+            records=[_call_rec(1, 0.02, 5000, 4096, "g1", out=20)],  # proxy: real cache_read=4096
+        )
         a1, recon = turn.messages
-        assert recon.cost_usd is None  # no cost to reconcile
-        assert a1.input_tokens + recon.input_tokens == 1000  # buckets still reconcile
+        assert (a1.input_tokens, a1.cache_read_tokens, a1.cost_usd) == (904, 4096, 0.02)  # real cache shows
+        usage = turn.token_usage
+        assert (usage.uncached_input_tokens, usage.cache_read_input_tokens) == (904, 4096)  # recomputed from proxy
+        # Four-bucket invariant holds exactly — this is what lets the evalboard sum the stream.
+        assert a1.input_tokens + recon.input_tokens == usage.uncached_input_tokens
+        assert a1.cache_read_tokens + recon.cache_read_tokens == usage.cache_read_input_tokens
+        assert a1.output_tokens + recon.output_tokens == usage.output_tokens
+        assert (recon.input_tokens, recon.cache_read_tokens, recon.output_tokens, recon.cost_usd) == (0, 0, 0, 0.0)
+
+    def test_tie_case_equal_output_aux_mis_binds_but_totals_stay_correct(self):
+        # KNOWN LIMITATION (display-only): an auxiliary call whose output equals the
+        # first generation's output is greedily bound to that generation by the
+        # order-walk, displacing the real call onto the reconcile row. There is no
+        # clean discriminator (transcript input is unreliable on this route, and the
+        # aux legitimately makes call_count > gen_count), so we pin the behavior: the
+        # per-message split is wrong, but the turn total and the invariant stay correct.
+        msgs = [_asst("m1", output=10), _asst("m2", output=20), ReconciliationMessage()]
+        turn = _turn_msgs(1, msgs, uncached=1550, cache_read=0, output=40)
+        records = [
+            _call_rec(1, 0.001, 50, 0, "aux", out=10),  # aux precedes g1 and shares its output
+            _call_rec(1, 0.01, 600, 0, "g1", out=10),
+            _call_rec(1, 0.02, 900, 0, "g2", out=20),
+        ]
+        apply_actual_cost(_result([turn]), run_id="R", task_id="T", records=records)
+        a1, a2, recon = turn.messages
+        assert a1.cost_usd == 0.001  # mis-bound to the aux (the documented wrong split)
+        assert a2.cost_usd == 0.02
+        # Totals + invariant are unaffected: real g1 ($0.01/600 in) lands on reconcile.
+        assert turn.token_usage.total_cost_usd == pytest.approx(0.031)
+        assert a1.input_tokens + a2.input_tokens + recon.input_tokens == turn.token_usage.uncached_input_tokens
 
     def test_no_reconciliation_row_still_costs_the_turn(self):
         # A turn with generations but no ReconciliationMessage: distribution runs and
