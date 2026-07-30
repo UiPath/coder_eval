@@ -41,12 +41,17 @@ model_list:
   # OpenAI-format, so LiteLLM does the Anthropic<->OpenAI translation.
   #
   # provider routing (extra_body.provider): OpenRouter is a multi-provider router,
-  # and its per-request routing is nondeterministic — a request can land on a
-  # provider far pricier than the model page's headline rate (observed: DeepSeek
-  # V4 Pro routed to Novita at ~$1.47/M input vs the $0.435/M headline, 3.4x).
-  # `sort: price` pins the cheapest upstream and `allow_fallbacks: false` forbids
-  # silently upgrading to a pricier one, so the billed rate is deterministic and
-  # matches the pricing.py table (and is the cost floor we benchmark for).
+  # and the harness can't tell which upstream actually served a given call — so
+  # letting it silently fall back to an arbitrary provider would make latency and
+  # behavior instrumentation hard to interpret. Instead, `provider.only` restricts
+  # each model to a HARD allowlist of providers we've observed to be reliable (a
+  # request is never served outside this set), `sort: price` tries them
+  # cheapest-first, and `allow_fallbacks: false` keeps routing from substituting a
+  # provider outside the vetted set. This also fixes the original single-pin 429:
+  # with no `only` list the global cheapest could be a contended provider (Baidu
+  # for deepseek-v4-pro) that 429s with nowhere to go — the curated set is
+  # known-good upstreams instead. Cost is exact regardless of which listed provider
+  # serves the call (cost_logger.py books the real per-call usage.cost).
   - model_name: moonshotai/kimi-k3
     litellm_params:
       model: openrouter/moonshotai/kimi-k3
@@ -62,6 +67,7 @@ model_list:
         provider:
           sort: price
           allow_fallbacks: false
+          only: ["baseten", "together", "fireworks"]
   - model_name: z-ai/glm-5.2
     litellm_params:
       model: openrouter/z-ai/glm-5.2
@@ -77,6 +83,7 @@ model_list:
         provider:
           sort: price
           allow_fallbacks: false
+          only: ["novita", "streamlake", "gmicloud", "alibaba"]
   - model_name: deepseek/deepseek-v4-pro
     litellm_params:
       model: openrouter/deepseek/deepseek-v4-pro
@@ -92,6 +99,7 @@ model_list:
         provider:
           sort: price
           allow_fallbacks: false
+          only: ["streamlake", "gmicloud", "novita", "alibaba"]
 
 litellm_settings:
   # Silently drop provider-unsupported OpenAI/Anthropic params rather than 400.
