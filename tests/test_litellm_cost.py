@@ -15,6 +15,7 @@ import pytest
 import coder_eval.orchestrator as orch_mod
 from coder_eval.litellm_cost import apply_actual_cost, load_cost_records
 from coder_eval.models import (
+    AgentKind,
     AssistantMessage,
     DirectRoute,
     EvaluationResult,
@@ -23,7 +24,6 @@ from coder_eval.models import (
     TokenUsage,
     TurnRecord,
 )
-from coder_eval.models.enums import AgentKind
 from coder_eval.orchestrator import Orchestrator
 from coder_eval.telemetry import hash_identifier
 
@@ -194,6 +194,30 @@ class TestOrchestratorJoinHook:
         Orchestrator._join_litellm_actual_cost(fake)  # missing file → no-op, no raise
         assert fake.result.iterations[0].token_usage.total_cost_usd == 0.5
 
+    def test_run_total_rederives_from_actual_after_join(self, tmp_path, monkeypatch):
+        # The join must run BEFORE aggregation so the run-level total sums the
+        # corrected per-turn costs, not the static estimate. Two turns, static 0.5
+        # each (Σ 1.0); the log books actuals 0.03 + 0.05 (Σ 0.08). If the ordering
+        # ever reversed, aggregation would sum the stale static costs and this fails.
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        log = tmp_path / "costs.jsonl"
+        run_id = hash_identifier(run_dir.as_posix())
+        log.write_text(
+            f'{{"run_id":"{run_id}","task_id":"calc","iteration":"0","cost":0.03}}\n'
+            f'{{"run_id":"{run_id}","task_id":"calc","iteration":"1","cost":0.05}}\n'
+        )
+        monkeypatch.setattr(orch_mod.settings, "litellm_cost_log", str(log))
+        fake = SimpleNamespace(
+            route=LiteLLMRoute(base_url="http://x:4000", auth_token="k", model="deepseek/deepseek-v4-pro"),
+            result=_result([_turn(0, static_cost=0.5), _turn(1, static_cost=0.5)]),
+            run_dir=run_dir,
+            _log_task_id="calc",
+        )
+        Orchestrator._join_litellm_actual_cost(fake)
+        Orchestrator._aggregate_token_usage(fake)
+        assert fake.result.total_token_usage.total_cost_usd == pytest.approx(0.08)  # Σ actual, not Σ static
+
 
 def _asst(message_id, output=5):
     return AssistantMessage(
@@ -300,3 +324,24 @@ class TestDistributeOntoMessages:
         a1, recon = turn.messages
         assert a1.input_tokens == 0 and recon.input_tokens == 1000  # untouched (can't group)
         assert recon.cost_usd == 0.01  # cost still surfaced on the reconcile row
+
+    def test_cost_less_run_leaves_reconcile_cost_none(self):
+        # A call with no reported cost on a turn whose total_cost_usd is None: the
+        # reconcile row's cost stays None (not 0.0), while token buckets still reconcile.
+        msgs = [_asst("m1", output=5), ReconciliationMessage()]
+        turn = _turn_msgs(1, msgs, uncached=1000, cache_read=0, output=5, static_cost=None)
+        apply_actual_cost(_result([turn]), run_id="R", task_id="T", records=[_call_rec(1, None, 1000, 0, "g1", out=5)])
+        a1, recon = turn.messages
+        assert recon.cost_usd is None  # no cost to reconcile
+        assert a1.input_tokens + recon.input_tokens == 1000  # buckets still reconcile
+
+    def test_no_reconciliation_row_still_costs_the_turn(self):
+        # A turn with generations but no ReconciliationMessage: distribution runs and
+        # hits the reconciliation-is-None early return, yet the turn still gets its
+        # real cost and the per-call breakdown.
+        turn = _turn_msgs(1, [_asst("m1", output=5)], uncached=1000, cache_read=0, output=5)
+        apply_actual_cost(_result([turn]), run_id="R", task_id="T", records=[_call_rec(1, 0.02, 1000, 0, "g1", out=5)])
+        (a1,) = turn.messages
+        assert turn.token_usage.total_cost_usd == 0.02
+        assert turn.provider_call_costs[0].cost_usd == 0.02
+        assert a1.cost_usd == 0.02  # distributed onto the generation

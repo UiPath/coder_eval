@@ -177,3 +177,21 @@ class TestDebugCapture:
         )
         rec = json.loads(path.read_text().splitlines()[0])
         assert "_debug" not in rec
+
+
+class TestToDict:
+    """`_to_dict` coerces a dict / pydantic model / litellm object to a plain dict."""
+
+    def test_uses_model_dump_and_survives_a_raising_dumper(self, cl):
+        class Ok:
+            def model_dump(self):
+                return {"k": "v"}
+
+        class Boom:
+            def model_dump(self):
+                raise RuntimeError("nope")
+
+        assert cl._to_dict(Ok()) == {"k": "v"}  # happy path
+        # A raising dumper falls through to {} — never propagates (the callback must
+        # not break the proxy). This is the branch the bare except guards.
+        assert cl._to_dict(Boom()) == {}

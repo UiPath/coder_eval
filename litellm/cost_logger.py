@@ -64,6 +64,9 @@ def _to_dict(obj: Any) -> dict[str, Any]:
     for attr in ("model_dump", "dict"):
         fn = getattr(obj, attr, None)
         if callable(fn):
+            # Best-effort coercion: if one dumper raises on a quirky litellm/pydantic
+            # object, fall through to the next attr (or to {} below) rather than
+            # propagate — a logging callback must never break the proxy response path.
             try:
                 result = fn()
                 if isinstance(result, dict):
