@@ -169,19 +169,21 @@ fields so subclass keys round-trip.
 `timestamp`, `duration_seconds`, `token_usage`, `model_used`, `assistant_turn_count`,
 `messages` (`list[TranscriptMessage]`, discriminated on `role`:
 `user`/`assistant`/`reconciliation`), `provider_call_costs`
-(`list[ProviderCallCost]` — per-call ACTUAL cost + cache captured proxy-side on the
-LiteLLM open-weight backend; empty on every other backend), `num_turns`,
-`max_turns_exhausted`, `result_summary` (`{is_error, subtype, stop_reason, result}`),
-`crashed`, `crash_reason`.
+(`list[ProviderCallCost]` — one row per real upstream call with its ACTUAL cost +
+cache buckets + routed `provider`, captured proxy-side on the LiteLLM open-weight
+backend and rendered by the evalboard as a per-call table; empty on every other
+backend), `num_turns`, `max_turns_exhausted`,
+`result_summary` (`{is_error, subtype, stop_reason, result}`), `crashed`,
+`crash_reason`.
 
 > **Token invariant.** Summing the four token buckets across `messages`
 > (assistant + the synthetic `reconciliation` entry) equals `token_usage` exactly.
 > The `reconciliation` message carries the residual the per-message stream
-> under-reports and is excluded from turn/generation counts. On the LiteLLM
-> actual-cost path, `assistant` and `reconciliation` messages additionally carry a
-> per-message `cost_usd` (the real OpenRouter bill, joined from the proxy log);
-> on every other backend `cost_usd` is null and cost stays on `token_usage`. See the
-> [Claude Code guide](agents/CLAUDE_CODE.md#telemetry).
+> under-reports; it has no cost and is excluded from turn/generation counts. The
+> LiteLLM actual-cost join writes cost at the TURN level only (`token_usage.total_cost_usd`
+> = the real bill) plus the per-call `provider_call_costs` audit record — it does
+> NOT touch the message token buckets, so this invariant holds on every backend.
+> See the [Claude Code guide](agents/CLAUDE_CODE.md#telemetry).
 
 ### EarlyStopInfo
 
