@@ -52,16 +52,18 @@ model_list:
   # for deepseek-v4-pro) that 429s with nowhere to go — the curated set is
   # known-good upstreams instead. Cost is exact regardless of which listed provider
   # serves the call (cost_logger.py books the real per-call usage.cost).
+  #
+  # extra_body.usage.include (set on every model below): ask OpenRouter to return
+  # the ACTUAL per-call usage.cost + cache tokens for the provider it routed to. The
+  # Anthropic response the SDK receives has no slot for these, so cost_logger.py (the
+  # callback in litellm_settings) reads them proxy-side and writes one JSONL record
+  # per call for the harness to join back by the x-ce-* correlation headers.
   - model_name: moonshotai/kimi-k3
     litellm_params:
       model: openrouter/moonshotai/kimi-k3
       api_key: os.environ/OPENROUTER_API_KEY
       extra_body:
-        # Ask OpenRouter to return the ACTUAL per-call cost (usage.cost) + cache
-        # tokens for the provider it routed to. The Anthropic response the SDK
-        # receives has no slot for these, so cost_logger.py (the callback below)
-        # reads them proxy-side and writes one JSONL record per call for the
-        # harness to join back by the x-ce-* correlation headers.
+        # usage.include + provider pin — see the OpenRouter note above.
         usage:
           include: true
         provider:
@@ -73,11 +75,7 @@ model_list:
       model: openrouter/z-ai/glm-5.2
       api_key: os.environ/OPENROUTER_API_KEY
       extra_body:
-        # Ask OpenRouter to return the ACTUAL per-call cost (usage.cost) + cache
-        # tokens for the provider it routed to. The Anthropic response the SDK
-        # receives has no slot for these, so cost_logger.py (the callback below)
-        # reads them proxy-side and writes one JSONL record per call for the
-        # harness to join back by the x-ce-* correlation headers.
+        # usage.include + provider pin — see the OpenRouter note above.
         usage:
           include: true
         provider:
@@ -89,11 +87,7 @@ model_list:
       model: openrouter/deepseek/deepseek-v4-pro
       api_key: os.environ/OPENROUTER_API_KEY
       extra_body:
-        # Ask OpenRouter to return the ACTUAL per-call cost (usage.cost) + cache
-        # tokens for the provider it routed to. The Anthropic response the SDK
-        # receives has no slot for these, so cost_logger.py (the callback below)
-        # reads them proxy-side and writes one JSONL record per call for the
-        # harness to join back by the x-ce-* correlation headers.
+        # usage.include + provider pin — see the OpenRouter note above.
         usage:
           include: true
         provider:

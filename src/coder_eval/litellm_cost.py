@@ -65,21 +65,30 @@ logger = logging.getLogger(__name__)
 
 def load_cost_records(path: str | Path) -> list[dict[str, Any]]:
     """Read the proxy's per-call JSONL cost log; tolerant of a missing file,
-    blank lines, and partial/garbled lines (returns only well-formed dict rows)."""
+    blank lines, and partial/garbled lines (returns only well-formed dict rows).
+
+    Streamed line-by-line rather than slurped whole, so a long-lived shared log is
+    not loaded into memory as one giant string. NOTE the log is append-only and, by
+    default (see ``start-litellm.sh``), shared across runs — it is not rotated here,
+    so each task's join re-reads the file; scope ``LITELLM_COST_LOG`` to a per-run
+    path (or rotate it) if it grows large. ``apply_actual_cost`` filters to the
+    current run/task/attempt, so stale rows are ignored, only re-read.
+    """
     p = Path(path)
     if not p.is_file():
         return []
     records: list[dict[str, Any]] = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            records.append(obj)
+    with p.open(encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                records.append(obj)
     return records
 
 
