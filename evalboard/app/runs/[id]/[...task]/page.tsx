@@ -33,10 +33,10 @@ export default async function TaskPage({
     searchParams,
 }: {
     params: Promise<{ id: string; task: string[] }>;
-    searchParams: Promise<{ r?: string }>;
+    searchParams: Promise<{ r?: string; v?: string }>;
 }) {
     const { id, task: taskSegments } = await params;
-    const { r } = await searchParams;
+    const { r, v } = await searchParams;
     const taskId = taskSegments.join("/");
     // Replicate index from ?r=NN — repeated runs of one task share this task
     // path, so the query param is what selects which replicate's <NN>/ dir to
@@ -45,27 +45,40 @@ export default async function TaskPage({
     const parsedR = Number(r);
     const replicate =
         r != null && Number.isInteger(parsedR) && parsedR >= 0 ? parsedR : 0;
-    const task = await readTaskDetail(id, taskId, replicate);
+    // Variant (model) from ?v=NAME — in a multi-model (A/B) run several variants
+    // share this task path, so ?v selects which model's <variant>/ subdir to
+    // open. Absent → "default" (the single-config subdir); the readers sanitize
+    // and fall back to "default" for anything unsafe or unknown.
+    const variant = v ?? "default";
+    const task = await readTaskDetail(id, taskId, replicate, variant);
     if (!task) notFound();
 
-    // Replicate indices available for this task — drives the run selector below.
-    // [0] (or fewer) for a non-repeated task, so the selector self-hides.
-    const replicates = await readTaskReplicates(id, taskId);
+    // Replicate indices available for this task/variant — drives the run
+    // selector below. [0] (or fewer) for a non-repeated task, so it self-hides.
+    const replicates = await readTaskReplicates(id, taskId, variant);
 
-    // variant is always "default" here; the replicate selects the <NN>/ dir.
+    // The replicate selects the <NN>/ dir within the variant's subtree.
     // readTaskReview returns null for older runs that predate the review feature.
     const review = await readTaskReview(
         id,
-        "default",
+        variant,
         taskId,
         replicateDirName(replicate),
     );
 
-    const log = await readLogTail(id, taskId, replicate);
+    const log = await readLogTail(id, taskId, replicate, variant);
     const conversation = parseConversation(
-        await readConversationLog(id, taskId, replicate),
+        await readConversationLog(id, taskId, replicate, variant),
     );
     const { flowDebug } = task;
+
+    // Preserve ?v= on in-page links (replicate selector, download) so switching
+    // replicates or downloading stays on the SAME model. "default" is the
+    // implicit fallback, so it's omitted to keep single-config URLs clean.
+    const variantParam =
+        variant && variant !== "default"
+            ? `&v=${encodeURIComponent(variant)}`
+            : "";
 
     return (
         <div className="space-y-6">
@@ -100,7 +113,7 @@ export default async function TaskPage({
                             return (
                                 <Link
                                     key={ri}
-                                    href={`/runs/${id}/${taskId}?r=${ri}`}
+                                    href={`/runs/${id}/${taskId}?r=${ri}${variantParam}`}
                                     // Keep the scroll position when switching runs
                                     // — Next scrolls to top on nav by default.
                                     scroll={false}
@@ -125,6 +138,23 @@ export default async function TaskPage({
                         {humanizeTaskId(taskId)}
                     </h1>
                     <StatusPill status={task.status} relabel />
+                    {/* Which LLM ran this task. Always shown when known so a
+                        single-model run still names its model, and an A/B run's
+                        per-model page is unambiguous. The variant alias (e.g.
+                        "kimi-k3") rides in the tooltip when it differs. */}
+                    {task.model && (
+                        <span
+                            className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-gray-50 px-2 py-0.5 font-mono text-xs text-gray-700"
+                            title={
+                                variant !== "default"
+                                    ? `model ${task.model} · variant ${variant}`
+                                    : `model ${task.model}`
+                            }
+                        >
+                            <span className="text-gray-400">model</span>
+                            {task.model}
+                        </span>
+                    )}
                     {/* Download zips the task folder from blob storage — an
                         internal-hosting surface (no blob backend in the public
                         OSS edition). See lib/edition.ts. */}
@@ -132,7 +162,7 @@ export default async function TaskPage({
                         <a
                             href={`/api/download?run=${encodeURIComponent(
                                 id,
-                            )}&task=${encodeURIComponent(taskId)}`}
+                            )}&task=${encodeURIComponent(taskId)}${variantParam}`}
                             className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 hover:text-studio-blue"
                             download
                         >

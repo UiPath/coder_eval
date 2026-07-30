@@ -32,6 +32,7 @@ function row(
         cacheCreationTokens: null,
         cacheReadTokens: null,
         model: null,
+        variant: null,
         tags: [],
         skill: null,
         matureSkipped: false,

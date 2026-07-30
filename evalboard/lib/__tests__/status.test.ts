@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { collapseReplicates } from "../status";
+import { collapseReplicates, perTaskPassCounts, taskGroupKey } from "../status";
 import type { TaskResultSummary } from "../runs";
 
 function row(
@@ -22,6 +22,7 @@ function row(
         cacheCreationTokens: null,
         cacheReadTokens: null,
         model: null,
+        variant: null,
         tags: [],
         skill: null,
         matureSkipped: false,
@@ -78,5 +79,71 @@ describe("collapseReplicates", () => {
             row("b", { replicateIndex: 1 }),
         ]);
         expect(out.map((r) => r.taskId)).toEqual(["b", "a"]);
+    });
+
+    test("keeps a row PER MODEL — variants sharing a taskId are not merged", () => {
+        // A multi-model (A/B) run: three variants ran the SAME task. They share
+        // the taskId but are distinct models, so they must stay three rows with
+        // their OWN metrics — never averaged into one.
+        const out = collapseReplicates([
+            row("t", { variant: "kimi-k3", model: "moonshotai/kimi-k3", totalCostUsd: 0.1 }),
+            row("t", { variant: "glm-5-2", model: "z-ai/glm-5.2", totalCostUsd: 0.2 }),
+            row("t", { variant: "deepseek-v4-pro", model: "deepseek/deepseek-v4-pro", totalCostUsd: 0.3 }),
+        ]);
+        expect(out).toHaveLength(3);
+        expect(out.map((r) => r.variant)).toEqual([
+            "kimi-k3",
+            "glm-5-2",
+            "deepseek-v4-pro",
+        ]);
+        // Each row keeps its own cost — no cross-model averaging.
+        expect(out.map((r) => r.totalCostUsd)).toEqual([0.1, 0.2, 0.3]);
+    });
+
+    test("still averages replicates WITHIN one variant of a multi-model run", () => {
+        const out = collapseReplicates([
+            row("t", { variant: "a", replicateIndex: 0, totalCostUsd: 0.1 }),
+            row("t", { variant: "a", replicateIndex: 1, totalCostUsd: 0.3 }),
+            row("t", { variant: "b", replicateIndex: 0, totalCostUsd: 1.0 }),
+        ]);
+        expect(out).toHaveLength(2);
+        const a = out.find((r) => r.variant === "a")!;
+        const b = out.find((r) => r.variant === "b")!;
+        expect(a.totalCostUsd).toBeCloseTo(0.2, 10); // mean of a's two replicates
+        expect(b.totalCostUsd).toBeCloseTo(1.0, 10);
+    });
+});
+
+describe("taskGroupKey", () => {
+    test("a null variant collapses to the same key as an explicit 'default'", () => {
+        expect(taskGroupKey({ taskId: "t", variant: null })).toBe(
+            taskGroupKey({ taskId: "t", variant: "default" }),
+        );
+    });
+
+    test("different variants of the same task yield different keys", () => {
+        expect(taskGroupKey({ taskId: "t", variant: "kimi-k3" })).not.toBe(
+            taskGroupKey({ taskId: "t", variant: "glm-5-2" }),
+        );
+    });
+
+    test("the separator cannot be forged from task-id/variant collisions", () => {
+        // "ab"+"c" must not equal "a"+"bc" — the control-char separator can't
+        // appear in an id, so no two distinct (task, variant) pairs collide.
+        expect(taskGroupKey({ taskId: "ab", variant: "c" })).not.toBe(
+            taskGroupKey({ taskId: "a", variant: "bc" }),
+        );
+    });
+});
+
+describe("perTaskPassCounts", () => {
+    test("counts each variant of a shared task separately", () => {
+        const m = perTaskPassCounts([
+            row("t", { variant: "a", status: "SUCCESS" }),
+            row("t", { variant: "b", status: "FAILURE" }),
+        ]);
+        expect(m.size).toBe(2);
+        expect(m.get(taskGroupKey({ taskId: "t", variant: "a" }))).toBe(1);
+        expect(m.get(taskGroupKey({ taskId: "t", variant: "b" }))).toBe(0);
     });
 });

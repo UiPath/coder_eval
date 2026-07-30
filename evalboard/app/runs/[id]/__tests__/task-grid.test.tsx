@@ -25,6 +25,7 @@ function row(
         cacheCreationTokens: null,
         cacheReadTokens: null,
         model: null,
+        variant: null,
         tags: [],
         skill: null,
         matureSkipped: false,
@@ -395,5 +396,72 @@ describe("TaskGrid — replicates", () => {
         expect(
             within(tr).getByTitle(/1 of 2 replicates passed/i).textContent?.replace(/\s/g, ""),
         ).toBe("1/2✓");
+    });
+});
+
+describe("TaskGrid — multi-model (A/B) runs", () => {
+    test("shows a Model column and one row per model when models differ", () => {
+        render(
+            <TaskGrid
+                runId="r1"
+                tasks={[
+                    row("t", 3, 5, {
+                        variant: "kimi-k3",
+                        model: "moonshotai/kimi-k3",
+                    }),
+                    row("t", 3, 5, {
+                        variant: "glm-5-2",
+                        model: "z-ai/glm-5.2",
+                    }),
+                ]}
+            />,
+        );
+        const table = screen.getByRole("table");
+        // The Model column header appears only for multi-model runs.
+        expect(
+            within(table).getByRole("columnheader", { name: /Model/i }),
+        ).toBeInTheDocument();
+        // Both models are rendered — the two variants stay distinct rows, not
+        // collapsed into one (the multi-model "no info displayed" bug).
+        expect(within(table).getByText("moonshotai/kimi-k3")).toBeInTheDocument();
+        expect(within(table).getByText("z-ai/glm-5.2")).toBeInTheDocument();
+    });
+
+    test("each model's row links to its OWN variant via ?v=", () => {
+        render(
+            <TaskGrid
+                runId="r1"
+                tasks={[
+                    row("t", 3, 5, {
+                        variant: "kimi-k3",
+                        model: "moonshotai/kimi-k3",
+                    }),
+                    row("t", 3, 5, {
+                        variant: "glm-5-2",
+                        model: "z-ai/glm-5.2",
+                    }),
+                ]}
+            />,
+        );
+        const table = screen.getByRole("table");
+        const links = within(table).getAllByRole("link", { name: /^t/i });
+        const hrefs = links.map((l) => l.getAttribute("href")).sort();
+        expect(hrefs).toEqual(["/runs/r1/t?v=glm-5-2", "/runs/r1/t?v=kimi-k3"]);
+    });
+
+    test("hides the Model column for a single-model run", () => {
+        render(
+            <TaskGrid
+                runId="r1"
+                tasks={[
+                    row("a", 3, 5, { variant: "default", model: "claude-sonnet-4-6" }),
+                    row("b", 3, 5, { variant: "default", model: "claude-sonnet-4-6" }),
+                ]}
+            />,
+        );
+        const table = screen.getByRole("table");
+        expect(
+            within(table).queryByRole("columnheader", { name: /Model/i }),
+        ).toBeNull();
     });
 });

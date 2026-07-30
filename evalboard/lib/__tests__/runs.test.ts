@@ -46,6 +46,21 @@ describe("toTaskRow", () => {
         const row = toTaskRow({ task_id: "x", expected_turns: null });
         expect(row.expectedTurns).toBeNull();
     });
+
+    test("maps variant_id and model_used (multi-model row)", () => {
+        const row = toTaskRow({
+            task_id: "x",
+            variant_id: "kimi-k3",
+            model_used: "moonshotai/kimi-k3",
+        });
+        expect(row.variant).toBe("kimi-k3");
+        expect(row.model).toBe("moonshotai/kimi-k3");
+    });
+
+    test("legacy row without variant_id yields null variant", () => {
+        const row = toTaskRow({ task_id: "x" });
+        expect(row.variant).toBeNull();
+    });
 });
 
 describe("aggregateSubAgentUsage", () => {
