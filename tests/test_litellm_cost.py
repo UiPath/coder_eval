@@ -24,7 +24,6 @@ from coder_eval.models import (
     TokenUsage,
     TurnRecord,
 )
-from coder_eval.orchestrator import Orchestrator
 from coder_eval.telemetry import hash_identifier
 
 
@@ -163,7 +162,7 @@ class TestOrchestratorJoinHook:
 
     def test_noop_off_litellm_route(self):
         fake = SimpleNamespace(route=DirectRoute(), result=_result([_turn(0, 0.5)]))
-        Orchestrator._join_litellm_actual_cost(fake)  # must not touch anything
+        orch_mod.Orchestrator._join_litellm_actual_cost(fake)  # must not touch anything
         assert fake.result.iterations[0].token_usage.total_cost_usd == 0.5
 
     def test_joins_on_litellm_route(self, tmp_path, monkeypatch):
@@ -179,7 +178,7 @@ class TestOrchestratorJoinHook:
             run_dir=run_dir,
             _log_task_id="calc",
         )
-        Orchestrator._join_litellm_actual_cost(fake)
+        orch_mod.Orchestrator._join_litellm_actual_cost(fake)
         assert fake.result.iterations[0].token_usage.total_cost_usd == 0.09  # static 0.5 overridden
         assert fake.result.iterations[0].provider_call_costs[0].cache_read_tokens == 5
 
@@ -191,7 +190,7 @@ class TestOrchestratorJoinHook:
             run_dir=tmp_path,
             _log_task_id="calc",
         )
-        Orchestrator._join_litellm_actual_cost(fake)  # missing file → no-op, no raise
+        orch_mod.Orchestrator._join_litellm_actual_cost(fake)  # missing file → no-op, no raise
         assert fake.result.iterations[0].token_usage.total_cost_usd == 0.5
 
     def test_run_total_rederives_from_actual_after_join(self, tmp_path, monkeypatch):
@@ -214,8 +213,8 @@ class TestOrchestratorJoinHook:
             run_dir=run_dir,
             _log_task_id="calc",
         )
-        Orchestrator._join_litellm_actual_cost(fake)
-        Orchestrator._aggregate_token_usage(fake)
+        orch_mod.Orchestrator._join_litellm_actual_cost(fake)
+        orch_mod.Orchestrator._aggregate_token_usage(fake)
         assert fake.result.total_token_usage.total_cost_usd == pytest.approx(0.08)  # Σ actual, not Σ static
 
 

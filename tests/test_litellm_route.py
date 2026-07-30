@@ -320,6 +320,30 @@ class TestBuildSdkEnvCustom:
         env_d, _ = ClaudeCodeAgent._build_sdk_env(DirectRoute(), cost_log_tags=tags)
         assert "ANTHROPIC_CUSTOM_HEADERS" not in env_d
 
+    def test_cost_log_tags_gated_on_agent_capability_not_route(self):
+        """Regression: cost_log_tags is a Claude-only constructor kwarg, but the
+        route that triggers it (LiteLLM) is agent-independent. The agent-agnostic
+        create_agent factory must forward it ONLY to agents that declare
+        supports_cost_log_tags — otherwise a none/codex/antigravity task crashes
+        with TypeError under API_BACKEND=litellm."""
+        from coder_eval.agents import AgentRegistry, create_agent
+        from coder_eval.models import NoneAgentConfig
+        from coder_eval.plugins import ensure_plugins_loaded
+
+        ensure_plugins_loaded()
+        # Capability contract the orchestrator gate reads.
+        assert AgentRegistry.get(AgentKind.CLAUDE_CODE).agent_class.supports_cost_log_tags is True
+        assert AgentRegistry.get(AgentKind.NONE).agent_class.supports_cost_log_tags is False
+
+        route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1", model="deepseek/deepseek-v4-pro")
+        # A none-agent constructs fine on a LiteLLM route (the gate omits the kwarg)...
+        assert create_agent(AgentKind.NONE, NoneAgentConfig(type=AgentKind.NONE), route=route) is not None
+        # ...and it WOULD crash if the kwarg were forwarded — exactly what the gate prevents.
+        with pytest.raises(TypeError):
+            create_agent(
+                AgentKind.NONE, NoneAgentConfig(type=AgentKind.NONE), route=route, cost_log_tags={"x-ce-run-id": "r"}
+            )
+
 
 class TestResolveEffectiveModelCustom:
     """_resolve_effective_model() on the LiteLLM route — no prefixing."""

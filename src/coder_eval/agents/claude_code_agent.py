@@ -656,6 +656,10 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     # ``should_stop`` check runs, so this agent supports early-stop-on-criterion.
     supports_cooperative_stop: ClassVar[bool] = True
 
+    # This agent's __init__ accepts cost_log_tags and stamps them into
+    # ANTHROPIC_CUSTOM_HEADERS for the proxy-side actual-cost join (LiteLLM backend).
+    supports_cost_log_tags: ClassVar[bool] = True
+
     def __init__(
         self,
         config: ClaudeCodeAgentConfig,

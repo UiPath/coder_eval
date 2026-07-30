@@ -72,6 +72,7 @@ def _to_dict(obj: Any) -> dict[str, Any]:
                 if isinstance(result, dict):
                     return result
             except Exception:
+                # This dumper failed on a quirky object; try the next attr / {}.
                 pass
     return {}
 

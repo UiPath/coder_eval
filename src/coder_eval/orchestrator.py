@@ -1234,7 +1234,7 @@ class Orchestrator:
             ValueError: If agent type is not supported
             TypeError: If config doesn't match agent's expected type
         """
-        from coder_eval.agents import create_agent
+        from coder_eval.agents import AgentRegistry, create_agent
         from coder_eval.plugins import ensure_plugins_loaded
 
         # Safety net for the production agent-construction path: create_agent no
@@ -1247,9 +1247,20 @@ class Orchestrator:
         # proxy-side cost-logging callback can attribute each call's real cost +
         # cache buckets back to this task-run. x-ce-run-id is a stable per-task-run
         # key (the join, in _finalize_result, recomputes it identically); x-ce-task-id
-        # is the human-readable canonical id. No-op for Direct/Bedrock agents.
+        # is the human-readable canonical id.
+        #
+        # Gate on AGENT CAPABILITY, not the route: the route is settings-derived and
+        # independent of agent type, but only agents whose __init__ accepts the kwarg
+        # (supports_cost_log_tags) may receive it — otherwise the agent-agnostic
+        # factory would forward it into NoOp/Codex/Antigravity/plugin constructors
+        # that don't declare it and crash with TypeError under API_BACKEND=litellm.
         kwargs: dict[str, Any] = {}
-        if isinstance(self.route, LiteLLMRoute):
+        registration = AgentRegistry.get(self.task.agent.type)
+        if (
+            isinstance(self.route, LiteLLMRoute)
+            and registration is not None
+            and registration.agent_class.supports_cost_log_tags
+        ):
             kwargs["cost_log_tags"] = {
                 "x-ce-run-id": hash_identifier(self.run_dir.as_posix()),
                 "x-ce-task-id": self._log_task_id,
