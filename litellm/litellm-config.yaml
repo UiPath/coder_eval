@@ -40,18 +40,16 @@ model_list:
   # OpenRouter models — cost-optimization path. Not on Bedrock; OpenRouter is
   # OpenAI-format, so LiteLLM does the Anthropic<->OpenAI translation.
   #
-  # provider routing (extra_body.provider): OpenRouter is a multi-provider router,
-  # and the harness can't tell which upstream actually served a given call — so
-  # letting it silently fall back to an arbitrary provider would make latency and
-  # behavior instrumentation hard to interpret. Instead, `provider.only` restricts
-  # each model to a HARD allowlist of providers we've observed to be reliable (a
-  # request is never served outside this set), `sort: price` tries them
-  # cheapest-first, and `allow_fallbacks: false` keeps routing from substituting a
-  # provider outside the vetted set. This also fixes the original single-pin 429:
-  # with no `only` list the global cheapest could be a contended provider (Baidu
-  # for deepseek-v4-pro) that 429s with nowhere to go — the curated set is
-  # known-good upstreams instead. Cost is exact regardless of which listed provider
-  # serves the call (cost_logger.py books the real per-call usage.cost).
+  # provider routing (extra_body.provider): OpenRouter is a multi-provider router.
+  # `provider.only` restricts each model to a HARD allowlist of providers we've
+  # observed to be reliable, `sort: price` tries them cheapest-first, and
+  # `allow_fallbacks: true` lets routing fall over to the NEXT provider in that set
+  # when the cheapest is saturated — so a contended provider no longer 429s with
+  # nowhere to go (the original single-pin failure). Fallback is bounded to the
+  # vetted `only` set, and cost_logger.py records the ACTUAL routed provider +
+  # usage.cost per call, so a fallover is both billed correctly and visible (the
+  # per-call table shows which upstream served each call). Cost is exact regardless
+  # of which listed provider serves the call.
   #
   # extra_body.usage.include (set on every model below): ask OpenRouter to return
   # the ACTUAL per-call usage.cost + cache tokens for the provider it routed to. The
@@ -68,7 +66,7 @@ model_list:
           include: true
         provider:
           sort: price
-          allow_fallbacks: false
+          allow_fallbacks: true
           only: ["baseten", "together", "fireworks"]
   - model_name: z-ai/glm-5.2
     litellm_params:
@@ -80,7 +78,7 @@ model_list:
           include: true
         provider:
           sort: price
-          allow_fallbacks: false
+          allow_fallbacks: true
           only: ["novita", "streamlake", "gmicloud", "alibaba"]
   - model_name: deepseek/deepseek-v4-pro
     litellm_params:
@@ -92,7 +90,7 @@ model_list:
           include: true
         provider:
           sort: price
-          allow_fallbacks: false
+          allow_fallbacks: true
           only: ["streamlake", "gmicloud", "novita", "alibaba"]
 
 litellm_settings:

@@ -37,7 +37,7 @@ SCRUB_KEYS = frozenset(
 # orchestrator (e.g. the LiteLLM actual-cost join sets ``provider_call_costs``).
 # Always empty here, and agent-agnostic, so dropping keeps the golden stable
 # across backends (Claude + Codex) without a per-field regen.
-DROP_KEYS = frozenset({"provider_call_costs", "cost_usd"})
+DROP_KEYS = frozenset({"provider_call_costs"})
 
 
 def scrub(obj: Any) -> Any:

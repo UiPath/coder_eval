@@ -127,6 +127,9 @@ class ProviderCallCost(BaseModel):
     """
 
     call_id: str | None = Field(default=None, description="Upstream generation id (e.g. OpenRouter gen-...).")
+    provider: str | None = Field(
+        default=None, description="Upstream provider OpenRouter routed to (e.g. 'fireworks'), if reported."
+    )
     cost_usd: float | None = Field(default=None, description="Real per-call cost (OpenRouter usage.cost), if reported.")
     input_tokens: int | None = Field(default=None, description="Prompt tokens for this call (incl. cached).")
     cache_read_tokens: int | None = Field(default=None, description="Cached prompt tokens served on this call.")
@@ -258,15 +261,6 @@ class AssistantMessage(BaseModel):
     cache_creation_tokens: int = Field(default=0, description="Tokens used to create prompt cache for this call.")
     cache_read_tokens: int = Field(default=0, description="Tokens read from prompt cache for this call.")
     reasoning_tokens: int = Field(default=0, description="Extended-thinking tokens; subset of output_tokens.")
-    cost_usd: float | None = Field(
-        default=None,
-        description=(
-            "Real per-call cost (USD) for this generation, joined post-run from the LiteLLM "
-            "proxy's captured OpenRouter usage.cost (open-weight backend only; see "
-            "litellm_cost.apply_actual_cost). None on other backends / when not captured — "
-            "the evalboard then prices this message from the rate card instead."
-        ),
-    )
 
     stop_reason: str | None = Field(default=None, description="SDK stop reason: 'tool_use', 'end_turn', etc.")
     model: str | None = Field(default=None, description="Model identifier that generated this turn.")
@@ -322,14 +316,6 @@ class ReconciliationMessage(BaseModel):
     output_tokens: int = Field(default=0, description="Residual output tokens.")
     cache_creation_tokens: int = Field(default=0, description="Residual cache-creation tokens.")
     cache_read_tokens: int = Field(default=0, description="Residual cache-read tokens.")
-    cost_usd: float | None = Field(
-        default=None,
-        description=(
-            "Residual cost (USD) not attributed to a generation. None normally (cost stays on "
-            "the authoritative aggregate); set by the open-weight actual-cost join to the turn's "
-            "real total minus what was distributed onto the generations (≈0 when they align)."
-        ),
-    )
 
     note: str = Field(
         default="",

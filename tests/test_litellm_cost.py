@@ -190,12 +190,40 @@ class TestApplyActualCost:
         result = _result([real, empty])
         records = [_call_rec(1, 0.01, 600, 0, "g1", out=10), _call_rec(1, 0.02, 900, 0, "g2", out=20)]
         apply_actual_cost(result, run_id="R", task_id="T", records=records)
-        a1, a2, _recon = real.messages
-        assert (a1.cost_usd, a2.cost_usd) == (0.01, 0.02)  # distributed onto the REAL turn
+        # Credited to the REAL (generation-bearing) turn, not the trailing empty one.
         assert len(real.provider_call_costs) == 2
         assert real.token_usage.total_cost_usd == 0.03
         assert empty.provider_call_costs == []  # empty turn stranded nothing
         assert empty.token_usage.total_cost_usd == 0.0
+
+    def test_degenerate_no_usage_call_is_ignored(self):
+        # A degenerate call with NO cost AND no tokens (a null record some providers
+        # emit) must not revert an otherwise-priced turn to static; it is dropped.
+        result = _result([_turn(0, static_cost=0.5)])
+        good = _rec(0, 0.03, call_id="real")
+        degenerate = {**_rec(0, None, call_id="null"), "input": 0, "output": 0}
+        applied = apply_actual_cost(result, run_id="R", task_id="T", records=[good, degenerate])
+        assert applied == 1
+        assert result.iterations[0].token_usage.total_cost_usd == 0.03  # priced, degenerate ignored
+        assert [c.call_id for c in result.iterations[0].provider_call_costs] == ["real"]
+
+    def test_retry_unpriced_survivor_does_not_zero_the_sibling(self):
+        # Regression: if the survivor falls back to static (an unpriced usage call),
+        # the crashed sibling must NOT be zeroed first — otherwise the iteration's
+        # spend is silently dropped. Both keep their static estimate.
+        result = _result([_turn(0, static_cost=0.5), _turn(0, static_cost=0.6)])
+        records = [_rec(0, 0.01, call_id="a"), _rec(0, None, call_id="b")]  # b has usage but no cost
+        applied = apply_actual_cost(result, run_id="R", task_id="T", records=records)
+        assert applied == 0
+        assert result.iterations[0].token_usage.total_cost_usd == 0.5  # sibling NOT zeroed
+        assert result.iterations[1].token_usage.total_cost_usd == 0.6  # survivor stays static
+        assert result.iterations[1].provider_call_costs == []
+
+    def test_provider_is_attached_to_the_breakdown(self):
+        result = _result([_turn(0, static_cost=0.5)])
+        rec = {**_rec(0, 0.02), "provider": "fireworks"}
+        apply_actual_cost(result, run_id="R", task_id="T", records=[rec])
+        assert result.iterations[0].provider_call_costs[0].provider == "fireworks"
 
 
 class TestOrchestratorJoinHook:
@@ -299,130 +327,3 @@ def _call_rec(iteration, cost, inp, cache_read, call_id, out=5):
         "cache_write": 0,
         "output": out,
     }
-
-
-class TestDistributeOntoMessages:
-    def test_matches_generations_to_calls_by_output_and_drains_reconcile(self):
-        # Generations matched to calls by output_tokens (10 → g1, 20 → g2).
-        msgs = [_asst("m1", output=10), _asst("m2", output=20), ReconciliationMessage()]
-        turn = _turn_msgs(1, msgs, uncached=1904, cache_read=4096, output=30)
-        # g2 has input 5000 total, 4096 cached → 904 uncached.
-        records = [_call_rec(1, 0.01, 1000, 0, "g1", out=10), _call_rec(1, 0.02, 5000, 4096, "g2", out=20)]
-        apply_actual_cost(_result([turn]), run_id="R", task_id="T", records=records)
-        a1, a2, recon = turn.messages
-        assert (a1.input_tokens, a1.cache_read_tokens, a1.cost_usd) == (1000, 0, 0.01)
-        assert (a2.input_tokens, a2.cache_read_tokens, a2.cost_usd) == (904, 4096, 0.02)
-        assert (recon.input_tokens, recon.cache_read_tokens) == (0, 0)  # drained
-        assert recon.cost_usd == 0.0  # total 0.03 minus (0.01 + 0.02)
-        # Reconciliation invariant preserved: buckets still sum to token_usage.
-        assert a1.input_tokens + a2.input_tokens + recon.input_tokens == 1904
-        assert a1.cache_read_tokens + a2.cache_read_tokens + recon.cache_read_tokens == 4096
-
-    def test_content_block_split_matches_on_summed_output(self):
-        # One generation split into 2 content-block emissions (shared message_id):
-        # its summed output (3+4=7) matches the call's output.
-        msgs = [_asst("m1", output=3), _asst("m1", output=4), ReconciliationMessage()]
-        turn = _turn_msgs(1, msgs, uncached=1000, cache_read=0, output=7)
-        apply_actual_cost(_result([turn]), run_id="R", task_id="T", records=[_call_rec(1, 0.05, 1000, 0, "g1", out=7)])
-        a1, a2, recon = turn.messages
-        assert (a1.input_tokens, a1.cost_usd) == (1000, 0.05)  # rep carries the call
-        assert (a2.input_tokens, a2.cost_usd) == (0, None)  # sibling zeroed (no double count)
-        assert recon.input_tokens == 0
-
-    def test_aux_call_unmatched_goes_to_reconcile(self):
-        # 2 generations (out 10, 20) + an unpaired auxiliary small-model call (out 5).
-        # The mains match by output; the aux matches no generation → reconcile.
-        msgs = [_asst("m1", output=10), _asst("m2", output=20), ReconciliationMessage()]
-        turn = _turn_msgs(1, msgs, uncached=1050, cache_read=500, output=35)
-        records = [
-            _call_rec(1, 0.001, 50, 0, "aux", out=5),
-            _call_rec(1, 0.01, 600, 0, "g1", out=10),
-            _call_rec(1, 0.02, 900, 500, "g2", out=20),
-        ]
-        apply_actual_cost(_result([turn]), run_id="R", task_id="T", records=records)
-        a1, a2, recon = turn.messages
-        assert (a1.input_tokens, a1.cost_usd) == (600, 0.01)  # matched g1
-        assert (a2.input_tokens, a2.cache_read_tokens, a2.cost_usd) == (400, 500, 0.02)  # matched g2 (900-500)
-        # The aux call lands in reconcile: its uncached input (50) + its cost (0.001).
-        assert recon.input_tokens == 50
-        assert recon.cache_read_tokens == 0
-        assert recon.cost_usd == pytest.approx(0.001)
-        assert turn.token_usage.total_cost_usd == 0.031
-
-    def test_bails_to_reconcile_when_order_diverges(self):
-        # Sub-agent-style: generations and calls carry the same outputs but in a
-        # DIFFERENT order (gens 10,20 vs calls 20,10). The order-respecting walk
-        # can't bind every generation cleanly → it refuses to guess and leaves the
-        # stream sparse, with the reconcile row carrying the real total.
-        msgs = [_asst("m1", output=10), _asst("m2", output=20), ReconciliationMessage()]
-        turn = _turn_msgs(1, msgs, uncached=1000, cache_read=0, output=30)
-        records = [_call_rec(1, 0.02, 900, 0, "g2", out=20), _call_rec(1, 0.01, 600, 0, "g1", out=10)]
-        apply_actual_cost(_result([turn]), run_id="R", task_id="T", records=records)
-        a1, a2, recon = turn.messages
-        assert (a1.cost_usd, a2.cost_usd) == (None, None)  # not guessed
-        assert recon.cost_usd == pytest.approx(0.03)  # whole real total on reconcile
-        assert turn.token_usage.total_cost_usd == pytest.approx(0.03)
-
-    def test_missing_message_id_leaves_sparse_but_reconciles_cost(self):
-        msgs = [_asst(None), ReconciliationMessage(input_tokens=1000)]
-        turn = _turn_msgs(1, msgs, uncached=1000, cache_read=0, output=5)
-        apply_actual_cost(_result([turn]), run_id="R", task_id="T", records=[_call_rec(1, 0.01, 1000, 0, "g1")])
-        a1, recon = turn.messages
-        assert a1.input_tokens == 0 and recon.input_tokens == 1000  # untouched (can't group)
-        assert recon.cost_usd == 0.01  # cost still surfaced on the reconcile row
-
-    def test_recomputes_token_buckets_from_proxy_and_holds_invariant(self):
-        # The real LiteLLM shape: the SDK turn reports cache_read=0 (the whole bug),
-        # while the proxy call carries the real cache read. On a clean bind the proxy
-        # is authoritative — token_usage is recomputed from the calls so the real
-        # cache read shows AND Σ(message buckets) == token_usage EXACTLY (no clamp).
-        msgs = [_asst("m1", output=20), ReconciliationMessage()]
-        turn = _turn_msgs(1, msgs, uncached=5000, cache_read=0, output=20)  # SDK sees cache_read=0
-        apply_actual_cost(
-            _result([turn]),
-            run_id="R",
-            task_id="T",
-            records=[_call_rec(1, 0.02, 5000, 4096, "g1", out=20)],  # proxy: real cache_read=4096
-        )
-        a1, recon = turn.messages
-        assert (a1.input_tokens, a1.cache_read_tokens, a1.cost_usd) == (904, 4096, 0.02)  # real cache shows
-        usage = turn.token_usage
-        assert (usage.uncached_input_tokens, usage.cache_read_input_tokens) == (904, 4096)  # recomputed from proxy
-        # Four-bucket invariant holds exactly — this is what lets the evalboard sum the stream.
-        assert a1.input_tokens + recon.input_tokens == usage.uncached_input_tokens
-        assert a1.cache_read_tokens + recon.cache_read_tokens == usage.cache_read_input_tokens
-        assert a1.output_tokens + recon.output_tokens == usage.output_tokens
-        assert (recon.input_tokens, recon.cache_read_tokens, recon.output_tokens, recon.cost_usd) == (0, 0, 0, 0.0)
-
-    def test_tie_case_equal_output_aux_mis_binds_but_totals_stay_correct(self):
-        # KNOWN LIMITATION (display-only): an auxiliary call whose output equals the
-        # first generation's output is greedily bound to that generation by the
-        # order-walk, displacing the real call onto the reconcile row. There is no
-        # clean discriminator (transcript input is unreliable on this route, and the
-        # aux legitimately makes call_count > gen_count), so we pin the behavior: the
-        # per-message split is wrong, but the turn total and the invariant stay correct.
-        msgs = [_asst("m1", output=10), _asst("m2", output=20), ReconciliationMessage()]
-        turn = _turn_msgs(1, msgs, uncached=1550, cache_read=0, output=40)
-        records = [
-            _call_rec(1, 0.001, 50, 0, "aux", out=10),  # aux precedes g1 and shares its output
-            _call_rec(1, 0.01, 600, 0, "g1", out=10),
-            _call_rec(1, 0.02, 900, 0, "g2", out=20),
-        ]
-        apply_actual_cost(_result([turn]), run_id="R", task_id="T", records=records)
-        a1, a2, recon = turn.messages
-        assert a1.cost_usd == 0.001  # mis-bound to the aux (the documented wrong split)
-        assert a2.cost_usd == 0.02
-        # Totals + invariant are unaffected: real g1 ($0.01/600 in) lands on reconcile.
-        assert turn.token_usage.total_cost_usd == pytest.approx(0.031)
-        assert a1.input_tokens + a2.input_tokens + recon.input_tokens == turn.token_usage.uncached_input_tokens
-
-    def test_no_reconciliation_row_still_costs_the_turn(self):
-        # A turn with generations but no ReconciliationMessage: distribution runs and
-        # hits the reconciliation-is-None early return, yet the turn still gets its
-        # real cost and the per-call breakdown.
-        turn = _turn_msgs(1, [_asst("m1", output=5)], uncached=1000, cache_read=0, output=5)
-        apply_actual_cost(_result([turn]), run_id="R", task_id="T", records=[_call_rec(1, 0.02, 1000, 0, "g1", out=5)])
-        (a1,) = turn.messages
-        assert turn.token_usage.total_cost_usd == 0.02
-        assert turn.provider_call_costs[0].cost_usd == 0.02
-        assert a1.cost_usd == 0.02  # distributed onto the generation

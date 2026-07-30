@@ -41,8 +41,9 @@ class TestLitellmConfigShape:
             assert extra["usage"]["include"] is True, model["model_name"]
             provider = extra["provider"]
             assert provider["sort"] == "price"
-            # Bounded to a vetted set, no silent fallback outside it.
-            assert provider["allow_fallbacks"] is False
+            # allow_fallbacks: true, but bounded to the vetted `only` set (fall over
+            # WITHIN the set on saturation; never outside it).
+            assert provider["allow_fallbacks"] is True
             assert isinstance(provider["only"], list) and provider["only"]
 
     def test_callback_symbol_exists_in_cost_logger(self):
