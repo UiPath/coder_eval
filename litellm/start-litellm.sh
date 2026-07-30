@@ -53,6 +53,15 @@ export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-$(read_env OPENROUTER_API_KEY)}
 export LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-$(read_env LITELLM_AUTH_TOKEN)}"
 export LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-sk-spike-local}"
 
+# --- per-call cost/cache capture (cost_logger.py) ---
+# The success callback appends one JSONL record per call to LITELLM_COST_LOG;
+# coder_eval reads the SAME path to join actual OpenRouter cost + cache buckets
+# back to each run/task. Make cost_logger importable by the proxy (it lives next
+# to this script). PYTHONPATH is honored even inside the uvx-isolated env.
+export LITELLM_COST_LOG="${LITELLM_COST_LOG:-$REPO_ROOT/tmp/litellm-costs.jsonl}"
+mkdir -p "$(dirname "$LITELLM_COST_LOG")"
+export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+
 # --- preflight: fail loud instead of a runtime 401 ---
 [ -f "$CONFIG" ] || { echo "ERROR: config not found: $CONFIG" >&2; exit 1; }
 if [ -z "$AWS_BEARER_TOKEN_BEDROCK" ]; then
@@ -64,6 +73,7 @@ echo "config     : $CONFIG"
 echo "region     : $AWS_REGION"
 echo "bedrock tok: set (${#AWS_BEARER_TOKEN_BEDROCK} chars)"
 echo "master key : $LITELLM_MASTER_KEY"
+echo "cost log   : $LITELLM_COST_LOG"
 
 # --- stop any stale proxy on the port (the classic 'creds-less running proxy') ---
 existing=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)

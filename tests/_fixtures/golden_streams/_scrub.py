@@ -32,9 +32,17 @@ SCRUB_KEYS = frozenset(
     }
 )
 
+# Fields DROPPED (not masked) from the snapshot because they are NOT produced by
+# the agent turn-loop this golden captures — they are populated later by the
+# orchestrator (e.g. the LiteLLM actual-cost join sets ``provider_call_costs``).
+# Always empty here, and agent-agnostic, so dropping keeps the golden stable
+# across backends (Claude + Codex) without a per-field regen.
+DROP_KEYS = frozenset({"provider_call_costs", "cost_usd"})
+
 
 def scrub(obj: Any) -> Any:
-    """Recursively replace scrub-listed field values with a stable placeholder.
+    """Recursively replace scrub-listed field values with a stable placeholder,
+    and drop ``DROP_KEYS`` fields entirely.
 
     A ``None`` value is preserved (so the meaningful, deterministic
     present-vs-absent distinction survives — e.g. ``duration_ms=None`` on an
@@ -45,6 +53,7 @@ def scrub(obj: Any) -> Any:
         return {
             key: (SCRUB_PLACEHOLDER if (key in SCRUB_KEYS and value is not None) else scrub(value))
             for key, value in obj.items()
+            if key not in DROP_KEYS
         }
     if isinstance(obj, list):
         return [scrub(item) for item in obj]

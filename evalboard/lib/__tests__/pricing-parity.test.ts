@@ -85,6 +85,13 @@ describe("pricing.ts ↔ pricing.py parity", () => {
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
+        // OpenRouter open-weight models: priced in pricing.py only for the Python
+        // max_usd static fallback. The evalboard deliberately does NOT statically
+        // price them — OpenRouter routes per-request, so it shows the captured
+        // ACTUAL per-call cost instead (see lib/pricing.ts + distributeActualCost).
+        "moonshotai/kimi-k3",
+        "z-ai/glm-5.2",
+        "deepseek/deepseek-v4-pro",
     ]);
 
     test("every pricing.py model is mirrored in pricing.ts or explicitly unmirrored", () => {

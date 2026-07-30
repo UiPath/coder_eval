@@ -50,15 +50,16 @@ export const PRICING: Record<string, Pricing> = {
     "gemini-3.1-pro-preview-customtools": p(2, 12, 2, 0.2),
     "gemini-3.5-flash": p(1.5, 9, 1.5, 0.15),
     "gemini-3-flash-preview": p(1.5, 9, 1.5, 0.15),
-    // OpenRouter open-weight models (litellm backend). Mirror of pricing.py;
-    // these providers cache implicitly (cache_write == input, unused) so only
-    // cache_read carries a discounted rate. NOTE: OpenRouter routes per-request,
-    // so these rates are only accurate when the litellm config pins the provider
-    // (sort: price) — otherwise the billed rate can differ from the headline.
-    "moonshotai/kimi-k3": p(3, 15, 3, 0.3),
-    "z-ai/glm-5.2": p(0.826, 2.596, 0.826, 0.1534),
-    "deepseek/deepseek-v4-pro": p(0.435, 0.87, 0.435, 0.003625),
+    // OpenRouter open-weight models (litellm backend) are DELIBERATELY NOT priced
+    // here. OpenRouter routes per-request, so a static headline rate is wrong (the
+    // billed rate depends on the provider it landed on), and there is no per-bucket
+    // rate to show. Instead the harness captures each call's ACTUAL cost proxy-side
+    // and the detail view renders it per call (TurnRecord.provider_call_costs →
+    // distributeActualCost); a static estimate here would only reintroduce the
+    // wrong number. See pricing.py (kept for the Python-side max_usd fallback).
     // Bedrock open-weight models (litellm backend, eu-north-1). Mirror of pricing.py.
+    // These run on Bedrock (fixed rates, like Claude) with NO OpenRouter actual-cost
+    // capture, so static pricing is correct and required here.
     // The recorded model_used arrives prefixed (e.g. "converse/zai.glm-5"), so
     // resolvePricing strips the routing/region prefixes before lookup.
     "deepseek.v3.2": p(0.74, 2.22, 0.74, 0),

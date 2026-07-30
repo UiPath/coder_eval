@@ -27,6 +27,7 @@ from .errors import (
 from .errors.executor import execute_with_retry
 from .errors.retry import create_error_context
 from .evaluation.checker import SuccessChecker, _short_failure_reason
+from .litellm_cost import apply_actual_cost, load_cost_records
 from .models import (
     ROUTE_NAMES,
     AgentKind,
@@ -660,6 +661,11 @@ class Orchestrator:
         if not self.result.model_used and self.task.agent is not None and self.task.agent.model:
             self.result.model_used = self.task.agent.model
 
+        # Open-weight (LiteLLM) backend: replace per-turn cost with the ACTUAL
+        # per-call OpenRouter cost captured proxy-side. Runs BEFORE aggregation so
+        # the run total re-derives from the corrected per-turn costs.
+        self._join_litellm_actual_cost()
+
         # Aggregate token usage
         self._aggregate_token_usage()
 
@@ -851,6 +857,28 @@ class Orchestrator:
                 self.task.task_id,
             )
             self._expected_turns_warning_emitted = True
+
+    def _join_litellm_actual_cost(self) -> None:
+        """Override per-turn cost with the proxy-captured ACTUAL per-call OpenRouter
+        cost (and attach the per-call cache breakdown) for the open-weight backend.
+
+        No-op unless the agent ran on a ``LiteLLMRoute`` AND ``LITELLM_COST_LOG`` is
+        configured. Never fatal: a failure, or an empty/mismatched log, leaves each
+        turn's static rate-card estimate in place (the whole-turn fallback).
+        """
+        if not (isinstance(self.route, LiteLLMRoute) and settings.litellm_cost_log and self.result is not None):
+            return
+        try:
+            applied = apply_actual_cost(
+                self.result,
+                run_id=hash_identifier(self.run_dir.as_posix()),
+                task_id=self._log_task_id,
+                records=load_cost_records(settings.litellm_cost_log),
+            )
+            if applied:
+                logger.info("LiteLLM actual-cost join: real per-call cost applied to %d turn(s)", applied)
+        except Exception:
+            logger.warning("LiteLLM actual-cost join failed; keeping static pricing", exc_info=True)
 
     def _aggregate_token_usage(self) -> None:
         """Aggregate token usage from turns, storing on self.result.
@@ -1175,7 +1203,18 @@ class Orchestrator:
         ensure_plugins_loaded()
         assert self.task.agent is not None
         assert self.task.agent.type is not None
-        return create_agent(self.task.agent.type, self.task.agent, route=self.route)
+        # LiteLLM (open-weight) route only: give the agent correlation headers so a
+        # proxy-side cost-logging callback can attribute each call's real cost +
+        # cache buckets back to this task-run. x-ce-run-id is a stable per-task-run
+        # key (the join, in _finalize_result, recomputes it identically); x-ce-task-id
+        # is the human-readable canonical id. No-op for Direct/Bedrock agents.
+        kwargs: dict[str, Any] = {}
+        if isinstance(self.route, LiteLLMRoute):
+            kwargs["cost_log_tags"] = {
+                "x-ce-run-id": hash_identifier(self.run_dir.as_posix()),
+                "x-ce-task-id": self._log_task_id,
+            }
+        return create_agent(self.task.agent.type, self.task.agent, route=self.route, **kwargs)
 
     async def _communicate_with_retry(
         self,

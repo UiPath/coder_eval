@@ -275,6 +275,13 @@ export interface TaskDetail extends TaskResultSummary {
     subAgentUsageByToolId: Record<string, SubAgentTotals>;
 }
 
+// Per-call ACTUAL cost + cache (open-weight/LiteLLM backend) is captured proxy-side
+// and joined onto each generation in Python (litellm_cost.apply_actual_cost) when
+// the generations align 1:1 with the calls — so it surfaces INLINE in the message
+// timeline (MessageEvent.costUsd + the cache token buckets), with the reconciliation
+// row drained to the residual. There is no separate per-call panel and no fragile
+// evalboard-side distribution; on a shape mismatch the join leaves the sparse stream.
+
 // Full per-sub-agent token breakdown (all components, cache-read included).
 export interface SubAgentTotals {
     total: number;
@@ -1191,6 +1198,10 @@ interface MessageEntry {
     cache_read_tokens?: number | null;
     reasoning_tokens?: number | null;
     model?: string | null;
+    // Real per-call cost (USD), joined post-run from the LiteLLM proxy's captured
+    // OpenRouter usage.cost (open-weight backend only). Preferred over the static
+    // rate-card estimate when present; absent/null on other backends.
+    cost_usd?: number | null;
     // Only on a role="reconciliation" entry: why these tokens are unattributed.
     note?: string | null;
 }
@@ -1385,6 +1396,7 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             cacheReadTokens: number | null;
             reasoningTokens: number | null;
             model: string | null;
+            costUsd: number | null;
         };
         const raws: Raw[] = [];
         for (const msg of turn.messages ?? []) {
@@ -1429,6 +1441,7 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                         ? msg.reasoning_tokens
                         : null,
                 model: typeof msg.model === "string" ? msg.model : null,
+                costUsd: typeof msg.cost_usd === "number" ? msg.cost_usd : null,
             };
             for (const b of msg.content_blocks ?? []) {
                 if (b.block_type === "thinking") {
@@ -1552,6 +1565,11 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             let haveCacheRead = false;
             let reasoningSum = 0;
             let haveReasoning = false;
+            // Real per-call cost joined from the proxy (open-weight backend). When
+            // any raw in the group carries it, it's authoritative for this message
+            // and preferred over the static rate-card estimate below.
+            let costUsdSum = 0;
+            let haveActualCost = false;
             // Real per-emission output attributed to thinking: the agent
             // distributes a call's output_tokens across its block-emissions by
             // content length, so a thinking-only emission's output_tokens IS
@@ -1615,6 +1633,10 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                     reasoningSum += r.reasoningTokens;
                     haveReasoning = true;
                 }
+                if (r.costUsd != null) {
+                    costUsdSum += r.costUsd;
+                    haveActualCost = true;
+                }
             }
             // Per-block output comes straight from each emission's recorded
             // output_tokens (thinking + text here, tools in the first pass) —
@@ -1649,13 +1671,17 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 thinkingOutputTokens: haveThinkingOut ? thinkingOutSum : null,
                 textOutputTokens,
                 model,
-                costUsd: messageCostUsd({
-                    model,
-                    inputTokens: haveInputTok ? inputTokSum : null,
-                    outputTokens: haveOutputTok ? outputTokSum : null,
-                    cacheWriteTokens: haveCacheWrite ? cacheWriteSum : null,
-                    cacheReadTokens: haveCacheRead ? cacheReadSum : null,
-                }),
+                // Prefer the real proxy-captured per-call cost (open-weight backend);
+                // fall back to the static rate-card estimate when it's absent.
+                costUsd: haveActualCost
+                    ? costUsdSum
+                    : messageCostUsd({
+                          model,
+                          inputTokens: haveInputTok ? inputTokSum : null,
+                          outputTokens: haveOutputTok ? outputTokSum : null,
+                          cacheWriteTokens: haveCacheWrite ? cacheWriteSum : null,
+                          cacheReadTokens: haveCacheRead ? cacheReadSum : null,
+                      }),
                 note: null,
             });
             group = [];
@@ -1728,14 +1754,20 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 // task total_cost_usd is unaffected (it reads the backend aggregate,
                 // not a sum of per-message costUsd), so there is no double-count.
                 model: turn.model_used ?? null,
-                costUsd: messageCostUsd({
-                    model: turn.model_used ?? null,
-                    inputTokens: typeof msg.input_tokens === "number" ? msg.input_tokens : null,
-                    outputTokens: typeof msg.output_tokens === "number" ? msg.output_tokens : null,
-                    cacheWriteTokens:
-                        typeof msg.cache_creation_tokens === "number" ? msg.cache_creation_tokens : null,
-                    cacheReadTokens: typeof msg.cache_read_tokens === "number" ? msg.cache_read_tokens : null,
-                }),
+                // Prefer the residual cost the actual-cost join wrote onto this row
+                // (open-weight backend; ≈0 when generations aligned); else price the
+                // residual tokens from the rate card (Claude/Bedrock).
+                costUsd:
+                    typeof msg.cost_usd === "number"
+                        ? msg.cost_usd
+                        : messageCostUsd({
+                              model: turn.model_used ?? null,
+                              inputTokens: typeof msg.input_tokens === "number" ? msg.input_tokens : null,
+                              outputTokens: typeof msg.output_tokens === "number" ? msg.output_tokens : null,
+                              cacheWriteTokens:
+                                  typeof msg.cache_creation_tokens === "number" ? msg.cache_creation_tokens : null,
+                              cacheReadTokens: typeof msg.cache_read_tokens === "number" ? msg.cache_read_tokens : null,
+                          }),
                 note: typeof msg.note === "string" ? msg.note : null,
             });
         }

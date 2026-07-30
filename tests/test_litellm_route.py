@@ -295,6 +295,31 @@ class TestBuildSdkEnvCustom:
         env, _ = ClaudeCodeAgent._build_sdk_env(LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1"))
         assert env["ANTHROPIC_API_KEY"] == ""
 
+    def test_cost_log_tags_become_custom_headers(self):
+        """cost_log_tags → ANTHROPIC_CUSTOM_HEADERS as newline-separated
+        `Name: Value` pairs (the format Claude Code forwards verbatim), so the
+        proxy-side cost log can join each call back to the run/task/turn."""
+        route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1", model="deepseek/deepseek-v4-pro")
+        tags = {"x-ce-run-id": "abc123", "x-ce-task-id": "calc/v1", "x-ce-iteration": "2"}
+        env, _ = ClaudeCodeAgent._build_sdk_env(route, cost_log_tags=tags)
+        assert env["ANTHROPIC_CUSTOM_HEADERS"] == "x-ce-run-id: abc123\nx-ce-task-id: calc/v1\nx-ce-iteration: 2"
+
+    def test_no_cost_log_tags_omits_custom_headers(self):
+        route = LiteLLMRoute(base_url="http://x:4000", auth_token="sk-1")
+        env, _ = ClaudeCodeAgent._build_sdk_env(route)
+        assert "ANTHROPIC_CUSTOM_HEADERS" not in env
+        env2, _ = ClaudeCodeAgent._build_sdk_env(route, cost_log_tags={})
+        assert "ANTHROPIC_CUSTOM_HEADERS" not in env2  # empty dict is a no-op
+
+    def test_cost_log_tags_ignored_on_non_litellm_routes(self):
+        """The tag is a LiteLLM-only concern; Bedrock/Direct must not emit it."""
+        tags = {"x-ce-run-id": "abc123"}
+        bedrock = BedrockRoute(bearer_token="t", region="eu-north-1", model="x")
+        env_b, _ = ClaudeCodeAgent._build_sdk_env(bedrock, cost_log_tags=tags)
+        assert "ANTHROPIC_CUSTOM_HEADERS" not in env_b
+        env_d, _ = ClaudeCodeAgent._build_sdk_env(DirectRoute(), cost_log_tags=tags)
+        assert "ANTHROPIC_CUSTOM_HEADERS" not in env_d
+
 
 class TestResolveEffectiveModelCustom:
     """_resolve_effective_model() on the LiteLLM route — no prefixing."""

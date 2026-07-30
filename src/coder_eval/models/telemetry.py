@@ -116,6 +116,24 @@ class TokenUsage(BaseModel):
         )
 
 
+class ProviderCallCost(BaseModel):
+    """One upstream API call's ACTUAL cost + cache buckets, captured proxy-side.
+
+    For the open-weight (LiteLLM) backend the Claude binary's Anthropic transport
+    drops OpenRouter's real ``usage.cost`` + per-call cache before Python can see
+    it, so a proxy-side callback (``litellm/cost_logger.py``) records each call and
+    the harness joins them onto the turn (``litellm_cost.apply_actual_cost``). Empty
+    on every other backend — the SDK reports cost/cache natively there.
+    """
+
+    call_id: str | None = Field(default=None, description="Upstream generation id (e.g. OpenRouter gen-...).")
+    cost_usd: float | None = Field(default=None, description="Real per-call cost (OpenRouter usage.cost), if reported.")
+    input_tokens: int | None = Field(default=None, description="Prompt tokens for this call (incl. cached).")
+    cache_read_tokens: int | None = Field(default=None, description="Cached prompt tokens served on this call.")
+    cache_write_tokens: int | None = Field(default=None, description="Prompt tokens written to cache on this call.")
+    output_tokens: int | None = Field(default=None, description="Completion tokens for this call.")
+
+
 class ContentBlock(BaseModel):
     """One content block within a message, in emission order.
 
@@ -240,6 +258,15 @@ class AssistantMessage(BaseModel):
     cache_creation_tokens: int = Field(default=0, description="Tokens used to create prompt cache for this call.")
     cache_read_tokens: int = Field(default=0, description="Tokens read from prompt cache for this call.")
     reasoning_tokens: int = Field(default=0, description="Extended-thinking tokens; subset of output_tokens.")
+    cost_usd: float | None = Field(
+        default=None,
+        description=(
+            "Real per-call cost (USD) for this generation, joined post-run from the LiteLLM "
+            "proxy's captured OpenRouter usage.cost (open-weight backend only; see "
+            "litellm_cost.apply_actual_cost). None on other backends / when not captured — "
+            "the evalboard then prices this message from the rate card instead."
+        ),
+    )
 
     stop_reason: str | None = Field(default=None, description="SDK stop reason: 'tool_use', 'end_turn', etc.")
     model: str | None = Field(default=None, description="Model identifier that generated this turn.")
@@ -295,6 +322,14 @@ class ReconciliationMessage(BaseModel):
     output_tokens: int = Field(default=0, description="Residual output tokens.")
     cache_creation_tokens: int = Field(default=0, description="Residual cache-creation tokens.")
     cache_read_tokens: int = Field(default=0, description="Residual cache-read tokens.")
+    cost_usd: float | None = Field(
+        default=None,
+        description=(
+            "Residual cost (USD) not attributed to a generation. None normally (cost stays on "
+            "the authoritative aggregate); set by the open-weight actual-cost join to the turn's "
+            "real total minus what was distributed onto the generations (≈0 when they align)."
+        ),
+    )
 
     note: str = Field(
         default="",

@@ -52,6 +52,13 @@ model_list:
       model: openrouter/moonshotai/kimi-k3
       api_key: os.environ/OPENROUTER_API_KEY
       extra_body:
+        # Ask OpenRouter to return the ACTUAL per-call cost (usage.cost) + cache
+        # tokens for the provider it routed to. The Anthropic response the SDK
+        # receives has no slot for these, so cost_logger.py (the callback below)
+        # reads them proxy-side and writes one JSONL record per call for the
+        # harness to join back by the x-ce-* correlation headers.
+        usage:
+          include: true
         provider:
           sort: price
           allow_fallbacks: false
@@ -60,6 +67,13 @@ model_list:
       model: openrouter/z-ai/glm-5.2
       api_key: os.environ/OPENROUTER_API_KEY
       extra_body:
+        # Ask OpenRouter to return the ACTUAL per-call cost (usage.cost) + cache
+        # tokens for the provider it routed to. The Anthropic response the SDK
+        # receives has no slot for these, so cost_logger.py (the callback below)
+        # reads them proxy-side and writes one JSONL record per call for the
+        # harness to join back by the x-ce-* correlation headers.
+        usage:
+          include: true
         provider:
           sort: price
           allow_fallbacks: false
@@ -68,6 +82,13 @@ model_list:
       model: openrouter/deepseek/deepseek-v4-pro
       api_key: os.environ/OPENROUTER_API_KEY
       extra_body:
+        # Ask OpenRouter to return the ACTUAL per-call cost (usage.cost) + cache
+        # tokens for the provider it routed to. The Anthropic response the SDK
+        # receives has no slot for these, so cost_logger.py (the callback below)
+        # reads them proxy-side and writes one JSONL record per call for the
+        # harness to join back by the x-ce-* correlation headers.
+        usage:
+          include: true
         provider:
           sort: price
           allow_fallbacks: false
@@ -75,6 +96,11 @@ model_list:
 litellm_settings:
   # Silently drop provider-unsupported OpenAI/Anthropic params rather than 400.
   drop_params: true
+  # Per-call ACTUAL-cost + cache capture for the open-weight backend. Appends one
+  # JSONL record per call to $LITELLM_COST_LOG (set in start-litellm.sh). Reads
+  # OpenRouter's real usage.cost, NOT LiteLLM's response_cost (0.0 for models it
+  # doesn't price). See cost_logger.py for the full rationale.
+  callbacks: cost_logger.proxy_handler_instance
 
 general_settings:
   # Read the virtual key from the environment — never hardcode a secret here.

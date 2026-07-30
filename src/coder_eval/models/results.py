@@ -14,6 +14,7 @@ from coder_eval.models.enums import FinalStatus
 from coder_eval.models.telemetry import (
     CommandStatistics,
     CommandTelemetry,
+    ProviderCallCost,
     TokenUsage,
     TranscriptMessage,
 )
@@ -339,6 +340,15 @@ class TurnRecord(BaseModel):
     result_summary: ResultSummary | None = Field(
         default=None,
         description="SDK ResultMessage summary, when one was emitted (clean turns or partials that got one).",
+    )
+    provider_call_costs: list[ProviderCallCost] = Field(
+        default_factory=list,
+        description=(
+            "Per-call ACTUAL cost + cache captured proxy-side for the open-weight (LiteLLM) backend, "
+            "joined onto this turn by litellm_cost.apply_actual_cost. Empty on every other backend "
+            "(the SDK reports cost/cache natively there). When present, total_cost_usd is the sum of "
+            "these calls' cost_usd (the real bill), not the static rate-card estimate."
+        ),
     )
     crashed: bool = Field(
         default=False,
